@@ -66,6 +66,7 @@ async function untilTransaction(
 
 async function publishedOffer(tenantB: Actor, unitPriceMinor = '300000'): Promise<string> {
   const product = await tenantB.post('/v1/products', {
+    idempotencyKey: idempotencyKey('e2e-catalogue'),
     body: {
       sku: `E2E-SKU-${Date.now()}-${Math.trunc(Math.random() * 1e6)}`,
       name: 'شیلنگ هیدرولیک',
@@ -77,6 +78,7 @@ async function publishedOffer(tenantB: Actor, unitPriceMinor = '300000'): Promis
   const productId = (product.body as { id: string }).id;
 
   const offer = await tenantB.post('/v1/offers', {
+    idempotencyKey: idempotencyKey('e2e-catalogue'),
     body: {
       productId,
       unitPriceMinor,

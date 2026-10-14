@@ -19,10 +19,11 @@ import { cleanup } from './helpers';
  * a second order (an order's `idempotencyKey` was not unique then). The rule
  * this pins: `PROCEED` only from an insert this request made itself.
  *
- * And the second way a key used to come free under a committed order (round 2
- * of the review): the order commits, recording its response fails, and the
- * claim was released anyway. Now the claim is kept, and should it still be
- * lost, `uq_order_org_idempotency_key` refuses the second order as a 409.
+ * And a key record lost under a committed order: the response is now stored in
+ * the order's own transaction, so a failed store leaves no order behind
+ * (`idempotency-response-in-transaction.int-spec.ts`); should a completed
+ * record still be lost — expired and purged — `uq_order_org_idempotency_key`
+ * refuses a second order as a 409.
  */
 describe('an Idempotency-Key whose claim vanishes under a request (real database)', () => {
   let harness: ApiHarness;
@@ -88,6 +89,7 @@ describe('an Idempotency-Key whose claim vanishes under a request (real database
     const asSupplier = `Bearer ${supplier(supplierOrg)}`;
     const product = await request(http)
       .post('/v1/products')
+      .set('idempotency-key', apiKey('catalogue'))
       .set('authorization', asSupplier)
       .send({
         sku: `RACE-SKU-${Date.now()}-${Math.trunc(Math.random() * 1e6)}`,
@@ -99,6 +101,7 @@ describe('an Idempotency-Key whose claim vanishes under a request (real database
       .expect(201);
     const offer = await request(http)
       .post('/v1/offers')
+      .set('idempotency-key', apiKey('catalogue'))
       .set('authorization', asSupplier)
       .send({
         productId: product.body.id,
@@ -164,9 +167,9 @@ describe('an Idempotency-Key whose claim vanishes under a request (real database
     expect(await ordersUnder(key)).toBe(1);
   });
 
-  it('A’s claim expires and is purged, B re-claims: A’s late complete and release change nothing', async () => {
+  it('A’s claim expires and is purged, B re-claims: A’s late completion is refused and changes nothing', async () => {
     const key = apiKey('race-token');
-    const body = { note: 'token' };
+    const body = { probe: 'token' };
     const rowOf = () =>
       runUnscoped('the suite reads the key whose claim changed hands', () =>
         harness.prisma.client.idempotencyKey.findUnique({
@@ -174,6 +177,10 @@ describe('an Idempotency-Key whose claim vanishes under a request (real database
             organizationId_endpoint_key: { organizationId: buyerOrg, endpoint: ENDPOINT, key },
           },
         }),
+      );
+    const completeInTransaction = (token: string, response: unknown) =>
+      asTenant(() =>
+        harness.prisma.transaction((tx) => store.complete(tx, ENDPOINT, key, token, 201, response)),
       );
 
     const a = await asTenant(() => store.claim(ENDPOINT, key, body));
@@ -195,14 +202,19 @@ describe('an Idempotency-Key whose claim vanishes under a request (real database
     if (b.kind !== 'PROCEED') throw new Error('B should own K');
     expect(b.token).not.toBe(a.token);
 
-    // A, late, neither completes nor releases B's row — and neither throws.
-    await asTenant(() => store.complete(ENDPOINT, key, a.token, 201, { id: 'from-A' }));
+    // A, late, cannot complete B's row: its completion throws, so A's own work
+    // would roll back with it — never two commits under one key. Its release
+    // frees nothing either.
+    await expect(completeInTransaction(a.token, { id: 'from-A' })).rejects.toMatchObject({
+      code: 'CONFLICT',
+      retryAfterSeconds: 1,
+    });
     expect(await rowOf()).toMatchObject({ state: 'IN_PROGRESS', responseStatus: null });
     await asTenant(() => store.release(ENDPOINT, key, a.token));
     expect(await rowOf()).toMatchObject({ state: 'IN_PROGRESS', claimToken: b.token });
 
     // B completes normally, and A's later release still cannot take it back.
-    await asTenant(() => store.complete(ENDPOINT, key, b.token, 201, { id: 'from-B' }));
+    await completeInTransaction(b.token, { id: 'from-B' });
     await asTenant(() => store.release(ENDPOINT, key, a.token));
     expect(await rowOf()).toMatchObject({
       state: 'COMPLETED',
@@ -211,9 +223,9 @@ describe('an Idempotency-Key whose claim vanishes under a request (real database
     });
   });
 
-  it('the order commits and recording its response fails: the claim is kept, never a second order', async () => {
+  it('defence in depth: a key record lost after its order committed cannot place a second order', async () => {
     const offerId = await publishOffer();
-    const key = apiKey('race-record');
+    const key = apiKey('race-lost');
     const body = { lines: [{ offerId, quantity: 1 }] };
     const place = () =>
       request(http)
@@ -221,40 +233,13 @@ describe('an Idempotency-Key whose claim vanishes under a request (real database
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', key)
         .send(body);
-    const claimState = () =>
-      runUnscoped('the suite reads the key whose recording failed', () =>
-        harness.prisma.client.idempotencyKey.findUnique({
-          where: {
-            organizationId_endpoint_key: { organizationId: buyerOrg, endpoint: ENDPOINT, key },
-          },
-        }),
-      ).then((row) => row?.state);
 
-    // The work commits; the write that records its response fails, once.
-    const recording = jest
-      .spyOn(store, 'complete')
-      .mockRejectedValueOnce(new Error('connection reset while recording the response'));
-    let first: request.Response;
-    try {
-      first = await place();
-    } finally {
-      recording.mockRestore();
-    }
-    expect(first.status).toBe(500);
-    expect(await ordersUnder(key)).toBe(1);
+    expect((await place()).status).toBe(201);
 
-    // The claim was not released: the key is still in flight, not free.
-    expect(await claimState()).toBe('IN_PROGRESS');
-    const retried = await place();
-    expect(retried.status).toBe(409);
-    expect(retried.body.code).toBe('CONFLICT');
-    expect(retried.headers['retry-after']).toBe('1');
-    expect(await ordersUnder(key)).toBe(1);
-
-    // Defence in depth: the claim is lost anyway (expired and purged, say).
-    // The retry claims the key and runs the work again — and the unique index
-    // refuses the second order as a conflict, not a 500, and frees the claim.
-    await runUnscoped('the suite removes the claim, as the expiry purge would', () =>
+    // The completed record is gone (expired and purged, say). The retry claims
+    // the key and runs the work again — and the unique index refuses the
+    // second order as a conflict, not a 500, and frees the claim.
+    await runUnscoped('the suite removes the record, as the expiry purge would', () =>
       harness.prisma.client.idempotencyKey.deleteMany({
         where: { organizationId: buyerOrg, endpoint: ENDPOINT, key },
       }),
@@ -267,6 +252,13 @@ describe('an Idempotency-Key whose claim vanishes under a request (real database
     });
     expect(afterPurge.headers['retry-after']).toBeUndefined();
     expect(await ordersUnder(key)).toBe(1);
-    expect(await claimState()).toBeUndefined();
+    const record = await runUnscoped('the suite reads the key the refusal freed', () =>
+      harness.prisma.client.idempotencyKey.findUnique({
+        where: {
+          organizationId_endpoint_key: { organizationId: buyerOrg, endpoint: ENDPOINT, key },
+        },
+      }),
+    );
+    expect(record).toBeNull();
   });
 });

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { APIRequestContext } from '@playwright/test';
-import { test, expect } from '../../src/api';
+import { test, expect, Actor, SessionToken } from '../../src/api';
 import { ORG } from '../../src/env';
 import {
   enableSignIn,
@@ -76,17 +76,17 @@ test.describe.serial('Keycloak projection of memberships (ADR-060 § 5)', () => 
   // Demotion and revocation are done by organization A's own administrator:
   // membership lookups are tenant-scoped, and administering A's members is
   // exactly their job.
-  test('a demotion is gone from the next token', async ({ tenantA, request, config }) => {
-    const me = await request.fetch(`${config.gatewayUrl}/v1/users/me`, {
-      headers: {
-        authorization: `Bearer ${await freshToken(username)}`,
-        accept: 'application/json',
-      },
-    });
-    expect(me.status()).toBe(200);
-    const memberships = (
-      (await me.json()) as { memberships: { id: string; organizationId: string }[] }
-    ).memberships;
+  test('a demotion is gone from the next token', async ({ tenantA, config }) => {
+    // As an `Actor`, so the bearer token never passes through Playwright's request context.
+    const person = new Actor(
+      username,
+      new SessionToken(await freshToken(username), () => freshToken(username)),
+      config,
+    );
+    const me = await person.get('/v1/users/me');
+    expect(me.status).toBe(200);
+    const memberships = (me.body as { memberships: { id: string; organizationId: string }[] })
+      .memberships;
     membershipInA = memberships.find((membership) => membership.organizationId === ORG.a)!.id;
 
     const demoted = await tenantA.post(`/v1/memberships/${membershipInA}/roles`, {

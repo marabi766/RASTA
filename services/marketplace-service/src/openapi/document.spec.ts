@@ -96,31 +96,72 @@ describe('enrichOpenApiDocument', () => {
     expect(key?.in).toBe('header');
   });
 
-  it('declares an optional integer Retry-After on an idempotent route’s 409, and only there', () => {
-    // docs/06 § 6.8: the in-flight CONFLICT carries it. A route with no
-    // Idempotency-Key has no in-flight state, so its 409 must not promise one.
+  it('declares an optional integer Retry-After on an idempotent route’s 409', () => {
+    // docs/06 § 6.8: the in-flight CONFLICT carries it.
     const document = emptyDocument();
-    document.paths = {
-      '/v1/orders': { post: { responses: {} } },
-      '/v1/offers': { post: { responses: {} } },
-    } as never;
+    document.paths = { '/v1/orders': { post: { responses: {} } } } as never;
 
     const enriched = enrichOpenApiDocument(document, OPTIONS);
-    const conflictOf = (path: string) =>
-      (
-        (enriched.paths[path] as Record<string, never>).post as unknown as {
-          responses: Record<string, { headers?: Record<string, unknown> }>;
-        }
-      ).responses['409'];
+    const operation = (enriched.paths['/v1/orders'] as Record<string, never>).post as unknown as {
+      responses: Record<string, { headers?: Record<string, unknown> }>;
+    };
 
-    expect(conflictOf('/v1/orders')?.headers).toEqual({
+    expect(operation.responses['409']?.headers).toEqual({
       'Retry-After': expect.objectContaining({
         required: false,
         schema: { type: 'integer', minimum: 1, maximum: 3600 },
       }),
     });
-    expect(conflictOf('/v1/offers')).toBeDefined();
-    expect(conflictOf('/v1/offers')?.headers).toBeUndefined();
+  });
+
+  it('requires an Idempotency-Key on every catalogue write, and on no catalogue read', () => {
+    // docs/06 § 6.8 lists publishing an offer among the idempotent operations:
+    // without a key a double submit published two offers. Reads stay keyless —
+    // the gateway applies the rule to unsafe methods only.
+    const document = emptyDocument();
+    document.paths = {
+      '/v1/products': { get: { responses: {} }, post: { responses: {} } },
+      '/v1/offers': { get: { responses: {} }, post: { responses: {} } },
+      '/v1/offers/{id}': { patch: { responses: {} } },
+      '/v1/products/{id}/offers': { get: { responses: {} } },
+    } as never;
+
+    const enriched = enrichOpenApiDocument(document, OPTIONS);
+    type Operation = {
+      parameters?: { name: string; in: string; required: boolean }[];
+      responses: Record<string, { headers?: Record<string, unknown> }>;
+    };
+    const operationOf = (path: string, method: string) =>
+      (enriched.paths[path] as Record<string, Operation>)[method] as Operation;
+
+    for (const [path, method] of [
+      ['/v1/products', 'post'],
+      ['/v1/offers', 'post'],
+      ['/v1/offers/{id}', 'patch'],
+    ] as const) {
+      const operation = operationOf(path, method);
+      const key = operation.parameters?.find((p) => p.name === 'Idempotency-Key');
+      expect({ path, method, required: key?.required, in: key?.in }).toEqual({
+        path,
+        method,
+        required: true,
+        in: 'header',
+      });
+      expect(operation.responses['409']?.headers).toHaveProperty('Retry-After');
+    }
+
+    for (const [path, method] of [
+      ['/v1/products', 'get'],
+      ['/v1/offers', 'get'],
+      ['/v1/products/{id}/offers', 'get'],
+    ] as const) {
+      const names = (operationOf(path, method).parameters ?? []).map((p) => p.name);
+      expect({ path, method, names }).toEqual({
+        path,
+        method,
+        names: expect.not.arrayContaining(['Idempotency-Key']),
+      });
+    }
   });
 
   describe('the retention window the key description states', () => {

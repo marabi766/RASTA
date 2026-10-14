@@ -149,6 +149,22 @@ describe('the navigation entry', () => {
     expect(hrefs(null)).toEqual(PORTAL_NAV.map((i) => i.href));
   });
 
+  it.each([
+    [['AUDITOR'], false],
+    [['AUDITOR', 'ORGANIZATION_ADMIN'], false],
+    [['ORGANIZATION_ADMIN', 'AUDITOR'], false],
+    [['AUDITOR', 'SYSTEM_ADMIN'], false],
+    [['AUDITOR', 'UNION_ADMIN', 'OPERATOR'], false],
+    [['OPERATOR', 'ORGANIZATION_ADMIN'], true],
+    [['UNION_ADMIN', 'SYSTEM_ADMIN'], true],
+    [['OPERATOR', 'DRIVER'], false],
+  ])(
+    'for roles %j offers it: %s (AUDITOR is refused by the service, even with an admin role)',
+    (roles, offered) => {
+      expect(hrefs(roles).includes('/settlements')).toBe(offered);
+    },
+  );
+
   it('sits after the wallet and leaves the rest in order', () => {
     const list = hrefs(['ORGANIZATION_ADMIN']);
     expect(list.indexOf('/settlements')).toBe(list.indexOf('/wallet') + 1);
