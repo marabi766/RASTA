@@ -366,26 +366,36 @@ import {
     },
 
     {
-      // The relay, the purge and both workers stop together in the destroy
-      // phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. Nothing stopped the
-      // relay before: it kept claiming rows through the close that the closed
-      // publisher could not send, and they waited out their leases. #247's
-      // coordinator (D-052): the relay bounds its own grace and release by the
-      // deadline, the purge its batch, and the workers abandon a batch still
-      // running at it.
+      // The relay, the purge, both workers and the dispatcher consumer stop
+      // together in the destroy phase, by one deadline inside
+      // SHUTDOWN_TIMEOUT_MS. Nothing stopped the relay before: it kept claiming
+      // rows through the close that the closed publisher could not send, and
+      // they waited out their leases. #247's coordinator (D-052): the relay
+      // bounds its own grace and release by the deadline, the purge its batch,
+      // and the workers abandon a batch still running at it. The consumer too
+      // (Codex r1 on #276): its own stop had no bound, and it abandons an event
+      // still in flight uncommitted (#270).
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OutboxPurgeScheduler, ResolutionWorker, MailWorker, ENV],
+      inject: [
+        OutboxRelay,
+        OutboxPurgeScheduler,
+        ResolutionWorker,
+        MailWorker,
+        DispatcherConsumer,
+        ENV,
+      ],
       useFactory: (
         relay: OutboxRelay,
         purge: OutboxPurgeScheduler,
         resolution: ResolutionWorker,
         mail: MailWorker,
+        dispatcher: DispatcherConsumer,
         env: NotificationEnv,
       ): OutboxShutdown =>
         new OutboxShutdown({
           relay,
           purge,
-          workers: [resolution, mail],
+          workers: [resolution, mail, dispatcher],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

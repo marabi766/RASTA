@@ -1464,8 +1464,9 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
     در nest-common با Producer وفادار به kafkajs (`__tests__/fake-kafka.ts`)، و در fleet: `test/outbox-shutdown.int-spec.ts`
     (Handler بی‌پایان کنار Publish و Batch بی‌پایان؛ Send بی‌پایان DLQ که پس از بستن می‌رسد؛ Handler واقعی که پس از بستن
     Commit می‌کند و تحویل دوباره‌اش بی‌اثر است) و `test/insurance-parked.int-spec.ts` (جاروی منتظر asset-service در
-    توقف) ⇐ خروج ۰ زیر مهلت، پیام Commit‌نشده، اثر یک‌بار. سرویس‌های دیگر (contract، construction، economic،
-    marketplace، notification، identity، audit، supplier، inventory) هنوز Coordinator ندارند و در فاز بعد می‌آیند.
+    توقف) ⇐ خروج ۰ زیر مهلت، پیام Commit‌نشده، اثر یک‌بار. Consumerهای notification و supplier در فاز ۲a آمدند
+    (پایین). سرویس‌های دیگر (contract، construction، economic، marketplace، identity، audit) هنوز Coordinator ندارند و در
+    فاز بعد می‌آیند.
   - **بودجه برای هر سرویسِ دارای رله (Codex روی #267، Low):** `loadEnv` Grace رله را فقط در سرویسی که Purge هم داشت با
     بودجه می‌سنجید و در بقیه با کل `SHUTDOWN_TIMEOUT_MS`؛ notification (رله و کارگرها با `OutboxShutdown`، بی Purge) Grace
     ۲۴ ثانیه را زیر مهلت ۲۵ ثانیه می‌پذیرفت در حالی که Coordinator تخلیه را در ۲۳ ثانیه قطع می‌کرد. حالا هر سرویسِ دارای
@@ -1474,9 +1475,14 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
     تغییری نمی‌کنند.
   - **فاز ۲a، کارگرهای هر سرویس:** notification دو کارگرش (Resolution و Mail، #267) را در همان `workers` نگه می‌دارد و
     Purge کنارشان می‌آید. `ReservationSweeper` در inventory مانند جاروی انقضای asset کارگر `OutboxShutdown` شد: هر Batch
-    آن ردیف Outbox می‌نویسد. Consumerهای Kafka (`DispatcherConsumer` در notification، `PerformanceConsumer` در supplier)
-    هنوز بیرون از این مهلت می‌ایستند، چون `EventConsumer.stop()` تا ادغام #270 مهلت نمی‌پذیرد. پس از #270 همان سیم‌کشی
-    fleet/asset/maintenance را می‌گیرند.
+    آن ردیف Outbox می‌نویسد. Consumerهای Kafka هم با `stop({ deadlineAt })` ـِ #270 در همان مهلت‌اند (Codex r1 روی #276):
+    `DispatcherConsumer` در notification (`onModuleDestroy` بی‌کرانش حذف شد؛ تراکنش Ingest تا ۳۰ ثانیه مجاز است) و
+    `PerformanceConsumer` در supplier (پیش‌تر `AppModule.onApplicationShutdown` آن را بی‌کران و پس از تخلیهٔ رله و Purge
+    متوقف می‌کرد) حالا `workers`ِ `OutboxShutdown`اند. نخستین توقف مهلت را می‌گیرد؛ `onApplicationShutdown` فقط به همان
+    می‌پیوندد. آزمون: `test/outbox-shutdown.int-spec.ts` در notification (Dispatcher واقعی روی `EventConsumer` واقعی؛
+    Ingest بی‌پایان، تنها یا کنار Publish، Batch Purge و Batch Mail بی‌پایان؛ Ingest ـی که پس از بستن برمی‌گردد) و در
+    supplier (Consumer روشن از راه Gate واقعی؛ Handler بی‌پایان کنار Publish و Batch بی‌پایان؛ Handler دیررس) ⇐ خروج ۰
+    زیر مهلت، پیام Commit‌نشده؛ و `src/app.module.shutdown.spec.ts` در هر دو (سیم‌کشی و یک مهلت).
   - **پیامد:** رله حالا پیش از بسته شدن سرور HTTP می‌ایستد، نه پس از آن. ردیفی که درخواستی در همین فاصله بنویسد در
     شروع بعدی (یا Replica دیگر) منتشر می‌شود — همان چیزی که پیش‌تر برای ردیف‌های لحظهٔ آخر هم بود.
 

@@ -227,12 +227,24 @@ import { loadSupplierEnv, SERVICE_NAME, type SupplierEnv } from './config/env';
         }),
     },
     {
-      // D-052: the relay and the purge drain together in the destroy phase,
-      // by one deadline inside SHUTDOWN_TIMEOUT_MS.
+      // D-052: the relay, the purge and the performance consumer stop together
+      // in the destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. The
+      // consumer too (Codex r1 on #276): stopped later, in
+      // `onApplicationShutdown`, its wait came on top of the relay's.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OutboxPurgeScheduler, ENV],
-      useFactory: (relay: OutboxRelay, purge: OutboxPurgeScheduler, env: SupplierEnv) =>
-        new OutboxShutdown({ relay, purge, budgetMs: outboxShutdownBudgetMs(env) }),
+      inject: [OutboxRelay, OutboxPurgeScheduler, PerformanceConsumer, ENV],
+      useFactory: (
+        relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
+        performance: PerformanceConsumer,
+        env: SupplierEnv,
+      ) =>
+        new OutboxShutdown({
+          relay,
+          purge,
+          workers: [performance],
+          budgetMs: outboxShutdownBudgetMs(env),
+        }),
     },
 
     {
@@ -305,10 +317,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
-    await this.performance.stop();
-    // The relay and the purge already drained in OutboxShutdown's
-    // onModuleDestroy, concurrently and by one deadline; this joins that stop
-    // and returns at once.
+    // The relay, the purge and the performance consumer already stopped in
+    // OutboxShutdown's onModuleDestroy, concurrently and by one deadline; this
+    // joins that stop and returns at once.
     await this.outboxShutdown.stop();
   }
 }
