@@ -263,7 +263,7 @@ export class Actor {
     path: string,
     options: CallOptions = {},
   ): Promise<ApiResponse<unknown>> {
-    const correlationId = options.correlationId ?? `e2e-${randomUUID()}`;
+    const correlationId = options.correlationId ?? randomUUID();
 
     const headers: Record<string, string> = {
       'x-correlation-id': correlationId,

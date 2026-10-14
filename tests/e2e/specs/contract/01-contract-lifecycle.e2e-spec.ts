@@ -212,9 +212,13 @@ interface PolicyBody {
 // Helpers — thin: each adds headers or polls, and none decides an outcome.
 // ---------------------------------------------------------------------------
 
-/** A correlation id this file can later find on the topic. */
-function correlation(label: string): string {
-  return `e2e-contract-${RUN}-${label}-${randomUUID()}`;
+/**
+ * A correlation id this file can later find on the topic. A bare UUID: the
+ * gateway adopts nothing else from a caller and would re-mint a labelled one.
+ * `_label` names the step for the reader only.
+ */
+function correlation(_label: string): string {
+  return randomUUID();
 }
 
 /** An unsafe call, each with a fresh `Idempotency-Key`: a retry here is a new attempt, never a replay. */

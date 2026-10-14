@@ -42,6 +42,13 @@ import { atFreshWindow, waitForWindowClose } from './helpers';
 const TAG = ulid().slice(-10);
 const tagged = (prefix: string): string => `${prefix}_${TAG}_${ulid()}`;
 /**
+ * A correlation id a user's or an anonymous request keeps: a bare ULID. From
+ * anyone but a verified service the middleware re-mints anything else (S-09);
+ * a service caller keeps its tagged one, which is how its rows are found and
+ * cleaned up below.
+ */
+const correlation = (): string => ulid();
+/**
  * A calling service whose name carries this run's tag, so its rows — whose
  * actor id **is** that name — belong to this run alone on a shared database,
  * and are removed by the same cleanup. The production name `fleet-service` is
@@ -94,7 +101,7 @@ describe('auth-guard tenant refusals → security_event_outbox (real PostgreSQL)
     const call = request(harness.app.getHttpServer())
       [options.method ?? 'get'](`${options.path ?? '/v1/users/me'}${options.query ?? ''}`)
       .set('user-agent', USER_AGENT)
-      .set('x-correlation-id', options.correlationId ?? tagged('COR'))
+      .set('x-correlation-id', options.correlationId ?? correlation())
       .set('traceparent', TRACEPARENT)
       .set('x-organization-id', requested);
     call.set('authorization', `Bearer ${options.token ?? userToken(caller)}`);
@@ -131,7 +138,7 @@ describe('auth-guard tenant refusals → security_event_outbox (real PostgreSQL)
     const second = tagged('ORG');
     const person = caller(home, { organizationIds: [home, second] });
     const requested = rejectedOrg();
-    const correlationId = tagged('COR');
+    const correlationId = correlation();
     const token = userToken(person);
 
     const response = await probe(person, requested, {
@@ -302,7 +309,7 @@ describe('auth-guard tenant refusals → security_event_outbox (real PostgreSQL)
       const switchRefusal = await request(harness.app.getHttpServer())
         .post(SWITCH_SITE.route)
         .set('authorization', `Bearer ${userToken(person)}`)
-        .set('x-correlation-id', tagged('COR'))
+        .set('x-correlation-id', correlation())
         .send({ organizationId: `ORG-REQ-${TAG}-${ulid()}` });
       expect(switchRefusal.status).toBe(403);
       expect(switchRefusal.body.code).toBe(ERROR_CODES.TENANT_MISMATCH);
@@ -361,12 +368,13 @@ describe('auth-guard tenant refusals → security_event_outbox (real PostgreSQL)
     ).toEqual([{ action: SERVICE_SITE.action }]);
 
     // No credentials at all: a 401 has no attributable actor.
-    const anonymousCorrelation = tagged('COR');
+    const anonymousCorrelation = correlation();
     const anonymous = await request(harness.app.getHttpServer())
       .get('/v1/users/me')
       .set('x-correlation-id', anonymousCorrelation)
       .set('x-organization-id', rejectedOrg());
     expect(anonymous.status).toBe(401);
+    expect(anonymous.headers['x-correlation-id']).toBe(anonymousCorrelation);
 
     for (const actor of [member, homeless]) {
       expect(await rowsFor(actor.userId)).toHaveLength(0);

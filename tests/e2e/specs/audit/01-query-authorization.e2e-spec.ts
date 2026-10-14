@@ -80,7 +80,7 @@ test.describe('AUD-002 — the audit read API over the real stack', () => {
     expect(wallet.status).toBe(200);
     walletId = (wallet.body as { id: string }).id;
 
-    correlationId = `e2e-audit-${randomUUID()}`;
+    correlationId = randomUUID();
     const topUp = await tenantA.post(`/v1/wallets/${walletId}/top-up`, {
       idempotencyKey: idempotencyKey('audit-topup'),
       correlationId,

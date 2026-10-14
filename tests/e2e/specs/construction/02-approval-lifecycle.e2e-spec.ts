@@ -342,7 +342,7 @@ test.describe.serial('the construction project lifecycle', () => {
     const step = await pendingStep(systemAdmin, projectId, 'project.completion');
     expect(step.round).toBe(2);
 
-    const correlationId = `e2e-con-${randomUUID()}`;
+    const correlationId = randomUUID();
     const granted = await tenantA.post(`/v1/approvals/${step.id}/decision`, {
       correlationId,
       body: { expectedVersion: step.version, decision: 'GRANT' },

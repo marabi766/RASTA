@@ -62,7 +62,7 @@ test.describe.serial('construction projects and needs (CON-001 PR 1)', () => {
     tenantA,
   }) => {
     const key = idempotencyKey('con-create');
-    createdCorrelationId = `e2e-con-${randomUUID()}`;
+    createdCorrelationId = randomUUID();
 
     const first = await tenantA.post('/v1/projects', {
       idempotencyKey: key,

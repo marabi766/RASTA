@@ -46,7 +46,7 @@ export class Anonymous {
   ) {}
 
   async get(path: string): Promise<ApiResponse<unknown>> {
-    const correlationId = `e2e-${randomUUID()}`;
+    const correlationId = randomUUID();
     const response = await this.context.fetch(`${this.config.gatewayUrl}${path}`, {
       headers: { 'x-correlation-id': correlationId, accept: 'application/json' },
       failOnStatusCode: false,

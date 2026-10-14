@@ -36,6 +36,12 @@ import { newPrisma, waitForWindowClose } from './helpers';
 const TAG = ulid().slice(-10);
 const tagged = (prefix: string): string => `${prefix}_${TAG}_${ulid()}`;
 /**
+ * A correlation id a user's request keeps: a bare ULID. From anyone but a
+ * verified service the middleware re-mints anything else (S-09), so a tagged
+ * one would never come back.
+ */
+const correlation = (): string => ulid();
+/**
  * An organization id the request body validator accepts — the readable seed
  * form `ORG-[A-Z0-9-]{1,48}` — still carrying this run's tag.
  */
@@ -68,7 +74,7 @@ function switchOrganization(
     .post(`${ROUTE}${options.query ?? ''}`)
     .set('authorization', `Bearer ${options.token ?? userToken(caller)}`)
     .set('user-agent', USER_AGENT)
-    .set('x-correlation-id', options.correlationId ?? tagged('COR'))
+    .set('x-correlation-id', options.correlationId ?? correlation())
     .set('traceparent', TRACEPARENT);
   for (const [name, value] of Object.entries(options.headers ?? {})) call.set(name, value);
   return call.send({ organizationId: target });
@@ -129,7 +135,7 @@ describe('security_event_outbox (real PostgreSQL)', () => {
       roles: ['FLEET_MANAGER', 'ORGANIZATION_ADMIN'],
     };
     const requested = requestedOrg();
-    const correlationId = tagged('COR');
+    const correlationId = correlation();
     const token = userToken(caller);
     const before = new Date(Date.now() - 1000);
 
@@ -234,17 +240,21 @@ describe('security_event_outbox (real PostgreSQL)', () => {
   });
 
   it('captures no 401, no route near miss, no unattributable guard refusal and no successful switch', async () => {
-    const before = await prisma.client.securityEventOutbox.count({
-      where: { correlationId: { contains: TAG } },
-    });
+    // Every id these requests were answered under: nothing may be filed under any.
+    const carried: string[] = [];
+    const answeredUnder = (response: { headers: Record<string, string> }): void => {
+      carried.push(response.headers['x-correlation-id']!);
+    };
 
     // 401: no credentials at all.
-    const anonymousCorrelation = tagged('COR');
+    const anonymousCorrelation = correlation();
     const anonymous = await request(harness.app.getHttpServer())
       .post(ROUTE)
       .set('x-correlation-id', anonymousCorrelation)
       .send({ organizationId: tagged('ORG') });
     expect(anonymous.status).toBe(401);
+    expect(anonymous.headers['x-correlation-id']).toBe(anonymousCorrelation);
+    answeredUnder(anonymous);
 
     // Near misses of instrumented templates: a method no route serves and a
     // template deeper than any route. Since AUD-004 Phase C9 every `@Roles`
@@ -261,9 +271,10 @@ describe('security_event_outbox (real PostgreSQL)', () => {
       const nearMiss = await request(harness.app.getHttpServer())
         [method](path)
         .set('authorization', `Bearer ${userToken(underPrivileged)}`)
-        .set('x-correlation-id', tagged('COR'))
+        .set('x-correlation-id', correlation())
         .send({});
       expect(nearMiss.status).toBe(404);
+      answeredUnder(nearMiss);
     }
     expect(
       await prisma.client.securityEventOutbox.count({ where: { actorId: underPrivileged.userId } }),
@@ -281,6 +292,7 @@ describe('security_event_outbox (real PostgreSQL)', () => {
     });
     expect(guardRefusal.status).toBe(403);
     expect(guardRefusal.body.code).toBe(ERROR_CODES.TENANT_MISMATCH);
+    answeredUnder(guardRefusal);
 
     // A switch that is allowed.
     const member: Caller = { userId: tagged('USR'), organizationId: tagged('ORG') };
@@ -313,20 +325,17 @@ describe('security_event_outbox (real PostgreSQL)', () => {
     const allowed = await switchOrganization(harness, member, target);
     expect(allowed.status).toBe(200);
     expect(allowed.body.activeOrganizationId).toBe(target);
+    answeredUnder(allowed);
 
     for (const actor of [underPrivileged, probing, member]) {
       expect(await rowsFor(actor.userId)).toHaveLength(0);
     }
+    expect(carried).toHaveLength(6);
     expect(
       await prisma.client.securityEventOutbox.count({
-        where: { correlationId: anonymousCorrelation },
+        where: { correlationId: { in: carried } },
       }),
     ).toBe(0);
-    expect(
-      await prisma.client.securityEventOutbox.count({
-        where: { correlationId: { contains: TAG } },
-      }),
-    ).toBe(before);
   });
 
   describe('a failed capture returns the identical 403 TENANT_MISMATCH', () => {
@@ -338,7 +347,7 @@ describe('security_event_outbox (real PostgreSQL)', () => {
       await locker.onModuleInit();
 
       try {
-        const correlationId = tagged('COR');
+        const correlationId = correlation();
         const requested = requestedOrg();
         const baselineCaller: Caller = { userId: tagged('USR'), organizationId: tagged('ORG') };
         const lockedCaller: Caller = { ...baselineCaller, userId: tagged('USR') };
@@ -408,7 +417,7 @@ describe('security_event_outbox (real PostgreSQL)', () => {
       });
 
       try {
-        const correlationId = tagged('COR');
+        const correlationId = correlation();
         const requested = requestedOrg();
         const baselineCaller: Caller = { userId: tagged('USR'), organizationId: tagged('ORG') };
         const failingCaller: Caller = { ...baselineCaller, userId: tagged('USR') };

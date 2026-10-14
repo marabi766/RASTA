@@ -131,7 +131,7 @@ test.describe.serial('correlation across HTTP, the outbox and Kafka', () => {
     tenantA,
     tenantB,
   }) => {
-    const correlationId = `e2e-mkt-${randomUUID()}`;
+    const correlationId = randomUUID();
     const offerId = await publishedOffer(tenantB);
 
     const placed = await tenantA.post('/v1/orders', {
