@@ -10,6 +10,11 @@ export {
   DATABASE_POOL_SIZE_MAX,
   DATABASE_POOL_TIMEOUT_SECONDS_MAX,
   kafkaEnvSchema,
+  outboxPurgeEnvSchema,
+  OUTBOX_PURGE_TRANSACTION_MARGIN_MS,
+  outboxPurgeBatchBoundMs,
+  OUTBOX_SHUTDOWN_RESERVE_MS,
+  outboxShutdownBudgetMs,
   KAFKA_SASL_MECHANISMS,
   kafkaSaslConfigured,
   kafkaPlaintextAllowed,
@@ -28,7 +33,7 @@ export {
   redisUrlSchema,
 } from './env';
 
-export type { NodeEnv, LogLevel, BaseEnv, KafkaEnv, EnvIssue } from './env';
+export type { NodeEnv, LogLevel, BaseEnv, KafkaEnv, OutboxPurgeEnv, EnvIssue } from './env';
 
 export { UTC_SESSION_OPTION, withUtcSession } from './database-session';
 

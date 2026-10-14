@@ -123,6 +123,12 @@ jobs:
         # turbo, root `pnpm db:migrate` included (#242).
         run: pnpm run test:db-runtime-privileges-lib
 
+      - name: Outbox purge settings reach the services through turbo (D-052)
+        # Every task that starts a service running the purge — `dev` and the
+        # integration suites — passes every OUTBOX_PURGE_* variable, and the
+        # root `pnpm dev` resolves them (turbo dry run). Codex r1 on #247.
+        run: pnpm run test:outbox-purge-turbo-env
+
       - name: Image scope rule
         # The rule that decides which images a pull request builds and scans
         # (L7-35). A wrong rule would quietly skip a changed image.
