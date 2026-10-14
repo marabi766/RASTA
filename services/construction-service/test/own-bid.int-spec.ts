@@ -22,6 +22,7 @@ import {
   testEnv,
   wire,
   type Wiring,
+  bidKey,
 } from './helpers';
 
 /**
@@ -34,8 +35,8 @@ import {
 const payloadOf = (row: { payload: unknown }) => eventEnvelopeSchema.parse(row.payload).payload;
 
 const FULL = [
-  { criterionCode: 'PRICE', scoreScaled: 8_500 },
-  { criterionCode: 'LICENCE', scoreScaled: 100 },
+  { criterionCode: 'PRICE', scoreScaled: 8_500, expectedRevision: 0 },
+  { criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 },
 ];
 
 describe('a contractor reads its own opened bid', () => {
@@ -178,7 +179,7 @@ describe('a contractor reads its own opened bid', () => {
     organizations.push(owner, bidder);
     await makeEligible(w, bidder);
     const { tenderId } = await publishedForBids(w, owner);
-    await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }));
+    await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }, bidKey()));
 
     const error = await codeOf(mine(bidder, tenderId));
     expect(error.code).toBe('BUSINESS_RULE_VIOLATION');
@@ -197,8 +198,10 @@ describe('a contractor reads its own opened bid', () => {
     await makeEligible(w, kept);
     await makeEligible(w, taken);
     const { tenderId } = await publishedForBids(w, owner);
-    await asBidder(kept, () => w.bids.submit(tenderId, { content: bidContent('1') }));
-    const back = await asBidder(taken, () => w.bids.submit(tenderId, { content: bidContent('2') }));
+    await asBidder(kept, () => w.bids.submit(tenderId, { content: bidContent('1') }, bidKey()));
+    const back = await asBidder(taken, () =>
+      w.bids.submit(tenderId, { content: bidContent('2') }, bidKey()),
+    );
     await asBidder(taken, () => w.bids.withdraw(tenderId, back.bidId, { expectedRevision: 1 }));
     await runUnscoped('the suite lets the deadline pass', () =>
       w.prisma.client.$executeRawUnsafe(
@@ -280,8 +283,8 @@ describe('a contractor reads its own opened bid', () => {
       () =>
         w.evaluation.score(tenderId, lose.bidId, {
           scores: [
-            { criterionCode: 'PRICE', scoreScaled: 7_000 },
-            { criterionCode: 'LICENCE', scoreScaled: 100 },
+            { criterionCode: 'PRICE', scoreScaled: 7_000, expectedRevision: 0 },
+            { criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 },
           ],
         }),
       newUserId(),

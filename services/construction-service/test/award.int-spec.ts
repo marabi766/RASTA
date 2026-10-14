@@ -156,8 +156,8 @@ describe('awarding an evaluated tender', () => {
         () =>
           w.evaluation.score(tenderId, bid.bidId, {
             scores: [
-              { criterionCode: 'PRICE', scoreScaled: 9_000 - index * 1_000 },
-              { criterionCode: 'LICENCE', scoreScaled: 100 },
+              { criterionCode: 'PRICE', scoreScaled: 9_000 - index * 1_000, expectedRevision: 0 },
+              { criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 },
             ],
           }),
         evaluator,
@@ -1278,8 +1278,8 @@ describe('awarding an evaluated tender', () => {
             () =>
               w.evaluation.score(t.tenderId, bid.bidId, {
                 scores: [
-                  { criterionCode: 'PRICE', scoreScaled: 9_000 - i * 1_000 },
-                  { criterionCode: 'LICENCE', scoreScaled: 100 },
+                  { criterionCode: 'PRICE', scoreScaled: 9_000 - i * 1_000, expectedRevision: 0 },
+                  { criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 },
                 ],
               }),
             decider,
@@ -1337,8 +1337,8 @@ describe('awarding an evaluated tender', () => {
           await evaluator(() =>
             w.evaluation.score(t.tenderId, bidId, {
               scores: [
-                { criterionCode: 'PRICE', scoreScaled: 8_000 },
-                { criterionCode: 'LICENCE', scoreScaled: 100 },
+                { criterionCode: 'PRICE', scoreScaled: 8_000, expectedRevision: 0 },
+                { criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 },
               ],
             }),
           );
@@ -1399,8 +1399,8 @@ describe('awarding an evaluated tender', () => {
         await old(() =>
           w.evaluation.score(tenderId, bids[0]!.bidId, {
             scores: [
-              { criterionCode: 'PRICE', scoreScaled: 8_000 },
-              { criterionCode: 'LICENCE', scoreScaled: 100 },
+              { criterionCode: 'PRICE', scoreScaled: 8_000, expectedRevision: 0 },
+              { criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 },
             ],
           }),
         );
@@ -1523,7 +1523,7 @@ describe('awarding an evaluated tender', () => {
         owner,
         () =>
           w.evaluation.score(tenderId, bids[1]!.bidId, {
-            scores: [{ criterionCode: 'PRICE', scoreScaled: 1 }],
+            scores: [{ criterionCode: 'PRICE', scoreScaled: 1, expectedRevision: 0 }],
           }),
         evaluator,
       );
@@ -1566,8 +1566,8 @@ describe('awarding an evaluated tender', () => {
         () =>
           w.evaluation.score(t.tenderId, t.bids[0]!.bidId, {
             scores: [
-              { criterionCode: 'PRICE', scoreScaled: 7_000 },
-              { criterionCode: 'LICENCE', scoreScaled: 100 },
+              { criterionCode: 'PRICE', scoreScaled: 7_000, expectedRevision: 0 },
+              { criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 },
             ],
           }),
         evaluator,

@@ -22,6 +22,7 @@ import {
   testEnv,
   wire,
   type Wiring,
+  bidKey,
 } from './helpers';
 
 /**
@@ -53,7 +54,7 @@ describe('evaluation API', () => {
       const bidder = org(`${label}-bidder${i}`);
       await qualify(w, bidder);
       const view = await asBidder(bidder, () =>
-        w.bids.submit(tenderId, { content: bidContent(price) }),
+        w.bids.submit(tenderId, { content: bidContent(price) }, bidKey()),
       );
       bids.push({ bidder, bidId: view.bidId });
     }
@@ -94,7 +95,7 @@ describe('evaluation API', () => {
       [
         'post',
         `/v1/tenders/${tenderId}/bids/${bidId}/scores`,
-        { scores: [{ criterionCode: 'PRICE', scoreScaled: 1 }] },
+        { scores: [{ criterionCode: 'PRICE', scoreScaled: 1, expectedRevision: 0 }] },
       ],
       ['post', `/v1/tenders/${tenderId}/evaluate`, {}],
       ['get', `/v1/tenders/${tenderId}/evaluation`, undefined],
@@ -214,8 +215,8 @@ describe('evaluation API', () => {
       .set(as(evaluator))
       .send({
         scores: [
-          { criterionCode: 'PRICE', scoreScaled: 8_550 },
-          { criterionCode: 'LICENCE', scoreScaled: 100 },
+          { criterionCode: 'PRICE', scoreScaled: 8_550, expectedRevision: 0 },
+          { criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 },
         ],
       });
     expect(scored.status).toBe(200);
@@ -248,7 +249,7 @@ describe('evaluation API', () => {
     const late = await http()
       .post(`/v1/tenders/${tenderId}/bids/${first.bidId}/scores`)
       .set(as(evaluator))
-      .send({ scores: [{ criterionCode: 'PRICE', scoreScaled: 1 }] });
+      .send({ scores: [{ criterionCode: 'PRICE', scoreScaled: 1, expectedRevision: 0 }] });
     expect(late.status).toBe(422);
     expect(late.body.message).toContain('NOT_EVALUATING');
   });
@@ -265,19 +266,30 @@ describe('evaluation API', () => {
       http().post(`/v1/tenders/${tenderId}/bids/${bidId}/scores`).set(as(token)).send(body);
 
     for (const bad of [
-      { scores: [{ criterionCode: 'PRICE', scoreScaled: 85.5 }] },
-      { scores: [{ criterionCode: 'PRICE', scoreScaled: -1 }] },
-      { scores: [{ criterionCode: 'PRICE', scoreScaled: '8500' }] },
+      { scores: [{ criterionCode: 'PRICE', scoreScaled: 85.5, expectedRevision: 0 }] },
+      { scores: [{ criterionCode: 'PRICE', scoreScaled: -1, expectedRevision: 0 }] },
+      { scores: [{ criterionCode: 'PRICE', scoreScaled: '8500', expectedRevision: 0 }] },
       { scores: [] },
-      { scores: [{ criterionCode: 'PRICE', scoreScaled: 1, evaluatorId: 'USR_X' }] },
-      { scores: [{ criterionCode: 'PRICE', scoreScaled: 1 }], organizationId: 'ORG_X' },
+      {
+        scores: [
+          { criterionCode: 'PRICE', scoreScaled: 1, expectedRevision: 0, evaluatorId: 'USR_X' },
+        ],
+      },
+      {
+        scores: [{ criterionCode: 'PRICE', scoreScaled: 1, expectedRevision: 0 }],
+        organizationId: 'ORG_X',
+      },
     ]) {
       expect((await score(bad)).status).toBe(400);
     }
-    const range = await score({ scores: [{ criterionCode: 'PRICE', scoreScaled: 10_001 }] });
+    const range = await score({
+      scores: [{ criterionCode: 'PRICE', scoreScaled: 10_001, expectedRevision: 0 }],
+    });
     expect(range.status).toBe(422);
     expect(range.body.message).toContain('SCORE_OUT_OF_RANGE');
-    const unknown = await score({ scores: [{ criterionCode: 'EXPERIENCE', scoreScaled: 1 }] });
+    const unknown = await score({
+      scores: [{ criterionCode: 'EXPERIENCE', scoreScaled: 1, expectedRevision: 0 }],
+    });
     expect(unknown.status).toBe(422);
     expect(unknown.body.message).toContain('UNKNOWN_CRITERION');
 
@@ -302,7 +314,7 @@ describe('evaluation API', () => {
       [
         'post',
         `/v1/tenders/${tenderId}/bids/${bidId}/scores`,
-        { scores: [{ criterionCode: 'PRICE', scoreScaled: 1 }] },
+        { scores: [{ criterionCode: 'PRICE', scoreScaled: 1, expectedRevision: 0 }] },
       ],
       ['post', `/v1/tenders/${tenderId}/evaluate`, {}],
       ['get', `/v1/tenders/${tenderId}/evaluation`, undefined],

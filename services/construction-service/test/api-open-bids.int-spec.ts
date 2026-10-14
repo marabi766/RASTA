@@ -19,6 +19,7 @@ import {
   qualify,
   wire,
   type Wiring,
+  bidKey,
 } from './helpers';
 
 /**
@@ -47,7 +48,9 @@ describe('open-bids API', () => {
     const bidder = org(`${label}-bidder`);
     await qualify(w, bidder);
     const { tenderId } = await publishedForBids(w, owner);
-    const bid = await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }));
+    const bid = await asBidder(bidder, () =>
+      w.bids.submit(tenderId, { content: bidContent() }, bidKey()),
+    );
     await runUnscoped('the suite lets the deadline pass', () =>
       w.prisma.client.$executeRawUnsafe(
         `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',

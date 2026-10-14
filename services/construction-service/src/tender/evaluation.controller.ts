@@ -1,6 +1,7 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AuditorSelfService, RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
+import { parseIdempotencyKey } from '../project/project.controller';
 import { EvaluationService } from './evaluation.service';
 import {
   qualifyBidSchema,
@@ -109,14 +110,19 @@ export class EvaluationController {
       '(`unchanged`). Only a QUALIFIED bid (422 `BID_NOT_QUALIFIED`), only while the tender is ' +
       'EVALUATING, and at most CONSTRUCTION_EVALUATION_MAX_EVALUATORS evaluators per bid (default 1; ' +
       '422 `EVALUATOR_LIMIT`). Publishes BID_SCORED (a count and a digest, never the scores). ' +
+      'Each score names `expectedRevision`, the revision of that cell of the caller’s own scores ' +
+      'they last saw (0 for a cell not yet scored): any other is 409 OPTIMISTIC_LOCK_FAILED and ' +
+      'nothing of the request is recorded, so a delayed retry of an older score never overwrites a ' +
+      'newer one. An optional Idempotency-Key answers a retry with the first answer. ' +
       EVALUATOR_NOTE,
   })
   async score(
     @Param('id') id: string,
     @Param('bidId') bidId: string,
     @Body(zodPipe(scoreBidSchema)) dto: ScoreBidDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return this.evaluation.score(id, bidId, dto);
+    return this.evaluation.score(id, bidId, dto, parseIdempotencyKey(idempotencyKey));
   }
 
   @AuditorSelfService(REFUSED_AND_AUDITED_BY_THE_SERVICE)

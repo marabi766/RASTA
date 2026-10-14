@@ -121,7 +121,9 @@ export const tenderCloseOldestOverdueAgeSeconds = new Gauge({
  * Opening or reading a tender's bids that was refused, by a closed reason
  * (not_closed, not_opened, proposal_required, second_person_required, no_proposal,
  * evidence_unavailable, evidence_behind, integrity, conflict_of_interest,
- * identity_unavailable, key_unavailable). `integrity` is the one to look at: a stored bid,
+ * identity_unavailable, key_unavailable, actor_identity_unknown, proposer_not_authorized — a
+ * proposer who may no longer open the bids, cleared at the approval; tender_over_limit — more
+ * standing bids than CONSTRUCTION_TENDER_MAX_STANDING_BIDS, an operator's decision, Q-117). `integrity` is the one to look at: a stored bid,
  * or the whole chain, did not match what audit-service holds (ADR-066 § 3);
  * `identity_unavailable` says identity-service could not tell whom a reader belongs to, so
  * nothing was shown. Never labelled by tender or tenant.
