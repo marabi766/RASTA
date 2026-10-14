@@ -304,7 +304,11 @@ describe('the outbox store, against a real database', () => {
     await prisma.onModuleDestroy();
   });
 
-  async function seed(count: number, publishedAt: Date | null = null): Promise<string[]> {
+  async function seed(
+    count: number,
+    publishedAt: Date | null = null,
+    createdAt?: Date,
+  ): Promise<string[]> {
     const ids: string[] = [];
     await runUnscoped('the suite seeds outbox rows', async () => {
       for (let index = 0; index < count; index += 1) {
@@ -324,6 +328,7 @@ describe('the outbox store, against a real database', () => {
             organizationId,
             correlationId: `COR-${ulid()}`,
             publishedAt,
+            ...(createdAt ? { createdAt } : {}),
           },
         });
       }
@@ -574,11 +579,20 @@ describe('the outbox store, against a real database', () => {
   });
 
   it('purges published rows older than the retention window, and only those', async () => {
-    const old = await seed(1, new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
+    // Created a moment before it was published, as every real row is.
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const old = await seed(1, thirtyDaysAgo, new Date(thirtyDaysAgo.getTime() - 1000));
     const recent = await seed(1, new Date());
     const unpublished = await seed(1);
 
-    await store.purgePublished(7);
+    // One bounded batch, as `OutboxPurgeScheduler` issues it. The isolated
+    // proof of what the purge keeps is `outbox-purge.int-spec.ts`.
+    await store.purgePublished({
+      retentionSeconds: 7 * 24 * 60 * 60,
+      limit: 10_000,
+      statementTimeoutMs: 5000,
+      maxWaitMs: 2000,
+    });
 
     expect(await rowsOf(old)).toHaveLength(0);
     expect(await rowsOf(recent)).toHaveLength(1);

@@ -40,7 +40,11 @@
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/request.controller.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/request.service.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-clearance.ts",
-        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-record.ts"
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-record.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/order/dto.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/order/order.controller.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/order/order.service.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/order/pricing.ts"
       ]
     },
     "test:unit": {
@@ -72,7 +76,11 @@
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/request.controller.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/request.service.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-clearance.ts",
-        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-record.ts"
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-record.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/order/dto.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/order/order.controller.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/order/order.service.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/order/pricing.ts"
       ]
     }
   }

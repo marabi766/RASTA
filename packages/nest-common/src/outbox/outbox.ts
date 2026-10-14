@@ -65,7 +65,17 @@ export interface OutboxMessageInput<TPayload = unknown> {
    * allocate against one key and label the envelope with another.
    */
   streamKey?: string;
+  /**
+   * The event's id, when it must be reproducible. Omitted (every ordinary
+   * call site): a fresh ULID. Supplied only by an operator-run re-emission of
+   * a fact that already exists, so that running it twice yields the same id and
+   * a consumer's idempotency marker makes the second run a no-op. Must be a
+   * ULID: the id is also the outbox primary key and the consumers' marker.
+   */
+  eventId?: string;
 }
+
+const ULID_PATTERN = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 
 export interface OutboxRow {
   id: string;
@@ -179,7 +189,10 @@ export function buildOutboxRow<TPayload>(
       );
     }
   }
-  const eventId = ulid();
+  if (input.eventId !== undefined && !ULID_PATTERN.test(input.eventId)) {
+    throw new Error('buildOutboxRow: eventId must be a ULID when supplied.');
+  }
+  const eventId = input.eventId ?? ulid();
   const occurredAt = input.occurredAt ?? new Date();
   const correlationId = context?.correlationId ?? eventId;
   // `null` is an explicit "no tenant"; only an omitted value falls back.
@@ -234,7 +247,12 @@ export function buildOutboxRow<TPayload>(
   };
 }
 
-function buildHeaders(envelope: EventEnvelope): Record<string, string> {
+/**
+ * The platform headers the relay publishes with an envelope (`EVENT_HEADERS`).
+ * Exported so a consumer that dead-letters an event it held back can restore
+ * them exactly as the producer's relay wrote them (#240 r8).
+ */
+export function buildHeaders(envelope: EventEnvelope): Record<string, string> {
   const headers: Record<string, string> = {
     [EVENT_HEADERS.eventId]: envelope.eventId,
     [EVENT_HEADERS.eventName]: envelope.eventName,
@@ -355,6 +373,20 @@ export interface OutboxRelayOptions {
   now?: () => number;
 }
 
+/**
+ * What a caller that owns the process's shutdown budget passes to `stop()`
+ * (`OutboxShutdown`). Without it a stop is bounded by the component's own
+ * setting alone.
+ */
+export interface OutboxStopOptions {
+  /**
+   * Epoch milliseconds (the component's own clock) by which the stop must
+   * return, shared by every component draining in the same shutdown. A stop
+   * waits for the earlier of this and its own bound.
+   */
+  deadlineAt?: number;
+}
+
 /** ADR-050 §Heartbeat timing. Three attempts before expiry, at every lease size. */
 export const RENEWAL_INTERVAL_DIVISOR = 4;
 /** Ceiling on one renewal's `statement_timeout`, in milliseconds. */
@@ -383,6 +415,8 @@ export class OutboxRelay {
   private heartbeat?: NodeJS.Timeout;
   private running = false;
   private stopped = true;
+  /** The one stop in progress or done since the last `start()`; later calls join it. */
+  private stopping?: Promise<void>;
 
   /** Rows this relay holds and has not yet acknowledged, failed or released. */
   private owned = new Set<string>();
@@ -409,6 +443,7 @@ export class OutboxRelay {
   start(): void {
     if (!this.stopped) return;
     this.stopped = false;
+    this.stopping = undefined;
     const interval = this.options.pollIntervalMs ?? 500;
     this.timer = setInterval(() => {
       if (this.stopped) return;
@@ -436,14 +471,23 @@ export class OutboxRelay {
    *
    * Shutdown never waits indefinitely: the grace is bounded by configuration,
    * so a pod cannot sit in `Terminating` behind a Kafka request that cannot be
-   * cancelled.
+   * cancelled. With `deadlineAt` (`OutboxShutdown`, D-052) the grace and the
+   * release both end by that shared deadline as well.
+   *
+   * One stop per `start()`: a second call joins the first and, once that one
+   * has returned, returns at once rather than waiting a second grace.
    */
-  async stop(): Promise<void> {
+  stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopping ??= this.drain(options.deadlineAt);
+    return this.stopping;
+  }
+
+  private async drain(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
 
-    const deadline = this.now() + this.shutdownGraceMs;
+    const deadline = Math.min(this.now() + this.shutdownGraceMs, deadlineAt ?? Infinity);
     while (this.running && this.now() < deadline) {
       await new Promise((resolve) => setImmediate(resolve));
     }
@@ -452,15 +496,27 @@ export class OutboxRelay {
     if (token) {
       const notSent = [...this.owned].filter((id) => this.state.get(id) === 'NOT_SENT');
       if (notSent.length > 0) {
-        try {
-          const released = await this.options.store.release(notSent, token);
-          this.recordFencing(notSent.length - released, 'release');
-          this.options.logger?.debug(
-            { count: released, owner: this.owner },
-            'Outbox shutdown released rows that had not been sent',
+        const releasing = this.options.store.release(notSent, token).then(
+          (released) => {
+            this.recordFencing(notSent.length - released, 'release');
+            this.options.logger?.debug(
+              { count: released, owner: this.owner },
+              'Outbox shutdown released rows that had not been sent',
+            );
+          },
+          (error: unknown) => {
+            this.options.logger?.error({ err: error }, 'Outbox shutdown release failed');
+          },
+        );
+        if (deadlineAt === undefined) {
+          await releasing;
+        } else if ((await withinDeadline(releasing, deadlineAt - this.now())) === 'abandoned') {
+          // Not released is safe: nothing was sent, and the lease lapses on its own.
+          this.options.logger?.warn(
+            { count: notSent.length, owner: this.owner, leaseSeconds: this.leaseSeconds },
+            'Outbox shutdown release did not finish by the shutdown deadline; the rows ' +
+              'return to the queue when their lease expires',
           );
-        } catch (error) {
-          this.options.logger?.error({ err: error }, 'Outbox shutdown release failed');
         }
       }
 
@@ -766,6 +822,31 @@ export class OutboxRelay {
         'A duplicate delivery may have occurred; that cannot be confirmed producer-side',
     );
   }
+}
+
+/**
+ * How `work` ended within `boundMs`: `finished`, or `abandoned` once the bound
+ * passed first. A rejection counts as finished (the callers handle their own
+ * errors), and the timer is cleared and unreferenced either way.
+ */
+export async function withinDeadline(
+  work: Promise<unknown>,
+  boundMs: number,
+): Promise<'finished' | 'abandoned'> {
+  if (boundMs <= 0) return 'abandoned';
+  let timer: NodeJS.Timeout | undefined;
+  const outcome = await Promise.race([
+    work.then(
+      () => 'finished' as const,
+      () => 'finished' as const,
+    ),
+    new Promise<'abandoned'>((resolve) => {
+      timer = setTimeout(() => resolve('abandoned'), boundMs);
+      timer.unref?.();
+    }),
+  ]);
+  clearTimeout(timer);
+  return outcome;
 }
 
 function hostLabel(): string {

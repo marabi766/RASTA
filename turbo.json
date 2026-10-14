@@ -69,7 +69,8 @@
         "KAFKA_SASL_*",
         "KAFKA_SSL*",
         "S3_*",
-        "DOCUMENT_*"
+        "DOCUMENT_*",
+        "OUTBOX_PURGE_*"
       ]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
@@ -91,6 +92,9 @@
       // with no scanner address at all and every document suite fails at
       // startup — on a developer machine the same command passes, because the
       // shell exported them directly.
+      //
+      // OUTBOX_PURGE_* (D-052): the integration suites build the AppModule
+      // from process.env, purge scheduler included; see "dev" below.
       "env": [
         "DATABASE_URL",
         "DATABASE_URL_*",
@@ -99,7 +103,8 @@
         "KAFKA_SASL_*",
         "KAFKA_SSL*",
         "S3_*",
-        "DOCUMENT_*"
+        "DOCUMENT_*",
+        "OUTBOX_PURGE_*"
       ]
     },
     // identity-service's two 500-write aggregation proofs, run alone after the
@@ -144,7 +149,14 @@
         "SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS"
       ]
     },
-    "dev": { "cache": false, "persistent": true },
+    // OUTBOX_PURGE_* (D-052, Codex r1 on #247): the D-005 trap once more, in
+    // the task that starts the services. A service reads the root .env itself
+    // (`node --env-file`, where the shell's value wins), so undeclared,
+    // `OUTBOX_PURGE_ENABLED=false pnpm dev` ran with the purge on, and an
+    // invalid value in the shell never reached the validation that refuses
+    // it. scripts/outbox-purge-turbo-env.test.mjs holds every task that starts
+    // a service wiring the purge to every variable of outboxPurgeEnvSchema.
+    "dev": { "cache": false, "persistent": true, "env": ["OUTBOX_PURGE_*"] },
     "clean": { "cache": false }
   }
 }

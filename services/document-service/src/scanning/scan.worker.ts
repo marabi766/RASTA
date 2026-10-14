@@ -1,5 +1,10 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { runWithContext, type RequestContext } from '@rasta/nest-common';
+import {
+  runWithContext,
+  withinDeadline,
+  type OutboxStopOptions,
+  type RequestContext,
+} from '@rasta/nest-common';
 import { withSpan } from '@rasta/observability';
 import type { Logger } from '@rasta/logging';
 import { ulid } from 'ulid';
@@ -22,6 +27,12 @@ import {
 import type { MalwareScanner, ScanResult } from './scanner.port';
 import { ScanRepository, type ClaimedDocument } from './scan.repository';
 import { backoffMs, decideTransition, stateOf } from './transitions';
+
+/**
+ * The part of a shutdown deadline kept for handing claims back when the scan
+ * in flight has not finished by it: one `UPDATE` on this worker's own rows.
+ */
+export const SCAN_RELEASE_BOUND_MS = 1000;
 
 /**
  * The asynchronous scan lifecycle (ADR-014 step 4, ADR-049).
@@ -75,6 +86,10 @@ export class ScanWorker {
   private timer?: NodeJS.Timeout;
   /** A tick is in flight. Guards against overlapping polls. */
   private running = false;
+  /** The batch in flight, for a stop to wait on. */
+  private inFlight?: Promise<number>;
+  /** The stop in progress or done, since the last `start()`. */
+  private stopping?: Promise<void>;
   /** The poll timer is armed. */
   private polling = false;
   /**
@@ -111,6 +126,7 @@ export class ScanWorker {
 
     this.polling = true;
     this.shuttingDown = false;
+    this.stopping = undefined;
     this.timer = setInterval(() => {
       if (this.shuttingDown) return;
       void this.tick();
@@ -118,14 +134,64 @@ export class ScanWorker {
     this.timer.unref?.();
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Stops polling at once and waits for the batch in flight — at most until
+   * `deadlineAt`, the shutdown's shared deadline (`OutboxShutdown`, which calls
+   * this in Nest's destroy phase beside the relay and the purge; Codex r3 on
+   * #247). A scan can take `DOCUMENT_SCAN_TIMEOUT_MS` (60 s by default), longer
+   * than the whole shutdown, so waiting for it unbounded ran the process into
+   * its forced exit mid-scan.
+   *
+   * At the deadline the batch is abandoned cleanly: every claim this worker
+   * holds, the document being scanned included, goes back to the queue
+   * ({@link ScanRepository.releaseAllHeld}), so another instance takes it at
+   * once and this one's late write-back matches nothing. The release has its
+   * own slice of the budget ({@link SCAN_RELEASE_BOUND_MS}) before the deadline;
+   * if it does not finish, the lease still expires after
+   * `DOCUMENT_SCAN_LEASE_SECONDS` and the document is claimable again — never
+   * stranded.
+   *
+   * Without a deadline (an operator's or a test's own stop) it waits for the
+   * batch, as before. One stop per `start()`: a second call joins the first.
+   */
+  stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopping ??= this.halt(options.deadlineAt);
+    return this.stopping;
+  }
+
+  private async halt(deadlineAt: number | undefined): Promise<void> {
     this.shuttingDown = true;
     this.polling = false;
     if (this.timer) clearInterval(this.timer);
-    // Let an in-flight batch finish rather than abandoning leases mid-scan.
-    while (this.running) {
-      await new Promise((resolve) => setImmediate(resolve));
+    this.timer = undefined;
+
+    const current = this.inFlight;
+    if (!current) return;
+    if (deadlineAt === undefined) {
+      await current;
+      return;
     }
+    const waitMs = deadlineAt - Date.now() - SCAN_RELEASE_BOUND_MS;
+    if ((await withinDeadline(current, waitMs)) === 'finished') return;
+
+    let released: number | undefined;
+    const release = this.scans.releaseAllHeld(this.owner).then(
+      (count) => {
+        released = count;
+      },
+      (error: unknown) => {
+        this.logger.warn({ err: error }, 'The stopping scan worker could not release its claims');
+      },
+    );
+    await withinDeadline(release, Math.min(SCAN_RELEASE_BOUND_MS, deadlineAt - Date.now()));
+    this.logger.warn(
+      {
+        released: released ?? null,
+        leaseSeconds: this.env.DOCUMENT_SCAN_LEASE_SECONDS,
+      },
+      'Scan still running at the shutdown deadline; abandoned. Its claims went back to the ' +
+        'queue (released: null = not confirmed, the lease expires instead)',
+    );
   }
 
   /**
@@ -140,6 +206,17 @@ export class ScanWorker {
     if (this.running) return 0;
     this.running = true;
 
+    const work = this.scanBatch();
+    this.inFlight = work;
+    try {
+      return await work;
+    } finally {
+      this.running = false;
+      this.inFlight = undefined;
+    }
+  }
+
+  private async scanBatch(): Promise<number> {
     try {
       const batch = await this.scans.claim({
         owner: this.owner,
@@ -165,8 +242,6 @@ export class ScanWorker {
       // database blip.
       this.logger.error({ err: error }, 'The scan worker could not claim work');
       return 0;
-    } finally {
-      this.running = false;
     }
   }
 

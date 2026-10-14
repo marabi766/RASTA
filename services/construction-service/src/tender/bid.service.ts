@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { RastaError, getContext } from '@rasta/nest-common';
 import { withFinancialSpan } from '@rasta/observability';
 import type { CursorPage } from '@rasta/contracts';
@@ -6,10 +6,20 @@ import type { Bid, Tender, TenderCriterion } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { ProjectAccess } from '../access/access';
-import { SERVICE_NAME } from '../config/env';
+import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import { tenderTransitionsTotal, versionConflictsTotal } from '../observability/metrics';
 import { transactionNow } from '../shared/clock';
+import {
+  IdempotencyStore,
+  canonicalise,
+  requiredIdempotencyKey,
+  targeted,
+  type RecordCompletion,
+  type RequestHasher,
+} from '../shared/idempotency';
 import { isUniqueViolation } from '../shared/prisma-errors';
+import { ENV, TENDER_KEY_PROVIDER } from '../tokens';
+import type { RequestDigestContext, TenderKeyProvider } from './sealing/key-provider';
 import { StandingAuthority } from './standing-authority';
 import { BidRepository, type LockedTenderForBid } from './bid.repository';
 import { TenderClock, insideWindow } from './tender-clock';
@@ -40,10 +50,16 @@ export const BID_REFUSALS = [
   'UNKNOWN_CRITERION',
   'BID_TOO_LARGE',
   'BID_NOT_SUBMITTED',
+  'BID_REVISION_LIMIT',
+  'TENDER_RECEIPT_LIMIT',
+  'TENDER_BID_LIMIT',
 ] as const;
 export type BidRefusal = (typeof BID_REFUSALS)[number];
 
 const OWN_BID_RECEIPT = 'OWN_BID_RECEIPT';
+
+/** The endpoint template a bid submission's `Idempotency-Key` is stored under (docs/06 § 6.8). */
+export const SUBMIT_BID_ENDPOINT = 'POST /v1/tenders/:id/bids';
 
 /**
  * Submitting, replacing and withdrawing a bid, and reading one's own receipt
@@ -88,7 +104,35 @@ export class BidService {
     private readonly events: EventPublisher,
     private readonly access: ProjectAccess,
     private readonly clock: TenderClock,
+    private readonly idempotency: IdempotencyStore,
+    @Inject(TENDER_KEY_PROVIDER) private readonly keys: TenderKeyProvider,
+    @Inject(ENV) private readonly env: ConstructionEnv,
   ) {}
+
+  /**
+   * The bid's request, recognised under a keyed, salted digest bound to the bidder organization and
+   * user who made it (see `submit`). No KEK means no tender could have been published, so no bid can
+   * arrive; it is an error, never an unkeyed fallback.
+   */
+  private requestHasherOf(requester: RequestDigestContext): RequestHasher {
+    return {
+      hash: (body) =>
+        this.digestOrFail(() => this.keys.requestDigest(requester, canonicalise(body))),
+      matches: (stored, body) =>
+        this.keys.matchesRequestDigest(stored, requester, canonicalise(body)),
+    };
+  }
+
+  private digestOrFail(digest: () => string): string {
+    try {
+      return digest();
+    } catch (error) {
+      if (error instanceof SealingError) {
+        throw RastaError.internal('No key is configured to recognise a bid request');
+      }
+      throw error;
+    }
+  }
 
   // -- what a bidder may bid on -------------------------------------------------
 
@@ -119,8 +163,50 @@ export class BidService {
 
   // -- submit -------------------------------------------------------------------
 
-  async submit(tenderId: string, dto: SubmitBidDto): Promise<BidReceiptView> {
+  /**
+   * Submits the caller's organization's one bid. The `Idempotency-Key` is **mandatory** (docs/06
+   * § 6.8, «ثبت پیشنهاد»; construction audit F4), judged here so a direct call is held to it too:
+   * the key belongs to the bidder's organization (the store keys on the acting organization), the
+   * request is the tender id and the body, and the receipt is stored with the bid, its receipt and
+   * its outbox row in one transaction. A retry with the same key and body answers that receipt and
+   * writes nothing; any failure — a refusal, an unreachable supplier-service, a 5xx — releases the
+   * key so the request can be made again. The role is checked before the key is looked at: a replay
+   * is for a bidder only.
+   *
+   * The stored request hash is **keyed** (`TenderKeyProvider.requestDigest`), not the plain SHA-256
+   * the other construction commands store: the body is the price, and an unkeyed hash of a
+   * low-entropy price would let a reader of a backup guess it (ADR-066 § 1). It is also salted per
+   * claim and bound to the bidder organization **and** user (Codex r1 on #250, R1): the claim is
+   * committed before eligibility, uniqueness and the window are judged, so a digest comparable
+   * across claims would let anyone with read access to the database and a contractor account
+   * confirm a competitor's guessed price by submitting candidates. A replay is recognised with the
+   * stored salt; the same key from another user of the organization is a different request
+   * (`409 IDEMPOTENCY_KEY_REUSED`), as with a score's evaluator.
+   */
+  async submit(
+    tenderId: string,
+    dto: SubmitBidDto,
+    idempotencyKey: string | undefined,
+  ): Promise<BidReceiptView> {
     const { organizationId: bidder, actor } = this.access.assertCanBid();
+    const key = requiredIdempotencyKey(idempotencyKey);
+    return this.idempotency.run(
+      SUBMIT_BID_ENDPOINT,
+      key,
+      targeted(tenderId, dto),
+      201,
+      (record) => this.submitOnce(tenderId, dto, bidder, actor, record),
+      this.requestHasherOf({ organizationId: bidder, userId: actor }),
+    );
+  }
+
+  private async submitOnce(
+    tenderId: string,
+    dto: SubmitBidDto,
+    bidder: string,
+    actor: string,
+    record: RecordCompletion<BidReceiptView>,
+  ): Promise<BidReceiptView> {
     const bidId = newId(ID_PREFIX.bid);
     const eligibleAsOf = await this.assertEligible(tenderId, bidder);
 
@@ -156,7 +242,7 @@ export class BidService {
               actor,
               at,
             });
-            return this.appendAndAnnounce(tx, {
+            const receipt = await this.appendAndAnnounce(tx, {
               eventName: 'BID_SUBMITTED',
               owner: tender.organizationId,
               tenderId,
@@ -168,6 +254,9 @@ export class BidService {
               at,
               eligibleAsOf,
             });
+            // The receipt and the key's completion commit with the bid, or none of them does.
+            await record(tx, bidId, receipt);
+            return receipt;
           }),
         { 'rasta.tender.command': 'bid-submit' },
       );
@@ -193,12 +282,17 @@ export class BidService {
             const { tender, at, criteria } = await this.decide(tx, tenderId, bidder);
             const locked = await this.lockOwnBid(tx, tenderId, bidId, bidder);
             this.assertRevision(locked, dto.expectedRevision);
+            const revision = dto.expectedRevision + 1;
+            // Under the bid's lock: a bid has at most so many revisions (F2), so that no one
+            // bidder can fill the tender's chain.
+            if (revision > this.env.CONSTRUCTION_BID_MAX_REVISIONS) {
+              throw this.refused(bidId, ['BID_REVISION_LIMIT']);
+            }
             this.assertAnswersKnown(dto.content, criteria);
             const key = await this.bids.findKey(tx, tenderId);
             if (!key)
               throw RastaError.internal('A published tender has no key; no bid can be sealed');
 
-            const revision = dto.expectedRevision + 1;
             const sealed = this.seal(key.publicKeyPem, content(dto), {
               tenderId,
               bidId,
@@ -448,6 +542,22 @@ export class BidService {
     },
   ): Promise<BidReceiptView> {
     const slot = await this.bids.nextReceiptSlot(tx, input.tenderId);
+    // Under the chain's advisory lock, in the bid's transaction: a receipt past what
+    // audit-service returns would leave a tender that can never be opened (F2). The refusal
+    // rolls the bid back with it.
+    if (slot.seq > this.env.CONSTRUCTION_TENDER_MAX_RECEIPTS) {
+      throw this.refused(input.tenderId, ['TENDER_RECEIPT_LIMIT']);
+    }
+    // A new bid, under the same lock: every submission holds it until it commits, so each one
+    // counts every bid committed before it, and a tender never stands more bids than its opening
+    // is known to finish (Codex r2 on #250). The refusal names the limit, never the count.
+    if (
+      input.eventName === 'BID_SUBMITTED' &&
+      (await this.bids.countStandingBids(tx, input.tenderId)) >
+        this.env.CONSTRUCTION_TENDER_MAX_STANDING_BIDS
+    ) {
+      throw this.refused(input.tenderId, ['TENDER_BID_LIMIT']);
+    }
     const previous = slot.previousReceipt ?? genesisReceipt(input.tenderId);
     const link = {
       bidId: input.bidId,

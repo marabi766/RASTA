@@ -30,6 +30,13 @@ import type { ProjectStateName } from '../project/project.state-machine';
 
 export type PolicyWithSteps = ApprovalPolicy & { steps: ApprovalPolicyStep[] };
 
+/** The platform administrator's queue: every organization's policies. */
+export const EVERY_ORGANIZATION = 'EVERY_ORGANIZATION';
+
+/** Which policies a listing may show: of one organization, the sides the caller may see, or all. */
+export type PolicyListScope =
+  { organizationId: string; governed: boolean; authored: boolean } | typeof EVERY_ORGANIZATION;
+
 /**
  * The 64-bit key of one policy slot — the policy in force for one
  * (organization, workflow key) — for `pg_advisory_xact_lock`. Derived here,
@@ -278,27 +285,32 @@ export class ApprovalRepository {
   }
 
   /**
-   * Policies an organization governs by or wrote — or, with `organizationId`
-   * null, every organization's (the platform administrator's queue).
+   * Policies an organization governs by (`governed`) or wrote (`authored`), only the sides the
+   * caller may see (`ProjectAccess.assertCanListPolicies`) — or, with `EVERY_ORGANIZATION`, every
+   * organization's (the platform administrator's queue). The visibility is part of the query, so
+   * the page and its cursor are made of visible rows only.
    */
   async listPolicies(filter: {
-    organizationId: string | null;
+    scope: PolicyListScope;
     workflowKey?: WorkflowKey;
     status?: PolicyStateName;
     cursor?: string;
     limit: number;
   }): Promise<PolicyWithSteps[]> {
+    const { scope } = filter;
+    const sides =
+      scope === EVERY_ORGANIZATION
+        ? []
+        : [
+            ...(scope.governed ? [{ organizationId: scope.organizationId }] : []),
+            ...(scope.authored ? [{ authorOrganizationId: scope.organizationId }] : []),
+          ];
+    // Fail closed: a scope with no visible side matches nothing rather than everything.
+    if (scope !== EVERY_ORGANIZATION && sides.length === 0) return [];
     return runUnscoped(POLICY_REASON, () =>
       this.prisma.client.approvalPolicy.findMany({
         where: {
-          ...(filter.organizationId !== null
-            ? {
-                OR: [
-                  { organizationId: filter.organizationId },
-                  { authorOrganizationId: filter.organizationId },
-                ],
-              }
-            : {}),
+          ...(scope !== EVERY_ORGANIZATION ? { OR: sides } : {}),
           ...(filter.workflowKey ? { workflowKey: filter.workflowKey } : {}),
           ...(filter.status ? { status: filter.status } : {}),
           ...(filter.cursor ? { id: { lt: filter.cursor } } : {}),
@@ -458,6 +470,41 @@ export class ApprovalRepository {
       }),
     );
     return result.count;
+  }
+
+  /**
+   * The progress the project's latest submitted report states (highest submission sequence), or
+   * null — read for its authority, which may be another organization, so the project's
+   * organization is named here rather than taken from the request (construction audit F7).
+   * The caller holds the project lock.
+   */
+  async latestSubmittedProgress(
+    tx: ExtendedPrismaClient,
+    scope: { organizationId: string; projectId: string },
+  ): Promise<number | null> {
+    const latest = await runUnscoped(AUTHORITY_REASON, () =>
+      tx.progressReport.findFirst({
+        where: { ...scope, status: 'SUBMITTED' },
+        orderBy: { submissionSequence: 'desc' },
+        select: { progressBasisPoints: true },
+      }),
+    );
+    return latest?.progressBasisPoints ?? null;
+  }
+
+  /** The round of the project's undecided (QUEUED or PENDING) steps of one workflow, or null. */
+  async openRound(
+    tx: ExtendedPrismaClient,
+    scope: { organizationId: string; projectId: string; workflowKey: string },
+  ): Promise<number | null> {
+    const open = await runUnscoped(AUTHORITY_REASON, () =>
+      tx.approval.findFirst({
+        where: { ...scope, tenderId: null, status: { in: ['QUEUED', 'PENDING'] } },
+        select: { round: true },
+        orderBy: { round: 'desc' },
+      }),
+    );
+    return open?.round ?? null;
   }
 
   async hasPending(

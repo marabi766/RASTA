@@ -9,6 +9,7 @@ import {
   loadEnv,
 } from '@rasta/config';
 import { isKekId, parseKekConfiguration, parseKekEntries } from '../tender/sealing/key-provider';
+import { EVIDENCE_MAX_CHAIN_LINKS } from '../tender/evidence-limits';
 import {
   CANCELLABLE_BY_LIFECYCLE,
   PROJECT_STATES,
@@ -22,6 +23,25 @@ export const CONSTRUCTION_TOPIC = 'rasta.construction.v1';
 
 /** The port `.env.example` and the gateway's `CONSTRUCTION_SERVICE_URL` both name. */
 export const DEFAULT_PORT = '3110';
+
+/**
+ * `CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS` (Codex r1 on #250, R2): never below Prisma's own 5 s default,
+ * which the opening used to inherit; never above two minutes of the tender's lock. The default
+ * leaves wide headroom over the measured worst case at the default caps (`tender-open-scale.int-spec`).
+ */
+export const TENDER_OPEN_TIMEOUT_MIN_MS = 5_000;
+export const TENDER_OPEN_TIMEOUT_MAX_MS = 120_000;
+export const TENDER_OPEN_TIMEOUT_DEFAULT_MS = 30_000;
+
+/**
+ * `CONSTRUCTION_TENDER_MAX_STANDING_BIDS` (Codex r2 on #250): the opening decrypts every standing
+ * bid in its transaction, and the receipt cap alone let 10,000 organizations bid once each —
+ * ~33 s of decryption before any write. PROVISIONAL default 200 (Q-117); the ceiling is the
+ * largest value measured to open within the default timeout (`tender-open-scale.int-spec`, run
+ * with it), so a configuration nobody has measured refuses to start.
+ */
+export const TENDER_MAX_STANDING_BIDS_DEFAULT = 200;
+export const TENDER_MAX_STANDING_BIDS_CEILING = 500;
 
 /**
  * The oversight role. Refused by this service whatever the configuration says
@@ -137,6 +157,17 @@ function roleList(name: string, options: { min: number }) {
  *   CONSTRUCTION_PROGRESS_ALLOW_DECREASE
  *                                       Q-72. Whether a submitted progress
  *                                       report may report less than the last.
+ *   CONSTRUCTION_TENDER_MAX_RECEIPTS    Construction audit F2. The receipts a
+ *                                       tender's chain may hold (≤ what
+ *                                       audit-service returns, 10,000).
+ *   CONSTRUCTION_BID_MAX_REVISIONS      PROVISIONAL (F2, D1): revisions one
+ *                                       bid may have, the submission included.
+ *   CONSTRUCTION_TENDER_MAX_STANDING_BIDS
+ *                                       PROVISIONAL (Q-117): bids standing on
+ *                                       one tender at once; 1–500, default 200.
+ *   CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS How long the opening's transaction (and
+ *                                       the owner's read of every opened bid)
+ *                                       may run; 5,000–120,000, default 30,000.
  *
  * `SYSTEM_ADMIN` is always accepted for project and policy commands, as
  * everywhere on the platform, and never needs to be listed. It is **not**
@@ -492,6 +523,61 @@ export const constructionEnvSchema = baseEnvSchema
       .min(0)
       .max(31_536_000)
       .default(0),
+
+    /**
+     * The most receipts a tender's chain may hold (construction audit F2): every submission and
+     * every replacement appends one, and the opening verifies the whole chain against
+     * audit-service, which returns at most `EVIDENCE_MAX_CHAIN_LINKS` links — a longer chain could
+     * never be opened. So a bid that would append past this is refused (`422
+     * TENDER_RECEIPT_LIMIT`), in its own transaction, and never more than audit-service returns.
+     */
+    CONSTRUCTION_TENDER_MAX_RECEIPTS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(EVIDENCE_MAX_CHAIN_LINKS)
+      .default(EVIDENCE_MAX_CHAIN_LINKS),
+    /**
+     * PROVISIONAL, pending the PM (construction audit F2, D1): the most revisions one bid may
+     * have, its submission (revision 1) included; a replacement past it is `422
+     * BID_REVISION_LIMIT`. Without it one bidder could fill the tender's chain and shut every
+     * competitor out. 50 lets 200 bidders use them all within the 10,000 receipts.
+     */
+    CONSTRUCTION_BID_MAX_REVISIONS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(EVIDENCE_MAX_CHAIN_LINKS)
+      .default(50),
+    /**
+     * PROVISIONAL, pending the product owner (Q-117; Codex r2 on #250): the most bids that may
+     * stand (submitted, not withdrawn) on one tender at once; a submission past it is `422
+     * TENDER_BID_LIMIT`, which says the limit is reached and nothing of how many bid. Without it
+     * the receipt cap was the only bound, and 10,000 bidders of one revision each fit under it:
+     * an opening that decrypts every standing bid could not finish within its timeout. The
+     * ceiling is what the scale test measured to open in time; above it the service refuses to
+     * start rather than accept tenders it may not be able to open.
+     */
+    CONSTRUCTION_TENDER_MAX_STANDING_BIDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(TENDER_MAX_STANDING_BIDS_CEILING)
+      .default(TENDER_MAX_STANDING_BIDS_DEFAULT),
+    /**
+     * How long the transaction that opens a tender's bids — and the owner's read of every opened
+     * bid, which repeats the same work — may run (Codex r1 on #250, R2). It decrypts every
+     * standing bid and writes an access row and event for each, under the tender's lock; Prisma's
+     * 5 s default would roll a large opening back every time. Out of range is a startup failure,
+     * never a silent default: too short refuses the openings the caps permit, too long holds the
+     * tender's lock past any sane request.
+     */
+    CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(TENDER_OPEN_TIMEOUT_MIN_MS)
+      .max(TENDER_OPEN_TIMEOUT_MAX_MS)
+      .default(TENDER_OPEN_TIMEOUT_DEFAULT_MS),
 
     /** docs/06 § 6.8: 24 hours unless configured. */
     CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),

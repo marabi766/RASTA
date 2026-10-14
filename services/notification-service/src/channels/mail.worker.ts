@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import { Injectable, type OnApplicationShutdown } from '@nestjs/common';
-import { createSystemContext, runWithContext } from '@rasta/nest-common';
+import {
+  createSystemContext,
+  runWithContext,
+  withinDeadline,
+  type OutboxStopOptions,
+} from '@rasta/nest-common';
 import type {
   NotificationRepository,
   SendableDelivery,
@@ -78,6 +83,8 @@ export class MailWorker implements OnApplicationShutdown {
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<void>;
   private stopped = false;
+  /** The one stop in progress or done since the last `start()`; later calls join it. */
+  private stopping?: Promise<void>;
 
   constructor(
     private readonly repository: NotificationRepository,
@@ -91,6 +98,7 @@ export class MailWorker implements OnApplicationShutdown {
   start(): void {
     if (this.timer) return;
     this.stopped = false;
+    this.stopping = undefined;
     this.timer = setInterval(() => void this.tickGuarded(), this.options.pollIntervalMs);
     this.timer.unref?.();
   }
@@ -99,13 +107,37 @@ export class MailWorker implements OnApplicationShutdown {
     await this.stop();
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Stops polling at once and waits for the batch in flight — until
+   * `deadlineAt` when the shutdown passes one (`OutboxShutdown`), else
+   * for as long as it takes. One stop per `start()`: a later call joins it.
+   */
+  stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopping ??= this.halt(options.deadlineAt);
+    return this.stopping;
+  }
+
+  private async halt(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     // A batch mid-flight finishes. Abandoning it would leave a row `SENDING`
     // with a live lease, which nobody may touch until that lease expires.
-    await this.inFlight;
+    const current = this.inFlight;
+    if (!current) return;
+    if (deadlineAt === undefined) {
+      await current;
+      return;
+    }
+    // Past the shutdown's deadline it is abandoned all the same — the forced
+    // exit would cut it off a moment later — and says so.
+    if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+      this.logger.warn(
+        'Mail batch still running at the shutdown deadline; abandoned. Its rows return to ' +
+          `the queue when their lease (${this.options.leaseSeconds} s) expires, and a message ` +
+          'sent but not yet recorded is sent again',
+      );
+    }
   }
 
   isRunning(): boolean {

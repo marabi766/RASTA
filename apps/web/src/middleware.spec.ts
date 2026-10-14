@@ -5,7 +5,7 @@ import { NextRequest } from 'next/server';
 
 import { middleware } from './middleware';
 import { renewSession } from '@/server/session-refresh';
-import { SESSION_COOKIE } from '@/server/session';
+import { SESSION_COOKIE, sealSession } from '@/server/session';
 
 // Only the session wiring below reaches these: a request without a session
 // cookie returns before the environment or the renewal is consulted, so the
@@ -238,6 +238,35 @@ describe('what is refused before the body is read (ADR-069)', () => {
       }),
     );
     expect(response.status).toBe(401);
+    expect(renew).not.toHaveBeenCalled();
+  });
+
+  it('refuses the place-order action of a session that has expired: 401 JSON, never the action', async () => {
+    // The path a retry of an unresolved order takes after the session ends
+    // (`place-order-recovery.spec.tsx` shows what the form does with it).
+    const expired = sealSession(
+      {
+        subject: 'USR_1',
+        username: 'buyer',
+        organizationId: 'ORG_1',
+        accessToken: 'access-token-value',
+        accessTokenExpiresAt: 2_000_000_000,
+        refreshToken: 'refresh-token-value',
+        csrfToken: 'csrf-token-value',
+        issuedAt: 1_000,
+      },
+      'a-session-secret-that-is-long-enough-to-be-one',
+    );
+    const response = await middleware(
+      post('/marketplace/PRD_1', {
+        'next-action': 'abc',
+        'content-length': '300',
+        cookie: `${SESSION_COOKIE}=${expired}`,
+      }),
+    );
+    expect(response.status).toBe(401);
+    expect(response.headers.get('content-type')).toMatch(/application\/json/);
+    expect(await response.json()).toEqual({ code: 'NO_SESSION' });
     expect(renew).not.toHaveBeenCalled();
   });
 

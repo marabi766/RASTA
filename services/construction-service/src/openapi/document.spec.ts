@@ -77,7 +77,7 @@ describe('the committed OpenAPI document', () => {
     expect(cancel.responses['422']).toBeDefined();
   });
 
-  it('describes the Idempotency-Key header as optional, on the two create endpoints only', () => {
+  it('describes the Idempotency-Key header where it is honoured: optional, required on a bid', () => {
     const document = buildConstructionOpenApiDocument(app);
     const headerOf = (path: string, method: string) =>
       (
@@ -95,6 +95,15 @@ describe('the committed OpenAPI document', () => {
     });
     expect(headerOf('/v1/projects/{id}/needs', 'post')).toMatchObject({ required: false });
     expect(headerOf('/v1/projects/{id}', 'patch')).toBeUndefined();
+    // Scoring honours a key (construction audit F5); submitting a bid requires one (F4).
+    expect(headerOf('/v1/tenders/{id}/bids/{bidId}/scores', 'post')).toMatchObject({
+      name: 'Idempotency-Key',
+      required: false,
+    });
+    expect(headerOf('/v1/tenders/{id}/bids', 'post')).toMatchObject({
+      name: 'Idempotency-Key',
+      required: true,
+    });
   });
 
   it('declares an optional integer Retry-After on an idempotent create’s 409, and only there', () => {

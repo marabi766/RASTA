@@ -307,6 +307,127 @@ export const kafkaEnvSchema = z.object({
 
 export type KafkaEnv = z.infer<typeof kafkaEnvSchema>;
 
+/**
+ * The scheduled purge of published outbox rows (D-052), for a service that
+ * runs one (`OutboxPurgeScheduler` in @rasta/nest-common).
+ *
+ * Its own schema rather than part of {@link kafkaEnvSchema}: a service merges
+ * it when it wires the purge, so a service that has not yet done so does not
+ * accept settings it would silently ignore. Every value is bounded and an
+ * invalid one stops the service at boot — an empty or misspelled retention
+ * must never fall through to "delete everything published".
+ */
+export const outboxPurgeEnvSchema = z.object({
+  /**
+   * On by default. Off is a deliberate operator choice, logged at startup,
+   * because without the purge `outbox_message` grows without bound (D-052).
+   */
+  OUTBOX_PURGE_ENABLED: booleanEnv(true),
+
+  /**
+   * How long a row is kept after it was published, by the database clock.
+   *
+   * 168 h is not a new number: it is the seven days `purgePublished` has
+   * defaulted to since ADR-050, the window that ADR's sizing argument assumes.
+   * The relay never reads a published row again, nor does `stream_seq`
+   * allocation (it reads `outbox_stream_sequence` only), so the window serves
+   * operators — answering "was this event published, and when?" from the
+   * producer's own table during an incident — and is theirs to tune. The floor
+   * of one hour refuses a typo that would empty that record as fast as it
+   * fills; the ceiling of a year refuses one that would make the purge a no-op.
+   */
+  OUTBOX_PURGE_RETENTION_HOURS: z.coerce.number().int().min(1).max(8760).default(168),
+
+  /**
+   * Pause between the end of one run and the start of the next. A row outlives
+   * its retention by at most one interval plus one run — five minutes against a
+   * 168-hour window — while an idle run costs a single indexed probe.
+   */
+  OUTBOX_PURGE_INTERVAL_SECONDS: z.coerce.number().int().min(10).max(86_400).default(300),
+
+  /**
+   * Rows deleted per statement. 1000 is the ceiling `OUTBOX_BATCH_SIZE`
+   * already allows the relay to lock in one claim, so a purge batch locks no
+   * more outbox rows at once than the platform's own relay may.
+   */
+  OUTBOX_PURGE_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(1000),
+
+  /**
+   * Batches per run, so one run is bounded in time too. A run that hits the
+   * cap reports `truncated` and the next continues; together with the defaults
+   * above that is 10 000 rows per run, 120 000 an hour.
+   */
+  OUTBOX_PURGE_MAX_BATCHES_PER_RUN: z.coerce.number().int().min(1).max(1000).default(10),
+
+  /**
+   * `statement_timeout` for each batch. Bounds how long one batch can hold its
+   * row locks or keep a migration's lock request queued behind it. Part of the
+   * batch bound that `loadEnv` holds under `SHUTDOWN_TIMEOUT_MS`
+   * ({@link outboxPurgeBatchBoundMs}).
+   */
+  OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
+
+  /**
+   * How long a batch may wait for a pooled connection before its transaction
+   * starts (Prisma's `maxWait`). Not covered by `statement_timeout`, which
+   * starts only once there is a connection, so it is budgeted on its own: a
+   * pool busy with request traffic makes a batch give up and the run end as
+   * `failed`, rather than queue behind the service's own work. Part of the
+   * batch bound ({@link outboxPurgeBatchBoundMs}).
+   */
+  OUTBOX_PURGE_MAX_WAIT_MS: z.coerce.number().int().min(100).max(60_000).default(2000),
+});
+
+export type OutboxPurgeEnv = z.infer<typeof outboxPurgeEnvSchema>;
+
+/**
+ * Prisma's transaction `timeout` for a purge batch is its `statement_timeout`
+ * plus this, so the database's statement timeout is what ends a slow DELETE
+ * (a clean error, locks released) rather than Prisma abandoning the
+ * transaction first. The margin also covers the batch's other round trips —
+ * `SET LOCAL`, the advisory-lock probe and COMMIT.
+ */
+export const OUTBOX_PURGE_TRANSACTION_MARGIN_MS = 5_000;
+
+/**
+ * The longest one purge batch can take: waiting for a connection, then
+ * running to Prisma's transaction timeout. A stopping scheduler waits for at
+ * most one batch, so this is also what shutdown waits for the purge, and
+ * `loadEnv` refuses a configuration where it does not fit the shutdown's
+ * outbox budget ({@link outboxShutdownBudgetMs}).
+ */
+export function outboxPurgeBatchBoundMs(settings: {
+  maxWaitMs: number;
+  statementTimeoutMs: number;
+}): number {
+  return settings.maxWaitMs + settings.statementTimeoutMs + OUTBOX_PURGE_TRANSACTION_MARGIN_MS;
+}
+
+/**
+ * The part of `SHUTDOWN_TIMEOUT_MS` kept back from the outbox drain, for what
+ * `app.close()` still does after it: Nest's `beforeApplicationShutdown`, the
+ * HTTP server close and `onApplicationShutdown`. Those wait on nothing of the
+ * outbox's — the drain has returned, its abandoned work bounded by the
+ * database's own timeouts — so they need a short, fixed allowance, not a share
+ * of a batch. 2 s is that allowance; with the default timeout (25 s) the
+ * budget is 23 s, which the relay's default grace (20 s) and the purge's
+ * default batch bound (12 s) both fit.
+ */
+export const OUTBOX_SHUTDOWN_RESERVE_MS = 2_000;
+
+/**
+ * How long the outbox drain may take in a service that runs both the relay
+ * and the purge (`OutboxShutdown` in @rasta/nest-common): one deadline, shared
+ * by the two, which drain concurrently from the start of Nest's destroy phase.
+ * `loadEnv` refuses a configuration in which either one's own bound — the
+ * relay's grace, the purge's batch bound — does not fit inside it, so the
+ * shared deadline only ever cuts a wait that something else already went
+ * wrong in.
+ */
+export function outboxShutdownBudgetMs(env: { SHUTDOWN_TIMEOUT_MS: number }): number {
+  return env.SHUTDOWN_TIMEOUT_MS - OUTBOX_SHUTDOWN_RESERVE_MS;
+}
+
 /** Services that use cache, distributed locks or rate limiting. */
 export const redisEnvSchema = z.object({
   REDIS_URL: redisUrlSchema,
@@ -384,7 +505,69 @@ export function loadEnv<S extends z.ZodTypeAny>(
 
   assertKafkaPlaintextOptOut(source, result.data);
   assertOutboxGraceWithinShutdown(result.data);
+  assertOutboxShutdownWithinTimeout(result.data);
   return result.data;
+}
+
+/**
+ * The whole outbox shutdown path of a service with the purge, as one worst
+ * case. The relay's grace and the purge's batch bound
+ * ({@link outboxPurgeBatchBoundMs}: the wait for a connection and the
+ * transaction both) run concurrently against one deadline (`OutboxShutdown`),
+ * so the path takes the longer of the two — never their sum — and that must
+ * fit in {@link outboxShutdownBudgetMs}, which leaves
+ * {@link OUTBOX_SHUTDOWN_RESERVE_MS} of `SHUTDOWN_TIMEOUT_MS` for the rest of
+ * the close. Checking each bound against the timeout on its own let a
+ * configuration pass whose two waits, run one after the other, overran it.
+ */
+function assertOutboxShutdownWithinTimeout(parsed: unknown): void {
+  if (typeof parsed !== 'object' || parsed === null) return;
+  const {
+    OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: statementTimeoutMs,
+    OUTBOX_PURGE_MAX_WAIT_MS: maxWaitMs,
+    OUTBOX_SHUTDOWN_GRACE_SECONDS: grace,
+    SHUTDOWN_TIMEOUT_MS: timeoutMs,
+  } = parsed as {
+    OUTBOX_PURGE_STATEMENT_TIMEOUT_MS?: unknown;
+    OUTBOX_PURGE_MAX_WAIT_MS?: unknown;
+    OUTBOX_SHUTDOWN_GRACE_SECONDS?: unknown;
+    SHUTDOWN_TIMEOUT_MS?: unknown;
+  };
+  if (
+    typeof statementTimeoutMs !== 'number' ||
+    typeof maxWaitMs !== 'number' ||
+    typeof timeoutMs !== 'number'
+  ) {
+    return;
+  }
+  const purgeMs = outboxPurgeBatchBoundMs({ maxWaitMs, statementTimeoutMs });
+  const graceMs = typeof grace === 'number' ? grace * 1000 : 0;
+  const budgetMs = outboxShutdownBudgetMs({ SHUTDOWN_TIMEOUT_MS: timeoutMs });
+  const issues: EnvIssue[] = [];
+  if (purgeMs > budgetMs) {
+    issues.push({
+      path: 'OUTBOX_PURGE_STATEMENT_TIMEOUT_MS',
+      message:
+        `with OUTBOX_PURGE_MAX_WAIT_MS, one purge batch may take ${purgeMs} ms ` +
+        `(${maxWaitMs} ms waiting for a connection + ${statementTimeoutMs} ms statement + ` +
+        `${OUTBOX_PURGE_TRANSACTION_MARGIN_MS} ms transaction margin), more than the outbox ` +
+        `shutdown budget of ${budgetMs} ms (SHUTDOWN_TIMEOUT_MS ${timeoutMs} ms − ` +
+        `${OUTBOX_SHUTDOWN_RESERVE_MS} ms for the rest of the close): shutdown waits for the ` +
+        'batch in flight. Lower either purge setting, or raise SHUTDOWN_TIMEOUT_MS (and keep it ' +
+        'under the orchestrator’s termination period)',
+    });
+  }
+  if (graceMs > budgetMs) {
+    issues.push({
+      path: 'OUTBOX_SHUTDOWN_GRACE_SECONDS',
+      message:
+        `(${grace} s) is more than the outbox shutdown budget of ${budgetMs} ms ` +
+        `(SHUTDOWN_TIMEOUT_MS ${timeoutMs} ms − ${OUTBOX_SHUTDOWN_RESERVE_MS} ms for the rest of ` +
+        'the close), which the relay shares with the purge. Lower the grace or raise ' +
+        'SHUTDOWN_TIMEOUT_MS (and keep it under the orchestrator’s termination period)',
+    });
+  }
+  if (issues.length > 0) throw new EnvValidationError(issues);
 }
 
 /**

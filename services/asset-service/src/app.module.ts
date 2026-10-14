@@ -13,7 +13,10 @@ import {
   EventConsumer,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
+  OutboxPurgeScheduler,
+  OutboxShutdown,
   OutboxRelay,
+  outboxPurgeSettings,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -21,6 +24,7 @@ import {
   type AuthGuardOptions,
   kafkaConnection,
 } from '@rasta/nest-common';
+import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
   outboxAckFencedTotal,
@@ -52,7 +56,9 @@ import {
 import { AssetController } from './asset/asset.controller';
 import { AssetInternalController, TransferRecordService } from './asset/transfer-record';
 import { AssetSnapshotService } from './asset/asset-snapshot';
+import { InsurancePolicyStandingService } from './insurance/policy-standing';
 import { InsuranceService } from './insurance/insurance.service';
+import { InsuranceExpirySweepScheduler } from './insurance/expiry-sweep.scheduler';
 import { ClaimService } from './insurance/claim.service';
 import { TimelineConsumer } from './consumers/timeline.consumer';
 import { AssetWorkStateClient } from './consumers/work-state';
@@ -179,6 +185,7 @@ const CONSUMED_TOPICS = [
     },
     TransferRecordService,
     AssetSnapshotService,
+    InsurancePolicyStandingService,
 
     {
       provide: InsuranceService,
@@ -276,6 +283,45 @@ const CONSUMED_TOPICS = [
     },
 
     {
+      // D-052: published rows past OUTBOX_PURGE_RETENTION_HOURS, in bounded batches.
+      provide: OutboxPurgeScheduler,
+      inject: [PrismaOutboxStore, ENV, LOGGER],
+      useFactory: (store: PrismaOutboxStore, env: AssetEnv, logger: Logger) =>
+        new OutboxPurgeScheduler({
+          store,
+          service: SERVICE_NAME,
+          logger,
+          ...outboxPurgeSettings(env),
+        }),
+    },
+    {
+      provide: InsuranceExpirySweepScheduler,
+      inject: [InsuranceService, LOGGER],
+      useFactory: (insurance: InsuranceService, logger: Logger) =>
+        new InsuranceExpirySweepScheduler(insurance, logger),
+    },
+    {
+      // D-052: the relay, the purge and the expiry sweep stop together in the
+      // destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. The sweep
+      // too (Codex r3 on #247): stopped later, it could keep writing outbox
+      // rows while the relay drained.
+      provide: OutboxShutdown,
+      inject: [OutboxRelay, OutboxPurgeScheduler, InsuranceExpirySweepScheduler, ENV],
+      useFactory: (
+        relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
+        expirySweep: InsuranceExpirySweepScheduler,
+        env: AssetEnv,
+      ) =>
+        new OutboxShutdown({
+          relay,
+          purge,
+          workers: [expirySweep],
+          budgetMs: outboxShutdownBudgetMs(env),
+        }),
+    },
+
+    {
       provide: AUTH_OPTIONS,
       inject: [ENV],
       useFactory: (env: AssetEnv): AuthGuardOptions => ({
@@ -302,13 +348,14 @@ const CONSUMED_TOPICS = [
 })
 export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdown {
   private gaugeTimer?: NodeJS.Timeout;
-  private sweepTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
+    private readonly purge: OutboxPurgeScheduler,
+    private readonly outboxShutdown: OutboxShutdown,
     private readonly store: PrismaOutboxStore,
-    private readonly insurance: InsuranceService,
+    private readonly expirySweep: InsuranceExpirySweepScheduler,
     private readonly idempotency: IdempotencyStore,
   ) {}
 
@@ -324,6 +371,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.prisma.assertRuntimeRole();
 
     this.relay.start();
+    this.purge.start();
 
     const sample = async () => {
       try {
@@ -348,25 +396,14 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     this.gaugeTimer = setInterval(() => void sample(), 15_000);
     this.gaugeTimer.unref?.();
 
-    // An interval, not a scheduler, for the MVP. It is honest about what it
-    // is: with several replicas every one of them sweeps, which the outbox
-    // and idempotent consumers already absorb. When Temporal takes over the
-    // scheduled work (ADR-013), this moves there and the method stays.
-    this.sweepTimer = setInterval(
-      () => {
-        void this.insurance.runExpirySweep().catch(() => {
-          // Already logged inside; a failed sweep retries on the next tick.
-        });
-      },
-      6 * 60 * 60 * 1000,
-    );
-    this.sweepTimer.unref?.();
+    this.expirySweep.start();
   }
 
   async onApplicationShutdown(): Promise<void> {
-    // Let an in-flight batch finish so it is not republished on restart.
-    await this.relay.stop();
+    // The relay, the purge and the expiry sweep already stopped in
+    // OutboxShutdown's onModuleDestroy, concurrently and by one deadline; this
+    // joins that stop and returns at once.
+    await this.outboxShutdown.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
-    if (this.sweepTimer) clearInterval(this.sweepTimer);
   }
 }

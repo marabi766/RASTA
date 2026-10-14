@@ -326,3 +326,70 @@ describe('a lease taken over mid-send', () => {
     await expect(worker(repo, mail).sendOne(delivery())).resolves.toBeUndefined();
   });
 });
+
+describe('stopping on shutdown (OutboxShutdown)', () => {
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  function loggedWorker(repo: ReturnType<typeof fakeRepository>) {
+    const lines: string[] = [];
+    const logger = { ...silent(), warn: (message: string) => void lines.push(message) };
+    const mailWorker = new MailWorker(
+      repo.repository,
+      fakeMail({}).channel,
+      repo.publisher,
+      async () => TEMPLATE,
+      { ...options, pollIntervalMs: 100 },
+      logger,
+    );
+    return { mailWorker, lines };
+  }
+
+  it('stops polling at once and abandons a batch that outlives the deadline, with a warning', async () => {
+    jest.useFakeTimers();
+    const repo = fakeRepository();
+    (repo.repository.claimSendable as jest.Mock).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+    const { mailWorker, lines } = loggedWorker(repo);
+    mailWorker.start();
+    await jest.advanceTimersByTimeAsync(100);
+    expect(repo.repository.claimSendable).toHaveBeenCalledTimes(1);
+
+    let returned = false;
+    const stopping = mailWorker.stop({ deadlineAt: Date.now() + 5_000 }).then(() => {
+      returned = true;
+    });
+    await jest.advanceTimersByTimeAsync(4_999);
+    expect(returned).toBe(false);
+    await jest.advanceTimersByTimeAsync(1);
+    await stopping;
+
+    expect(lines.join('\n')).toContain('abandoned');
+    // The later hook joins the stop rather than waiting again, unbounded.
+    await expect(mailWorker.onApplicationShutdown()).resolves.toBeUndefined();
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(repo.repository.claimSendable).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for a batch that ends in time, and every caller joins the one stop', async () => {
+    jest.useFakeTimers();
+    const repo = fakeRepository();
+    let finish!: (rows: SendableDelivery[]) => void;
+    (repo.repository.claimSendable as jest.Mock).mockImplementation(
+      () => new Promise<SendableDelivery[]>((resolve) => (finish = resolve)),
+    );
+    const { mailWorker, lines } = loggedWorker(repo);
+    mailWorker.start();
+    await jest.advanceTimersByTimeAsync(100);
+
+    const first = mailWorker.stop({ deadlineAt: Date.now() + 5_000 });
+    expect(mailWorker.stop()).toBe(first);
+    await jest.advanceTimersByTimeAsync(1_000);
+    finish([]);
+    await first;
+
+    expect(lines).toEqual([]);
+  });
+});

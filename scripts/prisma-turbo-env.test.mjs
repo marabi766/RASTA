@@ -14,33 +14,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { stripJsonComments } from './test-phases-lib.mjs';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { ROOT, allows, taskPatterns, turbo, workspacePackages } from './turbo-env-lib.mjs';
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PRISMA_SCRIPT = 'scripts/prisma.mjs';
 const TIMEOUT_VARIABLE = 'RASTA_MIGRATION_STATEMENT_TIMEOUT';
-
-const readJson = (file) => JSON.parse(stripJsonComments(readFileSync(file, 'utf8')));
-const turbo = readJson(join(ROOT, 'turbo.json'));
-
-/** Every workspace package (pnpm-workspace.yaml: apps, services, packages, tests). */
-function workspacePackages() {
-  const found = [];
-  for (const group of ['apps', 'services', 'packages', 'tests']) {
-    const groupDir = join(ROOT, group);
-    if (!existsSync(groupDir)) continue;
-    for (const entry of readdirSync(groupDir, { withFileTypes: true })) {
-      const dir = join(groupDir, entry.name);
-      if (entry.isDirectory() && existsSync(join(dir, 'package.json'))) {
-        found.push({ dir, manifest: readJson(join(dir, 'package.json')) });
-      }
-    }
-  }
-  return found;
-}
 
 /** `process.env.NAME` reads in prisma.mjs, by name. */
 function literalReads() {
@@ -50,36 +29,8 @@ function literalReads() {
 
 /** The two keyed reads, derived from the package name exactly as prisma.mjs derives them. */
 function keyedReads(packageName) {
-  const suffix = /^@rasta\/(.+)-service$/
-    .exec(packageName)[1]
-    .replaceAll('-', '_')
-    .toUpperCase();
+  const suffix = /^@rasta\/(.+)-service$/.exec(packageName)[1].replaceAll('-', '_').toUpperCase();
   return [`DATABASE_URL_${suffix}`, `DATABASE_URL_${suffix}_MIGRATOR`];
-}
-
-/** Turbo's env patterns: `*` matches any run of characters, a `!` entry excludes. */
-function allows(patterns, name) {
-  const matches = (pattern) =>
-    new RegExp(`^${pattern.split('*').map(escapeRegExp).join('.*')}$`).test(name);
-  return (
-    patterns.some((p) => !p.startsWith('!') && matches(p)) &&
-    !patterns.some((p) => p.startsWith('!') && matches(p.slice(1)))
-  );
-}
-
-function escapeRegExp(text) {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/** Everything turbo passes a task in strict mode, by declaration. */
-function taskPatterns(task) {
-  const config = turbo.tasks[task];
-  return [
-    ...(turbo.globalEnv ?? []),
-    ...(turbo.globalPassThroughEnv ?? []),
-    ...(config.env ?? []),
-    ...(config.passThroughEnv ?? []),
-  ];
 }
 
 /** [{ package, dir, task }] for every workspace script that runs prisma.mjs and is a turbo task. */
@@ -106,7 +57,10 @@ test('the matcher reads turbo patterns as turbo does', () => {
 test('every turbo task that runs prisma.mjs declares every variable prisma.mjs reads', () => {
   const literal = literalReads();
   // The parse must keep finding the variable this test exists for.
-  assert.ok(literal.includes(TIMEOUT_VARIABLE), `${PRISMA_SCRIPT} no longer reads ${TIMEOUT_VARIABLE}`);
+  assert.ok(
+    literal.includes(TIMEOUT_VARIABLE),
+    `${PRISMA_SCRIPT} no longer reads ${TIMEOUT_VARIABLE}`,
+  );
   assert.ok(literal.includes('DATABASE_URL'));
 
   const runs = turboTasksRunningPrisma();

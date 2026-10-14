@@ -397,6 +397,25 @@ model AssetRef {
   insuranceLapsedAt        DateTime? @map("insurance_lapsed_at")
   /// Recorded policy windows per coverage, one per policy (`INSURANCE_RECORDED`).
   insuranceCover           Json      @default("{}") @map("insurance_cover")
+  /// The asset's ownership generation as the latest `ASSET_TRANSFERRED` stated
+  /// it; NULL until a generation-bearing transfer is seen. An insurance event
+  /// stamped with a lower generation is the previous owner's.
+  ownershipGeneration      Int?      @map("ownership_generation")
+  /// The coverages that latest transfer let follow the vehicle (asset-service's
+  /// `INSURANCE_COVERAGES_FOLLOWING_VEHICLE` at transfer time). Empty when the
+  /// transfer did not say: fail closed.
+  retainedCoverages        String[]  @default([]) @map("retained_coverages")
+  /// Counts the changes to the insurance state above (windows, retained list,
+  /// lapses) and to the owner and generation (#240 r10). Kept by the trigger
+  /// `asset_ref_insurance_revision`, never written by the code: a verification
+  /// of an `INSURANCE_RECORDED` reads it before asking asset-service and applies
+  /// its answer only if it is unchanged under the asset's lock.
+  insuranceRevision        BigInt    @default(0) @map("insurance_revision")
+  /// Incremented by `insurance:clear-transferred` for every transferred replica
+  /// it targets, even one with nothing left to empty (#240 r11), and written by
+  /// nothing else. Compared with the revision by every verification: an answer
+  /// asked before a clear is never applied after it.
+  insuranceEpoch           BigInt    @default(0) @map("insurance_epoch")
 
   syncedAt    DateTime @map("synced_at")
   sourceEvent String   @map("source_event")
@@ -448,6 +467,44 @@ model AssetTransferRelease {
   @@id([assetId, fenceId])
   @@index([expiresAt], map: "asset_transfer_release_expires_at_idx")
   @@map("asset_transfer_release")
+}
+
+/// An `INSURANCE_RECORDED` waiting for the replica to catch up with its source
+/// (#240 round 8).
+///
+/// asset-service answered for a later owner than the replica has seen
+/// (`NOT_CURRENT_OWNER`, or a later ownership generation): the machine was
+/// transferred at the source and `ASSET_TRANSFERRED` has not been consumed yet —
+/// the topics carry no order between them. The delivery is marked processed and
+/// the event stored here; the transfer's handler re-verifies it once the
+/// transfer is projected, and a periodic sweep re-verifies what is left and
+/// dead-letters a row whose attempts run out. Never applied unverified.
+///
+/// Tenant data: `organizationId` is the event envelope's tenant. The consumer's
+/// reads by machine and the sweep cross tenants through `runUnscoped`.
+model InsurancePendingVerification {
+  eventId         String    @id @map("event_id")
+  assetId         String    @map("asset_id")
+  organizationId  String    @map("organization_id")
+  /// The envelope as consumed: re-verified from it, and dead-lettered as it.
+  envelope        Json
+  messageKey      String?   @map("message_key")
+  sourceTopic     String    @map("source_topic")
+  sourcePartition Int?      @map("source_partition")
+  sourceOffset    String?   @map("source_offset")
+  /// `NOT_CURRENT_OWNER` or `SOURCE_AHEAD`, or the last failure to get an answer.
+  reason          String
+  attempts        Int       @default(0)
+  firstSeenAt     DateTime  @default(now()) @map("first_seen_at") @db.Timestamptz(3)
+  lastAttemptAt   DateTime? @map("last_attempt_at") @db.Timestamptz(3)
+  /// Due from then, whatever its age: set by the machine's transfer (#240 r10),
+  /// cleared by the next attempt. NULL: the age rule alone.
+  nextAttemptAt   DateTime? @map("next_attempt_at") @db.Timestamptz(3)
+
+  @@index([organizationId, assetId])
+  @@index([assetId])
+  @@index([firstSeenAt])
+  @@map("insurance_pending_verification")
 }
 
 // -----------------------------------------------------------------------------

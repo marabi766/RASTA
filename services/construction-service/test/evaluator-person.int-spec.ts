@@ -30,8 +30,8 @@ const UNIQUE_PERSON = /23505[\s\S]*evaluator_issuer, evaluator_subject/;
 
 const SCORES = {
   scores: [
-    { criterionCode: 'PRICE', scoreScaled: 7_000 },
-    { criterionCode: 'LICENCE', scoreScaled: 100 },
+    { criterionCode: 'PRICE', scoreScaled: 7_000, expectedRevision: 0 },
+    { criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 },
   ],
 };
 

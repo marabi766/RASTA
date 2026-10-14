@@ -19,6 +19,11 @@
  *   configuration (`FLEET_DISPATCH_BLOCKING_COVERAGES`, AGENTS.md § 9). The
  *   default is all four, which is how it behaved before this change.
  *
+ * A recorded policy whose window has ended blocks the same way with no
+ * `INSURANCE_EXPIRED`: that event follows a periodic sweep in asset-service,
+ * and a machine must not be dispatched in the hours between a policy ending
+ * and the sweep.
+ *
  * The insurance answer is worked out when it is asked, not stored, because
  * the event that ends a lapse does not always arrive after it. A policy is
  * normally renewed *before* the old one runs out: the new policy's
@@ -39,6 +44,8 @@ export type CoverWindow = {
   policyId: string;
   validFrom: string;
   validTo: string;
+  /** The ownership generation the policy was recorded under; absent on an older event. */
+  generation?: number;
 };
 
 /**
@@ -68,10 +75,21 @@ export const INSURANCE_COVERAGES = [
  */
 export interface DispatchPolicy {
   readonly blockingCoverages: readonly string[];
+  /**
+   * The coverages that must have a policy **in force** for a machine to be
+   * dispatched (docs/24 Q-101), whether or not a lapse was ever seen. A
+   * machine with no recorded window for one of them, or whose only window
+   * starts later, is refused: "in force" cannot depend on having seen a policy
+   * end. Which coverages are required is a business decision nobody has made,
+   * so by default it is the blocking set — if a lapse blocks, absence blocks
+   * too — and an empty list switches the check off.
+   */
+  readonly requiredCoverages: readonly string[];
 }
 
 export const DEFAULT_DISPATCH_POLICY: DispatchPolicy = {
   blockingCoverages: INSURANCE_COVERAGES,
+  requiredCoverages: INSURANCE_COVERAGES,
 };
 
 /** Nest injection token for the {@link DispatchPolicy}. */
@@ -103,19 +121,24 @@ export function parseCover(value: unknown): InsuranceCover {
 
 function parseWindow(window: unknown): CoverWindow | null {
   if (!window || typeof window !== 'object') return null;
-  const { policyId, validFrom, validTo } = window as Record<string, unknown>;
+  const { policyId, validFrom, validTo, generation } = window as Record<string, unknown>;
   if (typeof policyId !== 'string' || typeof validFrom !== 'string') return null;
   if (typeof validTo !== 'string') return null;
-  return { policyId, validFrom, validTo };
+  return Number.isInteger(generation)
+    ? { policyId, validFrom, validTo, generation: generation as number }
+    : { policyId, validFrom, validTo };
 }
 
 /**
  * Adds a recorded policy to the map, one window per policy.
  *
- * A policy recorded again replaces its own window. Windows that have already
- * ended are dropped: they can never answer a lapse again, and keeping them
- * would grow the column for ever. Order-independent: two policies of one
- * coverage can arrive in either order, and the result is the same set.
+ * A policy recorded again replaces its own window. Of the windows that have
+ * already ended only the latest-ending one is kept: the rest can never answer
+ * a lapse again and would grow the column for ever, but the last one is the
+ * evidence that the coverage existed and ran out, which `expiredCoverages`
+ * needs when no `INSURANCE_EXPIRED` has arrived. Order-independent: two
+ * policies of one coverage can arrive in either order, and the result is the
+ * same set.
  */
 export function withRecordedPolicy(
   cover: InsuranceCover,
@@ -123,15 +146,59 @@ export function withRecordedPolicy(
   window: CoverWindow,
   now: Date,
 ): InsuranceCover {
-  const others = (cover[coverage] ?? []).filter(
-    (existing) => existing.policyId !== window.policyId && !hasEnded(existing, now),
-  );
-  const windows = hasEnded(window, now) ? others : [...others, window];
+  const all = [...(cover[coverage] ?? []).filter((e) => e.policyId !== window.policyId), window];
+  const latestEnded = all
+    .filter((w) => hasEnded(w, now))
+    .sort((a, b) => endTime(b) - endTime(a) || a.policyId.localeCompare(b.policyId))[0];
+  const windows = [...all.filter((w) => !hasEnded(w, now)), ...(latestEnded ? [latestEnded] : [])];
   const sorted = windows.sort((a, b) => a.policyId.localeCompare(b.policyId));
   const next = { ...cover };
   if (sorted.length > 0) next[coverage] = sorted;
   else delete next[coverage];
   return next;
+}
+
+/**
+ * The windows a transfer leaves the new owner (#240 round 2).
+ *
+ * Only the coverages asset-service lets follow the vehicle keep their windows;
+ * the previous owner's policy of any other coverage must not authorize the new
+ * owner's dispatch. A window recorded under the transfer's generation or a later
+ * one is the new owner's own — its event may have been consumed before the
+ * transfer's, the topics being separate — and stays. `retained` absent (an
+ * event that predates the field) retains nothing: fail closed, and the
+ * re-projection command restores the valid windows. `previousGenerationKnown`
+ * false (the replica's generation was NULL) retains no window without a
+ * generation either.
+ */
+export function afterTransfer(
+  cover: InsuranceCover,
+  retained: readonly string[] | undefined,
+  generation: number | undefined,
+  previousGenerationKnown = true,
+): InsuranceCover {
+  const kept = new Set(retained ?? []);
+  const next: InsuranceCover = {};
+  for (const [coverage, windows] of Object.entries(cover)) {
+    // From an UNKNOWN generation (#240 r15) a retained coverage keeps only the
+    // windows verified with a generation, all of them the tenure being left: one
+    // with none may be from an earlier tenure the replica never told apart.
+    const own = kept.has(coverage)
+      ? windows.filter((window) => previousGenerationKnown || window.generation !== undefined)
+      : windows.filter(
+          (window) =>
+            generation !== undefined &&
+            window.generation !== undefined &&
+            window.generation >= generation,
+        );
+    if (own.length > 0) next[coverage] = own;
+  }
+  return next;
+}
+
+function endTime(window: CoverWindow): number {
+  const to = Date.parse(window.validTo);
+  return Number.isNaN(to) ? Number.NEGATIVE_INFINITY : to;
 }
 
 function hasEnded(window: CoverWindow, now: Date): boolean {
@@ -172,11 +239,28 @@ export function unresolvedLapses(
   );
 }
 
+/**
+ * Coverages whose recorded policy has run out with nothing in force: a window
+ * has ended and no window of the coverage covers `now`. Needs no
+ * `INSURANCE_EXPIRED`, which only follows asset-service's periodic sweep. A
+ * coverage never recorded, or whose only window starts later, is not named:
+ * nothing has lapsed there.
+ */
+export function expiredCoverages(cover: InsuranceCover, now: Date): string[] {
+  return Object.entries(cover)
+    .filter(
+      ([, windows]) => !isCovered(windows, now) && windows.some((window) => hasEnded(window, now)),
+    )
+    .map(([coverage]) => coverage);
+}
+
 /** The replica fields the two causes live in. */
 export interface DispatchBlockFields {
   inspectionBlockedReason: string | null;
   insuranceLapsedCoverages: readonly string[];
   insuranceCover: unknown;
+  /** NULL: a row the generation migration left unknown; none of its windows counts. */
+  ownershipGeneration: number | null;
 }
 
 /** One reason a machine may not be dispatched, one entry per cause. */
@@ -201,15 +285,28 @@ export function activeDispatchBlocks(
   if (asset.inspectionBlockedReason) {
     blocks.push({ cause: 'INSPECTION', detail: asset.inspectionBlockedReason });
   }
+  // An UNKNOWN ownership generation (a row the generation migration left NULL)
+  // is an unknown tenure: the replica may have missed A→B→A before the column
+  // existed and still hold A's first-tenure window, which nothing on the row can
+  // tell from the current one. So no window counts until the row is initialised
+  // from asset-service — a refresh, or a verified INSURANCE_RECORDED (#240 r15).
+  // Fail closed: the machine reads as uninsured, the ordinary insurance refusal.
+  const cover = asset.ownershipGeneration === null ? {} : parseCover(asset.insuranceCover);
   // A lapse of a coverage that does not gate dispatch stays recorded, so that
   // widening the configuration later brings it back, but it blocks nothing.
-  const lapses = unresolvedLapses(
-    asset.insuranceLapsedCoverages,
-    parseCover(asset.insuranceCover),
-    now,
-  ).filter(
+  const lapses = [
+    ...new Set([
+      ...unresolvedLapses(asset.insuranceLapsedCoverages, cover, now),
+      ...expiredCoverages(cover, now),
+    ]),
+  ].filter(
     (coverage) => coverage === UNKNOWN_COVERAGE || policy.blockingCoverages.includes(coverage),
   );
+  // A required coverage with nothing in force blocks whether or not anything
+  // was ever recorded for it (Q-101).
+  for (const coverage of policy.requiredCoverages) {
+    if (!isCovered(cover[coverage], now) && !lapses.includes(coverage)) lapses.push(coverage);
+  }
   if (lapses.length > 0) {
     const sorted = lapses.sort();
     blocks.push({
