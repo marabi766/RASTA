@@ -8,7 +8,7 @@ import {
 } from '@rasta/nest-common';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { databaseUrl } from './helpers';
+import { databaseUrl, testEnv } from './helpers';
 
 /**
  * D-052 in construction-service, against a real PostgreSQL: the scheduled purge
@@ -36,6 +36,8 @@ const TOPIC = 'rasta.purge-test.v1';
  */
 const ORG_A = 'ORG-PURGE-A';
 const ORG_B = 'ORG-PURGE-B';
+/** The service's own transaction bound (CONSTRUCTION_TRANSACTION_TIMEOUT_MS, #271). */
+const TRANSACTION_TIMEOUT_MS = testEnv().CONSTRUCTION_TRANSACTION_TIMEOUT_MS;
 
 /** The owner of the database: the runtime role may create nothing (D-045). */
 function ownerUrl(): string {
@@ -165,7 +167,7 @@ describe('construction-service outbox purge (D-052)', () => {
   };
 
   beforeAll(async () => {
-    const owner = new PrismaService(ownerUrl());
+    const owner = new PrismaService(ownerUrl(), TRANSACTION_TIMEOUT_MS);
     try {
       await owner.client.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCHEMA}" CASCADE`);
       await owner.client.$executeRawUnsafe(`CREATE SCHEMA "${SCHEMA}"`);
@@ -186,8 +188,8 @@ describe('construction-service outbox purge (D-052)', () => {
     } finally {
       await owner.onModuleDestroy();
     }
-    runtime = new PrismaService(schemaUrl());
-    holder = new PrismaService(schemaUrl());
+    runtime = new PrismaService(schemaUrl(), TRANSACTION_TIMEOUT_MS);
+    holder = new PrismaService(schemaUrl(), TRANSACTION_TIMEOUT_MS);
     await runtime.onModuleInit();
     await holder.onModuleInit();
     store = new PrismaOutboxStore(runtime);
@@ -201,7 +203,7 @@ describe('construction-service outbox purge (D-052)', () => {
   afterAll(async () => {
     await runtime?.onModuleDestroy();
     await holder?.onModuleDestroy();
-    const owner = new PrismaService(ownerUrl());
+    const owner = new PrismaService(ownerUrl(), TRANSACTION_TIMEOUT_MS);
     try {
       await owner.client.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCHEMA}" CASCADE`);
     } finally {
@@ -335,7 +337,7 @@ describe('construction-service outbox purge (D-052)', () => {
     await seed('OLD', { createdHoursAgo: 200, publishedHoursAgo: 199 });
     const single = new URL(schemaUrl());
     single.searchParams.set('connection_limit', '1');
-    const starved = new PrismaService(single.toString());
+    const starved = new PrismaService(single.toString(), TRANSACTION_TIMEOUT_MS);
     await starved.onModuleInit();
     // The pool's one connection, held in an open transaction.
     let letGo!: () => void;
