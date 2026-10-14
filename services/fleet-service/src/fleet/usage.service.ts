@@ -87,9 +87,9 @@ export class UsageService {
       const existing = await this.repository.findUsageByClientReference(dto.clientReference);
       if (existing) {
         usageDuplicatesTotal.inc({ service: SERVICE_NAME });
-        this.logger.debug(
-          `Usage submission ${dto.clientReference} matched existing ${existing.id}`,
-        );
+        // The record's id, not the client's reference: that is a key the client
+        // chose, logged no more than an Idempotency-Key is (S-09).
+        this.logger.debug(`Usage submission matched existing ${existing.id}`);
         return toUsageView(existing);
       }
     }

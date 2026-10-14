@@ -1,5 +1,6 @@
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { Logger } from '@nestjs/common';
 import {
   ACTIVATION_ATTRIBUTE,
   KeycloakAdminClient,
@@ -427,5 +428,36 @@ describe('KeycloakAdminClient: a deadline on every call, the token request inclu
     expect(JSON.stringify(error, Object.getOwnPropertyNames(error))).not.toContain(
       'client-secret-for-tests',
     );
+  });
+});
+
+describe('KeycloakAdminClient with sync disabled', () => {
+  it('skips a create without logging the username, which is personal data (S-09)', async () => {
+    const lines: string[] = [];
+    const debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation((message: unknown) => {
+      lines.push(String(message));
+    });
+    try {
+      const client = new KeycloakAdminClient({
+        baseUrl: 'http://keycloak.test',
+        realm: 'rasta',
+        clientId: 'rasta-backend',
+        clientSecret: 'client-secret-for-tests',
+        enabled: false,
+      });
+      await expect(
+        client.createUser({
+          username: 'applicant-sentinel',
+          email: 'applicant@example.test',
+          firstName: 'A',
+          lastName: 'B',
+          attributes: provenanceOnly('USR_1'),
+          enabled: false,
+        }),
+      ).resolves.toBeNull();
+    } finally {
+      debug.mockRestore();
+    }
+    expect(lines).toEqual(['Keycloak sync disabled; skipping createUser']);
   });
 });

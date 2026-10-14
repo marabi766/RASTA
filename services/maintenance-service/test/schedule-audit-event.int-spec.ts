@@ -1,3 +1,4 @@
+import { RastaError } from '@rasta/nest-common';
 import { MaintenanceRepository } from '../src/maintenance/maintenance.repository';
 import { ScheduleService } from '../src/maintenance/schedule.service';
 import type { MaintenanceEnv } from '../src/config/env';
@@ -219,7 +220,16 @@ describe('schedule changes reach the audit trail', () => {
     await create();
     const before = await countEvents();
 
-    await expect(create()).rejects.toThrow();
+    const refusal = (await create().catch((error: unknown) => error)) as RastaError;
+    expect(refusal).toBeInstanceOf(RastaError);
+    expect(refusal.code).toBe('BUSINESS_RULE_VIOLATION');
+    // The title is client text: the refusal names the field, never the value (S-09).
+    expect(refusal.internalContext).toEqual({
+      rule: 'DUPLICATE_SCHEDULE_TITLE',
+      assetId,
+      field: 'title',
+    });
+    expect(JSON.stringify([refusal.message, refusal.internalContext])).not.toContain(title);
 
     expect(await countEvents()).toBe(before);
 

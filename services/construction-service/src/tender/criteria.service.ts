@@ -99,10 +99,11 @@ export class CriteriaService {
       } catch (error) {
         if (isUniqueViolation(error)) {
           // Two versions of one label drew the same number. Nothing was written.
+          // The label is client text: the log names the field, never its value (S-09).
           throw new RastaError(
             'CONFLICT',
             'Another version of this template was created at the same time; retry',
-            { internalContext: { label: dto.label } },
+            { internalContext: { field: 'label' } },
           );
         }
         throw error;

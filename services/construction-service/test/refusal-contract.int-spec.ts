@@ -172,8 +172,10 @@ describe('the refusal contract: real refusals against the generated OpenAPI docu
         message: 'Invitation refused: INVITED_ORGANIZATION_NOT_FOUND',
       },
     ]);
-    // `details` is a fixed message, no input echoed (the top-level `message`, for people, is unchanged).
-    expect(JSON.stringify(res.body.details)).not.toContain('ORG_NOBODY');
+    // Fixed text throughout: the id is client text that matched nothing, so it is
+    // echoed neither in `details` nor in `message`, which is also what is logged (S-09).
+    expect(res.body.message).toBe('The invited organization does not exist; it cannot be invited');
+    expect(JSON.stringify(res.body)).not.toContain('ORG_NOBODY');
   });
 
   describe('an award request, and the award that opens the winning bid', () => {

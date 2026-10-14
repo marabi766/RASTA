@@ -239,7 +239,8 @@ export class KeycloakAdminClient {
    */
   async createUser(input: CreateKeycloakUserInput): Promise<string | null> {
     if (!this.options.enabled) {
-      this.logger.debug(`Keycloak sync disabled; skipping createUser for ${input.username}`);
+      // No username: it is personal data the client chose (S-09).
+      this.logger.debug('Keycloak sync disabled; skipping createUser');
       return null;
     }
 

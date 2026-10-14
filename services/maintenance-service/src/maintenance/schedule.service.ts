@@ -223,10 +223,11 @@ export class ScheduleService {
       return toScheduleView(created as ScheduleRow, asset.name ?? null);
     } catch (error) {
       if (isUniqueViolation(error)) {
+        // The title is client text: the log names the field, never its value (S-09).
         throw RastaError.businessRule('This machine already has a live schedule with that title.', {
           rule: 'DUPLICATE_SCHEDULE_TITLE',
           assetId: dto.assetId,
-          title: dto.title,
+          field: 'title',
         });
       }
       throw error;
