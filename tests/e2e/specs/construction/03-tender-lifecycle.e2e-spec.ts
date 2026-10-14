@@ -169,7 +169,7 @@ interface OpenedBid {
 
 /** A correlation id this file can later find in audit-service and on the topic. */
 function correlation(label: string): string {
-  return `e2e-tender-${RUN}-${label}-${randomUUID().slice(0, 8)}`;
+  return `e2e-tender-${RUN}-${label}-${randomUUID()}`;
 }
 
 /**

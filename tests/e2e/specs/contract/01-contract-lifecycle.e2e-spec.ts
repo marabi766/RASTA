@@ -214,7 +214,7 @@ interface PolicyBody {
 
 /** A correlation id this file can later find on the topic. */
 function correlation(label: string): string {
-  return `e2e-contract-${RUN}-${label}-${randomUUID().slice(0, 8)}`;
+  return `e2e-contract-${RUN}-${label}-${randomUUID()}`;
 }
 
 /** An unsafe call, each with a fresh `Idempotency-Key`: a retry here is a new attempt, never a replay. */
