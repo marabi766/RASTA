@@ -305,12 +305,22 @@ const CONSUMED_TOPICS = [...ASSET_SYNC_TOPICS];
         }),
     },
     {
-      // D-052: the relay and the purge drain together in the destroy phase,
-      // by one deadline inside SHUTDOWN_TIMEOUT_MS.
+      // D-052: the relay, the purge and the asset-sync consumer stop together
+      // in the destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OutboxPurgeScheduler, ENV],
-      useFactory: (relay: OutboxRelay, purge: OutboxPurgeScheduler, env: FleetEnv) =>
-        new OutboxShutdown({ relay, purge, budgetMs: outboxShutdownBudgetMs(env) }),
+      inject: [OutboxRelay, OutboxPurgeScheduler, AssetSyncConsumer, ENV],
+      useFactory: (
+        relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
+        assetSync: AssetSyncConsumer,
+        env: FleetEnv,
+      ) =>
+        new OutboxShutdown({
+          relay,
+          purge,
+          workers: [assetSync],
+          budgetMs: outboxShutdownBudgetMs(env),
+        }),
     },
 
     {
@@ -395,9 +405,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onApplicationShutdown(): Promise<void> {
-    // The relay and the purge already drained in OutboxShutdown's
-    // onModuleDestroy, concurrently and by one deadline; this joins that stop
-    // and returns at once.
+    // The relay, the purge and the asset-sync consumer already stopped in
+    // OutboxShutdown's onModuleDestroy, concurrently and by one deadline; this
+    // joins that stop and returns at once.
     await this.outboxShutdown.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }

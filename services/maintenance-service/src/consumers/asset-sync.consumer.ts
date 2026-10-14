@@ -1,4 +1,4 @@
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
   UnprocessableEventError,
@@ -9,6 +9,7 @@ import {
   type EventConsumer,
   type EventDelivery,
   type EventHandler,
+  type OutboxStopOptions,
 } from '@rasta/nest-common';
 import {
   UNCONFIGURED_TRANSFER_RECORD_SOURCE,
@@ -129,7 +130,7 @@ const OWNER_CHECKED_EVENTS: ReadonlySet<string> = new Set([
 export type EventConsumerFactory = (handler: EventHandler) => EventConsumer;
 
 @Injectable()
-export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
+export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(AssetSyncConsumer.name);
   private consumer?: EventConsumer;
 
@@ -151,8 +152,20 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     await this.consumer.start();
   }
 
-  async onModuleDestroy(): Promise<void> {
-    await this.consumer?.stop();
+  /**
+   * An `OutboxShutdown` worker: stopped in Nest's destroy phase, beside the
+   * relay and the purge, by the shutdown's one deadline; an event still in
+   * flight is abandoned uncommitted and delivered again (A-09). Before, its own
+   * `onModuleDestroy` stopped the consumer with no bound, and a replay's
+   * refresh from asset-service could hold the close into the forced exit.
+   */
+  stop(options?: OutboxStopOptions): Promise<void> {
+    return this.consumer?.stop(options) ?? Promise.resolve();
+  }
+
+  /** Joins the stop `OutboxShutdown` began; returns at once. */
+  onApplicationShutdown(): Promise<void> {
+    return this.stop();
   }
 
   /** Handles one event. Exposed so a test can drive it without a broker. */

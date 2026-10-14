@@ -1,4 +1,4 @@
-import { Kafka, type Consumer, type Producer, type IHeaders } from 'kafkajs';
+import { Kafka, KafkaJSError, type Consumer, type Producer, type IHeaders } from 'kafkajs';
 import {
   DLQ_HEADERS,
   DLQ_REASONS,
@@ -18,6 +18,7 @@ import { createSystemContext, runWithContext } from '../context/request-context'
 import { RastaError } from '../errors/rasta-error';
 import { LOG_TEXT_MAX, safeLogText } from '../errors/safe-log-text';
 import { kafkaClientConfig, type KafkaConnectionOptions } from '../kafka/connection';
+import { withinDeadline, type OutboxStopOptions } from '../outbox/outbox';
 
 /**
  * The consuming half of the outbox pattern (ADR-021).
@@ -211,6 +212,32 @@ export class UnprocessableEventError extends Error {
 }
 
 /**
+ * Thrown out of kafkajs's `eachMessage` for a message a stopping consumer gives
+ * up on: before its handler runs, instead of a further attempt or the pause
+ * before one, or instead of its dead letter.
+ *
+ * Throwing is what keeps the message: kafkajs commits only the offsets of
+ * messages whose `eachMessage` returned, so this one stays uncommitted and the
+ * group delivers it again — to another member, or to this service when it
+ * starts. Returning instead would commit past a message nothing handled.
+ * Nothing is applied twice beyond what A-09 already absorbs: an attempt that
+ * failed rolled back, and one that is redelivered meets the handler's
+ * `processed_event` check.
+ *
+ * A `KafkaJSError`, and retriable, only so kafkajs treats it as its own: it
+ * does not log it as a handler failure (the consumer's own warning says what
+ * happened), and a retriable error never crashes the runner — which, stopping,
+ * ends its loop instead of retrying.
+ */
+export class ConsumerStoppingError extends KafkaJSError {
+  override readonly name = 'ConsumerStoppingError';
+
+  constructor(message: string) {
+    super(message, { retriable: true });
+  }
+}
+
+/**
  * The DLQ reason for a handler whose retries ran out.
  *
  * An owning service that was down the whole time is `UPSTREAM_UNAVAILABLE`,
@@ -257,8 +284,16 @@ export const CONSUMER_SESSION_TIMEOUT_MS = 60_000;
 export class EventConsumer {
   private readonly kafka: Kafka;
   private consumer?: Consumer;
+  /** Assigned before it has connected, so a stop reaches a connection still being made. */
   private dlqProducer?: Producer;
+  private dlqConnecting?: Promise<void>;
   private running = false;
+  /** Set when a stop begins: from then on nothing new starts for a message. */
+  private stopRequested = false;
+  /** The one stop in progress or done since the last `start()`; later calls join it. */
+  private stopping?: Promise<void>;
+  /** Wakes the pauses between attempts, so a stop does not wait one out. */
+  private readonly pauses = new Set<() => void>();
 
   constructor(
     private readonly options: EventConsumerOptions,
@@ -334,6 +369,8 @@ export class EventConsumer {
 
   async start(): Promise<void> {
     if (this.running) return;
+    this.stopRequested = false;
+    this.stopping = undefined;
 
     const consumer = this.kafka.consumer({
       groupId: this.options.groupId,
@@ -487,6 +524,9 @@ export class EventConsumer {
     const backoff = this.options.retryBackoffMs ?? DEFAULT_BACKOFF_MS;
 
     for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+      // Once stopping, no attempt starts — the first included — and the pause
+      // before a further one ends at once (`pause`).
+      this.abandonIfStopping({ topic, partition, offset }, `before attempt ${attempt}`);
       try {
         // The handler runs inside a context carrying the event's own
         // correlationId and tenant, so its log lines join up with the request
@@ -549,10 +589,45 @@ export class EventConsumer {
         this.logger.warn(`Attempt ${attempt}/${maxRetries} failed for ${event}: ${message}`);
         // The member stays in its group across the pause (#240 r12).
         beat?.();
-        await sleep(backoff * attempt);
+        await this.pause(backoff * attempt);
         beat?.();
       }
     }
+  }
+
+  /**
+   * Gives up on a message once a stop has begun ({@link ConsumerStoppingError}):
+   * thrown out of `eachMessage`, it leaves the message's offset uncommitted, so
+   * the group delivers it again. Called before anything new starts for a
+   * message — an attempt, a dead letter — never in the middle of one: what is
+   * already running is the stop's to wait for, by its deadline.
+   */
+  private abandonIfStopping(
+    at: { topic: string; partition: number; offset: string | undefined },
+    when: string,
+  ): void {
+    if (!this.stopRequested) return;
+    const where = `${at.topic}[${at.partition}]${at.offset === undefined ? '' : `@${at.offset}`}`;
+    this.logger.warn(
+      `${this.options.groupId} is stopping: ${where} left uncommitted ${when}; it is delivered again`,
+    );
+    throw new ConsumerStoppingError(
+      `${this.options.groupId} is stopping; ${where} is left uncommitted ${when}`,
+    );
+  }
+
+  /** The backoff between attempts; a stop ends it at once, and none starts once stopping. */
+  private pause(ms: number): Promise<void> {
+    if (this.stopRequested) return Promise.resolve();
+    return new Promise((resolve) => {
+      const wake = (): void => {
+        clearTimeout(timer);
+        this.pauses.delete(wake);
+        resolve();
+      };
+      const timer = setTimeout(wake, ms);
+      this.pauses.add(wake);
+    });
   }
 
   /**
@@ -600,6 +675,9 @@ export class EventConsumer {
     detail: string,
     attempts: number,
   ): Promise<void> {
+    // A stopping consumer starts no dead letter: the message is delivered
+    // again, and its next consumer reaches the same verdict (Codex on #267).
+    this.abandonIfStopping(original, 'before its dead letter was written');
     const originalTopic = original.topic;
     const target = this.options.deadLetterTopic;
     if (!target) {
@@ -637,36 +715,109 @@ export class EventConsumer {
     dlqMessagesTotal.inc({ service: this.options.clientId, topic: originalTopic, reason });
   }
 
+  /**
+   * The dead-letter producer, connected on first use. It is held from before
+   * its connection is made, so a stop can disconnect one still connecting; a
+   * failed connection is let go, and the next dead letter tries again.
+   */
   private async getDlqProducer(): Promise<Producer> {
     if (!this.dlqProducer) {
       const producer = this.kafka.producer({ idempotent: true, maxInFlightRequests: 1 });
-      await producer.connect();
       this.dlqProducer = producer;
+      this.dlqConnecting = producer.connect().catch((error: unknown) => {
+        if (this.dlqProducer === producer) {
+          this.dlqProducer = undefined;
+          this.dlqConnecting = undefined;
+        }
+        throw error;
+      });
     }
-    return this.dlqProducer;
+    const producer = this.dlqProducer;
+    await this.dlqConnecting;
+    return producer;
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Stops consuming, and returns by `deadlineAt` when one is given.
+   *
+   * Nothing new starts once it is called: no further message, no attempt, no
+   * pause between attempts, no dead letter ({@link ConsumerStoppingError}).
+   * kafkajs's `disconnect()` then waits for the message in flight, commits
+   * the offsets of messages that finished, and leaves the group; the
+   * dead-letter producer is closed after it.
+   *
+   * That wait used to have no bound: a handler's own timeouts, or a dead letter
+   * whose producer was still connecting or whose send did not return, could
+   * hold the close past SHUTDOWN_TIMEOUT_MS into the forced exit (Codex on
+   * #267, Medium). With `deadlineAt` — the shared shutdown deadline that
+   * `OutboxShutdown` hands its workers — the stop returns by then whatever is
+   * still running, with a warning:
+   *
+   *   - the message in flight is left uncommitted, so the group delivers it
+   *     again (A-09 absorbs a handler that did commit its effect);
+   *   - the dead-letter producer is closed at once, so a send that hangs fails
+   *     rather than land after the process has given the message up — it may
+   *     still have reached the broker, which makes a second dead letter on
+   *     redelivery possible, as after any crash between a send and its commit;
+   *   - kafkajs's disconnect carries on in the background while the close
+   *     goes on, and the partition passes to another member when it ends or,
+   *     at the latest, when the session times out.
+   *
+   * Without `deadlineAt` (a test, a CLI) it waits as before. One stop per
+   * `start()`: a later call joins the first — including its deadline — and,
+   * once that has returned, returns at once. A disconnect that fails rejects
+   * the stop, as it always has.
+   */
+  stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopping ??= this.halt(options.deadlineAt);
+    return this.stopping;
+  }
+
+  private async halt(deadlineAt: number | undefined): Promise<void> {
     this.running = false;
-    if (this.consumer) {
-      await this.consumer.disconnect();
-      this.consumer = undefined;
+    this.stopRequested = true;
+    for (const wake of [...this.pauses]) wake();
+
+    const consumer = this.consumer;
+    const producer = this.dlqProducer;
+    this.consumer = undefined;
+    this.dlqProducer = undefined;
+    this.dlqConnecting = undefined;
+    if (!consumer && !producer) return;
+
+    let producerClosed: Promise<void> | undefined;
+    const closeProducer = (): Promise<void> =>
+      (producerClosed ??= producer ? producer.disconnect() : Promise.resolve());
+    // The consumer first: its disconnect waits for the message in flight, which
+    // may be writing its dead letter through the producer.
+    const disconnecting = (async () => {
+      if (consumer) await consumer.disconnect();
+      await closeProducer();
+    })();
+
+    if (deadlineAt === undefined) return disconnecting;
+    if ((await withinDeadline(disconnecting, deadlineAt - Date.now())) === 'finished') {
+      return disconnecting;
     }
-    if (this.dlqProducer) {
-      await this.dlqProducer.disconnect();
-      this.dlqProducer = undefined;
-    }
+
+    this.logger.warn(
+      `${this.options.groupId} did not stop by the shutdown deadline: the message in flight is ` +
+        'abandoned uncommitted and is delivered again; the group reassigns its partition when ' +
+        `the disconnect ends or the ${CONSUMER_SESSION_TIMEOUT_MS} ms session times out`,
+    );
+    void closeProducer().catch((error: unknown) => {
+      this.logger.warn(
+        `Closing the dead-letter producer of ${this.options.groupId} failed: ${describe(error)}`,
+      );
+    });
+    void disconnecting.catch((error: unknown) => {
+      this.logger.warn(`Late disconnect of ${this.options.groupId} failed: ${describe(error)}`);
+    });
   }
 
   isRunning(): boolean {
     return this.running;
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }
 
 /**

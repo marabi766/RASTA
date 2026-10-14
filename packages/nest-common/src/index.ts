@@ -136,6 +136,7 @@ export type { KafkaConnectionOptions, KafkaConnectionEnv } from './kafka/connect
 // Event consumption ----------------------------------------------------------
 export {
   EventConsumer,
+  ConsumerStoppingError,
   UnprocessableEventError,
   deadLetterHeaders,
   HANDLER_MESSAGE_MAX,

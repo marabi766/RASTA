@@ -1,4 +1,4 @@
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { DLQ_REASONS, RETRY_TOPIC_SUFFIX, type EventEnvelope } from '@rasta/contracts';
 import {
   HANDLER_MESSAGE_MAX,
@@ -15,6 +15,7 @@ import {
   type EventConsumer,
   type EventDelivery,
   type EventHandler,
+  type OutboxStopOptions,
 } from '@rasta/nest-common';
 import { dlqMessagesTotal } from '@rasta/observability';
 import {
@@ -507,7 +508,7 @@ function initialisedTenure(
 }
 
 @Injectable()
-export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
+export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(AssetSyncConsumer.name);
   private consumer?: EventConsumer;
   private sweepTimer?: NodeJS.Timeout;
@@ -568,9 +569,24 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     this.sweepTimer.unref?.();
   }
 
-  async onModuleDestroy(): Promise<void> {
+  /**
+   * An `OutboxShutdown` worker: stopped in Nest's destroy phase, beside the
+   * relay and the purge, by the shutdown's one deadline. The parked sweep's
+   * timer is cleared and the consumer stops by that deadline, abandoning a
+   * message still in flight uncommitted, to be delivered again (A-09). Before,
+   * its own `onModuleDestroy` stopped the consumer with no bound, and a
+   * handler's upstream calls and transactions, retried three times, could hold
+   * the close into the forced exit.
+   */
+  stop(options?: OutboxStopOptions): Promise<void> {
     if (this.sweepTimer) clearInterval(this.sweepTimer);
-    await this.consumer?.stop();
+    this.sweepTimer = undefined;
+    return this.consumer?.stop(options) ?? Promise.resolve();
+  }
+
+  /** Joins the stop `OutboxShutdown` began; returns at once. */
+  onApplicationShutdown(): Promise<void> {
+    return this.stop();
   }
 
   /**

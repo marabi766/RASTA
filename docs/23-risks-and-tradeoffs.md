@@ -1439,6 +1439,26 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
     می‌کنند و واحد رهاشده Rollback و در گذر بعدی دوباره پیدا می‌شود. آزمون: `test/outbox-shutdown.int-spec.ts` در
     document (اسکن و Publish بی‌پایان ⇐ خروج ۰ زیر مهلت، هر دو سند به صف برگشته؛ اسکن کوتاه ⇐ حکم ثبت، از شروع بستن هیچ
     Claim تازه‌ای نیست).
+  - **Consumerهای Kafka در همان مهلت (Codex روی #267، فاز ۲ خاموش‌شدن):** `EventConsumer.stop()` کرانی نداشت؛
+    `disconnect()` در kafkajs منتظر پیام در پرواز می‌ماند، پس Handler کند، مکث‌های میان تلاش‌ها، یا Dead Letterی که Producerش
+    هنوز وصل می‌شد یا Sendش برنمی‌گشت بستن را تا خروج اجباری نگه می‌داشت. حالا `stop({ deadlineAt })`:
+    از لحظهٔ توقف هیچ چیز تازه‌ای برای پیامی شروع نمی‌شود — نه تلاش، نه مکث، نه Dead Letter (`ConsumerStoppingError`)؛
+    پیام در پرواز تا مهلت انتظار کشیده می‌شود و پس از آن **بی‌Commit رها** می‌شود، پس Group آن را دوباره تحویل می‌دهد
+    (پردازش دوباره را `processed_event` طبق A-09 جذب می‌کند)؛ Producer صف DLQ همان لحظه بسته می‌شود تا Send آویزان شکست
+    بخورد، نه این‌که پس از رها شدن پیام برسد (اگر پیش از آن رسیده باشد، Dead Letter دوم در تحویل دوباره ممکن است — همان چیزی
+    که پس از هر Crash میان Send و Commit هست). بی `deadlineAt` (آزمون، CLI) مثل پیش صبر می‌کند. Consumerهای fleet
+    (`AssetSyncConsumer`)، asset (`TimelineConsumer`) و maintenance (`UsageConsumer`، `AssetSyncConsumer`) حالا `workers`ِ
+    `OutboxShutdown`اند؛ `onModuleDestroy` بی‌کرانِ خودشان حذف شد و `onApplicationShutdown` فقط به همان توقف می‌پیوندد.
+    آزمون: `event-consumer.stop.spec.ts` و `event-consumer.lifecycle.spec.ts` (Nest واقعی، `installGracefulShutdown` واقعی)
+    در nest-common، و دو مورد تازه در `test/outbox-shutdown.int-spec.ts` fleet (Handler بی‌پایان کنار Publish و Batch
+    بی‌پایان؛ Send بی‌پایان DLQ) ⇐ خروج ۰ زیر مهلت، پیام Commit‌نشده. سرویس‌های دیگر (contract، construction، economic،
+    marketplace، notification، identity، audit، supplier، inventory) هنوز Coordinator ندارند و در فاز بعد می‌آیند.
+  - **بودجه برای هر سرویسِ دارای رله (Codex روی #267، Low):** `loadEnv` Grace رله را فقط در سرویسی که Purge هم داشت با
+    بودجه می‌سنجید و در بقیه با کل `SHUTDOWN_TIMEOUT_MS`؛ notification (رله و کارگرها با `OutboxShutdown`، بی Purge) Grace
+    ۲۴ ثانیه را زیر مهلت ۲۵ ثانیه می‌پذیرفت در حالی که Coordinator تخلیه را در ۲۳ ثانیه قطع می‌کرد. حالا هر سرویسِ دارای
+    رله باید Grace را در `outboxShutdownBudgetMs` جا دهد (رله‌ای که هنوز در `onApplicationShutdown` می‌ایستد هم به همان ذخیره
+    برای بقیهٔ بستن نیاز دارد)، و `SHUTDOWN_TIMEOUT_MS` ≤ ۲۰۰۰ در چنین سرویسی با نام خودش رد می‌شود. پیش‌فرض‌ها (۲۰ در ۲۳)
+    تغییری نمی‌کنند.
   - **پیامد:** رله حالا پیش از بسته شدن سرور HTTP می‌ایستد، نه پس از آن. ردیفی که درخواستی در همین فاصله بنویسد در
     شروع بعدی (یا Replica دیگر) منتشر می‌شود — همان چیزی که پیش‌تر برای ردیف‌های لحظهٔ آخر هم بود.
 
