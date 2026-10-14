@@ -1,13 +1,21 @@
 import { execFile } from 'node:child_process';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { SpanKind, SpanStatusCode } from '@opentelemetry/api';
+import { ROOT_CONTEXT, SpanKind, SpanStatusCode } from '@opentelemetry/api';
 import {
+  AlwaysOnSampler,
   BasicTracerProvider,
   InMemorySpanExporter,
+  SamplingDecision,
   SimpleSpanProcessor,
+  type SpanLimits,
 } from '@opentelemetry/sdk-trace-node';
-import { RedactingSpanProcessor, redactText, urlWithoutQuery } from './url-redaction';
+import {
+  RedactingSampler,
+  RedactingSpanProcessor,
+  redactText,
+  urlWithoutQuery,
+} from './url-redaction';
 
 describe('urlWithoutQuery', () => {
   it.each([
@@ -61,11 +69,42 @@ describe('redactText', () => {
       'GET https://idp.example/cb?[REDACTED] failed',
     ],
     ['request to /v1/x?abc failed', 'request to /v1/x?[REDACTED] failed'],
-    [`"/v1/x?cursor=abc"`, `"/v1/x?[REDACTED]"`],
+    // From the first `?` or `#` to whitespace or the end, whatever it holds:
+    // nothing inside a query ends it early (Codex on #261, r3 F1).
+    [`"/v1/x?cursor=abc"`, `"/v1/x?[REDACTED]`],
     ['at h (/app/x.js?v=abc:1:2)', 'at h (/app/x.js?[REDACTED]'],
-    // Not a query: left alone.
+    [
+      "GET https://idp.example/cb?state=can't&access_token=abc failed",
+      'GET https://idp.example/cb?[REDACTED] failed',
+    ],
+    [
+      'GET https://idp.example/cb#access_token=abc failed',
+      'GET https://idp.example/cb#[REDACTED] failed',
+    ],
+    ['GET https://idp.example/cb#x?access_token=abc', 'GET https://idp.example/cb#[REDACTED]'],
+    [
+      'GET https://idp.example/cb?q="abc"&r=[abc]&s=<abc>&t={abc}&u=`abc` failed',
+      'GET https://idp.example/cb?[REDACTED] failed',
+    ],
+    [
+      'GET https://idp.example/cb?q=مسیر&r=café‽abc failed',
+      'GET https://idp.example/cb?[REDACTED] failed',
+    ],
+    // A URL that ends the text.
+    ['POST https://idp.example/token?code=abc', 'POST https://idp.example/token?[REDACTED]'],
+    ["redirect to /cb?state=can't&code=abc", 'redirect to /cb?[REDACTED]'],
+    // A query with no path before it.
+    ['bad query ?code=abc', 'bad query ?[REDACTED]'],
+    ['callback cb?abc refused', 'callback cb?[REDACTED] refused'],
+    // Not a query, left alone: a `?` with whitespace or the end after it.
     ['Is the connection open?', 'Is the connection open?'],
+    ['is it ready?', 'is it ready?'],
     ['Is it open? No', 'Is it open? No'],
+    ['and/or? yes', 'and/or? yes'],
+    ['issue #12, C# and this.#x', 'issue #12, C# and this.#x'],
+    // Glued to what follows it after a word, a `?` is taken for a query:
+    // redaction may take more than the query, never less.
+    ['is it ready?!', 'is it ready?[REDACTED]'],
     ['WHERE a = ? AND b IN (?, ?)', 'WHERE a = ? AND b IN (?, ?)'],
     ['connect ECONNREFUSED 127.0.0.1:5432', 'connect ECONNREFUSED 127.0.0.1:5432'],
   ])('%j → %j', (text, expected) => {
@@ -73,12 +112,21 @@ describe('redactText', () => {
   });
 });
 
-describe('RedactingSpanProcessor', () => {
+/** A provider redacting as `initTelemetry`'s does: the sampler, then the processor. */
+const redactingProvider = (
+  exporter: InMemorySpanExporter,
+  spanLimits?: SpanLimits,
+): BasicTracerProvider =>
+  new BasicTracerProvider({
+    sampler: new RedactingSampler(new AlwaysOnSampler()),
+    spanLimits,
+    spanProcessors: [new RedactingSpanProcessor(), new SimpleSpanProcessor(exporter)],
+  });
+
+describe('RedactingSampler and RedactingSpanProcessor', () => {
   it('rewrites URL attributes set at start and later, drops url.query, keeps the rest', async () => {
     const exporter = new InMemorySpanExporter();
-    const provider = new BasicTracerProvider({
-      spanProcessors: [new RedactingSpanProcessor(), new SimpleSpanProcessor(exporter)],
-    });
+    const provider = redactingProvider(exporter);
     const span = provider.getTracer('test').startSpan('GET /v1/x/:id', {
       attributes: {
         'url.full': 'https://h.example/v1/x/1?cursor=abc#f',
@@ -107,9 +155,7 @@ describe('RedactingSpanProcessor', () => {
 
   it('sanitizes recorded exceptions, the status message, other attributes, events and links', async () => {
     const exporter = new InMemorySpanExporter();
-    const provider = new BasicTracerProvider({
-      spanProcessors: [new RedactingSpanProcessor(), new SimpleSpanProcessor(exporter)],
-    });
+    const provider = redactingProvider(exporter);
     const tracer = provider.getTracer('test');
     const linked = tracer.startSpan('linked');
     linked.end();
@@ -153,9 +199,7 @@ describe('RedactingSpanProcessor', () => {
 
   it('leaves an OK or unset status as it is', async () => {
     const exporter = new InMemorySpanExporter();
-    const provider = new BasicTracerProvider({
-      spanProcessors: [new RedactingSpanProcessor(), new SimpleSpanProcessor(exporter)],
-    });
+    const provider = redactingProvider(exporter);
     const ok = provider.getTracer('test').startSpan('ok');
     ok.setStatus({ code: SpanStatusCode.OK });
     ok.end();
@@ -170,10 +214,7 @@ describe('RedactingSpanProcessor', () => {
 
   it('sanitizes each value whole, before attributeValueLengthLimit cuts it (r2 F1)', async () => {
     const exporter = new InMemorySpanExporter();
-    const provider = new BasicTracerProvider({
-      spanLimits: { attributeValueLengthLimit: 40 },
-      spanProcessors: [new RedactingSpanProcessor(), new SimpleSpanProcessor(exporter)],
-    });
+    const provider = redactingProvider(exporter, { attributeValueLengthLimit: 40 });
     const tracer = provider.getTracer('test');
     const linked = tracer.startSpan('linked');
     linked.end();
@@ -211,6 +252,63 @@ describe('RedactingSpanProcessor', () => {
     expect(retry?.attributes).toEqual({ 'error.detail': cut });
     expect(exported?.attributes).toEqual({ 'error.detail': cut });
     expect(exported?.links[0]?.attributes).toEqual({ 'error.detail': cut });
+  });
+
+  it('sanitizes the attributes and links a span starts with whole, before attributeValueLengthLimit cuts them (r3 F2)', async () => {
+    const exporter = new InMemorySpanExporter();
+    const provider = redactingProvider(exporter, { attributeValueLengthLimit: 40 });
+    const tracer = provider.getTracer('test');
+    const linked = tracer.startSpan('linked');
+    linked.end();
+    // Cut to 40 characters first, each of these would keep "abc" and lose what marks it.
+    const parserShaped = `Unexpected token 'c', "code=abc" is not valid JSON`;
+    tracer
+      .startSpan('GET', {
+        attributes: {
+          'user_agent.original': parserShaped,
+          'server.address': `h.example/a-long-path-segment?code=abc`,
+          'url.full': 'https://h.example/v1/a-long-path-segment?code=abc',
+          'url.query': 'code=abc',
+          'http.request.method': 'GET',
+        },
+        links: [{ context: linked.spanContext(), attributes: { 'error.detail': parserShaped } }],
+      })
+      .end();
+    await provider.forceFlush();
+
+    const exported = exporter.getFinishedSpans().find((s) => s.name === 'GET');
+    expect(JSON.stringify({ ...exported?.attributes, links: exported?.links })).not.toContain(
+      'abc',
+    );
+    const cut = `Unexpected token 'c', "[REDACTED]" is no`;
+    expect(exported?.attributes).toEqual({
+      'user_agent.original': cut,
+      'server.address': 'h.example/a-long-path-segment?[REDACTED]',
+      'url.full': 'https://h.example/v1/a-long-path-segment',
+      'http.request.method': 'GET',
+    });
+    expect(exported?.links[0]?.attributes).toEqual({ 'error.detail': cut });
+  });
+
+  it('holds attributes a delegate sampler adds to the same rules, and leaves its decision alone', () => {
+    const delegate = {
+      shouldSample: () => ({
+        decision: SamplingDecision.RECORD,
+        attributes: { 'url.query': 'code=abc', 'error.detail': 'GET /cb?code=abc' },
+      }),
+    };
+    const result = new RedactingSampler(delegate).shouldSample(
+      ROOT_CONTEXT,
+      'trace',
+      'span',
+      SpanKind.INTERNAL,
+      {},
+      [],
+    );
+    expect(result).toEqual({
+      decision: SamplingDecision.RECORD,
+      attributes: { 'error.detail': 'GET /cb?[REDACTED]' },
+    });
   });
 });
 
@@ -371,6 +469,15 @@ describe('initTelemetry — spans from the real instrumentations carry no URL qu
     expect(exceptionMessages(handler)).toEqual([message]);
   });
 
+  it('caller-controlled headers in the server span start attributes are sanitized (r3 F2)', () => {
+    const [server] = find('@opentelemetry/instrumentation-http', SpanKind.SERVER, '/v1/headers');
+    expect(server?.attributes).toMatchObject({
+      'user_agent.original': `Unexpected token 'c', "[REDACTED]" is not valid JSON`,
+      'server.address': 'h.example/cb?[REDACTED]',
+      'client.address': '[/cb?[REDACTED]',
+    });
+  });
+
   it('a failed outgoing fetch: the error is recorded, url.full has no query', () => {
     const [failed] = spans.filter(
       (span) =>
@@ -404,6 +511,20 @@ describe('initTelemetry under OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT=40 — a cut val
   it('no exported span holds "abc"', () => {
     expect(spans.length).toBeGreaterThan(0);
     expect(spans.filter((span) => JSON.stringify(span).includes('abc'))).toEqual([]);
+  });
+
+  it('the server span start attributes from headers: sanitized whole, then cut (r3 F2)', () => {
+    const [server] = spans.filter(
+      (span) =>
+        span.scope === '@opentelemetry/instrumentation-http' &&
+        span.kind === SpanKind.SERVER &&
+        span.attributes['url.path'] === '/v1/headers',
+    );
+    expect(server?.attributes).toMatchObject({
+      'user_agent.original': `Unexpected token 'c', "[REDACTED]" is no`,
+      'server.address': 'h.example/cb?[REDACTED]',
+      'client.address': '[/cb?[REDACTED]',
+    });
   });
 
   it('the parser errors are recorded, redacted whole and then cut', () => {

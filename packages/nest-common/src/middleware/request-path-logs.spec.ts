@@ -8,7 +8,8 @@ import { promisify } from 'node:util';
  * No client data from a request reaches a trace-correlated OTel log record
  * (S-09, Codex on #261): not its query (`RequestContextMiddleware` records the
  * path alone, r1 F2), not the query of a URL an error names, in its message,
- * its cause or `originalMessage` (`safeLogText`, r2 F2), and not a correlation
+ * its cause or `originalMessage` (`safeLogText`, r2 F2) — whatever the query or
+ * fragment holds (an apostrophe, quotes, any script; r3 F1) — and not a correlation
  * id that is not one the platform minted (#259's rule, r2 F3). That is what
  * `AllExceptionsFilter` logs and pino's instrumentation forwards, with the
  * span's context, through the Logs API. Checked at the export boundary —
@@ -23,11 +24,19 @@ interface ExportedLog {
   correlated: boolean;
 }
 
+interface ExportedSpan {
+  name: string;
+  scope: string;
+  attributes: Record<string, unknown>;
+  events: { name: string; attributes?: Record<string, unknown> }[];
+  status: { code: number; message?: string };
+}
+
 interface FixtureResult {
   statuses: number[];
   correlationIds: (string | null)[];
   logs: ExportedLog[];
-  spans: unknown[];
+  spans: ExportedSpan[];
 }
 
 const PACKAGE_DIR = resolve(__dirname, '../..');
@@ -46,13 +55,46 @@ require.extensions['.ts'] = (module, filename) => {
 require(${JSON.stringify(FIXTURE)});
 `;
 
+/** The exception forms and URL variants of the fixture's `/v1/url/<form>/<variant>` (r3 F1). */
+const ERROR_FORMS = ['plain', 'internal', 'gateway'] as const;
+const URL_VARIANTS = ['apostrophe', 'fragment', 'quoted', 'unicode', 'path'] as const;
+const URL_PATHS = ERROR_FORMS.flatMap((form) =>
+  URL_VARIANTS.map((variant) => `/v1/url/${form}/${variant}`),
+);
+
+/** Each variant's URL as redacted: up to its first `?` or `#`, then `[REDACTED]`. */
+const REDACTED_URLS: Record<(typeof URL_VARIANTS)[number], string> = {
+  apostrophe: 'https://idp.example/cb?[REDACTED]',
+  fragment: 'https://idp.example/cb#[REDACTED]',
+  quoted: 'https://idp.example/cb?[REDACTED]',
+  unicode: 'https://idp.example/cb?[REDACTED]',
+  path: '/v1/cb?[REDACTED]',
+};
+
+/** The prose error of `/v1/prose`: a question, no URL, logged as it is. */
+const PROSE = 'Is the ledger ready? Not yet; retry later?';
+
 /** The statuses of the fixture's requests, in the order it sends them. */
-const STATUSES = [403, 400, 400, 500, 404, 500, 500, 502];
+const STATUSES = [
+  403,
+  400,
+  400,
+  500,
+  404,
+  500,
+  500,
+  502,
+  ...ERROR_FORMS.flatMap((form) => URL_VARIANTS.map(() => (form === 'gateway' ? 502 : 500))),
+  500,
+];
 
 const ULID = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 
-/** Runs the fixture with its logger at `level`. */
-async function runFixture(level: 'debug' | 'info'): Promise<FixtureResult> {
+/** Runs the fixture with its logger at `level`, plus `env`. */
+async function runFixture(
+  level: 'debug' | 'info',
+  extraEnv: Record<string, string> = {},
+): Promise<FixtureResult> {
   const dir = mkdtempSync(join(tmpdir(), 'correlated-logs-'));
   const output = join(dir, 'result.json');
   try {
@@ -62,6 +104,7 @@ async function runFixture(level: 'debug' | 'info'): Promise<FixtureResult> {
       ),
       // Nothing to collect metrics here; their default exporter would dial localhost:4318.
       OTEL_METRICS_EXPORTER: 'none',
+      ...extraEnv,
     };
     await promisify(execFile)(process.execPath, ['-e', RUN_FIXTURE, output, level], {
       cwd: PACKAGE_DIR,
@@ -116,6 +159,12 @@ describe('trace-correlated log records carry no client data from the request (de
         ['error', 'Unhandled error: An unexpected error occurred', '/v1/oauth'],
         ['error', 'Unhandled error: An unexpected error occurred', '/v1/oauth-internal'],
         ['error', 'Unhandled error: An unexpected error occurred', '/v1/oauth-gateway'],
+        ...URL_PATHS.map((path) => [
+          'error',
+          'Unhandled error: An unexpected error occurred',
+          path,
+        ]),
+        ['error', 'Unhandled error: An unexpected error occurred', '/v1/prose'],
       ].map(([severityText, body, path]) => ({
         severityText,
         body,
@@ -158,6 +207,67 @@ describe('trace-correlated log records carry no client data from the request (de
       [token, { originalMessage: token }],
     ]);
   });
+
+  it('a URL whose query or fragment holds an apostrophe, quotes, brackets or any script: redacted from its ? or # on, in each exception form (r3 F1)', () => {
+    const expected = ERROR_FORMS.flatMap(() =>
+      URL_VARIANTS.map((variant) => {
+        const message = `Token exchange failed: POST ${REDACTED_URLS[variant]}`;
+        return [`${message}: GET ${REDACTED_URLS[variant]} refused`, { originalMessage: message }];
+      }),
+    );
+    expect(
+      URL_PATHS.map((path) => {
+        const attributes = byPath(result.logs, path)?.attributes ?? {};
+        return [attributes['exception.message'], attributes['internalContext']];
+      }),
+    ).toEqual(expected);
+  });
+
+  it('the same errors on their NestJS handler spans: status and exception redacted alike (r3 F1)', () => {
+    const handlers = result.spans.filter(
+      (span) =>
+        span.scope === '@opentelemetry/instrumentation-nestjs-core' &&
+        span.name === 'AssetsController.url',
+    );
+    expect(
+      handlers.map((span) => [
+        span.attributes['url.full'],
+        span.status.message,
+        span.events.map((event) => event.attributes?.['exception.message']),
+      ]),
+    ).toEqual(
+      URL_PATHS.map((path, i) => {
+        const message = `Token exchange failed: POST ${REDACTED_URLS[URL_VARIANTS[i % URL_VARIANTS.length]!]}`;
+        return [path, message, [message]];
+      }),
+    );
+  });
+
+  it('prose with a question: logged and traced as it is — a ? with whitespace or the end after it is not a query', () => {
+    expect(byPath(result.logs, '/v1/prose')?.attributes).toMatchObject({
+      'exception.message': PROSE,
+      internalContext: { originalMessage: PROSE },
+    });
+    const [handler] = result.spans.filter((span) => span.name === 'AssetsController.prose');
+    expect(handler?.status.message).toBe(PROSE);
+  });
+});
+
+describe('under OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT=40 — a cut value carries nothing either (debug logging)', () => {
+  let result: FixtureResult;
+
+  beforeAll(async () => {
+    result = await runFixture('debug', { OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT: '40' });
+  }, CHILD_TIMEOUT_MS + 5_000);
+
+  it('no exported log record or span holds "LEAK"', () => {
+    const { logs, spans, statuses } = result;
+    expect(statuses).toEqual(STATUSES);
+    expect(logs).toHaveLength(STATUSES.length);
+    expect(spans.length).toBeGreaterThan(0);
+    expect(logs.filter((log) => JSON.stringify(log).includes('LEAK'))).toEqual([]);
+    expect(spans.filter((span) => JSON.stringify(span).includes('LEAK'))).toEqual([]);
+  });
 });
 
 describe('a correlation id that is a token is never adopted (#259 rule; info logging)', () => {
@@ -181,10 +291,7 @@ describe('a correlation id that is a token is never adopted (#259 rule; info log
     // At info, the debug refusals (400, 404) are not logged.
     expect(logs.map((log) => log.severityText)).toEqual([
       'warn',
-      'error',
-      'error',
-      'error',
-      'error',
+      ...STATUSES.filter((status) => status >= 500).map(() => 'error'),
     ]);
     expect(logs.filter((log) => JSON.stringify(log).includes('LEAK'))).toEqual([]);
     expect(spans.filter((span) => JSON.stringify(span).includes('LEAK'))).toEqual([]);

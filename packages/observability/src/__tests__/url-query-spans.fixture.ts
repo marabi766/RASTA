@@ -9,7 +9,8 @@
  *
  * The order is a service's `main.ts`: `initTelemetry` first, the framework
  * loaded after it. Every request carries "abc" — in its query, in a body the
- * JSON parser refuses, in the URL an error names. The spec runs it twice: with
+ * JSON parser refuses, in the URL an error names, in a header the server span
+ * starts with. The spec runs it twice: with
  * no span limits, and with `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT=40`.
  */
 import type * as NodeHttp from 'node:http';
@@ -29,6 +30,17 @@ const PARSER_BODIES = [
   'code=abc\u2028rest',
   'code=abc\u2029rest',
 ];
+
+/**
+ * Caller-controlled headers that become start attributes of the server span:
+ * `user_agent.original`, `server.address` and `client.address`. The user agent
+ * is shaped like a parser error, so a cut before redaction would keep "abc".
+ */
+const START_ATTRIBUTE_HEADERS = {
+  'user-agent': `Unexpected token 'c', "code=abc" is not valid JSON`,
+  'x-forwarded-host': 'h.example/cb?code=abc',
+  'x-forwarded-for': '[/cb?code=abc',
+};
 
 /** An origin nothing listens on: a port bound, then released. */
 async function refusingOrigin(http: typeof NodeHttp): Promise<string> {
@@ -60,6 +72,11 @@ async function main(): Promise<void> {
       return { ok: true };
     }
 
+    @Get('headers')
+    headers(): { ok: boolean } {
+      return { ok: true };
+    }
+
     // A failure whose message names the URL it was working on, query and all —
     // the shape of an HTTP client's or an OAuth library's error.
     @Get('fail')
@@ -81,6 +98,16 @@ async function main(): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     http
       .get(`${origin}/v1/x${QUERY}`, (response) => {
+        response.resume();
+        response.on('end', resolve);
+      })
+      .on('error', reject);
+  });
+  // Headers the http instrumentation copies into the server span's start
+  // attributes, which the SDK cuts before any span processor sees them (r3 F2).
+  await new Promise<void>((resolve, reject) => {
+    http
+      .get(`${origin}/v1/headers`, { headers: START_ATTRIBUTE_HEADERS }, (response) => {
         response.resume();
         response.on('end', resolve);
       })

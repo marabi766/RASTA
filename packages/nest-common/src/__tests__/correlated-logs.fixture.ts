@@ -31,6 +31,26 @@ const CORRELATION_ID = 'access_token=LEAK';
 const TOKEN_URL = 'https://idp.example/token?code=LEAK&state=LEAK';
 const CALLBACK_URL = 'https://idp.example/cb?access_token=LEAK';
 
+/**
+ * URLs whose query or fragment holds "LEAK" past a character that might be
+ * taken to end it (r3 F1). Each is named by an error, in its message (where the
+ * URL ends the text) and its cause (where text follows), in each of the forms
+ * the filter tells apart: a plain `Error`, `RastaError.internal`, and Nest's
+ * `BadGatewayException`.
+ */
+const URL_VARIANTS = {
+  apostrophe: "https://idp.example/cb?state=can't&access_token=LEAK",
+  fragment: 'https://idp.example/cb#access_token=LEAK',
+  quoted: 'https://idp.example/cb?q="LEAK"&r=[LEAK]&s=<LEAK>&t={LEAK}&u=`LEAK`',
+  unicode: 'https://idp.example/cb?q=مسیر&r=café‽LEAK',
+  path: "/v1/cb?state=can't#LEAK",
+} as const;
+
+const ERROR_FORMS = ['plain', 'internal', 'gateway'] as const;
+
+/** Prose with a question in it: no URL, nothing to take out. */
+const PROSE = 'Is the ledger ready? Not yet; retry later?';
+
 async function main(): Promise<void> {
   const [outputFile, level = 'debug'] = process.argv.slice(1);
   const spanExporter = new InMemorySpanExporter();
@@ -42,7 +62,8 @@ async function main(): Promise<void> {
   });
 
   await import('reflect-metadata');
-  const { BadGatewayException, Controller, Get, Module, Post } = await import('@nestjs/common');
+  const { BadGatewayException, Controller, Get, Module, Param, Post } =
+    await import('@nestjs/common');
   const { APP_FILTER, NestFactory } = await import('@nestjs/core');
   const { createLogger, setLogContextProvider } = await import('@rasta/logging');
   const { RequestContextMiddleware } = await import('../middleware/request-context.middleware');
@@ -99,6 +120,21 @@ async function main(): Promise<void> {
     oauthGateway(): never {
       throw new BadGatewayException(`Token exchange failed: POST ${TOKEN_URL}`);
     }
+
+    @Get('url/:form/:variant')
+    url(@Param('form') form: string, @Param('variant') variant: string): never {
+      const url = URL_VARIANTS[variant as keyof typeof URL_VARIANTS];
+      const message = `Token exchange failed: POST ${url}`;
+      const cause = new Error(`GET ${url} refused`);
+      if (form === 'internal') throw RastaError.internal(message, cause);
+      if (form === 'gateway') throw new BadGatewayException(message, { cause });
+      throw new Error(message, { cause });
+    }
+
+    @Get('prose')
+    prose(): never {
+      throw new Error(PROSE);
+    }
   }
 
   @Module({
@@ -147,6 +183,10 @@ async function main(): Promise<void> {
   await send('/v1/oauth');
   await send('/v1/oauth-internal');
   await send('/v1/oauth-gateway');
+  for (const form of ERROR_FORMS) {
+    for (const variant of Object.keys(URL_VARIANTS)) await send(`/v1/url/${form}/${variant}`);
+  }
+  await send('/v1/prose');
 
   await app.close();
   // Read before shutdown, which empties the in-memory exporters. Log records
@@ -164,6 +204,7 @@ async function main(): Promise<void> {
   }));
   const spans = spanExporter.getFinishedSpans().map((span) => ({
     name: span.name,
+    scope: span.instrumentationScope.name,
     attributes: span.attributes,
     events: span.events.map((event) => ({ name: event.name, attributes: event.attributes })),
     status: span.status,

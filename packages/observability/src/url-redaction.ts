@@ -1,6 +1,13 @@
-import type { AttributeValue, Attributes, TimeInput } from '@opentelemetry/api';
+import type {
+  AttributeValue,
+  Attributes,
+  Context,
+  Link,
+  SpanKind,
+  TimeInput,
+} from '@opentelemetry/api';
 import { ATTR_URL_FULL, ATTR_URL_QUERY } from '@opentelemetry/semantic-conventions';
-import type { Span, SpanProcessor } from '@opentelemetry/sdk-trace-node';
+import type { Sampler, SamplingResult, Span, SpanProcessor } from '@opentelemetry/sdk-trace-node';
 
 /**
  * Span attributes that carry a URL or request target, and so may carry its
@@ -18,12 +25,21 @@ const URL_ATTRIBUTES: ReadonlySet<string> = new Set([ATTR_URL_FULL, 'http.url', 
 export const REDACTED_TEXT = '[REDACTED]';
 
 /**
- * A query inside free text — an error message, a stack trace: `?` and the run
- * after it up to whitespace, a quote or an angle bracket, when that run holds
- * `=` or `&` (`?code=…`) or the `?` closes a path segment (`/cb?TOKEN`). A
- * lone `?` ending a sentence, or one between SQL placeholders, is not a query.
+ * A URL's query or fragment inside free text — an error message, a stack
+ * trace: from its first `?` or `#` to the next whitespace or the end of the
+ * text, whatever lies between. Nothing inside a query is trusted to end it — an
+ * apostrophe, a quote, a bracket, any script (Codex on #261, r3 F1) — so
+ * redaction may take more than the query, never less.
+ *
+ * It starts at a `?` or `#` that has a `/` before it in the same run of
+ * non-whitespace — a URL (`scheme://…`) or a path (`/cb?…`, `/cb#…`); and, for a
+ * query without a path, at a `?` right after a letter, digit, `_`, `.`, `~`,
+ * `%` or `-` (`cb?TOKEN`), or one whose run holds `=` or `&` (`?code=…`). A `?`
+ * with whitespace or the end right after it — a question, an SQL placeholder —
+ * is left alone; a `?` glued to what follows it after a word (`ready?!`) is
+ * not, and is redacted with it.
  */
-const QUERY_IN_TEXT = /\?(?:[^\s"'`<>]*[=&][^\s"'`<>]*|(?<=[\w/.~%-]\?)[^\s"'`<>]+)/g;
+const QUERY_IN_TEXT = /(?<=\/[^\s?#]*)[?#]\S+|(?<=[\p{L}\p{N}_.~%-])\?\S+|\?(?=\S*[=&])\S+/gu;
 
 /**
  * V8's `JSON.parse` error quotes the source it could not read — `Unexpected
@@ -41,11 +57,14 @@ export function urlWithoutQuery(url: string): string {
   return end === -1 ? url : url.slice(0, end);
 }
 
-/** Free text with any URL query and any quoted JSON source replaced by {@link REDACTED_TEXT}. */
+/**
+ * Free text with any quoted JSON source, and any URL query or fragment after
+ * its `?` or `#`, replaced by {@link REDACTED_TEXT}.
+ */
 export function redactText(text: string): string {
   return text
     .replace(JSON_SOURCE_IN_TEXT, `"${REDACTED_TEXT}" is not valid JSON`)
-    .replace(QUERY_IN_TEXT, `?${REDACTED_TEXT}`);
+    .replace(QUERY_IN_TEXT, (suffix) => `${suffix.charAt(0)}${REDACTED_TEXT}`);
 }
 
 function redactValue(value: AttributeValue | undefined): AttributeValue | undefined {
@@ -128,17 +147,13 @@ function isAttributes(value: Attributes | TimeInput | undefined): value is Attri
  * F1). `onStart` puts the redaction in front of the span's own writers;
  * `recordException` writes through `addEvent`, `setAttributes` through
  * `setAttribute`, `addLinks` through `addLink`, so these four and `setStatus`
- * are every way in. What was written before this processor saw the span — the
- * attributes and links given to `startSpan` — is sanitized there, as stored:
- * those are URL attributes, already cut if over the limit, and a cut URL still
- * loses whatever query it holds. Every exporting processor runs after this one
- * and sees only the result.
+ * are every way in after the start. The attributes and links the span is
+ * started with are stored — and cut — before `onStart`, so they are not this
+ * processor's: {@link RedactingSampler} sanitizes them first. Every exporting
+ * processor runs after this one and sees only the result.
  */
 export class RedactingSpanProcessor implements SpanProcessor {
   onStart(span: Span): void {
-    redactAttributes(span.attributes);
-    for (const link of span.links) redactAttributes(link.attributes);
-
     const setAttribute = span.setAttribute.bind(span);
     const addEvent = span.addEvent.bind(span);
     const addLink = span.addLink.bind(span);
@@ -173,5 +188,55 @@ export class RedactingSpanProcessor implements SpanProcessor {
 
   shutdown(): Promise<void> {
     return Promise.resolve();
+  }
+}
+
+/**
+ * Sanitizes the attributes and links a span is started with, by the rules
+ * {@link RedactingSpanProcessor} holds later writes to, before the SDK stores
+ * — and cuts — them (Codex on #261, r3 F2).
+ *
+ * The instrumentations put request data in a span's start attributes: the
+ * http server span's `user_agent.original`, `server.address` (`Host`,
+ * `Forwarded`, `X-Forwarded-Host`), `client.address` (`Forwarded`,
+ * `X-Forwarded-For`), `url.path` and `url.query`; the NestJS handler span's
+ * `url.full`. The SDK's tracer cuts those to `attributeValueLengthLimit` as
+ * it builds the span, before any span processor sees it — too late to tell a
+ * parser error from its cut — but asks the sampler first. It hands the
+ * sampler its own copy of the attributes and of each link's, and builds the
+ * span from those copies, the sampler's changes included
+ * (`@opentelemetry/sdk-trace` `Tracer.startSpan`); a span that is not
+ * sampled is not built. So every value here is sanitized whole, in place,
+ * and only then cut. The decision itself is the delegate's.
+ */
+export class RedactingSampler implements Sampler {
+  constructor(private readonly delegate: Sampler) {}
+
+  shouldSample(
+    context: Context,
+    traceId: string,
+    spanName: string,
+    spanKind: SpanKind,
+    attributes: Attributes,
+    links: Link[],
+  ): SamplingResult {
+    redactAttributes(attributes);
+    for (const link of links) redactAttributes(link.attributes);
+    const result = this.delegate.shouldSample(
+      context,
+      traceId,
+      spanName,
+      spanKind,
+      attributes,
+      links,
+    );
+    // What a delegate adds is merged into the start attributes, so it is held to the same rules.
+    return result.attributes
+      ? { ...result, attributes: redactedAttributes(result.attributes) }
+      : result;
+  }
+
+  toString(): string {
+    return `RedactingSampler{${this.delegate.toString()}}`;
   }
 }

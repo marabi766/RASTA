@@ -28,7 +28,7 @@ import {
   type SpanKind,
   type Link,
 } from '@opentelemetry/api';
-import { RedactingSpanProcessor } from './url-redaction';
+import { RedactingSampler, RedactingSpanProcessor } from './url-redaction';
 
 /**
  * OpenTelemetry bootstrap.
@@ -121,7 +121,9 @@ export function initTelemetry(config: TelemetryConfig): NodeSDK | undefined {
 
   sdk = new NodeSDK({
     resource,
-    sampler: new RastaSampler(config.sampleRatio ?? 1),
+    // Sanitizes what a span is started with before the SDK cuts it; the
+    // redacting span processor below takes everything written after.
+    sampler: new RedactingSampler(new RastaSampler(config.sampleRatio ?? 1)),
     // Built when `start()` reads it — after NodeSDK has registered its meter
     // provider, at the point where it would build the same processors itself —
     // and not at all under `OTEL_SDK_DISABLED`, where `start()` reads nothing.

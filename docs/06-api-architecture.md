@@ -283,13 +283,21 @@ Method و مسیر درخواست Forwardشده از نو نوشته می‌شو
 
 **Span ردیابی هم Query ندارد.** Instrumentationهای HTTP، چه ورودی چه خروجی (`http`، undici یعنی `fetch`، NestJS)، Query را در
 `url.query` و درون `url.full` ثبت می‌کنند. Query دادهٔ کلاینت است (Cursor، عبارت جست‌وجو، توکن در URL بازگشت) و S-09 رسیدنش به
-Backend ردیابی را هم نمی‌پذیرد. `RedactingSpanProcessor` در `initTelemetry` (`@rasta/observability`) پیش از پایان هر Span،
+Backend ردیابی را هم نمی‌پذیرد. `RedactingSpanProcessor` در `initTelemetry` (`@rasta/observability`) هنگام نوشتن هر مقدار،
 `url.full`، `http.url` و `http.target` را تا پیش از `?` یا `#` کوتاه می‌کند و `url.query` را برمی‌دارد. Instrumentationها
 خطا را هم ثبت می‌کنند و متن خطا همان را تکرار می‌کند — Parser JSON در Express بدنهٔ ردشده را نقل می‌کند — پس هر رشتهٔ دیگر
 Span هم پاک‌سازی می‌شود: Attributeها، Attributeهای هر Event (`exception.message`، `exception.stacktrace`) و هر Link، و پیام
-Status. Query درون متن به `?[REDACTED]` و منبع نقل‌شده در خطای `JSON.parse` به `"[REDACTED]"` بدل می‌شود — منبع هر چند خط
-که باشد (با هر نویسهٔ پایان خط) تا آخرین `is not valid JSON` یکجا. پاک‌سازی هنگام نوشتن هر مقدار در Span است، **پیش از** آنکه SDK
-آن را به `attributeValueLengthLimit` کوتاه کند: کوتاه‌شدن ممکن است همان پایان `is not valid JSON` را ببرد و بدنه را نگه دارد.
+Status. در متن، هر جا URL یا مسیری (`scheme://…` یا `/…`) باشد، همه‌چیز از نخستین `?` یا `#` تا نخستین فاصلهٔ سفید یا پایان
+متن به `?[REDACTED]` یا `#[REDACTED]` بدل می‌شود. نویسه‌های خود Query خوانده نمی‌شوند: آپستروف، گیومه، کروشه یا هر خط دیگری
+پایان Query حساب نمی‌شود، و پاک‌کردن بیش از اندازه بر نشت ترجیح دارد. Query بی‌مسیر هم همین‌طور است: `?` چسبیده به واژه
+(`cb?…`) یا `?` با `=`/`&` در ادامه. `?`ای که پس از آن فاصله یا پایان متن می‌آید (پرسش در نثر، Placeholder در SQL) دست
+نمی‌خورد. منبع نقل‌شده در خطای `JSON.parse` به `"[REDACTED]"` بدل می‌شود، هر چند خط که باشد (با هر نویسهٔ پایان خط)، و
+تا آخرین `is not valid JSON` یکجا. پاک‌سازی هنگام نوشتن هر مقدار در Span است، **پیش از** آنکه SDK آن را به
+`attributeValueLengthLimit` کوتاه کند، زیرا کوتاه‌شدن ممکن است همان پایان `is not valid JSON` را ببرد و بدنه را نگه دارد.
+Attributeها و Linkهایی که Span با آن‌ها آغاز می‌شود را SDK پیش از هر Span Processor ذخیره و کوتاه می‌کند. این‌ها از سرصفحه‌های
+درخواست می‌آیند: `user_agent.original`، `server.address` (از `Host`/`Forwarded`/`X-Forwarded-Host`)، `client.address` (از
+`X-Forwarded-For`/`Forwarded`) و `url.full` در Span ‏NestJS. پس `RedactingSampler` آن‌ها را در `shouldSample` پاک می‌کند، که
+SDK پیش از ساختن Span صدا می‌زند، و تصمیم نمونه‌برداری همچنان با `RastaSampler` است.
 نام Span، نام Event، `url.path` و `http.route` (الگوی Route) دست نمی‌خورند. انتخاب Exporter همان است که بود: پردازشگرهای صادرکننده را همان دو
 تابعی می‌سازند که `NodeSDK` خودش می‌خواند (`OTEL_TRACES_EXPORTER`، پروتکل OTLP، `OTEL_BSP_*`، `none` یعنی بی‌Tracer Provider) و
 پاک‌ساز فقط جلوی آن‌ها می‌ایستد. Log همبسته با Trace (pino ← OTel Logs) هم دادهٔ کلاینت از درخواست ندارد: `path` بی‌Query
@@ -297,10 +305,17 @@ Status. Query درون متن به `?[REDACTED]` و منبع نقل‌شده د�
 می‌گذرد که همین `redactText` را پیش از یک‌خطی‌کردن و کوتاه‌کردن اعمال می‌کند (نشانی OAuth در پیام خطا فقط تا مسیر می‌ماند)، و
 Frameهای Stack پس از همین پاک‌سازی جدا می‌شوند، چون سطری از بدنهٔ نقل‌شده می‌تواند شکل `at …` داشته باشد؛ و Correlation Id
 همان است که قاعدهٔ `X-Correlation-Id` (§ ۶٫۳) پذیرفته — `access_token=…` پذیرفته نمی‌شود و ULID تازه جایش را می‌گیرد. تست‌ها
-با Instrumentationهای واقعی و Exporter درون‌حافظه: `packages/observability/src/url-redaction.spec.ts` (Span، با و بی
-`OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT=40`)، `exporter-selection.spec.ts` (مقایسه با کد پیشین در هر ترکیب محیط) و
-`packages/nest-common/src/middleware/request-path-logs.spec.ts` (Log در سطح debug و info: 404 خود Nest، خطای OAuth با Cause،
-بدنهٔ JSON چندخطی، 403 با `x-correlation-id: access_token=…`).
+با Instrumentationهای واقعی و Exporter درون‌حافظه:
+- `packages/observability/src/url-redaction.spec.ts`: Span، با و بی `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT=40`، از جمله
+  `User-Agent` به شکل خطای Parser.
+- `exporter-selection.spec.ts`: مقایسه با کد پیشین در هر ترکیب محیط.
+- `packages/nest-common/src/middleware/request-path-logs.spec.ts`: Log و Span در سطح debug و info و با حد ۴۰، شامل:
+  - 404 خود Nest؛
+  - خطای OAuth با Cause، در هر سه شکل `Error`، `RastaError.internal` و `BadGatewayException`، با Query دارای آپستروف،
+    Fragment، گیومه/کروشه/یونیکد و URL در پایان متن؛
+  - نثر پرسشی که دست نمی‌خورد؛
+  - بدنهٔ JSON چندخطی؛
+  - 403 با `x-correlation-id: access_token=…`.
 
 **دلیل بستهٔ امتناع در `details`.** امتناعی که دلیلش یکی از فهرستی بسته است، آن دلیل را در `details[].code` می‌آورد.
 `code` سطح بالا (`FORBIDDEN`، `CONFLICT`، `BUSINESS_RULE_VIOLATION` …) و `message` همان می‌مانند. کلاینت اول روی `code` و سپس روی `details[].code`
