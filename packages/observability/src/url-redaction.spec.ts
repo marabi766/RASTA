@@ -46,6 +46,15 @@ describe('redactText', () => {
       `SyntaxError: Unexpected token 'c', "code=abc" is not valid JSON\n    at JSON.parse (<anonymous>)`,
       `SyntaxError: Unexpected token 'c', "[REDACTED]" is not valid JSON\n    at JSON.parse (<anonymous>)`,
     ],
+    // A body over several lines, by any line terminator (Codex on #261, r2 F1).
+    ...['\n', '\r\n', '\r', '\u2028', '\u2029'].map((eol): [string, string] => [
+      `SyntaxError: Unexpected token 'c', "code=abc${eol}rest${eol}" is not valid JSON\n    at JSON.parse (<anonymous>)`,
+      `SyntaxError: Unexpected token 'c', "[REDACTED]" is not valid JSON\n    at JSON.parse (<anonymous>)`,
+    ]),
+    [
+      `Unexpected token 'x', ..."a": 1,\n"abc"... is not valid JSON`,
+      `Unexpected token 'x', "[REDACTED]" is not valid JSON`,
+    ],
     // A URL in an error message, with a query of pairs or a bare token.
     [
       'GET https://idp.example/cb?code=abc&state=x failed',
@@ -158,6 +167,51 @@ describe('RedactingSpanProcessor', () => {
       { code: SpanStatusCode.UNSET },
     ]);
   });
+
+  it('sanitizes each value whole, before attributeValueLengthLimit cuts it (r2 F1)', async () => {
+    const exporter = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider({
+      spanLimits: { attributeValueLengthLimit: 40 },
+      spanProcessors: [new RedactingSpanProcessor(), new SimpleSpanProcessor(exporter)],
+    });
+    const tracer = provider.getTracer('test');
+    const linked = tracer.startSpan('linked');
+    linked.end();
+    const span = tracer.startSpan('middleware - jsonParser');
+    // Cut to 40 characters, this message loses its closing `" is not valid
+    // JSON` and keeps the body: `Unexpected token 'c', "code=abc` + newline.
+    const error = new SyntaxError(`Unexpected token 'c', "code=abc\nrest" is not valid JSON`);
+    span.recordException(error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+    span.setAttribute('error.detail', `Unexpected token 'c', "code=abc" is not valid JSON`);
+    span.addEvent('retry', {
+      'error.detail': `Unexpected token 'c', "code=abc" is not valid JSON`,
+    });
+    span.addLink({
+      context: linked.spanContext(),
+      attributes: { 'error.detail': `Unexpected token 'c', "code=abc" is not valid JSON` },
+    });
+    span.end();
+    await provider.forceFlush();
+
+    const exported = exporter.getFinishedSpans().find((s) => s.name === 'middleware - jsonParser');
+    const { attributes, events, links, status } = exported ?? {};
+    expect(JSON.stringify({ attributes, events, links, status })).not.toContain('abc');
+    const redacted = `Unexpected token 'c', "[REDACTED]" is not valid JSON`;
+    const cut = redacted.slice(0, 40);
+    expect(cut).toBe(`Unexpected token 'c', "[REDACTED]" is no`);
+    // The SDK does not cut a status message.
+    expect(exported?.status).toEqual({ code: SpanStatusCode.ERROR, message: redacted });
+    const [exception, retry] = exported?.events ?? [];
+    expect(exception?.attributes).toEqual({
+      'exception.type': 'SyntaxError',
+      'exception.message': cut,
+      'exception.stacktrace': `SyntaxError: ${redacted}`.slice(0, 40),
+    });
+    expect(retry?.attributes).toEqual({ 'error.detail': cut });
+    expect(exported?.attributes).toEqual({ 'error.detail': cut });
+    expect(exported?.links[0]?.attributes).toEqual({ 'error.detail': cut });
+  });
 });
 
 interface ExportedSpan {
@@ -186,6 +240,47 @@ require.extensions['.ts'] = (module, filename) => {
 require(${JSON.stringify(FIXTURE)});
 `;
 
+interface FixtureResult {
+  origin: string;
+  refused: string;
+  spans: ExportedSpan[];
+}
+
+/** Runs the fixture with no `OTEL_*` variable from this process, plus `env`. */
+async function runFixture(env: Record<string, string> = {}): Promise<FixtureResult> {
+  const { stdout } = await promisify(execFile)(process.execPath, ['-e', RUN_FIXTURE], {
+    cwd: PACKAGE_DIR,
+    env: {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([key]) => !key.startsWith('OTEL_')),
+      ),
+      ...env,
+    },
+    timeout: CHILD_TIMEOUT_MS,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  return JSON.parse(stdout) as FixtureResult;
+}
+
+/** The middleware spans of the bodies the JSON parser refused, in the order sent. */
+const parserSpans = (spans: ExportedSpan[]): ExportedSpan[] =>
+  spans.filter(
+    (span) =>
+      span.scope === '@opentelemetry/instrumentation-express' &&
+      span.name === 'middleware - jsonParser' &&
+      span.status.code === SpanStatusCode.ERROR,
+  );
+
+/** What the parser errors read once redacted, in the order the bodies were sent. */
+const REDACTED_PARSER_ERRORS = ['/', 'c', 'c', 'c', 'c', 'c', 'c'].map(
+  (token) => `Unexpected token '${token}', "[REDACTED]" is not valid JSON`,
+);
+
+const exceptionMessages = (span: ExportedSpan | undefined): unknown[] =>
+  (span?.events ?? [])
+    .filter((event) => event.name === 'exception')
+    .map((event) => event.attributes?.['exception.message']);
+
 describe('initTelemetry — spans from the real instrumentations carry no URL query', () => {
   let origin: string;
   let refused: string;
@@ -202,26 +297,8 @@ describe('initTelemetry — spans from the real instrumentations carry no URL qu
     );
 
   beforeAll(async () => {
-    const env = Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => !key.startsWith('OTEL_')),
-    );
-    const { stdout } = await promisify(execFile)(process.execPath, ['-e', RUN_FIXTURE], {
-      cwd: PACKAGE_DIR,
-      env,
-      timeout: CHILD_TIMEOUT_MS,
-      maxBuffer: 16 * 1024 * 1024,
-    });
-    ({ origin, refused, spans } = JSON.parse(stdout) as {
-      origin: string;
-      refused: string;
-      spans: ExportedSpan[];
-    });
+    ({ origin, refused, spans } = await runFixture());
   }, CHILD_TIMEOUT_MS + 5_000);
-
-  const exceptionMessages = (span: ExportedSpan | undefined): unknown[] =>
-    (span?.events ?? [])
-      .filter((event) => event.name === 'exception')
-      .map((event) => event.attributes?.['exception.message']);
 
   it('no exported span holds "abc" — name, attribute, event or status', () => {
     expect(spans.length).toBeGreaterThan(0);
@@ -268,19 +345,12 @@ describe('initTelemetry — spans from the real instrumentations carry no URL qu
     expect(server?.attributes).not.toHaveProperty(['url.query']);
   });
 
-  it('a JSON body the parser refuses: the exception and status stay, the quoted body does not', () => {
-    const parsers = spans.filter(
-      (span) =>
-        span.scope === '@opentelemetry/instrumentation-express' &&
-        span.name === 'middleware - jsonParser' &&
-        span.status.code === SpanStatusCode.ERROR,
+  it('a JSON body the parser refuses, on one line or several: the exception and status stay, the quoted body does not', () => {
+    const parsers = parserSpans(spans);
+    expect(parsers.map((span) => span.status.message)).toEqual(REDACTED_PARSER_ERRORS);
+    expect(parsers.map((span) => exceptionMessages(span))).toEqual(
+      REDACTED_PARSER_ERRORS.map((m) => [m]),
     );
-    const expected = [
-      `Unexpected token '/', "[REDACTED]" is not valid JSON`,
-      `Unexpected token 'c', "[REDACTED]" is not valid JSON`,
-    ];
-    expect(parsers.map((span) => span.status.message)).toEqual(expected);
-    expect(parsers.map((span) => exceptionMessages(span))).toEqual(expected.map((m) => [m]));
     for (const span of parsers) {
       const [exception] = span.events;
       expect(exception?.attributes?.['exception.stacktrace']).toMatch(
@@ -310,5 +380,37 @@ describe('initTelemetry — spans from the real instrumentations carry no URL qu
     expect(failed?.status.code).toBe(SpanStatusCode.ERROR);
     expect(exceptionMessages(failed)).toEqual([expect.stringContaining('ECONNREFUSED')]);
     expect(failed?.attributes).not.toHaveProperty(['url.query']);
+  });
+});
+
+describe('initTelemetry under OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT=40 — a cut value carries nothing either (r2 F1)', () => {
+  const LIMIT = 40;
+  let spans: ExportedSpan[];
+
+  beforeAll(async () => {
+    ({ spans } = await runFixture({ OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT: String(LIMIT) }));
+  }, CHILD_TIMEOUT_MS + 5_000);
+
+  it('the limit is in force', () => {
+    const lengths = spans.flatMap((span) => [
+      ...Object.values(span.attributes),
+      ...span.events.flatMap((event) => Object.values(event.attributes ?? {})),
+    ]);
+    expect(lengths.filter((value) => typeof value === 'string' && value.length > LIMIT)).toEqual(
+      [],
+    );
+  });
+
+  it('no exported span holds "abc"', () => {
+    expect(spans.length).toBeGreaterThan(0);
+    expect(spans.filter((span) => JSON.stringify(span).includes('abc'))).toEqual([]);
+  });
+
+  it('the parser errors are recorded, redacted whole and then cut', () => {
+    const parsers = parserSpans(spans);
+    expect(parsers.map((span) => span.status.message)).toEqual(REDACTED_PARSER_ERRORS);
+    expect(parsers.map((span) => exceptionMessages(span))).toEqual(
+      REDACTED_PARSER_ERRORS.map((m) => [m.slice(0, LIMIT)]),
+    );
   });
 });

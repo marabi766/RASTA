@@ -165,8 +165,8 @@ export function initTelemetry(config: TelemetryConfig): NodeSDK | undefined {
  * the redacting processor stand in front of them; which exporter runs, and
  * how, is unchanged (Codex on #261, F3; `exporter-selection.spec.ts`).
  *
- * The redacting processor rewrites a span before it ends, so every exporting
- * processor only ever sees — and exports — the sanitized span. With no
+ * The redacting processor sanitizes what a span is given as it is given, so
+ * every exporting processor only ever sees — and exports — the sanitized span. With no
  * exporting processor (`OTEL_TRACES_EXPORTER=none`) the pipeline is empty, and
  * NodeSDK then registers no tracer provider, as it did before.
  */

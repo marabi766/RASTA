@@ -1,4 +1,4 @@
-import type { AttributeValue, Attributes } from '@opentelemetry/api';
+import type { AttributeValue, Attributes, TimeInput } from '@opentelemetry/api';
 import { ATTR_URL_FULL, ATTR_URL_QUERY } from '@opentelemetry/semantic-conventions';
 import type { Span, SpanProcessor } from '@opentelemetry/sdk-trace-node';
 
@@ -28,11 +28,12 @@ const QUERY_IN_TEXT = /\?(?:[^\s"'`<>]*[=&][^\s"'`<>]*|(?<=[\w/.~%-]\?)[^\s"'`<>
 /**
  * V8's `JSON.parse` error quotes the source it could not read — `Unexpected
  * token 'c', "<body>" is not valid JSON`, or `..."<body>"...` when long — and
- * on an HTTP request that source is the client's body. Greedy to the last
- * occurrence on the line, so a body that itself contains the phrase is still
- * taken whole. The exception filter keeps the same text out of the log.
+ * on an HTTP request that source is the client's body, line terminators and
+ * all (`code=x\nrest` is quoted over two lines). So the quote runs from the
+ * first `"` to the last ` is not valid JSON` in the text, across any line
+ * break, and a body that itself contains the phrase is still taken whole.
  */
-const JSON_SOURCE_IN_TEXT = /(?:\.\.\.)?"[^\n]*"(?:\.\.\.)? is not valid JSON/g;
+const JSON_SOURCE_IN_TEXT = /(?:\.\.\.)?"[\s\S]*"(?:\.\.\.)? is not valid JSON/g;
 
 /** The URL, or path, without its query string and fragment. */
 export function urlWithoutQuery(url: string): string {
@@ -59,21 +60,47 @@ function redactValue(value: AttributeValue | undefined): AttributeValue | undefi
 }
 
 /**
- * Rewrites an attribute record in place: a URL attribute loses its query and
- * fragment, `url.query` goes (there is no query-free form of a query), every
- * other string is passed through {@link redactText}.
+ * An attribute as it may be exported: a URL attribute loses its query and
+ * fragment, `url.query` goes — undefined, as there is no query-free form of a
+ * query — and every other string is passed through {@link redactText}.
  */
+function redactAttribute(
+  key: string,
+  value: AttributeValue | undefined,
+): AttributeValue | undefined {
+  if (key === ATTR_URL_QUERY) return undefined;
+  if (URL_ATTRIBUTES.has(key) && typeof value === 'string') return urlWithoutQuery(value);
+  return redactValue(value);
+}
+
+/** Rewrites an attribute record in place by {@link redactAttribute}. */
 function redactAttributes(attributes: Attributes | undefined): void {
   if (!attributes) return;
   for (const [key, value] of Object.entries(attributes)) {
-    if (key === ATTR_URL_QUERY) {
-      delete attributes[key];
-    } else if (URL_ATTRIBUTES.has(key) && typeof value === 'string') {
-      attributes[key] = urlWithoutQuery(value);
-    } else {
-      attributes[key] = redactValue(value);
-    }
+    const redacted = redactAttribute(key, value);
+    if (redacted === undefined) delete attributes[key];
+    else attributes[key] = redacted;
   }
+}
+
+/** A copy of an attribute record, redacted by {@link redactAttribute}. */
+function redactedAttributes(attributes: Attributes): Attributes {
+  const copy: Attributes = {};
+  for (const [key, value] of Object.entries(attributes)) {
+    const redacted = redactAttribute(key, value);
+    if (redacted !== undefined) copy[key] = redacted;
+  }
+  return copy;
+}
+
+/**
+ * Whether `addEvent`'s second argument is the event's attributes rather than
+ * its time (a number, a `Date` or an `[seconds, nanos]` pair).
+ */
+function isAttributes(value: Attributes | TimeInput | undefined): value is Attributes {
+  return (
+    typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date)
+  );
 }
 
 /**
@@ -90,24 +117,52 @@ function redactAttributes(attributes: Attributes | undefined): void {
  * quotes the body it refused.
  *
  * So every string the span carries is sanitized: its attributes, each event's
- * and each link's attributes, and the status message. The rewrite happens in
- * `onEnding`, while the span is still writable and after every instrumentation
- * has set its attributes and recorded its exceptions, so one place covers
- * incoming and outgoing requests alike, and every exporting processor sees only
- * the result. Span names, event names, `url.path` and `http.route` (the route
- * template) are left as they are; none of them carries the query.
+ * and each link's attributes, and the status message. Span names, event names,
+ * `url.path` and `http.route` (the route template) are left as they are; none
+ * of them carries the query.
+ *
+ * Each value is sanitized as it is written, whole: the SDK cuts a value to
+ * `attributeValueLengthLimit` as it stores it, and a cut can remove exactly
+ * what marks the client data — the closing `" is not valid JSON` of a parser
+ * error — so sanitizing the stored span would come too late (Codex on #261, r2
+ * F1). `onStart` puts the redaction in front of the span's own writers;
+ * `recordException` writes through `addEvent`, `setAttributes` through
+ * `setAttribute`, `addLinks` through `addLink`, so these four and `setStatus`
+ * are every way in. What was written before this processor saw the span — the
+ * attributes and links given to `startSpan` — is sanitized there, as stored:
+ * those are URL attributes, already cut if over the limit, and a cut URL still
+ * loses whatever query it holds. Every exporting processor runs after this one
+ * and sees only the result.
  */
 export class RedactingSpanProcessor implements SpanProcessor {
-  onStart(): void {}
-
-  onEnding(span: Span): void {
+  onStart(span: Span): void {
     redactAttributes(span.attributes);
-    for (const event of span.events) redactAttributes(event.attributes);
     for (const link of span.links) redactAttributes(link.attributes);
-    // Only an ERROR status carries a message, and an ERROR status may still be
-    // replaced; there is no other way to write it.
-    const { code, message } = span.status;
-    if (message !== undefined) span.setStatus({ code, message: redactText(message) });
+
+    const setAttribute = span.setAttribute.bind(span);
+    const addEvent = span.addEvent.bind(span);
+    const addLink = span.addLink.bind(span);
+    const setStatus = span.setStatus.bind(span);
+    span.setAttribute = (key, value) => {
+      const redacted = redactAttribute(key, value);
+      return redacted === undefined ? span : setAttribute(key, redacted);
+    };
+    span.addEvent = (name, attributesOrTime, time) =>
+      addEvent(
+        name,
+        isAttributes(attributesOrTime) ? redactedAttributes(attributesOrTime) : attributesOrTime,
+        time,
+      );
+    span.addLink = (link) =>
+      addLink(
+        link.attributes ? { ...link, attributes: redactedAttributes(link.attributes) } : link,
+      );
+    span.setStatus = (status) =>
+      setStatus(
+        typeof status.message === 'string'
+          ? { ...status, message: redactText(status.message) }
+          : status,
+      );
   }
 
   onEnd(): void {}

@@ -9,7 +9,8 @@
  *
  * The order is a service's `main.ts`: `initTelemetry` first, the framework
  * loaded after it. Every request carries "abc" — in its query, in a body the
- * JSON parser refuses, in the URL an error names.
+ * JSON parser refuses, in the URL an error names. The spec runs it twice: with
+ * no span limits, and with `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT=40`.
  */
 import type * as NodeHttp from 'node:http';
 import { trace, type ProxyTracerProvider } from '@opentelemetry/api';
@@ -17,6 +18,17 @@ import { InMemorySpanExporter, type NodeTracerProvider } from '@opentelemetry/sd
 import { initTelemetry } from '../telemetry';
 
 const QUERY = '?secret=abc';
+
+/** The JSON bodies sent, in order; the spec expects their parser errors in this order. */
+const PARSER_BODIES = [
+  '/?code=abc',
+  'code=abc',
+  'code=abc\nrest',
+  'code=abc\r\nrest',
+  'code=abc\rrest',
+  'code=abc\u2028rest',
+  'code=abc\u2029rest',
+];
 
 /** An origin nothing listens on: a port bound, then released. */
 async function refusingOrigin(http: typeof NodeHttp): Promise<string> {
@@ -78,8 +90,9 @@ async function main(): Promise<void> {
   await (await fetch(`${origin}/v1/missing${QUERY}`)).text();
   // Bodies Express's instrumented JSON parser refuses: V8's message quotes
   // them, and the instrumentation records it as the middleware span's exception
-  // and status. One looks like a query (Codex on #261, F1), one does not.
-  for (const body of ['/?code=abc', 'code=abc']) {
+  // and status. One looks like a query (Codex on #261, F1), one does not, and
+  // the rest run over two lines, by each line terminator (r2 F1).
+  for (const body of PARSER_BODIES) {
     await (
       await fetch(`${origin}/v1/x`, {
         method: 'POST',
