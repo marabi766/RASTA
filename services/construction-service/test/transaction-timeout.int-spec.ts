@@ -77,17 +77,33 @@ describe('the interactive transaction timeout', () => {
     );
   });
 
-  it('runs the suites on the configured value, above Prisma’s 5 000 ms, and commits on it', async () => {
-    const env = testEnv();
+  /** Wires the service on `env` and commits one transaction on it. */
+  const commitsOn = async (env: ReturnType<typeof testEnv>): Promise<number> => {
     const w = wire(env);
     try {
-      expect(w.prisma.transactionTimeoutMs).toBe(env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS);
-      expect(env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS).toBeGreaterThan(5_000);
       await expect(
         w.prisma.transaction((tx) => tx.$queryRawUnsafe<{ one: number }[]>('SELECT 1 AS one')),
       ).resolves.toEqual([{ one: 1 }]);
+      return w.prisma.transactionTimeoutMs;
     } finally {
       await w.close();
+    }
+  };
+
+  // Whatever the run is configured with — the 15 s default (env.spec.ts) or an
+  // exported value. Any value the service accepts is a valid run, 5 000 ms
+  // included (Codex r1 on #271: this once demanded more than 5 000).
+  it('runs the suites on the configured value, within the bounds the service accepts', async () => {
+    const env = testEnv();
+    expect(env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS).toBeGreaterThanOrEqual(5_000);
+    expect(env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS).toBeLessThanOrEqual(60_000);
+    expect(await commitsOn(env)).toBe(env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS);
+  });
+
+  it('wires a value set explicitly — both bounds and one above the default — and commits on it', async () => {
+    for (const ms of [5_000, 30_000, 60_000]) {
+      const env = testEnv({ CONSTRUCTION_TRANSACTION_TIMEOUT_MS: String(ms) });
+      expect(await commitsOn(env)).toBe(ms);
     }
   });
 });
