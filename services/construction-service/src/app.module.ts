@@ -13,7 +13,10 @@ import {
   AUTH_OPTIONS,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
+  OutboxPurgeScheduler,
   OutboxRelay,
+  OutboxShutdown,
+  outboxPurgeSettings,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -21,6 +24,7 @@ import {
   type AuthGuardOptions,
   kafkaConnection,
 } from '@rasta/nest-common';
+import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
   outboxAckFencedTotal,
@@ -395,6 +399,49 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     },
 
     {
+      // D-052: published rows past OUTBOX_PURGE_RETENTION_HOURS, in bounded batches.
+      provide: OutboxPurgeScheduler,
+      inject: [PrismaOutboxStore, ENV, LOGGER],
+      useFactory: (store: PrismaOutboxStore, env: ConstructionEnv, logger: Logger) =>
+        new OutboxPurgeScheduler({
+          store,
+          service: SERVICE_NAME,
+          logger,
+          ...outboxPurgeSettings(env),
+        }),
+    },
+    {
+      // D-052: the relay, the purge and the three sweeps stop together in the
+      // destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. The sweeps
+      // too (as #247 r3): stopped later, they kept writing outbox rows while
+      // the relay drained. The consumers and the standing bootstrap write no
+      // outbox row and still stop in onApplicationShutdown.
+      provide: OutboxShutdown,
+      inject: [
+        OutboxRelay,
+        OutboxPurgeScheduler,
+        PolicyReconciliationSweeper,
+        TenderCloseSweeper,
+        AwardStandingCheckSweeper,
+        ENV,
+      ],
+      useFactory: (
+        relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
+        reconciliation: PolicyReconciliationSweeper,
+        tenderClose: TenderCloseSweeper,
+        awardCheck: AwardStandingCheckSweeper,
+        env: ConstructionEnv,
+      ) =>
+        new OutboxShutdown({
+          relay,
+          purge,
+          workers: [reconciliation, tenderClose, awardCheck],
+          budgetMs: outboxShutdownBudgetMs(env),
+        }),
+    },
+
+    {
       provide: AUTH_OPTIONS,
       inject: [ENV, InternalTokenService],
       useFactory: (
@@ -424,6 +471,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
+    private readonly purge: OutboxPurgeScheduler,
+    private readonly outboxShutdown: OutboxShutdown,
     private readonly moves: OrganizationMovedConsumer,
     private readonly standing: SupplierStandingConsumer,
     private readonly bootstrap: StandingBootstrap,
@@ -463,6 +512,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     this.tenderCloser.start();
     this.awardChecker.start();
     this.relay.start();
+    this.purge.start();
 
     const sample = async () => {
       try {
@@ -517,9 +567,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.moves.stop();
     await this.standing.stop();
     await this.bootstrap.stop();
-    await this.sweeper.stop();
-    await this.tenderCloser.stop();
-    await this.awardChecker.stop();
-    await this.relay.stop();
+    // The relay, the purge and the three sweeps already stopped in
+    // OutboxShutdown's onModuleDestroy, concurrently and by one deadline; this
+    // joins that stop and returns at once.
+    await this.outboxShutdown.stop();
   }
 }
