@@ -2,7 +2,7 @@
   "name": "@rasta/inventory-service",
   "version": "0.1.0",
   "private": true,
-  "description": "Inventory and forward logistics (COM-006, ADR-056): warehouses, stock items, an append-only stock movement ledger and reservations under PostgreSQL row locks; shipments and tracking follow.",
+  "description": "Inventory and forward logistics (COM-006, ADR-056): warehouses, stock items, an append-only stock movement ledger and reservations under PostgreSQL row locks; shipments and their tracking, read by owner and consignee.",
   "main": "dist/main.js",
   "scripts": {
     "build": "prisma generate && tsc -p tsconfig.json && node ../../scripts/copy-prisma-client.mjs",

@@ -18,13 +18,18 @@ import { PrismaClient } from '../generated/prisma';
  *
  * The balance writes are raw SQL (`stock.repository.ts`), which the guard does not see: every
  * one of them names `organization_id` in its own predicate, and the integration suites prove
- * each against another tenant's rows.
+ * each against another tenant's rows. So is every shipment statement (`shipment.repository.ts`):
+ * a shipment is read by its owner **or** its consignee (ADR-056 § 5), a predicate over two
+ * organizations the guard cannot express, so each read names both columns itself.
  */
 export const TENANT_SCOPED_MODELS = [
   'Warehouse',
   'StockItem',
   'StockMovement',
   'StockReservation',
+  'Shipment',
+  'ShipmentLeg',
+  'TrackingEvent',
   'IdempotencyKey',
 ] as const;
 

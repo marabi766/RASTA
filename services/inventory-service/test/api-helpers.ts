@@ -223,7 +223,46 @@ export function client(api: ApiHarness, token: string) {
     issue: (reservationId: string, k?: string) =>
       post(`/v1/stock/reservations/${reservationId}/issue`, {}, k),
     stockItem: (id: string) => get(`/v1/stock/${id}`),
+    createShipment: (
+      originWarehouseId: string,
+      consigneeOrganizationId: string,
+      extra: object = {},
+      k?: string,
+    ) =>
+      post(
+        '/v1/shipments',
+        {
+          originWarehouseId,
+          consigneeOrganizationId,
+          legs: [{ carrierName: 'Road freight', carrierReference: 'WB-1001' }],
+          ...extra,
+        },
+        k,
+      ),
+    dispatch: (shipmentId: string, body: object = {}, k?: string) =>
+      post(`/v1/shipments/${shipmentId}/dispatch`, body, k),
+    deliver: (shipmentId: string, body: object = {}, k?: string) =>
+      post(`/v1/shipments/${shipmentId}/deliver`, body, k),
+    shipment: (id: string) => get(`/v1/shipments/${id}`),
+    tracking: (id: string) => get(`/v1/shipments/${id}/tracking`),
   };
+}
+
+/**
+ * A warehouse of `owner` and a CREATED shipment out of it to `consignee`, through the API. Returns
+ * the ids.
+ */
+export async function seedShipment(
+  api: ApiHarness,
+  owner: string,
+  consignee: string,
+): Promise<{ warehouseId: string; shipmentId: string }> {
+  const operator = client(api, orgAdmin(owner));
+  const warehouse = await operator.createWarehouse();
+  expect(warehouse.status).toBe(201);
+  const shipment = await operator.createShipment(warehouse.body.id, consignee);
+  expect(shipment.status).toBe(201);
+  return { warehouseId: warehouse.body.id as string, shipmentId: shipment.body.id as string };
 }
 
 /**

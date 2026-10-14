@@ -95,6 +95,9 @@ describe('catalogue API', () => {
       const conflict = await createProduct(supplierOrg, { sku: shared });
       expect(conflict.status).toBe(409);
       expect(conflict.body.code).toBe('ALREADY_EXISTS');
+      // Names the field, never the client's value (S-09).
+      expect(conflict.body.message).toBe('A product with this sku already exists');
+      expect(JSON.stringify(conflict.body)).not.toContain(shared);
     });
 
     it('lets a different organization use the same SKU', async () => {

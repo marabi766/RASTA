@@ -58,14 +58,42 @@ describe('resolveOrganization', () => {
   });
 
   it('does not leak the membership list in the client-facing message', () => {
+    expect.assertions(3);
     try {
       resolveOrganization(ORG_C, ORG_A, [ORG_A, ORG_B]);
     } catch (error) {
       const message = (error as RastaError).message;
       expect(message).not.toContain(ORG_A);
       expect(message).not.toContain(ORG_B);
-      // It is still available server-side for the audit log.
-      expect((error as RastaError).internalContext).toMatchObject({ requested: ORG_C });
+      // The memberships are still available server-side for the log.
+      expect((error as RastaError).internalContext).toMatchObject({ allowed: [ORG_A, ORG_B] });
+    }
+  });
+
+  it('logs only that the header matched nothing, and its length, never its value (S-09)', () => {
+    // The header is client text: a caller can put anything in it, a token included.
+    const header = 'access_token=secret123';
+    expect.assertions(3);
+    try {
+      resolveOrganization(header, ORG_A, [ORG_A, ORG_B]);
+    } catch (error) {
+      const refusal = error as RastaError;
+      expect(refusal.code).toBe('TENANT_MISMATCH');
+      expect(refusal.internalContext).toEqual({
+        unmatchedHeader: 'X-Organization-Id',
+        headerLength: header.length,
+        allowed: [ORG_A, ORG_B],
+      });
+      expect(JSON.stringify([refusal.message, refusal.internalContext])).not.toContain('secret123');
+    }
+  });
+
+  it('logs a refused active organization, which is the signed token’s own claim', () => {
+    expect.assertions(1);
+    try {
+      resolveOrganization(undefined, ORG_C, [ORG_A]);
+    } catch (error) {
+      expect((error as RastaError).internalContext).toEqual({ requested: ORG_C, allowed: [ORG_A] });
     }
   });
 });

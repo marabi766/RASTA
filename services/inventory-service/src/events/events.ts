@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { INVENTORY_SHIPMENT_EVENTS, INVENTORY_SHIPMENT_EVENT_SCHEMAS } from '@rasta/contracts';
 
 /**
  * Events published by inventory-service, on `rasta.inventory.v1` (ADR-056 § 6).
@@ -7,7 +8,12 @@ import { z } from 'zod';
  * `STOCK_ISSUED`, the catalogue's (`docs/04` § 4.11), and `STOCK_ADJUSTED` — and the warehouse's
  * `WAREHOUSE_CREATED`. The last two are not in the catalogue: every state change goes through the
  * outbox (A-08) and so reaches audit-service (S-06); the project manager approved both
- * (COM-006 PR 1). `LOW_STOCK_DETECTED` waits for its threshold (Q-106); the shipment events are PR 2.
+ * (COM-006 PR 1). `LOW_STOCK_DETECTED` waits for its threshold (Q-106).
+ *
+ * PR 2 adds the shipment stream — `SHIPMENT_CREATED`, `SHIPMENT_DISPATCHED`, `SHIPMENT_DELIVERED`.
+ * Their names and payload schemas are cross-service contracts in `@rasta/contracts`
+ * (`events/inventory-shipments.ts`; `docs/events/README.md` § adding an event), composed into
+ * the one table below so every event this service publishes is validated the same way.
  *
  * The catalogue's `sku` is `productId` here: the opaque marketplace product reference the stock
  * item is keyed by (ADR-056 § 1), approved with this PR.
@@ -29,6 +35,7 @@ export const INVENTORY_EVENTS = {
   STOCK_RESERVED: 'STOCK_RESERVED',
   STOCK_RELEASED: 'STOCK_RELEASED',
   STOCK_ISSUED: 'STOCK_ISSUED',
+  ...INVENTORY_SHIPMENT_EVENTS,
 } as const;
 
 export type InventoryEventName = keyof typeof INVENTORY_EVENTS;
@@ -146,6 +153,7 @@ export const INVENTORY_EVENT_SCHEMAS = {
   STOCK_RESERVED: stockReservedPayload,
   STOCK_RELEASED: stockReleasedPayload,
   STOCK_ISSUED: stockIssuedPayload,
+  ...INVENTORY_SHIPMENT_EVENT_SCHEMAS,
 } as const satisfies Record<InventoryEventName, z.ZodTypeAny>;
 
 export type InventoryEventPayload<N extends InventoryEventName> = z.infer<

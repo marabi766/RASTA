@@ -544,7 +544,7 @@ describe('L1-06: a non-platform 5xx body is replaced, never reflected', () => {
   });
 
   it('never labels a reflected body with the upstream content type', async () => {
-    // Below 500 a non-JSON body is still wrapped as `{ raw }` (unchanged), but
+    // Below 500 a non-envelope body is replaced by a fixed envelope (#259), and
     // it goes out as JSON — a `text/html` label is how it would be rendered.
     upstream.respond = (res) => {
       res.writeHead(404, { 'content-type': 'text/html' });

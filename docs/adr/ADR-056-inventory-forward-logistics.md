@@ -334,6 +334,19 @@ D-1 برای هر جریان جدید می‌خواهد (Mapped Type در `routi
 - **جریان `shipmentId`:** `SHIPMENT_CREATED` · `SHIPMENT_DISPATCHED` ·
   `SHIPMENT_DELIVERED`.
 
+> **STRICT امروز نیت است، نه تحویل مرتب — D-027 (افزوده 2026-10-13، Codex روی #257).**
+> Relay مشترک `@rasta/nest-common` ردیف‌های Outbox را مستقل Claim می‌کند؛ میان دو
+> Relay، پس از Backoff، یا در مسیر انتشار تک‌ردیفی، رویداد بعدی یک جریان می‌تواند
+> پیش از قبلی یا دوباره برسد (D-027، باز تا ADR-051 B4). این PR سازوکار ترتیب تازه‌ای
+> نمی‌سازد. پس تا بسته شدن D-027، **هر Consumer رویدادهای هر دو جریان باید آن‌ها را با
+> `streamSeq` Envelope (به‌ازای `streamKey`؛ Header `x-stream-seq`) مرتب و
+> تکراری‌زدایی کند** — توالیِ نه‌بیشتر از آخرین اعمال‌شده بی‌اثر است و رویداد پس از شکاف
+> «بعدی» شمرده نمی‌شود؛ ترتیب رسیدن هرگز مبنا نیست. هر رویداد محموله `streamSeq` به‌ازای
+> همان محموله دارد (برابر `shipmentVersion`)؛ قرارداد در
+> `packages/contracts/src/events/inventory-shipments.ts` و
+> [`docs/events/README.md`](../events/README.md) § Inventory. امروز تنها مصرف‌کننده
+> `audit-service` است (الحاقی، بی‌وابستگی به ترتیب).
+
 **Idempotent Consumers.** هر Consumer آینده (وقتی marketplace/procurement
 واقعاً منتشر کنند) از `processed_event` طبق الگوی ADR-032 استفاده می‌کند: علامت
 «پردازش شد» فقط پس از اعمال واقعی اثر زده می‌شود، نه در ورودی Handler.

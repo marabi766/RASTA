@@ -134,9 +134,10 @@ function freezeContext(context: RequestContext): RequestContext {
 /**
  * Replaces the current context with an authenticated one.
  *
- * Called exactly once per request, by the auth guard, after the token has been
- * verified and the tenant resolved. Not exported from the package root: the
- * only legitimate caller lives inside this package.
+ * Called by the auth guard once per request, after the token has been verified
+ * and the tenant resolved — and, for a verified service caller, once before
+ * that to keep the correlation id it forwarded. Not exported from the package
+ * root: the only legitimate caller lives inside this package.
  */
 export function upgradeContext(patch: Partial<RequestContext>): RequestContext {
   const holder = storage.getStore();

@@ -95,7 +95,10 @@ export {
   RequestContextMiddleware,
   parseTraceparent,
   requestPath,
+  isWellFormedCorrelationId,
+  isServiceCorrelationId,
   CORRELATION_ID_HEADER,
+  CORRELATION_ID_MAX_LENGTH,
   REQUEST_ID_HEADER,
   TRACEPARENT_HEADER,
 } from './middleware/request-context.middleware';
@@ -137,6 +140,7 @@ export type { KafkaConnectionOptions, KafkaConnectionEnv } from './kafka/connect
 // Event consumption ----------------------------------------------------------
 export {
   EventConsumer,
+  ConsumerStoppingError,
   UnprocessableEventError,
   deadLetterHeaders,
   HANDLER_MESSAGE_MAX,

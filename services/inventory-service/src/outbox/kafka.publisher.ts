@@ -1,5 +1,5 @@
 import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
-import { Kafka, type Producer, CompressionTypes } from 'kafkajs';
+import { Kafka, type Admin, type Producer, CompressionTypes } from 'kafkajs';
 import { kafkaClientConfig, type KafkaConnectionOptions } from '@rasta/nest-common';
 import type { EventPublisher, OutboxRow } from '@rasta/nest-common';
 
@@ -120,15 +120,25 @@ export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
     });
   }
 
+  /**
+   * One short-lived admin client per probe, closed on every path.
+   *
+   * A probe that fails half-way — connected, then `listTopics()` refused — has
+   * still opened a client. Closing it only on success leaked one socket and its
+   * retry timers per failed readiness check, for as long as the broker stayed
+   * unhealthy. A failed close does not change the answer.
+   */
   async isHealthy(): Promise<boolean> {
+    let admin: Admin | undefined;
     try {
-      const admin = this.kafka.admin();
+      admin = this.kafka.admin();
       await admin.connect();
       await admin.listTopics();
-      await admin.disconnect();
       return true;
     } catch {
       return false;
+    } finally {
+      await admin?.disconnect().catch(() => undefined);
     }
   }
 

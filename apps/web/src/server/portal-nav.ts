@@ -110,6 +110,8 @@ export async function loadPortalNav(
   current?: CurrentUserResult,
 ): Promise<readonly SidebarItem[]> {
   const result = current ?? (await fetchCurrentUser(session));
+  // The realm claim is read only once identity answered: with no answer the gated
+  // links stay hidden, whatever the token says.
   const roles =
     result.kind === 'USER' ? requestRoles(result.user.effectiveRoles, session.accessToken) : [];
   return portalNavFor({

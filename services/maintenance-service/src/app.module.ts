@@ -102,12 +102,11 @@ import {
 const FLEET_TOPICS = ['rasta.fleet.v1'];
 const ASSET_TOPICS = ['rasta.asset.v1'];
 
-// A note on the two providers nothing below injects — `UsageConsumer` and
-// `AssetSyncConsumer`. Nest instantiates every provider a module declares, so
-// their `onModuleInit` runs and they subscribe without anyone holding a
-// reference. Injecting them into `AppModule` purely to keep them alive would be
-// a lie about the dependency. `DueScanner` starts its own timer the same way;
-// `OutboxShutdown` injects it because it stops it.
+// A note on the providers that start themselves — `UsageConsumer`,
+// `AssetSyncConsumer` and `DueScanner`. Nest instantiates every provider a
+// module declares, so their `onModuleInit` runs and they subscribe or start
+// their timer without anyone holding a reference. `OutboxShutdown` injects all
+// three because it stops them.
 
 @Module({
   controllers: [
@@ -307,22 +306,32 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
         }),
     },
     {
-      // D-052: the relay, the purge and the due scanner stop together in the
-      // destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. The scanner
-      // too (Codex r3 on #247): stopped later, its timer kept writing outbox
-      // rows while the relay drained.
+      // D-052: the relay, the purge, the due scanner and both consumers stop
+      // together in the destroy phase, by one deadline inside
+      // SHUTDOWN_TIMEOUT_MS. The scanner too (Codex r3 on #247): stopped later,
+      // its timer kept writing outbox rows while the relay drained. The
+      // consumers too (Codex on #267): their stops had no bound of their own.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OutboxPurgeScheduler, DueScanner, ENV],
+      inject: [
+        OutboxRelay,
+        OutboxPurgeScheduler,
+        DueScanner,
+        UsageConsumer,
+        AssetSyncConsumer,
+        ENV,
+      ],
       useFactory: (
         relay: OutboxRelay,
         purge: OutboxPurgeScheduler,
         dueScanner: DueScanner,
+        usage: UsageConsumer,
+        assetSync: AssetSyncConsumer,
         env: MaintenanceEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
-          workers: [dueScanner],
+          workers: [dueScanner, usage, assetSync],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },
@@ -418,9 +427,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onApplicationShutdown(): Promise<void> {
-    // The relay and the purge already drained in OutboxShutdown's
-    // onModuleDestroy, concurrently and by one deadline; this joins that stop
-    // and returns at once.
+    // The relay, the purge, the due scanner and both consumers already
+    // stopped in OutboxShutdown's onModuleDestroy, concurrently and by one
+    // deadline; this joins that stop and returns at once.
     await this.outboxShutdown.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }

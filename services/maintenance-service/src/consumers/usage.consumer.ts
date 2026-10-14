@@ -1,10 +1,11 @@
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import type { EventEnvelope } from '@rasta/contracts';
 import {
   invalidPayloadError,
   requireEnvelopeTenant,
   type EventConsumer,
   type EventHandler,
+  type OutboxStopOptions,
 } from '@rasta/nest-common';
 import { usageReadingsAppliedTotal } from '../observability/metrics';
 import { SERVICE_NAME } from '../config/env';
@@ -65,7 +66,7 @@ const USAGE_RECORDED_FIELDS = Object.keys(usageRecordedSchema.shape);
 export type EventConsumerFactory = (handler: EventHandler) => EventConsumer;
 
 @Injectable()
-export class UsageConsumer implements OnModuleInit, OnModuleDestroy {
+export class UsageConsumer implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(UsageConsumer.name);
   private consumer?: EventConsumer;
 
@@ -88,8 +89,20 @@ export class UsageConsumer implements OnModuleInit, OnModuleDestroy {
     await this.consumer.start();
   }
 
-  async onModuleDestroy(): Promise<void> {
-    await this.consumer?.stop();
+  /**
+   * An `OutboxShutdown` worker: stopped in Nest's destroy phase, beside the
+   * relay and the purge, by the shutdown's one deadline; a reading still in
+   * flight is abandoned uncommitted and delivered again, and its
+   * `processed_event` marker keeps a second fold out (A-09). Before, its own
+   * `onModuleDestroy` stopped the consumer with no bound.
+   */
+  stop(options?: OutboxStopOptions): Promise<void> {
+    return this.consumer?.stop(options) ?? Promise.resolve();
+  }
+
+  /** Joins the stop `OutboxShutdown` began; returns at once. */
+  onApplicationShutdown(): Promise<void> {
+    return this.stop();
   }
 
   /**

@@ -14,9 +14,10 @@ import { Counter, Gauge, registry } from '@rasta/observability';
 
 /**
  * What each command did: `command` is one of `create_warehouse`, `receive`, `adjust`, `reserve`,
- * `release`, `issue`; `outcome` one of `applied`, `refused` or `contended` (a stock item another
- * command held past INVENTORY_LOCK_TIMEOUT_MS — 409 with Retry-After). A steady `contended` is a
- * hot item; a steady `refused` on `reserve` is demand above stock.
+ * `release`, `issue`, `create_shipment`, `dispatch_shipment`, `deliver_shipment`; `outcome` one
+ * of `applied`, `refused` or `contended` (a stock item or shipment another command held past
+ * INVENTORY_LOCK_TIMEOUT_MS — 409 with Retry-After). A steady `contended` is a hot item; a steady
+ * `refused` on `reserve` is demand above stock.
  */
 export const inventoryCommandsTotal = new Counter({
   name: 'rasta_inventory_commands_total',
