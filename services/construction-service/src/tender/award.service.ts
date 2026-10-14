@@ -523,7 +523,8 @@ export class AwardService {
       throw this.rule('NOT_EVALUATED');
     }
     const bid = bids.find((candidate) => candidate.id === dto.bidId);
-    if (!bid) throw RastaError.notFound('Bid', dto.bidId);
+    // The unrecognised id is the client's text: not logged (S-09).
+    if (!bid) throw RastaError.notFound('Bid');
     if (bid.status !== 'QUALIFIED') throw this.rule('BID_NOT_QUALIFIED');
 
     const ranked = buildMatrix(input).bids.find((entry) => entry.bidId === bid.id);

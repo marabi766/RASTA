@@ -189,7 +189,7 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     // One wait for a fresh window, one window to close, then two hops.
     test.setTimeout(windowMs * 2 + 180_000);
 
-    const correlationId = `e2e-refusal-${randomUUID()}`;
+    const correlationId = randomUUID();
     await atFreshWindow(windowMs);
     const burstStartedAt = Date.now();
 
@@ -274,7 +274,7 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     }
     test.setTimeout(windowMs * 2 + 180_000);
 
-    const correlationId = `e2e-role-refusal-${randomUUID()}`;
+    const correlationId = randomUUID();
     const querySecret = `e2e-query-${randomUUID()}`;
     await atFreshWindow(windowMs);
     const burstStartedAt = Date.now();
@@ -355,7 +355,7 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     }
     test.setTimeout(windowMs * 2 + 180_000);
 
-    const correlationId = `e2e-create-refusal-${randomUUID()}`;
+    const correlationId = randomUUID();
     const bodySecret = `e2e-body-${randomUUID()}`;
     await atFreshWindow(windowMs);
     const burstStartedAt = Date.now();
@@ -452,7 +452,7 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     }
     test.setTimeout(windowMs * 2 + 180_000);
 
-    const correlationId = `e2e-membership-refusal-${randomUUID()}`;
+    const correlationId = randomUUID();
     const targets = Array.from({ length: REFUSALS }, () => `USR-e2e-target-${randomUUID()}`);
     const bodySecrets = Array.from({ length: REFUSALS }, () => `e2e-body-${randomUUID()}`);
     await atFreshWindow(windowMs);
@@ -555,7 +555,7 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     }
     test.setTimeout(windowMs * 2 + 180_000);
 
-    const correlationId = `e2e-roles-refusal-${randomUUID()}`;
+    const correlationId = randomUUID();
     const targets = Array.from({ length: REFUSALS }, () => `MBR-e2e-target-${randomUUID()}`);
     const bodySecrets = Array.from({ length: REFUSALS }, () => `e2e-reason-${randomUUID()}`);
     await atFreshWindow(windowMs);
@@ -653,7 +653,7 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     }
     test.setTimeout(windowMs * 2 + 180_000);
 
-    const correlationId = `e2e-revoke-refusal-${randomUUID()}`;
+    const correlationId = randomUUID();
     const targets = Array.from({ length: REFUSALS }, () => `MBR-e2e-revoke-${randomUUID()}`);
     const bodySecrets = Array.from({ length: REFUSALS }, () => `e2e-revoke-reason-${randomUUID()}`);
     await atFreshWindow(windowMs);
@@ -757,7 +757,7 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     }
     test.setTimeout(windowMs * 2 + 180_000);
 
-    const correlationId = `e2e-approve-refusal-${randomUUID()}`;
+    const correlationId = randomUUID();
     const targets = Array.from({ length: REFUSALS }, () => `REG-e2e-approve-${randomUUID()}`);
     const bodySecrets = Array.from(
       { length: REFUSALS },
@@ -856,7 +856,7 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     }
     test.setTimeout(windowMs * 2 + 180_000);
 
-    const correlationId = `e2e-reject-refusal-${randomUUID()}`;
+    const correlationId = randomUUID();
     const targets = Array.from({ length: REFUSALS }, () => `REG-e2e-reject-${randomUUID()}`);
     const reasonSecrets = Array.from(
       { length: REFUSALS },
@@ -956,7 +956,7 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     }
     test.setTimeout(windowMs * 2 + 180_000);
 
-    const correlationId = `e2e-review-separation-${randomUUID()}`;
+    const correlationId = randomUUID();
     const outcomes = ['approve', 'approve', 'reject', 'reject'] as const;
     // Per-request ids and reason secrets, distinct from the correlation id —
     // which the records carry by design — so the leak check below is exact.
@@ -1035,8 +1035,8 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     }
     test.setTimeout(windowMs * 2 + 180_000);
 
-    const correlationId = `e2e-tenant-probe-${randomUUID()}`;
-    const gatewayCorrelationId = `e2e-tenant-probe-gateway-${randomUUID()}`;
+    const correlationId = randomUUID();
+    const gatewayCorrelationId = randomUUID();
     const rejected = Array.from({ length: REFUSALS }, () => `ORG-E2E-REJECTED-${randomUUID()}`);
     // Different endpoints, to prove the record does not depend on the route:
     // the guard refuses before any controller authorization.

@@ -106,3 +106,39 @@ describe('internal service tokens', () => {
     });
   });
 });
+
+/**
+ * jose checks `crit` before the signature, and its refusal quotes the entry it
+ * did not recognise — text the caller chose, in a token nobody signed. The
+ * refusal keeps jose's code for the log and nothing of its message (S-09).
+ */
+describe('a refused token never puts its own text in the log', () => {
+  const encode = (value: object): string =>
+    Buffer.from(JSON.stringify(value)).toString('base64url');
+  const unsigned = (alg: string): string =>
+    [
+      encode({ alg, kid: 'test-key', crit: ['access_token=secret123'] }),
+      encode({ sub: 'x' }),
+      'AAAA',
+    ].join('.');
+
+  it.each([
+    ['a user token', () => verifier().verifyUserToken(unsigned('RS256'))],
+    [
+      'an internal token',
+      () =>
+        new InternalTokenService(
+          randomBytes(32).toString('base64url'),
+          'rasta-internal',
+          300,
+        ).verify(unsigned('HS256'), 'identity-service'),
+    ],
+  ])('%s', async (_label, verify) => {
+    const error = (await verify().catch((e: unknown) => e)) as RastaError;
+
+    expect(error).toBeInstanceOf(RastaError);
+    expect(error.code).toBe('TOKEN_INVALID');
+    expect(error.internalContext).toEqual({ joseCode: 'ERR_JOSE_NOT_SUPPORTED' });
+    expect(JSON.stringify([error.message, error.internalContext])).not.toContain('secret123');
+  });
+});

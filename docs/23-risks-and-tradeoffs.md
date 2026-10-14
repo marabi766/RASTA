@@ -1441,6 +1441,37 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
     می‌کنند و واحد رهاشده Rollback و در گذر بعدی دوباره پیدا می‌شود. آزمون: `test/outbox-shutdown.int-spec.ts` در
     document (اسکن و Publish بی‌پایان ⇐ خروج ۰ زیر مهلت، هر دو سند به صف برگشته؛ اسکن کوتاه ⇐ حکم ثبت، از شروع بستن هیچ
     Claim تازه‌ای نیست).
+  - **Consumerهای Kafka در همان مهلت (Codex روی #267، فاز ۲ خاموش‌شدن):** `EventConsumer.stop()` کرانی نداشت؛
+    `disconnect()` در kafkajs منتظر پیام در پرواز می‌ماند، پس Handler کند، مکث‌های میان تلاش‌ها، یا Dead Letterی که Producerش
+    هنوز وصل می‌شد یا Sendش برنمی‌گشت بستن را تا خروج اجباری نگه می‌داشت. حالا `stop({ deadlineAt })`:
+    از لحظهٔ توقف هیچ چیز تازه‌ای برای پیامی شروع نمی‌شود — نه تلاش، نه مکث، نه Dead Letter (`ConsumerStoppingError`)؛
+    پیام در پرواز تا مهلت انتظار کشیده می‌شود و پس از آن **بی‌Commit رها** می‌شود، پس Group آن را دوباره تحویل می‌دهد
+    (پردازش دوباره را `processed_event` طبق A-09 جذب می‌کند). مهلت خودِ پیام را می‌بندد، نه فقط انتظار را (Codex r1 روی
+    #270): Handler یا Send ـی که پس از مهلت تمام شود — حتی موفق — باز از `eachMessage` خطا می‌دهد و kafkajs آن Offset را
+    Commit نمی‌کند؛ این حکم مال همان دورِ `start()` است که پیام در آن رسید. مسیر DLQ پس از هر `await` دوباره بررسی می‌شود:
+    اتصالی که پس از شروع توقف کامل شود (kafkajs در این حالت Producer بسته را دوباره «وصل» می‌کند) هیچ Sendی شروع نمی‌کند و
+    Producer دوباره بسته می‌شود. `disconnect()` در kafkajs Send در پرواز را لغو نمی‌کند و منتظرش می‌ماند؛ توقف منتظر آن
+    نمی‌ماند، و اگر آن Send پس از مهلت برسد پیام باز Commit نمی‌شود و در تحویل دوباره **دوباره** به DLQ می‌رود. DLQ کلید
+    یکتاکننده ندارد (کلید رکورد همان کلید پارتیشن Aggregate است و Producer Idempotent فقط درون یک نشست تکرار را حذف
+    می‌کند)، پس دو نسخه ممکن است — همان چیزی که پس از هر Crash میان Send و Commit هست — و بازپخش هر دو را
+    `processed_event` بی‌اثر می‌کند. بی `deadlineAt` (آزمون، CLI) مثل پیش صبر می‌کند. Consumerهای fleet
+    (`AssetSyncConsumer`)، asset (`TimelineConsumer`) و maintenance (`UsageConsumer`، `AssetSyncConsumer`) حالا `workers`ِ
+    `OutboxShutdown`اند؛ `onModuleDestroy` بی‌کرانِ خودشان حذف شد و `onApplicationShutdown` فقط به همان توقف می‌پیوندد.
+    جاروی رویدادهای بیمهٔ پارک‌شده در fleet هم با همان توقف می‌ایستد (Codex r1 روی #270): از شروع توقف هیچ دور، ردیف، پرسش یا
+    تصمیم تازه‌ای شروع نمی‌شود، پاسخی که پس از آن از asset-service برسد دور ریخته می‌شود (ردیف همان‌طور due می‌ماند و دور
+    بعدی، هر جا، تصمیمش را می‌گیرد) و توقف تا مهلت منتظر گام در پرواز می‌ماند.
+    آزمون: `event-consumer.stop.spec.ts` و `event-consumer.lifecycle.spec.ts` (Nest واقعی، `installGracefulShutdown` واقعی)
+    در nest-common با Producer وفادار به kafkajs (`__tests__/fake-kafka.ts`)، و در fleet: `test/outbox-shutdown.int-spec.ts`
+    (Handler بی‌پایان کنار Publish و Batch بی‌پایان؛ Send بی‌پایان DLQ که پس از بستن می‌رسد؛ Handler واقعی که پس از بستن
+    Commit می‌کند و تحویل دوباره‌اش بی‌اثر است) و `test/insurance-parked.int-spec.ts` (جاروی منتظر asset-service در
+    توقف) ⇐ خروج ۰ زیر مهلت، پیام Commit‌نشده، اثر یک‌بار. سرویس‌های دیگر (contract، construction، economic،
+    marketplace، notification، identity، audit، supplier، inventory) هنوز Coordinator ندارند و در فاز بعد می‌آیند.
+  - **بودجه برای هر سرویسِ دارای رله (Codex روی #267، Low):** `loadEnv` Grace رله را فقط در سرویسی که Purge هم داشت با
+    بودجه می‌سنجید و در بقیه با کل `SHUTDOWN_TIMEOUT_MS`؛ notification (رله و کارگرها با `OutboxShutdown`، بی Purge) Grace
+    ۲۴ ثانیه را زیر مهلت ۲۵ ثانیه می‌پذیرفت در حالی که Coordinator تخلیه را در ۲۳ ثانیه قطع می‌کرد. حالا هر سرویسِ دارای
+    رله باید Grace را در `outboxShutdownBudgetMs` جا دهد (رله‌ای که هنوز در `onApplicationShutdown` می‌ایستد هم به همان ذخیره
+    برای بقیهٔ بستن نیاز دارد)، و `SHUTDOWN_TIMEOUT_MS` ≤ ۲۰۰۰ در چنین سرویسی با نام خودش رد می‌شود. پیش‌فرض‌ها (۲۰ در ۲۳)
+    تغییری نمی‌کنند.
   - **فاز ۲a، کارگرهای هر سرویس:** notification دو کارگرش (Resolution و Mail، #267) را در همان `workers` نگه می‌دارد و
     Purge کنارشان می‌آید. `ReservationSweeper` در inventory مانند جاروی انقضای asset کارگر `OutboxShutdown` شد: هر Batch
     آن ردیف Outbox می‌نویسد. Consumerهای Kafka (`DispatcherConsumer` در notification، `PerformanceConsumer` در supplier)

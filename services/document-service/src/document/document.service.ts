@@ -204,7 +204,8 @@ export class DocumentService {
     const actor = getContext().userId ?? SERVICE_NAME;
 
     const intent = await this.repository.findIntent(dto.uploadIntentId);
-    if (!intent) throw RastaError.notFound('UploadIntent', dto.uploadIntentId);
+    // The unrecognised id is the client's text: not logged (S-09).
+    if (!intent) throw RastaError.notFound('UploadIntent');
 
     // Object-level authorization before anything is read from storage.
     assertIntentRedeemable(intent);

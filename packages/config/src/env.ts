@@ -295,12 +295,14 @@ export const kafkaEnvSchema = z.object({
    * already have reached the broker guarantees a replay, whereas letting the
    * lease lapse replays only if it genuinely has to.
    *
-   * Must be **shorter than `SHUTDOWN_TIMEOUT_MS`** (`loadEnv` refuses the
-   * combination otherwise): the process gives up and exits after that timeout,
-   * so a longer grace is a wait the process will never get to finish — the
-   * abandon-without-release path would be unreachable and every slow publish
-   * would end as a forced exit. The default, 20 s, sits under the default
-   * 25 s timeout; it was 30 s, which did not.
+   * Must **fit the outbox shutdown budget**, `SHUTDOWN_TIMEOUT_MS` less
+   * {@link OUTBOX_SHUTDOWN_RESERVE_MS} (`loadEnv` refuses the combination
+   * otherwise, {@link outboxShutdownBudgetMs}): the relay drains by that
+   * deadline and the process exits after the timeout, so a longer grace is a
+   * wait the process will never get to finish — the abandon-without-release
+   * path would be unreachable and every slow publish would end as a forced
+   * exit. The default, 20 s, fits the default 23 s budget; it was 30 s, which
+   * did not even fit the 25 s timeout.
    */
   OUTBOX_SHUTDOWN_GRACE_SECONDS: z.coerce.number().int().min(0).max(300).default(20),
 });
@@ -416,13 +418,13 @@ export function outboxPurgeBatchBoundMs(settings: {
 export const OUTBOX_SHUTDOWN_RESERVE_MS = 2_000;
 
 /**
- * How long the outbox drain may take in a service that runs both the relay
- * and the purge (`OutboxShutdown` in @rasta/nest-common): one deadline, shared
- * by the two, which drain concurrently from the start of Nest's destroy phase.
- * `loadEnv` refuses a configuration in which either one's own bound — the
- * relay's grace, the purge's batch bound — does not fit inside it, so the
- * shared deadline only ever cuts a wait that something else already went
- * wrong in.
+ * How long a service's shutdown drain may take (`OutboxShutdown` in
+ * @rasta/nest-common): one deadline, shared by the relay, the purge and the
+ * service's other background work — its workers and Kafka consumers — which
+ * all stop concurrently from the start of Nest's destroy phase. `loadEnv`
+ * refuses a configuration in which a configured bound — the relay's grace, the
+ * purge's batch bound — does not fit inside it, so the shared deadline only
+ * ever cuts a wait that something else already went wrong in.
  */
 export function outboxShutdownBudgetMs(env: { SHUTDOWN_TIMEOUT_MS: number }): number {
   return env.SHUTDOWN_TIMEOUT_MS - OUTBOX_SHUTDOWN_RESERVE_MS;
@@ -504,23 +506,36 @@ export function loadEnv<S extends z.ZodTypeAny>(
   }
 
   assertKafkaPlaintextOptOut(source, result.data);
-  assertOutboxGraceWithinShutdown(result.data);
-  assertOutboxShutdownWithinTimeout(result.data);
+  assertOutboxShutdownWithinBudget(result.data);
   return result.data;
 }
 
 /**
- * The whole outbox shutdown path of a service with the purge, as one worst
- * case. The relay's grace and the purge's batch bound
- * ({@link outboxPurgeBatchBoundMs}: the wait for a connection and the
- * transaction both) run concurrently against one deadline (`OutboxShutdown`),
- * so the path takes the longer of the two — never their sum — and that must
- * fit in {@link outboxShutdownBudgetMs}, which leaves
- * {@link OUTBOX_SHUTDOWN_RESERVE_MS} of `SHUTDOWN_TIMEOUT_MS` for the rest of
- * the close. Checking each bound against the timeout on its own let a
- * configuration pass whose two waits, run one after the other, overran it.
+ * The whole outbox shutdown path of a service with the relay, as one worst
+ * case, held to {@link outboxShutdownBudgetMs} — the deadline `OutboxShutdown`
+ * actually gives it, which leaves {@link OUTBOX_SHUTDOWN_RESERVE_MS} of
+ * `SHUTDOWN_TIMEOUT_MS` for the rest of the close.
+ *
+ * - **The relay's grace**, in every service that has one (`kafkaEnvSchema`
+ *   with `baseEnvSchema`). It used to be held to the bare timeout unless the
+ *   service also ran the purge, so a relay-and-workers service
+ *   (notification-service, #267) accepted a 24 s grace under a 25 s timeout
+ *   while its coordinator cut the drain at 23 s (Codex on #267, Low). A relay
+ *   still stopped in `onApplicationShutdown` needs the same reserve: the rest
+ *   of the close runs before it.
+ * - **The purge's batch bound** ({@link outboxPurgeBatchBoundMs}: the wait for
+ *   a connection and the transaction both), where the service runs the purge.
+ *   It drains beside the relay, against the same deadline, so the path takes
+ *   the longer of the two — never their sum. Checking each bound against the
+ *   timeout on its own let a configuration pass whose two waits, run one after
+ *   the other, overran it.
+ * - **A timeout that leaves no budget** at all (2000 ms or less): the
+ *   coordinator refuses it at construction anyway, so it is named here, at
+ *   boot, with the variable to change.
+ *
+ * Every problem is reported at once.
  */
-function assertOutboxShutdownWithinTimeout(parsed: unknown): void {
+function assertOutboxShutdownWithinBudget(parsed: unknown): void {
   if (typeof parsed !== 'object' || parsed === null) return;
   const {
     OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: statementTimeoutMs,
@@ -533,18 +548,28 @@ function assertOutboxShutdownWithinTimeout(parsed: unknown): void {
     OUTBOX_SHUTDOWN_GRACE_SECONDS?: unknown;
     SHUTDOWN_TIMEOUT_MS?: unknown;
   };
-  if (
-    typeof statementTimeoutMs !== 'number' ||
-    typeof maxWaitMs !== 'number' ||
-    typeof timeoutMs !== 'number'
-  ) {
-    return;
-  }
-  const purgeMs = outboxPurgeBatchBoundMs({ maxWaitMs, statementTimeoutMs });
-  const graceMs = typeof grace === 'number' ? grace * 1000 : 0;
+  const purgeMs =
+    typeof statementTimeoutMs === 'number' && typeof maxWaitMs === 'number'
+      ? outboxPurgeBatchBoundMs({ maxWaitMs, statementTimeoutMs })
+      : undefined;
+  // Only a service with a shutdown timeout and something that drains by it has a budget to hold.
+  if (typeof timeoutMs !== 'number') return;
+  if (typeof grace !== 'number' && purgeMs === undefined) return;
   const budgetMs = outboxShutdownBudgetMs({ SHUTDOWN_TIMEOUT_MS: timeoutMs });
+  if (budgetMs < 1) {
+    throw new EnvValidationError([
+      {
+        path: 'SHUTDOWN_TIMEOUT_MS',
+        message:
+          `(${timeoutMs} ms) leaves no outbox shutdown budget: ${OUTBOX_SHUTDOWN_RESERVE_MS} ms of ` +
+          'it are kept for the rest of the close, and the relay drains in what remains. Raise ' +
+          `it above ${OUTBOX_SHUTDOWN_RESERVE_MS} ms (and keep it under the orchestrator’s ` +
+          'termination period)',
+      },
+    ]);
+  }
   const issues: EnvIssue[] = [];
-  if (purgeMs > budgetMs) {
+  if (purgeMs !== undefined && purgeMs > budgetMs) {
     issues.push({
       path: 'OUTBOX_PURGE_STATEMENT_TIMEOUT_MS',
       message:
@@ -557,42 +582,18 @@ function assertOutboxShutdownWithinTimeout(parsed: unknown): void {
         'under the orchestrator’s termination period)',
     });
   }
-  if (graceMs > budgetMs) {
+  if (typeof grace === 'number' && grace * 1000 > budgetMs) {
     issues.push({
       path: 'OUTBOX_SHUTDOWN_GRACE_SECONDS',
       message:
         `(${grace} s) is more than the outbox shutdown budget of ${budgetMs} ms ` +
         `(SHUTDOWN_TIMEOUT_MS ${timeoutMs} ms − ${OUTBOX_SHUTDOWN_RESERVE_MS} ms for the rest of ` +
-        'the close), which the relay shares with the purge. Lower the grace or raise ' +
+        'the close): the relay drains by that deadline, beside the service’s other background ' +
+        'work, so a longer grace could never finish. Lower the grace or raise ' +
         'SHUTDOWN_TIMEOUT_MS (and keep it under the orchestrator’s termination period)',
     });
   }
   if (issues.length > 0) throw new EnvValidationError(issues);
-}
-
-/**
- * The outbox relay's shutdown grace must end before the process's own shutdown
- * timeout does. Two numbers from two schemas (`kafkaEnvSchema`,
- * `baseEnvSchema`) cannot be compared by either, so the comparison is made
- * here, on the merged result, and only for a service that has both.
- */
-function assertOutboxGraceWithinShutdown(parsed: unknown): void {
-  if (typeof parsed !== 'object' || parsed === null) return;
-  const { OUTBOX_SHUTDOWN_GRACE_SECONDS: grace, SHUTDOWN_TIMEOUT_MS: timeoutMs } = parsed as {
-    OUTBOX_SHUTDOWN_GRACE_SECONDS?: unknown;
-    SHUTDOWN_TIMEOUT_MS?: unknown;
-  };
-  if (typeof grace !== 'number' || typeof timeoutMs !== 'number') return;
-  if (grace * 1000 < timeoutMs) return;
-  throw new EnvValidationError([
-    {
-      path: 'OUTBOX_SHUTDOWN_GRACE_SECONDS',
-      message:
-        `(${grace} s) must be shorter than SHUTDOWN_TIMEOUT_MS (${timeoutMs} ms): the process ` +
-        'exits when that timeout ends, so a longer grace could never finish. Lower the grace ' +
-        'or raise SHUTDOWN_TIMEOUT_MS (and keep it under the orchestrator’s termination period)',
-    },
-  ]);
 }
 
 /**
