@@ -173,6 +173,19 @@ describe('IdempotencyStore conflicts carry nothing of the key (S-09)', () => {
 describe('IdempotencyStore.claim — who may proceed', () => {
   const hour = 60 * 60 * 1000;
 
+  // Each attempt reads the clock once and decides "lapsed" against that one
+  // reading. Frozen here, so a row's `expiresAt` sits at an exact instant
+  // relative to it. A row built from the live clock inside the mock was read
+  // a few milliseconds after the claim's own reading on a slow runner, and
+  // "lapsed a millisecond ago" became "still in flight".
+  const NOW = new Date('2026-10-13T12:00:00.000Z');
+  const at = (offsetMs: number) => new Date(NOW.getTime() + offsetMs);
+  beforeEach(() => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(NOW);
+  });
+  afterEach(() => jest.useRealTimers());
+
   function storeWith(script: { create: jest.Mock; findUnique?: jest.Mock }) {
     const idempotencyKey = {
       create: script.create,
@@ -226,7 +239,7 @@ describe('IdempotencyStore.claim — who may proceed', () => {
       findUnique: jest.fn().mockResolvedValueOnce({
         requestHash: 'whatever',
         state: 'COMPLETED',
-        expiresAt: new Date(Date.now() - hour),
+        expiresAt: at(-hour),
       }),
     });
 
@@ -241,7 +254,7 @@ describe('IdempotencyStore.claim — who may proceed', () => {
         organizationId: 'ORG-UNIT',
         endpoint: 'POST /v1/orders',
         key: 'K',
-        expiresAt: { lte: expect.any(Date) },
+        expiresAt: { lte: NOW },
       },
     });
     expect(idempotencyKey.delete).not.toHaveBeenCalled();
@@ -250,26 +263,25 @@ describe('IdempotencyStore.claim — who may proceed', () => {
 
   it('reserves the key for its lease only, not for the retention', async () => {
     const { store, idempotencyKey } = storeWith({ create: jest.fn().mockResolvedValue({}) });
-    const before = Date.now();
 
     await asTenant(() => store.claim('POST /v1/orders', 'K', {}));
 
     const { data } = (idempotencyKey.create.mock.calls[0] as [{ data: { expiresAt: Date } }])[0];
     expect(data).toMatchObject({ state: 'IN_PROGRESS' });
-    expect(data.expiresAt.getTime()).toBeGreaterThanOrEqual(before + LEASE_SECONDS * 1000);
-    expect(data.expiresAt.getTime()).toBeLessThan(before + LEASE_SECONDS * 1000 + 5_000);
+    expect(data.expiresAt).toEqual(at(LEASE_SECONDS * 1000));
   });
 
   it('takes over a claim whose lease lapsed: removed while still lapsed, then a new insert', async () => {
     // The holder's release failed, or its process died: an IN_PROGRESS row
-    // past its lease no longer blocks an identical retry (#253).
+    // past its lease no longer blocks an identical retry (#253). Its lease
+    // ends exactly now — the boundary, which counts as lapsed.
     const { store, idempotencyKey } = storeWith({
       create: jest.fn().mockRejectedValueOnce(uniqueViolation).mockResolvedValueOnce({}),
       findUnique: jest.fn(() =>
         Promise.resolve({
           requestHash: sameRequest({}),
           state: 'IN_PROGRESS',
-          expiresAt: new Date(Date.now() - 1),
+          expiresAt: at(0),
         }),
       ),
     });
@@ -278,8 +290,9 @@ describe('IdempotencyStore.claim — who may proceed', () => {
       kind: 'PROCEED',
       token: expect.any(String),
     });
+    // Removed only while lapsed by the same reading that decided it lapsed.
     expect(idempotencyKey.deleteMany).toHaveBeenCalledWith({
-      where: expect.objectContaining({ expiresAt: { lte: expect.any(Date) } }),
+      where: expect.objectContaining({ expiresAt: { lte: NOW } }),
     });
     // A new token: the old holder's complete and release match nothing.
     const tokens = idempotencyKey.create.mock.calls.map(
@@ -310,7 +323,7 @@ describe('IdempotencyStore.claim — who may proceed', () => {
           requestHash: writtenByA,
           state,
           responseBody: { id: 'OFFER_OF_ANOTHER_ORG' },
-          expiresAt: new Date(Date.now() + hour),
+          expiresAt: at(hour),
         }),
       });
 
@@ -324,14 +337,17 @@ describe('IdempotencyStore.claim — who may proceed', () => {
     }
   });
 
-  it('still refuses a live key in flight at once', async () => {
+  it.each([
+    ['an hour', hour],
+    ['a millisecond', 1],
+  ])('still refuses a key in flight at once, %s before its lease lapses', async (_case, left) => {
     const { store, idempotencyKey } = storeWith({
       create: jest.fn().mockRejectedValue(uniqueViolation),
       findUnique: jest.fn(() =>
         Promise.resolve({
           requestHash: sameRequest({}),
           state: 'IN_PROGRESS',
-          expiresAt: new Date(Date.now() + hour),
+          expiresAt: at(left),
         }),
       ),
     });
