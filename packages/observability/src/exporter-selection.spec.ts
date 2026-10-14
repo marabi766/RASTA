@@ -23,7 +23,12 @@ const CHILD_TIMEOUT_MS = 60_000;
 const CONCURRENCY = 4;
 /** Bounds an export the collector somehow does not answer; the OTLP default is 10 s. */
 const EXPORT_TIMEOUT_MS = '5000';
-const SECRET = 'abc';
+/**
+ * The query value the fixture's spans carry. Not hex, and long: an OTLP/JSON
+ * export spells trace and span ids in hex, where a short hex-like value (`abc`)
+ * turns up by chance.
+ */
+const SECRET = 'QUERY_LEAK_SENTINEL';
 
 const RUN_FIXTURE = `
 const { readFileSync } = require('node:fs');

@@ -2,7 +2,7 @@
  * The child-process half of `exporter-selection.spec.ts`.
  *
  * Starts telemetry one of two ways, under whatever `OTEL_*` environment the
- * spec gave it, ends two spans whose `url.full` carries "abc" in its query and
+ * spec gave it, ends two spans whose `url.full` carries the spec's `SECRET` in its query and
  * shuts down, which flushes every exporter:
  *
  *   baseline  `initTelemetry`'s NodeSDK setup before #261, verbatim.
@@ -81,7 +81,7 @@ async function main(): Promise<void> {
   let recording = false;
   for (let i = 0; i < SPAN_COUNT; i += 1) {
     const span = tracer.startSpan('GET', {
-      attributes: { 'url.full': 'http://h/v1/x?secret=abc' },
+      attributes: { 'url.full': 'http://h/v1/x?secret=QUERY_LEAK_SENTINEL' },
     });
     recording ||= span.isRecording();
     span.end();
