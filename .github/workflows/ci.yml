@@ -129,6 +129,12 @@ jobs:
         # root `pnpm dev` resolves them (turbo dry run). Codex r1 on #247.
         run: pnpm run test:outbox-purge-turbo-env
 
+      - name: Construction settings reach the service through turbo
+        # The same for construction-service's own CONSTRUCTION_* settings:
+        # `dev` and the integration suites pass every one, and the root
+        # `pnpm dev` resolves them (turbo dry run). Codex r1 on #271.
+        run: pnpm run test:construction-turbo-env
+
       - name: Database settings reach the services through turbo
         # Every task that starts a service with a database — `dev` and the
         # integration suites — passes every databaseEnvSchema variable (pool,

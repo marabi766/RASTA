@@ -97,6 +97,24 @@ export function canReadTenders(
 }
 
 /**
+ * Whether inventory-service would let these roles read, so the Inventory link
+ * is worth drawing. Unlike projects, `SYSTEM_ADMIN` is not admitted: the
+ * service refuses the platform administrator, and `AUDITOR`, whatever else the
+ * person holds. Everyone else needs a configured operator or reader role.
+ */
+export function canReadInventory(
+  roles: readonly string[],
+  settings: Pick<WebServerEnv, 'WEB_INVENTORY_ROLES' | 'WEB_INVENTORY_READER_ROLES'>,
+): boolean {
+  if (roles.includes('AUDITOR') || roles.includes('SYSTEM_ADMIN')) return false;
+  return roles.some(
+    (role) =>
+      settings.WEB_INVENTORY_ROLES.includes(role) ||
+      settings.WEB_INVENTORY_READER_ROLES.includes(role),
+  );
+}
+
+/**
  * The navigation for a person, from the roles identity-service reports for the
  * organization they are acting in plus the global realm roles in their token
  * (`SYSTEM_ADMIN`), which is the set the backend services act on.
@@ -118,5 +136,6 @@ export async function loadPortalNav(
     canReadProjects: canReadProjects(roles, webServerEnv()),
     canReadTenders: canReadTenders(roles, webServerEnv()),
     canReadSettlements: canReadSettlements(result.kind === 'USER' ? roles : null),
+    canReadInventory: canReadInventory(roles, webServerEnv()),
   });
 }

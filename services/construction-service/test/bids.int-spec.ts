@@ -8,7 +8,6 @@ import {
   type TenderChain,
 } from '../src/tender/tender-evidence.client';
 import { eventEnvelopeSchema } from '@rasta/contracts';
-import { PrismaClient } from '../src/generated/prisma';
 import {
   genesisReceipt,
   nextReceipt,
@@ -27,7 +26,7 @@ import {
   loadStanding,
   newOrganizationId,
   outboxFor,
-  ownerDatabaseUrl,
+  ownerClient,
   SUPPLIER,
   publishedForBids,
   qualify,
@@ -1031,7 +1030,7 @@ describe('bids', () => {
 
     /** Rewrites the stored chain from `fromSeq` on, as a database owner could: bid, digests, every later receipt. */
     async function rewriteChain(tenderId: string, fromSeq: number, forged: SealedBid) {
-      const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+      const owner = ownerClient();
       try {
         await owner.$transaction(async (tx) => {
           for (const [table, trigger] of [
@@ -1198,7 +1197,7 @@ describe('bids', () => {
       // migration's or an operator's — inside a transaction that is rolled back
       // whatever happens, so a missing trigger fails the case without emptying
       // the shared tables.
-      const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+      const owner = ownerClient();
       const rollback = new Error('the suite rolls the attempt back');
       try {
         for (const table of ['bid_access_log', 'bid_receipt']) {
