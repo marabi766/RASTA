@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { ERROR_CODES, type ApiError, type ErrorCode, type ErrorDetail } from '@rasta/contracts';
 import type { Logger } from '@rasta/logging';
+import { redactText } from '@rasta/observability';
 import {
   RETRY_AFTER_MAX_SECONDS,
   RETRY_AFTER_MIN_SECONDS,
@@ -340,8 +341,11 @@ export function loggableError(error: unknown, depth = 0): LoggedError {
   if (!(error instanceof Error)) {
     return { type: typeof error, message: safeLogText(String(error)) };
   }
-  // Frames only: a stack's first line is `Name: message`, the text above.
-  const frames = (error.stack ?? '')
+  // Frames only: a stack opens with `Name: message`, the text above. That
+  // message may run over several lines — a JSON parser quotes a body line
+  // breaks and all — and a body line can read `    at …`; so the stack is
+  // redacted (`redactText`, as `safeLogText` does) before frames are picked.
+  const frames = redactText(error.stack ?? '')
     .split('\n')
     .filter((line) => /^\s+at /.test(line))
     .slice(0, MAX_STACK_FRAMES)

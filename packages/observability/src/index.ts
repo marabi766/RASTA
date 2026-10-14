@@ -9,6 +9,7 @@ export {
   ALWAYS_SAMPLE_ATTRIBUTE,
 } from './telemetry';
 export type { TelemetryConfig } from './telemetry';
+export { redactText, REDACTED_TEXT } from './url-redaction';
 
 export {
   registry,

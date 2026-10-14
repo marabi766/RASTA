@@ -133,6 +133,42 @@ describe('AllExceptionsFilter, 5xx (S-09)', () => {
     expect(JSON.stringify(body)).not.toContain('SENTINEL');
     expect(lines[0]?.payload.err).toEqual({ type: 'string', message: `raw string ${SENTINEL}` });
   });
+
+  it('a URL named in the message or a cause keeps its path, not its query (#261 r2 F2)', () => {
+    const error = RastaError.internal(
+      `Token exchange failed: POST https://idp.example/token?code=${SENTINEL}&state=x`,
+      new Error(`GET https://idp.example/cb?access_token=${SENTINEL} refused`),
+    );
+
+    const { lines } = run(error);
+
+    const payload = lines[0]?.payload;
+    expect(payload?.internalContext?.originalMessage).toBe(
+      'Token exchange failed: POST https://idp.example/token?[REDACTED]',
+    );
+    expect(payload?.err.message).toBe(payload?.internalContext?.originalMessage);
+    expect(payload?.err.cause?.message).toBe('GET https://idp.example/cb?[REDACTED] refused');
+    expect(JSON.stringify(lines)).not.toContain('SENTINEL');
+  });
+
+  it('a body JSON.parse quotes over several lines reaches neither the message nor the frames', () => {
+    // V8 quotes a short source whole: here over two lines, the second of which
+    // reads as a frame in the stack.
+    let error: unknown;
+    try {
+      JSON.parse('c\n    at LEAK');
+    } catch (thrown) {
+      error = thrown;
+    }
+    expect((error as Error).stack?.split('\n')[1]).toBe('    at LEAK" is not valid JSON');
+
+    const { lines } = run(error);
+
+    const err = lines[0]?.payload.err;
+    expect(err?.message).toBe(`Unexpected token 'c', "[REDACTED]" is not valid JSON`);
+    expect(err?.stack).toMatch(/^\s+at JSON\.parse/);
+    expect(JSON.stringify(lines)).not.toContain('LEAK');
+  });
 });
 
 describe('AllExceptionsFilter, a request the framework could not read (S-09)', () => {

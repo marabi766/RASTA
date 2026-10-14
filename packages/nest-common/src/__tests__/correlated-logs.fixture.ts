@@ -9,8 +9,11 @@
  * the query (#261, F2). It runs outside jest because the instrumentations patch
  * modules through Node's own `require`, which jest's loader bypasses.
  *
- * Every request carries "LEAK" in its query; the result is written as JSON to
- * the file named by argv[1] (stdout is the logger's).
+ * Every request carries "LEAK" in its query and as its correlation id
+ * (`x-correlation-id: access_token=LEAK`, r2 F3); some carry it in a body or
+ * in the URL an error names (r2 F2). The logger runs at the level in argv[2];
+ * the result is written as JSON to the file named by argv[1] (stdout is the
+ * logger's).
  */
 import { writeFileSync } from 'node:fs';
 import type { MiddlewareConsumer } from '@nestjs/common';
@@ -21,8 +24,15 @@ import { initTelemetry, shutdownTelemetry } from '@rasta/observability';
 
 const QUERY = '?secret=LEAK';
 
+/** A correlation id that is a token: what a caller may send, and no log may hold. */
+const CORRELATION_ID = 'access_token=LEAK';
+
+/** The URLs an OAuth exchange's errors name — the code and state in the query. */
+const TOKEN_URL = 'https://idp.example/token?code=LEAK&state=LEAK';
+const CALLBACK_URL = 'https://idp.example/cb?access_token=LEAK';
+
 async function main(): Promise<void> {
-  const [outputFile] = process.argv.slice(1);
+  const [outputFile, level = 'debug'] = process.argv.slice(1);
   const spanExporter = new InMemorySpanExporter();
   const logExporter = new InMemoryLogRecordExporter();
   initTelemetry({
@@ -32,7 +42,7 @@ async function main(): Promise<void> {
   });
 
   await import('reflect-metadata');
-  const { Controller, Get, Module, Post } = await import('@nestjs/common');
+  const { BadGatewayException, Controller, Get, Module, Post } = await import('@nestjs/common');
   const { APP_FILTER, NestFactory } = await import('@nestjs/core');
   const { createLogger, setLogContextProvider } = await import('@rasta/logging');
   const { RequestContextMiddleware } = await import('../middleware/request-context.middleware');
@@ -43,7 +53,7 @@ async function main(): Promise<void> {
 
   const logger = createLogger({
     serviceName: 'correlated-logs-fixture',
-    level: 'debug',
+    level,
     pretty: false,
   });
   setLogContextProvider(() => toLogContext());
@@ -67,6 +77,28 @@ async function main(): Promise<void> {
     boom(): never {
       throw new Error('boom');
     }
+
+    // Failures whose message, and whose cause's, name a URL with its query —
+    // an OAuth library's errors. Logged at error, with `originalMessage`.
+    @Get('oauth')
+    oauth(): never {
+      throw new Error(`Token exchange failed: POST ${TOKEN_URL}`, {
+        cause: new Error(`GET ${CALLBACK_URL} refused`),
+      });
+    }
+
+    @Get('oauth-internal')
+    oauthInternal(): never {
+      throw RastaError.internal(
+        `Token exchange failed: POST ${TOKEN_URL}`,
+        new Error(`GET ${CALLBACK_URL} refused`),
+      );
+    }
+
+    @Get('oauth-gateway')
+    oauthGateway(): never {
+      throw new BadGatewayException(`Token exchange failed: POST ${TOKEN_URL}`);
+    }
   }
 
   @Module({
@@ -87,18 +119,34 @@ async function main(): Promise<void> {
   const origin = await app.getUrl();
 
   const statuses: number[] = [];
-  const send = async (path: string, init?: RequestInit): Promise<void> => {
-    const response = await fetch(`${origin}${path}${QUERY}`, init);
+  // The correlation id each response carries: the one the request was logged under.
+  const correlationIds: (string | null)[] = [];
+  const send = async (
+    path: string,
+    init?: { method?: string; headers?: Record<string, string>; body?: string },
+  ): Promise<void> => {
+    const response = await fetch(`${origin}${path}${QUERY}`, {
+      ...init,
+      headers: { ...init?.headers, 'x-correlation-id': CORRELATION_ID },
+    });
     await response.text();
     statuses.push(response.status);
+    correlationIds.push(response.headers.get('x-correlation-id'));
   };
-  await send('/v1/assets');
-  await send('/v1/assets', {
+  const postJson = (body: string) => ({
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: '{',
+    body,
   });
+  await send('/v1/assets');
+  await send('/v1/assets', postJson('{'));
+  await send('/v1/assets', postJson('code=LEAK\nrest'));
   await send('/v1/boom');
+  // No route: Nest's own fallback, `Cannot GET /v1/missing?secret=LEAK`.
+  await send('/v1/missing');
+  await send('/v1/oauth');
+  await send('/v1/oauth-internal');
+  await send('/v1/oauth-gateway');
 
   await app.close();
   // Read before shutdown, which empties the in-memory exporters. Log records
@@ -120,7 +168,7 @@ async function main(): Promise<void> {
     events: span.events.map((event) => ({ name: event.name, attributes: event.attributes })),
     status: span.status,
   }));
-  writeFileSync(outputFile as string, JSON.stringify({ statuses, logs, spans }));
+  writeFileSync(outputFile as string, JSON.stringify({ statuses, correlationIds, logs, spans }));
   await shutdownTelemetry();
 }
 
