@@ -1,3 +1,4 @@
+import { SHIPMENT_AGGREGATE } from '@rasta/contracts';
 import type { InventoryEventName, InventoryEventPayload } from './events';
 
 /**
@@ -10,12 +11,13 @@ import type { InventoryEventName, InventoryEventPayload } from './events';
  * | ------------------------------------ | ---------- | ------------------------------------------- |
  * | `rasta.inventory.v1` + `stockItemId` | **STRICT** | RESERVED before ISSUED: an inversion is     |
  * |                                      |            | stock leaving that was never reserved       |
- * | `rasta.inventory.v1` + `warehouseId` | —          | one event per warehouse in PR 1             |
+ * | `rasta.inventory.v1` + `shipmentId`  | **STRICT** | DISPATCHED before DELIVERED: an inversion   |
+ * |                                      |            | is a shipment delivered before it left      |
+ * | `rasta.inventory.v1` + `warehouseId` | —          | one event per warehouse                     |
  *
- * The shipment stream (`shipmentId`, STRICT) arrives with PR 2. Co-partitioning, not ordering:
- * several relay replicas may publish separate rows of one key concurrently — D-027, open; a
- * consumer reads order from the envelope's `streamSeq` and the payload's `itemVersion`, never
- * from arrival.
+ * Co-partitioning, not ordering: several relay replicas may publish separate rows of one key
+ * concurrently — D-027, open; a consumer reads order from the envelope's `streamSeq` and the
+ * payload's `itemVersion` / `shipmentVersion`, never from arrival.
  */
 
 export const AGGREGATE_OF = {
@@ -25,10 +27,14 @@ export const AGGREGATE_OF = {
   STOCK_RESERVED: 'StockItem',
   STOCK_RELEASED: 'StockItem',
   STOCK_ISSUED: 'StockItem',
+  SHIPMENT_CREATED: SHIPMENT_AGGREGATE,
+  SHIPMENT_DISPATCHED: SHIPMENT_AGGREGATE,
+  SHIPMENT_DELIVERED: SHIPMENT_AGGREGATE,
 } as const satisfies Record<InventoryEventName, string>;
 
 export const PARTITION_SCOPES = {
   STOCK_ITEM: 'STOCK_ITEM',
+  SHIPMENT: 'SHIPMENT',
   WAREHOUSE: 'WAREHOUSE',
 } as const;
 
@@ -56,6 +62,10 @@ export const PARTITION_KEY_POLICY: { [N in InventoryEventName]: PartitionRule<N>
   STOCK_RESERVED: (payload) => ({ scope: 'STOCK_ITEM', key: payload.stockItemId }),
   STOCK_RELEASED: (payload) => ({ scope: 'STOCK_ITEM', key: payload.stockItemId }),
   STOCK_ISSUED: (payload) => ({ scope: 'STOCK_ITEM', key: payload.stockItemId }),
+  // ---- the shipment stream: one partition per shipment, STRICT -----------
+  SHIPMENT_CREATED: (payload) => ({ scope: 'SHIPMENT', key: payload.shipmentId }),
+  SHIPMENT_DISPATCHED: (payload) => ({ scope: 'SHIPMENT', key: payload.shipmentId }),
+  SHIPMENT_DELIVERED: (payload) => ({ scope: 'SHIPMENT', key: payload.shipmentId }),
 };
 
 /**

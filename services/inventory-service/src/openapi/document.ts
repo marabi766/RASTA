@@ -32,6 +32,15 @@ import {
   reservationViewSchema,
   reserveStockSchema,
 } from '../reservation/dto';
+import { ShipmentController } from '../shipment/shipment.controller';
+import { ShipmentService } from '../shipment/shipment.service';
+import {
+  createShipmentSchema,
+  listShipmentsQuerySchema,
+  moveShipmentSchema,
+  shipmentViewSchema,
+  trackingViewSchema,
+} from '../shipment/dto';
 import { IdempotencyStore } from '../shared/idempotency';
 import { REFUSAL_REASONS, type RefusalArea } from '../shared/refusal';
 
@@ -91,6 +100,12 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'POST /v1/stock/reservations': { status: '201', schema: reservationBatchViewSchema },
   'POST /v1/stock/reservations/{id}/release': { status: '200', schema: reservationViewSchema },
   'POST /v1/stock/reservations/{id}/issue': { status: '200', schema: reservationViewSchema },
+  'GET /v1/shipments': { status: '200', schema: cursorPageOf(shipmentViewSchema) },
+  'GET /v1/shipments/{id}': { status: '200', schema: shipmentViewSchema },
+  'GET /v1/shipments/{id}/tracking': { status: '200', schema: trackingViewSchema },
+  'POST /v1/shipments': { status: '201', schema: shipmentViewSchema },
+  'POST /v1/shipments/{id}/dispatch': { status: '200', schema: shipmentViewSchema },
+  'POST /v1/shipments/{id}/deliver': { status: '200', schema: shipmentViewSchema },
 };
 
 /** Every command takes a strict body, and every command requires an Idempotency-Key. */
@@ -101,6 +116,9 @@ const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'POST /v1/stock/reservations': reserveStockSchema,
   'POST /v1/stock/reservations/{id}/release': endReservationSchema,
   'POST /v1/stock/reservations/{id}/issue': endReservationSchema,
+  'POST /v1/shipments': createShipmentSchema,
+  'POST /v1/shipments/{id}/dispatch': moveShipmentSchema,
+  'POST /v1/shipments/{id}/deliver': moveShipmentSchema,
 };
 
 /** The area whose closed reasons a command's refusals carry in `details[].code` (docs/06 § 6.7). */
@@ -110,24 +128,34 @@ const REFUSAL_AREA_OF: Record<string, RefusalArea> = {
   'POST /v1/stock/reservations': 'reservation',
   'POST /v1/stock/reservations/{id}/release': 'reservation',
   'POST /v1/stock/reservations/{id}/issue': 'reservation',
+  'POST /v1/shipments/{id}/dispatch': 'shipment',
+  'POST /v1/shipments/{id}/deliver': 'shipment',
 };
 
-/** The commands that lock stock items and may meet one another holds (409 CONFLICT). */
-const STOCK_COMMANDS: ReadonlySet<string> = new Set(Object.keys(REFUSAL_AREA_OF));
+/** The stock commands: they lock stock items and may break a stock rule (422). */
+const STOCK_COMMANDS: ReadonlySet<string> = new Set(
+  Object.entries(REFUSAL_AREA_OF)
+    .filter(([, area]) => area !== 'shipment')
+    .map(([key]) => key),
+);
+
+/** Commands whose **body** names an existing row of the caller's — another's is 404. */
+const BODY_NAMES_A_ROW: ReadonlySet<string> = new Set([...STOCK_COMMANDS, 'POST /v1/shipments']);
 
 const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/warehouses': listWarehousesQuerySchema,
   'GET /v1/stock': listStockQuerySchema,
   'GET /v1/stock/movements': listMovementsQuerySchema,
   'GET /v1/stock/reservations': listReservationsQuerySchema,
+  'GET /v1/shipments': listShipmentsQuerySchema,
 };
 
 /** `Retry-After` on a command's 409 CONFLICT: optional, only that 409 carries it. */
 const RETRY_AFTER_HEADER = {
   required: false,
   description:
-    'Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item ' +
-    'another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database ' +
+    'Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item or ' +
+    'shipment another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database ' +
     'connection or transaction was to be had within the budget, or reservations past their ' +
     'expiresAt whose release would reverse the refusal are still being released: the seconds ' +
     'to wait before retrying with the same key. Absent on every other 409.',
@@ -157,15 +185,15 @@ function refusalErrorSchema(area: RefusalArea, status: number): z.ZodTypeAny | u
 
 const REFUSAL_DETAILS_NOTE =
   ' When refused for a closed reason, `details` names it: one entry, `path` the area (stock, ' +
-  'reservation) and `code` the reason, one of those listed here. Branch on `code` and ' +
+  'reservation, shipment) and `code` the reason, one of those listed here. Branch on `code` and ' +
   '`details[].code`, never on `message`.';
 
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
   400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
-  403: 'Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).',
-  404: 'Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.',
-  409: 'An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE).',
+  403: 'Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).',
+  404: 'Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.',
+  409: 'An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).',
   422: 'Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once.',
   500: 'Unexpected server error.',
 };
@@ -181,7 +209,10 @@ const DESCRIPTION =
   'that does not equal the sum of its movements. Everything is the warehouse owner’s: another ' +
   'organization gets 404. Every command requires an Idempotency-Key. Products, orders and ' +
   'purchase orders are opaque references to the services that own them (Q-105); quantities are ' +
-  'whole numbers of a product’s base unit. Shipments and tracking follow.';
+  'whole numbers of a product’s base unit. Shipments leave an owner’s warehouse for a consignee ' +
+  'organization, CREATED → DISPATCHED → DELIVERED with a tracking event for each, moved only by ' +
+  'the owner and read by the owner and the consignee alone (ADR-056 § 2, § 5); a shipment moves ' +
+  'no stock.';
 
 /** Builds the finished document for a booted application. */
 export function buildInventoryOpenApiDocument(app: INestApplication): OpenAPIObject {
@@ -202,11 +233,12 @@ export function buildInventoryOpenApiDocument(app: INestApplication): OpenAPIObj
  * and produces the same bytes on every machine. The controllers in `AppModule`'s order.
  */
 @Module({
-  controllers: [WarehouseController, ReservationController, StockController],
+  controllers: [WarehouseController, ReservationController, StockController, ShipmentController],
   providers: [
     { provide: WarehouseService, useValue: {} },
     { provide: StockService, useValue: {} },
     { provide: ReservationService, useValue: {} },
+    { provide: ShipmentService, useValue: {} },
     { provide: IdempotencyStore, useValue: {} },
   ],
 })
@@ -274,10 +306,11 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       for (const [status, description] of Object.entries(ERROR_DESCRIPTIONS)) {
         // A route with no `{id}` names no existing row — except a command whose body does.
-        if (status === '404' && !path.includes('{id}') && !STOCK_COMMANDS.has(key)) continue;
+        if (status === '404' && !path.includes('{id}') && !BODY_NAMES_A_ROW.has(key)) continue;
         // Only a route with a query or a body can answer 400 (the id is an opaque string).
         if (status === '400' && !query && !body) continue;
-        // 409 is a command's; 422 a stock command's — creating a warehouse has no rule to break.
+        // 409 is a command's; 422 a stock command's — creating a warehouse or moving a shipment
+        // has no rule to break, only a state to be in (409).
         if (status === '409' && !body) continue;
         if (status === '422' && !STOCK_COMMANDS.has(key)) continue;
         operation.responses[status] ??= {

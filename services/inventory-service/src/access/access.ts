@@ -16,6 +16,12 @@ import type { InventoryEnv } from '../config/env';
  * The holder side of a reservation is the owner itself in PR 1 (Q-104); cross-organization
  * holders, and the read path they need, come with the integration PR.
  *
+ * ## The one second organization: a shipment's consignee
+ *
+ * A shipment is read by the owner of its origin warehouse **or** by its consignee (ADR-056 § 5),
+ * each through its own roles (`assertShipmentReader`); a third organization finds it `404`. The
+ * consignee only reads — every shipment command is the owner's operators'.
+ *
  * ## Who, from configuration
  *
  * Writes need a role of `INVENTORY_OPERATOR_ROLES`, reads one of `INVENTORY_READER_ROLES` or of
@@ -42,14 +48,26 @@ export interface Acting {
   readonly userId: string;
 }
 
+/**
+ * The sides of a shipment the acting organization may read it from (ADR-056 § 5): as the owner of
+ * its origin warehouse, as its consignee, or both — each opened by its own roles.
+ */
+export interface ShipmentReader {
+  readonly organizationId: string;
+  readonly asOrigin: boolean;
+  readonly asConsignee: boolean;
+}
+
 @Injectable()
 export class InventoryAccess {
   private readonly operators: readonly string[];
   private readonly readers: readonly string[];
+  private readonly consigneeReaders: readonly string[];
 
   constructor(@Inject(ENV) env: InventoryEnv) {
     this.operators = env.INVENTORY_OPERATOR_ROLES;
     this.readers = [...new Set([...env.INVENTORY_READER_ROLES, ...env.INVENTORY_OPERATOR_ROLES])];
+    this.consigneeReaders = env.INVENTORY_CONSIGNEE_READER_ROLES;
   }
 
   /** The caller of a command: a signed-in person of the owner with an operator role. */
@@ -64,6 +82,39 @@ export class InventoryAccess {
     const organizationId = this.assertPerson();
     this.assertHolds(this.readers);
     return { organizationId };
+  }
+
+  /**
+   * The caller of a shipment read: a signed-in person of the origin warehouse's owner with a
+   * reader or operator role, or of the consignee with a role of INVENTORY_CONSIGNEE_READER_ROLES
+   * (Q-113). Which sides the roles open is returned, and the read asks for those sides only — a
+   * shipment outside them is `404` like any other organization's.
+   */
+  assertShipmentReader(): ShipmentReader {
+    const organizationId = this.assertPerson();
+    const roles = getContext().roles;
+    const holds = (granted: readonly string[]) => granted.some((role) => roles.includes(role));
+    const reader = {
+      organizationId,
+      asOrigin: holds(this.readers),
+      asConsignee: holds(this.consigneeReaders),
+    };
+    if (!reader.asOrigin && !reader.asConsignee) {
+      throw RastaError.insufficientRole(
+        [...new Set([...this.readers, ...this.consigneeReaders])],
+        roles,
+      );
+    }
+    return reader;
+  }
+
+  /**
+   * Whether the caller holds a role that opens a shipment's consignee side (Q-113) — so a
+   * command on a shipment it can read but not move is told so (`403`) rather than `404`.
+   */
+  readsAsConsignee(): boolean {
+    const roles = getContext().roles;
+    return this.consigneeReaders.some((role) => roles.includes(role));
   }
 
   private assertPerson(): string {

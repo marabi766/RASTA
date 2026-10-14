@@ -177,11 +177,33 @@ describe('KafkaEventPublisher publishing', () => {
     await publisher.onModuleDestroy();
   });
 
-  it('reports healthy when the broker lists topics, and unhealthy when it cannot', async () => {
+  it('reports healthy when the broker lists topics, and closes the probe client', async () => {
     expect(await publisher.isHealthy()).toBe(true);
-    expect(adminDisconnect).toHaveBeenCalled();
+    expect(adminDisconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports unhealthy when listing fails, and still closes the probe client', async () => {
+    // Connected, then refused: the client is open and only `finally` closes it.
+    listTopics.mockRejectedValueOnce(new Error('down'));
+    expect(await publisher.isHealthy()).toBe(false);
+    expect(adminConnect).toHaveBeenCalledTimes(1);
+    expect(adminDisconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports unhealthy when the probe cannot connect, and still closes the probe client', async () => {
+    // A connect that gave up can leave retry timers behind; disconnect stops them.
+    adminConnect.mockRejectedValueOnce(new Error('unreachable'));
+    expect(await publisher.isHealthy()).toBe(false);
+    expect(listTopics).not.toHaveBeenCalled();
+    expect(adminDisconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the probe answer when closing the probe client fails', async () => {
+    adminDisconnect.mockRejectedValueOnce(new Error('already gone'));
+    expect(await publisher.isHealthy()).toBe(true);
 
     listTopics.mockRejectedValueOnce(new Error('down'));
+    adminDisconnect.mockRejectedValueOnce(new Error('already gone'));
     expect(await publisher.isHealthy()).toBe(false);
   });
 });

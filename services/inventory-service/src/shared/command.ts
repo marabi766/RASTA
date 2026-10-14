@@ -11,7 +11,7 @@ import {
 } from './prisma-errors';
 import { refusal } from './refusal';
 
-/** `Retry-After` on a command that met a stock item another command held too long. */
+/** `Retry-After` on a command that met a stock item or shipment another command held too long. */
 const CONTENDED_RETRY_AFTER_SECONDS = 1;
 
 /**
@@ -62,10 +62,22 @@ const BALANCE_CHECKS = new Set([
 ]);
 
 /** The backstop of the Idempotency-Key in the domain tables. */
-const COMMAND_KEYS = new Set(['ux_stock_movement_command', 'ux_stock_reservation_command']);
+const COMMAND_KEYS = new Set([
+  'ux_stock_movement_command',
+  'ux_stock_reservation_command',
+  'ux_shipment_command',
+  'ux_tracking_event_command',
+]);
 
-/** The columns both backstop indexes are on, as PostgreSQL's DETAIL names them. */
-const COMMAND_KEY_COLUMNS = '(organization_id, command_key_hash, stock_item_id)';
+/**
+ * The columns the backstop indexes are on, as PostgreSQL's DETAIL names them: per stock item for
+ * the stock commands, per organization for the shipment commands (one shipment or one tracking
+ * event per command).
+ */
+const COMMAND_KEY_COLUMNS = [
+  '(organization_id, command_key_hash, stock_item_id)',
+  '(organization_id, command_key_hash)',
+];
 
 /**
  * Whether a unique violation is the Idempotency-Key backstop. A raw query's failure carries the
@@ -75,7 +87,9 @@ const COMMAND_KEY_COLUMNS = '(organization_id, command_key_hash, stock_item_id)'
 function isCommandKey(error: unknown, constraint: string | undefined): boolean {
   if (constraint !== undefined && COMMAND_KEYS.has(constraint)) return true;
   const message = (error as { message?: unknown } | null)?.message;
-  return typeof message === 'string' && message.includes(COMMAND_KEY_COLUMNS);
+  return (
+    typeof message === 'string' && COMMAND_KEY_COLUMNS.some((columns) => message.includes(columns))
+  );
 }
 
 /**
@@ -100,7 +114,7 @@ export function translateCommandError(
   if (isLockTimeout(error) || isTransactionUnavailable(error)) {
     return new RastaError(
       'CONFLICT',
-      'The stock is being changed by another request; retry shortly',
+      'What this command changes is being changed by another request; retry shortly',
       { retryAfterSeconds: CONTENDED_RETRY_AFTER_SECONDS },
     );
   }

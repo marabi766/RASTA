@@ -19,6 +19,16 @@ describe('the provisional defaults (Q-102, Q-103)', () => {
     expect(env.INVENTORY_READER_ROLES).toEqual(['ORGANIZATION_ADMIN']);
   });
 
+  it('lets a shipment’s consignee read it as ORGANIZATION_ADMIN only (Q-113)', () => {
+    expect(env.INVENTORY_CONSIGNEE_READER_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+  });
+
+  it('configures no shipment state, cancellation or stock link the documents leave open (Q-114, Q-115)', () => {
+    expect(
+      Object.keys(env).filter((name) => /SHIPMENT|FAILED|CANCEL|CHECKPOINT/.test(name)),
+    ).toEqual([]);
+  });
+
   it('gives a reservation no default lifetime, only a seven-day cap on the one a caller sets (Q-102)', () => {
     expect(env.INVENTORY_RESERVATION_MAX_TTL_SECONDS).toBe(7 * 24 * 60 * 60);
     expect(Object.keys(env).filter((name) => /DEFAULT_TTL/.test(name))).toEqual([]);
@@ -94,6 +104,12 @@ describe('overrides', () => {
     ['an empty operator list', { INVENTORY_OPERATOR_ROLES: '' }],
     ['an empty reader list', { INVENTORY_READER_ROLES: ' , ' }],
     ['an unknown role', { INVENTORY_READER_ROLES: 'WIZARD' }],
+    ['AUDITOR among the consignee readers', { INVENTORY_CONSIGNEE_READER_ROLES: 'AUDITOR' }],
+    [
+      'SYSTEM_ADMIN among the consignee readers',
+      { INVENTORY_CONSIGNEE_READER_ROLES: 'SYSTEM_ADMIN' },
+    ],
+    ['an empty consignee reader list', { INVENTORY_CONSIGNEE_READER_ROLES: '' }],
     ['a reservation cap under a minute', { INVENTORY_RESERVATION_MAX_TTL_SECONDS: '59' }],
     ['a reservation cap over a year', { INVENTORY_RESERVATION_MAX_TTL_SECONDS: '40000000' }],
     ['a zero sweep interval', { INVENTORY_RESERVATION_SWEEP_INTERVAL_SECONDS: '0' }],

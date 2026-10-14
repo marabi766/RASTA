@@ -194,15 +194,19 @@ describe('repair orders', () => {
 });
 
 describe('the inventory prefixes (COM-006, ADR-056 plan step 6)', () => {
-  it('route warehouses and stock to inventory-service and require a key on their writes', () => {
-    // A reservation, an issue or an adjustment posted twice must move stock once (docs/06
-    // § 6.8). The requirement applies to unsafe methods only, so reading stock needs none.
+  it('route warehouses, stock and shipments to inventory-service and require a key on their writes', () => {
+    // A reservation, an issue, an adjustment or a dispatch posted twice must take effect once
+    // (docs/06 § 6.8). The requirement applies to unsafe methods only, so reading — tracking a
+    // shipment included — needs none.
     for (const path of [
       '/warehouses',
       '/stock/receipts',
       '/stock/adjustments',
       '/stock/reservations',
       '/stock/reservations/SRV_1/issue',
+      '/shipments',
+      '/shipments/SHP_1/dispatch',
+      '/shipments/SHP_1/deliver',
     ]) {
       const route = resolveRoute(path);
       expect([path, route?.service, route?.requiresIdempotencyKey]).toEqual([
@@ -214,15 +218,19 @@ describe('the inventory prefixes (COM-006, ADR-056 plan step 6)', () => {
   });
 
   it('stay closed, with no role filter of their own: the service decides who acts (Q-103)', () => {
-    for (const prefix of ['warehouses', 'stock']) {
+    for (const prefix of ['warehouses', 'stock', 'shipments']) {
       const route = resolveRoute(prefix);
       expect(route?.publicReason).toBeUndefined();
       expect(route?.roles).toBeUndefined();
     }
   });
 
-  it('leave shipments as they were until its routes exist (PR 2)', () => {
-    expect(resolveRoute('/shipments')).toEqual({ prefix: 'shipments', service: 'inventory' });
+  it('gives shipments the key and nothing else: the consignee’s read is the service’s rule (ADR-056 § 5)', () => {
+    expect(resolveRoute('/shipments/SHP_1/tracking')).toEqual({
+      prefix: 'shipments',
+      service: 'inventory',
+      requiresIdempotencyKey: true,
+    });
   });
 });
 

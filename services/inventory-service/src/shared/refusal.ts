@@ -12,6 +12,7 @@ import { RastaError } from '@rasta/nest-common';
 export const REFUSAL_AREAS = {
   stock: 'Stock cannot be moved',
   reservation: 'Reservation cannot be made or ended',
+  shipment: 'Shipment cannot be moved',
 } as const;
 export type RefusalArea = keyof typeof REFUSAL_AREAS;
 
@@ -39,6 +40,12 @@ export const REFUSAL_REASONS = {
     HOLDER_NOT_OWNER: 422,
     /** Released, issued or expired already: a reservation ends once. */
     RESERVATION_NOT_ACTIVE: 409,
+  },
+  shipment: {
+    /** Dispatched or delivered already: a shipment is dispatched once, from CREATED. */
+    SHIPMENT_NOT_CREATED: 409,
+    /** Not dispatched yet, or delivered already: a shipment is delivered once, from DISPATCHED. */
+    SHIPMENT_NOT_DISPATCHED: 409,
   },
 } as const satisfies Record<RefusalArea, Record<string, 409 | 422>>;
 

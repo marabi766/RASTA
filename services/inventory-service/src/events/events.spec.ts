@@ -19,6 +19,14 @@ const reservation = {
   orderReference: null,
   quantity: 2,
 };
+const shipment = {
+  shipmentId: `SHP_${ULID}`,
+  organizationId: 'ORG_1',
+  originWarehouseId: `WHS_${ULID}`,
+  consigneeOrganizationId: `ORG_${ULID}`,
+  orderReference: `ORD_${ULID}`,
+  trackingEventId: `TRK_${ULID}`,
+};
 
 const VALID = {
   WAREHOUSE_CREATED: {
@@ -56,11 +64,25 @@ const VALID = {
     releasedAt: at,
   },
   STOCK_ISSUED: { ...stock, ...reservation, issuedBy: 'USR_1', issuedAt: at },
+  SHIPMENT_CREATED: {
+    ...shipment,
+    shipmentVersion: 1,
+    legCount: 2,
+    createdBy: 'USR_1',
+    createdAt: at,
+  },
+  SHIPMENT_DISPATCHED: { ...shipment, shipmentVersion: 2, dispatchedBy: 'USR_1', dispatchedAt: at },
+  SHIPMENT_DELIVERED: { ...shipment, shipmentVersion: 3, deliveredBy: 'USR_1', deliveredAt: at },
 } as const;
 
+const SHIPMENT_EVENTS = ['SHIPMENT_CREATED', 'SHIPMENT_DISPATCHED', 'SHIPMENT_DELIVERED'];
+
 describe('the published event contracts (ADR-056 § 6)', () => {
-  it('names the catalogue’s stock events, STOCK_ADJUSTED and WAREHOUSE_CREATED — no shipment and no LOW_STOCK_DETECTED yet', () => {
+  it('names the catalogue’s stock and shipment events, STOCK_ADJUSTED and WAREHOUSE_CREATED — no LOW_STOCK_DETECTED yet', () => {
     expect(Object.keys(INVENTORY_EVENTS).sort()).toEqual([
+      'SHIPMENT_CREATED',
+      'SHIPMENT_DELIVERED',
+      'SHIPMENT_DISPATCHED',
       'STOCK_ADJUSTED',
       'STOCK_ISSUED',
       'STOCK_RECEIVED',
@@ -101,15 +123,33 @@ describe('the published event contracts (ADR-056 § 6)', () => {
       }),
     ).toThrow();
   });
+
+  it('validates shipment events against the contracts of @rasta/contracts: no carrier, no free text', () => {
+    expect(() =>
+      validateInventoryPayload('SHIPMENT_CREATED', {
+        ...VALID.SHIPMENT_CREATED,
+        carrier: 'Acme Freight',
+      }),
+    ).toThrow(/does not match its published contract/);
+    expect(() =>
+      validateInventoryPayload('SHIPMENT_DELIVERED', {
+        ...VALID.SHIPMENT_DELIVERED,
+        shipmentVersion: 2,
+      }),
+    ).toThrow();
+  });
 });
 
 describe('the partition policy', () => {
-  it('keys every stock event by its stock item — the STRICT stream — and the warehouse by itself', () => {
+  it('keys every stock event by its stock item and every shipment event by its shipment — the STRICT streams — and the warehouse by itself', () => {
     for (const name of Object.keys(VALID) as (keyof typeof VALID)[]) {
       const decision = resolvePartitionKey(name, VALID[name] as never);
       if (name === 'WAREHOUSE_CREATED') {
         expect(decision).toEqual({ scope: 'WAREHOUSE', key: `WHS_${ULID}` });
         expect(AGGREGATE_OF[name]).toBe('Warehouse');
+      } else if (SHIPMENT_EVENTS.includes(name)) {
+        expect([name, decision]).toEqual([name, { scope: 'SHIPMENT', key: `SHP_${ULID}` }]);
+        expect(AGGREGATE_OF[name]).toBe('Shipment');
       } else {
         expect([name, decision]).toEqual([name, { scope: 'STOCK_ITEM', key: `SKI_${ULID}` }]);
         expect(AGGREGATE_OF[name]).toBe('StockItem');

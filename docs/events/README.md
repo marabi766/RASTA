@@ -488,8 +488,24 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 > **دو جریان (ADR-056 § ۶).** رویدادهای موجودی با `stockItemId` کلید می‌خورند (جریان **STRICT**: رزرو پیش از صدور)،
 > و `WAREHOUSE_CREATED` با `warehouseId`. هر رویداد موجودی موقعیت دفتر کالا را پس از حرکت حمل می‌کند (`itemVersion`،
 > پیوسته از ۱) همراه `onHandAfter`/`reservedAfter`. `STOCK_RELEASED` با `reason: EXPIRED` یعنی سرویس رزرو منقضی را
-> آزاد کرده (`releasedBy: null`، Q-102). `LOW_STOCK_DETECTED` تا تعیین آستانه ساخته نمی‌شود (Q-106)؛ رویدادهای محموله
-> با PR دوم. **امروز مصرف‌کننده‌ای جز audit نیست** (ADR-056 § ۷)؛ ستون مصرف‌کنندگان برنامه است.
+> آزاد کرده (`releasedBy: null`، Q-102). `LOW_STOCK_DETECTED` تا تعیین آستانه ساخته نمی‌شود (Q-106). **امروز مصرف‌کننده‌ای جز
+> audit نیست** (ADR-056 § ۷)؛ ستون مصرف‌کنندگان برنامه است.
+>
+> **COM-006 PR دوم — رویدادهای محموله.** سه رویداد `SHIPMENT_*` پیاده‌اند؛ نام و Schemaی آن‌ها قرارداد میان‌سرویسی است در
+> `packages/contracts/src/events/inventory-shipments.ts` (`.strict()`، صادرشده از `@rasta/contracts`) و سرویس پیش از Outbox با همان
+> اعتبارسنجی می‌کند. **جریان سوم (ADR-056 § ۶):** کلید `shipmentId`، `aggregateType` = `Shipment`، **STRICT** — ارسال پیش از تحویل؛
+> `shipmentVersion` (۱، ۲، ۳) جایگاه رویداد در تاریخچهٔ محموله است و `trackingEventId` ردیف رهگیری‌ای که اعلام می‌کند. انحراف از کاتالوگ
+> پیشین: `orderId` → `orderReference` مبهم (`ORD_`/`PO_` یا `null`)؛ **`carrier` روی رویداد نیست** — متن آزاد است و در `shipment_leg`
+> می‌ماند و از API خوانده می‌شود (همان قاعدهٔ حریم construction)؛ به‌جایش `legCount`. هیچ نشانی، نام یا متن آزادی نیست.
+>
+> **ترتیب محموله — قرارداد مصرف‌کننده تا بسته شدن D-027 (Codex #257 r1).** STRICT در این جریان **نیت** است، نه رفتار امروز:
+> Relay مشترک ردیف‌ها را مستقل Claim می‌کند، پس `SHIPMENT_DISPATCHED` و `SHIPMENT_DELIVERED` یک محموله می‌توانند میان دو Relay، پس
+> از Backoff، یا در مسیر انتشار تک‌ردیفی **وارونه یا تکراری** برسند (D-027، باز؛ رفعش ADR-051 B4). پس هر Consumer رویدادهای محموله
+> **باید** آن‌ها را با `streamSeq` Envelope (همان Header `x-stream-seq`؛ `streamKey` = `shipmentId`؛ برابر `shipmentVersion`) مرتب و
+> تکراری‌زدایی کند: توالی کوچک‌تر یا برابر با آخرین توالیِ اعمال‌شدهٔ همان محموله تکراری یا کهنه است و اثری نمی‌گذارد، و رویدادی
+> که پس از شکاف برسد (توالی بزرگ‌تر از آخرین + ۱) به‌عنوان «بعدی» اعمال نمی‌شود. ترتیب رسیدن هرگز مبنا نیست. هر سه رویداد `streamSeq`
+> و `streamKey` را حمل می‌کنند (`services/inventory-service/test/shipments.int-spec.ts`). امروز تنها مصرف‌کننده audit-service است که
+> هر رویداد را الحاقی و با `streamSeq` ذخیره می‌کند و به ترتیب وابسته نیست.
 
 | رویداد                  | مصرف‌کنندگان                 | Payload کلیدی                                                                                                                              |
 | ----------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -500,9 +516,9 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 | `STOCK_RELEASED`        | marketplace (Saga سفارش)     | `reservationId`, `stockItemId`, `quantity`, `reason` (`RELEASED`\|`EXPIRED`), `releasedBy`, `itemVersion`, …                               |
 | `STOCK_ISSUED`          | marketplace · analytics      | `reservationId`, `stockItemId`, `productId`, `quantity`, `issuedBy`, `itemVersion`, …                                                      |
 | `LOW_STOCK_DETECTED`    | notification · procurement   | (ساخته نشده — Q-106)                                                                                                                       |
-| `SHIPMENT_CREATED`      | marketplace · notification   | `shipmentId`, `orderId`, `carrier`                                                                                                         |
-| `SHIPMENT_DISPATCHED`   | notification                 | `shipmentId`, `dispatchedAt`                                                                                                               |
-| `SHIPMENT_DELIVERED`    | marketplace · notification   | `shipmentId`, `deliveredAt`                                                                                                                |
+| `SHIPMENT_CREATED`      | marketplace · notification   | `shipmentId`, `originWarehouseId`, `consigneeOrganizationId`, `orderReference`, `legCount`, `shipmentVersion` (۱), `createdBy`, …          |
+| `SHIPMENT_DISPATCHED`   | notification                 | `shipmentId`, `consigneeOrganizationId`, `trackingEventId`, `shipmentVersion` (۲), `dispatchedBy`, `dispatchedAt`, …                       |
+| `SHIPMENT_DELIVERED`    | marketplace · notification   | `shipmentId`, `consigneeOrganizationId`, `trackingEventId`, `shipmentVersion` (۳), `deliveredBy`, `deliveredAt`, …                         |
 
 ## Construction — `rasta.construction.v1`
 
