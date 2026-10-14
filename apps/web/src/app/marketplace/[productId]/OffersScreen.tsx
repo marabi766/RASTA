@@ -11,6 +11,8 @@ import { productKindLabel } from '@/lib/labels';
 import { formatMoney, toPersianDigits } from '@/lib/format';
 import type { OffersPage, Product, ReadResult } from '@/server/marketplace';
 
+import { PlaceOrderForm } from './PlaceOrderForm';
+
 /**
  * `/marketplace/[productId]` — مقایسه پیشنهادها (docs/16 § ۱۶٫۶, role
  * `PROCUREMENT_USER`).
@@ -31,6 +33,21 @@ export interface OffersScreenProps {
   readonly offers: ReadResult<OffersPage>;
   readonly productId: string;
   readonly sort?: string;
+  /**
+   * What placing an order needs from the page: the signed-in session's CSRF
+   * token, a minter for the form's submission id (bound to that session, which
+   * only the page has), and the caller's own organization, whose offers are
+   * left out of the choice. Absent, the screen only compares.
+   */
+  readonly ordering?: {
+    readonly csrfToken: string;
+    readonly mintSubmissionId: () => string;
+    readonly organizationId: string | null;
+    /** One-way tags of this login, so a form can recognise its own remembered order (`submissionBinding`). */
+    readonly binding: { readonly owner: string; readonly session: string };
+    /** The session's lifetime: a remembered unresolved order is not kept longer than that. */
+    readonly sessionMaxAgeSeconds: number;
+  };
 }
 
 const CONTROL =
@@ -123,7 +140,46 @@ function OfferRows({ offers }: { offers: OffersPage }) {
   );
 }
 
-export function OffersScreen({ product, offers, productId, sort }: OffersScreenProps) {
+function OrderSection({
+  offers,
+  ordering,
+  productId,
+}: {
+  offers: OffersPage;
+  ordering: NonNullable<OffersScreenProps['ordering']>;
+  productId: string;
+}) {
+  // A plain link back to this page: a full navigation, so a new submission id is minted.
+  const newOrderHref = `/marketplace/${encodeURIComponent(productId)}`;
+  // An organization cannot order from itself; the service refuses it, and
+  // offering the choice only to refuse it would be a form built to fail.
+  const orderable = offers.items.filter(
+    (offer) => offer.supplierOrganizationId !== ordering.organizationId,
+  );
+
+  return (
+    <Section headingId="place-order" title="سفارش از یکی از پیشنهادها">
+      {orderable.length === 0 ? (
+        <EmptyState
+          title="پیشنهادی برای سفارش نیست"
+          description="هیچ پیشنهاد منتشرشده‌ای از سازمانی غیر از سازمان شما برای این کالا یا خدمت نیست."
+        />
+      ) : (
+        <PlaceOrderForm
+          offers={orderable}
+          csrfToken={ordering.csrfToken}
+          submissionId={ordering.mintSubmissionId()}
+          newOrderHref={newOrderHref}
+          productId={productId}
+          binding={ordering.binding}
+          sessionMaxAgeSeconds={ordering.sessionMaxAgeSeconds}
+        />
+      )}
+    </Section>
+  );
+}
+
+export function OffersScreen({ product, offers, productId, sort, ordering }: OffersScreenProps) {
   const title =
     product.kind === 'OK'
       ? product.data.name
@@ -175,6 +231,10 @@ export function OffersScreen({ product, offers, productId, sort }: OffersScreenP
           ) : null}
           {offers.kind === 'OK' ? <OfferRows offers={offers.data} /> : null}
         </Section>
+      ) : null}
+
+      {product.kind === 'OK' && offers.kind === 'OK' && ordering ? (
+        <OrderSection offers={offers.data} ordering={ordering} productId={productId} />
       ) : null}
     </>
   );

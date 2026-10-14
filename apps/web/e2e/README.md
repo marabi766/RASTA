@@ -49,6 +49,20 @@ If a run is killed or crashes between filing a request and recording its id, the
 next run stops at the check above. Reset the stack (CI never needs this), or
 cancel the named requests yourself, and run again.
 
+## Orders (`orders.spec.ts`)
+
+Needs marketplace-service in the stack, started with `MARKETPLACE_TEMPORAL_ENABLED=false`
+(ADR-039's no-Temporal mode): no saga runs, so an order stays `PENDING`, no wallet is
+touched, and no order reaches economic-service (which is in the stack for the settlements
+scenario only). The scenario places orders and reads them; it never confirms receipt and
+never settles.
+
+It places orders against the seeded `OFR_SEED_AGGREGATE_D2` (220 available) and **does not
+cancel them**: they stay as records on that stack, and each run uses up a little of the
+offer's availability. CI starts a fresh stack, so that is nothing there; a local re-run on
+the same stack keeps consuming it (and, like the other write scenarios, assumes it is the
+only run). The scenarios run in order and share the id the first one places.
+
 ## Settlements (`settlements.spec.ts`) — the one scenario that settles
 
 `/settlements` is read-only, so the scenario has to make settlements before it

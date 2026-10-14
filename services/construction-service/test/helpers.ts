@@ -402,6 +402,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       new StandingAuthority(SUPPLIER),
       clock,
       env,
+      idempotency,
     ),
     ownBids: new OwnBidService(prisma, bidRepository, reader, bidAudit, access),
     award: new AwardService(
@@ -455,6 +456,9 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       events,
       access,
       clock,
+      idempotency,
+      keys,
+      env,
     ),
     needs: new NeedService(prisma, repository, events, access, idempotency),
     tenderRepository,
@@ -514,7 +518,15 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       access,
       env,
     ),
-    progress: new ProgressService(prisma, repository, events, access, env, idempotency),
+    progress: new ProgressService(
+      prisma,
+      repository,
+      events,
+      access,
+      env,
+      idempotency,
+      approvalRepository,
+    ),
     close: () => prisma.onModuleDestroy(),
   };
 }
@@ -639,14 +651,26 @@ export class FakeMemberships implements MembershipSource {
       byOrganization.set(organizationId, { organizationId, roles: ['ORGANIZATION_ADMIN'] });
     }
     const request = currentRequest();
-    if (request?.userId === userId && request.organizationId && !this.revoked.has(userId)) {
-      byOrganization.set(request.organizationId, {
-        organizationId: request.organizationId,
-        roles: this.rolesOf.get(userId) ?? request.roles,
-      });
+    if (request?.userId === userId && request.organizationId) {
+      const seen = this.known.get(userId) ?? new Map<string, readonly string[]>();
+      seen.set(request.organizationId, request.roles);
+      this.known.set(userId, seen);
+    }
+    // What the user's own requests showed, answered whoever asks — as identity-service would
+    // answer the approver of an opening about its proposer (F6) — unless said otherwise.
+    if (!this.revoked.has(userId)) {
+      for (const [organizationId, roles] of this.known.get(userId) ?? []) {
+        byOrganization.set(organizationId, {
+          organizationId,
+          roles: this.rolesOf.get(userId) ?? roles,
+        });
+      }
     }
     return { memberships: [...byOrganization.values()], asOf: this.liveAsOf ?? new Date() };
   }
+
+  /** Each user's memberships as their own requests showed them (organization → roles). */
+  private readonly known = new Map<string, Map<string, readonly string[]>>();
 
   /** Back to the default: nobody belongs to anything, nothing fails, nothing asked. */
   reset(): void {
@@ -656,6 +680,7 @@ export class FakeMemberships implements MembershipSource {
     this.liveAsOf = undefined;
     this.history.clear();
     this.of.clear();
+    this.known.clear();
     this.revoked.clear();
     this.rolesOf.clear();
     this.beforeAnswer.clear();
@@ -701,6 +726,11 @@ export function newOrganizationId(): string {
 
 export function newUserId(): string {
   return `USR_${ulid()}`;
+}
+
+/** A fresh `Idempotency-Key` for a bid submission, which requires one (docs/06 § 6.8, F4). */
+export function bidKey(): string {
+  return `bid-${ulid()}`;
 }
 
 /** The issuer every test token is verified against (a user token always has one, #188). */
@@ -1369,7 +1399,7 @@ export async function evaluatingTender(
     organizations.push(bidder);
     await qualify(w, bidder);
     const view = await asBidder(bidder, () =>
-      w.bids.submit(tenderId, { content: bidContent(prices[i] ?? String(1_000 + i)) }),
+      w.bids.submit(tenderId, { content: bidContent(prices[i] ?? String(1_000 + i)) }, bidKey()),
     );
     bids.push({ bidder, bidId: view.bidId });
   }
@@ -1444,8 +1474,12 @@ export async function evaluatedTender(
       () =>
         w.evaluation.score(tenderId, bid.bidId, {
           scores: [
-            { criterionCode: 'PRICE', scoreScaled: options.tie ? 8_000 : 9_000 - index * 1_000 },
-            { criterionCode: 'LICENCE', scoreScaled: 100 },
+            {
+              criterionCode: 'PRICE',
+              scoreScaled: options.tie ? 8_000 : 9_000 - index * 1_000,
+              expectedRevision: 0,
+            },
+            { criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 },
           ],
         }),
       evaluator,

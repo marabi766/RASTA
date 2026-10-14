@@ -229,6 +229,39 @@ export const ROUTES: readonly RouteRule[] = [
   { prefix: 'kpis', service: 'analytics' },
 ];
 
+/** A request the gateway forwards under a deadline of its own, not `GATEWAY_UPSTREAM_TIMEOUT_MS`. */
+export interface UpstreamDeadlineRoute {
+  service: ServiceName;
+  /** Upper-case HTTP method; `GET` also covers `HEAD` (see `TENDER_OPENING_ROUTES`). */
+  method: string;
+  /** The whole forwarded path (`/v1/...`, no query). */
+  path: RegExp;
+}
+
+/**
+ * The two requests that decrypt every standing bid of a tender in construction-service, under its
+ * `CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS` (Codex r2 on #250, G1): opening the bids, and the owner's
+ * read of every opened bid. They run under `GATEWAY_TENDER_OPEN_TIMEOUT_MS`; nothing else does — the
+ * proposal, a single bid's read and every other route keep the default deadline. Data, like the
+ * table above: the gateway learns which requests are slow, not why (ADR-009).
+ *
+ * Matched as the upstream's router matches them (Express 5, Codex r3 on #250, F2), or a request that
+ * reaches the same handler would get the short deadline: the path **case-insensitively**
+ * (`/OPEN-BIDS` is the opening), one optional trailing slash, and `HEAD` as `GET` (Express runs the
+ * GET handler for it, the full read included). Percent-encoded letters (`open%2Dbids`) and doubled
+ * slashes reach no handler upstream, so they keep the default.
+ */
+export const TENDER_OPENING_ROUTES: readonly UpstreamDeadlineRoute[] = [
+  { service: 'construction', method: 'POST', path: /^\/v1\/tenders\/[^/]+\/open-bids\/?$/i },
+  { service: 'construction', method: 'GET', path: /^\/v1\/tenders\/[^/]+\/bids\/?$/i },
+];
+
+/** The method a deadline route is matched under: the upstream answers `HEAD` with its GET handler. */
+export function deadlineMethodOf(method: string): string {
+  const upper = method.toUpperCase();
+  return upper === 'HEAD' ? 'GET' : upper;
+}
+
 /** Longest-prefix match, so `orders` never shadows a longer sibling. */
 export function resolveRoute(path: string): RouteRule | undefined {
   const segment = path.replace(/^\/+/, '').split('/')[0];

@@ -45,6 +45,8 @@ export interface OrderDetailScreenProps {
   readonly mintSubmissionId: () => string;
   /** The command that just succeeded, from the redirect's query flag. */
   readonly done?: OrderCommand;
+  /** The order was just placed from the offers page (`?placed=1`). */
+  readonly placed?: boolean;
 }
 
 const STEP_CLASSES: Readonly<Record<StepState, string>> = {
@@ -169,6 +171,7 @@ export function OrderDetailScreen({
   csrfToken,
   mintSubmissionId,
   done,
+  placed,
 }: OrderDetailScreenProps) {
   if (result.kind === 'NOT_FOUND') {
     // One message for "does not exist" and "not yours": marketplace-service
@@ -201,6 +204,12 @@ export function OrderDetailScreen({
   return (
     <div className="flex flex-col gap-4">
       {done ? <Alert tone="success">{DONE_MESSAGES[done]}</Alert> : null}
+      {placed ? (
+        <Alert tone="success">
+          سفارش ثبت شد. هنوز قطعی نیست: وجه آن باید نگه داشته شود و تأمین‌کننده آن را بپذیرد؛ هر
+          مرحله در نمودار زیر دیده می‌شود.
+        </Alert>
+      ) : null}
 
       <Section headingId="order-summary" title="وضعیت سفارش">
         <div className="flex flex-wrap items-baseline justify-between gap-2">

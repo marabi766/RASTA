@@ -5,7 +5,7 @@ import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import { readCapped } from '../organization/organization-directory';
 import { SealingError } from './sealing/errors';
-import { genesisReceipt, verifyReceiptChain, type TrustedReceipts } from './sealing/sealing';
+import { genesisReceipt, verifyReceipts, type VerifiedReceipts } from './sealing/sealing';
 
 /** The service that holds the receipt chain outside this one's database. */
 export const AUDIT_SERVICE = 'audit-service';
@@ -142,8 +142,14 @@ function safeCorrelationId(): string {
  * named. Anything else is `RECEIPT_CHAIN_BROKEN` and nothing is opened. The stored
  * bids are then compared with *these* links (`openBid`), not with this service's own
  * `bid_receipt`, which whoever rewrote a bid could have rewritten with it.
+ *
+ * Verified here, once per read of the evidence, and indexed by bid: every bid an opening (or a
+ * read) opens reuses it (Codex r1 on #250, R2).
  */
-export function trustedReceiptsOf(chain: TenderChain): TrustedReceipts {
+export function trustedReceiptsOf(chain: TenderChain): VerifiedReceipts {
+  if (chain.genesis !== genesisReceipt(chain.tenderId)) {
+    throw new SealingError('RECEIPT_CHAIN_BROKEN');
+  }
   const links = chain.links.map((link) => ({
     bidId: link.bidId,
     revision: link.revision,
@@ -152,9 +158,5 @@ export function trustedReceiptsOf(chain: TenderChain): TrustedReceipts {
     contentCommitment: link.contentCommitment,
     receipt: link.receipt,
   }));
-  const sound =
-    chain.genesis === genesisReceipt(chain.tenderId) &&
-    verifyReceiptChain(chain.tenderId, links, chain.head).ok;
-  if (!sound) throw new SealingError('RECEIPT_CHAIN_BROKEN');
-  return { links, head: chain.head };
+  return verifyReceipts(chain.tenderId, { links, head: chain.head });
 }
