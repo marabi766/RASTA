@@ -6,7 +6,7 @@
 > نمی‌گیرد — سند می‌گوید **چه کسی کجا کار می‌کند**، و git می‌گوید **همین
 > لحظه چه چیزی در مخزن هست**. هر دو لازم‌اند.
 
-**آخرین به‌روزرسانی:** ۱۴۰۵/۰۷/۲۲ (2026-10-14) · **`main` در آن لحظه:** `dc88cac`
+**آخرین به‌روزرسانی:** ۱۴۰۵/۰۷/۲۲ (2026-10-14) · **`main` در آن لحظه:** `50f4596`
 
 ---
 
@@ -34,9 +34,10 @@
 `ci.yml` فقط با `pull_request: branches: [main]` فعال می‌شود. این «CI
 کند است» نیست؛ هیچ اجرایی ساخته نمی‌شود و GitHub هم چیزی نمی‌گوید.
 
-۳. **همگام‌سازی با Merge، نه Rebase.** قرارداد این مخزن Merge Commit است
-(`git log origin/main --merges`). تاریخچهٔ هر شاخه پس از ادغام دست‌نخورده
-روی `main` می‌ماند.
+۳. **همگام‌سازی با Merge، نه Rebase.** شاخه با `origin/main` همگام می‌شود
+(Merge Commit، نه Rebase). ادغام PR در `main` اما Squash است (`git log origin/main --first-parent`:
+یک کامیت به‌ازای هر PR)؛ پس تاریخچهٔ شاخه روی `main` نمی‌ماند و شاخهٔ ادغام‌شده
+کامیت یکتای خودش را نگه می‌دارد.
 
 ۴. **شمارهٔ یکتا پیش از مصرف رزرو می‌شود — و آن را مدیر پروژه رزرو می‌کند** (§ ۲۶٫۵).
 شامل شمارهٔ ADR، شمارهٔ پرسش باز `Q-NN`، و نام Migration. نشستِ کاری شماره را از
@@ -62,23 +63,26 @@ PRهای باز را `CONFLICTING` می‌کرد و CI آن‌ها را از ن�
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                              | Worktree                          | نشست            | PR                                                  | ahead / behind | وضعیت                                                                                     |
-| --------------------------------- | --------------------------------- | --------------- | --------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------- |
-| `demo/investor-preview`           | `F:\Rasta-Parallel\investor-demo` | —               | —                                                   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید              |
-| `design/claude-design`            | پوشهٔ موقت در `%TEMP%`            | —               | —                                                   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                     |
-| `fix/error-path-no-query`         | سرور (کارگر ۴)                    | server-worker-4 | [#259](https://github.com/marabi766/RASTA/pull/259) | —              | پاکت خطا و لاگ‌ها مسیر درخواست را بی‌query نگه می‌دارند (S-09)؛ از کارگر ۲ تحویل گرفته شد |
-| `fix/otel-url-no-query`           | سرور (کارگر ۲)                    | server-worker-2 | [#261](https://github.com/marabi766/RASTA/pull/261) | —              | Spanهای ردیابی URL را بی‌query می‌برند (S-09)                                             |
-| `chore/prisma-pool-config`        | سرور (کارگر ۱)                    | server-worker   | [#268](https://github.com/marabi766/RASTA/pull/268) | —              | اندازهٔ Pool پریزما از پیکربندی                                                           |
-| `feat/web-exp-004-inventory-read` | سرور (کارگر ۳)                    | server-worker-3 | [#269](https://github.com/marabi766/RASTA/pull/269) | —              | EXP-004 برش ۳: /inventory فقط‌خواندنی (انبارها و موجودی)                                  |
-| `fix/shutdown-phase2`             | سرور (کارگر ۱)                    | server-worker   | [#270](https://github.com/marabi766/RASTA/pull/270) | —              | خاموشی: توقف EventConsumer در مهلت مشترک؛ فاز ۲                                           |
-| `fix/construction-award-tx-test`  | سرور (کارگر ۴)                    | server-worker-4 | [#271](https://github.com/marabi766/RASTA/pull/271) | —              | سقف زمانی تراکنش‌های construction (award.int-spec ناپایدار)                               |
-| `fix/audit-evidence-test-marker`  | —                                 | —               | [#272](https://github.com/marabi766/RASTA/pull/272) | —              | نشانگر نشت شواهد مناقصه در تست audit که شناسهٔ تصادفی نتواند داشته باشد                   |
-| `chore/ci-split-integration`      | سرور                              | —               | [#274](https://github.com/marabi766/RASTA/pull/274) | —              | CI: Job یکپارچگی به چهار Job موازی تقسیم می‌شود                                           |
+| شاخه                                 | Worktree                          | نشست            | PR                                                  | ahead / behind | وضعیت                                                                                                |
+| ------------------------------------ | --------------------------------- | --------------- | --------------------------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------- |
+| `demo/investor-preview`              | `F:\Rasta-Parallel\investor-demo` | —               | —                                                   | ۳۴ / ۹۴۹       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                         |
+| `design/claude-design`               | پوشهٔ موقت در `%TEMP%`            | —               | —                                                   | ۷ / ۱۲۵۶       | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                |
+| `fix/otel-url-no-query`              | سرور (کارگر ۲)                    | server-worker-2 | [#261](https://github.com/marabi766/RASTA/pull/261) | —              | Spanهای ردیابی URL را بی‌query می‌برند (S-09)                                                        |
+| `chore/prisma-pool-config`           | سرور (کارگر ۱)                    | server-worker   | [#268](https://github.com/marabi766/RASTA/pull/268) | —              | اندازهٔ Pool پریزما از پیکربندی                                                                      |
+| `feat/web-exp-004-inventory-read`    | سرور (کارگر ۳)                    | server-worker-3 | [#269](https://github.com/marabi766/RASTA/pull/269) | —              | EXP-004 برش ۳: /inventory فقط‌خواندنی (انبارها و موجودی)                                             |
+| `fix/construction-award-tx-test`     | سرور (کارگر ۴)                    | server-worker-4 | [#271](https://github.com/marabi766/RASTA/pull/271) | —              | سقف زمانی تراکنش‌های construction (award.int-spec ناپایدار)                                          |
+| `fix/audit-evidence-test-marker`     | `~/pm` (مدیر پروژه)               | PM              | [#272](https://github.com/marabi766/RASTA/pull/272) | —              | نشانگر نشت شواهد مناقصه در تست audit که شناسهٔ تصادفی نتواند داشته باشد                              |
+| `chore/ci-split-integration`         | سرور (کارگر ۱)                    | server-worker   | [#274](https://github.com/marabi766/RASTA/pull/274) | —              | CI: Job یکپارچگی به چهار Job موازی تقسیم می‌شود                                                      |
+| `feat/outbox-purge-phase2a`          | سرور (کارگر ۲)                    | server-worker-2 | [#276](https://github.com/marabi766/RASTA/pull/276) | —              | پاک‌سازی زمان‌بندی‌شدهٔ ردیف‌های منتشرشدهٔ outbox، فاز ۲a (D-052): notification، supplier، inventory |
+| `feat/outbox-purge-phase2b`          | سرور (کارگر ۴)                    | server-worker-4 | [#277](https://github.com/marabi766/RASTA/pull/277) | —              | همان، فاز ۲b: construction، contract، economic، marketplace                                          |
+| `fix/document-outbox-shutdown-flake` | سرور (کارگر ۳)                    | server-worker-3 | [#278](https://github.com/marabi766/RASTA/pull/278) | —              | تست document: ترتیب claimها با sequence، نه میلی‌ثانیه                                               |
 
 ## شاخه‌های بازنشسته
 
-این‌ها `ahead=0` هستند، یعنی محتوایشان کاملاً روی `main` است و می‌توان حذفشان
-کرد. تا وقتی حذف نشده‌اند در این جدول می‌مانند تا کسی دوباره رویشان کار نکند.
+بازنشستگی با **PR ادغام‌شده و `sha`ِ ادغام روی `main`** تأیید می‌شود، نه با
+تبارِ git: ادغام‌های Squash کامیت‌های شاخه را روی `main` نمی‌آورند، پس `ahead` شاخهٔ
+بازنشسته می‌تواند صفر نباشد (مثلاً #256: ۱، #246: ۸، #257: ۱۸ کامیت یکتا). تا وقتی
+حذف نشده‌اند در این جدول می‌مانند تا کسی دوباره رویشان کار نکند.
 
 | شاخه                                                              | PR                                                  | ادغام شد در |
 | ----------------------------------------------------------------- | --------------------------------------------------- | ----------- |
@@ -297,6 +301,8 @@ PRهای باز را `CONFLICTING` می‌کرد و CI آن‌ها را از ن�
 | `fix/marketplace-receipt-note`                                    | [#263](https://github.com/marabi766/RASTA/pull/263) | `f33e613`   |
 | `fix/web-nav-realm-admin`                                         | [#266](https://github.com/marabi766/RASTA/pull/266) | `69898d4`   |
 | `feat/inventory-shipments`                                        | [#257](https://github.com/marabi766/RASTA/pull/257) | `dc88cac`   |
+| `fix/error-path-no-query`                                         | [#259](https://github.com/marabi766/RASTA/pull/259) | `eb800cc`   |
+| `fix/shutdown-phase2`                                             | [#270](https://github.com/marabi766/RASTA/pull/270) | `50f4596`   |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب
 > است و می‌ماند. هیچ Worktreeای `main` را checkout نکرده، پس `git fetch` آن ref
@@ -310,15 +316,17 @@ PRهای باز را `CONFLICTING` می‌کرد و CI آن‌ها را از ن�
 پیش از ویرایش هرکدام از این‌ها، ستون «چه کسی الان لمسش می‌کند» را ببینید.
 این فهرست از روی تداخل‌های واقعی این مخزن ساخته شده، نه از روی حدس.
 
-| فایل                                                        | چرا پرتداخل است                                                                                             | الان چه کسی                     |
-| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| `docs/24-open-questions.md`                                 | هر شاخه پرسش تازه‌اش را ته همین فایل می‌افزاید و جدول § ۲۴٫۱۰ را بازمی‌شمارد. **منبع هر سه حادثهٔ § ۲۶٫۱.** | —                               |
-| `docs/21-adr-list.md`                                       | هر ADR تازه یک ردیف فهرست و یک بخش می‌خواهد؛ شمارهٔ تکراری اینجا آشکار می‌شود                               | —                               |
-| `package.json` → زنجیرهٔ `test:migration`                   | هر سرویس تازه نامش را به **یک خط** اضافه می‌کند                                                             | —                               |
-| `.github/workflows/ci.yml`                                  | بلوک‌های توضیحی‌اش ادعای واقعی دارند؛ دو طرف می‌توانند بدون تداخل متنی **معناً متناقض** شوند                | —                               |
-| `scripts/verify-migration-reversible-lib.mjs` و `.test.mjs` | هر سرویس یک بخش تازه می‌افزاید (معمولاً افزایشی و بی‌دردسر)                                                 | —                               |
-| `pnpm-lock.yaml`                                            | هر نصب بازتولیدش می‌کند                                                                                     | هر شاخه‌ای که وابستگی اضافه کند |
-| `PROJECT_MEMORY.md`                                         | همه بعد از ادغام می‌خواهند به‌روزش کنند                                                                     | `claude/quirky-curie-15d850`    |
+| فایل                                                        | چرا پرتداخل است                                                                                             | الان چه کسی                                                                                                          |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `docs/24-open-questions.md`                                 | هر شاخه پرسش تازه‌اش را ته همین فایل می‌افزاید و جدول § ۲۴٫۱۰ را بازمی‌شمارد. **منبع هر سه حادثهٔ § ۲۶٫۱.** | —                                                                                                                    |
+| `docs/21-adr-list.md`                                       | هر ADR تازه یک ردیف فهرست و یک بخش می‌خواهد؛ شمارهٔ تکراری اینجا آشکار می‌شود                               | —                                                                                                                    |
+| `package.json` → زنجیرهٔ `test:migration`                   | هر سرویس تازه نامش را به **یک خط** اضافه می‌کند                                                             | #268 (server-worker)، #271 (server-worker-4)، #274 (server-worker)                                                   |
+| `.github/workflows/ci.yml`                                  | بلوک‌های توضیحی‌اش ادعای واقعی دارند؛ دو طرف می‌توانند بدون تداخل متنی **معناً متناقض** شوند                | #268 (server-worker)، #271 (server-worker-4)، #274 (server-worker)                                                   |
+| `scripts/verify-migration-reversible-lib.mjs` و `.test.mjs` | هر سرویس یک بخش تازه می‌افزاید (معمولاً افزایشی و بی‌دردسر)                                                 | —                                                                                                                    |
+| `pnpm-lock.yaml`                                            | هر نصب بازتولیدش می‌کند                                                                                     | #261 (server-worker-2)؛ و هر شاخه‌ای که وابستگی اضافه کند                                                            |
+| `PROJECT_MEMORY.md`                                         | همه بعد از ادغام می‌خواهند به‌روزش کنند                                                                     | `claude/quirky-curie-15d850`                                                                                         |
+| `docs/26-branch-registry.md`                                | جدول فعال یک‌جا بازچینی می‌شود؛ ویرایش هم‌زمان = تداخل در همان جدول                                         | #274 (server-worker)، #275 (server-worker-3)، #276 (server-worker-2)، #277 (server-worker-4)، #278 (server-worker-3) |
+| `.env.example`                                              | هر کلید پیکربندی تازه اینجا اضافه می‌شود                                                                    | #268 (server-worker)، #269 (server-worker-3)، #271 (server-worker-4)، #276 (server-worker-2)، #277 (server-worker-4) |
 
 ### تداخلی که `git merge-tree` نشان نمی‌دهد
 
