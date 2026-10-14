@@ -139,6 +139,20 @@ export function ownerDatabaseUrl(): string {
   return withUtcSession(url);
 }
 
+/**
+ * A client on the owner connection ({@link ownerDatabaseUrl}), its interactive transactions bounded
+ * like the service's own (`CONSTRUCTION_TRANSACTION_TIMEOUT_MS`) rather than by Prisma's unwritten
+ * 5 000 ms, which a stalled CI runner outlasts.
+ */
+export function ownerClient(
+  transactionTimeoutMs: number = testEnv().CONSTRUCTION_TRANSACTION_TIMEOUT_MS,
+): PrismaClient {
+  return new PrismaClient({
+    datasources: { db: { url: ownerDatabaseUrl() } },
+    transactionOptions: { timeout: transactionTimeoutMs },
+  });
+}
+
 export function testEnv(overrides: Record<string, string> = {}): ConstructionEnv {
   return loadConstructionEnv({
     ...process.env,
@@ -262,7 +276,7 @@ export class TestTenderClock extends TenderClock {
  * where a test can read them), no Kafka.
  */
 export function wire(env: ConstructionEnv = testEnv()): Wiring {
-  const prisma = new PrismaService(databaseUrl());
+  const prisma = new PrismaService(databaseUrl(), env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS);
   const hierarchy = new FakeHierarchy();
   const events = new EventPublisher(env);
   const repository = new ProjectRepository(prisma);
@@ -815,7 +829,7 @@ export async function cleanup(_prisma: PrismaService, organizationIds: string[])
   // test: a trigger that protects rows from the service must not be switched off
   // with the service's connection, or the suites would teach the code to do it.
   // The owner client carries no tenant guard, so it needs no `runUnscoped`.
-  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  const owner = ownerClient();
   try {
     // A cancelled or published tender's criteria are frozen, and a criteria
     // template is append-only, for every writer (threat C3), so both are lifted
@@ -1195,7 +1209,7 @@ export async function loadStanding(w: Wiring): Promise<void> {
  * for everybody else), so a suite can show the state before the standing is loaded.
  */
 export async function forgetBootstrap(): Promise<void> {
-  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  const owner = ownerClient();
   try {
     await owner.$transaction(async (tx) => {
       await tx.$executeRawUnsafe(
@@ -1421,7 +1435,7 @@ export async function evaluatingTender(
  * migrations', never the service's); every other suite goes through the runtime role.
  */
 export async function ownerSql(statements: string[]): Promise<void> {
-  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  const owner = ownerClient();
   try {
     await owner.$transaction(async (tx) => {
       await tx.$executeRawUnsafe(
@@ -1652,7 +1666,7 @@ export async function cancelApproved(
  * `cleanup`: the service's own connection never switches a trigger off. Put back by `restoreApprovalGuard`.
  */
 export async function liftApprovalGuard(): Promise<void> {
-  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  const owner = ownerClient();
   try {
     await owner.$executeRawUnsafe(
       'ALTER TABLE "tender" DISABLE TRIGGER "tg_tender_status_requires_approval"',
@@ -1663,7 +1677,7 @@ export async function liftApprovalGuard(): Promise<void> {
 }
 
 export async function restoreApprovalGuard(): Promise<void> {
-  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  const owner = ownerClient();
   try {
     await owner.$executeRawUnsafe(
       'ALTER TABLE "tender" ENABLE TRIGGER "tg_tender_status_requires_approval"',
