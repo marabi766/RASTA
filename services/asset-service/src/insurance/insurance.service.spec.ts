@@ -347,6 +347,56 @@ describe('InsuranceService', () => {
       expect(enqueueTxs).toEqual([claimTx]);
     });
 
+    it('starts no further expiry batch once told to stop (shutdown, #247 r4)', async () => {
+      // A full first batch: without the stop the loop would claim again.
+      const full = Array.from({ length: 200 }, (_, i) => lapsedPolicy(`INS_F${i}`));
+      let stopping = false;
+      const claim = jest.fn(async () => {
+        if (stopping) return [];
+        stopping = true;
+        return full;
+      });
+      const h = harness({ claimLapsedPolicies: claim });
+
+      const result = await h.service.runExpirySweep({ shouldStop: () => stopping });
+
+      expect(claim).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ expired: 200 });
+    });
+
+    it('starts no warning transaction when the stop came while the warning queries ran (Codex #247 r4)', async () => {
+      // The shutdown begins while both reads are pending. Asked only between
+      // expiry batches, the sweep still opened the warning transaction and
+      // enqueued its events after the relay had stopped.
+      let stopping = false;
+      const h = harness({
+        findPoliciesExpiringWithin: jest.fn(async () => {
+          stopping = true;
+          return [
+            {
+              id: 'INS_W1',
+              assetId: ASSET_ID,
+              organizationId: DEH1,
+              insurerName: 'بیمه نمونه',
+              validTo: new Date(Date.now() + 20 * day),
+            },
+          ];
+        }),
+        findInspectionsExpiringWithin: jest.fn(async () => [
+          { id: 'INP_W1', assetId: ASSET_ID, organizationId: DEH1, validTo: new Date() },
+        ]),
+        claimLapsedPolicies: jest.fn(async () => [lapsedPolicy('INS_W2')]),
+      });
+      const repository = h.service['repository'] as unknown as Record<string, jest.Mock>;
+
+      const result = await h.service.runExpirySweep({ shouldStop: () => stopping });
+
+      expect(result).toEqual({ warned: 0, expired: 0, held: 0 });
+      expect(repository.transaction).not.toHaveBeenCalled();
+      expect(repository.claimLapsedPolicies).not.toHaveBeenCalled();
+      expect(h.enqueued).toEqual([]);
+    });
+
     it('works through a backlog in batches until one comes back short', async () => {
       const full = Array.from({ length: 200 }, (_, i) => lapsedPolicy(`INS_F${i}`));
       const claim = jest

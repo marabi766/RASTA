@@ -3,6 +3,7 @@ import {
   type MiddlewareConsumer,
   type NestModule,
   type OnApplicationShutdown,
+  type OnModuleDestroy,
   type OnModuleInit,
 } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
@@ -300,9 +301,11 @@ const CONSUMED_TOPICS = [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],
 })
-export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdown {
+export class AppModule implements NestModule, OnModuleInit, OnModuleDestroy, OnApplicationShutdown {
   private gaugeTimer?: NodeJS.Timeout;
   private sweepTimer?: NodeJS.Timeout;
+  /** Set when the close begins; the sweep starts no transaction after it. */
+  private sweepStopped = false;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -354,7 +357,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     // scheduled work (ADR-013), this moves there and the method stays.
     this.sweepTimer = setInterval(
       () => {
-        void this.insurance.runExpirySweep().catch(() => {
+        void this.insurance.runExpirySweep({ shouldStop: () => this.sweepStopped }).catch(() => {
           // Already logged inside; a failed sweep retries on the next tick.
         });
       },
@@ -363,10 +366,20 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     this.sweepTimer.unref?.();
   }
 
+  /**
+   * The sweep stops when the close begins, not after the relay: a sweep left
+   * running past `relay.stop()` enqueued events no relay of this process would
+   * publish. A transaction already open commits whole; nothing new starts.
+   */
+  onModuleDestroy(): void {
+    this.sweepStopped = true;
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+    this.sweepTimer = undefined;
+  }
+
   async onApplicationShutdown(): Promise<void> {
     // Let an in-flight batch finish so it is not republished on restart.
     await this.relay.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
-    if (this.sweepTimer) clearInterval(this.sweepTimer);
   }
 }
