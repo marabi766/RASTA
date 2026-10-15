@@ -43,7 +43,7 @@ describe('the committed OpenAPI document', () => {
     expect(readFileSync(committedPath, 'utf8')).toBe(generated);
   });
 
-  it('publishes the reads and commands of CON-003, its amendments and milestones and the approval-policy routes, each closed, and no route that creates a contract', () => {
+  it('publishes the reads and commands of CON-003, its amendments, milestones and statements and the approval-policy routes, each closed, and no route that creates a contract', () => {
     const document = buildContractOpenApiDocument(app);
     const operations = Object.entries(document.paths ?? {}).flatMap(([path, item]) =>
       Object.entries(
@@ -62,6 +62,8 @@ describe('the committed OpenAPI document', () => {
       'GET /v1/contracts/{id}/amendments/{amendmentId}',
       'GET /v1/contracts/{id}/milestones',
       'GET /v1/contracts/{id}/milestones/{milestoneId}',
+      'GET /v1/contracts/{id}/statements',
+      'GET /v1/contracts/{id}/statements/{statementId}',
       'PATCH /v1/contracts/{id}/milestones/{milestoneId}',
       'POST /v1/contract-approval-policies',
       'POST /v1/contract-approval-policies/{id}/approve',
@@ -73,14 +75,18 @@ describe('the committed OpenAPI document', () => {
       'POST /v1/contracts/{id}/cancel',
       'POST /v1/contracts/{id}/milestones',
       'POST /v1/contracts/{id}/sign',
+      'POST /v1/contracts/{id}/statements',
+      'POST /v1/contracts/{id}/statements/{statementId}/submit',
     ]);
     for (const { key, operation } of operations) {
       expect(operation.security).toEqual([{ bearer: [] }]);
-      // The routes that create (a policy, an amendment, a milestone) answer 201; every other 200.
+      // The routes that create (a policy, an amendment, a milestone, a statement) answer 201;
+      // every other 200.
       const created = [
         'POST /v1/contract-approval-policies',
         'POST /v1/contracts/{id}/amendments',
         'POST /v1/contracts/{id}/milestones',
+        'POST /v1/contracts/{id}/statements',
       ].includes(key);
       expect(operation.responses['200'] !== undefined).toBe(!created);
       expect(operation.responses['201'] !== undefined).toBe(created);

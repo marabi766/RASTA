@@ -34,7 +34,7 @@ const cancelled = {
 };
 
 describe('the contract events', () => {
-  it('are the lifecycle’s four, the approval policy’s seven, the authority review’s two and amendments’ and milestones’ seven, each with a schema and an aggregate', () => {
+  it('are the lifecycle’s four, the approval policy’s seven, the authority review’s two, amendments’ and milestones’ seven and statements’ two, each with a schema and an aggregate', () => {
     const names = [
       'CONTRACT_DRAFTED',
       'CONTRACT_SIGNATURE_RECORDED',
@@ -56,6 +56,8 @@ describe('the contract events', () => {
       'CONTRACT_MILESTONE_PLANNED',
       'CONTRACT_MILESTONE_CHANGED',
       'CONTRACT_AUTHORITY_REFUSED',
+      'STATEMENT_DRAFTED',
+      'STATEMENT_SUBMITTED',
     ];
     expect(Object.keys(CONTRACT_EVENTS)).toEqual(names);
     expect(Object.keys(CONTRACT_EVENT_SCHEMAS)).toEqual(names);
@@ -617,6 +619,65 @@ describe('CONTRACT_DRAFTED', () => {
       validateContractPayload('CONTRACT_DRAFTED', {
         ...drafted,
         draftedAt: '2026-10-05T13:30:00+03:30',
+      }),
+    ).toThrow();
+  });
+});
+
+describe('the statement events (CON-003 PR 4)', () => {
+  const statementDrafted = {
+    contractId: 'CTR_1',
+    statementId: 'STM_1',
+    statementNumber: 1,
+    organizationId: 'ORG_OWNER',
+    contractorOrganizationId: 'ORG_WINNER',
+    draftedBy: 'USR_1',
+    draftedAt: '2026-10-15T10:00:00.000Z',
+  };
+  const { draftedBy: _by, draftedAt: _at, ...common } = statementDrafted;
+  const statementSubmitted = {
+    ...common,
+    submittedBy: 'USR_1',
+    submittedAt: '2026-10-15T11:00:00.000Z',
+  };
+
+  it('accept the payloads as published, keyed by the contract the statement belongs to', () => {
+    expect(validateContractPayload('STATEMENT_DRAFTED', statementDrafted)).toEqual(
+      statementDrafted,
+    );
+    expect(validateContractPayload('STATEMENT_SUBMITTED', statementSubmitted)).toEqual(
+      statementSubmitted,
+    );
+    expect(resolvePartitionKey('STATEMENT_SUBMITTED', statementSubmitted).key).toBe('CTR_1');
+  });
+
+  it.each([
+    'grossAmount',
+    'grossMinor',
+    'netMinor',
+    'deductionsMinor',
+    'deductions',
+    'lines',
+    'description',
+  ])('refuse %s: identifiers and instants only, no amount (Q-97 (2)) and no text', (field) => {
+    for (const [name, payload] of [
+      ['STATEMENT_DRAFTED', statementDrafted],
+      ['STATEMENT_SUBMITTED', statementSubmitted],
+    ] as const) {
+      expect(() => validateContractPayload(name, { ...payload, [field]: '1' })).toThrow(
+        /does not match its published contract/,
+      );
+    }
+  });
+
+  it('refuse a statement number below 1 and an instant with an offset', () => {
+    expect(() =>
+      validateContractPayload('STATEMENT_DRAFTED', { ...statementDrafted, statementNumber: 0 }),
+    ).toThrow();
+    expect(() =>
+      validateContractPayload('STATEMENT_SUBMITTED', {
+        ...statementSubmitted,
+        submittedAt: '2026-10-15T14:30:00+03:30',
       }),
     ).toThrow();
   });

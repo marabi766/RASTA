@@ -42,6 +42,8 @@ export const CONTRACT_EVENTS = {
   CONTRACT_MILESTONE_PLANNED: 'CONTRACT_MILESTONE_PLANNED',
   CONTRACT_MILESTONE_CHANGED: 'CONTRACT_MILESTONE_CHANGED',
   CONTRACT_AUTHORITY_REFUSED: 'CONTRACT_AUTHORITY_REFUSED',
+  STATEMENT_DRAFTED: 'STATEMENT_DRAFTED',
+  STATEMENT_SUBMITTED: 'STATEMENT_SUBMITTED',
 } as const;
 
 export type ContractEventName = keyof typeof CONTRACT_EVENTS;
@@ -503,6 +505,42 @@ export const contractAuthorityRefusedPayload = z
   })
   .strict();
 
+/**
+ * The contractor drafted a statement of a signed contract (CON-003 PR 4, ADR-068 § 5).
+ * Identifiers, its number and instants only: **no amount** — not the gross, not a deduction, not
+ * the net (Q-97 (2): a consumer that needs one reads the API) — and no line text.
+ */
+export const statementDraftedPayload = z
+  .object({
+    contractId: id,
+    statementId: id,
+    statementNumber: positive,
+    /** The employer — the tender's owner and the tenant of the contract. */
+    organizationId: id,
+    contractorOrganizationId: id,
+    draftedBy: id,
+    draftedAt: instant,
+  })
+  .strict();
+
+/**
+ * The contractor submitted a draft statement for approval (`DRAFT → SUBMITTED`). The catalogue's
+ * `STATEMENT_SUBMITTED`, without its `grossAmount` (Q-97 (2): ids only, the amount is read through
+ * the API). The submitter is named by user id; the identity pair the approvals compare stays in this
+ * service's database.
+ */
+export const statementSubmittedPayload = z
+  .object({
+    contractId: id,
+    statementId: id,
+    statementNumber: positive,
+    organizationId: id,
+    contractorOrganizationId: id,
+    submittedBy: id,
+    submittedAt: instant,
+  })
+  .strict();
+
 export const CONTRACT_EVENT_SCHEMAS = {
   CONTRACT_DRAFTED: contractDraftedPayload,
   CONTRACT_SIGNATURE_RECORDED: contractSignatureRecordedPayload,
@@ -524,6 +562,8 @@ export const CONTRACT_EVENT_SCHEMAS = {
   CONTRACT_MILESTONE_PLANNED: contractMilestonePlannedPayload,
   CONTRACT_MILESTONE_CHANGED: contractMilestoneChangedPayload,
   CONTRACT_AUTHORITY_REFUSED: contractAuthorityRefusedPayload,
+  STATEMENT_DRAFTED: statementDraftedPayload,
+  STATEMENT_SUBMITTED: statementSubmittedPayload,
 } as const satisfies Record<ContractEventName, z.ZodTypeAny>;
 
 export type ContractEventPayload<N extends ContractEventName> = z.infer<
