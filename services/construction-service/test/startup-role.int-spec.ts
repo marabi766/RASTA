@@ -1,6 +1,6 @@
 import { migratorCredentialsIn, withUtcSession } from '@rasta/config';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { databaseUrl } from './helpers';
+import { databaseUrl, testEnv } from './helpers';
 
 /**
  * construction-service refuses to start as anything but its runtime role (D-045,
@@ -26,7 +26,7 @@ function migratorUrl(): string {
 describe('construction-service starts only as its runtime role (D-045)', () => {
   const opened: PrismaService[] = [];
   const open = (url: string) => {
-    const prisma = new PrismaService(url);
+    const prisma = new PrismaService(url, testEnv().CONSTRUCTION_TRANSACTION_TIMEOUT_MS);
     opened.push(prisma);
     return prisma;
   };

@@ -2937,6 +2937,105 @@ describe('AssetSyncConsumer', () => {
         expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')!.attempts).toBe(0);
       });
 
+      /**
+       * Codex r1 on #270: a sweep run waiting on asset-service when the shutdown
+       * began outlived the stop, then decided its row and went on to the next
+       * while the relay was already stopped.
+       */
+      describe('the stop', () => {
+        const EVENT = '01JBQ8Z4K7M2N5P8R1T3V6X9Y2';
+        /** The timer's run, as the interval starts it; private, reached as the timer does. */
+        const runSweep = (consumer: AssetSyncConsumer) =>
+          (consumer as unknown as { runSweep(): void }).runSweep();
+        const sweepRun = (consumer: AssetSyncConsumer) =>
+          (consumer as unknown as { sweepRun?: Promise<void> }).sweepRun;
+        const until = async (condition: () => boolean): Promise<void> => {
+          const deadline = Date.now() + 2000;
+          while (!condition()) {
+            if (Date.now() > deadline) throw new Error('condition not reached in time');
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        };
+
+        /** A parked row the sweep would apply, and asset-service answering only on `answer()`. */
+        async function waitingOnTheSource() {
+          const setup = parkedSetup(B, 4);
+          await setup.consumer.handle(recordedPolicy());
+          setup.move(B, 4);
+          // A second due row, listed behind the first.
+          jest.mocked(setup.repository.listDueParkedInsurance).mockResolvedValueOnce([
+            { eventId: EVENT, assetId: 'AST-SEED-0001' },
+            { eventId: '01JBQ8Z4K7M2N5P8R1T3V6X9Z3', assetId: 'AST-SEED-0002' },
+          ] as never);
+          let answer!: () => void;
+          const answered = new Promise<void>((resolve) => (answer = resolve));
+          let asking = false;
+          const verify = setup.policies.verify.bind(setup.policies);
+          jest.spyOn(setup.policies, 'verify').mockImplementationOnce(async (...args) => {
+            asking = true;
+            await answered;
+            return verify(...args);
+          });
+          const transactions = jest.mocked(setup.repository.transaction).mock.calls.length;
+          runSweep(setup.consumer);
+          await until(() => asking);
+          return { ...setup, answer, transactions };
+        }
+
+        it('waits for the run in flight; an answer that arrives once stopping is discarded, and no further row starts', async () => {
+          const { consumer, recorded, repository, answer, transactions } =
+            await waitingOnTheSource();
+
+          let stopped = false;
+          const stopping = consumer.stop({ deadlineAt: Date.now() + 5000 }).then(() => {
+            stopped = true;
+          });
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          expect(stopped).toBe(false);
+
+          answer();
+          await stopping;
+
+          // Only the first row's read: no decision, no second row.
+          expect(jest.mocked(repository.transaction).mock.calls.length).toBe(transactions + 1);
+          expect(recorded.parked.get(EVENT)).toMatchObject({ attempts: 0, due: true });
+          expect(recorded.upserts.some((row) => row.sourceEvent === 'INSURANCE_RECORDED')).toBe(
+            false,
+          );
+          expect(sweepRun(consumer)).toBeUndefined();
+        });
+
+        it('returns by the deadline; the answer that comes after writes nothing', async () => {
+          const { consumer, recorded, repository, answer, transactions } =
+            await waitingOnTheSource();
+
+          const startedAt = Date.now();
+          await consumer.stop({ deadlineAt: Date.now() + 200 });
+          expect(Date.now() - startedAt).toBeLessThan(1000);
+          expect(sweepRun(consumer)).toBeDefined();
+
+          answer();
+          await until(() => sweepRun(consumer) === undefined);
+
+          expect(jest.mocked(repository.transaction).mock.calls.length).toBe(transactions + 1);
+          expect(recorded.parked.get(EVENT)).toMatchObject({ attempts: 0, due: true });
+          expect(recorded.upserts.some((row) => row.sourceEvent === 'INSURANCE_RECORDED')).toBe(
+            false,
+          );
+        });
+
+        it('starts no run once stopping, and a later stop joins the first', async () => {
+          const { consumer, repository } = parkedSetup(B, 4);
+          const first = consumer.stop({ deadlineAt: Date.now() + 1000 });
+          expect(consumer.stop()).toBe(first);
+          await first;
+
+          runSweep(consumer);
+          expect(sweepRun(consumer)).toBeUndefined();
+          expect(repository.listDueParkedInsurance).not.toHaveBeenCalled();
+        });
+      });
+
       it('r9, r10: asset-service is never asked inside a transaction, live or parked', async () => {
         const { consumer, recorded, move } = parkedSetup(B, 4);
         await consumer.handle(recordedPolicy());

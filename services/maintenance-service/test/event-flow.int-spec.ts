@@ -153,7 +153,7 @@ describeWithKafka('maintenance event flow over Kafka', () => {
   }, 120_000);
 
   afterAll(async () => {
-    await usageConsumer?.onModuleDestroy();
+    await usageConsumer?.stop();
     await fleetProducer?.disconnect();
     await consumer?.disconnect();
     await publisher?.onModuleDestroy();
