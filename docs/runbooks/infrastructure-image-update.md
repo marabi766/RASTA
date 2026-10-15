@@ -68,7 +68,7 @@ pnpm check:dockerfile-pins
 docker compose --profile all --profile observability --profile search --profile tools config -q
 ```
 
-۳. PR را باز کنید. Jobهایی که این Containerها را بالا می‌آورند — `integration`، `migration-reversibility`، `e2e`،
+۳. PR را باز کنید. Jobهایی که این Containerها را بالا می‌آورند — چهار Job ‏`integration-*`، `migration-reversibility`، `e2e`،
 `web-browser`، `broker-authorisation`، `prometheus-rules`، `security`، `clamav-signatures` — تصویر را با همان Digest Pull
 می‌کنند؛ Digest اشتباه همان‌جا با `manifest unknown` شکست می‌خورد.
 

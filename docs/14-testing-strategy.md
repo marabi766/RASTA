@@ -949,6 +949,16 @@ pnpm verify                     # دروازه کامل کیفیت
 **اجرای محلی Suite یکپارچگی یک سرویس (از #131، Broker با SASL_SSL).** Suiteها `.env` را خودشان نمی‌خوانند؛ باید در Shell
 Export شود. CI همین متغیرها را صریح در `env:` هر گام می‌دهد (`.github/workflows/ci.yml`، گام «Integration tests»).
 
+**چیدمان CI (از 2026-10-14).** کار یکپارچگی که به ۳۳–۳۴ دقیقه رسیده بود، چهار Job موازی است و هرکدام PostgreSQL،
+Broker و — فقط جایی که Suiteهایش می‌خوانند — MinIO، ClamAV و Redis خودش را بالا می‌آورد: `integration-suites` (گام
+«Integration tests» و سپس نگهبان‌های فقط-PostgreSQL)، `integration-security` (استقلال تست F-25، جداسازی Tenant و
+مجوز، Retry replay)، `integration-coverage-critical` (دروازه‌های پوشش construction، contract و inventory) و
+`integration-coverage` (هفت دروازهٔ پوشش دیگر). همان دستورها، همان `env:` و همان مهلت هر گام. Job ‏`integration` با
+نام «Integration and security tests» — همان Check الزامی Branch protection و Merge queue — فقط تجمیع می‌کند: با
+`always()` اجرا می‌شود و جز وقتی هر چهار `success` باشند شکست می‌خورد (شکست، لغو یا Skip). ‏`pnpm
+test:ci-integration-split` (در Job کیفیت) رد می‌کند اگر Job ‏`integration-*`ی بیرون از آن بماند، گامی از کار قدیم در هیچ
+Jobی یا در دو Job اجرا شود، یا گامی بدون زیرساختی که می‌خواند اجرا شود.
+
 ```bash
 cp .env.example .env            # یک بار؛ پس از هر تغییر .env.example دوباره مقایسه کن
 cp .env.migrator.example .env.migrator   # اعتبار مالک پایگاه داده (D-045)؛ هیچ سرویسی آن را بار نمی‌کند
