@@ -87,6 +87,15 @@ describe('createLogger — structured errors are scrubbed and capped', () => {
     expect(raw()).not.toContain('deepest');
   });
 
+  it('continues the message with the cause’s, as pino’s own serializer does', () => {
+    const { logger, last } = capture();
+
+    logger.error({ err: new Error('outer', { cause: new Error('inner Bearer LEAK') }) }, 'failed');
+
+    expect(last().err.message).toBe(`outer: inner Bearer ${REDACTED}`);
+    expect(last().err.cause.message).toBe(`inner Bearer ${REDACTED}`);
+  });
+
   it('scrubs the members of an AggregateError, and bounds them', () => {
     const { logger, raw, last } = capture();
     const members = Array.from(

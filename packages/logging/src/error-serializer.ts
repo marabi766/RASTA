@@ -103,7 +103,16 @@ function serialize(value: unknown, depth: number): unknown {
 
   if (depth < MAX_ERROR_CAUSE_DEPTH) {
     const cause = read(value, 'cause');
-    if (cause !== undefined && cause !== null) out.cause = serialize(cause, depth + 1);
+    if (cause !== undefined && cause !== null) {
+      const serialized = serialize(cause, depth + 1);
+      out.cause = serialized;
+      // Like pino's own serializer (which #261's span tests rely on), the
+      // message continues with the cause's: "outer: inner".
+      const causeMessage = (serialized as SerializedError | null)?.message;
+      if (typeof out.message === 'string' && typeof causeMessage === 'string') {
+        out.message = `${out.message}: ${causeMessage}`;
+      }
+    }
 
     const members = read(value, 'errors');
     if (Array.isArray(members)) {
