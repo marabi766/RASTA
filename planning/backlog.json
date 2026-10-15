@@ -534,7 +534,7 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 21,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Stock movement and reservation are concurrency safe",
         "Shipment state is visible without sharing another service database"
@@ -561,6 +561,11 @@
           "kind": "TEST",
           "ref": "pnpm --filter @rasta/inventory-service run test:coverage",
           "note": "services/inventory-service/test/ also has idempotency.int-spec.ts (PR #264 fixed a pool-exhaustion race in this suite without changing production code, confirming the underlying concurrency behavior was already correct) and shipment-constraints.int-spec.ts."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "https://github.com/marabi766/RASTA/pull/299",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-15, in the project-manager chat, on the criterion-by-criterion evidence recorded above. Independently verified by the Codex review of PR #299, round 1 (PR-299-r1), criterion by criterion: criterion 1 — stock-item locking in a consistent lock order, database constraints and concurrent reservation/receipt tests; criterion 2 — shipment API, tracking and transactional outbox events, with owner, consignee and third-tenant tests. No limitation disclosed."
         }
       ]
     },
@@ -786,7 +791,7 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 21,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Projects, needs and progress reports follow explicit lifecycles",
         "Approval authorities come from configuration and never create a new legal authority"
@@ -813,6 +818,11 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/152",
           "note": "Test-only fix making the need-submit-vs-cancel race deterministic by asserting on stream order instead of wall-clock createdAt — confirms the lifecycle logic itself was already correct. Merge commit ea75756, merged 2026-09-30."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "https://github.com/marabi766/RASTA/pull/299",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-15, in the project-manager chat, on the criterion-by-criterion evidence recorded above. Independently verified by the Codex review of PR #299, round 1 (PR-299-r1), criterion by criterion: criterion 1 — explicit project, need and progress lifecycles with locking/version checks and integration tests; criterion 2 — configured approval steps, the platform approval gate, four-eyes checks and organization-move reconciliation, with no newly invented legal authority. No limitation disclosed."
         }
       ]
     },
@@ -823,7 +833,7 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 21,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Tender deadlines survive restarts and late bids are rejected",
         "Bid confidentiality and configurable evaluation are independently testable and auditable"
@@ -890,6 +900,11 @@
           "kind": "TEST",
           "ref": "services/construction-service/test/tender-open.int-spec.ts and bid-opening leak checks (PR #189, #212, #272)",
           "note": "Leak-specific test hardening confirms the confidentiality checks are precise, not evidence of an open defect: distinctive price markers (#189), value comparison rather than substring (#212), a leak marker a random id cannot contain (#272)."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "https://github.com/marabi766/RASTA/pull/299",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-15, in the project-manager chat, on the criterion-by-criterion evidence recorded above. Independently verified by the Codex review of PR #299, round 1 (PR-299-r1), criterion by criterion: criterion 1 — persisted deadlines, database-clock checks, the late-bid trigger and crash/restart sweeper tests; criterion 2, within ADR-066's boundary — sealed bids, independently held audit receipts, configurable evaluation and access auditing. Disclosed limitation accepted with it (docs/23 D-043): confidentiality before opening is enforced by the application, not by a cryptographic time lock, so an operator holding both the KEK and database access can decrypt bids early. This remains a production limitation."
         }
       ]
     },
@@ -994,7 +1009,7 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 21,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Core operational workflows are usable at documented permissions",
         "Desktop and supported mobile viewports pass accessibility and tenant-isolation E2E"
@@ -1121,6 +1136,11 @@
           "kind": "DOCUMENT",
           "ref": "docs/16-ui-architecture.md#۱۶۶-نقشه-صفحات",
           "note": "Checked against the documented page map on 2026-10-15: /login, /, /organizations, /assets, /assets/[id], /assets/[id]/timeline, /drivers, /usage, /maintenance and /maintenance/[id] all exist in apps/web/src/app, each with its own actions.ts/actions.spec.ts pair. Both acceptance criteria for EXP-002's domains (identity, organization, asset, fleet, maintenance) are now met; this is a candidate for the product owner's acceptance review."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "https://github.com/marabi766/RASTA/pull/299",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-15, in the project-manager chat, on the criterion-by-criterion evidence recorded above. Independently verified by the Codex review of PR #299, round 1 (PR-299-r1), criterion by criterion: criterion 1, for the documented MVP substitution — the identity, organization, asset, fleet and maintenance screens and operational forms exist; criterion 2 — the browser axe and tenant-isolation suites run on desktop and Pixel 5, with the live-stack flag enabled in CI. Disclosed limitation accepted with it (ADR-029): WORKSHOP self-service is deferred, no workshop portal is built, and fleet managers record workshop work."
         }
       ]
     },
@@ -1362,7 +1382,7 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 8,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Every service authenticates to Kafka with its own SASL/SCRAM-SHA-512 principal over TLS, and allow.everyone.if.no.acl.found is false",
         "WRITE on each topic is granted only to the principals ADR-061's TOPIC_PRODUCERS names for it, and READ only to declared consumer groups",
@@ -1393,6 +1413,11 @@
           "kind": "DOCUMENT",
           "ref": "docs/runbooks/kafka-credential-rotation.md",
           "note": "A substantive rotation runbook exists (210 lines), cross-referenced from docs/23-risks-and-tradeoffs.md. connection.ts documents that staging, production and a forgotten environment variable all fail closed, satisfying the sixth criterion. All six RUN-006 acceptance criteria are checked and MET as of 2026-10-15; this is a candidate for the product owner's acceptance review. One residual noted honestly in docs/23 line ~924 (an accepted CI-only credential gap, reviewed in PR #131 round 2) does not bear on the stated criteria."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "https://github.com/marabi766/RASTA/pull/299",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-15, in the project-manager chat, on the criterion-by-criterion evidence recorded above. Independently verified by the Codex review of PR #299, round 1 (PR-299-r1), criterion by criterion: all six criteria — per-service SCRAM/TLS with a default-deny broker; producer and subscription ACLs; generated ACL drift checks, group namespaces and retry/DLQ ownership; broker rejection tests with authenticated CI wiring; the authenticated development compose/bootstrap; production startup failing closed, plus the rotation runbook — each with matching implementation and test paths. No limitation disclosed."
         }
       ]
     },
@@ -2270,6 +2295,46 @@
       "reason": "RUN-006 moves from READY to IN_PROGRESS. PR #128 and #131 deliver the authenticated, per-topic-ACL Kafka broker in both CI and the development compose, with drift checking, group-prefix enforcement, dead-letter/retry ownership restricted to ops-replay, and a documented credential-rotation runbook; PR #142 proves the broker live by demonstrating a refused unauthorized write. All six acceptance criteria now have real, tested evidence; the item still earns zero points pending product-owner review.",
       "recordedBy": "Claude Sonnet 5",
       "approvalRef": "Project manager task 001 (chore/backlog-evidence-sync), evidence-based backlog synchronization, 2026-10-15",
+      "recordIds": ["RUN-006"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "ITEM_ACCEPTED",
+      "reason": "COM-006 (21 SP) moves from IN_PROGRESS to ACCEPTED. Both acceptance criteria are met on the recorded evidence (PR #246, PR #257, CI 38571985411) and were independently verified in the Codex review of PR #299 round 1. Its dependency COM-005 remains IN_PROGRESS; the Product Owner accepted COM-006 on its own criteria.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-15, relayed to PR #299 by the project manager at 19:55 UTC",
+      "recordIds": ["COM-006"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "ITEM_ACCEPTED",
+      "reason": "CON-001 (21 SP) moves from IN_PROGRESS to ACCEPTED. Both acceptance criteria are met on the recorded evidence (PR #119, #122, #148) and were independently verified in the Codex review of PR #299 round 1.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-15, relayed to PR #299 by the project manager at 19:55 UTC",
+      "recordIds": ["CON-001"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "ITEM_ACCEPTED",
+      "reason": "CON-002 (21 SP) moves from IN_PROGRESS to ACCEPTED. Both acceptance criteria are met on the recorded evidence (PR #156-#227, #250, #255, #271, #272) and were independently verified in the Codex review of PR #299 round 1. Accepted with the disclosed limitation D-043: an operator holding both the KEK and database access can decrypt bids before opening, so cryptographic exclusion remains a production limitation.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-15, relayed to PR #299 by the project manager at 19:55 UTC",
+      "recordIds": ["CON-002"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "ITEM_ACCEPTED",
+      "reason": "EXP-002 (21 SP) moves from IN_PROGRESS to ACCEPTED. Both acceptance criteria are met on the recorded evidence (PR #155-#225, the desktop and Pixel 5 accessibility and tenant-isolation suites) and were independently verified in the Codex review of PR #299 round 1. Accepted with the disclosed limitation of ADR-029: WORKSHOP self-service is deferred, and fleet managers record workshop work.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-15, relayed to PR #299 by the project manager at 19:55 UTC",
+      "recordIds": ["EXP-002"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "ITEM_ACCEPTED",
+      "reason": "RUN-006 (8 SP) moves from IN_PROGRESS to ACCEPTED. All six acceptance criteria are met on the recorded evidence (PR #128, #131, #142) and were independently verified in the Codex review of PR #299 round 1.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-15, relayed to PR #299 by the project manager at 19:55 UTC",
       "recordIds": ["RUN-006"]
     }
   ]

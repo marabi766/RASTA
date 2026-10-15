@@ -17,6 +17,7 @@ const VALID_CHANGE_TYPES = new Set([
   'STATUS_CORRECTED',
   'BASELINE_APPROVED',
   'ITEM_DECOMPOSED',
+  'ITEM_ACCEPTED',
 ]);
 
 function isNonEmptyString(value) {
@@ -341,6 +342,21 @@ export function validateBacklog(backlog) {
         entry.recordIds.some((id) => !recordsById.has(id))
       ) {
         errors.push(`${label} requires existing parent and story recordIds`);
+      }
+    }
+    if (entry.type === 'ITEM_ACCEPTED') {
+      // Acceptance is the product owner's decision (docs/25 § 25.5), so the
+      // entry names who decided, and it may only name records that are in fact
+      // ACCEPTED: a logged acceptance the status contradicts is a false record.
+      if (!isNonEmptyString(entry.approvalRef)) {
+        errors.push(`${label} requires an approvalRef`);
+      }
+      if (
+        !Array.isArray(entry.recordIds) ||
+        entry.recordIds.length === 0 ||
+        entry.recordIds.some((id) => recordsById.get(id)?.status !== 'ACCEPTED')
+      ) {
+        errors.push(`${label} requires recordIds that exist and are ACCEPTED`);
       }
     }
   }

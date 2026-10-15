@@ -25,11 +25,53 @@ test('the repository baseline is valid and preserves the approved horizons', () 
   // is accepted, so they are updated in the same commit as the acceptance —
   // that coupling is the point: a status change nobody meant to make fails here.
   assert.equal(progress.mvp.committed, 563);
-  assert.equal(progress.mvp.earned, 217);
-  assert.equal(progress.mvp.percent, 38.5);
+  assert.equal(progress.mvp.earned, 309);
+  assert.equal(progress.mvp.percent, 54.9);
   assert.equal(progress.fullProduct.committed, 786);
-  assert.equal(progress.fullProduct.earned, 217);
-  assert.equal(progress.fullProduct.percent, 27.6);
+  assert.equal(progress.fullProduct.earned, 309);
+  assert.equal(progress.fullProduct.percent, 39.3);
+});
+
+test('a logged acceptance names who decided and only records that are ACCEPTED', () => {
+  const logged = baseline.changeLog.filter((entry) => entry.type === 'ITEM_ACCEPTED');
+  assert.ok(logged.length > 0);
+  assert.deepEqual(validateBacklog(baseline), []);
+
+  const unapproved = copy();
+  unapproved.changeLog.find((entry) => entry.type === 'ITEM_ACCEPTED').approvalRef = null;
+  assert.ok(
+    validateBacklog(unapproved).some(
+      (error) => error.includes("'ITEM_ACCEPTED'") && error.includes('requires an approvalRef'),
+    ),
+  );
+  assert.ok(
+    validateBacklogSchema(unapproved, schema).some((error) => error.includes('approvalRef')),
+  );
+
+  // The log may not claim an acceptance the status contradicts, in either order
+  // of mistake: a record withdrawn from ACCEPTED, or one never accepted at all.
+  const withdrawn = copy();
+  const id = logged[0].recordIds[0];
+  withdrawn.items.find((item) => item.id === id).status = 'IN_PROGRESS';
+  const notAccepted = copy();
+  notAccepted.changeLog.find((entry) => entry.type === 'ITEM_ACCEPTED').recordIds = [
+    notAccepted.items.find((item) => item.status === 'IN_PROGRESS').id,
+  ];
+  for (const backlog of [withdrawn, notAccepted]) {
+    assert.ok(
+      validateBacklog(backlog).some((error) =>
+        error.includes('requires recordIds that exist and are ACCEPTED'),
+      ),
+    );
+  }
+
+  const missingIds = copy();
+  delete missingIds.changeLog.find((entry) => entry.type === 'ITEM_ACCEPTED').recordIds;
+  assert.ok(
+    validateBacklogSchema(missingIds, schema).some((error) =>
+      error.includes("must have required property 'recordIds'"),
+    ),
+  );
 });
 
 test('the repository baseline satisfies its declared JSON Schema', () => {

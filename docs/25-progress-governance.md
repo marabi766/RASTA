@@ -113,6 +113,8 @@ PROPOSED → READY → IN_PROGRESS → ACCEPTED
 - برای دامنه حساس، تست‌های مالی/امنیتی/E2E لازم سبزند؛
 - نتیجه توسط مالک محصول یا نماینده صریحاً مجاز او پذیرفته شده است.
 
+پذیرش در Change Log با `ITEM_ACCEPTED` ثبت می‌شود: `approvalRef` می‌گوید چه کسی، کی و کجا پذیرفت و `recordIds` آیتم‌های پذیرفته‌شده را نام می‌برد. Validator و Schema ورودی بدون `approvalRef` یا `recordIds` را رد می‌کنند و Validator ورودی‌ای را که آیتمی غیر `ACCEPTED` را نام ببرد نیز رد می‌کند. پذیرش‌های پیش از ۲۰۲۶-۱۰-۱۵ این ورودی را ندارند.
+
 Evidence معتبر شامل Commit، PR، CI، Test، Live Runtime یا سند ثبت‌کننده Evidence است. صرف نوشتن عبارت «Done» یا `READY_FOR_NEXT_PHASE` Evidence نیست.
 
 ## ۲۵٫۶ برآورد و تغییر Scope
