@@ -13,6 +13,7 @@ import {
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
   OutboxRelay,
+  OutboxShutdown,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -20,6 +21,7 @@ import {
   type AuthGuardOptions,
   kafkaConnection,
 } from '@rasta/nest-common';
+import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
   outboxAckFencedTotal,
@@ -156,6 +158,15 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
     },
 
     {
+      // D-052: the relay and the Temporal worker stop together in the destroy
+      // phase, by one deadline inside SHUTDOWN_TIMEOUT_MS.
+      provide: OutboxShutdown,
+      inject: [OutboxRelay, OrderSagaWorker, ENV],
+      useFactory: (relay: OutboxRelay, saga: OrderSagaWorker, env: MarketplaceEnv) =>
+        new OutboxShutdown({ relay, workers: [saga], budgetMs: outboxShutdownBudgetMs(env) }),
+    },
+
+    {
       provide: AUTH_OPTIONS,
       inject: [ENV, InternalTokenService],
       useFactory: (
@@ -185,6 +196,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
+    private readonly outboxShutdown: OutboxShutdown,
     private readonly store: PrismaOutboxStore,
     private readonly idempotency: IdempotencyStore,
   ) {}
@@ -227,6 +239,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
-    await this.relay.stop();
+    // The relay and the saga worker already stopped in OutboxShutdown's
+    // onModuleDestroy, concurrently and by one deadline; this joins that stop.
+    await this.outboxShutdown.stop();
   }
 }

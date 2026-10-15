@@ -10,6 +10,7 @@ import {
 } from '@rasta/config';
 import { isKekId, parseKekConfiguration, parseKekEntries } from '../tender/sealing/key-provider';
 import { EVIDENCE_MAX_CHAIN_LINKS } from '../tender/evidence-limits';
+import { constructionOperationBudgets } from './operation-budgets';
 import {
   CANCELLABLE_BY_LIFECYCLE,
   PROJECT_STATES,
@@ -658,15 +659,19 @@ export type CancellableStates = readonly ProjectStateName[];
  *                 database would violate A-01 quietly.
  */
 export function loadConstructionEnv(source: NodeJS.ProcessEnv = process.env): ConstructionEnv {
-  return loadEnv(constructionEnvSchema, {
-    ...source,
-    SERVICE_NAME: source.SERVICE_NAME ?? SERVICE_NAME,
-    PORT: source.PORT ?? source.PORT_CONSTRUCTION ?? DEFAULT_PORT,
-    DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_CONSTRUCTION,
-    KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? SERVICE_NAME,
-    KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
-    CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
-  });
+  return loadEnv(
+    constructionEnvSchema,
+    {
+      ...source,
+      SERVICE_NAME: source.SERVICE_NAME ?? SERVICE_NAME,
+      PORT: source.PORT ?? source.PORT_CONSTRUCTION ?? DEFAULT_PORT,
+      DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_CONSTRUCTION,
+      KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? SERVICE_NAME,
+      KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
+      CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
+    },
+    { operationBudgets: constructionOperationBudgets },
+  );
 }
 
 export function corsOrigins(env: ConstructionEnv): string[] {

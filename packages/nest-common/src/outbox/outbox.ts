@@ -1,4 +1,5 @@
 import { ulid } from 'ulid';
+import type { OperationBudget } from '@rasta/config';
 import {
   EVENT_HEADERS,
   assertSafeStreamSeq,
@@ -398,6 +399,30 @@ export function renewalIntervalMs(leaseSeconds: number): number {
 
 export function renewalDeadlineMs(leaseSeconds: number): number {
   return Math.min(renewalIntervalMs(leaseSeconds) / 2, RENEWAL_DEADLINE_CEILING_MS);
+}
+
+/**
+ * A renewal's transaction outlives its `statement_timeout` by this much, so
+ * the statement timeout is what ends a slow renewal (`renewSql`).
+ */
+export const RENEWAL_TRANSACTION_MARGIN_MS = 5_000;
+
+/**
+ * The relay's lease renewal, as an operation budget (#268 r4): its
+ * transaction's timeout, the renewal deadline plus
+ * {@link RENEWAL_TRANSACTION_MARGIN_MS}. Every service with a relay declares it.
+ */
+export function outboxRenewalOperationBudget(env: {
+  OUTBOX_CLAIM_LEASE_SECONDS: number;
+}): OperationBudget {
+  const deadlineMs = renewalDeadlineMs(env.OUTBOX_CLAIM_LEASE_SECONDS);
+  return {
+    name: 'OUTBOX_CLAIM_LEASE_SECONDS',
+    budgetMs: deadlineMs + RENEWAL_TRANSACTION_MARGIN_MS,
+    derivation:
+      `the outbox relay's lease renewal: its own statement timeout, ${deadlineMs} ms at this ` +
+      `lease, + ${RENEWAL_TRANSACTION_MARGIN_MS} ms`,
+  };
 }
 
 /**

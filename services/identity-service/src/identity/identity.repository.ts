@@ -8,7 +8,11 @@ import {
   type OutboxMessageInput,
 } from '@rasta/nest-common';
 import { assertTopicFor, resolvePartitionKey, type OutboundEventName } from './routing';
-import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
+import {
+  PrismaService,
+  type ExtendedPrismaClient,
+  type TransactionOptions,
+} from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
 import type { ListUsersQuery } from './dto';
 
@@ -34,7 +38,7 @@ export class IdentityRepository {
 
   transaction<T>(
     fn: (tx: ExtendedPrismaClient) => Promise<T>,
-    options?: { maxWait?: number; timeout?: number },
+    options?: TransactionOptions,
   ): Promise<T> {
     return this.prisma.transaction(fn, options);
   }

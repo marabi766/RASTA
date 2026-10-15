@@ -505,11 +505,31 @@ describe('organization hierarchy integrity', () => {
         service.changeStatus(organization.id, { status: 'SUSPENDED', reason: 'first' }),
       );
 
+      // Both requests must decide from SUSPENDED before either writes. Left to
+      // the scheduler, the second can start after the first commits and then
+      // correctly sees the new status — INVALID_STATE_TRANSITION, or a second
+      // success when ACTIVE committed first — which is not the race under test.
+      // A barrier on the read makes the overlap certain, not likely.
+      const gated = new OrganizationRepository(prisma);
+      const realFind = gated.findById.bind(gated);
+      let arrived = 0;
+      let release!: () => void;
+      const bothRead = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      gated.findById = async (id: string) => {
+        const current = await realFind(id);
+        if (++arrived === 2) release();
+        await bothRead;
+        return current;
+      };
+      const racing = serviceWith(8, gated);
+
       const outcomes = await Promise.allSettled([
         operator(() =>
-          service.changeStatus(organization.id, { status: 'DEACTIVATED', reason: 'close' }),
+          racing.changeStatus(organization.id, { status: 'DEACTIVATED', reason: 'close' }),
         ),
-        operator(() => service.changeStatus(organization.id, { status: 'ACTIVE', reason: 'back' })),
+        operator(() => racing.changeStatus(organization.id, { status: 'ACTIVE', reason: 'back' })),
       ]);
 
       const winners = outcomes.filter((outcome) => outcome.status === 'fulfilled');

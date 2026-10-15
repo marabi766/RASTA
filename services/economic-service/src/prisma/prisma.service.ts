@@ -1,6 +1,10 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { SERVICE_NAME } from '../config/env';
 import {
+  CONTENTION_TRANSACTION_MAX_WAIT_MS,
+  CONTENTION_TRANSACTION_TIMEOUT_MS,
+} from '../config/operation-budgets';
+import {
   createTenantGuardExtension,
   assertRuntimeRole as assertConnectedRuntimeRole,
 } from '@rasta/nest-common';
@@ -165,12 +169,14 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    * path holds row locks on two wallets while it posts a journal, and under
    * the mandated 100-way concurrency test the last writer in the queue waits
    * for the 99 before it. A transaction timing out there would look like a
-   * financial failure while being a test-harness artefact.
+   * financial failure while being a test-harness artefact. It is one of the
+   * service's operation budgets (`config/operation-budgets.ts`), so a
+   * configured statement timeout cannot cut that wait short (#268 r4).
    */
   transaction<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
     return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient), {
-      maxWait: 30_000,
-      timeout: 60_000,
+      maxWait: CONTENTION_TRANSACTION_MAX_WAIT_MS,
+      timeout: CONTENTION_TRANSACTION_TIMEOUT_MS,
     });
   }
 }

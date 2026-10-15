@@ -135,6 +135,22 @@ jobs:
         # `pnpm dev` resolves them (turbo dry run). Codex r1 on #271.
         run: pnpm run test:construction-turbo-env
 
+      - name: Database settings reach the services through turbo
+        # Every task that starts a service with a database — `dev` and the
+        # integration suites — passes every databaseEnvSchema variable (pool,
+        # statement timeout, the service's own URL), every setting its
+        # operation budgets are computed from, and construction's and the
+        # gateway's own settings; and the root `pnpm dev` resolves them (turbo
+        # dry run). Codex r1 and r4 on #268.
+        run: pnpm run test:database-turbo-env
+
+      - name: Optional database-side statement timeout for the runtime roles
+        # Behind PgBouncer the services' own statement_timeout option is
+        # dropped, so the bootstrap, the split and the rotation can set one
+        # on each runtime role — only where POSTGRES_STATEMENT_TIMEOUT_MS_<SVC>
+        # asks for it, refused when malformed, never on a migrator (#268 r4).
+        run: pnpm run test:session-statement-timeout
+
       - name: Image scope rule
         # The rule that decides which images a pull request builds and scans
         # (L7-35). A wrong rule would quietly skip a changed image.
@@ -254,6 +270,18 @@ jobs:
         # its environment, must exit naming the variable and never its value
         # (@rasta/config assertNoMigratorCredentials; Codex review of #176).
         run: pnpm run test:boot-guard
+
+      - name: Service dev scripts load TypeScript as CommonJS, telemetry first
+        # `pnpm dev` ran the services through swc-node's ES-module loader,
+        # under which main.ts could not import AppModule from its CommonJS
+        # sibling: every service refused at link time. Runs each service's
+        # own dev loader flags on a two-file entry; services with a Prisma
+        # schema generate the client first. And swc hoists main.ts's imports
+        # above its initTelemetry(), so dev preloads dev/telemetry.ts: the
+        # real main.ts, stopped as AppModule is about to load, must find the
+        # SDK started (Codex on #281). After Build: main.ts loads the built
+        # packages and the generated Prisma client.
+        run: pnpm run test:dev-loader
 
       - name: Services trace Kafka from the built entry point
         # Each built dist/main.js, loaded up to its app.module, must have
@@ -1354,6 +1382,21 @@ jobs:
         # demo seeds must each open their sessions in UTC regardless, and the
         # runner's copy of the URL function must agree with the services'.
         run: pnpm run test:db-session-utc
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+
+      - name: The runtime pool and statement timeout come from configuration
+        # DATABASE_POOL_SIZE and DATABASE_POOL_TIMEOUT_SECONDS reach Prisma
+        # only through the URL every service builds (@rasta/config): unset,
+        # a burst still opens Prisma's default pool; set, a client opened on
+        # that URL keeps to the size and fails with P2024 after the wait. And
+        # every service's clients are opened on that URL and no other.
+        # DATABASE_STATEMENT_TIMEOUT_MS is opt-in: unset, the session keeps
+        # the database's own; set, a longer statement is cancelled with 57014.
+        run: pnpm run test:db-pool-config
         env:
           PGHOST: localhost
           PGPORT: '5432'
