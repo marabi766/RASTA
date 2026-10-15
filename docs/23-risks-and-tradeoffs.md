@@ -1495,6 +1495,31 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
       inventory و Consumerهای Kafka سه سرویس بالا هنوز بیرون از Coordinatorاند.
   - **پیامد:** رله حالا پیش از بسته شدن سرور HTTP می‌ایستد، نه پس از آن. ردیفی که درخواستی در همین فاصله بنویسد در
     شروع بعدی (یا Replica دیگر) منتشر می‌شود — همان چیزی که پیش‌تر برای ردیف‌های لحظهٔ آخر هم بود.
+  - **بستن Publisherهای Kafka در همان مهلت (Codex r2 روی #276، F2؛ فاز ۴b خاموش‌شدن):** `disconnect()` در kafkajs چیزی را
+    لغو نمی‌کند: Producer ← Cluster ← BrokerPool ← ConnectionPool ← `Connection.disconnect()`، که اول منتظر همهٔ
+    درخواست‌های در پرواز همان Connection می‌ماند (`RequestQueue.waitForPendingRequests`)، تا `requestTimeout` هر درخواست
+    (پیش‌فرض ۳۰ ثانیه). `onModuleDestroy` در `kafka.publisher.ts` هر سیزده سرویس دارای Outbox، `producer.disconnect()` را
+    بی‌کران await می‌کرد و Nest منتظر همهٔ Destroy Hookها می‌ماند؛ پس Produce (یا ApiVersions اتصالی که هنوز برقرار
+    می‌شد) که Broker جوابش را نمی‌داد `app.close()` را پس از پایان `OutboxShutdown` نگه می‌داشت ⇐ خروج ۱ در
+    `SHUTDOWN_TIMEOUT_MS`.
+    - **`boundedDisconnect` (`@rasta/nest-common`):** بستن را با مهلت مسابقه می‌دهد. بستنی که در مهلت تمام شود تمیز است؛
+      وگرنه با هشدار رها می‌شود و درخواست‌های در پروازش با فرایند تمام می‌شوند. ردیف‌های آن Produce تأیید نشده‌اند، پس
+      فرایند بعدی دوباره منتشرشان می‌کند و Consumerها تکرار را با `eventId` حذف می‌کنند. بستنی که شکست بخورد هم فقط
+      هشدار است و خاموش‌شدن را شکست نمی‌دهد (Client در هر دو حالت رها می‌شود). فراخوانی دوم برای همان Client به بستنِ
+      جاری و مهلتِ آن می‌پیوندد و `disconnect()` دوباره‌ای شروع نمی‌کند.
+    - **مهلت:** `kafkaConnection(env)` حالا `shutdownBudgetMs` = `outboxShutdownBudgetMs(env)` را حمل می‌کند و Publisher
+      آن را از شروع `onModuleDestroy` خودش می‌شمارد. این همان گذر Destroy است که `OutboxShutdown` در آن شروع می‌شود: هر دو
+      Provider همان AppModuleاند و Nest Hookهای یک Module را در یک حلقه شروع می‌کند، پس هر دو مهلت به یک لحظه می‌رسند.
+      `app.module.ts` هیچ سرویسی دست نخورد.
+    - **دو شکل:** ساده (asset، document، economic، fleet، identity، maintenance، marketplace، organization، supplier) یک
+      Producer دارد و Hook دوم از راه `boundedDisconnect` به بستن جاری می‌پیوندد. Pending (construction، contract، inventory،
+      notification) Producerی را که هنوز وصل می‌شود هم با همان مهلت می‌بندد و بستنش یک Promise است. Admin Client
+      Probe آمادگی (`isHealthy`) جزو مسیر Destroy نیست و دست نخورد.
+    - آزمون: `bounded-disconnect.spec.ts` در nest-common (با `Connection` خود kafkajs و درخواستی در پرواز)، و
+      `kafka.publisher.shutdown.spec.ts` در fleet (شکل ساده) و inventory (Pending و Admin). در این دو، Publisher، kafkajs،
+      رله، `OutboxShutdown`، بستن Nest و `installGracefulShutdown` واقعی‌اند و روبه‌روی `StubKafkaBroker` (`@rasta/testing`،
+      Brokerی روی loopback که Produce یا ApiVersions را بی‌پاسخ نگه می‌دارد) اجرا می‌شوند ⇐ خروج ۰ در مهلت، یک هشدار و یک
+      `disconnect()`. Fence رله در برابر Claim دیر پس از توقف (فاز ۴a) در #291 است؛ با این دو، فاز ۴ کامل است.
 
   هر Batch یک تراکنش کوتاه است:
   - `SET LOCAL statement_timeout`؛
