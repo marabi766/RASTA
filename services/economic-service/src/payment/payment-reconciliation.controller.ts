@@ -173,9 +173,10 @@ export class PaymentReconciliationController {
  * The store now binds every record to its actor itself (`requestActor`, review
  * of #287); this stays in the hash so that the records already stored still
  * match their own retries. It still names the platform user id, which the
- * store's actor no longer does: on these four routes a retry whose token
- * gained or lost `rasta_uid` is still `409 IDEMPOTENCY_KEY_REUSED` (docs/23
- * D-054, residual risk).
+ * store's actor no longer does. A token without `rasta_uid` never gets this
+ * far (`authorize()` refuses it first), but a retry whose `rasta_uid` changed
+ * between two tokens that both carry one is still `409 IDEMPOTENCY_KEY_REUSED`
+ * (docs/23 D-054, residual risk).
  */
 function boundTo(actor: OperatorActor, body: unknown): unknown {
   return { by: { userId: actor.userId, issuer: actor.issuer, subject: actor.subject }, body };
