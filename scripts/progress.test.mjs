@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { calculateProgress, renderProgressReport, validateBacklog } from './progress-lib.mjs';
+import { validateBacklogSchema } from './progress-schema.mjs';
 
-const baseline = JSON.parse(
-  await readFile(new URL('../planning/backlog.json', import.meta.url), 'utf8'),
-);
+const backlogUrl = new URL('../planning/backlog.json', import.meta.url);
+const schemaUrl = new URL('../planning/backlog.schema.json', import.meta.url);
+const baseline = JSON.parse(await readFile(backlogUrl, 'utf8'));
+const schema = JSON.parse(await readFile(schemaUrl, 'utf8'));
 
 function copy() {
   return structuredClone(baseline);
@@ -24,6 +30,74 @@ test('the repository baseline is valid and preserves the approved horizons', () 
   assert.equal(progress.fullProduct.committed, 786);
   assert.equal(progress.fullProduct.earned, 217);
   assert.equal(progress.fullProduct.percent, 27.6);
+});
+
+test('the repository baseline satisfies its declared JSON Schema', () => {
+  assert.deepEqual(validateBacklogSchema(baseline, schema), []);
+});
+
+test('the instance $schema keyword is declared, not tolerated by accident', () => {
+  // The exact drift a Draft 2020-12 validator reported on PR #299: the schema
+  // forbade additional properties and never declared the instance's `$schema`.
+  const undeclared = structuredClone(schema);
+  delete undeclared.properties.$schema;
+  assert.deepEqual(validateBacklogSchema(baseline, undeclared), [
+    "schema: / has unexpected property '$schema'",
+  ]);
+});
+
+test('an undeclared property is refused at every level the schema closes', () => {
+  const backlog = copy();
+  backlog.owner = 'nobody';
+  backlog.governance.velocity = 10;
+  backlog.items[0].completion = 0.5;
+  backlog.items[0].evidence.push({ kind: 'PR', ref: '#1', note: 'n', url: 'x' });
+  backlog.stories[0].userStory.because = 'reasons';
+  backlog.changeLog[0].approvedBy = 'someone';
+  // The semantic validator does not look for unknown keys; the schema must.
+  assert.deepEqual(validateBacklog(backlog), []);
+  const errors = validateBacklogSchema(backlog, schema);
+  for (const expected of [
+    "/ has unexpected property 'owner'",
+    "/governance has unexpected property 'velocity'",
+    "/items/0 has unexpected property 'completion'",
+    `/items/0/evidence/${backlog.items[0].evidence.length - 1} has unexpected property 'url'`,
+    "/stories/0/userStory has unexpected property 'because'",
+    "/changeLog/0 has unexpected property 'approvedBy'",
+  ]) {
+    assert.ok(errors.includes(`schema: ${expected}`), `missing: ${expected}\n${errors.join('\n')}`);
+  }
+  assert.equal(errors.length, 6);
+});
+
+test('schema formats are enforced where the semantic shape check is looser', () => {
+  const backlog = copy();
+  backlog.asOf = '2026-13-45';
+  assert.deepEqual(validateBacklog(backlog), []);
+  assert.deepEqual(validateBacklogSchema(backlog, schema), [
+    'schema: /asOf must match format "date"',
+  ]);
+});
+
+test('the progress command fails on a schema violation', async (t) => {
+  const script = fileURLToPath(new URL('./progress.mjs', import.meta.url));
+  const root = await mkdtemp(path.join(tmpdir(), 'progress-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, 'planning'));
+  await copyFile(schemaUrl, path.join(root, 'planning', 'backlog.schema.json'));
+  const run = () =>
+    spawnSync(process.execPath, [script, 'validate'], { cwd: root, encoding: 'utf8' });
+
+  await copyFile(backlogUrl, path.join(root, 'planning', 'backlog.json'));
+  const clean = run();
+  assert.equal(clean.status, 0, clean.stderr);
+
+  const backlog = copy();
+  backlog.items[0].completion = 0.5;
+  await writeFile(path.join(root, 'planning', 'backlog.json'), JSON.stringify(backlog));
+  const drifted = run();
+  assert.equal(drifted.status, 1);
+  assert.match(drifted.stderr, /schema: \/items\/0 has unexpected property 'completion'/);
 });
 
 test('decomposed features contribute child stories exactly once', () => {

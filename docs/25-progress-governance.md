@@ -24,14 +24,15 @@ Progress = accepted story points / active committed story points × 100
 
 ## ۲۵٫۲ منبع حقیقت
 
-| فایل                           | نقش                                            |
-| ------------------------------ | ---------------------------------------------- |
-| `planning/backlog.json`        | Backlog مرجع و تنها ورودی محاسبه               |
-| `planning/backlog.schema.json` | قرارداد ماشین‌خوان برای Editor و ابزارها       |
-| `scripts/progress-lib.mjs`     | اعتبارسنجی قواعد و محاسبه                      |
-| `scripts/progress.mjs`         | رابط Validate، تولید گزارش و کنترل Staleness   |
-| `scripts/progress.test.mjs`    | آزمون قواعد اصلی سنجش                          |
-| `docs/25-project-progress.md`  | Snapshot خواندنی و خودکار؛ ویرایش مستقیم ممنوع |
+| فایل                           | نقش                                               |
+| ------------------------------ | ------------------------------------------------- |
+| `planning/backlog.json`        | Backlog مرجع و تنها ورودی محاسبه                  |
+| `planning/backlog.schema.json` | قرارداد ماشین‌خوان؛ در هر Validate اجباری است     |
+| `scripts/progress-schema.mjs`  | اعتبارسنجی واقعی JSON Schema (Draft 2020-12، Ajv) |
+| `scripts/progress-lib.mjs`     | اعتبارسنجی قواعد و محاسبه                         |
+| `scripts/progress.mjs`         | رابط Validate، تولید گزارش و کنترل Staleness      |
+| `scripts/progress.test.mjs`    | آزمون قواعد اصلی سنجش                             |
+| `docs/25-project-progress.md`  | Snapshot خواندنی و خودکار؛ ویرایش مستقیم ممنوع    |
 
 اگر سند دیگری عدد متفاوتی نشان دهد، عدد تولیدشده از Backlog مرجع است؛ البته تا وقتی Baseline در حالت `PROVISIONAL` است، Story Pointها هنوز تعهد تأییدشده مالک محصول نیستند.
 
@@ -158,7 +159,7 @@ Baseline نخست از Scope رسمی `docs/17` و ADR-044 تا ADR-048 ساخت
 ## ۲۵٫۹ فرمان‌های عملیاتی
 
 ```bash
-pnpm progress:validate  # فقط اعتبارسنجی Backlog و روابط
+pnpm progress:validate  # فقط اعتبارسنجی Backlog (Schema + قواعد و روابط)
 pnpm progress:report    # بازتولید گزارش خواندنی
 pnpm progress:check     # اعتبارسنجی + رد گزارش stale
 pnpm test:progress      # آزمون موتور محاسبه و قواعد ضد دستکاری

@@ -738,7 +738,7 @@
         {
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/71",
-          "note": "Second criterion: six REST routes implementing a claim state machine (SUBMITTED -> UNDER_REVIEW -> APPROVED|REJECTED -> SETTLED) with per-claim status history and a configurable deciding-authority role set (Q-59). The PR body explicitly states no money moves and no ledger entry or wallet or economic-service call is made, i.e. it does not claim insurer integration. Tested in services/asset-service/test/insurance-claim.int-spec.ts. Merge commit fa14ef4, merged 2026-09-21."
+          "note": "Second criterion, PARTIAL: six REST routes implementing a claim state machine (SUBMITTED -> UNDER_REVIEW -> APPROVED|REJECTED -> SETTLED) with tenant-safe per-claim status history and a configurable deciding-authority role set (Q-59). The PR body explicitly states no money moves and no ledger entry or wallet or economic-service call is made, i.e. it does not claim insurer integration. Tested in services/asset-service/test/insurance-claim.int-spec.ts (lifecycle, tenant isolation, concurrency, outbox). Merge commit fa14ef4, merged 2026-09-21. NOT evidenced: claim documents. The strict submitClaimSchema (services/asset-service/src/asset/dto.ts) refuses a documentId, the InsuranceClaim model has no document reference, and ClaimService.getClaim returns the claim and its history only; document-service's generic ownerResourceType/ownerResourceId metadata stores the reference without resolving the owner, so it does not by itself show a claim-document flow or claim-document tenant isolation (Codex review of PR #299, round 1)."
         },
         {
           "kind": "PR",
@@ -2219,7 +2219,7 @@
     {
       "date": "2026-10-15",
       "type": "STATUS_CORRECTED",
-      "reason": "COM-010 moves from READY to IN_PROGRESS. The policy registry (asset-service, commit 24afd12e, 2026-08-27) and its expiry events were never credited to this item; PR #108 hardened the expiry sweep and PR #71 built a tenant-safe claim history that explicitly disclaims insurer integration. Both acceptance criteria now have real, tested evidence; this is a backlog-accuracy correction for pre-existing, previously uncredited work, not new scope. The item still earns zero points pending product-owner review.",
+      "reason": "COM-010 moves from READY to IN_PROGRESS. The policy registry (asset-service, commit 24afd12e, 2026-08-27) and its expiry events were never credited to this item; PR #108 hardened the expiry sweep and PR #71 built a tenant-safe claim history that explicitly disclaims insurer integration. The first acceptance criterion has real, tested evidence; the second is only partially evidenced, because a claim cannot yet carry or return documents (no document reference on the claim, refused at submission, absent from the claim read). This is a backlog-accuracy correction for pre-existing, previously uncredited work, not new scope. The item earns zero points pending claim documents and product-owner review.",
       "recordedBy": "Claude Sonnet 5",
       "approvalRef": "Project manager task 001 (chore/backlog-evidence-sync), evidence-based backlog synchronization, 2026-10-15",
       "recordIds": ["COM-010"]

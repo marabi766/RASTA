@@ -16,6 +16,7 @@
     "changeLog"
   ],
   "properties": {
+    "$schema": { "type": "string", "format": "uri-reference" },
     "version": { "const": 2 },
     "project": { "const": "RASTA" },
     "asOf": { "type": "string", "format": "date" },
