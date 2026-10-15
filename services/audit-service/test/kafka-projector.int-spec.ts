@@ -132,6 +132,22 @@ if (!brokerList) {
   console.warn('[audit] KAFKA_BROKERS is not set — skipping the projector tests');
 }
 
+/**
+ * Every `[retry-replay]` test is in a suite that skips without a broker. Where
+ * RETRY_REPLAY_REQUIRED says they must run (CI's "Retry replay, published as
+ * ops-replay" step), a missing or empty KAFKA_BROKERS fails here instead, so
+ * that step cannot pass having run none of them.
+ */
+if (!brokerList && process.env.RETRY_REPLAY_REQUIRED === 'true') {
+  describe('retry replay without a broker', () => {
+    it('[retry-replay] needs KAFKA_BROKERS, which RETRY_REPLAY_REQUIRED requires', () => {
+      throw new Error(
+        'RETRY_REPLAY_REQUIRED is true and KAFKA_BROKERS names no broker: the [retry-replay] tests would all be skipped',
+      );
+    });
+  });
+}
+
 describeWithKafka('domain projector over Kafka', () => {
   let prisma: PrismaService;
   let migrator: PrismaService;
