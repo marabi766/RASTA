@@ -136,7 +136,7 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     const first = await claim(storeA, 10, 0);
     const second = await claim(storeB, 10, LEASE, 'worker-b');
 
-    const released = await storeA.release(['STALE_RELEASE'], first.token!);
+    const released = await storeA.release(['STALE_RELEASE'], first.token!, 5_000);
 
     expect(released).toBe(0);
     // The new owner's claim is untouched: a stale release must not hand its
@@ -324,7 +324,7 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     const first = await claim(storeA, 10);
     const firstOrder = first.rows.map((row) => row.id);
 
-    await storeA.release(firstOrder, first.token!);
+    await storeA.release(firstOrder, first.token!, 5_000);
     const second = await claim(storeB, 10, LEASE, 'worker-b');
 
     expect(firstOrder).toEqual([...ids].sort());
@@ -479,7 +479,7 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     expect(await storeA.renew(ids, claimed.token!, LEASE, 5000)).toEqual([]);
     expect(await storeA.markPublished(ids, claimed.token!)).toBe(0);
     expect(await storeA.markFailed(ids[0], claimed.token!, 'x', BACKOFF)).toBe(0);
-    expect(await storeA.release(ids, claimed.token!)).toBe(0);
+    expect(await storeA.release(ids, claimed.token!, 5_000)).toBe(0);
   });
 
   // -- 19 --------------------------------------------------------------------
@@ -496,7 +496,8 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
       markPublished: (ids: readonly string[], token: string) => storeA.markPublished(ids, token),
       markFailed: (id: string, token: string, error: string, backoff: typeof BACKOFF) =>
         storeA.markFailed(id, token, error, backoff),
-      release: (ids: readonly string[], token: string) => storeA.release(ids, token),
+      release: (ids: readonly string[], token: string, deadline: number) =>
+        storeA.release(ids, token, deadline),
       oldestPendingAgeSeconds: () => storeA.oldestPendingAgeSeconds(),
       renew: async (ids: readonly string[], token: string, lease: number, deadline: number) => {
         attempts += 1;
@@ -560,7 +561,10 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     const tick = relay.tick();
     await gate.started;
 
-    await relay.stop();
+    // A zero grace: the stop does not wait for SD0. The release is bounded by
+    // the shared deadline `OutboxShutdown` passes — with no deadline the grace
+    // bounds it too, and a zero grace would leave nothing for it (#291 r2).
+    await relay.stop({ deadlineAt: Date.now() + 5_000 });
 
     // The two that never left are released: no token, no failure recorded, no
     // backoff — so they are due immediately rather than parked until expiry.
@@ -645,6 +649,38 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
 
     publisher.finish();
     await tick;
+  });
+
+  // -- the release's own bound (#291 r2) -------------------------------------
+
+  it('a release blocked on a row lock ends by its own statement timeout and leaves the claim', async () => {
+    // The relay stops waiting for a release at its stop's bound in any case;
+    // this is the database giving up then too, not holding the UPDATE (and a
+    // pooled connection) behind a lock after the process has moved on.
+    await seedRow(a, 'SD_BLOCKED');
+    const claimed = await claim(storeA, 10);
+    const held = await holdLockOnOldest(b, 1, `id = 'SD_BLOCKED'`);
+    expect(held.ids).toEqual(['SD_BLOCKED']);
+
+    let backstop: NodeJS.Timeout | undefined;
+    try {
+      const outcome = await Promise.race([
+        storeA.release(['SD_BLOCKED'], claimed.token!, 300).then(
+          (released) => `released ${released}`,
+          (error: unknown) => String(error),
+        ),
+        new Promise<string>((resolve) => {
+          backstop = setTimeout(() => resolve('still waiting after 10 s'), 10_000);
+        }),
+      ]);
+      expect(outcome).toMatch(/57014|statement timeout/);
+    } finally {
+      clearTimeout(backstop);
+      await held.release();
+    }
+
+    // Not released: the token still holds the row, and its lease decides.
+    expect((await readRow(a, 'SD_BLOCKED')).claim_token).toBe(claimed.token);
   });
 
   // -- 23 --------------------------------------------------------------------

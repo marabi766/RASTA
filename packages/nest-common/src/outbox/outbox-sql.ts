@@ -17,7 +17,8 @@ import { RENEWAL_TRANSACTION_MARGIN_MS, orderForPublish, type OutboxRow } from '
  * a contract, in the same sense as an event schema.
  *
  * Every value is bound as a parameter. Nothing is interpolated into SQL (S-05),
- * with one guarded exception noted on {@link renewSql}.
+ * with one guarded exception: the `statement_timeout` of {@link renewSql} and
+ * {@link releaseSql}.
  *
  * **The token is the only fence.** Every mutation below matches on
  * `claim_token` exactly, and not one of them conditions on `claim_expires_at`.
@@ -42,7 +43,7 @@ export interface OutboxSqlClient {
 /**
  * Runs `fn` inside one transaction that lives at least `timeoutMs`.
  *
- * Only {@link renewSql} needs it, and it is a callback rather than a method on
+ * {@link renewSql} and {@link releaseSql} need it, and it is a callback rather than a method on
  * {@link OutboxSqlClient} for a concrete reason: Prisma's `$transaction` is an
  * overload set whose first signature takes an array, so a structural interface
  * requiring it never matches a real `PrismaClient`. Supplying the call from the
@@ -501,23 +502,53 @@ export async function markFailedSql(
  *
  * Leaves `attempts` and `next_attempt_at` alone: nothing failed, so the row
  * should be claimable immediately rather than parked behind a backoff.
+ *
+ * Bounded like {@link renewSql}, by `statement_timeout` at `deadlineMs`: what
+ * is left of the stop's bound. The relay stops waiting at that bound in any
+ * case (Codex r1 on #291, finding 2); this makes the database give up then
+ * too, rather than keep a blocked UPDATE — and a pooled connection — waiting
+ * on a lock after the process has moved on.
  */
 export async function releaseSql(
-  client: OutboxSqlClient,
+  runTransaction: OutboxTxRunner,
   ids: readonly string[],
   token: string,
+  deadlineMs: number,
 ): Promise<number> {
   if (ids.length === 0) return 0;
-  return client.$executeRawUnsafe(
-    `UPDATE outbox_message
-        SET claim_token      = NULL,
-            claim_owner      = NULL,
-            claim_expires_at = NULL
-      WHERE id = ANY($1::text[])
-        AND claim_token = $2`,
-    [...ids],
-    token,
+  const timeoutMs = localStatementTimeoutMs(deadlineMs, 'release');
+
+  return runTransaction(
+    async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
+      return tx.$executeRawUnsafe(
+        `UPDATE outbox_message
+            SET claim_token      = NULL,
+                claim_owner      = NULL,
+                claim_expires_at = NULL
+          WHERE id = ANY($1::text[])
+            AND claim_token = $2`,
+        [...ids],
+        token,
+      );
+    },
+    // As for a renewal: the statement timeout, not Prisma, ends a slow release.
+    timeoutMs + RENEWAL_TRANSACTION_MARGIN_MS,
   );
+}
+
+/**
+ * A `SET LOCAL statement_timeout` value. Interpolated because `SET LOCAL`
+ * accepts no bind parameters. Not user input — it is derived from validated
+ * configuration — and coerced to a safe positive integer here so nothing but
+ * digits can reach the statement (S-05).
+ */
+function localStatementTimeoutMs(deadlineMs: number, operation: string): number {
+  const timeoutMs = Math.max(1, Math.floor(deadlineMs));
+  if (!Number.isSafeInteger(timeoutMs)) {
+    throw new Error(`outbox ${operation}: refusing a non-integer statement timeout: ${deadlineMs}`);
+  }
+  return timeoutMs;
 }
 
 /**
@@ -542,14 +573,7 @@ export async function renewSql(
   deadlineMs: number,
 ): Promise<string[]> {
   if (ids.length === 0) return [];
-
-  // Interpolated because `SET LOCAL` accepts no bind parameters. Not user
-  // input — it is derived from validated configuration — and coerced to a safe
-  // positive integer here so nothing but digits can reach the statement (S-05).
-  const timeoutMs = Math.max(1, Math.floor(deadlineMs));
-  if (!Number.isSafeInteger(timeoutMs)) {
-    throw new Error(`outbox renew: refusing a non-integer statement timeout: ${deadlineMs}`);
-  }
+  const timeoutMs = localStatementTimeoutMs(deadlineMs, 'renew');
 
   return runTransaction(async (tx) => {
     await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);

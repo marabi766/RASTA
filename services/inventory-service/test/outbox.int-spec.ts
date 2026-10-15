@@ -118,7 +118,7 @@ describe('the transactional outbox', () => {
     expect(mine).toHaveLength(2);
     expect(await store.markPublished(mine, 'not-the-token')).toBe(0);
     expect(await store.markPublished(mine, claim.token as string)).toBe(2);
-    if (others.length > 0) await store.release(others, claim.token as string);
+    if (others.length > 0) await store.release(others, claim.token as string, 5_000);
     expect((await outboxOf(a)).every((row) => row.publishedAt !== null)).toBe(true);
   });
 });

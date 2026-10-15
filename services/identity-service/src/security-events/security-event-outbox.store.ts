@@ -387,18 +387,28 @@ export class SecurityEventOutboxStore implements OutboxStore {
     );
   }
 
-  /** Gives rows back without counting a failure. */
-  async release(ids: readonly string[], token: string): Promise<number> {
+  /**
+   * Gives rows back without counting a failure. Bounded by its own statement
+   * timeout at what is left of the relay's stop (Codex r1 on #291, finding 2).
+   */
+  async release(ids: readonly string[], token: string, deadlineMs: number): Promise<number> {
     if (ids.length === 0) return 0;
-    return this.prisma.client.$executeRawUnsafe(
-      `UPDATE security_event_outbox
-          SET claim_token      = NULL,
-              claim_owner      = NULL,
-              claim_expires_at = NULL
-        WHERE id = ANY($1::text[])
-          AND claim_token = $2`,
-      [...ids],
-      token,
+    const bound = statementTimeoutOf(deadlineMs);
+    return this.prisma.client.$transaction(
+      async (tx) => {
+        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${bound}`);
+        return tx.$executeRawUnsafe(
+          `UPDATE security_event_outbox
+              SET claim_token      = NULL,
+                  claim_owner      = NULL,
+                  claim_expires_at = NULL
+            WHERE id = ANY($1::text[])
+              AND claim_token = $2`,
+          [...ids],
+          token,
+        );
+      },
+      { maxWait: bound, timeout: bound + TRANSACTION_MARGIN_MS },
     );
   }
 

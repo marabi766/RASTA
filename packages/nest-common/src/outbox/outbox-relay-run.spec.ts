@@ -5,6 +5,8 @@ import { OutboxRelay, type OutboxClaim, type OutboxRow, type OutboxStore } from 
  * resolved afterwards, and the tick installed its ownership, started the
  * heartbeat, published and acknowledged — new work after the stop had returned.
  * Every continuation of a tick or a renewal now checks the run it began in.
+ * Codex r1 on #291: stops never overlap (finding 1), and every wait of a stop,
+ * the release's included, ends by its bound (finding 2).
  *
  * Deterministic: each store call and each publish is a barrier the test opens,
  * and the heartbeat runs on fake timers. Real `setImmediate`, which the stop's
@@ -59,7 +61,7 @@ const claimOf = (token: string, ...ids: string[]): OutboxClaim => ({
  */
 function gatedStore() {
   const claims: Barrier<OutboxClaim>[] = [];
-  let releaseGate: Barrier<void> | undefined;
+  const releaseGates: Barrier<void>[] = [];
   let renewGate: Barrier<string[]> | undefined;
   const store = {
     claimPending: jest.fn(
@@ -68,8 +70,8 @@ function gatedStore() {
     ),
     markPublished: jest.fn(async (ids: readonly string[]) => ids.length),
     markFailed: jest.fn(async () => 1),
-    release: jest.fn(async (ids: readonly string[]) => {
-      await releaseGate?.promise;
+    release: jest.fn(async (ids: readonly string[], _token: string, _deadlineMs: number) => {
+      await releaseGates.shift()?.promise;
       return ids.length;
     }),
     renew: jest.fn((ids: readonly string[]) => renewGate?.promise ?? Promise.resolve([...ids])),
@@ -84,9 +86,11 @@ function gatedStore() {
       claims.push(next);
       return next;
     },
+    /** Gates the next release not yet gated, in call order. */
     gateRelease(): Barrier<void> {
-      releaseGate = barrier<void>();
-      return releaseGate;
+      const gate = barrier<void>();
+      releaseGates.push(gate);
+      return gate;
     },
     gateRenew(): Barrier<string[]> {
       renewGate = barrier<string[]>();
@@ -197,7 +201,7 @@ describe('OutboxRelay: a claim that returns after its stop', () => {
     await flush();
 
     expect(store.release).toHaveBeenCalledTimes(1);
-    expect(store.release).toHaveBeenCalledWith(['R1', 'R2'], 'tok-1');
+    expect(store.release).toHaveBeenCalledWith(['R1', 'R2'], 'tok-1', 20_000);
     expect(publish).not.toHaveBeenCalled();
     expect(store.markPublished).not.toHaveBeenCalled();
     expect(store.renew).not.toHaveBeenCalled();
@@ -300,7 +304,7 @@ describe('OutboxRelay: a publish in flight at the stop', () => {
 
     expect(publish).toHaveBeenCalledTimes(1);
     expect(store.markFailed).not.toHaveBeenCalled();
-    expect(store.release).toHaveBeenCalledWith(['R1', 'R2', 'R3'], 'tok-1');
+    expect(store.release).toHaveBeenCalledWith(['R1', 'R2', 'R3'], 'tok-1', 20_000);
   });
 
   it('in the per-row fallback, no further row is sent once the stop has begun', async () => {
@@ -324,7 +328,7 @@ describe('OutboxRelay: a publish in flight at the stop', () => {
 
     expect(publish).toHaveBeenCalledTimes(2);
     expect(store.markPublished).toHaveBeenCalledWith(['R1'], 'tok-1');
-    expect(store.release).toHaveBeenCalledWith(['R2', 'R3'], 'tok-1');
+    expect(store.release).toHaveBeenCalledWith(['R2', 'R3'], 'tok-1', 20_000);
   });
 });
 
@@ -419,6 +423,60 @@ describe('OutboxRelay: the next run', () => {
     await relay.stop();
   });
 
+  it('a stop() during a stop joins it and cancels a start() made in between: one drain, and no run opens until both have returned', async () => {
+    // Codex r1 on #291, finding 1. Before: the start() cleared the stop in
+    // progress, the second stop() drained the same run again, the first one's
+    // return opened a run a forced tick claimed in, and the second one's
+    // return ended the old run — so that claim published after it.
+    const { store, claim, gateRelease } = gatedStore();
+    const { publish, calls } = gatedPublisher();
+    const { relay } = relayWith(store, publish, 20);
+    const pending = claim();
+    const firstRelease = gateRelease();
+    const secondRelease = gateRelease();
+
+    const tick = relay.tick();
+    const first = relay.stop();
+    pending.resolve(claimOf('tok-1', 'R1'));
+    expect(await tick).toBe(0);
+    await flush();
+    await flush();
+    expect(store.release).toHaveBeenCalledTimes(1);
+
+    relay.start();
+    let secondReturned = false;
+    const second = relay.stop().then(() => {
+      secondReturned = true;
+    });
+    await flush();
+    // A forced tick while the stop is in progress claims nothing.
+    claim(claimOf('tok-2', 'R2'));
+    expect(await relay.tick()).toBe(0);
+    expect(store.claimPending).toHaveBeenCalledTimes(1);
+
+    firstRelease.resolve();
+    await first;
+    await flush();
+    expect(secondReturned).toBe(true);
+    expect(store.release).toHaveBeenCalledTimes(1);
+
+    // The start() was cancelled by the second stop(): nothing polls.
+    jest.advanceTimersByTime(2_000);
+    await flush();
+    expect(store.claimPending).toHaveBeenCalledTimes(1);
+    expect(publish).not.toHaveBeenCalled();
+
+    // Positive control: once both have returned, an operator's forced tick is
+    // a new run and publishes.
+    const forced = relay.tick();
+    await flush();
+    calls[0]!.resolve();
+    expect(await forced).toBe(1);
+    expect(store.markPublished).toHaveBeenCalledWith(['R2'], 'tok-2');
+    secondRelease.resolve();
+    await second;
+  });
+
   it('a tick after a stop — an operator forcing a drain — still publishes', async () => {
     const { store, claim } = gatedStore();
     const publish = jest.fn(async () => undefined);
@@ -429,5 +487,70 @@ describe('OutboxRelay: the next run', () => {
     claim(claimOf('tok-1', 'R1'));
     expect(await relay.tick()).toBe(1);
     expect(store.markPublished).toHaveBeenCalledWith(['R1'], 'tok-1');
+  });
+});
+
+describe('OutboxRelay: a release that does not finish (Codex r1 on #291, finding 2)', () => {
+  it.each<[string, () => number | undefined, number]>([
+    ['with no deadlineAt, by its grace (20 s)', () => undefined, 20_000],
+    ['with deadlineAt 5 s away, by it', () => Date.now() + 5_000, 5_000],
+  ])(
+    'the stop returns %s, abandoning the release to the lease',
+    async (_how, deadlineAt, boundMs) => {
+      const { store, claim, gateRelease } = gatedStore();
+      const { publish } = gatedPublisher();
+      const { relay, warnings } = relayWith(store, publish, 20);
+      const pending = claim();
+      gateRelease(); // blocked, as on a row lock, and never let go
+
+      const tick = relay.tick();
+      const at = deadlineAt();
+      let returned = false;
+      const stopping = relay.stop(at === undefined ? {} : { deadlineAt: at }).then(() => {
+        returned = true;
+      });
+      pending.resolve(claimOf('tok-1', 'R1', 'R2'));
+      expect(await tick).toBe(0);
+      await flush();
+      await flush();
+      // The store's own statement timeout is what is left of the bound.
+      expect(store.release).toHaveBeenCalledWith(['R1', 'R2'], 'tok-1', boundMs);
+
+      jest.advanceTimersByTime(boundMs - 1);
+      await flush();
+      expect(returned).toBe(false);
+      jest.advanceTimersByTime(1);
+      await stopping;
+
+      expect(warnings).toContainEqual(
+        expect.stringMatching(/release did not finish by the shutdown deadline.*lease expires/),
+      );
+      expect(publish).not.toHaveBeenCalled();
+    },
+  );
+
+  it('with nothing left of its bound, the stop does not begin the release', async () => {
+    const { store, claim } = gatedStore();
+    const { publish, calls } = gatedPublisher();
+    const { relay, warnings } = relayWith(store, publish, 0);
+    claim(claimOf('tok-1', 'R1', 'R2', 'R3'));
+
+    const tick = relay.tick();
+    await flush();
+    calls[0]!.reject(new Error('batch refused'));
+    await flush();
+    // R1 alone is in flight; R2 and R3 were never sent.
+    expect(publish).toHaveBeenCalledTimes(2);
+
+    await relay.stop();
+    expect(store.release).not.toHaveBeenCalled();
+    expect(warnings).toContainEqual(
+      expect.stringMatching(/release did not finish by the shutdown deadline/),
+    );
+
+    calls[1]!.resolve();
+    expect(await tick).toBe(0);
+    expect(store.release).not.toHaveBeenCalled();
+    expect(store.markPublished).not.toHaveBeenCalled();
   });
 });

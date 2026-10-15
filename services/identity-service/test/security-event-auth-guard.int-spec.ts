@@ -403,6 +403,7 @@ describe('auth-guard tenant refusals → security_event_outbox (real PostgreSQL)
         await harness.store.release(
           others.map((candidate) => candidate.id),
           claim.token,
+          5_000,
         );
       }
       return { token: claim.token, mine };

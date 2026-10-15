@@ -484,7 +484,7 @@ describe('security_event_outbox (real PostgreSQL)', () => {
       expect(await harness.store.markPublished([id], second.token!)).toBe(1);
 
       const others = second.rows.map((row) => row.id).filter((other) => other !== id);
-      await harness.store.release(others, second.token!);
+      await harness.store.release(others, second.token!, 5_000);
 
       const row = await prisma.client.securityEventOutbox.findUniqueOrThrow({ where: { id } });
       expect(row.publishedAt).not.toBeNull();

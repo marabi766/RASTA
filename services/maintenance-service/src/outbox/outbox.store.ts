@@ -61,8 +61,14 @@ export class PrismaOutboxStore implements OutboxStore, OutboxPurgeStore {
     return markFailedSql(this.prisma.client, id, token, error, backoff);
   }
 
-  async release(ids: readonly string[], token: string): Promise<number> {
-    return releaseSql(this.prisma.client, ids, token);
+  async release(ids: readonly string[], token: string, deadlineMs: number): Promise<number> {
+    return releaseSql(
+      (fn, timeoutMs) =>
+        this.prisma.client.$transaction(fn, { timeout: timeoutMs, maxWait: timeoutMs }),
+      ids,
+      token,
+      deadlineMs,
+    );
   }
 
   async renew(
