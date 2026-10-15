@@ -205,10 +205,13 @@ jobs:
       - name: Integration split is aggregated
         # The integration work runs as parallel `integration-*` jobs and
         # `integration` ("Integration and security tests", the required check)
-        # only aggregates them. Static: every split job is needed by it, it
-        # runs always() and fails unless all succeeded, each step of the old
-        # single job runs in exactly one split job, and every step has the
-        # broker, bucket, scanner, Redis or database it reads.
+        # only aggregates them. Every split job is needed by it, it runs
+        # always() and nothing else, and its verdict script, executed here
+        # against each job failed, cancelled and skipped, fails on all of
+        # them. Each step of the old single job runs in exactly one split job,
+        # with its declared command, env and time limit, no `if:` and no
+        # `continue-on-error`, and has the broker, bucket, scanner, Redis or
+        # database it reads.
         run: pnpm run test:ci-integration-split
 
       - name: Image pre-pull retries only transient registry errors
@@ -969,7 +972,12 @@ jobs:
   # `integration` itself keeps the name branch protection and the merge queue
   # know, "Integration and security tests", and passes only when all four
   # passed. `scripts/ci-integration-split.test.mjs` fails if a job named
-  # `integration-*` is left out of it.
+  # `integration-*` is left out of it, and holds every test and guard step to
+  # the inventory in `scripts/ci-integration-split-lib.mjs`: its exact
+  # command, the env it was declared with, and a limit of its own (the
+  # PostgreSQL guards and retry replay 5 minutes, test independence 8; they
+  # took 2–60 s on run 38676719548). No step here, and no job, may carry
+  # `if:` or `continue-on-error`.
   #
   # Service containers rather than Testcontainers here: GitHub provisions them
   # before the job starts, which is faster and avoids docker-in-docker.
@@ -1341,6 +1349,7 @@ jobs:
         # Every url the suite touches is passed explicitly. Skipping a service
         # because its variable is missing would turn a missing gate into a
         # green one, which is the failure `pnpm test:e2e` used to have.
+        timeout-minutes: 5
         run: pnpm run test:outbox-b3
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
@@ -1370,6 +1379,7 @@ jobs:
         # lib/supplier-privilege-split.bash and the remaining migrations; the
         # suite checks the rows survive and the runtime role gets 42501 for
         # DISABLE TRIGGER, ALTER, DROP and DROP DATABASE.
+        timeout-minutes: 5
         run: pnpm run test:supplier-privilege-split
         env:
           PGHOST: localhost
@@ -1386,6 +1396,7 @@ jobs:
         # … DISABLE TRIGGER and lift an integrity guard. Runs against every
         # service database this job bootstrapped and migrated; every service
         # must be split (audit its own way), so a new one that is not fails.
+        timeout-minutes: 5
         run: pnpm run check:db-runtime-privileges
         env:
           PGHOST: localhost
@@ -1398,6 +1409,7 @@ jobs:
         # unsplit service is — owned by its runtime role — must be reported in
         # full; after lib/service-privilege-split.bash it must be reported
         # clean, its rows intact and its trigger out of the runtime role's reach.
+        timeout-minutes: 5
         run: pnpm run test:db-runtime-privileges
         env:
           PGHOST: localhost
@@ -1412,6 +1424,7 @@ jobs:
         # (@rasta/config), the migration runner (scripts/prisma.mjs) and the
         # demo seeds must each open their sessions in UTC regardless, and the
         # runner's copy of the URL function must agree with the services'.
+        timeout-minutes: 5
         run: pnpm run test:db-session-utc
         env:
           PGHOST: localhost
@@ -1427,6 +1440,7 @@ jobs:
         # every service's clients are opened on that URL and no other.
         # DATABASE_STATEMENT_TIMEOUT_MS is opt-in: unset, the session keeps
         # the database's own; set, a longer statement is cancelled with 57014.
+        timeout-minutes: 5
         run: pnpm run test:db-pool-config
         env:
           PGHOST: localhost
@@ -1678,6 +1692,7 @@ jobs:
         #
         # Scoped to the one file the defect was found in. Widening it is a
         # deliberate act, not a default, because each name costs a jest start.
+        timeout-minutes: 8
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
@@ -1787,6 +1802,7 @@ jobs:
         # [retry-replay]. No other step's scope changes; `check:kafka-credential-scope`
         # allows exactly this step to take it. It fails, rather than skips,
         # without the credential.
+        timeout-minutes: 5
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh replay)"
           eval "${kafka_credentials}"
