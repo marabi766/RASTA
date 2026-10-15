@@ -1,5 +1,5 @@
 import { format } from 'node:util';
-import pino,{ type DestinationStream, type Logger, type LoggerOptions } from 'pino';
+import pino, { type DestinationStream, type Logger, type LoggerOptions } from 'pino';
 import { scrubbedErrorSerializer } from './error-serializer';
 import { buildRedactionPaths, REDACTED, scrubMessage } from './redaction';
 
