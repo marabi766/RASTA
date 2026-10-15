@@ -25,6 +25,10 @@ import {
   runMonth,
   runtimeUrl,
 } from './helpers';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { libpqInvocation } = require('../../../scripts/verify-migration-reversible-lib.mjs') as {
+  libpqInvocation: (url: string) => { target: string; env: Record<string, string> };
+};
 
 /**
  * Correction linkage and the internal target lookup, against a real PostgreSQL
@@ -542,18 +546,11 @@ function runbookBlock(name: string): string {
 
 /** psql as the operator runs it: this service's own role, stopping at the first error; unaligned tuples. */
 function runbookPsqlArgs(): string[] {
-  return ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-A', '-t', '-F', '|'];
+  const { target } = libpqInvocation(runtimeUrl());
+  return ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-A', '-t', '-F', '|', target];
 }
 
-/** The connection travels in libpq's environment, the password never in argv. */
+/** The password travels in PGPASSWORD, never in argv. */
 function runbookPsqlEnv(): NodeJS.ProcessEnv {
-  const url = new URL(runtimeUrl());
-  return {
-    ...process.env,
-    PGHOST: url.hostname,
-    PGPORT: url.port || '5432',
-    PGDATABASE: decodeURIComponent(url.pathname.slice(1)),
-    PGUSER: decodeURIComponent(url.username),
-    PGPASSWORD: decodeURIComponent(url.password),
-  };
+  return { ...process.env, ...libpqInvocation(runtimeUrl()).env };
 }

@@ -12,6 +12,10 @@ import {
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl } from './helpers';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { libpqInvocation } = require('../../../scripts/verify-migration-reversible-lib.mjs') as {
+  libpqInvocation: (url: string) => { target: string; env: Record<string, string> };
+};
 
 /**
  * D-052 in identity-service, against a real PostgreSQL: the scheduled purge
@@ -590,25 +594,30 @@ function runbookBlock(name: string): string {
 
 /**
  * psql as the operator runs it: the service's own role, stopping at the first
- * error; unaligned tuples. The connection travels in libpq's environment, the
- * password never in argv. The one line before the block points the session at
- * this suite's schema, where the operator's is `public`.
+ * error; unaligned tuples. The password travels in PGPASSWORD, never in argv.
+ * The one line before the block points the session at this suite's schema,
+ * where the operator's is `public`.
  */
 function runbookPsql(script: string, eventId: string) {
-  const url = new URL(databaseUrl());
+  const { target, env } = libpqInvocation(databaseUrl());
   return spawnSync(
     'psql',
-    ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-A', '-t', '-F', '|', '-v', `event_id=${eventId}`],
+    [
+      '-v',
+      `event_id=${eventId}`,
+      '-X',
+      '-q',
+      '-v',
+      'ON_ERROR_STOP=1',
+      '-A',
+      '-t',
+      '-F',
+      '|',
+      target,
+    ],
     {
       input: `SET search_path TO "${SCHEMA}";\n${script}`,
-      env: {
-        ...process.env,
-        PGHOST: url.hostname,
-        PGPORT: url.port || '5432',
-        PGDATABASE: decodeURIComponent(url.pathname.slice(1)),
-        PGUSER: decodeURIComponent(url.username),
-        PGPASSWORD: decodeURIComponent(url.password),
-      },
+      env: { ...process.env, ...env },
       encoding: 'utf8',
     },
   );
