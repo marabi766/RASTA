@@ -211,6 +211,15 @@ jobs:
         # broker, bucket, scanner, Redis or database it reads.
         run: pnpm run test:ci-integration-split
 
+      - name: Image pre-pull retries only transient registry errors
+        # `scripts/ci-pull-image.sh` runs before the steps that start a
+        # container: a 5xx, timeout or connection reset is retried (10/30/60 s),
+        # a 404, "manifest unknown", unauthorized, digest mismatch or any
+        # error it does not recognise fails at once, and a reference without a
+        # sha256 digest is refused. Also fails if a step runs a digest-pinned
+        # image that no earlier step of its job pre-pulls.
+        run: pnpm run test:ci-pull-image
+
       - name: Grafana dashboard contract
         # The provisioned local `Rasta Audit Evidence` dashboard: stable
         # datasource UID on every query, every alert in the rules file, the
@@ -329,6 +338,11 @@ jobs:
         # not something to merge past.
         run: pnpm audit --audit-level=high
 
+      - name: Pre-pull Semgrep (retries transient registry errors)
+        run: |
+          scripts/ci-pull-image.sh \
+            semgrep/semgrep:1.175.0@sha256:b94b53d02fd4a022f9eac4e2af1380f5c3c4c21400e79d3336bdff1d1db5e796
+
       - name: Static analysis
         # Run the maintained image directly rather than semgrep/semgrep-action@v1.
         # That action is archived and ships semgrep 1.36 (2023), which dies on
@@ -427,6 +441,12 @@ jobs:
           echo "KEYCLOAK_ADMIN_PASSWORD=${keycloak_password}" >> "$GITHUB_ENV"
           echo "INTERNAL_TOKEN_SECRET=${internal_secret}" >> "$GITHUB_ENV"
           echo "WEB_SESSION_SECRET=${web_session_secret}" >> "$GITHUB_ENV"
+
+      - name: Pre-pull Keycloak and MinIO (retries transient registry errors)
+        run: |
+          scripts/ci-pull-image.sh \
+            quay.io/keycloak/keycloak:26.0@sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858 \
+            "$MINIO_IMAGE" "$MC_IMAGE"
 
       - name: Start Keycloak with the platform realm
         # Service containers start before checkout, so the checked-in realm
@@ -895,6 +915,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - name: Pre-pull Prometheus (retries transient registry errors)
+        run: |
+          scripts/ci-pull-image.sh \
+            prom/prometheus:v3.1.0@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218
+
       - name: Check config and rule syntax
         # Also fails when a file named in `rule_files` does not exist.
         run: |
@@ -1024,6 +1049,12 @@ jobs:
         env:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets
+
+      - name: Pre-pull MinIO and ClamAV (retries transient registry errors)
+        run: |
+          scripts/ci-pull-image.sh \
+            "$MINIO_IMAGE" "$MC_IMAGE" \
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 
       - name: Start MinIO and create the document bucket
         # `docker run` rather than a `services:` container, and not by
@@ -1475,6 +1506,12 @@ jobs:
         env:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets
+
+      - name: Pre-pull MinIO and ClamAV (retries transient registry errors)
+        run: |
+          scripts/ci-pull-image.sh \
+            "$MINIO_IMAGE" "$MC_IMAGE" \
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 
       - name: Start MinIO and create the document bucket
         # document-service's suites are in the tenant isolation step's
@@ -2005,6 +2042,12 @@ jobs:
         env:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets
+
+      - name: Pre-pull MinIO and ClamAV (retries transient registry errors)
+        run: |
+          scripts/ci-pull-image.sh \
+            "$MINIO_IMAGE" "$MC_IMAGE" \
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 
       - name: Start MinIO and create the document bucket
         # For the document coverage gate. Same images, bucket and private
@@ -2731,6 +2774,14 @@ jobs:
           echo "KEYCLOAK_ADMIN_PASSWORD=${keycloak_password}" >> "$GITHUB_ENV"
           echo "INTERNAL_TOKEN_SECRET=${internal_secret}" >> "$GITHUB_ENV"
 
+      - name: Pre-pull Keycloak, Temporal, MinIO and ClamAV (retries transient registry errors)
+        run: |
+          scripts/ci-pull-image.sh \
+            quay.io/keycloak/keycloak:26.0@sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858 \
+            temporalio/admin-tools:1.26.2@sha256:37e2e33dbd7b86a12fa1daecf48f5b42544956ae503a83bd45460587f25591f2 \
+            "$MINIO_IMAGE" "$MC_IMAGE" \
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+
       - name: Start Keycloak with the platform realm
         # A `docker run` rather than a service container, because the realm
         # import needs a file from the repository and service containers start
@@ -3380,9 +3431,12 @@ jobs:
         # By digest, so this job scans exactly what the integration job, the
         # E2E job and `docker-compose.yml` run. A tag here would scan a
         # different image than the one deployed and report on it confidently.
+        # The pull is the retrying helper's: an explicit `docker pull` contacts
+        # the registry even when the image is already local.
         run: |
           set -euo pipefail
-          docker pull clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+          scripts/ci-pull-image.sh \
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
           docker tag clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6 \
             rasta/clamav-pinned:ci
 

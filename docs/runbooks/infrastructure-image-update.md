@@ -96,7 +96,8 @@ docker compose --profile all --profile observability --profile search --profile 
 - **برچسب محلیِ تصویر Pin‌شده** — `docker tag <pinned> rasta/clamav-pinned:ci` و سپس `docker run rasta/clamav-pinned:ci`،
   حتی در Step بعدی همان Workflow، پذیرفته است، چون همان تصویر است؛ برچسب محلیِ تصویری بی Digest نه.
 - **فرمانی که Check نمی‌تواند طبقه‌بندی کند ولی درست است** — توضیحی روی سطر همان فرمان یا سطر بالای آن:
-  `# image-pin-exempt: <چرا>`. دلیل الزامی است؛ نشانهٔ بی دلیل خطاست. امروز هیچ فرمانی معاف نیست.
+  `# image-pin-exempt: <چرا>`. دلیل الزامی است؛ نشانهٔ بی دلیل خطاست. امروز یک فرمان از تحلیل ایستا معاف است: `docker pull "$image"` در `scripts/ci-pull-image.sh`؛ این Helper پیش از Pull بی‌تغییر،
+  الزام می‌کند که ارجاع یک Digest از نوع SHA-256 باشد، پس Pin با Digest همچنان اجباری است.
 - **گزینهٔ ناشناختهٔ `docker run`** — آن را به `VALUE_FLAGS` یا `BOOL_FLAGS` همان فایل بیفزایید (با آزمون).
 
 ## آنچه این Runbook پوشش نمی‌دهد
