@@ -1,6 +1,5 @@
 import { ulid } from 'ulid';
-import { PrismaClient } from '../src/generated/prisma';
-import { cleanup, newOrganizationId, ownerDatabaseUrl, wire, type Wiring } from './helpers';
+import { cleanup, newOrganizationId, ownerClient, wire, type Wiring } from './helpers';
 
 /**
  * What PostgreSQL itself refuses about a tender, whatever a future write path
@@ -77,7 +76,7 @@ describe('tender database invariants', () => {
       await w.prisma.client.$executeRawUnsafe(sql);
       return;
     }
-    const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    const owner = ownerClient();
     try {
       await owner.$transaction(async (tx) => {
         await tx.$executeRawUnsafe(

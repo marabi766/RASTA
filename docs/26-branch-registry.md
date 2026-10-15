@@ -75,6 +75,7 @@ PRهای باز را `CONFLICTING` می‌کرد و CI آن‌ها را از ن�
 | `fix/marketplace-idempotency-gaps`      | سرور (کارگر ۱)                    | server-worker   | [#253](https://github.com/marabi766/RASTA/pull/253) | —              | شکاف‌های Idempotency در marketplace؛ Q-110 و Q-116                                                                   |
 | `fix/economic-scoped-cursor`            | سرور (کارگر ۲)                    | server-worker-2 | [#256](https://github.com/marabi766/RASTA/pull/256) | —              | مکان‌نمای فهرست‌های economic در دامنهٔ خود فهرست؛ در صف ادغام                                                        |
 | `feat/inventory-shipments`              | سرور (کارگر ۴)                    | server-worker-4 | [#257](https://github.com/marabi766/RASTA/pull/257) | —              | COM-006 PR 2: محموله و رهگیری (پایه: #246)؛ Q-113 … Q-115                                                            |
+| `chore/ci-split-integration`            | سرور (کارگر ۱)                    | server-worker   | [#274](https://github.com/marabi766/RASTA/pull/274) | —              | Integration در CI به چهار Job موازی؛ Check قدیم تجمیعی                                                               |
 | `feat/outbox-purge-phase2a`             | سرور (کارگر ۲)                    | server-worker-2 | [#276](https://github.com/marabi766/RASTA/pull/276) | —              | پاک‌سازی زمان‌بندی‌شدهٔ Outbox، فاز ۲a (D-052): notification، supplier، inventory؛ identity متوقف (تصمیم مدیر پروژه) |
 
 ## شاخه‌های بازنشسته
