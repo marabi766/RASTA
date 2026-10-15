@@ -165,6 +165,24 @@ const schema = z.object({
     PLATFORM_ROLE,
   ]),
 
+  /**
+   * Which roles are shown the Contracts link, on the employer's side
+   * (`server/portal-nav.ts`). The contractor's side needs `CONTRACTOR`, fixed
+   * in contract-service (ADR-068 § 7), so it has no setting here — the same
+   * shape as the bidder side of Tenders.
+   *
+   * This **mirrors** contract-service's `CONTRACT_READER_ROLES` (default
+   * `ORGANIZATION_ADMIN`) and must be changed together with it. It decides
+   * only whether a link is drawn; the service still decides who may read, and
+   * a refusal is rendered as an outcome. `AUDITOR` is refused at boot, as the
+   * service refuses it on both sides.
+   *
+   * contract-service has no separate "extra reader" role the way
+   * construction-service's projects do, so there is one setting here, not a
+   * pair — see docs/16 § ۱۶٫۶ for the note that explains this choice.
+   */
+  WEB_CONTRACT_READER_ROLES: roleList('WEB_CONTRACT_READER_ROLES', 'ORGANIZATION_ADMIN'),
+
   WEB_COOKIE_SECURE: z
     .enum(['true', 'false'])
     .default('true')

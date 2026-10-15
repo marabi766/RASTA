@@ -5,9 +5,11 @@ import { portalNavFor } from '@/app/nav';
 
 import type { CurrentUserResult } from './identity';
 import {
+  canReadContracts,
   canReadInventory,
   canReadProjects,
   canReadTenders,
+  contractSidesFor,
   loadPortalNav,
   tenderDoorsFor,
   tenderSidesFor,
@@ -117,6 +119,63 @@ describe('tenderDoorsFor', () => {
   });
 });
 
+const CONTRACT_DEFAULTS = { WEB_CONTRACT_READER_ROLES: ['ORGANIZATION_ADMIN'] };
+
+describe('contractSidesFor / canReadContracts', () => {
+  it('offers the employer’s side to the configured reader and to SYSTEM_ADMIN', () => {
+    expect(contractSidesFor(['ORGANIZATION_ADMIN'], CONTRACT_DEFAULTS)).toEqual({
+      employer: true,
+      contractor: false,
+    });
+    expect(contractSidesFor(['SYSTEM_ADMIN'], CONTRACT_DEFAULTS)).toEqual({
+      employer: true,
+      contractor: false,
+    });
+    for (const role of ['FLEET_MANAGER', 'DRIVER', 'SUPPLIER']) {
+      expect(contractSidesFor([role], CONTRACT_DEFAULTS).employer).toBe(false);
+    }
+  });
+
+  it('offers the contractor’s side to CONTRACTOR only', () => {
+    expect(contractSidesFor(['CONTRACTOR'], CONTRACT_DEFAULTS)).toEqual({
+      employer: false,
+      contractor: true,
+    });
+    for (const role of ['ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'SUPPLIER', 'DRIVER']) {
+      expect(contractSidesFor([role], CONTRACT_DEFAULTS).contractor).toBe(false);
+    }
+  });
+
+  it('refuses the contractor’s side to SYSTEM_ADMIN and AUDITOR whenever present, as the service does', () => {
+    expect(contractSidesFor(['CONTRACTOR', 'SYSTEM_ADMIN'], CONTRACT_DEFAULTS).contractor).toBe(
+      false,
+    );
+    expect(contractSidesFor(['CONTRACTOR', 'AUDITOR'], CONTRACT_DEFAULTS).contractor).toBe(false);
+  });
+
+  it('offers neither side to AUDITOR, whatever else the person holds or the settings say', () => {
+    for (const roles of [
+      ['AUDITOR'],
+      ['AUDITOR', 'ORGANIZATION_ADMIN'],
+      ['AUDITOR', 'CONTRACTOR'],
+    ]) {
+      expect(contractSidesFor(roles, CONTRACT_DEFAULTS)).toEqual({
+        employer: false,
+        contractor: false,
+      });
+      expect(canReadContracts(roles, CONTRACT_DEFAULTS)).toBe(false);
+    }
+  });
+
+  it('draws the link for an employer reader, a contractor or both, and for nobody else', () => {
+    expect(canReadContracts(['ORGANIZATION_ADMIN'], CONTRACT_DEFAULTS)).toBe(true);
+    expect(canReadContracts(['CONTRACTOR'], CONTRACT_DEFAULTS)).toBe(true);
+    expect(canReadContracts(['ORGANIZATION_ADMIN', 'CONTRACTOR'], CONTRACT_DEFAULTS)).toBe(true);
+    expect(canReadContracts(['DRIVER'], CONTRACT_DEFAULTS)).toBe(false);
+    expect(canReadContracts([], CONTRACT_DEFAULTS)).toBe(false);
+  });
+});
+
 const INVENTORY_DEFAULTS = {
   WEB_INVENTORY_ROLES: ['ORGANIZATION_ADMIN'],
   WEB_INVENTORY_READER_ROLES: ['ORGANIZATION_ADMIN'],
@@ -178,6 +237,21 @@ describe('portalNavFor', () => {
     expect(contractor.indexOf('/tenders')).toBe(contractor.indexOf('/marketplace') + 1);
   });
 
+  it('puts Contracts right after Tenders, and only when allowed', () => {
+    const shown = hrefs(
+      portalNavFor({ canReadProjects: true, canReadTenders: true, canReadContracts: true }),
+    );
+    const hidden = hrefs(
+      portalNavFor({ canReadProjects: true, canReadTenders: true, canReadContracts: false }),
+    );
+    const contractor = hrefs(portalNavFor({ canReadProjects: false, canReadContracts: true }));
+
+    expect(shown.indexOf('/contracts')).toBe(shown.indexOf('/tenders') + 1);
+    expect(hidden).not.toContain('/contracts');
+    expect(contractor).toContain('/contracts');
+    expect(contractor).not.toContain('/projects');
+  });
+
   it('puts Projects between the marketplace and the wallet, and only when allowed', () => {
     const shown = hrefs(portalNavFor({ canReadProjects: true }));
     const hidden = hrefs(portalNavFor({ canReadProjects: false }));
@@ -237,6 +311,30 @@ describe('loadPortalNav', () => {
     expect(hrefs(await loadPortalNav(SESSION, user(['CONTRACTOR'])))).toContain('/tenders');
     expect(hrefs(await loadPortalNav(SESSION, user(['AUDITOR'])))).not.toContain('/tenders');
     expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/tenders');
+  });
+
+  describe('Contracts', () => {
+    beforeEach(() => {
+      delete process.env.WEB_CONTRACT_READER_ROLES;
+    });
+
+    it('offers the link to the configured employer reader, to SYSTEM_ADMIN and to a contractor, not to the oversight role', async () => {
+      expect(hrefs(await loadPortalNav(SESSION, user(['ORGANIZATION_ADMIN'])))).toContain(
+        '/contracts',
+      );
+      expect(hrefs(await loadPortalNav(SESSION, user(['CONTRACTOR'])))).toContain('/contracts');
+      expect(hrefs(await loadPortalNav(SESSION, user(['AUDITOR'])))).not.toContain('/contracts');
+      expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/contracts');
+    });
+
+    it('is not read when identity did not answer', async () => {
+      for (const result of [
+        { kind: 'UNAVAILABLE', status: 503, correlationId: 'c' },
+        { kind: 'MALFORMED', correlationId: 'c' },
+      ] as const) {
+        expect(hrefs(await loadPortalNav(SESSION, result))).not.toContain('/contracts');
+      }
+    });
   });
 
   // The service acts on membership roles plus the global realm roles, so a realm
@@ -407,6 +505,7 @@ describe('loadPortalNav', () => {
       const items = hrefs(await loadPortalNav(SESSION, result));
       expect(items).not.toContain('/projects');
       expect(items).not.toContain('/tenders');
+      expect(items).not.toContain('/contracts');
       expect(items).not.toContain('/settlements');
       expect(items).not.toContain('/inventory');
       expect(items).toContain('/assets');
