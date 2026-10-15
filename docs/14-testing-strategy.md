@@ -967,10 +967,14 @@ Jobی یا در دو Job اجرا شود، یا گامی بدون زیرساخت
 `404`، `manifest unknown`، `unauthorized/denied`، ناهمخوانی Digest و هر متن خطای ناشناخته **فوراً** شکست می‌خورد و خروجی
 خود docker چاپ می‌شود؛ مرجع بی‌Digest رد می‌شود (کد ۲) و هیچ Pin یا اسکنی سست نشده است. مرجع‌های `semgrep`، `keycloak`،
 `temporalio/admin-tools`، `prometheus`، `clamav` و `MINIO_IMAGE`/`MC_IMAGE` در Jobهای `security`، `web-browser`،
-`prometheus-rules`، `integration-{suites,security,coverage}`، `e2e` و `clamav-signatures` پوشش دارند. `pnpm
+`prometheus-rules`، `integration-{suites,security,coverage}`، `e2e` و `clamav-signatures` پوشش دارند (در `clamav-signatures`
+خود Pull اصلی هم از همین Helper می‌گذرد، نه `docker pull` عریان). Broker کافکا هم که هفت Job (`web-browser`، چهار Job
+یکپارچگی، `broker-authorisation` و `e2e`) از طریق `infrastructure/docker/kafka/ci-up.sh` بالا می‌آورند، ایمیج
+`apache/kafka` را در خود اسکریپت، پیش از اولین `docker run`، با همین Helper Pull می‌کند. بیرون از این PR: Trivy DB و Pull
+ایمیج‌های `FROM` در buildx (Backlog)، و کانتینرهای `services:` که دست‌نخورده‌اند. `pnpm
 test:ci-pull-image` (در Job کیفیت) با docker ساختگی (۵۰۲، Timeout، reset، ۴۰۴، `manifest unknown`، unauthorized، Digest،
 خطای ناشناخته) رفتار را می‌سنجد و رد می‌کند اگر گامی ایمیجی با Digest را اجرا کند که گام Pre-pull پیش از آن در همان Job
-ندارد.
+ندارد؛ و اگر اسکریپت `.sh`ای که یک Workflow صدا می‌زند `docker run|pull|create` را پیش از فراخوانی Helper داشته باشد.
 
 بیرون از این پوشش (عمداً): ‏**`services:`** ‏(`postgis`، `redis`) را خودِ Runner پیش از گام‌های Job و پیش از checkout
 Pull می‌کند؛ اسکریپتی نمی‌تواند آن را تکرار کند و شکست Pull در «Initialize containers» کل Job را از «Set up job» می‌اندازد

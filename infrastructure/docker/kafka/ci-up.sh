@@ -99,6 +99,10 @@ on_error() {
 trap on_error ERR
 
 # ---------------------------------------------------------------- 2. TLS
+# The first `docker run` below would pull the image implicitly, and under
+# `set -e` one registry 502 would end the bootstrap. The helper retries
+# transient errors only and refuses a reference not pinned by digest.
+"${ROOT}/scripts/ci-pull-image.sh" "${IMAGE}"
 mkdir -p "${TLS_DIR}"
 docker run --rm --user 0 \
   -v "${TLS_DIR}:/tls" -v "${HERE}:/bootstrap:ro" \

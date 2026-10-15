@@ -180,12 +180,71 @@ test('every digest-pinned image a step pulls or runs is pre-pulled earlier in th
   assert.deepEqual(problems, []);
 });
 
+// A workflow step can hand the pull to a shell script (the Kafka bootstrap
+// does): that script's `docker run`/`pull`/`create` is as exposed to a registry
+// error as a step's, and the check above never looked inside it.
+const scriptCalls = (text) =>
+  [...text.matchAll(/(?:^|[\s"'(=])((?:\$\{?\w+\}?\/|\.\/)?(?:[\w.-]+\/)*[\w.-]+\.sh)\b/gm)]
+    .map((m) => m[1].replace(/^\$\{?\w+\}?\//, ''))
+    .filter((p) => p !== 'scripts/ci-pull-image.sh');
+
+const shellScriptsCalledFrom = (runs) => {
+  const found = new Map(); // repo-relative path -> source text
+  const queue = runs.flatMap(scriptCalls);
+  while (queue.length > 0) {
+    const rel = queue.pop();
+    for (const candidate of [rel, `${'infrastructure/docker/kafka'}/${rel}`]) {
+      const abs = resolve(ROOT, candidate);
+      if (found.has(candidate) || !existsSync(abs)) continue;
+      const text = readFileSync(abs, 'utf8');
+      found.set(candidate, text);
+      queue.push(...scriptCalls(text));
+    }
+  }
+  return found;
+};
+
+test('a shell script a workflow calls pre-pulls every digest-pinned image it runs', () => {
+  const runs = Object.values(workflow.jobs).flatMap((job) =>
+    (job.steps ?? []).map((step) => String(step.run ?? '')),
+  );
+  const scripts = shellScriptsCalledFrom(runs);
+  assert.ok(
+    scripts.has('infrastructure/docker/kafka/ci-up.sh'),
+    'the Kafka bootstrap should be found as a script called from a workflow',
+  );
+  const problems = [];
+  for (const [path, text] of scripts) {
+    const lines = text.split('\n');
+    let prepulled = false;
+    lines.forEach((line, i) => {
+      if (/^\s*#/.test(line)) return;
+      if (line.includes('ci-pull-image.sh')) prepulled = true;
+      else if (/\bdocker\s+(run|pull|create)\b/.test(line) && !prepulled)
+        problems.push(`${path}:${i + 1} runs docker with no earlier call to ci-pull-image.sh`);
+    });
+  }
+  assert.deepEqual(problems, []);
+});
+
+test('the Kafka bootstrap pre-pulls its image by the digest it runs', () => {
+  const text = readFileSync(resolve(ROOT, 'infrastructure/docker/kafka/ci-up.sh'), 'utf8');
+  assert.match(text, /^IMAGE="\$\{KAFKA_IMAGE:-[^"}]*@sha256:[0-9a-f]{64}\}"$/m);
+  assert.match(text, /^"\$\{ROOT\}\/scripts\/ci-pull-image\.sh" "\$\{IMAGE\}"$/m);
+});
+
 test('the pre-pull steps do not weaken pinning: none names a tag-only image', () => {
   for (const job of Object.values(workflow.jobs)) {
     for (const step of job.steps ?? []) {
       const run = String(step.run ?? '');
       if (!run.includes('scripts/ci-pull-image.sh')) continue;
-      const args = run.replace(/\\\n/g, ' ').split('ci-pull-image.sh')[1].trim().split(/\s+/);
+      // The helper's own command only: the step may go on to `docker tag`.
+      const args = run
+        .replace(/\\\n/g, ' ')
+        .split('ci-pull-image.sh')[1]
+        .split('\n')[0]
+        .trim()
+        .split(/\s+/);
       for (const arg of args) {
         assert.match(arg.replace(/"/g, ''), /^(\$\w+|.+@sha256:[0-9a-f]{64})$/, arg);
       }
