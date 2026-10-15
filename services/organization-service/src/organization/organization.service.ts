@@ -1028,14 +1028,7 @@ export class OrganizationService {
   // =========================================================================
 
   private assertWithinDepth(resultingDepth: number, context: Record<string, unknown>): void {
-    if (resultingDepth > this.maxDepth) {
-      throw RastaError.businessRule(`Hierarchy may not exceed ${this.maxDepth} levels`, {
-        rule: 'HIERARCHY_TOO_DEEP',
-        maxDepth: this.maxDepth,
-        resultingDepth,
-        ...context,
-      });
-    }
+    assertWithinHierarchyDepth(this.maxDepth, resultingDepth, context);
   }
 
   private async insertLocation(
@@ -1098,9 +1091,10 @@ function rethrowConstraintViolation(aggregate: string, id: string) {
 /**
  * Refuses an operation that would leave an ACTIVE organization beneath a
  * SUSPENDED or DEACTIVATED one. `chain` is ancestors root-first, already
- * locked by the caller; the nearest blocking one is reported.
+ * locked by the caller; the nearest blocking one is reported. The demo seed
+ * applies the same rule to the rows it creates (`seed-organization.ts`).
  */
-function assertNoBlockingAncestor(chain: readonly ChainRow[], action: string): void {
+export function assertNoBlockingAncestor(chain: readonly ChainRow[], action: string): void {
   const blocking = [...chain]
     .reverse()
     .find((row) => BLOCKING_ANCESTOR_STATUSES.includes(row.status));
@@ -1109,6 +1103,27 @@ function assertNoBlockingAncestor(chain: readonly ChainRow[], action: string): v
     `Cannot ${action} beneath a ${blocking.status.toLowerCase()} organization`,
     { rule: 'ANCESTOR_NOT_ACTIVE', ancestorId: blocking.id, ancestorStatus: blocking.status },
   );
+}
+
+/**
+ * Refuses a write that would put an organization deeper than `maxDepth`
+ * (`MAX_HIERARCHY_DEPTH`). `resultingDepth` is computed from rows read under
+ * the hierarchy lock. The demo seed applies the same rule to the rows it
+ * places (`seed-organization.ts`).
+ */
+export function assertWithinHierarchyDepth(
+  maxDepth: number,
+  resultingDepth: number,
+  context: Record<string, unknown>,
+): void {
+  if (resultingDepth > maxDepth) {
+    throw RastaError.businessRule(`Hierarchy may not exceed ${maxDepth} levels`, {
+      rule: 'HIERARCHY_TOO_DEEP',
+      maxDepth,
+      resultingDepth,
+      ...context,
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------

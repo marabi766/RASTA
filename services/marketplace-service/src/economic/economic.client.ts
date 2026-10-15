@@ -49,6 +49,18 @@ export interface TransactionView {
 }
 
 /**
+ * What `GET /v1/transactions/{id}` answers with: the transaction as its payer
+ * sees it now, with the settlement that closed it, if one did. Only the
+ * fields the saga reads.
+ */
+export interface TransactionDetailView extends TransactionView {
+  disputedAt: string | null;
+  /** The objection while DISPUTED; the resolution once resolved. */
+  disputeReason: string | null;
+  settlement: { id: string; journalId: string; settledAt: string } | null;
+}
+
+/**
  * What `POST /v1/settlements` answers with.
  *
  * Field names copied from economic-service's controller, not guessed: the id
@@ -170,6 +182,38 @@ export class EconomicClient {
           item.sourceReference === input.orderId && item.transactionType === OBLIGATION_TYPE,
       ) ?? null
     );
+  }
+
+  /**
+   * The order's obligation as economic-service has it now, or null if
+   * `transactionId` is not this order's obligation.
+   *
+   * The saga's answer to "did my command already happen?" when a retry is
+   * refused for the transaction's state (D-053). economic-service replays a
+   * command's stored answer only for `ECONOMIC_IDEMPOTENCY_TTL_HOURS`; a retry
+   * after that is judged against the state the first attempt produced and
+   * refused. Read as the payer, with the same service token as the command;
+   * checked against the order and the obligation type, so a transaction that
+   * is somebody else's — or another order's — can never prove anything.
+   */
+  async readObligation(input: {
+    orderId: string;
+    transactionId: string;
+    buyerOrganizationId: string;
+    correlationId: string;
+  }): Promise<TransactionDetailView | null> {
+    const transaction = await this.call<TransactionDetailView>('readObligation', {
+      method: 'GET',
+      path: `/v1/transactions/${input.transactionId}`,
+      organizationId: input.buyerOrganizationId,
+      correlationId: input.correlationId,
+    });
+    const ours =
+      transaction.id === input.transactionId &&
+      transaction.organizationId === input.buyerOrganizationId &&
+      transaction.sourceReference === input.orderId &&
+      transaction.transactionType === OBLIGATION_TYPE;
+    return ours ? transaction : null;
   }
 
   /** Marks the obligation ready to settle. Only reachable after receipt. */

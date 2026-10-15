@@ -2542,9 +2542,9 @@ ScanWorker → Claim (FOR UPDATE SKIP LOCKED + Lease) → Stream از MinIO → 
 
 | موضوع         | واقعیت                                                                                  |
 | ------------- | --------------------------------------------------------------------------------------- |
-| Image         | `clamav/clamav@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0` |
+| Image         | `clamav/clamav@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6` |
 | نسخه          | ClamAV 1.5.4، Alpine 3.24.2، amd64، ~۴۰۰MB                                              |
-| امضا در Image | `main.cvd` v63 · `daily.cvd` v28136 · `bytecode.cvd` v339                               |
+| امضا در Image | `main.cvd` v63 · `daily.cvd` v28150 · `bytecode.cvd` v339                               |
 | Production    | Unix Socket؛ `DOCUMENT_CLAMAV_HOST` در Production **رد می‌شود و فرآیند خارج** (S-08)    |
 | Local/CI      | TCP فقط روی `127.0.0.1`؛ CI روی لینوکس از Socket استفاده می‌کند                         |
 | freshclam     | Container جداگانه، غیر-root، Volume ماندگار — **محلی تأیید شد: 28108 → 28109**          |
