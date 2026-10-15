@@ -213,6 +213,8 @@ const inertRelay = { start: () => undefined, stop: async () => undefined };
 const inertWorker = {
   onApplicationBootstrap: async () => undefined,
   onModuleDestroy: async () => undefined,
+  // OutboxShutdown stops the worker with the relay (D-052).
+  stop: async () => undefined,
 };
 
 export async function startApi(): Promise<ApiHarness> {
