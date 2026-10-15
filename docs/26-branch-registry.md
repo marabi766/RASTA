@@ -77,7 +77,6 @@ PRهای باز را `CONFLICTING` می‌کرد و CI آن‌ها را از ن�
 | `feat/inventory-shipments`              | سرور (کارگر ۴)                    | server-worker-4 | [#257](https://github.com/marabi766/RASTA/pull/257) | —              | COM-006 PR 2: محموله و رهگیری (پایه: #246)؛ Q-113 … Q-115                    |
 | `chore/ci-split-integration`            | سرور (کارگر ۱)                    | server-worker   | [#274](https://github.com/marabi766/RASTA/pull/274) | —              | Integration در CI به چهار Job موازی؛ Check قدیم تجمیعی                       |
 | `fix/document-outbox-shutdown-flake`    | سرور (کارگر ۳)                    | server-worker-3 | [#278](https://github.com/marabi766/RASTA/pull/278) | —              | ترتیب رویدادها به‌جای میلی‌ثانیه در int-spec خاموشی document؛ فقط تست        |
-| `chore/ci-image-pull-retry`             | سرور (کارگر ۳)                    | server-worker-3 | —                                                   | —              | Retry فقط-خطای-گذرا برای Pull ایمیج در CI؛ Pin و اسکن سست نمی‌شود            |
 
 ## شاخه‌های بازنشسته
 
