@@ -5,6 +5,6 @@
     "noEmit": true,
     "incremental": false
   },
-  "include": ["src/**/*", "test/**/*"],
+  "include": ["src/**/*", "test/**/*", "dev/**/*"],
   "exclude": ["node_modules", "dist"]
 }
