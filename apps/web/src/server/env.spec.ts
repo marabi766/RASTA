@@ -105,6 +105,35 @@ describe('who is shown the Projects link', () => {
   );
 });
 
+describe('who is shown the Inventory link', () => {
+  it("defaults to inventory-service's own defaults: ORGANIZATION_ADMIN operates and reads", () => {
+    const env = loadWebServerEnv(REQUIRED);
+    expect(env.WEB_INVENTORY_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+    expect(env.WEB_INVENTORY_READER_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+  });
+
+  it('reads comma lists, trimmed, with empty elements dropped', () => {
+    const env = loadWebServerEnv({
+      ...REQUIRED,
+      WEB_INVENTORY_ROLES: ' ORGANIZATION_ADMIN , FLEET_MANAGER,, ',
+      WEB_INVENTORY_READER_ROLES: 'DRIVER',
+    });
+    expect(env.WEB_INVENTORY_ROLES).toEqual(['ORGANIZATION_ADMIN', 'FLEET_MANAGER']);
+    expect(env.WEB_INVENTORY_READER_ROLES).toEqual(['DRIVER']);
+  });
+
+  it.each(['WEB_INVENTORY_ROLES', 'WEB_INVENTORY_READER_ROLES'])(
+    'refuses to start when %s names AUDITOR or SYSTEM_ADMIN, as the service does',
+    (key) => {
+      for (const refused of ['AUDITOR', 'SYSTEM_ADMIN']) {
+        expect(() =>
+          loadWebServerEnv({ ...REQUIRED, [key]: `ORGANIZATION_ADMIN,${refused}` }),
+        ).toThrow(new RegExp(key));
+      }
+    },
+  );
+});
+
 describe('refresh coordination in production (ADR-059 addendum)', () => {
   it('refuses to start in production without WEB_REDIS_URL', () => {
     // Two replicas are the documented topology; without shared coordination
