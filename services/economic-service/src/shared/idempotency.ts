@@ -47,6 +47,22 @@ import { SERVICE_NAME, type EconomicEnv } from '../config/env';
  * CONFLICT` rather than a re-execution until the record expires. For a
  * financial write that is the right way round — a caller retrying too early is
  * a nuisance, and a caller charged twice is an incident.
+ *
+ * ## Why the answer is stored inside the effect's transaction
+ *
+ * The work receives an {@link IdempotentAnswer} and stores its response — or
+ * a declared terminal refusal — through it, inside the transaction that
+ * applies its effect, from the rows that transaction wrote. The effect and its
+ * completed key are one commit, so nothing that fails after that commit can
+ * free the key: {@link release} only ever removes an `IN_PROGRESS` row, and the
+ * row is `COMPLETED` by then. A retry with the same key replays the answer.
+ *
+ * The response used to be stored after the commit, and the work's own
+ * post-commit steps — reading the transaction back for the response — ran
+ * inside the `try` that releases the claim. A read that failed there freed the
+ * key of an applied state change; the retry was judged against the moved state
+ * and refused `INVALID_STATE_TRANSITION`, and the order saga never learnt that
+ * its authorisation had succeeded (review of #283, finding 2; docs/23 D-054).
  */
 @Injectable()
 export class IdempotencyStore {
@@ -191,21 +207,28 @@ export class IdempotencyStore {
   }
 
   /**
-   * Records the response so a retry can replay it.
+   * Records the answer so a retry can replay it — **inside the work's own
+   * transaction** `tx`, the one that applies its effect.
    *
-   * Deliberately **not** inside the caller's transaction. Recording the
-   * response is not part of the financial effect: if the effect committed and
-   * this write then failed, the money has moved and a retry would find
-   * `IN_PROGRESS` and be refused — annoying, and safe. If it shared the
-   * transaction, a failure here would roll back a settlement that had already
-   * succeeded, which is not.
+   * A failure here rolls the effect back with it: the claim is then released
+   * and a retry with the same key runs the work, which never happened. A
+   * claim that is no longer `IN_PROGRESS` — it outlived its retention and was
+   * purged or taken over — matches nothing, and that throws too, so the effect
+   * is never committed without its key.
    */
-  async complete(endpoint: string, key: string, status: number, body: unknown): Promise<void> {
+  private async complete(
+    tx: ExtendedPrismaClient,
+    endpoint: string,
+    key: string,
+    status: number,
+    body: unknown,
+  ): Promise<void> {
     const organizationId = getOrganizationId();
-    await this.prisma.client.idempotencyKey.updateMany({
+    const { count } = await tx.idempotencyKey.updateMany({
       where: { organizationId, endpoint, key, state: 'IN_PROGRESS' },
       data: { state: 'COMPLETED', responseStatus: status, responseBody: body as object },
     });
+    if (count !== 1) throw claimLost(endpoint);
   }
 
   /**
@@ -230,13 +253,18 @@ export class IdempotencyStore {
    * sequence is written once. A handler that forgot the `release` on failure
    * would leave a key wedged until expiry, and that is exactly the kind of
    * detail that is got wrong when it is repeated per endpoint.
+   *
+   * `work` answers through `answer`, inside the transaction that applies its
+   * effect, and what it answered is what this returns — the same body a
+   * replay returns. A work that returns normally must have answered in a
+   * transaction that committed.
    */
   async run<T>(
     endpoint: string,
     key: string,
     body: unknown,
     successStatus: number,
-    work: () => Promise<T>,
+    work: (answer: IdempotentAnswer<T>) => Promise<unknown>,
     options?: { terminalRefusals?: TerminalRefusals },
   ): Promise<T> {
     const claim = await this.claim(endpoint, key, body);
@@ -247,25 +275,45 @@ export class IdempotencyStore {
       return claim.body as T;
     }
 
-    // Only a failure of `work` releases the claim. A failure to record the
-    // response comes after the work committed — the money has moved — so the
-    // claim is kept and the error surfaces: retries meet the in-flight 409
-    // until the claim expires, rather than a freed key executing the work a
-    // second time (review of #141). The release used to cover both.
-    let result: T;
+    let answered: { response: T } | undefined;
+    const answer = new IdempotentAnswer<T>(
+      async (tx, response) => {
+        await this.complete(tx, endpoint, key, successStatus, response);
+        answered = { response };
+      },
+      async (tx, refusal) => {
+        // An undeclared refusal is not one the store can replay: it is left
+        // to the release below, and the effect it ends is never rolled back
+        // for it.
+        if (!declaredBy(options?.terminalRefusals, refusal)) return;
+        await this.complete(tx, endpoint, key, refusal.status, { refusal: refusal.refusal });
+      },
+    );
+
     try {
-      result = await work();
+      await work(answer);
     } catch (error) {
-      const declared =
+      // Unconditional, and safe to be: an answer stored in a transaction that
+      // committed left the row COMPLETED, which the release never removes —
+      // whatever failed afterwards, a retry replays it. A transaction that
+      // rolled back took its answer with it, and the key is freed.
+      if (
         error instanceof TerminalRefusalError &&
-        options?.terminalRefusals !== undefined &&
-        isDeclared(options.terminalRefusals, error.refusal);
-      if (declared && (await this.completeRefusal(endpoint, key, error))) throw error;
+        declaredBy(options?.terminalRefusals, error) &&
+        (await this.completeRefusal(endpoint, key, error))
+      ) {
+        throw error;
+      }
       await this.release(endpoint, key);
       throw error;
     }
-    await this.complete(endpoint, key, successStatus, result);
-    return result;
+    if (!answered) {
+      // A programming error: the work may have committed without its answer.
+      // The claim stays IN_PROGRESS for its retention, so retries are refused
+      // rather than run a second time.
+      throw RastaError.internal(`Idempotent work for ${endpoint} did not store its answer`);
+    }
+    return answered.response;
   }
 
   /**
@@ -274,6 +322,11 @@ export class IdempotencyStore {
    * recorded; when not, the caller releases the key as it does for any other
    * error, because a refusal the store could not record is not one it can
    * replay.
+   *
+   * For a refusal that ends work with no effect. One that ends a transaction
+   * which did change something — a declined refund returning its hold — is
+   * recorded in that transaction through {@link IdempotentAnswer.refuse}, and
+   * this then finds the row COMPLETED and matches nothing.
    */
   private async completeRefusal(
     endpoint: string,
@@ -354,11 +407,63 @@ export class TerminalRefusalError extends RastaError {
   }
 }
 
+/** Stores an answer in the transaction that applies the effect it answers for. */
+type Store<A> = (tx: ExtendedPrismaClient, answer: A) => Promise<void>;
+
+/**
+ * How an idempotent command answers its key: **inside the transaction that
+ * applies its effect**, built from the rows that transaction wrote (review of
+ * #283, finding 2). The effect and the completed key then commit together, so
+ * a failure after the commit — a read, a serialisation, a lost connection —
+ * can only ever be answered by replaying what was applied, never by freeing
+ * the key as if nothing had been.
+ *
+ * Call it as late in the transaction as possible: anything after it that fails
+ * rolls the answer back with the effect, which is correct, but is wasted work.
+ * A work that answers twice — a first transaction that rolled back, a second
+ * that committed — leaves the later answer, which is the committed one.
+ */
+export class IdempotentAnswer<T> {
+  constructor(
+    private readonly storeResponse: Store<T>,
+    private readonly storeRefusal: Store<TerminalRefusalError>,
+  ) {}
+
+  /** The success response — exactly what this request and every replay return. */
+  respond(tx: ExtendedPrismaClient, response: T): Promise<void> {
+    return this.storeResponse(tx, response);
+  }
+
+  /**
+   * A declared terminal refusal the work throws **after** this transaction
+   * commits, recorded with the effect that ended in it. An undeclared one is
+   * ignored: the store releases the key for it as for any other error.
+   */
+  refuse(tx: ExtendedPrismaClient, refusal: TerminalRefusalError): Promise<void> {
+    return this.storeRefusal(tx, refusal);
+  }
+
+  /**
+   * The same answer for a service that returns its own result type: `view`
+   * turns that result into the response, inside the same transaction.
+   */
+  map<R>(view: (result: R) => T): IdempotentAnswer<R> {
+    return new IdempotentAnswer<R>(
+      (tx, result) => this.storeResponse(tx, view(result)),
+      this.storeRefusal,
+    );
+  }
+}
+
 /** A stored status at or above this is a recorded refusal, not a response body. */
 const REFUSAL_STATUS_FLOOR = 400;
 
 function isDeclared(refusals: TerminalRefusals, name: string): boolean {
   return Object.prototype.hasOwnProperty.call(refusals, name);
+}
+
+function declaredBy(refusals: TerminalRefusals | undefined, error: TerminalRefusalError): boolean {
+  return refusals !== undefined && isDeclared(refusals, error.refusal);
 }
 
 /**
@@ -416,6 +521,20 @@ function inFlight(endpoint: string): RastaError {
     internalContext: { endpoint },
     retryAfterSeconds: IN_FLIGHT_RETRY_AFTER_SECONDS,
   });
+}
+
+/**
+ * The claim this request took is no longer `IN_PROGRESS` — it outlived its
+ * retention and was purged, perhaps taken over by a retry — so its work must
+ * not commit. Retryable: the key is either free again or another request's,
+ * and a retry learns which.
+ */
+function claimLost(endpoint: string): RastaError {
+  return new RastaError(
+    'CONFLICT',
+    'This request took too long and its Idempotency-Key lapsed; retry shortly',
+    { internalContext: { endpoint }, retryAfterSeconds: IN_FLIGHT_RETRY_AFTER_SECONDS },
+  );
 }
 
 /**

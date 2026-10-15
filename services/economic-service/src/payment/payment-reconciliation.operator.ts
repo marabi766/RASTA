@@ -18,6 +18,7 @@ import { paymentIntentsTotal } from '../observability/metrics';
 import { ENV, PAYMENT_PROVIDER } from '../tokens';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { assertNotAuditor } from '../access/access';
+import type { IdempotentAnswer } from '../shared/idempotency';
 import type {
   PaymentIntent,
   PaymentReconciliationResolution,
@@ -209,11 +210,19 @@ export class PaymentReconciliationOperator {
    * nothing. The reason is kept in an append-only, tenant-scoped requeue row
    * in the same transaction — never in a log or the event (S-09; Codex on
    * #175, MED 4).
+   *
+   * The task is read back, and `answer` stored, in that same transaction:
+   * read after the commit, a failed read freed the key of a requeue that had
+   * happened (review of #283, finding 2).
    */
-  async requeue(paymentIntentId: string, reason: string): Promise<ReconciliationTaskView> {
+  async requeue(
+    paymentIntentId: string,
+    reason: string,
+    answer?: IdempotentAnswer<ReconciliationTaskView>,
+  ): Promise<ReconciliationTaskView> {
     const actor = this.authorize();
     const organizationId = getOrganizationId();
-    const { taskId, requeueId } = await this.prisma.transaction(async (tx) => {
+    const { requeueId, view } = await this.prisma.transaction(async (tx) => {
       const intent = await this.lockIntent(tx, paymentIntentId, organizationId);
       const task = await this.tasks.lockOpenTask(tx, organizationId, paymentIntentId);
       if (!task) throw noOpenTask('REQUEUED');
@@ -250,13 +259,15 @@ export class PaymentReconciliationOperator {
         evidenceReference: null,
         proposedBy: null,
       });
-      return { taskId: task.id, requeueId: requeued.id };
+      const row = await tx.paymentReconciliationTask.findFirstOrThrow({
+        where: { id: task.id, organizationId },
+      });
+      const requeuedView = toTaskView(row);
+      await answer?.respond(tx, requeuedView);
+      return { requeueId: requeued.id, view: requeuedView };
     });
     this.logAction('REQUEUED', paymentIntentId, requeueId, actor.userId);
-    const row = await this.prisma.client.paymentReconciliationTask.findFirstOrThrow({
-      where: { id: taskId, organizationId },
-    });
-    return toTaskView(row);
+    return view;
   }
 
   /**
@@ -265,7 +276,11 @@ export class PaymentReconciliationOperator {
    * it: a known marker (the sweeper or a requeue records it), a wallet that
    * is not active for a refund, a second pending proposal.
    */
-  async propose(paymentIntentId: string, input: ProposeResolution): Promise<ResolutionView> {
+  async propose(
+    paymentIntentId: string,
+    input: ProposeResolution,
+    answer?: IdempotentAnswer<ResolutionView>,
+  ): Promise<ResolutionView> {
     const actor = this.authorize();
     const organizationId = getOrganizationId();
     const fourEyes = this.fourEyes;
@@ -342,11 +357,15 @@ export class PaymentReconciliationOperator {
         evidenceReference: proposed.evidenceReference,
         proposedBy: actor.userId,
       });
-      if (fourEyes) return { resolution: proposed, verdict: null };
+      if (fourEyes) return this.answered(tx, answer, { resolution: proposed, verdict: null });
       // Separation of duties configured off (development and test only): the
       // proposer is the approver, and the record says so. The creator was
       // proven apart above.
-      return this.approveLocked(tx, task, proposed, actor, input.reason);
+      return this.answered(
+        tx,
+        answer,
+        await this.approveLocked(tx, task, proposed, actor, input.reason),
+      );
     });
     this.logAction(
       fourEyes ? 'PROPOSED' : 'PROPOSED_AND_APPLIED',
@@ -363,6 +382,7 @@ export class PaymentReconciliationOperator {
     paymentIntentId: string,
     resolutionId: string,
     reason: string,
+    answer?: IdempotentAnswer<ResolutionView>,
   ): Promise<ResolutionView> {
     const actor = this.authorize();
     const organizationId = getOrganizationId();
@@ -372,7 +392,7 @@ export class PaymentReconciliationOperator {
       const task = await tx.paymentReconciliationTask.findFirstOrThrow({
         where: { id: proposed.taskId, organizationId },
       });
-      return this.approveLocked(tx, task, proposed, actor, reason);
+      return this.answered(tx, answer, await this.approveLocked(tx, task, proposed, actor, reason));
     });
     this.logAction('APPROVED', paymentIntentId, resolution.id, actor.userId);
     this.countFailure(verdict);
@@ -384,10 +404,11 @@ export class PaymentReconciliationOperator {
     paymentIntentId: string,
     resolutionId: string,
     reason: string,
+    answer?: IdempotentAnswer<ResolutionView>,
   ): Promise<ResolutionView> {
     const actor = this.authorize();
     const organizationId = getOrganizationId();
-    const resolution = await this.prisma.transaction(async (tx) => {
+    const { resolution } = await this.prisma.transaction(async (tx) => {
       const intent = await this.lockIntent(tx, paymentIntentId, organizationId);
       const proposed = await this.decidable(tx, intent, resolutionId, actor, 'REJECTED');
       const decided = await this.decide(tx, proposed, 'REJECTED', actor, reason);
@@ -404,13 +425,26 @@ export class PaymentReconciliationOperator {
         proposedBy: decided.proposedBy,
         fourEyes: decided.fourEyes,
       });
-      return decided;
+      return this.answered(tx, answer, { resolution: decided });
     });
     this.logAction('REJECTED', paymentIntentId, resolution.id, actor.userId);
     return toResolutionView(resolution);
   }
 
   // ==========================================================================
+
+  /**
+   * Stores the resolution as the request's answer, in the transaction that
+   * decided it — so a failure after the commit replays it.
+   */
+  private async answered<O extends { resolution: PaymentReconciliationResolution }>(
+    tx: ExtendedPrismaClient,
+    answer: IdempotentAnswer<ResolutionView> | undefined,
+    outcome: O,
+  ): Promise<O> {
+    await answer?.respond(tx, toResolutionView(outcome.resolution));
+    return outcome;
+  }
 
   /**
    * Runs the approved outcome through the reconciler's apply, then records

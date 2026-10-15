@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import type { ArgumentsHost } from '@nestjs/common';
 import type { Logger } from '@rasta/logging';
 import { AllExceptionsFilter, createSystemContext, runWithContext } from '@rasta/nest-common';
-import { IdempotencyStore, hashRequestBody, targeted } from './idempotency';
-import type { PrismaService } from '../prisma/prisma.service';
+import { IdempotencyStore, hashRequestBody, targeted, type IdempotentAnswer } from './idempotency';
+import type { ExtendedPrismaClient, PrismaService } from '../prisma/prisma.service';
 import type { EconomicEnv } from '../config/env';
 
 /**
@@ -309,10 +309,13 @@ describe('IdempotencyStore.claim — who may proceed', () => {
 });
 
 /**
- * Which failure frees the key (review of #141). The work's own failure does,
- * so a corrected retry can run; a failure to record the response does not,
- * because by then the work has committed — freeing the key there let a retry
- * execute it a second time.
+ * Which failure frees the key. The answer is stored inside the effect's own
+ * transaction (review of #283, finding 2), so the effect and the completed key
+ * commit together or not at all: a failure before that commit — the answer's
+ * own write included — rolls both back and frees the key; a failure after it
+ * finds the row COMPLETED, and the release, which only ever removes an
+ * IN_PROGRESS row, removes nothing. The same property against a real database
+ * is `idempotency.int-spec.ts` and `idempotent-answer-after-commit.int-spec.ts`.
  */
 describe('IdempotencyStore.run — when the claim is released', () => {
   function claimedStore(updateMany: jest.Mock) {
@@ -325,7 +328,9 @@ describe('IdempotencyStore.run — when the claim is released', () => {
     const store = new IdempotencyStore(prisma, {
       ECONOMIC_IDEMPOTENCY_TTL_HOURS: 24,
     } as EconomicEnv);
-    return { store, idempotencyKey };
+    // The effect's transaction, as the fake hands it out.
+    const tx = { idempotencyKey } as unknown as ExtendedPrismaClient;
+    return { store, idempotencyKey, tx };
   }
 
   const asTenant = <T>(fn: () => Promise<T>) =>
@@ -334,16 +339,61 @@ describe('IdempotencyStore.run — when the claim is released', () => {
       fn,
     );
 
-  it('keeps the claim, and surfaces the error, when recording fails after the work committed', async () => {
-    const { store, idempotencyKey } = claimedStore(
-      jest.fn().mockRejectedValueOnce(new Error('connection reset while recording')),
-    );
-    const work = jest.fn().mockResolvedValue({ id: 'TXN_UNIT' });
+  const completedOnly = {
+    where: { organizationId: 'ORG-UNIT', endpoint: 'POST /x', key: 'K', state: 'IN_PROGRESS' },
+    data: { state: 'COMPLETED', responseStatus: 201, responseBody: { id: 'TXN_UNIT' } },
+  };
 
-    await expect(asTenant(() => store.run('POST /x', 'K', {}, 201, work))).rejects.toThrow(
-      'connection reset while recording',
-    );
-    expect(work).toHaveBeenCalledTimes(1);
+  it('stores the answer in the transaction the work hands it, and returns that answer', async () => {
+    const { store, idempotencyKey, tx } = claimedStore(jest.fn().mockResolvedValue({ count: 1 }));
+
+    await expect(
+      asTenant(() =>
+        store.run('POST /x', 'K', {}, 201, (answer: IdempotentAnswer<{ id: string }>) =>
+          answer.respond(tx, { id: 'TXN_UNIT' }),
+        ),
+      ),
+    ).resolves.toEqual({ id: 'TXN_UNIT' });
+    expect(idempotencyKey.updateMany).toHaveBeenCalledWith(completedOnly);
+    expect(idempotencyKey.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('after a stored answer, a later failure releases only an IN_PROGRESS row — none is left', async () => {
+    const { store, idempotencyKey, tx } = claimedStore(jest.fn().mockResolvedValue({ count: 1 }));
+
+    await expect(
+      asTenant(() =>
+        store.run('POST /x', 'K', {}, 201, async (answer: IdempotentAnswer<{ id: string }>) => {
+          await answer.respond(tx, { id: 'TXN_UNIT' });
+          throw new Error('the read after the commit failed');
+        }),
+      ),
+    ).rejects.toThrow('the read after the commit failed');
+    // The committed row is COMPLETED; this predicate cannot match it.
+    expect(idempotencyKey.deleteMany).toHaveBeenCalledWith({
+      where: { organizationId: 'ORG-UNIT', endpoint: 'POST /x', key: 'K', state: 'IN_PROGRESS' },
+    });
+  });
+
+  it('fails the effect when its answer matches no claim in progress, so it never commits keyless', async () => {
+    const { store, tx } = claimedStore(jest.fn().mockResolvedValue({ count: 0 }));
+
+    await expect(
+      asTenant(() =>
+        store.run('POST /x', 'K', {}, 201, (answer: IdempotentAnswer<{ id: string }>) =>
+          answer.respond(tx, { id: 'TXN_UNIT' }),
+        ),
+      ),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('keeps the claim of a work that returned without storing an answer', async () => {
+    const { store, idempotencyKey } = claimedStore(jest.fn());
+
+    await expect(
+      asTenant(() => store.run('POST /x', 'K', {}, 201, async () => ({ id: 'TXN_UNIT' }))),
+    ).rejects.toMatchObject({ code: 'INTERNAL_ERROR' });
+    expect(idempotencyKey.updateMany).not.toHaveBeenCalled();
     expect(idempotencyKey.deleteMany).not.toHaveBeenCalled();
   });
 

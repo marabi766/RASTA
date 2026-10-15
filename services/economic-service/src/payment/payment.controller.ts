@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
-import { PaymentService, REFUND_REFUSALS } from './payment.service';
+import { PaymentService, REFUND_REFUSALS, type RefundResultView } from './payment.service';
 import { IdempotencyStore, targeted } from '../shared/idempotency';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import { assertNotAuditor } from '../access/access';
@@ -92,24 +92,26 @@ export class PaymentController {
       key,
       targeted(id, dto),
       200,
-      async () => {
-        const result = await this.payments.refund(id, dto.reason);
-        return {
-          paymentIntentId: result.paymentIntentId,
-          reversalJournalId: result.reversalJournalId,
-          amountMinor: result.amountMinor.toString(),
-          currency: result.currency,
-          provider: result.provider,
-          simulated: result.simulated,
-          refundedAt: result.refundedAt.toISOString(),
-          balances: {
-            ledgerBalanceMinor: result.balances.ledgerBalanceMinor.toString(),
-            pendingBalanceMinor: result.balances.pendingBalanceMinor.toString(),
-            availableBalanceMinor: result.balances.availableBalanceMinor.toString(),
-          },
-        };
-      },
+      (answer) => this.payments.refund(id, dto.reason, answer.map(toRefundView)),
       { terminalRefusals: REFUND_REFUSALS },
     );
   }
+}
+
+/** The refund response, built inside the transaction that records the refund. */
+function toRefundView(result: RefundResultView) {
+  return {
+    paymentIntentId: result.paymentIntentId,
+    reversalJournalId: result.reversalJournalId,
+    amountMinor: result.amountMinor.toString(),
+    currency: result.currency,
+    provider: result.provider,
+    simulated: result.simulated,
+    refundedAt: result.refundedAt.toISOString(),
+    balances: {
+      ledgerBalanceMinor: result.balances.ledgerBalanceMinor.toString(),
+      pendingBalanceMinor: result.balances.pendingBalanceMinor.toString(),
+      availableBalanceMinor: result.balances.availableBalanceMinor.toString(),
+    },
+  };
 }

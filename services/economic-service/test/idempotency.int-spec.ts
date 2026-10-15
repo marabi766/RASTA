@@ -10,7 +10,11 @@ import {
   wire,
   type Wiring,
 } from './helpers';
-import { IdempotencyStore, TerminalRefusalError } from '../src/shared/idempotency';
+import {
+  IdempotencyStore,
+  TerminalRefusalError,
+  type IdempotentAnswer,
+} from '../src/shared/idempotency';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
 /**
@@ -36,6 +40,18 @@ describe('idempotency (real database)', () => {
     idempotency = new IdempotencyStore(prisma, testEnv());
   });
 
+  /**
+   * The answer of a work with no effect of its own, stored in a transaction
+   * of its own — the stand-in for the effect's transaction a real command
+   * stores it in.
+   */
+  const respondWith = <T>(answer: IdempotentAnswer<T>, response: T) =>
+    prisma.transaction((tx) => answer.respond(tx, response));
+  const answering =
+    <T>(response: T) =>
+    (answer: IdempotentAnswer<T>) =>
+      respondWith(answer, response);
+
   afterAll(async () => {
     await cleanup(prisma, [org.a, org.b, org.c]);
     await prisma.onModuleDestroy();
@@ -44,16 +60,16 @@ describe('idempotency (real database)', () => {
   describe('the documented contract', () => {
     it('executes once for a new key', async () => {
       const executed = await asActor({ organizationId: org.a }, () =>
-        idempotency.run('POST /itest', 'key-new-0001', { a: 1 }, 201, async () => ({ ok: true })),
+        idempotency.run('POST /itest', 'key-new-0001', { a: 1 }, 201, answering({ ok: true })),
       );
       expect(executed).toEqual({ ok: true });
     });
 
     it('replays the stored response for the same key and body, without re-executing', async () => {
       let runs = 0;
-      const work = async () => {
+      const work = (answer: IdempotentAnswer<{ attempt: number }>) => {
         runs += 1;
-        return { attempt: runs };
+        return respondWith(answer, { attempt: runs });
       };
 
       const first = await asActor({ organizationId: org.a }, () =>
@@ -70,9 +86,9 @@ describe('idempotency (real database)', () => {
 
     it('ignores key order in the body, so a retry is recognised as one', async () => {
       let runs = 0;
-      const work = async () => {
+      const work = (answer: IdempotentAnswer<{ runs: number }>) => {
         runs += 1;
-        return { runs };
+        return respondWith(answer, { runs });
       };
 
       await asActor({ organizationId: org.a }, () =>
@@ -87,13 +103,7 @@ describe('idempotency (real database)', () => {
 
     it('refuses the same key with a different body', async () => {
       await asActor({ organizationId: org.a }, () =>
-        idempotency.run(
-          'POST /itest',
-          'key-reuse-01',
-          { amountMinor: '100' },
-          201,
-          async () => ({}),
-        ),
+        idempotency.run('POST /itest', 'key-reuse-01', { amountMinor: '100' }, 201, answering({})),
       );
 
       await expect(
@@ -103,7 +113,7 @@ describe('idempotency (real database)', () => {
             'key-reuse-01',
             { amountMinor: '999' },
             201,
-            async () => ({}),
+            answering({}),
           ),
         ),
       ).rejects.toThrow(expect.objectContaining({ code: 'IDEMPOTENCY_KEY_REUSED' }));
@@ -119,7 +129,8 @@ describe('idempotency (real database)', () => {
         });
         const k = `key-proto-${name}`;
         let runs = 0;
-        const work = async () => ({ runs: (runs += 1) });
+        const work = (answer: IdempotentAnswer<{ runs: number }>) =>
+          respondWith(answer, { runs: (runs += 1) });
         const run = (x: number) =>
           asActor({ organizationId: org.a }, () =>
             idempotency.run('POST /itest', k, body(x), 201, work),
@@ -164,9 +175,121 @@ describe('idempotency (real database)', () => {
 
       await expect(
         asActor({ organizationId: org.a }, () =>
-          idempotency.run('POST /itest', 'key-failed-01', {}, 201, async () => ({ ok: true })),
+          idempotency.run('POST /itest', 'key-failed-01', {}, 201, answering({ ok: true })),
         ),
       ).resolves.toEqual({ ok: true });
+    });
+
+    describe('the answer is stored with the effect (review of #283, finding 2)', () => {
+      const endpoint = 'POST /itest/answer';
+      const record = (key: string) =>
+        runUnscoped('the suite reads the idempotency record', () =>
+          prisma.client.idempotencyKey.findFirst({
+            where: { organizationId: org.a, endpoint, key },
+          }),
+        );
+      const run = <T>(key: string, work: (answer: IdempotentAnswer<T>) => Promise<unknown>) =>
+        asActor({ organizationId: org.a }, () => idempotency.run(endpoint, key, {}, 200, work));
+
+      it('replays an answer whose transaction committed, whatever failed after it', async () => {
+        let runs = 0;
+        const work = async (answer: IdempotentAnswer<{ applied: number }>) => {
+          runs += 1;
+          await respondWith(answer, { applied: runs });
+          throw new Error('the read after the commit failed');
+        };
+
+        await expect(run('key-answer-01', work)).rejects.toThrow(
+          'the read after the commit failed',
+        );
+        expect(await record('key-answer-01')).toMatchObject({
+          state: 'COMPLETED',
+          responseStatus: 200,
+          responseBody: { applied: 1 },
+        });
+        await expect(run('key-answer-01', work)).resolves.toEqual({ applied: 1 });
+        expect(runs).toBe(1);
+      });
+
+      it('frees the key when the transaction holding the answer rolled back', async () => {
+        await expect(
+          run('key-answer-02', (answer: IdempotentAnswer<{ ok: boolean }>) =>
+            prisma.transaction(async (tx) => {
+              await answer.respond(tx, { ok: true });
+              throw new Error('the effect failed after its answer');
+            }),
+          ),
+        ).rejects.toThrow('the effect failed after its answer');
+        expect(await record('key-answer-02')).toBeNull();
+        await expect(run('key-answer-02', answering({ ok: true }))).resolves.toEqual({ ok: true });
+      });
+
+      it('keeps the claim of a work that returned without storing an answer', async () => {
+        // A programming error, after which the work may have committed: the
+        // key is neither completed with a guess nor freed for a second run.
+        await expect(run('key-answer-03', async () => ({ ok: true }))).rejects.toThrow(
+          expect.objectContaining({ code: 'INTERNAL_ERROR' }),
+        );
+        expect(await record('key-answer-03')).toMatchObject({ state: 'IN_PROGRESS' });
+        await expect(run('key-answer-03', answering({ ok: true }))).rejects.toThrow(
+          expect.objectContaining({ code: 'CONFLICT' }),
+        );
+      });
+
+      it('answers with the stored body, not anything the work returned', async () => {
+        await expect(
+          run('key-answer-04', async (answer: IdempotentAnswer<{ from: string }>) => {
+            await respondWith(answer, { from: 'the transaction' });
+            return { from: 'after it' };
+          }),
+        ).resolves.toEqual({ from: 'the transaction' });
+      });
+
+      const refusals = {
+        DECLINED: { code: 'BUSINESS_RULE_VIOLATION', message: 'Declined, and final' },
+      } as const;
+
+      it('replays a declared refusal stored with the effect that ended in it', async () => {
+        let runs = 0;
+        const declined = new TerminalRefusalError('DECLINED', refusals.DECLINED);
+        const work = async (answer: IdempotentAnswer<unknown>) => {
+          runs += 1;
+          await prisma.transaction((tx) => answer.refuse(tx, declined));
+          throw declined;
+        };
+        const refuse = () =>
+          asActor({ organizationId: org.a }, () =>
+            idempotency.run(endpoint, 'key-answer-05', {}, 200, work, {
+              terminalRefusals: refusals,
+            }),
+          );
+
+        await expect(refuse()).rejects.toThrow('Declined, and final');
+        expect(await record('key-answer-05')).toMatchObject({
+          state: 'COMPLETED',
+          responseStatus: 422,
+          responseBody: { refusal: 'DECLINED' },
+        });
+        await expect(refuse()).rejects.toThrow('Declined, and final');
+        expect(runs).toBe(1);
+      });
+
+      it('ignores a refusal the endpoint did not declare, and releases the key for it', async () => {
+        const undeclared = new TerminalRefusalError('OTHER', refusals.DECLINED);
+        let committed = false;
+        await expect(
+          run('key-answer-06', async (answer) => {
+            await prisma.transaction(async (tx) => {
+              await answer.refuse(tx, undeclared);
+              committed = true;
+            });
+            throw undeclared;
+          }),
+        ).rejects.toThrow('Declined, and final');
+        // The effect it ended is never rolled back for it.
+        expect(committed).toBe(true);
+        expect(await record('key-answer-06')).toBeNull();
+      });
     });
 
     describe('terminal refusals (opt-in)', () => {
@@ -174,7 +297,12 @@ describe('idempotency (real database)', () => {
         DECLINED: { code: 'BUSINESS_RULE_VIOLATION', message: 'Declined, and final' },
       } as const;
       const declined = () => new TerminalRefusalError('DECLINED', refusals.DECLINED, { n: 1 });
-      const run = (key: string, body: unknown, work: () => Promise<unknown>, opt = true) =>
+      const run = (
+        key: string,
+        body: unknown,
+        work: (answer: IdempotentAnswer<unknown>) => Promise<unknown>,
+        opt = true,
+      ) =>
         asActor({ organizationId: org.a }, () =>
           idempotency.run(
             'POST /itest/terminal',
@@ -226,7 +354,7 @@ describe('idempotency (real database)', () => {
         await expect(
           run('key-term-02', { a: 1 }, async () => Promise.reject(declined())),
         ).rejects.toThrow();
-        await expect(run('key-term-02', { a: 2 }, async () => ({ ok: true }))).rejects.toThrow(
+        await expect(run('key-term-02', { a: 2 }, answering({ ok: true }))).rejects.toThrow(
           expect.objectContaining({ code: 'IDEMPOTENCY_KEY_REUSED' }),
         );
       });
@@ -238,7 +366,7 @@ describe('idempotency (real database)', () => {
           run('key-term-03', {}, async () => Promise.reject(undeclared())),
         ).rejects.toThrow();
         expect(await stored('key-term-03')).toBeNull();
-        await expect(run('key-term-03', {}, async () => ({ ok: true }))).resolves.toEqual({
+        await expect(run('key-term-03', {}, answering({ ok: true }))).resolves.toEqual({
           ok: true,
         });
       });
@@ -250,7 +378,7 @@ describe('idempotency (real database)', () => {
           }),
         ).rejects.toThrow(expect.objectContaining({ code: 'INSUFFICIENT_BALANCE' }));
         expect(await stored('key-term-04')).toBeNull();
-        await expect(run('key-term-04', {}, async () => ({ ok: true }))).resolves.toEqual({
+        await expect(run('key-term-04', {}, answering({ ok: true }))).resolves.toEqual({
           ok: true,
         });
       });
@@ -267,10 +395,10 @@ describe('idempotency (real database)', () => {
       // The key is scoped by tenant and endpoint, so two organizations using
       // the same client-generated key do not interfere.
       const a = await asActor({ organizationId: org.a }, () =>
-        idempotency.run('POST /itest', 'shared-key-01', {}, 201, async () => ({ who: 'a' })),
+        idempotency.run('POST /itest', 'shared-key-01', {}, 201, answering({ who: 'a' })),
       );
       const b = await asActor({ organizationId: org.b }, () =>
-        idempotency.run('POST /itest', 'shared-key-01', {}, 201, async () => ({ who: 'b' })),
+        idempotency.run('POST /itest', 'shared-key-01', {}, 201, answering({ who: 'b' })),
       );
 
       expect(a).toEqual({ who: 'a' });
@@ -279,10 +407,10 @@ describe('idempotency (real database)', () => {
 
     it('keeps one endpoint key from colliding with another', async () => {
       const one = await asActor({ organizationId: org.a }, () =>
-        idempotency.run('POST /one', 'endpoint-key-01', {}, 201, async () => ({ where: 'one' })),
+        idempotency.run('POST /one', 'endpoint-key-01', {}, 201, answering({ where: 'one' })),
       );
       const two = await asActor({ organizationId: org.a }, () =>
-        idempotency.run('POST /two', 'endpoint-key-01', {}, 201, async () => ({ where: 'two' })),
+        idempotency.run('POST /two', 'endpoint-key-01', {}, 201, answering({ where: 'two' })),
       );
 
       expect(one).toEqual({ where: 'one' });
@@ -305,8 +433,16 @@ describe('idempotency (real database)', () => {
 
       const create = () =>
         asActor({ organizationId }, () =>
-          idempotency.run('POST /v1/transactions', 'financial-key-01', body, 201, () =>
-            wiring.transactions.create({ ...body, idempotencyKey: 'financial-key-01' }),
+          idempotency.run(
+            'POST /v1/transactions',
+            'financial-key-01',
+            body,
+            201,
+            (answer: IdempotentAnswer<{ id: string }>) =>
+              wiring.transactions.create(
+                { ...body, idempotencyKey: 'financial-key-01' },
+                answer.map(({ id }) => ({ id })),
+              ),
           ),
         );
 
@@ -353,7 +489,12 @@ describe('idempotency (real database)', () => {
             'settle-key-01',
             { transactionId: transaction.id },
             201,
-            () => wiring.settlements.settle(transaction.id, 'USR-ITEST'),
+            (answer: IdempotentAnswer<{ settlementId: string }>) =>
+              wiring.settlements.settle(
+                transaction.id,
+                'USR-ITEST',
+                answer.map(({ settlementId }) => ({ settlementId })),
+              ),
           ),
         );
 
@@ -430,7 +571,12 @@ describe('idempotency (real database)', () => {
             'race-key-01',
             { transactionId: transaction.id },
             201,
-            () => wiring.settlements.settle(transaction.id, 'USR-ITEST'),
+            (answer: IdempotentAnswer<{ settlementId: string }>) =>
+              wiring.settlements.settle(
+                transaction.id,
+                'USR-ITEST',
+                answer.map(({ settlementId }) => ({ settlementId })),
+              ),
           ),
         ).then(
           () => 'ok' as const,
@@ -466,7 +612,7 @@ describe('idempotency (real database)', () => {
       const key = `key-expire-01-${org.a}`;
 
       await asActor({ organizationId: org.a }, () =>
-        idempotency.run('POST /itest', key, {}, 201, async () => ({})),
+        idempotency.run('POST /itest', key, {}, 201, answering({})),
       );
 
       // Both columns are moved back together, because `ck_idempotency_expiry`
@@ -496,7 +642,7 @@ describe('idempotency (real database)', () => {
       const organizationId = `${org.b}-RECLAIM`;
       const key = `key-reclaim-${organizationId}`;
       await asActor({ organizationId }, () =>
-        idempotency.run('POST /itest', key, { a: 1 }, 201, async () => ({})),
+        idempotency.run('POST /itest', key, { a: 1 }, 201, answering({})),
       );
       await runUnscoped('the race test back-dates a record it created', () =>
         prisma.client.$executeRawUnsafe(

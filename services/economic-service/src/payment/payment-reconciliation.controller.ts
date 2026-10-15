@@ -69,7 +69,7 @@ export class PaymentReconciliationController {
       key,
       targeted(id, boundTo(actor, dto)),
       200,
-      () => this.operator.requeue(id, dto.reason),
+      (answer) => this.operator.requeue(id, dto.reason, answer),
     );
   }
 
@@ -100,7 +100,7 @@ export class PaymentReconciliationController {
       key,
       targeted(id, boundTo(actor, dto)),
       200,
-      () => this.operator.propose(id, dto),
+      (answer) => this.operator.propose(id, dto, answer),
     );
   }
 
@@ -130,7 +130,7 @@ export class PaymentReconciliationController {
       key,
       targeted(`${id}/${resolutionId}`, boundTo(actor, dto)),
       200,
-      () => this.operator.approve(id, resolutionId, dto.reason),
+      (answer) => this.operator.approve(id, resolutionId, dto.reason, answer),
     );
   }
 
@@ -156,7 +156,7 @@ export class PaymentReconciliationController {
       key,
       targeted(`${id}/${resolutionId}`, boundTo(actor, dto)),
       200,
-      () => this.operator.reject(id, resolutionId, dto.reason),
+      (answer) => this.operator.reject(id, resolutionId, dto.reason, answer),
     );
   }
 }

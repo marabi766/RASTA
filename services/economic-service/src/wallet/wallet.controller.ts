@@ -2,7 +2,7 @@ import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@n
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AllowService, RastaError, Roles, zodPipe } from '@rasta/nest-common';
 import { WalletService } from './wallet.service';
-import { PaymentService } from '../payment/payment.service';
+import { PaymentService, type TopUpResult } from '../payment/payment.service';
 import { IdempotencyStore, targeted } from '../shared/idempotency';
 import { assertNotAuditor, assertWalletVisible } from '../access/access';
 import { toHoldView, toWalletView, type HoldRow, type WalletRow } from '../shared/views';
@@ -144,27 +144,8 @@ export class WalletController {
       key,
       targeted(id, body),
       201,
-      async () => {
-        const result = await this.payments.topUp(id, { ...body, idempotencyKey: key });
-        return {
-          paymentIntentId: result.paymentIntentId,
-          transactionId: result.transactionId,
-          journalId: result.journalId,
-          status: result.status,
-          amountMinor: result.amountMinor.toString(),
-          currency: result.currency,
-          provider: result.provider,
-          simulated: result.simulated,
-          ...(result.failureReason ? { failureReason: result.failureReason } : {}),
-          balances: result.balances
-            ? {
-                ledgerBalanceMinor: result.balances.ledgerBalanceMinor.toString(),
-                pendingBalanceMinor: result.balances.pendingBalanceMinor.toString(),
-                availableBalanceMinor: result.balances.availableBalanceMinor.toString(),
-              }
-            : null,
-        };
-      },
+      (answer) =>
+        this.payments.topUp(id, { ...body, idempotencyKey: key }, answer.map(toTopUpView)),
     );
   }
 }
@@ -191,4 +172,26 @@ export function requireIdempotencyKey(value: string | undefined): string {
     );
   }
   return key;
+}
+
+/** The top-up response, built inside the transaction that records its outcome. */
+function toTopUpView(result: TopUpResult) {
+  return {
+    paymentIntentId: result.paymentIntentId,
+    transactionId: result.transactionId,
+    journalId: result.journalId,
+    status: result.status,
+    amountMinor: result.amountMinor.toString(),
+    currency: result.currency,
+    provider: result.provider,
+    simulated: result.simulated,
+    ...(result.failureReason ? { failureReason: result.failureReason } : {}),
+    balances: result.balances
+      ? {
+          ledgerBalanceMinor: result.balances.ledgerBalanceMinor.toString(),
+          pendingBalanceMinor: result.balances.pendingBalanceMinor.toString(),
+          availableBalanceMinor: result.balances.availableBalanceMinor.toString(),
+        }
+      : null,
+  };
 }

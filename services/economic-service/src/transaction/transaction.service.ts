@@ -15,6 +15,7 @@ import { ECONOMIC_EVENTS } from '../events/events';
 import { financialTransactionDuration, transactionsCreatedTotal } from '../observability/metrics';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { ENV } from '../tokens';
+import type { IdempotentAnswer } from '../shared/idempotency';
 import type { Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
 import type { CreateTransactionDto, DisputeTransactionDto, ResolveDisputeDto } from './dto';
 
@@ -58,7 +59,10 @@ export class TransactionService {
    * Both happen in one transaction, so a hold that fails for insufficient
    * balance leaves no orphaned obligation behind.
    */
-  async create(dto: CreateTransactionDto): Promise<TransactionDetail> {
+  async create(
+    dto: CreateTransactionDto,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const organizationId = getOrganizationId();
     const actor = getContext().userId ?? SERVICE_NAME;
     const grossAmountMinor = parseMinor(dto.grossAmountMinor, 'grossAmountMinor');
@@ -157,7 +161,7 @@ export class TransactionService {
           },
         );
 
-        return id;
+        return this.answered(tx, id, answer);
       });
 
       transactionsCreatedTotal.inc({
@@ -166,7 +170,7 @@ export class TransactionService {
         source: 'api',
       });
 
-      return this.get(created);
+      return created;
     } catch (error) {
       throw await this.duplicateSourceOr(error, organizationId, dto);
     } finally {
@@ -365,13 +369,20 @@ export class TransactionService {
    * releasing the money. Collapsing them would make the product document's
    * "تأیید دریافت" control indistinguishable from the payment.
    */
-  async authoriseSettlement(transactionId: string): Promise<TransactionDetail> {
+  async authoriseSettlement(
+    transactionId: string,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
     const at = new Date();
-    return this.move(transactionId, 'AUTHORISE_SETTLEMENT', actor, at, {
-      settlementAuthorisedAt: at,
-      settlementAuthorisedBy: actor,
-    });
+    return this.move(
+      transactionId,
+      'AUTHORISE_SETTLEMENT',
+      actor,
+      at,
+      { settlementAuthorisedAt: at, settlementAuthorisedBy: actor },
+      answer,
+    );
   }
 
   /**
@@ -381,14 +392,21 @@ export class TransactionService {
    * machine has no edge from `DISPUTED` to `SETTLED`, only to
    * `PENDING_SETTLEMENT` by an explicit human decision, or to `REFUNDED`.
    */
-  async dispute(transactionId: string, dto: DisputeTransactionDto): Promise<TransactionDetail> {
+  async dispute(
+    transactionId: string,
+    dto: DisputeTransactionDto,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
     const at = new Date();
-    return this.move(transactionId, 'DISPUTE', actor, at, {
-      disputedAt: at,
-      disputedBy: actor,
-      disputeReason: dto.reason,
-    });
+    return this.move(
+      transactionId,
+      'DISPUTE',
+      actor,
+      at,
+      { disputedAt: at, disputedBy: actor, disputeReason: dto.reason },
+      answer,
+    );
   }
 
   /**
@@ -397,14 +415,21 @@ export class TransactionService {
    * A human decision, recorded with who made it. It does not settle — it only
    * unblocks, so that releasing the money remains a separate, deliberate act.
    */
-  async resolveDispute(transactionId: string, dto: ResolveDisputeDto): Promise<TransactionDetail> {
+  async resolveDispute(
+    transactionId: string,
+    dto: ResolveDisputeDto,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
     const at = new Date();
-    return this.move(transactionId, 'RESOLVE_DISPUTE', actor, at, {
-      disputeResolvedAt: at,
-      disputeResolvedBy: actor,
-      disputeReason: dto.resolution,
-    });
+    return this.move(
+      transactionId,
+      'RESOLVE_DISPUTE',
+      actor,
+      at,
+      { disputeResolvedAt: at, disputeResolvedBy: actor, disputeReason: dto.resolution },
+      answer,
+    );
   }
 
   /**
@@ -419,7 +444,11 @@ export class TransactionService {
    * Q-62). Checked under the row lock, against the status the state machine is
    * about to read, so the two cannot disagree.
    */
-  async refund(transactionId: string, reason: string): Promise<TransactionDetail> {
+  async refund(
+    transactionId: string,
+    reason: string,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
     const stop = financialTransactionDuration.startTimer({
       service: SERVICE_NAME,
@@ -427,7 +456,7 @@ export class TransactionService {
     });
 
     try {
-      await this.prisma.transaction(async (tx) => {
+      return await this.prisma.transaction(async (tx) => {
         const transaction = await this.repository.lockForUpdate(tx, transactionId);
         if (!transaction) throw RastaError.notFound('Transaction', transactionId);
         assertMayRefund(transaction, { payeeMayRefund: this.env.ECONOMIC_REFUND_BY_PAYEE_ENABLED });
@@ -483,23 +512,30 @@ export class TransactionService {
           by: actor,
           at: refundedAt,
         });
-      });
 
-      return this.get(transactionId);
+        return this.answered(tx, transactionId, answer);
+      });
     } finally {
       stop();
     }
   }
 
   /** Cancels a transaction nothing has moved against yet. */
-  async cancel(transactionId: string, reason: string): Promise<TransactionDetail> {
+  async cancel(
+    transactionId: string,
+    reason: string,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
     const at = new Date();
-    return this.move(transactionId, 'CANCEL', actor, at, {
-      failureReason: reason,
-      cancelledAt: at,
-      cancelledBy: actor,
-    });
+    return this.move(
+      transactionId,
+      'CANCEL',
+      actor,
+      at,
+      { failureReason: reason, cancelledAt: at, cancelledBy: actor },
+      answer,
+    );
   }
 
   /**
@@ -510,7 +546,8 @@ export class TransactionService {
    * that a caller who is neither payer nor payee gets a 404 rather than
    * discovering the transaction exists. The actor and the instant go on the
    * row (through `extra`) and on the `TRANSACTION_STATUS_CHANGED` record, in
-   * the same transaction as the move.
+   * the same transaction as the move — and so does the answer, read from the
+   * row the move wrote (see {@link answered}).
    */
   private async move(
     transactionId: string,
@@ -518,8 +555,9 @@ export class TransactionService {
     actor: string,
     at: Date,
     extra: Prisma.TransactionUncheckedUpdateManyInput,
+    answer?: IdempotentAnswer<TransactionDetail>,
   ): Promise<TransactionDetail> {
-    await this.prisma.transaction(async (tx) => {
+    return this.prisma.transaction(async (tx) => {
       const transaction = await this.repository.lockForUpdate(tx, transactionId);
       if (!transaction) throw RastaError.notFound('Transaction', transactionId);
       assertTransactionVisible(transaction);
@@ -542,9 +580,31 @@ export class TransactionService {
         by: actor,
         at,
       });
-    });
 
-    return this.get(transactionId);
+      return this.answered(tx, transactionId, answer);
+    });
+  }
+
+  /**
+   * The transaction as the command that just changed it leaves it, read in
+   * that command's own transaction `tx` — and, for an idempotent request,
+   * stored there as its key's answer.
+   *
+   * It used to be read after the commit, and that read was a failure point
+   * after the effect: inside the idempotency store's work, a read that failed
+   * released the key of a state change that had happened, and the same-key
+   * retry was refused `INVALID_STATE_TRANSITION` against the state it had
+   * itself moved (review of #283, finding 2). Read here, a failure rolls the
+   * change back with it; once this commits, the key is COMPLETED.
+   */
+  private async answered(
+    tx: ExtendedPrismaClient,
+    transactionId: string,
+    answer: IdempotentAnswer<TransactionDetail> | undefined,
+  ): Promise<TransactionDetail> {
+    const detail = await this.get(transactionId, tx);
+    await answer?.respond(tx, detail);
+    return detail;
   }
 
   /**
@@ -605,8 +665,8 @@ export class TransactionService {
    * would hide it from the payee, who is legitimately a party to it. The
    * explicit check refuses everyone else with a 404 (docs/09).
    */
-  async get(id: string): Promise<TransactionDetail> {
-    const transaction = await this.repository.findByIdForParty(id);
+  async get(id: string, client?: ExtendedPrismaClient): Promise<TransactionDetail> {
+    const transaction = await this.repository.findByIdForParty(id, client);
     // Not logged: a settlement passes the client's body text here, and one that
     // names nothing is just that text (S-09). A path id is in the logged path.
     if (!transaction) throw RastaError.notFound('Transaction');

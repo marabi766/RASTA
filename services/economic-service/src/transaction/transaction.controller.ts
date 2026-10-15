@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AllowService, Roles, zodPipe } from '@rasta/nest-common';
-import { TransactionService } from './transaction.service';
+import { TransactionService, type TransactionDetail } from './transaction.service';
 import { IdempotencyStore, targeted } from '../shared/idempotency';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import { assertNotAuditor } from '../access/access';
@@ -135,10 +135,9 @@ export class TransactionController {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);
 
-    return this.idempotency.run('POST /v1/transactions', key, dto, 201, async () => {
-      const created = await this.transactions.create({ ...dto, idempotencyKey: key });
-      return toTransactionDetailView(created as never);
-    });
+    return this.idempotency.run('POST /v1/transactions', key, dto, 201, (answer) =>
+      this.transactions.create({ ...dto, idempotencyKey: key }, answer.map(detailView)),
+    );
   }
 
   @Post(':id/authorise-settlement')
@@ -164,8 +163,7 @@ export class TransactionController {
       key,
       targeted(id),
       200,
-      async () =>
-        toTransactionDetailView((await this.transactions.authoriseSettlement(id)) as never),
+      (answer) => this.transactions.authoriseSettlement(id, answer.map(detailView)),
     );
   }
 
@@ -193,7 +191,7 @@ export class TransactionController {
       key,
       targeted(id, dto),
       200,
-      async () => toTransactionDetailView((await this.transactions.dispute(id, dto)) as never),
+      (answer) => this.transactions.dispute(id, dto, answer.map(detailView)),
     );
   }
 
@@ -225,8 +223,7 @@ export class TransactionController {
       key,
       targeted(id, dto),
       200,
-      async () =>
-        toTransactionDetailView((await this.transactions.resolveDispute(id, dto)) as never),
+      (answer) => this.transactions.resolveDispute(id, dto, answer.map(detailView)),
     );
   }
 
@@ -259,10 +256,7 @@ export class TransactionController {
       key,
       targeted(id, dto),
       200,
-      async () => {
-        const result = await this.transactions.refund(id, dto.reason);
-        return toTransactionDetailView(result as never);
-      },
+      (answer) => this.transactions.refund(id, dto.reason, answer.map(detailView)),
     );
   }
 
@@ -289,8 +283,16 @@ export class TransactionController {
       key,
       targeted(id, dto),
       200,
-      async () =>
-        toTransactionDetailView((await this.transactions.cancel(id, dto.reason)) as never),
+      (answer) => this.transactions.cancel(id, dto.reason, answer.map(detailView)),
     );
   }
+}
+
+/**
+ * The response every transaction command answers with. Built by the service
+ * inside the command's own transaction, from the row it wrote, and stored
+ * there as the key's answer (`IdempotentAnswer`).
+ */
+function detailView(transaction: TransactionDetail) {
+  return toTransactionDetailView(transaction as never);
 }

@@ -28,6 +28,7 @@ import type { TopUpDto } from './dto';
 import {
   hashRequestBody,
   TerminalRefusalError,
+  type IdempotentAnswer,
   type TerminalRefusals,
 } from '../shared/idempotency';
 import { PaymentReconciliationRepository } from './payment-reconciliation.repository';
@@ -101,8 +102,16 @@ export class PaymentService {
    * deliberately: an external call inside a transaction holds row locks for
    * the duration of somebody else's network, and a provider that hangs would
    * take the wallet with it. The write that follows is short and atomic.
+   *
+   * `answer`, for an idempotent request, is stored in the transaction that
+   * records the outcome — the capture, or the failure — so a failure after
+   * that commit replays the outcome rather than freeing the key.
    */
-  async topUp(walletId: string, dto: TopUpDto): Promise<TopUpResult> {
+  async topUp(
+    walletId: string,
+    dto: TopUpDto,
+    answer?: IdempotentAnswer<TopUpResult>,
+  ): Promise<TopUpResult> {
     const organizationId = getOrganizationId();
     const actor = getContext().userId ?? SERVICE_NAME;
     const amountMinor = parseMinor(dto.amountMinor, 'amountMinor');
@@ -133,7 +142,7 @@ export class PaymentService {
         organizationId_idempotencyKey: { organizationId, idempotencyKey: dto.idempotencyKey },
       },
     });
-    if (existing) return this.resume(existing, requestHash, actor);
+    if (existing) return this.resume(existing, requestHash, actor, answer);
 
     // The balance this top-up would leave is checked before the provider is
     // asked for anything, and reserved (Codex review of PR #121, finding 1).
@@ -188,6 +197,7 @@ export class PaymentService {
         amountMinor,
         wallet.currency,
         failureCodeFrom(authorization.failureCode, 'PROVIDER_DECLINED'),
+        answer,
       );
     }
 
@@ -246,17 +256,19 @@ export class PaymentService {
         amountMinor,
         wallet.currency,
         failureCodeFrom(capture.failureCode, 'CAPTURE_DECLINED'),
+        answer,
       );
     }
 
     const intent = { intentId, walletId, organizationId, amountMinor, currency: wallet.currency };
-    const recorded = await this.recordCaptureOrFindIt(intent, actor);
+    const recorded = await this.recordCaptureOrFindIt(intent, actor, answer);
     if (recorded.captured) return recorded.captured;
     return this.returnUncreditedCapture(
       intent,
       authorization.providerReference,
       dto.idempotencyKey,
       recorded.cause,
+      answer,
     );
   }
 
@@ -276,15 +288,20 @@ export class PaymentService {
    *
    * The metrics count a capture after this decision, outside it, so a failing
    * counter can never be mistaken for a failed write.
+   *
+   * A capture write that committed stored `answer` with it, so a committed
+   * result found here is already its key's answer; one that rolled back took
+   * its answer with it, and the path that follows stores another.
    */
   private async recordCaptureOrFindIt(
     intent: CaptureTarget,
     actor: string,
+    answer: IdempotentAnswer<TopUpResult> | undefined,
   ): Promise<{ captured: TopUpResult; cause?: undefined } | { captured: null; cause: unknown }> {
     let captured: TopUpResult | null;
     let cause: unknown;
     try {
-      captured = await this.completeCapture(intent, actor);
+      captured = await this.completeCapture(intent, actor, answer);
     } catch (error) {
       cause = error;
       captured = await this.committedCapture(intent).catch((readError: unknown) => {
@@ -429,6 +446,7 @@ export class PaymentService {
     intent: PaymentIntent,
     requestHash: string,
     actor: string,
+    answer: IdempotentAnswer<TopUpResult> | undefined,
   ): Promise<TopUpResult> {
     // The whole request, first (Codex round 3 on #121, H2): a retry that
     // changed the instrument was resumed as if it were the original. An intent
@@ -447,7 +465,7 @@ export class PaymentService {
           { paymentIntentId: intent.id, status: intent.status, outcome: intent.failureReason },
         );
       }
-      return this.capturedView(intent);
+      return this.answerAlone(answer, await this.capturedView(intent));
     }
     // Refunded since: answering CAPTURED would describe money that went back
     // (round 3, M3). Terminal, and not replayable under this key.
@@ -455,7 +473,7 @@ export class PaymentService {
       throw RastaError.invalidStateTransition('PaymentIntent', 'REFUNDED', 'CAPTURED');
     }
     if (intent.status === 'FAILED') {
-      return {
+      return this.answerAlone(answer, {
         paymentIntentId: intent.id,
         transactionId: null,
         journalId: null,
@@ -466,7 +484,7 @@ export class PaymentService {
         provider: intent.provider,
         simulated: intent.simulated,
         failureReason: intent.failureReason ?? 'UNKNOWN',
-      };
+      });
     }
     // Only a provider that answered "declined" makes a capture creditable
     // here; `CAPTURED_REFUND_UNKNOWN` falls through to the refusal (U6).
@@ -484,7 +502,7 @@ export class PaymentService {
       amountMinor: intent.amountMinor,
       currency: intent.currency,
     };
-    const recorded = await this.recordCaptureOrFindIt(target, actor);
+    const recorded = await this.recordCaptureOrFindIt(target, actor, answer);
     if (recorded.captured) return recorded.captured;
     // Still uncreditable: the same refusal the first attempt gave, and the
     // intent stays marked. Its unreconciled event was published then.
@@ -528,6 +546,7 @@ export class PaymentService {
     providerReference: string,
     idempotencyKey: string,
     cause: unknown,
+    answer: IdempotentAnswer<TopUpResult> | undefined,
   ): Promise<TopUpResult> {
     const reason = isWalletBalanceLimit(cause) ? WALLET_BALANCE_LIMIT : 'CAPTURE_NOT_CREDITED';
     this.logger.error(
@@ -609,7 +628,20 @@ export class PaymentService {
       throw cause;
     }
 
-    return this.fail(intentId, organizationId, amountMinor, currency, reason);
+    return this.fail(intentId, organizationId, amountMinor, currency, reason, answer);
+  }
+
+  /**
+   * The answer to a same-key retry that found its outcome already recorded on
+   * the intent and changed nothing: stored on its own, since there is no
+   * effect to store it with. A failure here applied nothing and frees the key.
+   */
+  private async answerAlone(
+    answer: IdempotentAnswer<TopUpResult> | undefined,
+    result: TopUpResult,
+  ): Promise<TopUpResult> {
+    if (answer) await this.prisma.transaction((tx) => answer.respond(tx, result));
+    return result;
   }
 
   /**
@@ -625,6 +657,7 @@ export class PaymentService {
   private async completeCapture(
     { intentId, walletId, organizationId, amountMinor, currency }: CaptureTarget,
     actor: string,
+    answer: IdempotentAnswer<TopUpResult> | undefined,
   ): Promise<TopUpResult> {
     const stop = financialTransactionDuration.startTimer({
       service: SERVICE_NAME,
@@ -702,17 +735,19 @@ export class PaymentService {
           },
         });
 
-        return {
+        const captured: TopUpResult = {
           paymentIntentId: intentId,
           transactionId,
           journalId: credited.journalId,
-          status: 'CAPTURED' as const,
+          status: 'CAPTURED',
           amountMinor,
           currency,
           balances: credited.balances,
           provider: this.provider.name,
           simulated: this.provider.simulated,
         };
+        await answer?.respond(tx, captured);
+        return captured;
       });
     } finally {
       stop();
@@ -734,21 +769,9 @@ export class PaymentService {
     amountMinor: bigint,
     currency: string,
     reason: string,
+    answer: IdempotentAnswer<TopUpResult> | undefined,
   ): Promise<TopUpResult> {
-    await this.prisma.transaction((tx) =>
-      this.recordFailure(tx, { intentId, organizationId, amountMinor, currency, reason }),
-    );
-
-    paymentIntentsTotal.inc({
-      service: SERVICE_NAME,
-      provider: this.provider.name,
-      simulated: String(this.provider.simulated),
-      outcome: 'FAILED',
-    });
-
-    this.logger.warn(`Payment intent ${intentId} failed: ${reason}`);
-
-    return {
+    const failed: TopUpResult = {
       paymentIntentId: intentId,
       transactionId: null,
       journalId: null,
@@ -760,6 +783,21 @@ export class PaymentService {
       simulated: this.provider.simulated,
       failureReason: reason,
     };
+    await this.prisma.transaction(async (tx) => {
+      await this.recordFailure(tx, { intentId, organizationId, amountMinor, currency, reason });
+      await answer?.respond(tx, failed);
+    });
+
+    paymentIntentsTotal.inc({
+      service: SERVICE_NAME,
+      provider: this.provider.name,
+      simulated: String(this.provider.simulated),
+      outcome: 'FAILED',
+    });
+
+    this.logger.warn(`Payment intent ${intentId} failed: ${reason}`);
+
+    return failed;
   }
 
   /**
@@ -844,8 +882,17 @@ export class PaymentService {
    *     only returns the hold, and the provider is never asked again;
    *   - a crash anywhere after step 1 → `REFUND_REQUESTED` with the hold,
    *     which a second refund also refuses.
+   *
+   * `answer`, for an idempotent request, is stored in the transaction that
+   * ends it: step 3's reversal, or the return of a declined refund's hold with
+   * its terminal refusal. A failure after either commit replays that outcome;
+   * it never frees the key for a second request to the provider.
    */
-  async refund(intentId: string, reason: string): Promise<RefundResultView> {
+  async refund(
+    intentId: string,
+    reason: string,
+    answer?: IdempotentAnswer<RefundResultView>,
+  ): Promise<RefundResultView> {
     const organizationId = getOrganizationId();
     const actor = getContext().userId ?? SERVICE_NAME;
 
@@ -866,7 +913,13 @@ export class PaymentService {
       if (row.failureReason === REFUND_DECLINED_RELEASE_PENDING) {
         await this.returnDeclinedHold(tx, row, wallet, actor);
         await this.closeDeclined(tx, row, actor);
-        return { row, next: 'RELEASED' as const };
+        const refusal = new TerminalRefusalError(
+          'REFUND_DECLINED_EARLIER',
+          REFUND_REFUSALS.REFUND_DECLINED_EARLIER,
+          { paymentIntentId: intentId, outcome: 'REFUND_DECLINED' },
+        );
+        await answer?.refuse(tx, refusal);
+        return { row, next: 'RELEASED' as const, refusal };
       }
       // No money leaves a frozen wallet (PM ruling, round 2 on #143). Refused
       // before any hold or provider call; the intent stays refundable once the
@@ -917,13 +970,7 @@ export class PaymentService {
       return { row, next: 'ASK' as const };
     });
 
-    if (requested.next === 'RELEASED') {
-      throw new TerminalRefusalError(
-        'REFUND_DECLINED_EARLIER',
-        REFUND_REFUSALS.REFUND_DECLINED_EARLIER,
-        { paymentIntentId: intentId, outcome: 'REFUND_DECLINED' },
-      );
-    }
+    if (requested.next === 'RELEASED') throw requested.refusal;
 
     // 2. Ask the provider.
     if (requested.next === 'ASK') {
@@ -943,11 +990,24 @@ export class PaymentService {
       }
 
       if (providerResult.outcome === 'FAILED') {
+        const context = {
+          intentId,
+          code: failureCodeFrom(providerResult.failureCode, 'REFUND_DECLINED'),
+        };
+        const refusal = new TerminalRefusalError(
+          'REFUND_DECLINED',
+          REFUND_REFUSALS.REFUND_DECLINED,
+          context,
+        );
         // The decline is known. Should returning the hold fail, that fact is
         // recorded rather than lost: without it the intent would sit in
         // REFUND_REQUESTED, every later refund refused, and nothing announced.
         let released = true;
-        await this.releaseDeclinedRefund(requested.row, actor).catch(async (error: unknown) => {
+        await this.releaseDeclinedRefund(
+          requested.row,
+          actor,
+          answer && ((tx) => answer.refuse(tx, refusal)),
+        ).catch(async (error: unknown) => {
           released = false;
           this.logger.error(
             `Payment intent ${intentId}: the provider declined the refund and returning the ` +
@@ -960,17 +1020,13 @@ export class PaymentService {
             'PROVIDER_DECLINED_RELEASE_PENDING',
           );
         });
-        const context = {
-          intentId,
-          code: failureCodeFrom(providerResult.failureCode, 'REFUND_DECLINED'),
-        };
         // Terminal only once the held amount is back: while the release is
         // pending, a same-key retry is what returns it, so that refusal is
         // released with its key like any other.
         if (!released) {
           throw RastaError.businessRule(REFUND_REFUSALS.REFUND_DECLINED.message, context);
         }
-        throw new TerminalRefusalError('REFUND_DECLINED', REFUND_REFUSALS.REFUND_DECLINED, context);
+        throw refusal;
       }
     }
 
@@ -988,6 +1044,7 @@ export class PaymentService {
           resolution: 'REFUNDED',
           resolvedBy: actor,
         });
+        await answer?.respond(tx, view);
         return view;
       });
     } catch (error) {
@@ -1132,18 +1189,25 @@ export class PaymentService {
    *
    * Should this write fail, the intent keeps `REFUND_REQUESTED` and its hold
    * — money kept safe, and a second refund refused — rather than anything
-   * being guessed.
+   * being guessed. `refuse` stores the terminal refusal this decline is
+   * answered with, in the same transaction as the hold's return.
    */
-  private async releaseDeclinedRefund(intent: PaymentIntent, actor: string): Promise<void> {
+  private async releaseDeclinedRefund(
+    intent: PaymentIntent,
+    actor: string,
+    refuse?: (tx: ExtendedPrismaClient) => Promise<void>,
+  ): Promise<void> {
     await this.prisma.transaction(async (tx) => {
       const { intent: row, wallet } = await this.lockForRefund(
         tx,
         intent.id,
         intent.organizationId,
       );
-      if (row.failureReason !== REFUND_REQUESTED) return;
-      await this.returnDeclinedHold(tx, row, wallet, actor);
-      await this.closeDeclined(tx, row, actor);
+      if (row.failureReason === REFUND_REQUESTED) {
+        await this.returnDeclinedHold(tx, row, wallet, actor);
+        await this.closeDeclined(tx, row, actor);
+      }
+      await refuse?.(tx);
     });
   }
 
