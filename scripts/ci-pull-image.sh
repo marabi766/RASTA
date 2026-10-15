@@ -42,6 +42,7 @@ pull_one() {
   out="$(mktemp)"
   while :; do
     attempt=$((attempt + 1))
+    # image-pin-exempt: every argument was checked to be name@sha256:<64 hex> before any pull
     docker pull "$image" >"$out" 2>&1
     rc=$?
     if [ "$rc" -eq 0 ]; then
