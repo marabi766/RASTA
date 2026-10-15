@@ -91,26 +91,39 @@ export class SettlementController {
     const key = requireIdempotencyKey(idempotencyKey);
     const actor = getContext().userId ?? SERVICE_NAME;
 
-    return this.idempotency.run('POST /v1/settlements', key, dto, 201, async (answer) => {
-      // Authorization before the lock: the caller must be entitled to commit
-      // the paying organization. Read outside the settlement transaction so an
-      // unauthorised request never takes a row lock at all.
-      const transaction = await this.transactions.get(dto.transactionId);
-      canCommitOrganization(transaction.organizationId);
+    return this.idempotency.run(
+      'POST /v1/settlements',
+      key,
+      dto,
+      201,
+      async (answer) => {
+        // Authorization before the lock: the caller must be entitled to commit
+        // the paying organization. Read outside the settlement transaction so an
+        // unauthorised request never takes a row lock at all.
+        await this.authorizeSettlement(dto.transactionId);
 
-      // The response is stored with the settlement, in its transaction: a
-      // failure after that commit replays it, never frees the key.
-      const result = await this.settlements.settle(
-        dto.transactionId,
-        actor,
-        answer.map(toSettlementView),
-      );
+        // The response is stored with the settlement, in its transaction: a
+        // failure after that commit replays it, never frees the key.
+        const result = await this.settlements.settle(
+          dto.transactionId,
+          actor,
+          answer.map(toSettlementView),
+        );
 
-      // Deliberately after the settlement's transaction has committed, and
-      // deliberately not awaited into it. docs/10 § 10.10: a reward never rolls
-      // a settlement back.
-      await this.grantSettlementRewards(result.payeeOrganizationId, result.transactionId);
-    });
+        // Deliberately after the settlement's transaction has committed, and
+        // deliberately not awaited into it. docs/10 § 10.10: a reward never rolls
+        // a settlement back.
+        await this.grantSettlementRewards(result.payeeOrganizationId, result.transactionId);
+      },
+      // The same check, before a stored settlement is shown to anyone.
+      { mayReplay: () => this.authorizeSettlement(dto.transactionId) },
+    );
+  }
+
+  /** Whether the caller may settle this transaction: a party, entitled to commit its payer. */
+  private async authorizeSettlement(transactionId: string): Promise<void> {
+    const transaction = await this.transactions.get(transactionId);
+    canCommitOrganization(transaction.organizationId);
   }
 
   /**

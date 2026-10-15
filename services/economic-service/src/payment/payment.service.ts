@@ -116,10 +116,7 @@ export class PaymentService {
     const actor = getContext().userId ?? SERVICE_NAME;
     const amountMinor = parseMinor(dto.amountMinor, 'amountMinor');
 
-    const wallet = await this.wallets.getById(walletId);
-    if (wallet.organizationId !== organizationId) {
-      throw RastaError.notFound('Wallet', walletId);
-    }
+    const wallet = await this.ownWallet(walletId);
     if (wallet.status !== 'ACTIVE') {
       throw RastaError.businessRule('This wallet cannot be topped up', { walletId });
     }
@@ -896,10 +893,7 @@ export class PaymentService {
     const organizationId = getOrganizationId();
     const actor = getContext().userId ?? SERVICE_NAME;
 
-    const intent = await this.prisma.client.paymentIntent.findUnique({ where: { id: intentId } });
-    if (!intent || intent.organizationId !== organizationId) {
-      throw RastaError.notFound('PaymentIntent', intentId);
-    }
+    const intent = await this.ownIntent(intentId);
     if (intent.status !== 'CAPTURED') {
       throw RastaError.invalidStateTransition('PaymentIntent', intent.status, 'REFUNDED');
     }
@@ -1398,6 +1392,32 @@ export class PaymentService {
     const intent = await this.prisma.client.paymentIntent.findUnique({ where: { id: intentId } });
     if (!intent) throw RastaError.notFound('PaymentIntent', intentId);
     return intent;
+  }
+
+  /**
+   * The acting organization's own intent, or `NOT_FOUND` — the check a refund
+   * makes first, and the replay guard of a stored refund answer (review of
+   * #287, finding 1).
+   */
+  async ownIntent(intentId: string) {
+    const intent = await this.prisma.client.paymentIntent.findUnique({ where: { id: intentId } });
+    if (!intent || intent.organizationId !== getOrganizationId()) {
+      throw RastaError.notFound('PaymentIntent', intentId);
+    }
+    return intent;
+  }
+
+  /**
+   * The acting organization's own wallet, or `NOT_FOUND` — the check a top-up
+   * makes first, and the replay guard of a stored top-up answer (review of
+   * #287, finding 1).
+   */
+  async ownWallet(walletId: string) {
+    const wallet = await this.wallets.getById(walletId);
+    if (wallet.organizationId !== getOrganizationId()) {
+      throw RastaError.notFound('Wallet', walletId);
+    }
+    return wallet;
   }
 
   /** This organization's intents, newest first. The cursor is resolved in the

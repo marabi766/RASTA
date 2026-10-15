@@ -206,6 +206,30 @@ export class PaymentReconciliationOperator {
   }
 
   /**
+   * The replay guard of a stored operator answer (review of #287, finding 1):
+   * the caller is still a resolver ({@link authorize}), and the intent — and
+   * the resolution, for a decision — are still theirs to see, refused with the
+   * `NOT_FOUND` a fresh request gets. Locks nothing and decides nothing: who
+   * proposed or created what is a question for applying a decision, and the
+   * stored record is the same actor's own.
+   */
+  async assertMayReplay(paymentIntentId: string, resolutionId?: string): Promise<void> {
+    this.authorize();
+    const organizationId = getOrganizationId();
+    const intent = await this.prisma.client.paymentIntent.findFirst({
+      where: { id: paymentIntentId, organizationId },
+      select: { id: true },
+    });
+    if (!intent) throw RastaError.notFound('PaymentIntent', paymentIntentId);
+    if (resolutionId === undefined) return;
+    const resolution = await this.prisma.client.paymentReconciliationResolution.findFirst({
+      where: { id: resolutionId, paymentIntentId, organizationId },
+      select: { id: true },
+    });
+    if (!resolution) throw RastaError.notFound('PaymentReconciliationResolution', resolutionId);
+  }
+
+  /**
    * Puts the open task back for the sweeper, due now, attempts reset. Moves
    * nothing. The reason is kept in an append-only, tenant-scoped requeue row
    * in the same transaction — never in a log or the event (S-09; Codex on

@@ -146,6 +146,11 @@ export class WalletController {
       201,
       (answer) =>
         this.payments.topUp(id, { ...body, idempotencyKey: key }, answer.map(toTopUpView)),
+      {
+        mayReplay: async () => {
+          await this.payments.ownWallet(id);
+        },
+      },
     );
   }
 }

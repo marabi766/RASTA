@@ -93,7 +93,12 @@ export class PaymentController {
       targeted(id, dto),
       200,
       (answer) => this.payments.refund(id, dto.reason, answer.map(toRefundView)),
-      { terminalRefusals: REFUND_REFUSALS },
+      {
+        terminalRefusals: REFUND_REFUSALS,
+        mayReplay: async () => {
+          await this.payments.ownIntent(id);
+        },
+      },
     );
   }
 }

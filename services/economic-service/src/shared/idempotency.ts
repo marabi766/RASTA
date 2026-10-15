@@ -1,7 +1,7 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { ERROR_STATUS, type ErrorCode } from '@rasta/contracts';
-import { RastaError, getOrganizationId, runUnscoped } from '@rasta/nest-common';
+import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { isUniqueViolation } from '../ledger/ledger.repository';
 import { idempotentReplaysTotal } from '../observability/metrics';
@@ -25,6 +25,7 @@ import { SERVICE_NAME, type EconomicEnv } from '../config/env';
  * | new key                            | execute, store the response, return   |
  * | same key, same body                | the stored response, no re-execution  |
  * | same key, different body           | `409 IDEMPOTENCY_KEY_REUSED`          |
+ * | same key, different actor          | `409 IDEMPOTENCY_KEY_REUSED`          |
  * | key currently in flight            | `409 CONFLICT` + `Retry-After: 1`     |
  * | missing key on a required endpoint | `400 VALIDATION_FAILED`               |
  *
@@ -63,6 +64,35 @@ import { SERVICE_NAME, type EconomicEnv } from '../config/env';
  * key of an applied state change; the retry was judged against the moved state
  * and refused `INVALID_STATE_TRANSITION`, and the order saga never learnt that
  * its authorisation had succeeded (review of #283, finding 2; docs/23 D-054).
+ *
+ * ## Who may be answered from a record
+ *
+ * A record answers **the actor who made it, and only while that actor may
+ * still reach its object** (review of #287, finding 1). The key was scoped to
+ * the acting organization, the endpoint and — through the hash — the target,
+ * but not to the person: a `SYSTEM_ADMIN` acting in A authorised a B↔C
+ * transaction with key K, and an `ORGANIZATION_ADMIN` of A who sent the same
+ * target and K was handed B and C's transaction, where a fresh key got
+ * `NOT_FOUND`. Two rules close it:
+ *
+ *   - the record carries a hash of the actor who reserved it
+ *     ({@link requestActor}); the same key from anyone else is `409
+ *     IDEMPOTENCY_KEY_REUSED` — the answer to the same key with another body —
+ *     and never a replay;
+ *   - before any stored answer is returned, the endpoint's own object checks
+ *     run again, as the caller now is ({@link ReplayGuard}) — not the
+ *     transition, only who may see and act on its object. A caller who lost
+ *     that access gets the `NOT_FOUND` (or `403`) a fresh request gets.
+ *
+ * ## Whose claim a completion completes
+ *
+ * Each reservation carries a random claim token, and completing, recording a
+ * refusal and releasing all require it (review of #287, finding 2). Matching
+ * by key and state alone let a request whose claim had expired and been
+ * replaced complete the replacement: its effect committed under another
+ * request's key, and that request's retries replayed the wrong answer. A stale
+ * token matches nothing, so the late effect rolls back with a retryable
+ * conflict and the replacement claim is left to its owner.
  */
 @Injectable()
 export class IdempotencyStore {
@@ -80,21 +110,21 @@ export class IdempotencyStore {
    * Reserves the key, or reports what to do instead.
    *
    * Returns:
-   *   `{ kind: 'PROCEED' }`  — the caller owns the key and should do the work
-   *   `{ kind: 'REPLAY' }`   — a stored response to return unchanged
+   *   `{ kind: 'PROCEED', token }` — the caller owns the key, under `token`,
+   *                                  and should do the work
+   *   `{ kind: 'REPLAY' }`         — a stored response, for {@link run} to
+   *                                  return once its replay guard has passed
    *
-   * and throws for the two conflict cases, because they are errors rather than
+   * and throws for the conflict cases — another body or another actor under
+   * the key, or the key in flight — because they are errors rather than
    * outcomes.
    */
-  async claim(
-    endpoint: string,
-    key: string,
-    body: unknown,
-  ): Promise<{ kind: 'PROCEED' } | { kind: 'REPLAY'; status: number; body: unknown }> {
+  async claim(endpoint: string, key: string, body: unknown): Promise<Claim> {
     const requestHash = this.hash(body);
+    const actorHash = this.hash(requestActor());
     const deadline = Date.now() + CLAIM_WAIT_MS;
     for (let attempt = 1; attempt <= CLAIM_ATTEMPTS; attempt += 1) {
-      const outcome = await this.claimOnce(endpoint, key, requestHash, deadline);
+      const outcome = await this.claimOnce(endpoint, key, requestHash, actorHash, deadline);
       if (outcome !== RETRY_CLAIM) return outcome;
     }
     // Every attempt found the key vanishing under it: other requests are
@@ -121,24 +151,33 @@ export class IdempotencyStore {
     endpoint: string,
     key: string,
     requestHash: string,
+    actorHash: string,
     deadline: number,
-  ): Promise<
-    { kind: 'PROCEED' } | { kind: 'REPLAY'; status: number; body: unknown } | typeof RETRY_CLAIM
-  > {
+  ): Promise<Claim | typeof RETRY_CLAIM> {
     const organizationId = getOrganizationId();
     const now = new Date();
     const expiresAt = new Date(
       now.getTime() + this.env.ECONOMIC_IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000,
     );
+    const claimToken = randomUUID();
 
     try {
       // Waits behind an uncommitted removal of the same key — within the budget only.
       await this.withinBudget(endpoint, deadline, (tx) =>
         tx.idempotencyKey.create({
-          data: { key, organizationId, endpoint, requestHash, state: 'IN_PROGRESS', expiresAt },
+          data: {
+            key,
+            organizationId,
+            endpoint,
+            requestHash,
+            actorHash,
+            claimToken,
+            state: 'IN_PROGRESS',
+            expiresAt,
+          },
         }),
       );
-      return { kind: 'PROCEED' };
+      return { kind: 'PROCEED', token: claimToken };
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
     }
@@ -162,7 +201,14 @@ export class IdempotencyStore {
       return RETRY_CLAIM;
     }
 
-    if (existing.requestHash !== requestHash) {
+    // Another body, or another actor: a different request under the same key,
+    // refused alike and with nothing of the record (review of #287, finding
+    // 1). A record from before actors were bound has none; it is answered only
+    // through the replay guard, and only until it expires.
+    if (
+      existing.requestHash !== requestHash ||
+      (existing.actorHash !== null && existing.actorHash !== actorHash)
+    ) {
       throw RastaError.idempotencyKeyReused();
     }
 
@@ -212,20 +258,22 @@ export class IdempotencyStore {
    *
    * A failure here rolls the effect back with it: the claim is then released
    * and a retry with the same key runs the work, which never happened. A
-   * claim that is no longer `IN_PROGRESS` — it outlived its retention and was
-   * purged or taken over — matches nothing, and that throws too, so the effect
-   * is never committed without its key.
+   * claim that is no longer this request's `IN_PROGRESS` reservation — it
+   * outlived its retention and was purged, or taken over by another request
+   * under a new token — matches nothing, and that throws too, so the effect is
+   * never committed without its key, nor under another request's.
    */
   private async complete(
     tx: ExtendedPrismaClient,
     endpoint: string,
     key: string,
+    token: string,
     status: number,
     body: unknown,
   ): Promise<void> {
     const organizationId = getOrganizationId();
     const { count } = await tx.idempotencyKey.updateMany({
-      where: { organizationId, endpoint, key, state: 'IN_PROGRESS' },
+      where: { organizationId, endpoint, key, claimToken: token, state: 'IN_PROGRESS' },
       data: { state: 'COMPLETED', responseStatus: status, responseBody: body as object },
     });
     if (count !== 1) throw claimLost(endpoint);
@@ -236,13 +284,14 @@ export class IdempotencyStore {
    *
    * A failed attempt must not block a corrected retry: a settlement refused
    * for insufficient balance should be retryable once the wallet is topped up,
-   * with the same key. Only `IN_PROGRESS` rows are removed, so a completed
-   * response is never dropped.
+   * with the same key. Only this request's own `IN_PROGRESS` reservation is
+   * removed — never a completed response, and never the claim another request
+   * took over after this one's expired.
    */
-  async release(endpoint: string, key: string): Promise<void> {
+  async release(endpoint: string, key: string, token: string): Promise<void> {
     const organizationId = getOrganizationId();
     await this.prisma.client.idempotencyKey.deleteMany({
-      where: { organizationId, endpoint, key, state: 'IN_PROGRESS' },
+      where: { organizationId, endpoint, key, claimToken: token, state: 'IN_PROGRESS' },
     });
   }
 
@@ -258,6 +307,9 @@ export class IdempotencyStore {
    * effect, and what it answered is what this returns — the same body a
    * replay returns. A work that returns normally must have answered in a
    * transaction that committed.
+   *
+   * `options.mayReplay` is required: no endpoint can return a stored answer
+   * without saying who may still have it (see the class comment).
    */
   async run<T>(
     endpoint: string,
@@ -265,28 +317,33 @@ export class IdempotencyStore {
     body: unknown,
     successStatus: number,
     work: (answer: IdempotentAnswer<T>) => Promise<unknown>,
-    options?: { terminalRefusals?: TerminalRefusals },
+    options: { mayReplay: ReplayGuard<T>; terminalRefusals?: TerminalRefusals },
   ): Promise<T> {
     const claim = await this.claim(endpoint, key, body);
     if (claim.kind === 'REPLAY') {
-      if (claim.status >= REFUSAL_STATUS_FLOOR) {
-        throw replayedRefusal(claim.body, options?.terminalRefusals);
-      }
+      const refused = claim.status >= REFUSAL_STATUS_FLOOR;
+      // Before anything of the record leaves: what a fresh request would be
+      // refused, the replay is refused too.
+      await options.mayReplay(refused ? undefined : (claim.body as T));
+      if (refused) throw replayedRefusal(claim.body, options.terminalRefusals);
       return claim.body as T;
     }
+    const { token } = claim;
 
     let answered: { response: T } | undefined;
     const answer = new IdempotentAnswer<T>(
       async (tx, response) => {
-        await this.complete(tx, endpoint, key, successStatus, response);
+        await this.complete(tx, endpoint, key, token, successStatus, response);
         answered = { response };
       },
       async (tx, refusal) => {
         // An undeclared refusal is not one the store can replay: it is left
         // to the release below, and the effect it ends is never rolled back
         // for it.
-        if (!declaredBy(options?.terminalRefusals, refusal)) return;
-        await this.complete(tx, endpoint, key, refusal.status, { refusal: refusal.refusal });
+        if (!declaredBy(options.terminalRefusals, refusal)) return;
+        await this.complete(tx, endpoint, key, token, refusal.status, {
+          refusal: refusal.refusal,
+        });
       },
     );
 
@@ -299,12 +356,12 @@ export class IdempotencyStore {
       // rolled back took its answer with it, and the key is freed.
       if (
         error instanceof TerminalRefusalError &&
-        declaredBy(options?.terminalRefusals, error) &&
-        (await this.completeRefusal(endpoint, key, error))
+        declaredBy(options.terminalRefusals, error) &&
+        (await this.completeRefusal(endpoint, key, token, error))
       ) {
         throw error;
       }
-      await this.release(endpoint, key);
+      await this.release(endpoint, key, token);
       throw error;
     }
     if (!answered) {
@@ -331,12 +388,13 @@ export class IdempotencyStore {
   private async completeRefusal(
     endpoint: string,
     key: string,
+    token: string,
     error: TerminalRefusalError,
   ): Promise<boolean> {
     const organizationId = getOrganizationId();
     try {
       const { count } = await this.prisma.client.idempotencyKey.updateMany({
-        where: { organizationId, endpoint, key, state: 'IN_PROGRESS' },
+        where: { organizationId, endpoint, key, claimToken: token, state: 'IN_PROGRESS' },
         data: {
           state: 'COMPLETED',
           responseStatus: error.status,
@@ -453,6 +511,44 @@ export class IdempotentAnswer<T> {
       this.storeRefusal,
     );
   }
+}
+
+/** What {@link IdempotencyStore.claim} reserved, or the stored answer it found. */
+export type Claim =
+  { kind: 'PROCEED'; token: string } | { kind: 'REPLAY'; status: number; body: unknown };
+
+/**
+ * The endpoint's own object checks, run again before a stored answer is
+ * returned — as the caller now is, against the object as it now is (review of
+ * #287, finding 1). Throws what a fresh request would be refused with: the
+ * `NOT_FOUND` of an object the caller cannot see, the `403` of one it may see
+ * but not act on. It never re-runs the transition: whether the command could
+ * be applied again is not the question, who may see what it did is.
+ *
+ * `stored` is the success response being replayed, or `undefined` for a
+ * recorded refusal. A route with no target in its path (creating a
+ * transaction) has only the response to name its object.
+ */
+export type ReplayGuard<T> = (stored: T | undefined) => Promise<void>;
+
+/**
+ * Who sent this request, as the record binds it: the token's stable identity
+ * (issuer and subject), the platform user id, and for a service call the
+ * calling service — the fields reconciliation's `boundTo` already folded into
+ * its keys (Codex on #175, MED 3), now for every endpoint. The acting
+ * organization and the endpoint are the record's primary key; the target is in
+ * the request hash ({@link targeted}). Roles are not part of it: they are
+ * what the replay guard asks about, as they are now.
+ */
+export function requestActor(): Record<string, string | null> {
+  const context = getContext();
+  return {
+    authType: context.authType,
+    issuer: context.issuer ?? null,
+    subject: context.subject ?? null,
+    userId: context.userId ?? null,
+    callerService: context.callerService ?? null,
+  };
 }
 
 /** A stored status at or above this is a recorded refusal, not a response body. */

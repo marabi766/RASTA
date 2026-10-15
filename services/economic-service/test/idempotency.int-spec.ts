@@ -1,6 +1,6 @@
 import { RastaError, runUnscoped } from '@rasta/nest-common';
 import {
-  asActor,
+  asActor as asSomeone,
   cleanup,
   fundWallet,
   newPrisma,
@@ -16,6 +16,18 @@ import {
   type IdempotentAnswer,
 } from '../src/shared/idempotency';
 import type { PrismaService } from '../src/prisma/prisma.service';
+
+/**
+ * One person sends every request here unless a test says otherwise: a key is
+ * bound to its actor (review of #287), and the helper's default user id is
+ * new on every call.
+ */
+const REQUESTER = 'USR-ITEST-IDEMPOTENCY';
+const asActor = <T>(options: Parameters<typeof asSomeone>[0], fn: () => Promise<T>) =>
+  asSomeone({ userId: REQUESTER, ...options }, fn);
+
+/** The stored answers of the mechanism's own tests are nobody's object: any caller may have them. */
+const openly = { mayReplay: async () => undefined };
 
 /**
  * Idempotency (docs/06 § 6.8, docs/10 § 10.12).
@@ -60,7 +72,14 @@ describe('idempotency (real database)', () => {
   describe('the documented contract', () => {
     it('executes once for a new key', async () => {
       const executed = await asActor({ organizationId: org.a }, () =>
-        idempotency.run('POST /itest', 'key-new-0001', { a: 1 }, 201, answering({ ok: true })),
+        idempotency.run(
+          'POST /itest',
+          'key-new-0001',
+          { a: 1 },
+          201,
+          answering({ ok: true }),
+          openly,
+        ),
       );
       expect(executed).toEqual({ ok: true });
     });
@@ -73,10 +92,10 @@ describe('idempotency (real database)', () => {
       };
 
       const first = await asActor({ organizationId: org.a }, () =>
-        idempotency.run('POST /itest', 'key-replay-01', { a: 1 }, 201, work),
+        idempotency.run('POST /itest', 'key-replay-01', { a: 1 }, 201, work, openly),
       );
       const second = await asActor({ organizationId: org.a }, () =>
-        idempotency.run('POST /itest', 'key-replay-01', { a: 1 }, 201, work),
+        idempotency.run('POST /itest', 'key-replay-01', { a: 1 }, 201, work, openly),
       );
 
       expect(first).toEqual({ attempt: 1 });
@@ -92,10 +111,10 @@ describe('idempotency (real database)', () => {
       };
 
       await asActor({ organizationId: org.a }, () =>
-        idempotency.run('POST /itest', 'key-order-01', { a: 1, b: 2 }, 201, work),
+        idempotency.run('POST /itest', 'key-order-01', { a: 1, b: 2 }, 201, work, openly),
       );
       await asActor({ organizationId: org.a }, () =>
-        idempotency.run('POST /itest', 'key-order-01', { b: 2, a: 1 }, 201, work),
+        idempotency.run('POST /itest', 'key-order-01', { b: 2, a: 1 }, 201, work, openly),
       );
 
       expect(runs).toBe(1);
@@ -103,7 +122,14 @@ describe('idempotency (real database)', () => {
 
     it('refuses the same key with a different body', async () => {
       await asActor({ organizationId: org.a }, () =>
-        idempotency.run('POST /itest', 'key-reuse-01', { amountMinor: '100' }, 201, answering({})),
+        idempotency.run(
+          'POST /itest',
+          'key-reuse-01',
+          { amountMinor: '100' },
+          201,
+          answering({}),
+          openly,
+        ),
       );
 
       await expect(
@@ -114,6 +140,7 @@ describe('idempotency (real database)', () => {
             { amountMinor: '999' },
             201,
             answering({}),
+            openly,
           ),
         ),
       ).rejects.toThrow(expect.objectContaining({ code: 'IDEMPOTENCY_KEY_REUSED' }));
@@ -133,7 +160,7 @@ describe('idempotency (real database)', () => {
           respondWith(answer, { runs: (runs += 1) });
         const run = (x: number) =>
           asActor({ organizationId: org.a }, () =>
-            idempotency.run('POST /itest', k, body(x), 201, work),
+            idempotency.run('POST /itest', k, body(x), 201, work, openly),
           );
 
         expect(await run(1)).toEqual({ runs: 1 });
@@ -167,15 +194,22 @@ describe('idempotency (real database)', () => {
       // the same key once the wallet is topped up.
       await expect(
         asActor({ organizationId: org.a }, () =>
-          idempotency.run('POST /itest', 'key-failed-01', {}, 201, async () => {
-            throw new Error('the work failed');
-          }),
+          idempotency.run(
+            'POST /itest',
+            'key-failed-01',
+            {},
+            201,
+            async () => {
+              throw new Error('the work failed');
+            },
+            openly,
+          ),
         ),
       ).rejects.toThrow('the work failed');
 
       await expect(
         asActor({ organizationId: org.a }, () =>
-          idempotency.run('POST /itest', 'key-failed-01', {}, 201, answering({ ok: true })),
+          idempotency.run('POST /itest', 'key-failed-01', {}, 201, answering({ ok: true }), openly),
         ),
       ).resolves.toEqual({ ok: true });
     });
@@ -189,7 +223,9 @@ describe('idempotency (real database)', () => {
           }),
         );
       const run = <T>(key: string, work: (answer: IdempotentAnswer<T>) => Promise<unknown>) =>
-        asActor({ organizationId: org.a }, () => idempotency.run(endpoint, key, {}, 200, work));
+        asActor({ organizationId: org.a }, () =>
+          idempotency.run(endpoint, key, {}, 200, work, openly),
+        );
 
       it('replays an answer whose transaction committed, whatever failed after it', async () => {
         let runs = 0;
@@ -260,6 +296,7 @@ describe('idempotency (real database)', () => {
         const refuse = () =>
           asActor({ organizationId: org.a }, () =>
             idempotency.run(endpoint, 'key-answer-05', {}, 200, work, {
+              ...openly,
               terminalRefusals: refusals,
             }),
           );
@@ -310,7 +347,7 @@ describe('idempotency (real database)', () => {
             body,
             200,
             work,
-            opt ? { terminalRefusals: refusals } : undefined,
+            opt ? { ...openly, terminalRefusals: refusals } : openly,
           ),
         );
       const stored = (key: string) =>
@@ -395,10 +432,10 @@ describe('idempotency (real database)', () => {
       // The key is scoped by tenant and endpoint, so two organizations using
       // the same client-generated key do not interfere.
       const a = await asActor({ organizationId: org.a }, () =>
-        idempotency.run('POST /itest', 'shared-key-01', {}, 201, answering({ who: 'a' })),
+        idempotency.run('POST /itest', 'shared-key-01', {}, 201, answering({ who: 'a' }), openly),
       );
       const b = await asActor({ organizationId: org.b }, () =>
-        idempotency.run('POST /itest', 'shared-key-01', {}, 201, answering({ who: 'b' })),
+        idempotency.run('POST /itest', 'shared-key-01', {}, 201, answering({ who: 'b' }), openly),
       );
 
       expect(a).toEqual({ who: 'a' });
@@ -407,10 +444,24 @@ describe('idempotency (real database)', () => {
 
     it('keeps one endpoint key from colliding with another', async () => {
       const one = await asActor({ organizationId: org.a }, () =>
-        idempotency.run('POST /one', 'endpoint-key-01', {}, 201, answering({ where: 'one' })),
+        idempotency.run(
+          'POST /one',
+          'endpoint-key-01',
+          {},
+          201,
+          answering({ where: 'one' }),
+          openly,
+        ),
       );
       const two = await asActor({ organizationId: org.a }, () =>
-        idempotency.run('POST /two', 'endpoint-key-01', {}, 201, answering({ where: 'two' })),
+        idempotency.run(
+          'POST /two',
+          'endpoint-key-01',
+          {},
+          201,
+          answering({ where: 'two' }),
+          openly,
+        ),
       );
 
       expect(one).toEqual({ where: 'one' });
@@ -443,6 +494,7 @@ describe('idempotency (real database)', () => {
                 { ...body, idempotencyKey: 'financial-key-01' },
                 answer.map(({ id }) => ({ id })),
               ),
+            openly,
           ),
         );
 
@@ -495,6 +547,7 @@ describe('idempotency (real database)', () => {
                 'USR-ITEST',
                 answer.map(({ settlementId }) => ({ settlementId })),
               ),
+            openly,
           ),
         );
 
@@ -577,6 +630,7 @@ describe('idempotency (real database)', () => {
                 'USR-ITEST',
                 answer.map(({ settlementId }) => ({ settlementId })),
               ),
+            openly,
           ),
         ).then(
           () => 'ok' as const,
@@ -612,7 +666,7 @@ describe('idempotency (real database)', () => {
       const key = `key-expire-01-${org.a}`;
 
       await asActor({ organizationId: org.a }, () =>
-        idempotency.run('POST /itest', key, {}, 201, answering({})),
+        idempotency.run('POST /itest', key, {}, 201, answering({}), openly),
       );
 
       // Both columns are moved back together, because `ck_idempotency_expiry`
@@ -642,7 +696,7 @@ describe('idempotency (real database)', () => {
       const organizationId = `${org.b}-RECLAIM`;
       const key = `key-reclaim-${organizationId}`;
       await asActor({ organizationId }, () =>
-        idempotency.run('POST /itest', key, { a: 1 }, 201, answering({})),
+        idempotency.run('POST /itest', key, { a: 1 }, 201, answering({}), openly),
       );
       await runUnscoped('the race test back-dates a record it created', () =>
         prisma.client.$executeRawUnsafe(

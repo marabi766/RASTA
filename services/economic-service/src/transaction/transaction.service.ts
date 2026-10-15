@@ -7,7 +7,12 @@ import { WalletService } from '../wallet/wallet.service';
 import { WalletRepository } from '../wallet/wallet.repository';
 import { TransactionRepository, type TransactionFilter } from './transaction.repository';
 import { nextStatus } from './state-machine';
-import { assertMayRefund, assertTransactionVisible, canCommitOrganization } from '../access/access';
+import {
+  assertMayRefund,
+  assertTransactionVisible,
+  canCommitOrganization,
+  type RefundableTransaction,
+} from '../access/access';
 import { formatMinor, parseMinor } from '../shared/money';
 import { isUniqueViolation } from '../ledger/ledger.repository';
 import { LedgerService } from '../ledger/ledger.service';
@@ -459,7 +464,7 @@ export class TransactionService {
       return await this.prisma.transaction(async (tx) => {
         const transaction = await this.repository.lockForUpdate(tx, transactionId);
         if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-        assertMayRefund(transaction, { payeeMayRefund: this.env.ECONOMIC_REFUND_BY_PAYEE_ENABLED });
+        this.authorizeAct(transaction, 'REFUND');
 
         const target = nextStatus(transactionId, transaction.status, 'REFUND');
 
@@ -560,8 +565,7 @@ export class TransactionService {
     return this.prisma.transaction(async (tx) => {
       const transaction = await this.repository.lockForUpdate(tx, transactionId);
       if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-      assertTransactionVisible(transaction);
-      canCommitOrganization(transaction.organizationId);
+      this.authorizeAct(transaction, 'COMMIT');
 
       const target = nextStatus(transactionId, transaction.status, event);
       const moved = await this.repository.transition(
@@ -583,6 +587,39 @@ export class TransactionService {
 
       return this.answered(tx, transactionId, answer);
     });
+  }
+
+  /**
+   * Who may act on this transaction, as a command asks it: `COMMIT` for a
+   * lifecycle move, `REFUND` for a refund (docs/24 Q-62), `READ` for what only
+   * shows it. A non-party learns nothing — `NOT_FOUND` first, always.
+   */
+  private authorizeAct(transaction: RefundableTransaction, act: TransactionAct): void {
+    switch (act) {
+      case 'READ':
+        assertTransactionVisible(transaction);
+        return;
+      case 'COMMIT':
+        assertTransactionVisible(transaction);
+        canCommitOrganization(transaction.organizationId);
+        return;
+      case 'REFUND':
+        assertMayRefund(transaction, { payeeMayRefund: this.env.ECONOMIC_REFUND_BY_PAYEE_ENABLED });
+        return;
+    }
+  }
+
+  /**
+   * The checks of {@link authorizeAct}, against the transaction as it is now,
+   * without the command — the replay guard of an idempotent command on it
+   * (review of #287, finding 1). A caller who could not make the command now
+   * is refused exactly as that command would refuse them: a stored answer
+   * shows the transaction, so it goes only to whom the transaction would.
+   */
+  async assertMayReplay(transactionId: string, act: TransactionAct): Promise<void> {
+    const transaction = await this.repository.findByIdForParty(transactionId);
+    if (!transaction) throw RastaError.notFound('Transaction', transactionId);
+    this.authorizeAct(transaction, act);
   }
 
   /**
@@ -678,6 +715,9 @@ export class TransactionService {
     return this.repository.list(getOrganizationId(), filter);
   }
 }
+
+/** What a caller asks to do to a transaction — see `TransactionService.authorizeAct`. */
+export type TransactionAct = 'READ' | 'COMMIT' | 'REFUND';
 
 type StatusChangeAction =
   | 'CREATE'
