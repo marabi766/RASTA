@@ -1,4 +1,4 @@
-import { Runtime, type Logger as TemporalLogger } from '@temporalio/worker';
+import { Runtime, type Logger as TemporalLogger, type RuntimeOptions } from '@temporalio/worker';
 import { createLogger, scrubMessage, type Logger } from '@rasta/logging';
 import { scrubLogValue } from '@rasta/nest-common';
 import { SERVICE_NAME, type MarketplaceEnv } from '../config/env';
@@ -66,10 +66,25 @@ export class TemporalRuntimeLogger implements TemporalLogger {
   }
 }
 
+/**
+ * The runtime's options: {@link TemporalRuntimeLogger} as the SDK's logger, and
+ * Core's own logs forwarded to it. Core — the native layer under
+ * `NativeConnection` and `Worker` — logs apart from `logger`: a retried gRPC
+ * status or a poll error at WARN, written by its console exporter straight to
+ * stderr, unscrubbed and uncapped (Codex on #296, r2 F1). `logging.forward`
+ * sends those records through `logger` as well, under Core's default filter.
+ */
+export function temporalRuntimeOptions(base: Logger): RuntimeOptions {
+  return {
+    logger: new TemporalRuntimeLogger(base),
+    telemetryOptions: { logging: { forward: {} } },
+  };
+}
+
 let installed = false;
 
 /**
- * Installs the Temporal runtime with {@link TemporalRuntimeLogger}. Call it
+ * Installs the Temporal runtime with {@link temporalRuntimeOptions}. Call it
  * before the first `NativeConnection`, `Worker` or `Connection` of the process:
  * the SDK builds its runtime on first use, with its default (raw) logger, and
  * cannot be given another afterwards. Idempotent; the worker and the client
@@ -79,8 +94,8 @@ export function installTemporalRuntimeLogger(
   env: Pick<MarketplaceEnv, 'NODE_ENV' | 'LOG_LEVEL' | 'SERVICE_VERSION'>,
 ): void {
   if (installed) return;
-  Runtime.install({
-    logger: new TemporalRuntimeLogger(
+  Runtime.install(
+    temporalRuntimeOptions(
       createLogger({
         serviceName: SERVICE_NAME,
         serviceVersion: env.SERVICE_VERSION,
@@ -89,6 +104,6 @@ export function installTemporalRuntimeLogger(
         pretty: env.NODE_ENV === 'development',
       }),
     ),
-  });
+  );
   installed = true;
 }

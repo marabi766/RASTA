@@ -1,5 +1,6 @@
 import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
 import { OrderSagaClient } from './saga.client';
+import { installTemporalRuntimeLogger } from './runtime-logger';
 import type { MarketplaceEnv } from '../config/env';
 
 /**
@@ -203,6 +204,17 @@ describe('signalling a running saga', () => {
 });
 
 describe('the connection', () => {
+  it('is dialled only after the Temporal runtime (Core logs forwarded) is installed', async () => {
+    stubTemporal();
+    const settings = env();
+
+    await new OrderSagaClient(settings).start('ORD_21');
+
+    const install = installTemporalRuntimeLogger as jest.Mock;
+    expect(install).toHaveBeenCalledWith(settings);
+    expect(install.mock.invocationCallOrder[0]).toBeLessThan(connect.mock.invocationCallOrder[0]!);
+  });
+
   it('is established once and reused across calls', async () => {
     // One TCP connection per command would be a new connection per order.
     const temporal = stubTemporal();

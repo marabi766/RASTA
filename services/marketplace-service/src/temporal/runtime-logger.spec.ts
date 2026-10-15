@@ -1,8 +1,15 @@
 import { ApplicationFailure } from '@temporalio/activity';
 import { MockActivityEnvironment } from '@temporalio/testing';
 import { Runtime } from '@temporalio/worker';
-import type { Logger } from '@rasta/logging';
-import { TemporalRuntimeLogger, installTemporalRuntimeLogger } from './runtime-logger';
+// The SDK's option compiler, what `Runtime.install` runs (no exports map: a
+// deep import is how it is reached).
+import { compileOptions } from '@temporalio/worker/lib/runtime-options';
+import { createLogger, type Logger } from '@rasta/logging';
+import {
+  TemporalRuntimeLogger,
+  installTemporalRuntimeLogger,
+  temporalRuntimeOptions,
+} from './runtime-logger';
 
 /**
  * The Temporal SDK logs an activity that throws ("Activity failed") with the
@@ -157,8 +164,70 @@ describe('TemporalRuntimeLogger', () => {
   });
 });
 
+/**
+ * Core — the native layer under `NativeConnection` and `Worker` — logs apart
+ * from the runtime's `logger`, through an exporter chosen by the SDK's option
+ * compiler; without `logging.forward` that exporter is Core's console one,
+ * writing to stderr raw (Codex on #296, r2 F1). These run that compiler — the
+ * one `Runtime.install` runs — and its native log collector, network-free.
+ */
+describe('Core (native) logs', () => {
+  type Compiled = ReturnType<typeof compileOptions>;
+  const exporterOf = (compiled: Compiled) =>
+    compiled.runtimeOptions.logExporter as { type: string; receiver?: (entries: string[]) => void };
+  const close = (compiled: Compiled) => (compiled.logger as { close?: () => void }).close?.();
+
+  it('are forwarded: the compiler selects the forwarding exporter, not the console one', () => {
+    const forwarded = compileOptions(temporalRuntimeOptions(stubLogger().logger));
+    // The configuration before this fix, as a control.
+    const logOnly = compileOptions({ logger: new TemporalRuntimeLogger(stubLogger().logger) });
+    try {
+      expect(exporterOf(forwarded).type).toBe('forward');
+      expect(exporterOf(logOnly).type).toBe('console');
+    } finally {
+      close(forwarded);
+      close(logOnly);
+    }
+  });
+
+  it('reach the destination scrubbed: a Core poll warning carrying credentials', () => {
+    const lines: string[] = [];
+    const base = createLogger({
+      serviceName: 'marketplace-service',
+      level: 'trace',
+      environment: 'test',
+      pretty: false,
+      destination: { write: (line: string) => void lines.push(line) },
+    });
+    const compiled = compileOptions(temporalRuntimeOptions(base));
+
+    // An entry as Core pushes it: JSON, nanosecond timestamp, tracing fields.
+    exporterOf(compiled).receiver!([
+      JSON.stringify({
+        timestamp: String(BigInt(Date.now()) * 1_000_000n),
+        level: 'WARN',
+        message: `Error when polling: status: Unauthenticated, message: "Authorization: Bearer ${TOKEN}"`,
+        target: 'temporalio_sdk_core::pollers::poll_buffer',
+        spanContexts: [],
+        fields: { error: `connect ${DSN}` },
+      }),
+    ]);
+    close(compiled); // flushes what the collector buffers
+
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      level: 'warn',
+      component: 'temporal',
+      sdkComponent: 'core',
+      msg: expect.stringContaining('Error when polling') as unknown,
+    });
+    expect(lines[0]).not.toContain(TOKEN);
+    expect(lines[0]).not.toContain(PASSWORD);
+  });
+});
+
 describe('installTemporalRuntimeLogger', () => {
-  it('installs the runtime with the adapter, once', () => {
+  it('installs the runtime with the adapter and Core forwarding, once', () => {
     const install = jest.spyOn(Runtime, 'install').mockImplementation(() => undefined as never);
     const env = { NODE_ENV: 'test', LOG_LEVEL: 'info', SERVICE_VERSION: '1' } as never;
 
@@ -166,7 +235,14 @@ describe('installTemporalRuntimeLogger', () => {
     installTemporalRuntimeLogger(env);
 
     expect(install).toHaveBeenCalledTimes(1);
-    expect(install.mock.calls[0][0].logger).toBeInstanceOf(TemporalRuntimeLogger);
+    const options = install.mock.calls[0][0];
+    expect(options.logger).toBeInstanceOf(TemporalRuntimeLogger);
+    const compiled = compileOptions(options);
+    try {
+      expect((compiled.runtimeOptions.logExporter as { type: string }).type).toBe('forward');
+    } finally {
+      (compiled.logger as { close?: () => void }).close?.();
+    }
     install.mockRestore();
   });
 });

@@ -16,8 +16,26 @@ import { EconomicClient } from './economic.client';
  * application registers the pino adapter (Codex on #290, F4): a credential-
  * bearing URL or an upstream error body reached stdout as it was. These run the
  * real client in a real application context with `installNestLogger` — what
- * `main.ts` does — and read what reaches stdout.
+ * `main.ts` does — and read what reaches the logger's destination.
  */
+
+/**
+ * Every line any `createLogger` writes: the real logger (serialization,
+ * scrubbing, caps) with only its destination replaced — it opens fd 1 itself,
+ * so a `process.stdout` spy sees nothing (Codex on #296, r2 F2).
+ */
+const mockWritten: string[] = [];
+jest.mock('@rasta/logging', () => {
+  const actual = jest.requireActual<typeof import('@rasta/logging')>('@rasta/logging');
+  return {
+    ...actual,
+    createLogger: (config: import('@rasta/logging').LoggerConfig) =>
+      actual.createLogger({
+        ...config,
+        destination: { write: (line: string) => void mockWritten.push(line) },
+      }),
+  };
+});
 
 const PASSWORD = 'LEAKPASSWORD';
 const TOKEN = 'LEAKTOKEN0123456789';
@@ -29,19 +47,10 @@ const ENV_VALUES = {
 
 type Line = Record<string, unknown> & { msg?: string; level?: string; context?: string };
 
-async function captureStdout(work: () => Promise<void>): Promise<Line[]> {
-  const written: string[] = [];
-  // Under Jest `process.stdout` is replaced, so pino writes through its `write`.
-  const spy = jest.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
-    written.push(String(chunk));
-    return true;
-  }) as typeof process.stdout.write);
-  try {
-    await work();
-  } finally {
-    spy.mockRestore();
-  }
-  return written
+async function captureLines(work: () => Promise<void>): Promise<Line[]> {
+  mockWritten.length = 0;
+  await work();
+  return mockWritten
     .join('')
     .split('\n')
     .filter((text) => text.startsWith('{'))
@@ -52,8 +61,7 @@ async function captureStdout(work: () => Promise<void>): Promise<Line[]> {
 async function failingCall(error: Error): Promise<Line[]> {
   const fetchSpy = jest.spyOn(globalThis, 'fetch').mockRejectedValue(error);
   try {
-    return await captureStdout(async () => {
-      // Built under the spy: pino picks its destination when it is created.
+    return await captureLines(async () => {
       const logger = createLogger({
         serviceName: 'marketplace-service',
         level: 'debug',

@@ -10,23 +10,33 @@ import { kafkaLogCreator } from './log-creator';
  * are (Codex on #296, F2).
  */
 
+/**
+ * Every line any `createLogger` writes: the real logger (serialization,
+ * scrubbing, caps) with only its destination replaced — it opens fd 1 itself,
+ * so a `process.stdout` spy sees nothing (Codex on #296, r2 F2).
+ */
+const mockWritten: string[] = [];
+jest.mock('@rasta/logging', () => {
+  const actual = jest.requireActual<typeof import('@rasta/logging')>('@rasta/logging');
+  return {
+    ...actual,
+    createLogger: (config: import('@rasta/logging').LoggerConfig) =>
+      actual.createLogger({
+        ...config,
+        destination: { write: (line: string) => void mockWritten.push(line) },
+      }),
+  };
+});
+
 const PASSWORD = 'LEAKPASSWORD';
 const DSN = `postgresql://app:${PASSWORD}@db.internal:5432/app`;
 
 type Line = Record<string, unknown> & { msg?: string; level?: string };
 
-function captureStdout(work: () => void): Line[] {
-  const written: string[] = [];
-  const spy = jest.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
-    written.push(String(chunk));
-    return true;
-  }) as typeof process.stdout.write);
-  try {
-    work();
-  } finally {
-    spy.mockRestore();
-  }
-  return written
+function captureLines(work: () => void): Line[] {
+  mockWritten.length = 0;
+  work();
+  return mockWritten
     .join('')
     .split('\n')
     .filter((text) => text.startsWith('{'))
@@ -35,7 +45,7 @@ function captureStdout(work: () => void): Line[] {
 
 describe('kafkaLogCreator', () => {
   const write = (level: number, log: Record<string, unknown>) =>
-    captureStdout(() =>
+    captureLines(() =>
       kafkaLogCreator('svc-kafka')(level)({ namespace: 'Connection', level, log } as never),
     );
 

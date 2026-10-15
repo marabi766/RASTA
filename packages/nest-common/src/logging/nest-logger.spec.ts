@@ -12,8 +12,27 @@ import { bootstrapLogger, installNestLogger, logFatal } from './nest-logger';
  * writes through; unless the application registers an adapter it prints raw to
  * stdout and none of `@rasta/logging`'s scrubbing or capping applies (Codex on
  * #290, F4). These run a real Nest application context and read what reaches
- * the process's stdout.
+ * the logger's destination.
  */
+
+/**
+ * Every line any `createLogger` writes. The logger is the real one — pino's
+ * serialization and `@rasta/logging`'s scrubbing and caps — with only its
+ * destination replaced: it opens fd 1 itself, so a `process.stdout` spy sees
+ * nothing (Codex on #296, r2 F2).
+ */
+const mockWritten: string[] = [];
+jest.mock('@rasta/logging', () => {
+  const actual = jest.requireActual<typeof import('@rasta/logging')>('@rasta/logging');
+  return {
+    ...actual,
+    createLogger: (config: import('@rasta/logging').LoggerConfig) =>
+      actual.createLogger({
+        ...config,
+        destination: { write: (line: string) => void mockWritten.push(line) },
+      }),
+  };
+});
 
 const PASSWORD = 'LEAKPASSWORD';
 const TOKEN = 'LEAKTOKEN0123456789';
@@ -21,22 +40,11 @@ const DSN = `postgresql://app:${PASSWORD}@db.internal:5432/app`;
 
 type Line = Record<string, unknown> & { msg?: string; level?: string };
 
-/**
- * Lines the logger writes to stdout while `work` runs. Under Jest `process.stdout`
- * is replaced, so pino writes through its `write` rather than to fd 1.
- */
-async function captureStdout(work: () => Promise<void> | void): Promise<Line[]> {
-  const written: string[] = [];
-  const spy = jest.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
-    written.push(String(chunk));
-    return true;
-  }) as typeof process.stdout.write);
-  try {
-    await work();
-  } finally {
-    spy.mockRestore();
-  }
-  return written
+/** Lines the loggers write while `work` runs. */
+async function captureLines(work: () => Promise<void> | void): Promise<Line[]> {
+  mockWritten.length = 0;
+  await work();
+  return mockWritten
     .join('')
     .split('\n')
     .filter((text) => text.startsWith('{'))
@@ -66,13 +74,12 @@ describe('installNestLogger', () => {
   }
 
   async function run(work: (service: OtherService) => void): Promise<Line[]> {
-    // A factory, so pino picks its destination under the stdout spy.
     @Module({
       providers: [OtherService, { provide: EXCEPTION_FILTER_LOGGER, useFactory: appLogger }],
     })
     class AppModule {}
 
-    return captureStdout(async () => {
+    return captureLines(async () => {
       const app = await NestFactory.createApplicationContext(AppModule, {
         bufferLogs: true,
         logger: false,
@@ -225,7 +232,7 @@ describe('bootstrapLogger', () => {
     const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     let lines: Line[] = [];
     try {
-      lines = await captureStdout(async () => {
+      lines = await captureLines(async () => {
         await NestFactory.createApplicationContext(BrokenModule, {
           logger: bootstrapLogger(
             { NODE_ENV: 'test', LOG_LEVEL: 'trace', SERVICE_VERSION: '1' },
@@ -273,7 +280,7 @@ describe('every service installs the adapter', () => {
 
 describe('logFatal', () => {
   it('writes a startup failure through the logger, scrubbed', async () => {
-    const lines = await captureStdout(() =>
+    const lines = await captureLines(() =>
       logFatal(
         { serviceName: 'svc-a' },
         '[svc-a] failed to start',

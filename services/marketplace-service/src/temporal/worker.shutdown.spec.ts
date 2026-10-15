@@ -1,5 +1,6 @@
 import { NativeConnection, Worker } from '@temporalio/worker';
 import { OrderSagaWorker } from './worker';
+import { installTemporalRuntimeLogger } from './runtime-logger';
 
 jest.mock('./runtime-logger', () => ({ installTemporalRuntimeLogger: jest.fn() }));
 jest.mock('@temporalio/worker', () => ({
@@ -44,6 +45,17 @@ function build(run: () => Promise<void>) {
 
 describe('OrderSagaWorker shutdown (Codex on #277, finding 2)', () => {
   beforeEach(() => jest.clearAllMocks());
+
+  it('installs the Temporal runtime (Core logs forwarded) before its first connection', async () => {
+    const { worker } = build(() => new Promise<void>(() => undefined));
+    await worker.onApplicationBootstrap();
+
+    const install = installTemporalRuntimeLogger as jest.Mock;
+    expect(install).toHaveBeenCalledWith(env);
+    expect(install.mock.invocationCallOrder[0]).toBeLessThan(
+      (NativeConnection.connect as jest.Mock).mock.invocationCallOrder[0]!,
+    );
+  });
 
   it('derives the SDK force time from the shutdown budget', async () => {
     const { worker } = build(() => new Promise<void>(() => undefined));
