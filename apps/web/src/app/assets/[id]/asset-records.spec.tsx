@@ -248,15 +248,18 @@ it('uses no physical-direction utility, and has no accessibility violations', as
   );
   expect(container.innerHTML).not.toMatch(PHYSICAL_DIRECTION);
   expect(await axe(container)).toHaveNoViolations();
+});
 
-  const failed = render(
+// Its own test, so each axe run gets the whole default timeout to itself.
+it('has no accessibility violations when neither list could be read', async () => {
+  const { container } = render(
     <AssetRecords
       policies={{ kind: 'UNAVAILABLE', status: 503, correlationId: 'c' }}
       inspections={{ kind: 'FORBIDDEN' }}
       now={NOW}
     />,
   );
-  expect(await axe(failed.container)).toHaveNoViolations();
+  expect(await axe(container)).toHaveNoViolations();
 });
 
 describe('stored inspection text with a bidi override (#220)', () => {
