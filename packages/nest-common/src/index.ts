@@ -136,6 +136,13 @@ export {
   KafkaConnectionConfigError,
 } from './kafka/connection';
 export type { KafkaConnectionOptions, KafkaConnectionEnv } from './kafka/connection';
+export { boundedDisconnect, kafkaShutdownDeadline } from './kafka/bounded-disconnect';
+export type {
+  BoundedDisconnectOptions,
+  Disconnectable,
+  DisconnectLogger,
+  DisconnectOutcome,
+} from './kafka/bounded-disconnect';
 
 // Event consumption ----------------------------------------------------------
 export {

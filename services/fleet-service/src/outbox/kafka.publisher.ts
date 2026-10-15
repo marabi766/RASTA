@@ -1,6 +1,11 @@
 import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
 import { Kafka, type Producer, CompressionTypes } from 'kafkajs';
-import { kafkaClientConfig, type KafkaConnectionOptions } from '@rasta/nest-common';
+import {
+  boundedDisconnect,
+  kafkaClientConfig,
+  kafkaShutdownDeadline,
+  type KafkaConnectionOptions,
+} from '@rasta/nest-common';
 import type { EventPublisher, OutboxRow } from '@rasta/nest-common';
 
 /** The service's connection to the broker, SASL and TLS included (RUN-006). */
@@ -98,11 +103,24 @@ export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
     }
   }
 
+  /**
+   * Closes the producer by the shutdown deadline, the one `OutboxShutdown`
+   * drains the relay by (D-052 phase 4b).
+   *
+   * kafkajs's `disconnect()` waits for every request in flight, and Nest waits
+   * for this hook: a broker that stopped answering held `app.close()` past
+   * SHUTDOWN_TIMEOUT_MS. A close the broker does not let finish is abandoned
+   * with a warning instead. A second call joins the close already under way.
+   */
   async onModuleDestroy(): Promise<void> {
-    if (this.producer) {
-      await this.producer.disconnect();
-      this.producer = undefined;
-    }
+    const producer = this.producer;
+    if (!producer) return;
+    await boundedDisconnect(producer, {
+      deadlineAt: kafkaShutdownDeadline(this.options),
+      label: 'Kafka producer',
+      logger: this.logger,
+    });
+    if (this.producer === producer) this.producer = undefined;
   }
 }
 

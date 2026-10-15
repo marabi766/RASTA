@@ -1,6 +1,11 @@
 import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
 import { Kafka, type Producer, CompressionTypes } from 'kafkajs';
-import { kafkaClientConfig, type KafkaConnectionOptions } from '@rasta/nest-common';
+import {
+  boundedDisconnect,
+  kafkaClientConfig,
+  kafkaShutdownDeadline,
+  type KafkaConnectionOptions,
+} from '@rasta/nest-common';
 import type { EventPublisher, OutboxRow } from '@rasta/nest-common';
 
 /** The service's connection to the broker, SASL and TLS included (RUN-006). */
@@ -45,6 +50,8 @@ export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
    * the application has just finished leaving.
    */
   private destroyed = false;
+  /** The bounded close, once begun (`onModuleDestroy`). */
+  private closing?: Promise<void>;
 
   constructor(private readonly options: KafkaPublisherOptions) {
     this.kafka = new Kafka({
@@ -140,23 +147,35 @@ export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
    * retry timers behind `connect()`, which keep the event loop alive with no
    * socket to show for it — a process that will not exit and gives no reason
    * why.
+   *
+   * Both by the shutdown deadline, the one `OutboxShutdown` drains the relay by
+   * (D-052 phase 4b). kafkajs's `disconnect()` waits for every request in
+   * flight — a connect's included — and Nest waits for this hook: a broker that
+   * stopped answering held `app.close()` past SHUTDOWN_TIMEOUT_MS. A close the
+   * broker does not let finish is abandoned with a warning instead. One close:
+   * a second call joins it.
    */
-  async onModuleDestroy(): Promise<void> {
+  onModuleDestroy(): Promise<void> {
+    this.closing ??= this.close(kafkaShutdownDeadline(this.options));
+    return this.closing;
+  }
+
+  private async close(deadlineAt: number): Promise<void> {
     this.destroyed = true;
     this.connecting = undefined;
 
-    const pending = this.pendingProducer;
+    // `disconnect()` on a producer that is still connecting cancels the retry
+    // rather than waiting it out — once its request in flight has returned.
+    const clients = [this.pendingProducer, this.producer].filter(
+      (client): client is Producer => client !== undefined,
+    );
     this.pendingProducer = undefined;
-    if (pending) {
-      // `disconnect()` on a producer that is still connecting cancels the
-      // retry rather than waiting it out.
-      await pending.disconnect().catch(() => undefined);
-    }
-
-    if (this.producer) {
-      await this.producer.disconnect();
-      this.producer = undefined;
-    }
+    this.producer = undefined;
+    await Promise.all(
+      clients.map((client) =>
+        boundedDisconnect(client, { deadlineAt, label: 'Kafka producer', logger: this.logger }),
+      ),
+    );
   }
 }
 

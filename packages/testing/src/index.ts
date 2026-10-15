@@ -40,3 +40,6 @@ export {
   MIN_REASON_LENGTH,
 } from './tenant-scope';
 export type { DmmfModelLike, TenantScopeInput } from './tenant-scope';
+
+export { StubKafkaBroker } from './stub-kafka-broker';
+export type { StubKafkaBrokerOptions } from './stub-kafka-broker';
