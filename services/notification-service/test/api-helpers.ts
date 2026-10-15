@@ -129,7 +129,9 @@ function applyEnvironment(): void {
 
 const inertConsumer = {
   start: async (): Promise<void> => undefined,
-  onModuleDestroy: async (): Promise<void> => undefined,
+  // An `OutboxShutdown` worker, like the real one.
+  stop: async (): Promise<void> => undefined,
+  onApplicationShutdown: async (): Promise<void> => undefined,
   isRunning: (): boolean => false,
 };
 

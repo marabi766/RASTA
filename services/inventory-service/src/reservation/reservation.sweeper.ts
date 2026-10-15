@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import { RastaError } from '@rasta/nest-common';
+import { RastaError, withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { SERVICE_NAME } from '../config/env';
 import { ReservationExpiry } from './expiry';
@@ -47,11 +47,17 @@ function errorCodeOf(error: unknown): string {
  * one interval — whatever is left then is the next sweep's, and nothing done so far is lost.
  *
  * One item failing never stalls the batch, and a sweep never overlaps the previous one.
+ *
+ * `OutboxShutdown` stops it in Nest's destroy phase, beside the relay and the purge, by their
+ * shared deadline (D-052): every batch writes outbox rows, and a sweeper stopped later kept
+ * writing them while the relay drained.
  */
 export class ReservationSweeper {
   private readonly logger = new Logger(ReservationSweeper.name);
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<unknown>;
+  private stopping?: Promise<void>;
+  private stopped = false;
 
   constructor(
     private readonly reservations: ReservationRepository,
@@ -60,9 +66,9 @@ export class ReservationSweeper {
   ) {}
 
   start(): void {
-    if (this.timer) return;
+    if (this.timer || this.stopped) return;
     this.timer = setInterval(() => {
-      if (this.inFlight) return;
+      if (this.inFlight || this.stopped) return;
       this.inFlight = this.runOnce()
         .catch((error: unknown) => {
           // A sweep that fails as a whole (the database is down) is retried by the next tick;
@@ -76,10 +82,35 @@ export class ReservationSweeper {
     this.timer.unref?.();
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Stops the timer at once, lets a sweep in flight start no further batch, and waits for the
+   * batch running — at most until `deadlineAt`, the shutdown's shared deadline. Past it the sweep
+   * is abandoned with a warning: each batch commits whole, so an exit rolls back the one in
+   * flight and the next sweep, anywhere, finds its reservations again. Without a deadline it
+   * waits. One stop per process.
+   */
+  stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopping ??= this.halt(options.deadlineAt);
+    return this.stopping;
+  }
+
+  private async halt(deadlineAt: number | undefined): Promise<void> {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    await this.inFlight;
+
+    const current = this.inFlight;
+    if (!current) return;
+    if (deadlineAt === undefined) {
+      await current;
+      return;
+    }
+    if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+      this.logger.warn(
+        'Reservation expiry sweep still running at the shutdown deadline; abandoned. The batch ' +
+          'in flight rolls back and the next sweep finds its reservations again',
+      );
+    }
   }
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
@@ -98,9 +129,10 @@ export class ReservationSweeper {
     while (pending.length > 0) {
       const again: DueItem[] = [];
       for (const target of pending) {
-        if (await this.sweepItem(target, outcome)) again.push(target);
+        // Stopping: an item not reached keeps its due reservations for the next sweep.
+        if (this.stopped || (await this.sweepItem(target, outcome))) again.push(target);
       }
-      if (again.length > 0 && Date.now() - startedAt >= this.options.intervalMs) {
+      if (again.length > 0 && (this.stopped || Date.now() - startedAt >= this.options.intervalMs)) {
         outcome.backlogged = again.length;
         break;
       }

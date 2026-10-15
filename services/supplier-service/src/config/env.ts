@@ -7,6 +7,7 @@ import {
   kafkaEnvSchema,
   kafkaSaslConfigured,
   loadEnv,
+  outboxPurgeEnvSchema,
 } from '@rasta/config';
 import { supplierOperationBudgets } from './operation-budgets';
 
@@ -38,6 +39,7 @@ export const DEFAULT_PORT = '3108';
 export const supplierEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
   .merge(kafkaEnvSchema)
+  .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
     CORS_ORIGINS: z.string().default(''),
