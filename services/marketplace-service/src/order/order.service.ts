@@ -28,7 +28,7 @@ import {
   type SagaActivity,
   type SagaStep,
 } from './order.repository';
-import { ORDER_TRANSITIONS, assertTransition } from './state-machine';
+import { ORDER_TRANSITIONS, assertTransition, isTerminal } from './state-machine';
 import { availableOrderActions } from './order-actions';
 import { priceOrder, type PriceableOffer } from './pricing';
 import type {
@@ -803,12 +803,18 @@ export class OrderService {
    * Returns `DISPUTED` without changing anything when a dispute committed
    * after the saga last looked. The saga then goes back to waiting on the
    * dispute rather than treating the refusal as a failed settlement attempt.
+   *
+   * Returns `CANCELLING` the same way when that dispute has since been
+   * resolved as a refund: the saga reads the order and compensates. Reached
+   * when the step runs late — a retry whose first attempt yielded on a worker
+   * older than its record, or a worker down while the dispute was decided —
+   * and refusing it ended the saga with the funds held (D-053).
    */
   async markSettling(orderId: string, saga: SagaStep): Promise<OrderStatus> {
     return this.systemTransition(orderId, 'SETTLING', saga, {
       activity: 'markSettling',
       from: ['RECEIPT_CONFIRMED'],
-      yieldTo: ['DISPUTED'],
+      yieldTo: ['DISPUTED', 'CANCELLING'],
       apply: async (tx, order) => {
         await runUnscoped('the saga records that settlement is in flight', () =>
           tx.order.update({ where: { id: order.id }, data: { status: 'SETTLING' } }),
@@ -957,12 +963,23 @@ export class OrderService {
    * Counted once per reminder, not once per attempt: a Temporal retry of a
    * reminder that committed finds its step record and changes nothing
    * (D-053). The next reminder is a different scheduled activity, so a
-   * different step.
+   * different step. A reminder counted before its record could exist is
+   * recognised by its history row, written since the activity was scheduled:
+   * the previous reminder is at least a day older.
    */
   async recordReminder(orderId: string, saga: SagaStep): Promise<void> {
     const counted = await this.prisma.transaction(async (tx) => {
       const order = await this.repository.lockOrder(tx, orderId);
       if (await this.repository.findSagaStep(tx, order, saga, 'recordReminder')) return false;
+
+      const countedBefore = await this.repository.hasSagaHistorySince(tx, order, {
+        kind: 'REMINDER',
+        since: sagaWindowStart(saga),
+      });
+      if (countedBefore) {
+        await this.repository.recordSagaStep(tx, order, saga, 'recordReminder', undefined);
+        return false;
+      }
 
       await runUnscoped('an overdue order is counted by the saga, for neither party', () =>
         tx.order.update({
@@ -1219,6 +1236,20 @@ export class OrderService {
    * record returns it and does nothing else. The record is read under the
    * order's lock, so two attempts of one step cannot both act.
    *
+   * ## A step older than its record (D-053, Codex on #283)
+   *
+   * A first attempt that ran on a worker older than `saga_step` left no
+   * record, only its effect — and that effect includes the history row it
+   * wrote in the same transaction. So a retry with no record that the order's
+   * state would refuse looks for that row: this step's edge (`from` → `to`,
+   * with its reason), written since Temporal first scheduled this activity.
+   * Every edge a saga step takes is taken by that step alone, the workflow
+   * runs one step at a time, and it waits on this one; so such a row is this
+   * step's own. The same edge written by an earlier step is older than this
+   * activity's scheduling by at least the settlement backoff (30 s), or is
+   * an edge an order takes once; the allowance for clocks
+   * (`SAGA_CLOCK_SKEW_MS`) is well inside that.
+   *
    * Returns the order's status after the call — for a retry, after the first.
    */
   private async systemTransition(
@@ -1235,8 +1266,8 @@ export class OrderService {
       /**
        * Recognises this step's own effect on an order that has moved on, for
        * a retry with no record: one whose first attempt ran before the record
-       * existed. Only a step whose effect leaves a mark nothing else writes
-       * can say; the others rely on the record alone.
+       * existed. Only a step whose effect leaves a mark on the order nothing
+       * else writes can say; every step also has its history row (below).
        */
       appliedTo?: (order: LockedOrderRow) => boolean;
       reason?: string;
@@ -1248,7 +1279,7 @@ export class OrderService {
       const recorded = await this.repository.findSagaStep(tx, order, saga, step.activity);
       if (recorded) return { status: recordedStatus(order.id, recorded.result), moved: false };
 
-      const result = await this.applySystemStep(tx, order, to, step);
+      const result = await this.applySystemStep(tx, order, to, saga, step);
       await this.repository.recordSagaStep(tx, order, saga, step.activity, {
         status: result.status,
       });
@@ -1264,6 +1295,7 @@ export class OrderService {
     tx: ExtendedPrismaClient,
     order: LockedOrderRow,
     to: OrderStatus,
+    saga: SagaStep,
     step: Parameters<OrderService['systemTransition']>[3],
   ): Promise<{ status: OrderStatus; moved: boolean }> {
     if (order.status === to) {
@@ -1278,6 +1310,28 @@ export class OrderService {
     }
 
     if (step.appliedTo?.(order)) return { status: order.status, moved: false };
+
+    // Only for an order the step would refuse: from a state it acts on, it
+    // acts. Never for a finished one: only a later saga step finishes an
+    // order, and none runs while the saga waits on this one — so a replayed
+    // command on a finished order is still refused as finished.
+    const applied =
+      !step.from.includes(order.status) &&
+      !isTerminal(order.status) &&
+      (await this.repository.hasSagaHistorySince(tx, order, {
+        kind: 'TRANSITION',
+        from: step.from,
+        to,
+        reason: step.reason ?? null,
+        since: sagaWindowStart(saga),
+      }));
+    if (applied) {
+      this.logger.log(
+        `Saga step ${step.activity} of order ${order.id} was applied before its record existed; ` +
+          `answering ${to} from the order's history`,
+      );
+      return { status: to, moved: false };
+    }
 
     // The table first, so a finished order is refused as finished.
     assertTransition(order.id, order.status, to);
@@ -1323,6 +1377,23 @@ export class OrderService {
     if (!row) throw RastaError.notFound('Order', orderId);
     return toView(row);
   }
+}
+
+/**
+ * How far the clock that stamps order history may disagree with Temporal's,
+ * which stamps an activity's scheduling (D-053).
+ *
+ * A history row a step wrote is newer than the step's scheduling; with clocks
+ * that disagree it can read as slightly older, so the window opens this much
+ * early. It must stay well below the shortest gap between two writes of the
+ * same edge on one order — the settlement backoff, 30 s; reminders are days
+ * apart.
+ */
+export const SAGA_CLOCK_SKEW_MS = 5_000;
+
+/** Where a step's own history rows begin: its scheduling, less the clock allowance. */
+function sagaWindowStart(saga: SagaStep): Date {
+  return new Date(saga.scheduledAt.getTime() - SAGA_CLOCK_SKEW_MS);
 }
 
 /**

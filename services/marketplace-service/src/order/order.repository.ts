@@ -243,6 +243,45 @@ export class OrderRepository {
     );
   }
 
+  /**
+   * Whether the order's history holds a row a saga step wrote since `since`
+   * (D-053): evidence of a step that took effect before its record could
+   * exist — its first attempt ran on a worker older than `saga_step`.
+   *
+   * The history row is written in the step's own transaction, so it exists
+   * exactly when the effect does. Read under the order's lock, like the record.
+   */
+  async hasSagaHistorySince(
+    tx: ExtendedPrismaClient,
+    order: { id: string; organizationId: string },
+    row: {
+      kind: 'TRANSITION' | 'REMINDER';
+      from?: readonly OrderStatus[];
+      to?: OrderStatus;
+      /** Matched exactly when given; `null` matches a row written without one. */
+      reason?: string | null;
+      since: Date;
+    },
+  ): Promise<boolean> {
+    const found = await runUnscoped(
+      'a saga step looks for its own history row on the order it drives',
+      () =>
+        tx.orderStatusHistory.findFirst({
+          where: {
+            organizationId: order.organizationId,
+            orderId: order.id,
+            kind: row.kind,
+            ...(row.from ? { fromStatus: { in: [...row.from] } } : {}),
+            ...(row.to ? { toStatus: row.to } : {}),
+            ...(row.reason === undefined ? {} : { reason: row.reason }),
+            occurredAt: { gte: row.since },
+          },
+          select: { id: true },
+        }),
+    );
+    return found !== null;
+  }
+
   /** Lists orders the caller is a party to, on whichever side. */
   async listForCaller(query: {
     status?: OrderStatus;
@@ -279,6 +318,12 @@ export class OrderRepository {
  */
 export interface SagaStep {
   key: string;
+  /**
+   * When the workflow first scheduled the activity — the same on every retry
+   * of it. Anything the step wrote is newer; the same edge written by an
+   * earlier step is older (D-053).
+   */
+  scheduledAt: Date;
 }
 
 /** The saga activities that leave a record: every one with an effect. */

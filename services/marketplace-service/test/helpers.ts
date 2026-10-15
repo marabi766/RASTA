@@ -182,9 +182,11 @@ export function key(prefix: string): string {
 /**
  * A saga step of its own, as each separately scheduled activity has (D-053).
  * A Temporal retry is the same step again: keep the value and pass it twice.
+ * `scheduledAt` is when the workflow scheduled it: now, unless the case needs
+ * the gap a real saga leaves between two steps.
  */
-export function sagaStep(): SagaStep {
-  return { key: `order-test/run-test/${ulid()}` };
+export function sagaStep(scheduledAt: Date = new Date()): SagaStep {
+  return { key: `order-test/run-test/${ulid()}`, scheduledAt };
 }
 
 /** Removes everything the named organizations wrote. */

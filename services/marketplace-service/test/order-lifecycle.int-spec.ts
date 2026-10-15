@@ -568,7 +568,9 @@ describe('order lifecycle (real database)', () => {
     await asSupplier(() => wiring.orders.fulfill(order.id, {}));
 
     await asSaga(() => wiring.orders.recordReminder(order.id, sagaStep()));
-    await asSaga(() => wiring.orders.recordReminder(order.id, sagaStep()));
+    // The next reminder is scheduled a reminder interval later: a day at least.
+    const nextDay = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await asSaga(() => wiring.orders.recordReminder(order.id, sagaStep(nextDay)));
 
     const after = await asBuyer(() => wiring.orders.get(order.id));
     expect(after.status).toBe('AWAITING_RECEIPT_CONFIRMATION');

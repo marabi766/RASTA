@@ -5,7 +5,7 @@ import type { PrismaService } from '../prisma/prisma.service';
 import type { MarketplaceEnv } from '../config/env';
 import type { OrderStatus } from '../generated/prisma';
 import type { LockedOrderRow, OrderRepository, SagaStep } from './order.repository';
-import { OrderService } from './order.service';
+import { OrderService, SAGA_CLOCK_SKEW_MS } from './order.service';
 
 /**
  * The saga's internal transitions are audited (AGENTS.md S-06, global audit
@@ -37,9 +37,17 @@ function order(overrides: Partial<LockedOrderRow> = {}): LockedOrderRow {
 
 let steps = 0;
 /** A step of its own, as each separately scheduled activity has (D-053). */
-const sagaStep = (): SagaStep => ({ key: `order-ORD_1/run-1/${++steps}` });
+const sagaStep = (): SagaStep => ({
+  key: `order-ORD_1/run-1/${++steps}`,
+  scheduledAt: new Date('2026-10-15T10:00:00Z'),
+});
 
-function harness(row: LockedOrderRow, recorded: { result: unknown } | null = null) {
+function harness(
+  row: LockedOrderRow,
+  recorded: { result: unknown } | null = null,
+  /** Whether the order's history holds the step's own row (D-053, old workers). */
+  inHistory = false,
+) {
   const enqueued: Array<{
     tx: unknown;
     eventName: string;
@@ -59,6 +67,7 @@ function harness(row: LockedOrderRow, recorded: { result: unknown } | null = nul
     restoreAvailability: jest.fn(async () => undefined),
     findSagaStep: jest.fn(async () => recorded),
     recordSagaStep: jest.fn(async () => undefined),
+    hasSagaHistorySince: jest.fn(async () => inHistory),
   } as unknown as OrderRepository;
   const events = {
     enqueue: jest.fn(
@@ -294,6 +303,162 @@ describe('a retried saga step answers what its first attempt answered (D-053)', 
     await expect(
       h.asSaga(() => h.service.markFundsHeld('ORD_1', 'TXN_OTHER', sagaStep())),
     ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+  });
+
+  describe('a step applied before its record existed (old workers; Codex on #283, finding 3)', () => {
+    // Each order is in a state its step would refuse, and the only evidence
+    // is the history row the old worker wrote in the step's transaction.
+    it.each<
+      [
+        string,
+        OrderStatus,
+        OrderStatus,
+        { from: OrderStatus[]; reason: string | null },
+        (s: OrderService, step: SagaStep) => Promise<OrderStatus>,
+      ]
+    >([
+      [
+        'markFundsHeld',
+        'CONFIRMED',
+        'FUNDS_HELD',
+        { from: ['PENDING'], reason: null },
+        (s, step) => s.markFundsHeld('ORD_1', 'TXN_1', step),
+      ],
+      [
+        'markFailed',
+        'CONFIRMED',
+        'FAILED',
+        { from: ['PENDING'], reason: 'wallet empty' },
+        (s, step) => s.markFailed('ORD_1', 'wallet empty', step),
+      ],
+      [
+        'markSettling',
+        'CONFIRMED',
+        'SETTLING',
+        { from: ['RECEIPT_CONFIRMED'], reason: null },
+        (s, step) => s.markSettling('ORD_1', step),
+      ],
+      [
+        'markSettlementFailed',
+        'DISPUTED',
+        'RECEIPT_CONFIRMED',
+        { from: ['SETTLING'], reason: null },
+        (s, step) => s.markSettlementFailed('ORD_1', step),
+      ],
+      [
+        'markCompleted',
+        'DISPUTED',
+        'COMPLETED',
+        { from: ['SETTLING'], reason: null },
+        (s, step) =>
+          s.markCompleted(
+            'ORD_1',
+            { settlementId: 'STL_1', commissionAmountMinor: '0', netAmountMinor: '500000' },
+            step,
+          ),
+      ],
+      [
+        'markCancelled',
+        'DISPUTED',
+        'CANCELLED',
+        { from: ['CANCELLING'], reason: 'changed' },
+        (s, step) => s.markCancelled('ORD_1', 'changed', step),
+      ],
+    ])(
+      '%s answers from its own history row, records that answer and writes nothing else',
+      async (activity, current, to, edge, run) => {
+        const h = harness(order({ status: current }), null, true);
+        const step = sagaStep();
+
+        await expect(h.asSaga(() => run(h.service, step))).resolves.toBe(to);
+
+        expect(h.repository.hasSagaHistorySince).toHaveBeenCalledWith(
+          h.tx,
+          expect.objectContaining({ id: 'ORD_1', organizationId: BUYER }),
+          {
+            kind: 'TRANSITION',
+            from: edge.from,
+            to,
+            reason: edge.reason,
+            // The activity's first scheduling, less the clock allowance.
+            since: new Date(step.scheduledAt.getTime() - SAGA_CLOCK_SKEW_MS),
+          },
+        );
+        expect(h.repository.recordSagaStep).toHaveBeenCalledWith(
+          h.tx,
+          expect.objectContaining({ id: 'ORD_1' }),
+          step,
+          activity,
+          { status: to },
+        );
+        expect(h.tx.order.update).not.toHaveBeenCalled();
+        expect(h.repository.recordHistory).not.toHaveBeenCalled();
+        expect(h.enqueued).toEqual([]);
+      },
+    );
+
+    it('still refuses when the history holds no row of the step since it was scheduled', async () => {
+      const h = harness(order({ status: 'DISPUTED' }), null, false);
+
+      await expect(
+        h.asSaga(() => h.service.markSettlementFailed('ORD_1', sagaStep())),
+      ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+      expect(h.repository.recordSagaStep).not.toHaveBeenCalled();
+    });
+
+    it('still refuses a finished order as finished, whatever the history holds', async () => {
+      // Only a later saga step finishes an order, and none runs while the saga
+      // waits on this one.
+      const h = harness(order({ status: 'COMPLETED' }), null, true);
+
+      await expect(
+        h.asSaga(() => h.service.markSettling('ORD_1', sagaStep())),
+      ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+      expect(h.repository.hasSagaHistorySince).not.toHaveBeenCalled();
+    });
+
+    it('does not look at the history for a step the order’s state already answers', async () => {
+      const h = harness(order({ status: 'RECEIPT_CONFIRMED' }), null, true);
+
+      await expect(h.asSaga(() => h.service.markSettling('ORD_1', sagaStep()))).resolves.toBe(
+        'SETTLING',
+      );
+      expect(h.repository.hasSagaHistorySince).not.toHaveBeenCalled();
+      expect(h.enqueued).toHaveLength(1);
+    });
+
+    it('counts a reminder once when its history row predates its record', async () => {
+      const h = harness(order({ status: 'FUNDS_HELD' }), null, true);
+      const step = sagaStep();
+
+      await h.asSaga(() => h.service.recordReminder('ORD_1', step));
+
+      expect(h.repository.hasSagaHistorySince).toHaveBeenCalledWith(h.tx, expect.anything(), {
+        kind: 'REMINDER',
+        since: new Date(step.scheduledAt.getTime() - SAGA_CLOCK_SKEW_MS),
+      });
+      expect(h.tx.order.update).not.toHaveBeenCalled();
+      expect(h.repository.recordHistory).not.toHaveBeenCalled();
+      expect(h.repository.recordSagaStep).toHaveBeenCalledWith(
+        h.tx,
+        expect.anything(),
+        step,
+        'recordReminder',
+        undefined,
+      );
+    });
+  });
+
+  it('a settlement attempt yields to a dispute already resolved as a refund', async () => {
+    // The step ran late: the dispute it would have yielded to has become
+    // CANCELLING. The saga reads it and compensates.
+    const h = harness(order({ status: 'CANCELLING' }));
+
+    await expect(h.asSaga(() => h.service.markSettling('ORD_1', sagaStep()))).resolves.toBe(
+      'CANCELLING',
+    );
+    expect(h.tx.order.update).not.toHaveBeenCalled();
+    expect(h.enqueued).toEqual([]);
   });
 
   it('refuses a record that holds no order status rather than guessing one', async () => {
