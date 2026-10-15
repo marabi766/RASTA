@@ -22,7 +22,8 @@ import { cleanup, id } from './helpers';
  *     fresh request gets: the endpoint's object checks run again before any
  *     stored answer leaves (the transition is not run again);
  *   - a record from before actors were bound (`actor_hash` NULL) is answered
- *     through those checks alone.
+ *     through those checks alone;
+ *   - one person is one actor whether or not their token carries `rasta_uid`.
  */
 describe('who an idempotent economic answer is replayed to (HTTP)', () => {
   let harness: ApiHarness;
@@ -33,7 +34,7 @@ describe('who an idempotent economic answer is replayed to (HTTP)', () => {
   const payer = apiTenant('REPLAY-B');
   const payee = apiTenant('REPLAY-C');
 
-  /** One person, by subject and platform user id — the record binds both. */
+  /** One person: the record binds the verified issuer and subject. */
   const platformPerson = (roles: string[]) =>
     `Bearer ${bearer({
       sub: `sub-replay-platform-${acting}`,
@@ -327,5 +328,83 @@ describe('who an idempotent economic answer is replayed to (HTTP)', () => {
     const other = await create(asPlatformAdmin()).expect(409);
     expect(other.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
     disclosesNothing(other);
+  });
+
+  /**
+   * One person is one actor across a token refresh (review of #287 r2,
+   * finding 1). The platform user id is `rasta_uid` when the token carries it
+   * and the IdP subject when it does not, so binding it made a refresh that
+   * added or dropped the claim a different actor: the retry of a committed
+   * authorisation was refused `409 IDEMPOTENCY_KEY_REUSED` instead of answered.
+   */
+  describe('one person across a token refresh', () => {
+    const person = (claims: { sub: string; rastaUserId?: string; iss?: string }) =>
+      `Bearer ${bearer({
+        ...claims,
+        organizationId: payer,
+        organizationIds: [payer],
+        roles: ['ORGANIZATION_ADMIN'],
+      })}`;
+    const SUBJECT = `sub-refresh-${payer}`;
+    const PLATFORM_ID = 'USR-APITEST-REFRESH';
+    const withoutPlatformId = () => person({ sub: SUBJECT });
+    const withPlatformId = () => person({ sub: SUBJECT, rastaUserId: PLATFORM_ID });
+    const authorise = (transactionId: string) =>
+      `/v1/transactions/${transactionId}/authorise-settlement`;
+    const actorOf = async (key: string) =>
+      (
+        await runUnscoped('the suite reads the idempotency record', () =>
+          harness.prisma.client.idempotencyKey.findFirst({
+            where: {
+              organizationId: payer,
+              endpoint: 'POST /v1/transactions/:id/authorise-settlement',
+              key,
+            },
+          }),
+        )
+      )?.actorHash;
+
+    it.each([
+      { name: 'gains rasta_uid', first: withoutPlatformId, retry: withPlatformId },
+      { name: 'loses rasta_uid', first: withPlatformId, retry: withoutPlatformId },
+    ])(
+      'the retry of a token that $name is answered with the committed authorisation',
+      async (c) => {
+        const transactionId = await transaction('held');
+        const key = id('refresh');
+
+        const first = await post(authorise(transactionId), c.first(), key).expect(200);
+        expect(first.body).toMatchObject({ id: transactionId, status: 'PENDING_SETTLEMENT' });
+        const stored = await actorOf(key);
+
+        const retry = await post(authorise(transactionId), c.retry(), key);
+        expect(retry.status).toBe(200);
+        expect(retry.body).toEqual(first.body);
+        expect(await actorOf(key)).toBe(stored);
+      },
+    );
+
+    it('another subject is another actor, even under the same platform user id', async () => {
+      const transactionId = await transaction('held');
+      const key = id('refresh-other');
+
+      await post(authorise(transactionId), withPlatformId(), key).expect(200);
+
+      const otherSubject = await post(
+        authorise(transactionId),
+        person({ sub: `${SUBJECT}-other`, rastaUserId: PLATFORM_ID }),
+        key,
+      );
+      expect(otherSubject.status).toBe(409);
+      expect(otherSubject.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+
+      const otherIssuer = await post(
+        authorise(transactionId),
+        person({ sub: SUBJECT, rastaUserId: PLATFORM_ID, iss: 'https://idp.other.test/realms/x' }),
+        key,
+      );
+      expect(otherIssuer.status).toBe(409);
+      expect(otherIssuer.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    });
   });
 });

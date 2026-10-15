@@ -78,8 +78,9 @@ export { CLAIM_WAIT_MS };
  * target and K was handed B and C's transaction, where a fresh key got
  * `NOT_FOUND`. Two rules close it:
  *
- *   - the record carries a hash of the actor who reserved it
- *     ({@link requestActor}); the same key from anyone else is `409
+ *   - the record carries a hash of the actor who reserved it — the verified
+ *     issuer and subject, or the calling service ({@link requestActor}); the
+ *     same key from anyone else is `409
  *     IDEMPOTENCY_KEY_REUSED` — the answer to the same key with another body —
  *     and never a replay;
  *   - before any stored answer is returned, the endpoint's own object checks
@@ -535,22 +536,28 @@ export type Claim =
 export type ReplayGuard<T> = (stored: T | undefined) => Promise<void>;
 
 /**
- * Who sent this request, as the record binds it: the token's stable identity
- * (issuer and subject), the platform user id, and for a service call the
- * calling service — the fields reconciliation's `boundTo` already folded into
- * its keys (Codex on #175, MED 3), now for every endpoint. The acting
- * organization and the endpoint are the record's primary key; the target is in
- * the request hash ({@link targeted}). Roles are not part of it: they are
- * what the replay guard asks about, as they are now.
+ * Who sent this request, as the record binds it: for a person the verified
+ * token's stable identity — issuer and subject — and for a service call the
+ * calling service. The acting organization and the endpoint are the record's
+ * primary key; the target is in the request hash ({@link targeted}). Roles are
+ * not part of it: they are what the replay guard asks about, as they are now.
+ *
+ * **Not the platform user id** (review of #287 r2, finding 1). `userId` is
+ * `rasta_uid` when the token carries it and the IdP subject when it does not
+ * (`AuthGuard`), so the same person's token gaining or losing that claim on a
+ * refresh made two actors of one, and their retry was refused `409
+ * IDEMPOTENCY_KEY_REUSED` instead of answered. The platform id stays what it
+ * was: the attribution an endpoint writes (`settledBy`, `postedBy`, …).
  */
 export function requestActor(): Record<string, string | null> {
   const context = getContext();
+  if (context.authType === 'SERVICE') {
+    return { authType: context.authType, callerService: context.callerService ?? null };
+  }
   return {
     authType: context.authType,
     issuer: context.issuer ?? null,
     subject: context.subject ?? null,
-    userId: context.userId ?? null,
-    callerService: context.callerService ?? null,
   };
 }
 

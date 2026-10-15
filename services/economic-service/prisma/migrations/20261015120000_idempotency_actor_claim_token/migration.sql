@@ -1,9 +1,9 @@
 -- Whose an idempotency record is, and which reservation may complete it
 -- (review of #287, findings 1 and 2; docs/23 D-054).
 --
--- `actor_hash`: SHA-256 of the actor who reserved the key (issuer, subject,
--- platform user id, calling service). The same key from another actor is
--- 409 IDEMPOTENCY_KEY_REUSED, never a replay of someone else's answer.
+-- `actor_hash`: SHA-256 of the actor who reserved the key (a person's verified
+-- issuer and subject, or the calling service). The same key from another actor
+-- is 409 IDEMPOTENCY_KEY_REUSED, never a replay of someone else's answer.
 --
 -- `claim_token`: a random token per reservation. Completing, recording a
 -- refusal and releasing all require it, so a request whose claim expired and

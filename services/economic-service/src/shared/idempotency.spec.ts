@@ -6,6 +6,7 @@ import {
   IdempotencyStore,
   TerminalRefusalError,
   hashRequestBody,
+  requestActor,
   targeted,
   type IdempotentAnswer,
 } from './idempotency';
@@ -125,6 +126,65 @@ describe('targeted — the request identity of a route that acts on one resource
   it('with no body, hashes exactly what authorise-settlement always stored', () => {
     // So keys that route recorded before this change still match after it.
     expect(hashRequestBody(targeted('TXN_A'))).toBe(hashRequestBody({ id: 'TXN_A' }));
+  });
+});
+
+/**
+ * The actor a record is bound to (review of #287 r2, finding 1): a person by
+ * the verified issuer and subject, a service by its name — never by the
+ * platform user id, which is `rasta_uid` on one token and the IdP subject on
+ * the next refresh of the same person's.
+ */
+describe('requestActor — who an idempotency record is bound to', () => {
+  const ISSUER = 'https://idp.unit.test/realms/rasta';
+
+  const actorOf = (context: Parameters<typeof createSystemContext>[0]) =>
+    runWithContext(createSystemContext(context), () => hashRequestBody(requestActor()));
+
+  const person = (overrides: Parameters<typeof createSystemContext>[0]) =>
+    actorOf({
+      authType: 'USER',
+      roles: ['ORGANIZATION_ADMIN'],
+      organizationId: 'ORG-UNIT',
+      issuer: ISSUER,
+      subject: 'sub-1',
+      ...overrides,
+    });
+
+  it('is one person whether or not the token carries rasta_uid', () => {
+    const withoutPlatformId = person({
+      correlationId: 'a',
+      userId: 'sub-1',
+      platformUserId: false,
+    });
+    const withPlatformId = person({
+      correlationId: 'b',
+      userId: 'USR-1',
+      platformUserId: true,
+    });
+    expect(withPlatformId).toBe(withoutPlatformId);
+  });
+
+  it('tells two subjects apart, even under one platform user id', () => {
+    expect(person({ correlationId: 'a', userId: 'USR-1', subject: 'sub-1' })).not.toBe(
+      person({ correlationId: 'b', userId: 'USR-1', subject: 'sub-2' }),
+    );
+  });
+
+  it('tells two issuers apart for the same subject', () => {
+    expect(person({ correlationId: 'a' })).not.toBe(
+      person({ correlationId: 'b', issuer: 'https://idp.other.test/realms/rasta' }),
+    );
+  });
+
+  it('is a service by its name alone, and never a person with the same name', () => {
+    const service = (callerService: string) =>
+      actorOf({ correlationId: callerService, organizationId: 'ORG-UNIT', callerService });
+    expect(service('marketplace-service')).toBe(service('marketplace-service'));
+    expect(service('marketplace-service')).not.toBe(service('contract-service'));
+    expect(service('marketplace-service')).not.toBe(
+      person({ correlationId: 'p', subject: 'marketplace-service' }),
+    );
   });
 });
 
