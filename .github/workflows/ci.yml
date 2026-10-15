@@ -264,6 +264,18 @@ jobs:
         # (@rasta/config assertNoMigratorCredentials; Codex review of #176).
         run: pnpm run test:boot-guard
 
+      - name: Service dev scripts load TypeScript as CommonJS, telemetry first
+        # `pnpm dev` ran the services through swc-node's ES-module loader,
+        # under which main.ts could not import AppModule from its CommonJS
+        # sibling: every service refused at link time. Runs each service's
+        # own dev loader flags on a two-file entry; services with a Prisma
+        # schema generate the client first. And swc hoists main.ts's imports
+        # above its initTelemetry(), so dev preloads dev/telemetry.ts: the
+        # real main.ts, stopped as AppModule is about to load, must find the
+        # SDK started (Codex on #281). After Build: main.ts loads the built
+        # packages and the generated Prisma client.
+        run: pnpm run test:dev-loader
+
   # ---------------------------------------------------------------------------
   # Security. Every gate here fails the build rather than warning: a warning
   # nobody is forced to read is not a control.

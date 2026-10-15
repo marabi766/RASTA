@@ -81,6 +81,7 @@
     "test:outbox-purge-turbo-env": "node --test scripts/outbox-purge-turbo-env.test.mjs",
     "test:construction-turbo-env": "node --test scripts/construction-turbo-env.test.mjs",
     "test:boot-guard": "node --test scripts/service-boot-guard.test.mjs",
+    "test:dev-loader": "node --test scripts/service-dev-loader.test.mjs",
     "check:db-runtime-privileges": "node --env-file-if-exists=.env scripts/check-db-runtime-privileges.mjs",
     "ci:image-matrix": "node scripts/ci-image-matrix.mjs",
     "progress:validate": "node scripts/progress.mjs validate",
