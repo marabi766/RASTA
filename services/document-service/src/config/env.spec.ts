@@ -1,4 +1,5 @@
 import { clamdAddress, loadDocumentEnv } from './env';
+import { documentOperationBudgets } from './operation-budgets';
 
 /**
  * The scanner configuration, and the two things it refuses.
@@ -167,5 +168,41 @@ describe('what the schema still does not have', () => {
       /ALLOW_UNSCANNED|SKIP_SCAN|BYPASS|UNSAFE_DOWNLOAD/i.test(key),
     );
     expect(bypasses).toEqual([]);
+  });
+});
+
+describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)', () => {
+  const at = (statementTimeoutMs: string) => () =>
+    load({ ...SOCKET, DATABASE_STATEMENT_TIMEOUT_MS: statementTimeoutMs });
+
+  it('unset, applies no statement timeout', () => {
+    const env = load(SOCKET);
+    expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+    expect(env.DATABASE_URL).not.toContain('statement_timeout');
+  });
+
+  it('declares every budget, at the defaults', () => {
+    expect(documentOperationBudgets(load(SOCKET)).map((b) => [b.name, b.budgetMs])).toEqual([
+      ['PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS', 5000],
+      ['OUTBOX_CLAIM_LEASE_SECONDS', 12_500],
+      ['OUTBOX_PURGE_STATEMENT_TIMEOUT_MS', 10_000],
+    ]);
+  });
+
+  it('set, must be above the largest: the outbox renewal; the bound is exact', () => {
+    expect(at('12500')).toThrow(
+      /DATABASE_STATEMENT_TIMEOUT_MS: \(12500 ms\) is not above OUTBOX_CLAIM_LEASE_SECONDS, 12500 ms/,
+    );
+    expect(at('12501')).not.toThrow();
+  });
+
+  it('a longer purge statement timeout raises the floor with it', () => {
+    const slow = { OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '15000' };
+    expect(() => load({ ...SOCKET, ...slow, DATABASE_STATEMENT_TIMEOUT_MS: '20000' })).toThrow(
+      /not above OUTBOX_PURGE_STATEMENT_TIMEOUT_MS, 20000 ms/,
+    );
+    expect(() =>
+      load({ ...SOCKET, ...slow, DATABASE_STATEMENT_TIMEOUT_MS: '20001' }),
+    ).not.toThrow();
   });
 });

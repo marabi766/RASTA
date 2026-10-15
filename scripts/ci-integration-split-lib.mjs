@@ -150,6 +150,9 @@ export const STEP_INVENTORY = Object.freeze({
     'pnpm run test:db-runtime-privileges',
   ),
   'Every database session runs in UTC (L7-37)': postgresGuard('pnpm run test:db-session-utc'),
+  'The runtime pool and statement timeout come from configuration': postgresGuard(
+    'pnpm run test:db-pool-config',
+  ),
   'Retry replay, published as ops-replay': {
     run: withKafka('replay', 'pnpm run test:retry-replay'),
     env: {
@@ -195,6 +198,7 @@ const UNBUILT = [
   /\btest:independence\b/,
   /\btest:retry-replay\b/,
   /\btest:db-session-utc\b/,
+  /\btest:db-pool-config\b/,
 ];
 const TURBO_BUILDS = /\bpnpm run test:integration\b/;
 

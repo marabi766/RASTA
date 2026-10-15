@@ -7,6 +7,7 @@ import {
   loadEnv,
   outboxPurgeEnvSchema,
 } from '@rasta/config';
+import { organizationOperationBudgets } from './operation-budgets';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
 
 /**
@@ -72,15 +73,19 @@ export const organizationEnvSchema = baseEnvSchema
 export type OrganizationEnv = z.infer<typeof organizationEnvSchema>;
 
 export function loadOrganizationEnv(source: NodeJS.ProcessEnv = process.env): OrganizationEnv {
-  return loadEnv(organizationEnvSchema, {
-    ...source,
-    SERVICE_NAME: source.SERVICE_NAME ?? 'organization-service',
-    PORT: source.PORT ?? source.PORT_ORGANIZATION ?? '3102',
-    DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_ORGANIZATION,
-    KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? 'organization-service',
-    KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'organization-service.main',
-    CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
-  });
+  return loadEnv(
+    organizationEnvSchema,
+    {
+      ...source,
+      SERVICE_NAME: source.SERVICE_NAME ?? 'organization-service',
+      PORT: source.PORT ?? source.PORT_ORGANIZATION ?? '3102',
+      DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_ORGANIZATION,
+      KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? 'organization-service',
+      KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'organization-service.main',
+      CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
+    },
+    { operationBudgets: organizationOperationBudgets },
+  );
 }
 
 export function corsOrigins(env: OrganizationEnv): string[] {

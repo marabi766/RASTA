@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { withUtcSession } from './database-session';
+import { DatabaseUrlConflictError, withDatabasePool } from './database-pool';
+import { withStatementTimeout, withUtcSession } from './database-session';
 
 /**
  * Environment loading for Rasta services.
@@ -206,17 +207,82 @@ export const baseEnvSchema = z.object({
 export type BaseEnv = z.infer<typeof baseEnvSchema>;
 
 /**
+ * The largest `DATABASE_POOL_SIZE`: one replica holding half the production
+ * cluster's `max_connections` (200, docs/11 § 11.2) is already more than any
+ * service should.
+ */
+export const DATABASE_POOL_SIZE_MAX = 100;
+
+/**
+ * The longest `DATABASE_POOL_TIMEOUT_SECONDS`. A request that has waited a
+ * minute for a connection has long been given up on by its caller.
+ */
+export const DATABASE_POOL_TIMEOUT_SECONDS_MAX = 60;
+
+/** Below a second, ordinary queries under load would be cancelled. */
+export const DATABASE_STATEMENT_TIMEOUT_MS_MIN = 1000;
+
+/** An hour: past that, a runtime statement is a stuck one. */
+export const DATABASE_STATEMENT_TIMEOUT_MS_MAX = 3_600_000;
+
+/**
+ * A whole number read from an environment variable, refused unless it is
+ * written as plain digits.
+ *
+ * Stricter than `z.coerce.number()` on purpose: that reads `1e1` as 10, `0x10`
+ * as 16 and an empty value as 0. For a setting that sizes a production pool,
+ * anything but the number the operator meant fails at boot.
+ */
+function wholeNumberEnv(min: number, max: number) {
+  return z
+    .string()
+    .regex(/^[0-9]+$/, 'Expected a whole number written as digits, such as "10"')
+    .transform(Number)
+    .pipe(z.number().int().min(min).max(max));
+}
+
+/**
  * Services that own a database.
  *
  * `DATABASE_URL` comes out with `options=-c TimeZone=UTC` added
  * ({@link withUtcSession}): every client a service opens on it — the runtime
  * pool, the startup role check, a CLI — runs its sessions in UTC whatever the
  * server's or the role's default (L7-37).
+ *
+ * The pool is sized from configuration the same way: `loadEnv` writes
+ * `DATABASE_POOL_SIZE` and `DATABASE_POOL_TIMEOUT_SECONDS` into that URL as
+ * Prisma's `connection_limit` and `pool_timeout` ({@link withDatabasePool}).
+ * Both are optional, and unset means Prisma's own default (`num_physical_cpus
+ * * 2 + 1` connections, a 10-second wait) — what every service ran with before
+ * they existed. `0` is refused for the wait: to Prisma it means waiting
+ * forever, which is the unbounded queue a bounded pool exists to prevent.
+ *
+ * `DATABASE_STATEMENT_TIMEOUT_MS` goes into the same URL as the session's
+ * `statement_timeout` ({@link withStatementTimeout}), so no runtime statement —
+ * a lock wait included — holds a pooled connection longer. **Opt-in** (#268
+ * r4): unset, nothing is written and the session keeps the database's own
+ * setting, as before the variable existed. Set, it must be above every
+ * operation budget the service declares ({@link OperationBudget}), or `loadEnv`
+ * refuses it; `0` (PostgreSQL's "no limit") is refused for the same reason as
+ * the pool's. The migrators never read it (D-045).
  */
 export const databaseEnvSchema = z.object({
-  DATABASE_URL: postgresUrlSchema.transform(withUtcSession),
-  DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(10),
-  DATABASE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(0).default(15_000),
+  DATABASE_URL: postgresUrlSchema.transform((url, ctx) => {
+    try {
+      return withUtcSession(url);
+    } catch (error) {
+      // A URL whose options the driver would read otherwise (database-session.ts).
+      if (!(error instanceof DatabaseUrlConflictError)) throw error;
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: error.message });
+      return z.NEVER;
+    }
+  }),
+  DATABASE_POOL_SIZE: wholeNumberEnv(1, DATABASE_POOL_SIZE_MAX).optional(),
+  DATABASE_POOL_TIMEOUT_SECONDS: wholeNumberEnv(1, DATABASE_POOL_TIMEOUT_SECONDS_MAX).optional(),
+  DATABASE_STATEMENT_TIMEOUT_MS: wholeNumberEnv(
+    DATABASE_STATEMENT_TIMEOUT_MS_MIN,
+    DATABASE_STATEMENT_TIMEOUT_MS_MAX,
+  ).optional(),
 });
 
 /** The only SASL mechanism a broker credential is issued for (ADR-061 § 3). */
@@ -486,6 +552,87 @@ export class EnvValidationError extends Error {
 }
 
 /**
+ * Room for the database work a lock holder does around its upstream calls,
+ * where its transaction's own timeout is a fixed allowance rather than one
+ * derived from its settings: the 5 s fleet's asset-sync budget already allows.
+ */
+export const STATEMENT_WAIT_MARGIN_MS = 5_000;
+
+/**
+ * One operation a service supports on its runtime database, and how long it
+ * is allowed to take (#268 r4): a transaction's timeout, a lock or claim wait,
+ * a contention budget, a sweep's batch. A statement inside it — a lock wait
+ * included — may legitimately run that long, so a session `statement_timeout`
+ * at or below it would cancel a supported operation (`57014`): one that is
+ * merely slow would fail, and one that answers its own timeout with 409 would
+ * answer 500.
+ */
+export interface OperationBudget {
+  /** The setting it is configured by, or the constant it is fixed at. */
+  readonly name: string;
+  /** The budget at the configured values, in milliseconds. */
+  readonly budgetMs: number;
+  /** What it bounds, and how the number is made up. */
+  readonly derivation: string;
+}
+
+/** Prisma's interactive-transaction `timeout` when a call passes none (Prisma 6). */
+export const PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS = 5_000;
+
+/** The budget of every interactive transaction that sets no timeout of its own. */
+export const PRISMA_DEFAULT_TRANSACTION_BUDGET: OperationBudget = {
+  name: 'PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS',
+  budgetMs: PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
+  derivation:
+    'every interactive transaction that sets no timeout of its own, at Prisma’s default: a ' +
+    'statement in one may wait on a lock that long',
+};
+
+/** One outbox purge batch (D-052), as an operation budget: its transaction's timeout. */
+export function outboxPurgeOperationBudget(
+  env: Pick<OutboxPurgeEnv, 'OUTBOX_PURGE_STATEMENT_TIMEOUT_MS'>,
+): OperationBudget {
+  return {
+    name: 'OUTBOX_PURGE_STATEMENT_TIMEOUT_MS',
+    budgetMs: env.OUTBOX_PURGE_STATEMENT_TIMEOUT_MS + OUTBOX_PURGE_TRANSACTION_MARGIN_MS,
+    derivation:
+      'one outbox purge batch: its own statement timeout, this setting, + ' +
+      `${OUTBOX_PURGE_TRANSACTION_MARGIN_MS} ms`,
+  };
+}
+
+/**
+ * An `Idempotency-Key` claim, as an operation budget: each of its waits runs
+ * in its own transaction whose `lock_timeout` is what is left of `waitMs`, and
+ * whose timeout is that + `slackMs`. A statement timeout under the wait would
+ * end it with `57014` instead of `55P03`, and the retryable 409 would be a 500.
+ */
+export function idempotencyClaimOperationBudget(
+  name: string,
+  waitMs: number,
+  slackMs: number,
+): OperationBudget {
+  return {
+    name,
+    budgetMs: waitMs + slackMs,
+    derivation:
+      `an Idempotency-Key claim: a lock wait of up to ${waitMs} ms in a transaction of that ` +
+      `+ ${slackMs} ms`,
+  };
+}
+
+/** What a service hands `loadEnv` besides its schema. */
+export interface LoadEnvOptions<T> {
+  /**
+   * Every operation budget the service has, at the parsed values. Required
+   * for `DATABASE_STATEMENT_TIMEOUT_MS` to be accepted at all: a service that
+   * declares none is refused one rather than trusted to have none (fail
+   * closed). Not consulted while the variable is unset.
+   */
+  readonly operationBudgets?: (env: T) => readonly OperationBudget[];
+}
+
+/**
  * Validates `source` against `schema` and returns the parsed, typed result.
  * Throws {@link EnvValidationError} listing *every* problem at once — fixing
  * one missing variable per restart is a miserable way to configure 17 services.
@@ -493,6 +640,7 @@ export class EnvValidationError extends Error {
 export function loadEnv<S extends z.ZodTypeAny>(
   schema: S,
   source: NodeJS.ProcessEnv = process.env,
+  options: LoadEnvOptions<z.infer<S>> = {},
 ): z.infer<S> {
   const result = schema.safeParse(withKafkaCredentialFallback(source));
 
@@ -507,7 +655,86 @@ export function loadEnv<S extends z.ZodTypeAny>(
 
   assertKafkaPlaintextOptOut(source, result.data);
   assertOutboxShutdownWithinBudget(result.data);
-  return result.data;
+  assertStatementTimeoutAboveBudgets(result.data, options.operationBudgets);
+  return withConfiguredDatabase(result.data);
+}
+
+/**
+ * A configured `DATABASE_STATEMENT_TIMEOUT_MS` must be above every operation
+ * budget the service declares (#268 r4), so it can never cancel an operation
+ * the service supports. Equal is refused too: the two timeouts would race.
+ * Unset, there is nothing to check — no statement timeout is applied.
+ */
+function assertStatementTimeoutAboveBudgets<T>(
+  parsed: T,
+  operationBudgets: ((env: T) => readonly OperationBudget[]) | undefined,
+): void {
+  if (typeof parsed !== 'object' || parsed === null) return;
+  const { DATABASE_URL: url, DATABASE_STATEMENT_TIMEOUT_MS: timeoutMs } = parsed as {
+    DATABASE_URL?: unknown;
+    DATABASE_STATEMENT_TIMEOUT_MS?: unknown;
+  };
+  if (typeof url !== 'string' || typeof timeoutMs !== 'number') return;
+  if (!operationBudgets) {
+    throw new EnvValidationError([
+      {
+        path: 'DATABASE_STATEMENT_TIMEOUT_MS',
+        message:
+          'is set, but this service declares no operation budgets to check it against, so it ' +
+          'could cancel an operation the service supports. Leave it unset',
+      },
+    ]);
+  }
+  const budgets = operationBudgets(parsed);
+  const undercut = budgets.filter((budget) => budget.budgetMs >= timeoutMs);
+  if (undercut.length === 0) return;
+  const largest = budgets.reduce((max, budget) => Math.max(max, budget.budgetMs), 0);
+  throw new EnvValidationError(
+    undercut.map((budget) => ({
+      path: 'DATABASE_STATEMENT_TIMEOUT_MS',
+      message:
+        `(${timeoutMs} ms) is not above ${budget.name}, ${budget.budgetMs} ms ` +
+        `(${budget.derivation}), so it would cancel that operation first. Set it above ` +
+        `${largest} ms, this service's largest operation budget, or leave it unset`,
+    })),
+  );
+}
+
+/**
+ * `DATABASE_URL` with the configured pool and statement timeout written into
+ * it, for a service whose schema has `databaseEnvSchema`. Done here rather than
+ * in that schema: the URL and the settings are siblings, and a transform over
+ * the object would stop it being `.merge`d into each service's schema.
+ */
+function withConfiguredDatabase<T>(parsed: T): T {
+  if (typeof parsed !== 'object' || parsed === null) return parsed;
+  const {
+    DATABASE_URL: url,
+    DATABASE_POOL_SIZE: size,
+    DATABASE_POOL_TIMEOUT_SECONDS: timeoutSeconds,
+    DATABASE_STATEMENT_TIMEOUT_MS: statementTimeoutMs,
+  } = parsed as {
+    DATABASE_URL?: unknown;
+    DATABASE_POOL_SIZE?: unknown;
+    DATABASE_POOL_TIMEOUT_SECONDS?: unknown;
+    DATABASE_STATEMENT_TIMEOUT_MS?: unknown;
+  };
+  if (typeof url !== 'string') return parsed;
+  const pool = {
+    size: typeof size === 'number' ? size : undefined,
+    timeoutSeconds: typeof timeoutSeconds === 'number' ? timeoutSeconds : undefined,
+  };
+  try {
+    const timed = withStatementTimeout(
+      url,
+      typeof statementTimeoutMs === 'number' ? statementTimeoutMs : undefined,
+    );
+    const configured = withDatabasePool(timed, pool);
+    return configured === url ? parsed : { ...parsed, DATABASE_URL: configured };
+  } catch (error) {
+    if (!(error instanceof DatabaseUrlConflictError)) throw error;
+    throw new EnvValidationError([{ path: error.variable, message: error.message }]);
+  }
 }
 
 /**
