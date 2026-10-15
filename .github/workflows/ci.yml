@@ -255,6 +255,12 @@ jobs:
         # (@rasta/config assertNoMigratorCredentials; Codex review of #176).
         run: pnpm run test:boot-guard
 
+      - name: Services trace Kafka from the built entry point
+        # Each built dist/main.js, loaded up to its app.module, must have
+        # kafkajs wrapped by the OpenTelemetry instrumentation: an import that
+        # loads kafkajs before initTelemetry() leaves it untraced (audit-service).
+        run: pnpm run test:telemetry-order
+
   # ---------------------------------------------------------------------------
   # Security. Every gate here fails the build rather than warning: a warning
   # nobody is forced to read is not a control.

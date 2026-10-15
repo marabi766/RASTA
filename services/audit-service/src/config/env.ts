@@ -1,5 +1,7 @@
 import { z } from 'zod';
-import { DOMAIN_PROJECTOR_CONSUMER } from '../audit/audit.mapper';
+// main.ts loads this before initTelemetry(): nothing imported here may reach
+// @rasta/nest-common or kafkajs (../audit/domain-projector-consumer.ts).
+import { DOMAIN_PROJECTOR_CONSUMER } from '../audit/domain-projector-consumer';
 import {
   AUDIT_SOURCE_SERVICES,
   isAuditSourceService,
