@@ -1474,16 +1474,31 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
     تغییری نمی‌کنند.
   - **identity (#280، تصمیم مدیر پروژه — گزینهٔ a):** identity هم Purge می‌شود، فقط `outbox_message`؛
     `security_event_outbox` جدولی جداست و Purge نمی‌شود، و `audit_correction_command` هم نه. `audit-gap-detected.md`
-    گام ۵ («اصلاح identity») نبودِ ردیف Outbox را دیگر یکسره «توضیح‌نداده» نمی‌داند: اگر `created_at` فرمان از Retention به‌اضافهٔ
-    Interval Purge قدیمی‌تر است، ردیف پس از انتشار Purge شده و بررسی از سمت `audit-service` با همان `event_id` ادامه
-    می‌یابد؛ جوان‌تر از آن همچنان تشدید می‌شود. چرا: همان قاعده‌ای که فاز ۱ برای مسیر A گذاشت؛ `audit-service` فقط
-    افزودنی است، پس شاهد بیش از ردیف Outbox می‌ماند؛ و جدول کران‌دار پیش‌نیاز Production است.
+    گام ۵ («اصلاح identity») نبودِ ردیف Outbox را **با شاهد** می‌سنجد، هرگز با سن: `event_id` در `audit-service`
+    جست‌وجو می‌شود، با نقش فقط‌خواندنی و در دامنهٔ مستأجر مورد بررسی. **پیدا شد** ⇐ رویداد منتشر و مصرف شده، و نبودِ ردیف
+    با Purge (یا هر حذفی پس از انتشار) توضیح داده می‌شود؛ شکاف نیست. **پیدا نشد** ⇐ توضیح‌نداده و تشدید، هر سنی که فرمان
+    داشته باشد. سن و Retention فقط زمینه‌اند («احتمالاً Purge شده، انتشار تأییدنشده»). ردیف `audit_event` با سه ستون به فرمان
+    بسته می‌شود: `source_event_id` = `event_id` فرمان (روی `rasta.audit.trail.v1` و از `identity-service`)،
+    `correction_of` = `target_id` فرمان، و `organization_id` = مستأجر مورد بررسی. این آخری مستأجر رکورد هدف است که identity
+    از جست‌وجوی مورداعتماد `audit-service` در رویداد می‌گذارد؛ برای رکورد پلتفرمی تهی است و فقط با دامنهٔ صریح پلتفرم پیدا
+    می‌شود. `audit_correction_command` خودش ستون مستأجر ندارد.
+    **قاعدهٔ سنیِ نسخهٔ اول این PR کنار گذاشته شد** (Codex r1 روی #280، F1 و F3). آن قاعده می‌گفت فرمانی قدیمی‌تر از
+    Retention به‌اضافهٔ Interval Purge یعنی «ردیف پس از انتشار Purge شده». ولی سن فقط **واجد** Purge بودن را ثابت می‌کند، نه
+    انتشار و نه حذف. ردیفی که پیش از انتشار گم شده، Purgeی که اجرا نشده یا کوتاه شده، Retentionی که از آن پس عوض شده، و
+    جابه‌جایی ساعت پایگاه داده، همه همان سن را نشان می‌دهند. جست‌وجوی `audit_event` آن نسخه هم مستأجر را نه محدود می‌کرد نه
+    می‌سنجید. مسیر A همان گام هم به همین قاعده درآمد، چون قاعدهٔ سنی فاز ۱ را داشت و identity را هم در بر می‌گرفت.
+    Purge با این قاعده هنوز امن است: `audit-service` فقط افزودنی است، پس شاهد بیش از ردیف Outbox می‌ماند؛ و جدول کران‌دار
+    پیش‌نیاز Production است.
     کارگرها: رلهٔ رد (`security_event_outbox`)، `MembershipExpiryScanner` (هر Lapse ردیف Outbox می‌نویسد؛ حالا مانند جاروی
     asset توقف با مهلت دارد) و `KeycloakProjectionConsumer` (`stop({ deadlineAt })` ـِ #270؛ `onModuleDestroy` بی‌کرانش
-    حذف شد) `workers`ِ `OutboxShutdown`اند، و `AppModule.onApplicationShutdown` فقط به همان توقف می‌پیوندد. آزمون:
-    `test/outbox-purge.int-spec.ts` (مال fleet، به‌اضافهٔ دو جدول دست‌نخورده و پرسش گام ۵ روی ردیف Purge‌شده)،
-    `test/outbox-shutdown.int-spec.ts` (Publish، Claim رد، Batch Purge، Lapse و Projection بی‌پایان ⇐ خروج ۰ زیر مهلت،
-    پیام Commit‌نشده) و `src/app.module.shutdown.spec.ts`.
+    حذف شد) `workers`ِ `OutboxShutdown`اند، و `AppModule.onApplicationShutdown` فقط به همان توقف می‌پیوندد. **مانده:** Claimی
+    از رلهٔ رد که پس از بازگشت `stop()` برسد هنوز Publish و Ack را شروع می‌کند (Codex r1 روی #280، F2). این نقص مشترک
+    `OutboxRelay` در nest-common است، نه مال identity، و با `disconnect()` بی‌کران Publisher به فاز ۴ خاموشی میان‌سرویسی
+    منتقل شد. آزمون: `test/outbox-purge.int-spec.ts` (مال fleet، به‌اضافهٔ دو جدول دست‌نخورده و بلوک identity گام ۵ با `psql`،
+    که برای ردیف Purge‌شده، ردیف گم‌شده پیش از انتشار و ردیف گمشدهٔ فرمان جوان همان پاسخ را می‌دهد)، بلوک `audit-service` گام ۵
+    در `services/audit-service/test/correction-linkage.int-spec.ts` (پیدا شد برای اصلاح ثبت‌شده، قدیمی یا جوان؛ پیدا نشد برای
+    اصلاح ثبت‌نشده، مستأجر دیگر، رکورد هدف دیگر و Producer دیگر)، `test/outbox-shutdown.int-spec.ts` (Publish، Claim رد، Batch
+    Purge، Lapse و Projection بی‌پایان ⇐ خروج ۰ زیر مهلت، پیام Commit‌نشده) و `src/app.module.shutdown.spec.ts`.
   - **پیامد:** رله حالا پیش از بسته شدن سرور HTTP می‌ایستد، نه پس از آن. ردیفی که درخواستی در همین فاصله بنویسد در
     شروع بعدی (یا Replica دیگر) منتشر می‌شود — همان چیزی که پیش‌تر برای ردیف‌های لحظهٔ آخر هم بود.
 
