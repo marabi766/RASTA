@@ -959,6 +959,26 @@ Broker و — فقط جایی که Suiteهایش می‌خوانند — MinIO،
 test:ci-integration-split` (در Job کیفیت) رد می‌کند اگر Job ‏`integration-*`ی بیرون از آن بماند، گامی از کار قدیم در هیچ
 Jobی یا در دو Job اجرا شود، یا گامی بدون زیرساختی که می‌خواند اجرا شود.
 
+**Pull ایمیج در CI و خطای گذرای Registry (از 2026-10-15).** `docker run` در گام «Start Keycloak with the platform realm»
+با کد ۱۲۵ شکست خورد چون quay.io برای Manifest پاسخ `502 Bad Gateway` داد (#279)؛ گام Retry نداشت. اکنون پیش از گام‌هایی
+که کانتینر بالا می‌آورند، یک گام «Pre-pull …» ‏`scripts/ci-pull-image.sh <image@sha256:…> …` را اجرا می‌کند و گام اصلی
+بی‌تغییر می‌ماند (Pull آن دیگر محلی است). قواعد: حداکثر ۴ تلاش با فاصلهٔ ۱۰/۳۰/۶۰ ثانیه (`CI_PULL_BACKOFF`)؛ فقط خطای
+**گذرا** تکرار می‌شود (۵xx، `TLS handshake timeout`، `i/o timeout`، `connection reset`، `EOF`، `toomanyrequests`)؛
+`404`، `manifest unknown`، `unauthorized/denied`، ناهمخوانی Digest و هر متن خطای ناشناخته **فوراً** شکست می‌خورد و خروجی
+خود docker چاپ می‌شود؛ مرجع بی‌Digest رد می‌شود (کد ۲) و هیچ Pin یا اسکنی سست نشده است. مرجع‌های `semgrep`، `keycloak`،
+`temporalio/admin-tools`، `prometheus`، `clamav` و `MINIO_IMAGE`/`MC_IMAGE` در Jobهای `security`، `web-browser`،
+`prometheus-rules`، `integration-{suites,security,coverage}`، `e2e` و `clamav-signatures` پوشش دارند. `pnpm
+test:ci-pull-image` (در Job کیفیت) با docker ساختگی (۵۰۲، Timeout، reset، ۴۰۴، `manifest unknown`، unauthorized، Digest،
+خطای ناشناخته) رفتار را می‌سنجد و رد می‌کند اگر گامی ایمیجی با Digest را اجرا کند که گام Pre-pull پیش از آن در همان Job
+ندارد.
+
+بیرون از این پوشش (عمداً): ‏**`services:`** ‏(`postgis`، `redis`) را خودِ Runner پیش از گام‌های Job و پیش از checkout
+Pull می‌کند؛ اسکریپتی نمی‌تواند آن را تکرار کند و شکست Pull در «Initialize containers» کل Job را از «Set up job» می‌اندازد
+(Re-run دستی). انتقال آن‌ها به گام فقط وقتی کم‌خطر است که `--health-*`، شبکه و ترتیب شروع حفظ شود؛ در این PR دست نخورد.
+Pull پایه‌ایمیج‌های `FROM` در `docker/build-push-action` (Job ‏`containers`، فقط روی main/PR با تغییر سرویس)، دانلود Trivy DB
+در `trivy-action`، و دانلود Temporal test server (کش‌شده) هنوز Retry ندارند؛ `freshclam` در `clamav-signatures` عمداً
+Retry نمی‌شود چون خودش همان چیزی است که اثبات می‌کند.
+
 ```bash
 cp .env.example .env            # یک بار؛ پس از هر تغییر .env.example دوباره مقایسه کن
 cp .env.migrator.example .env.migrator   # اعتبار مالک پایگاه داده (D-045)؛ هیچ سرویسی آن را بار نمی‌کند
