@@ -8,6 +8,7 @@ import {
   kafkaEnvSchema,
   loadEnv,
 } from '@rasta/config';
+import { economicOperationBudgets } from './operation-budgets';
 
 /**
  * economic-service configuration.
@@ -281,15 +282,19 @@ export const economicEnvSchema = baseEnvSchema
 export type EconomicEnv = z.infer<typeof economicEnvSchema>;
 
 export function loadEconomicEnv(source: NodeJS.ProcessEnv = process.env): EconomicEnv {
-  const env = loadEnv(economicEnvSchema, {
-    ...source,
-    SERVICE_NAME: source.SERVICE_NAME ?? 'economic-service',
-    PORT: source.PORT ?? source.PORT_ECONOMIC ?? '3112',
-    DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_ECONOMIC,
-    KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? 'economic-service',
-    KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'economic-service.main',
-    CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
-  });
+  const env = loadEnv(
+    economicEnvSchema,
+    {
+      ...source,
+      SERVICE_NAME: source.SERVICE_NAME ?? 'economic-service',
+      PORT: source.PORT ?? source.PORT_ECONOMIC ?? '3112',
+      DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_ECONOMIC,
+      KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? 'economic-service',
+      KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'economic-service.main',
+      CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
+    },
+    { operationBudgets: economicOperationBudgets },
+  );
   assertFourEyesOptOut(source, env);
   return env;
 }

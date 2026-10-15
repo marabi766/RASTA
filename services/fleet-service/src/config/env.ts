@@ -14,6 +14,7 @@ import {
   DEFAULT_MAX_RETRIES,
 } from '@rasta/nest-common';
 import { INSURANCE_COVERAGES, type DispatchPolicy } from '../fleet/dispatch-blocks';
+import { fleetOperationBudgets } from './operation-budgets';
 
 /**
  * fleet-service configuration.
@@ -319,15 +320,19 @@ export function assetSyncBudgetProblem(env: AssetSyncTimeouts): string | undefin
 }
 
 export function loadFleetEnv(source: NodeJS.ProcessEnv = process.env): FleetEnv {
-  const env = loadEnv(fleetEnvSchema, {
-    ...source,
-    SERVICE_NAME: source.SERVICE_NAME ?? 'fleet-service',
-    PORT: source.PORT ?? source.PORT_FLEET ?? '3104',
-    DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_FLEET,
-    KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? 'fleet-service',
-    KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'fleet-service.main',
-    CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
-  });
+  const env = loadEnv(
+    fleetEnvSchema,
+    {
+      ...source,
+      SERVICE_NAME: source.SERVICE_NAME ?? 'fleet-service',
+      PORT: source.PORT ?? source.PORT_FLEET ?? '3104',
+      DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_FLEET,
+      KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? 'fleet-service',
+      KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'fleet-service.main',
+      CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
+    },
+    { operationBudgets: fleetOperationBudgets },
+  );
   // Fail closed at startup: an invalid combination would fail every replay of
   // a state event at run time instead (#240 r9, r10).
   const problem = assetSyncBudgetProblem(env);

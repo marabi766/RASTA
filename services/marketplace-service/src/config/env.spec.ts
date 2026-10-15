@@ -1,5 +1,6 @@
 import { EnvValidationError } from '@rasta/config';
 import { loadMarketplaceEnv } from './env';
+import { marketplaceOperationBudgets } from './operation-budgets';
 
 /**
  * `MARKETPLACE_TEMPORAL_ENABLED` — whether the order-saga worker starts with
@@ -94,5 +95,42 @@ describe('MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS', () => {
         MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS: '3599',
       }).MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS,
     ).toBe(3599);
+  });
+});
+
+/**
+ * #268 r4: DATABASE_STATEMENT_TIMEOUT_MS is opt-in, and when set it must be
+ * above every operation budget — so an idempotency claim's lock wait always
+ * ends as its retryable 409, never as a 500 from a statement timeout.
+ */
+describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets', () => {
+  const at = (statementTimeoutMs: string) => () =>
+    loadMarketplaceEnv({ ...BASE, DATABASE_STATEMENT_TIMEOUT_MS: statementTimeoutMs });
+
+  it('unset, applies no statement timeout', () => {
+    const env = loadMarketplaceEnv(BASE);
+    expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+    expect(env.DATABASE_URL).not.toContain('statement_timeout');
+  });
+
+  it('declares every budget, at the defaults', () => {
+    expect(
+      marketplaceOperationBudgets(loadMarketplaceEnv(BASE)).map((b) => [b.name, b.budgetMs]),
+    ).toEqual([
+      ['PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS', 5000],
+      ['CLAIM_WAIT_MS', 7000],
+      ['OUTBOX_CLAIM_LEASE_SECONDS', 12_500],
+    ]);
+  });
+
+  it('refuses one under the claim wait, which would turn its 409 into a 500', () => {
+    expect(at('5000')).toThrow(/not above CLAIM_WAIT_MS, 7000 ms/);
+  });
+
+  it('set, must be above the largest: the outbox renewal; the bound is exact', () => {
+    expect(at('12500')).toThrow(
+      /DATABASE_STATEMENT_TIMEOUT_MS: \(12500 ms\) is not above OUTBOX_CLAIM_LEASE_SECONDS, 12500 ms/,
+    );
+    expect(at('12501')).not.toThrow();
   });
 });

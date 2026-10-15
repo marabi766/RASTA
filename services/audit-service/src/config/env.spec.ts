@@ -5,6 +5,7 @@ import {
   DEFAULT_MAX_VERIFICATION_RECORDS,
 } from '../audit/audit.query.dto';
 import { withUtcSession } from '@rasta/config';
+import { auditOperationBudgets } from './operation-budgets';
 
 const RUNTIME_URL = 'postgresql://rasta_audit:pw@localhost:5433/rasta_audit?schema=audit';
 const MIGRATOR_URL = 'postgresql://rasta_audit_migrator:pw@localhost:5433/rasta_audit?schema=audit';
@@ -304,5 +305,29 @@ describe('audit-service configuration', () => {
       expect(text).not.toContain('SENTINEL');
       expect(text).not.toContain('zzzz');
     });
+  });
+});
+
+describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)', () => {
+  it('unset, applies no statement timeout', () => {
+    const env = loadAuditEnv(base());
+    expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+    expect(env.DATABASE_URL).toBe(withUtcSession(RUNTIME_URL));
+  });
+
+  it('declares every budget', () => {
+    expect(auditOperationBudgets(loadAuditEnv(base())).map((b) => [b.name, b.budgetMs])).toEqual([
+      ['PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS', 5000],
+      ['INGEST_TRANSACTION_TIMEOUT_MS', 30_000],
+    ]);
+  });
+
+  it('set, must be above the largest: a chain ingest, 30 s; the bound is exact', () => {
+    expect(() => loadAuditEnv(base({ DATABASE_STATEMENT_TIMEOUT_MS: '30000' }))).toThrow(
+      /DATABASE_STATEMENT_TIMEOUT_MS: \(30000 ms\) is not above INGEST_TRANSACTION_TIMEOUT_MS, 30000 ms/,
+    );
+    expect(loadAuditEnv(base({ DATABASE_STATEMENT_TIMEOUT_MS: '30001' })).DATABASE_URL).toContain(
+      'statement_timeout%3D30001',
+    );
   });
 });

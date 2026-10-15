@@ -1,5 +1,12 @@
 import { EnvValidationError } from '@rasta/config';
 import { loadIdentityEnv, provisioningScopePolicy, roleGrantPolicy } from './env';
+import {
+  APPROVAL_TRANSACTION_TIMEOUT_MS,
+  PROJECTION_TRANSACTION_TIMEOUT_MS,
+  identityOperationBudgets,
+} from './operation-budgets';
+import { APPROVAL_TRANSACTION_OPTIONS } from '../identity/identity.service';
+import { PROJECTION_TRANSACTION_OPTIONS } from '../keycloak/keycloak.projector';
 
 /**
  * `KEYCLOAK_SYNC_ENABLED` — whether account provisioning reaches the identity
@@ -220,5 +227,50 @@ describe('cross-organization provisioning (docs/24 Q-61)', () => {
     expect(() =>
       loadIdentityEnv({ ...BASE, USER_PROVISIONING_CROSS_ORG_ROLES: 'UNIONADMIN' }),
     ).toThrow(EnvValidationError);
+  });
+});
+
+/**
+ * #268 r4: DATABASE_STATEMENT_TIMEOUT_MS is opt-in, and when set it must be
+ * above every operation budget — the Keycloak projection and the registration
+ * approval, 65 s, are the longest.
+ */
+describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets', () => {
+  const at = (statementTimeoutMs: string) => () =>
+    loadIdentityEnv({ ...BASE, DATABASE_STATEMENT_TIMEOUT_MS: statementTimeoutMs });
+
+  it('unset, applies no statement timeout', () => {
+    const env = loadIdentityEnv(BASE);
+    expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+    expect(env.DATABASE_URL).not.toContain('statement_timeout');
+  });
+
+  it('declares every budget, at the defaults', () => {
+    expect(
+      identityOperationBudgets(loadIdentityEnv(BASE)).map((b) => [b.name, b.budgetMs]),
+    ).toEqual([
+      ['PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS', 5000],
+      ['PROJECTION_TRANSACTION_TIMEOUT_MS', 65_000],
+      ['APPROVAL_TRANSACTION_TIMEOUT_MS', 65_000],
+      ['SECURITY_EVENT_CAPTURE_TIMEOUT_MS', 250],
+      ['OUTBOX_CLAIM_LEASE_SECONDS', 12_500],
+    ]);
+  });
+
+  it('the Keycloak transactions keep their own SET LOCAL at exactly their budgets', () => {
+    expect(PROJECTION_TRANSACTION_OPTIONS).toMatchObject({
+      timeout: PROJECTION_TRANSACTION_TIMEOUT_MS,
+      statementTimeoutMs: PROJECTION_TRANSACTION_TIMEOUT_MS,
+    });
+    expect(APPROVAL_TRANSACTION_OPTIONS).toMatchObject({
+      timeout: APPROVAL_TRANSACTION_TIMEOUT_MS,
+      statementTimeoutMs: APPROVAL_TRANSACTION_TIMEOUT_MS,
+    });
+  });
+
+  it('set, must be above the largest: the Keycloak transactions, 65 s; the bound is exact', () => {
+    expect(at('65000')).toThrow(/not above PROJECTION_TRANSACTION_TIMEOUT_MS, 65000 ms/);
+    expect(at('65000')).toThrow(/not above APPROVAL_TRANSACTION_TIMEOUT_MS, 65000 ms/);
+    expect(at('65001')).not.toThrow();
   });
 });
