@@ -6,23 +6,14 @@ import { isUniqueViolation } from './maintenance.repository';
 import { idempotentReplaysTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type MaintenanceEnv } from '../config/env';
+import { IN_FLIGHT_WAIT_MS, WAIT_TRANSACTION_SLACK_MS } from '../config/operation-budgets';
+
+export { IN_FLIGHT_WAIT_MS };
 
 /** `Retry-After` on the in-flight 409, as docs/06 § 6.8 states it. */
 const IN_FLIGHT_RETRY_AFTER_SECONDS = 1;
 
-/**
- * How long a request waits on a key another request is still working on,
- * before it answers `409 CONFLICT` with `Retry-After`. A create takes a
- * fraction of a second, so a double submit — the portal's button pressed
- * twice, a proxy retrying — is normally answered with the first request's own
- * 201 (#157). A create slower than this leaves its duplicate the 409, which
- * the portal shows as in progress and offers again after the wait (round 1 on
- * #171), never as an invalid form.
- */
-export const IN_FLIGHT_WAIT_MS = 5_000;
 const IN_FLIGHT_POLL_MS = 100;
-/** Slack for a claim-side transaction beyond its lock wait, so the wait ends first. */
-const WAIT_TRANSACTION_SLACK_MS = 2_000;
 
 /**
  * How many times one claim tries to reserve a key it keeps finding vanished or

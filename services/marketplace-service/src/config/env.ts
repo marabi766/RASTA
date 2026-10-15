@@ -7,6 +7,7 @@ import {
   kafkaEnvSchema,
   loadEnv,
 } from '@rasta/config';
+import { marketplaceOperationBudgets } from './operation-budgets';
 
 /**
  * marketplace-service configuration.
@@ -125,15 +126,19 @@ export const marketplaceEnvSchema = baseEnvSchema
 export type MarketplaceEnv = z.infer<typeof marketplaceEnvSchema>;
 
 export function loadMarketplaceEnv(source: NodeJS.ProcessEnv = process.env): MarketplaceEnv {
-  return loadEnv(marketplaceEnvSchema, {
-    ...source,
-    SERVICE_NAME: source.SERVICE_NAME ?? 'marketplace-service',
-    PORT: source.PORT ?? source.PORT_MARKETPLACE ?? '3106',
-    DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_MARKETPLACE,
-    KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? 'marketplace-service',
-    KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'marketplace-service.main',
-    CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
-  });
+  return loadEnv(
+    marketplaceEnvSchema,
+    {
+      ...source,
+      SERVICE_NAME: source.SERVICE_NAME ?? 'marketplace-service',
+      PORT: source.PORT ?? source.PORT_MARKETPLACE ?? '3106',
+      DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_MARKETPLACE,
+      KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? 'marketplace-service',
+      KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'marketplace-service.main',
+      CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
+    },
+    { operationBudgets: marketplaceOperationBudgets },
+  );
 }
 
 export function corsOrigins(env: MarketplaceEnv): string[] {

@@ -8,6 +8,7 @@ import {
   outboxPurgeEnvSchema,
 } from '@rasta/config';
 import { INSURANCE_COVERAGES } from '../insurance/ownership';
+import { assetOperationBudgets } from './operation-budgets';
 
 /**
  * asset-service configuration.
@@ -140,15 +141,19 @@ export const assetEnvSchema = baseEnvSchema
 export type AssetEnv = z.infer<typeof assetEnvSchema>;
 
 export function loadAssetEnv(source: NodeJS.ProcessEnv = process.env): AssetEnv {
-  return loadEnv(assetEnvSchema, {
-    ...source,
-    SERVICE_NAME: source.SERVICE_NAME ?? 'asset-service',
-    PORT: source.PORT ?? source.PORT_ASSET ?? '3103',
-    DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_ASSET,
-    KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? 'asset-service',
-    KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'asset-service.main',
-    CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
-  });
+  return loadEnv(
+    assetEnvSchema,
+    {
+      ...source,
+      SERVICE_NAME: source.SERVICE_NAME ?? 'asset-service',
+      PORT: source.PORT ?? source.PORT_ASSET ?? '3103',
+      DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_ASSET,
+      KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? 'asset-service',
+      KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'asset-service.main',
+      CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
+    },
+    { operationBudgets: assetOperationBudgets },
+  );
 }
 
 export function corsOrigins(env: AssetEnv): string[] {

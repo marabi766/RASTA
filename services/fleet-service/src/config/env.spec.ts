@@ -7,6 +7,7 @@ import {
   loadFleetEnv,
   parkingFromEnv,
 } from './env';
+import { fleetOperationBudgets } from './operation-budgets';
 
 /** #240 r9: no asset-sync transaction may expire while it holds, or waits on, a lock across upstream calls. */
 describe('FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS', () => {
@@ -86,6 +87,53 @@ describe('FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS', () => {
     expect(at(3 * 3_124 + 5_001, 3_124)).toBeUndefined();
     expect(at(3 * 3_125 + 5_001, 3_125)).toMatch(/consumer session timeout/);
     expect(at(3 * 3_125 + 5_000, 3_125)).toMatch(/must exceed/);
+  });
+
+  describe('#268 r4: DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets', () => {
+    const at =
+      (statementTimeoutMs: number, overrides: NodeJS.ProcessEnv = {}) =>
+      () =>
+        loadFleetEnv({
+          ...MINIMAL,
+          ...overrides,
+          DATABASE_STATEMENT_TIMEOUT_MS: String(statementTimeoutMs),
+        });
+
+    it('unset, applies no statement timeout', () => {
+      const env = loadFleetEnv(MINIMAL);
+      expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+      expect(env.DATABASE_URL).not.toContain('statement_timeout');
+    });
+
+    it('declares every budget, at the defaults', () => {
+      expect(fleetOperationBudgets(loadFleetEnv(MINIMAL)).map((b) => [b.name, b.budgetMs])).toEqual(
+        [
+          ['PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS', 5000],
+          ['IN_FLIGHT_WAIT_MS', 7000],
+          ['FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS', 14_200],
+          ['OUTBOX_CLAIM_LEASE_SECONDS', 12_500],
+          ['OUTBOX_PURGE_STATEMENT_TIMEOUT_MS', 10_000],
+        ],
+      );
+    });
+
+    it('set, must be above the largest: the asset-sync transaction timeout; the bound is exact', () => {
+      // Others wait on the refresh's lock for as long as its transaction may run.
+      expect(at(14_200)).toThrow(
+        /DATABASE_STATEMENT_TIMEOUT_MS: \(14200 ms\) is not above FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS, 14200 ms/,
+      );
+      expect(at(14_201)).not.toThrow();
+    });
+
+    it('a shorter asset-sync timeout lowers the floor to the next budget, the outbox renewal', () => {
+      // Still above 3 × the upstream timeout + 5 s, as the budget above asks.
+      const short = {
+        FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: '11999',
+        ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: '2000',
+      };
+      expect(at(12_500, short)).toThrow(/not above OUTBOX_CLAIM_LEASE_SECONDS, 12500 ms/);
+      expect(at(12_501, short)).not.toThrow();
+    });
   });
 
   it('refuses a transaction timeout longer than the session timeout, and a start wait out of range, in the schema', () => {

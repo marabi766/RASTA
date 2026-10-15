@@ -13,10 +13,7 @@ import { ENV } from '../tokens';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { Prisma } from '../generated/prisma';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
-
-/** One page's snapshot waits this long for a connection, and lives this long. */
-const AUDIT_TX_MAX_WAIT_MS = 30_000;
-const AUDIT_TX_TIMEOUT_MS = 120_000;
+import { AUDIT_TX_MAX_WAIT_MS, AUDIT_TX_TIMEOUT_MS } from '../config/operation-budgets';
 
 /**
  * The wallet/ledger reconciliation (docs/10 § 10.3).

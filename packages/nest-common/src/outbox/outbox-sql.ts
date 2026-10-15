@@ -1,7 +1,7 @@
 import { OUTBOX_PURGE_TRANSACTION_MARGIN_MS } from '@rasta/config';
 import { toStreamSeq } from '@rasta/contracts';
 
-import { orderForPublish, type OutboxRow } from './outbox';
+import { RENEWAL_TRANSACTION_MARGIN_MS, orderForPublish, type OutboxRow } from './outbox';
 
 /**
  * The SQL behind every service's outbox store.
@@ -568,7 +568,7 @@ export async function renewSql(
     // The transaction has to outlive the statement it wraps, or Prisma aborts
     // the renewal before `statement_timeout` ever fires and the bound that
     // actually applied would be the wrong one.
-  }, timeoutMs + 5_000);
+  }, timeoutMs + RENEWAL_TRANSACTION_MARGIN_MS);
 }
 
 export async function oldestPendingAgeSecondsSql(client: OutboxSqlClient): Promise<number> {

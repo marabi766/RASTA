@@ -88,8 +88,20 @@ export function withMigrationStatementTimeout(url, value) {
 /**
  * The `options` parameter of `url`, decoded, and a function that rebuilds
  * `url` with it replaced — everything else byte for byte.
+ *
+ * Refuses, as the services' copy does and before any option is read, a URL
+ * with a raw control character (U+0000–U+001F, U+007F: a URL parser drops a
+ * tab, CR or LF and reads another name) or with more than one `options`
+ * parameter (the driver keeps only the last). The message never contains the
+ * URL.
  */
 function splitOptions(url) {
+  if ([...url].some((char) => char <= '\u001f' || char === '\u007f')) {
+    throw new Error(
+      'DATABASE_URL contains a raw control character (U+0000–U+001F or U+007F), which a URL ' +
+        'parser would drop or read differently from this; remove it, or percent-encode it',
+    );
+  }
   const hashAt = url.indexOf('#');
   const beforeHash = hashAt === -1 ? url : url.slice(0, hashAt);
   const hash = hashAt === -1 ? '' : url.slice(hashAt);
@@ -105,11 +117,16 @@ function splitOptions(url) {
 
   const decode = (value) => decodeURIComponent(value.replace(/\+/g, ' '));
   const isOptions = (pair) => decode(pair.split('=')[0] ?? '') === 'options';
-  const existing = pairs
-    .filter(isOptions)
-    .map((pair) => decode(pair.slice(pair.indexOf('=') + 1 || pair.length)))
-    .join(' ')
-    .trim();
+  const written = pairs.filter(isOptions);
+  if (written.length > 1) {
+    throw new Error(
+      `DATABASE_URL has ${written.length} options parameters, and the driver keeps only the ` +
+        'last one; write every startup option in a single options parameter',
+    );
+  }
+  const [pair] = written;
+  const existing =
+    pair === undefined ? '' : decode(pair.slice(pair.indexOf('=') + 1 || pair.length)).trim();
   const kept = pairs.filter((pair) => !isOptions(pair));
   return {
     existing,
