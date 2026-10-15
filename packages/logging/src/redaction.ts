@@ -246,12 +246,24 @@ function scrubAuthSchemes(text: string): string {
  * message longer than `max` (default {@link SCRUB_MESSAGE_MAX}) is cut to it first — never
  * between the halves of a surrogate pair — the rules fail closed at the cut,
  * and it ends in {@link TRUNCATED_MESSAGE}.
+ *
+ * `max` bounds the *result* too, not only the input: replacing a token with
+ * {@link REDACTED} can make a text longer (`Bearer a ` doubles), so what the
+ * rules produce is cut to `max` again. The result is at most
+ * `max + TRUNCATED_MESSAGE.length` UTF-16 code units — lengths here and in
+ * `@rasta/logging` are code units, never encoded bytes.
  */
 export function scrubMessage(message: string, max: number = SCRUB_MESSAGE_MAX): string {
-  if (message.length <= max) {
-    return scrubAuthSchemes(scrubConnectionStrings(message, false));
-  }
-  const last = message.charCodeAt(max - 1);
-  const kept = message.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
-  return `${scrubAuthSchemes(scrubConnectionStrings(kept, true))}${TRUNCATED_MESSAGE}`;
+  const cut = message.length > max;
+  const scrubbed = scrubAuthSchemes(
+    scrubConnectionStrings(cut ? head(message, max) : message, cut),
+  );
+  return cut || scrubbed.length > max ? `${head(scrubbed, max)}${TRUNCATED_MESSAGE}` : scrubbed;
+}
+
+/** The first `max` code units of `text`, never ending between a surrogate pair. */
+function head(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const last = text.charCodeAt(max - 1);
+  return text.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
 }

@@ -1,7 +1,8 @@
 import { Writable } from 'node:stream';
 import pino from 'pino';
 import { clearLogContextProvider, createLogger, setLogContextProvider } from './logger';
-import { REDACTED } from './redaction';
+import { scrubbedErrorSerializer } from './error-serializer';
+import { REDACTED, TRUNCATED_MESSAGE } from './redaction';
 import {
   FALLBACK_LINE,
   MAX_LOG_LINE_LENGTH,
@@ -307,6 +308,124 @@ describe('logging never throws (Codex r3 F3)', () => {
     expect(() => loggerFor(stream).error({ err: proxy }, 'failed')).not.toThrow();
 
     expect(stream.lines).toHaveLength(1);
+  });
+});
+
+describe('asynchronous destination failures are contained (Codex r4 F2)', () => {
+  /** A Writable whose every write fails after `write` has returned. */
+  function failing(): Writable {
+    return new Writable({
+      write(_chunk, _encoding, done) {
+        done(new Error('synthetic disk failure'));
+      },
+    });
+  }
+
+  const settle = () => new Promise<void>((done) => setTimeout(done, 20));
+
+  /** Fails the test if the process sees an uncaught exception meanwhile. */
+  async function withoutUncaught(run: () => void): Promise<unknown[]> {
+    const uncaught: unknown[] = [];
+    const listeners = process.listeners('uncaughtException');
+    process.removeAllListeners('uncaughtException');
+    process.on('uncaughtException', (error) => uncaught.push(error));
+    try {
+      run();
+      await settle();
+    } finally {
+      process.removeAllListeners('uncaughtException');
+      for (const listener of listeners) process.on('uncaughtException', listener);
+    }
+    return uncaught;
+  }
+
+  it('a destination that fails after write returned', async () => {
+    const logger = loggerFor(failing());
+
+    expect(await withoutUncaught(() => logger.info('hello'))).toEqual([]);
+  });
+
+  it('every member of a multistream, and one added later', async () => {
+    const members = [failing(), failing()];
+    const late = failing();
+    const multi = pino.multistream([{ stream: members[0]! }, { stream: members[1]! }]);
+    const logger = loggerFor(multi);
+    (logger as unknown as { [k: symbol]: pino.MultiStreamRes })[
+      Object.getOwnPropertySymbols(logger).find((s) => s.toString() === 'Symbol(pino.stream)')!
+    ]!.add({ stream: late });
+
+    expect(await withoutUncaught(() => logger.info('hello'))).toEqual([]);
+    for (const stream of [...members, late]) {
+      expect(stream.listenerCount('error')).toBeGreaterThan(0);
+    }
+  });
+
+  it('keeps logging to the stream that is left', async () => {
+    const good = sink();
+    const logger = loggerFor(pino.multistream([{ stream: failing() }, { stream: good }]));
+
+    await withoutUncaught(() => logger.info('one'));
+    await withoutUncaught(() => logger.info('two'));
+
+    expect(text(good)).toContain('two');
+  });
+});
+
+describe('transports as destinations (Codex r4 F5)', () => {
+  class ThreadStream {
+    write(): void {}
+  }
+
+  it('is refused, at creation, with a clear error', () => {
+    expect(() => loggerFor(new ThreadStream() as unknown as pino.DestinationStream)).toThrow(
+      /pino transport.*not supported/,
+    );
+  });
+
+  it('is refused as a multistream member too', () => {
+    const multi = { write() {}, streams: [{ stream: new ThreadStream() }] };
+    expect(() => loggerFor(multi as unknown as pino.DestinationStream)).toThrow(/transport/);
+  });
+});
+
+describe('the cap holds after scrubbing (Codex r4 F3)', () => {
+  it('a string that grows when its credentials are replaced stays within the budget', () => {
+    const stream = sink();
+
+    loggerFor(stream).info('Bearer a '.repeat(1800));
+
+    const { msg } = json(stream.lines[0]!);
+    expect(msg.length).toBeLessThanOrEqual(MAX_LOG_STRING_LENGTH + TRUNCATED_MESSAGE.length);
+    expect(msg.endsWith(TRUNCATED_MESSAGE)).toBe(true);
+  });
+
+  it('a record whose fields grow past the line limit is replaced, not written', () => {
+    const fields = Array.from({ length: 2800 }, (_, i) => `"k${i}":"Bearer a"`).join(',');
+    const line = `{${fields}}\n`;
+
+    expect(line.length).toBeLessThanOrEqual(MAX_LOG_LINE_LENGTH);
+    const out = scrubLine(line);
+    expect(out.length).toBeLessThan(200);
+    expect(out).toMatch(/line too long/);
+  });
+
+  it('escaping that grows a line is counted too', () => {
+    const line = `{"msg":"${'é\\u0000'.repeat(9000)}Bearer x"}\n`;
+    expect(scrubLine(line).length).toBeLessThanOrEqual(MAX_LOG_LINE_LENGTH);
+  });
+});
+
+describe('a huge stack costs a bounded scan (Codex r4 F4)', () => {
+  it('splits only the head of a 16 MB stack', () => {
+    const stack = `Error: x\n${'    at frame (file.js:1:1)\n'.repeat(700_000)}`;
+    const started = process.hrtime.bigint();
+    const out = scrubbedErrorSerializer(Object.assign(new Error('x'), { stack })) as {
+      stack: string;
+    };
+    const milliseconds = Number(process.hrtime.bigint() - started) / 1e6;
+
+    expect(out.stack.length).toBeLessThan(5000);
+    expect(milliseconds).toBeLessThan(50);
   });
 });
 

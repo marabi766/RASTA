@@ -82,6 +82,15 @@ Middleware (Gateway) → RequestContext ایجاد می‌شود
 Redaction خودکار در `@rasta/logging`: فهرست کلیدهای حساس (`password`, `token`, `secret`,
 `authorization`, `nationalId`, `cardNumber`, …) پیش از سریال‌سازی جایگزین `[REDACTED]` می‌شوند.
 
+پاک‌سازی آخرِ مسیر (`scrubbing-destination.ts`): هر رشتهٔ سطر نهایی از Credential پاک و کوتاه می‌شود، و
+خودِ جریان `createLogger` را می‌پوشاند — از جمله جریان دومی که Instrumentation پینوی OTel برای ارسال Log به
+OTLP/Collector اضافه می‌کند؛ پس مقصد پیکربندی‌شده و Exporter هر دو همان سطرِ پاک‌شده را می‌گیرند. کران‌ها
+بر حسب **UTF-16 code unit** هستند (نه بایت): ۱۶Ki برای هر رشته (به‌علاوهٔ نشانهٔ برش) و ۶۴Ki برای سطر، که **پس از**
+پاک‌سازی (و جایگزینی `[REDACTED]`) دوباره سنجیده می‌شود؛ سطر بلندتر با نشانهٔ ثابت جایگزین می‌شود. خطای
+ناهمزمان مقصد، اعضای Multistream و Transport مهار می‌شود (Listener ‏`error` که هرگز نمی‌اندازد). Transportِ
+پینو (`pino.transport`) به‌عنوان `destination` پذیرفته نیست و در `createLogger` خطا می‌دهد (مسیردهیِ چندهدفه
+سطح عددی می‌خواهد و سطر بدون خطا حذف می‌شد). باقی‌مانده: T-07 در docs/23.
+
 **MVP → PRODUCTION.** MVP: خروجی به stdout، تجمیع با `docker compose logs`.
 Production: OTel Collector → Loki یا سامانه معادل، با نگهداشت ۳۰ روز (۱۳ ماه برای
 Logهای مالی).

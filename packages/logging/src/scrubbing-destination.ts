@@ -11,10 +11,18 @@ import { scrubMessage } from './redaction';
  * Nothing is parsed into values, so numbers (bigint included) are untouched.
  */
 
-/** The longest line written, in UTF-16 code units. A longer one is replaced. */
+/**
+ * The longest line written, in UTF-16 code units (`String#length`, not encoded
+ * bytes; a line is at most three times as many UTF-8 bytes). A longer one —
+ * measured on arrival and again after scrubbing — is replaced.
+ */
 export const MAX_LOG_LINE_LENGTH = 64 * 1024;
 
-/** The longest single string kept in a line; longer ones are cut and marked. */
+/**
+ * The longest single string kept in a line, in UTF-16 code units, including
+ * any text a credential was replaced with; longer ones are cut and marked (the
+ * marker follows the limit).
+ */
 export const MAX_LOG_STRING_LENGTH = 16 * 1024;
 
 /** Written whenever a line cannot be scrubbed or logging itself fails. */
@@ -67,7 +75,10 @@ export function scrubLine(line: string): string {
     }
     at = close + 1;
   }
-  return copied === 0 ? line : `${out}${line.slice(copied)}`;
+  const scrubbed = copied === 0 ? line : `${out}${line.slice(copied)}`;
+  // Replacement text and re-escaping can make a line longer than it came in, so
+  // the limit is enforced on what is about to be written, not only on the input.
+  return scrubbed.length > MAX_LOG_LINE_LENGTH ? oversizeLine(scrubbed.length) : scrubbed;
 }
 
 /** Writes {@link FALLBACK_LINE}; a destination that fails again is left alone. */
@@ -82,6 +93,43 @@ export function writeFallback(destination: DestinationStream): void {
   }
 }
 
+const contained = new WeakSet<object>();
+
+/** An `'error'` handler: nothing a stream reports is allowed to throw from here. */
+function swallow(): void {
+  // The write that failed has no caller left to tell; the next one is tried.
+}
+
+/**
+ * Gives a stream — and each member of a multistream — an `'error'` listener.
+ * A stream that emits `'error'` without one throws it as an uncaught exception,
+ * and a destination fails that way asynchronously (a disk error, a closed
+ * pipe, a transport worker that cannot start), after the `try`/`catch` around
+ * its `write` has returned. Never throws itself.
+ */
+export function containErrors(stream: unknown): void {
+  try {
+    if (typeof stream !== 'object' || stream === null) return;
+    const emitter = stream as { on?: unknown; streams?: unknown };
+    if (!contained.has(stream)) {
+      contained.add(stream);
+      if (typeof emitter.on === 'function') {
+        (emitter.on as (event: string, listener: () => void) => unknown).call(
+          stream,
+          'error',
+          swallow,
+        );
+      }
+    }
+    // Members are looked at every time: `add` appends to the same array.
+    if (Array.isArray(emitter.streams)) {
+      for (const member of emitter.streams as { stream?: unknown }[]) containErrors(member?.stream);
+    }
+  } catch {
+    // Containing errors is best effort; it must not itself be the failure.
+  }
+}
+
 /**
  * Wraps a destination so every line written to it is first passed through
  * {@link scrubLine}. A multistream is wrapped as a whole, so each of its
@@ -90,6 +138,7 @@ export function writeFallback(destination: DestinationStream): void {
  * `lastObj` and `lastLogger` are withheld.
  */
 export function scrubbingDestination(inner: DestinationStream): DestinationStream {
+  containErrors(inner);
   const write = (chunk: unknown): void => {
     let line: string;
     try {
@@ -107,6 +156,16 @@ export function scrubbingDestination(inner: DestinationStream): DestinationStrea
   return new Proxy(inner, {
     get(target, property) {
       if (property === 'write') return write;
+      if (property === 'add' && typeof Reflect.get(target, property) === 'function') {
+        // A multistream member added later fails like the others.
+        return (...args: unknown[]): unknown => {
+          const result: unknown = (target as unknown as { add: (...a: unknown[]) => unknown }).add(
+            ...args,
+          );
+          containErrors(target);
+          return result;
+        };
+      }
       const value: unknown = Reflect.get(target, property, target);
       return typeof value === 'function' ? (value as () => unknown).bind(target) : value;
     },

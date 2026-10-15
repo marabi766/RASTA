@@ -35,6 +35,9 @@ export const MAX_AGGREGATE_ERRORS = 10;
 /** How many stack frame lines are kept. */
 export const MAX_STACK_FRAMES = 50;
 
+/** How much of a stack is looked at, in UTF-16 code units; the rest is dropped. */
+export const MAX_STACK_SCAN = 64 * 1024;
+
 const UNSERIALISABLE_ERROR = '[unserialisable error]';
 
 const FRAME_LINE = /^\s+at /;
@@ -56,7 +59,12 @@ export interface SerializedError {
  * {@link MAX_STACK_FRAMES} and scrubbed as one block, so each part is capped.
  */
 function scrubStack(stack: string): string {
-  const lines = stack.split('\n');
+  // Bounded before it is split: a stack is attacker-influenced text of any size.
+  // The cut is far past what is kept, and the parts below fail closed at their
+  // own cuts, so a secret straddling it is never kept whole.
+  const lines = (stack.length > MAX_STACK_SCAN ? stack.slice(0, MAX_STACK_SCAN) : stack).split(
+    '\n',
+  );
   let firstFrame = lines.findIndex((line) => FRAME_LINE.test(line));
   if (firstFrame === -1) firstFrame = lines.length;
   const head = scrubMessage(lines.slice(0, firstFrame).join('\n'));

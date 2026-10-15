@@ -71,10 +71,41 @@ function openDestination(
 
   const stdout = pino.destination({ dest: process.stdout.fd || 1, sync: true });
   stdout.on('error', (error: NodeJS.ErrnoException) => {
-    if (error.code !== 'EPIPE') throw error;
-    stdout.write = () => true;
+    // A handler must never throw: it would be an uncaught exception. A closed
+    // pipe ends output; any other failure is left to the next write.
+    if (error.code === 'EPIPE') stdout.write = () => true;
   });
   return stdout;
+}
+
+/**
+ * A pino transport (`pino.transport(...)`) as a destination. The worker routes
+ * records to its targets by numeric level, and this logger writes the level as
+ * a word, so a transport with `targets` would silently drop every record.
+ * Whether a transport has one target or several cannot be read back from it,
+ * so none is accepted; the built-in `pretty` option is the one supported
+ * transport.
+ */
+function isTransport(stream: unknown): boolean {
+  return (
+    typeof stream === 'object' &&
+    stream !== null &&
+    (stream.constructor as { name?: string } | undefined)?.name === 'ThreadStream'
+  );
+}
+
+function rejectTransport(destination: DestinationStream | undefined): void {
+  const members = (destination as { streams?: { stream?: unknown }[] } | undefined)?.streams;
+  const found =
+    isTransport(destination) ||
+    (Array.isArray(members) && members.some((member) => isTransport(member?.stream)));
+  if (found) {
+    throw new Error(
+      '@rasta/logging: a pino transport (pino.transport) is not supported as `destination`: ' +
+        'its multi-target routing needs numeric levels, and records would be dropped. ' +
+        'Pass a stream (pino.destination, a Writable) or use `pretty`.',
+    );
+  }
 }
 
 export function createLogger(config: LoggerConfig): Logger {
@@ -87,9 +118,9 @@ export function createLogger(config: LoggerConfig): Logger {
     destination,
   } = config;
 
-  // Every line leaves through this: credentials in any string of it are
-  // removed and its length is bounded, whatever produced it.
-  const output = scrubbingDestination(openDestination(destination, pretty));
+  rejectTransport(destination);
+  const raw = openDestination(destination, pretty);
+  let output: DestinationStream = raw;
 
   const options: LoggerOptions = {
     level,
@@ -139,7 +170,19 @@ export function createLogger(config: LoggerConfig): Logger {
     },
   };
 
-  return pino(options, output);
+  const logger = pino(options, raw);
+
+  // Every line leaves through this: credentials in any string of it are
+  // removed and its length is bounded, whatever produced it. It wraps the
+  // stream the logger *ended up with*, not the one it was given: when
+  // OpenTelemetry's pino instrumentation is active it has already replaced that
+  // stream with a multistream that also feeds the OTel Logs API, and wrapping
+  // the whole of it puts every consumer behind the scrub.
+  const symbols = pino.symbols as unknown as { streamSym: symbol };
+  const loggerState = logger as unknown as Record<symbol, DestinationStream>;
+  output = scrubbingDestination(loggerState[symbols.streamSym] ?? raw);
+  loggerState[symbols.streamSym] = output;
+  return logger;
 }
 
 /** Child logger scoped to a component, so its lines are filterable. */
