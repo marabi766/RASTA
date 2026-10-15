@@ -1,4 +1,5 @@
-import pino, { type DestinationStream, type Logger, type LoggerOptions } from 'pino';
+import { format } from 'node:util';
+import pino,{ type DestinationStream, type Logger, type LoggerOptions } from 'pino';
 import { scrubbedErrorSerializer } from './error-serializer';
 import { buildRedactionPaths, REDACTED, scrubMessage } from './redaction';
 
@@ -46,6 +47,68 @@ export function clearLogContextProvider(): void {
   contextProvider = undefined;
 }
 
+const PLACEHOLDER = /%[sdifjoOc]/;
+
+function isPlainFields(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** The error pino would take a message from: `{ err }` / `{ error }` fields. */
+function fieldError(fields: Record<string, unknown>): Error | undefined {
+  for (const key of ['err', 'error']) {
+    try {
+      const value = fields[key];
+      if (value instanceof Error) return value;
+    } catch {
+      // A throwing getter must not take the log line down with it.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Rewrites the arguments of a log call so the message pino will print is
+ * already final: `(fields?, message?, ...interpolation)` becomes
+ * `(fields, scrubbedCappedMessage)`. Covers an explicit string, `%s`-style
+ * interpolation (formatted here, then scrubbed as a whole, so a secret in an
+ * argument is caught), a message pino would generate from `err`/`error`, and a
+ * `msg` field. The structured fields themselves are left to the serializers
+ * and key-based redaction.
+ */
+function finalMessageArgs(args: unknown[]): unknown[] {
+  const first = args[0];
+  let rest = args.slice(1);
+  let fields: Record<string, unknown> | undefined;
+  if (first instanceof Error) {
+    fields = { err: first };
+  } else if (isPlainFields(first)) {
+    fields = first;
+  } else {
+    // `logger.info('text', ...args)`: the message leads.
+    rest = args;
+  }
+
+  const [text, ...interpolation] = rest;
+  let message: string | undefined;
+  if (typeof text === 'string') {
+    message =
+      interpolation.length > 0 && PLACEHOLDER.test(text) ? format(text, ...interpolation) : text;
+  } else if (fields) {
+    const source = first instanceof Error ? first : fieldError(fields);
+    if (source) message = source.message;
+    else if (typeof fields.msg === 'string') message = fields.msg;
+  }
+
+  if (message === undefined) return fields ? [fields] : args;
+  if (fields && typeof fields.msg === 'string') {
+    // pino lets an explicit message argument win over a `msg` field; drop the
+    // field's raw copy rather than rely on that.
+    const { msg: _raw, ...withoutMsg } = fields;
+    fields = withoutMsg;
+  }
+  return fields ? [fields, scrubMessage(message)] : [scrubMessage(message)];
+}
+
 export function createLogger(config: LoggerConfig): Logger {
   const {
     serviceName,
@@ -84,16 +147,10 @@ export function createLogger(config: LoggerConfig): Logger {
       logMethod(args, method) {
         // Credentials embedded in free-text messages escape key-based
         // redaction; the classic case is a driver error echoing its DSN.
-        const scrubbed = args.map((arg) => (typeof arg === 'string' ? scrubMessage(arg) : arg));
-        // `logger.error(err)`: pino would take the message for the line from
-        // the error itself, after this hook, uncapped. Make the error a field
-        // (so the serializer sees it) and the message a scrubbed string.
-        const [first, ...rest] = scrubbed;
-        if (first instanceof Error) {
-          if (typeof rest[0] !== 'string') rest.unshift(scrubMessage(first.message));
-          return method.apply(this, [{ err: first }, ...rest] as Parameters<typeof method>);
-        }
-        return method.apply(this, scrubbed as Parameters<typeof method>);
+        // Every call shape ends here with ONE scrubbed, capped message string:
+        // pino would otherwise copy an error's raw message into `msg`, or
+        // interpolate arguments into it, after this hook and unscrubbed.
+        return method.apply(this, finalMessageArgs(args) as Parameters<typeof method>);
       },
     },
 

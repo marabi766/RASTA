@@ -187,3 +187,104 @@ describe('createLogger — structured errors are scrubbed and capped', () => {
     expect(raw()).not.toContain('LEAK');
   });
 });
+
+describe('createLogger — the final msg is scrubbed and capped for every call shape', () => {
+  const SCRUBBED = `postgresql://u:${REDACTED}@host Bearer ${REDACTED}`;
+
+  it('omitted message: { err } gets a scrubbed msg', () => {
+    const { logger, raw, last } = capture();
+
+    logger.error({ err: new Error(SECRET_TEXT) });
+
+    expect(raw()).not.toContain('LEAK');
+    expect(last().msg).toBe(SCRUBBED);
+  });
+
+  it('omitted message: { error } gets a scrubbed msg', () => {
+    const { logger, raw, last } = capture();
+
+    logger.error({ error: new Error(SECRET_TEXT) });
+
+    expect(raw()).not.toContain('LEAK');
+    expect(last().msg).toBe(SCRUBBED);
+  });
+
+  it('omitted message with a 16k error message is capped in msg too', () => {
+    const { logger, last } = capture();
+
+    logger.error({ err: new Error(`${SECRET_TEXT} ${'x'.repeat(16_000)}`) });
+
+    // Redaction markers may lengthen the capped text; scrubMessage's bound is 2x.
+    expect(last().msg.length).toBeLessThanOrEqual(2 * SCRUB_MESSAGE_MAX + TRUNCATED_MESSAGE.length);
+    expect(last().msg).toContain(TRUNCATED_MESSAGE);
+  });
+
+  it('a 16k explicit message is capped', () => {
+    const { logger, last } = capture();
+
+    logger.info({ requestId: 'r' }, 'y'.repeat(16_000));
+
+    expect(last().msg.length).toBeLessThanOrEqual(SCRUB_MESSAGE_MAX + TRUNCATED_MESSAGE.length);
+  });
+
+  it('interpolation: a secret argument is scrubbed (%s, %o, %j)', () => {
+    const { logger, raw, last } = capture();
+
+    logger.error('failed %s', SECRET_TEXT);
+    expect(last().msg).toBe(`failed ${SCRUBBED}`);
+    logger.error({ a: 1 }, 'failed %o', { dsn: DSN });
+    logger.error('failed %j', { dsn: DSN });
+    logger.error('failed %s', new Error(SECRET_TEXT));
+
+    expect(raw()).not.toContain('LEAK');
+  });
+
+  it('interpolation with a 16k argument is capped', () => {
+    const { logger, last } = capture();
+
+    logger.warn('payload %s', 'z'.repeat(16_000));
+
+    expect(last().msg.length).toBeLessThanOrEqual(SCRUB_MESSAGE_MAX + TRUNCATED_MESSAGE.length);
+  });
+
+  it('a raw `msg` field is scrubbed', () => {
+    const { logger, raw } = capture();
+
+    logger.info({ msg: SECRET_TEXT });
+
+    expect(raw()).not.toContain('LEAK');
+  });
+
+  it('child loggers: omitted-message, interpolation and explicit shapes', () => {
+    const { logger, raw, last } = capture();
+    const child = logger.child({ component: 'c' }).child({ more: 1 });
+
+    child.error({ err: new Error(SECRET_TEXT) });
+    expect(last().msg).toBe(SCRUBBED);
+    expect(last().component).toBe('c');
+    child.error(new Error(SECRET_TEXT));
+    child.error('failed %s', SECRET_TEXT);
+    child.error({ error: new Error(SECRET_TEXT) }, `explicit ${SECRET_TEXT}`);
+
+    expect(raw()).not.toContain('LEAK');
+  });
+
+  it('pino child bindings carrying an error are serialised through the scrubbing serializer', () => {
+    const { logger, raw, last } = capture();
+    const child = logger.child({ err: new Error(SECRET_TEXT) });
+
+    child.info('hello');
+
+    expect(last().msg).toBe('hello');
+    expect(raw()).not.toContain('LEAK');
+  });
+
+  it('does not mutate the caller’s fields object', () => {
+    const { logger } = capture();
+    const fields = { msg: SECRET_TEXT, err: new Error(SECRET_TEXT) };
+
+    logger.info(fields, 'explicit');
+
+    expect(fields.msg).toBe(SECRET_TEXT);
+  });
+});
