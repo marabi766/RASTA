@@ -9,6 +9,9 @@ import {
   loadEnv,
   outboxPurgeEnvSchema,
 } from '@rasta/config';
+import { contractOperationBudgets } from './operation-budgets';
+
+export { SIGNING_TRANSACTION_MARGIN_MS, signingTransactionTimeoutMs } from './operation-budgets';
 
 export const SERVICE_NAME = 'contract-service';
 
@@ -296,15 +299,19 @@ export type ContractEnv = z.infer<typeof contractEnvSchema>;
  *                 database would violate A-01 quietly.
  */
 export function loadContractEnv(source: NodeJS.ProcessEnv = process.env): ContractEnv {
-  return loadEnv(contractEnvSchema, {
-    ...source,
-    SERVICE_NAME: source.SERVICE_NAME ?? SERVICE_NAME,
-    PORT: source.PORT ?? source.PORT_CONTRACT ?? DEFAULT_PORT,
-    DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_CONTRACT,
-    KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? SERVICE_NAME,
-    KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
-    CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
-  });
+  return loadEnv(
+    contractEnvSchema,
+    {
+      ...source,
+      SERVICE_NAME: source.SERVICE_NAME ?? SERVICE_NAME,
+      PORT: source.PORT ?? source.PORT_CONTRACT ?? DEFAULT_PORT,
+      DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_CONTRACT,
+      KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? SERVICE_NAME,
+      KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
+      CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
+    },
+    { operationBudgets: contractOperationBudgets },
+  );
 }
 
 export function corsOrigins(env: ContractEnv): string[] {

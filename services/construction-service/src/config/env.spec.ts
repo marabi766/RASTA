@@ -13,6 +13,7 @@ import {
   TENDER_OPEN_TIMEOUT_MAX_MS,
   TENDER_OPEN_TIMEOUT_MIN_MS,
 } from './env';
+import { constructionOperationBudgets } from './operation-budgets';
 
 /**
  * Configuration parsing, the fallbacks a deployment relies on, and the four
@@ -613,5 +614,74 @@ describe('the tender close sweeper (ADR-065 § 3)', () => {
     expect(() => load({ CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE: '100000' })).toThrow();
     expect(() => load({ CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: '1' })).toThrow();
     expect(() => load({ CONSTRUCTION_TENDER_CLOSE_BACKOFF_BASE_SECONDS: '0' })).toThrow();
+  });
+});
+
+describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)', () => {
+  it('unset, applies no statement timeout', () => {
+    const env = load();
+    expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+    expect(env.DATABASE_URL).not.toContain('statement_timeout');
+  });
+
+  it('declares every budget, at the defaults', () => {
+    expect(constructionOperationBudgets(load()).map((b) => [b.name, b.budgetMs])).toEqual([
+      ['CONSTRUCTION_TRANSACTION_TIMEOUT_MS', 15_000],
+      ['CLAIM_WAIT_MS', 7000],
+      ['CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS', TENDER_OPEN_TIMEOUT_DEFAULT_MS],
+      ['OUTBOX_CLAIM_LEASE_SECONDS', 12_500],
+    ]);
+  });
+
+  it('set, must be above the largest: the tender opening, 30 s; the bound is exact', () => {
+    expect(() => load({ DATABASE_STATEMENT_TIMEOUT_MS: '30000' })).toThrow(
+      /DATABASE_STATEMENT_TIMEOUT_MS: \(30000 ms\) is not above CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS, 30000 ms/,
+    );
+    expect(() => load({ DATABASE_STATEMENT_TIMEOUT_MS: '30001' })).not.toThrow();
+  });
+
+  it('moves with the opening timeout, down to the transaction timeout', () => {
+    const slow = { CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS: String(TENDER_OPEN_TIMEOUT_MAX_MS) };
+    expect(() =>
+      load({ ...slow, DATABASE_STATEMENT_TIMEOUT_MS: String(TENDER_OPEN_TIMEOUT_MAX_MS) }),
+    ).toThrow(/not above CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS/);
+    expect(() =>
+      load({ ...slow, DATABASE_STATEMENT_TIMEOUT_MS: String(TENDER_OPEN_TIMEOUT_MAX_MS + 1) }),
+    ).not.toThrow();
+    const fast = { CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS: String(TENDER_OPEN_TIMEOUT_MIN_MS) };
+    expect(() => load({ ...fast, DATABASE_STATEMENT_TIMEOUT_MS: '15000' })).toThrow(
+      /not above CONSTRUCTION_TRANSACTION_TIMEOUT_MS, 15000 ms/,
+    );
+    expect(() => load({ ...fast, DATABASE_STATEMENT_TIMEOUT_MS: '15001' })).not.toThrow();
+  });
+
+  it('with the shortest transaction timeout too, down to the outbox renewal', () => {
+    const fastest = {
+      CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS: String(TENDER_OPEN_TIMEOUT_MIN_MS),
+      CONSTRUCTION_TRANSACTION_TIMEOUT_MS: '5000',
+    };
+    expect(() => load({ ...fastest, DATABASE_STATEMENT_TIMEOUT_MS: '12500' })).toThrow(
+      /not above OUTBOX_CLAIM_LEASE_SECONDS, 12500 ms/,
+    );
+    expect(() => load({ ...fastest, DATABASE_STATEMENT_TIMEOUT_MS: '12501' })).not.toThrow();
+  });
+
+  // #271 r2 review: ordinary transactions at a minute and the opening at 30 s
+  // were accepted with a 30001 ms statement timeout, which then cancelled an
+  // award queued 35 s on the tender lock — before its own transaction timeout.
+  it('moves with the transaction timeout, above the opening', () => {
+    const slowTransactions = {
+      CONSTRUCTION_TRANSACTION_TIMEOUT_MS: '60000',
+      CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS: '30000',
+    };
+    expect(() => load({ ...slowTransactions, DATABASE_STATEMENT_TIMEOUT_MS: '30001' })).toThrow(
+      /DATABASE_STATEMENT_TIMEOUT_MS: \(30001 ms\) is not above CONSTRUCTION_TRANSACTION_TIMEOUT_MS, 60000 ms/,
+    );
+    expect(() => load({ ...slowTransactions, DATABASE_STATEMENT_TIMEOUT_MS: '60000' })).toThrow(
+      /not above CONSTRUCTION_TRANSACTION_TIMEOUT_MS, 60000 ms/,
+    );
+    expect(() =>
+      load({ ...slowTransactions, DATABASE_STATEMENT_TIMEOUT_MS: '60001' }),
+    ).not.toThrow();
   });
 });

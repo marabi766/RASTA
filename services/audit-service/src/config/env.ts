@@ -16,6 +16,7 @@ import {
   DEFAULT_MAX_QUERY_WINDOW_DAYS,
   DEFAULT_MAX_VERIFICATION_RECORDS,
 } from '../audit/audit.query.dto';
+import { auditOperationBudgets } from './operation-budgets';
 
 export const SERVICE_NAME = 'audit-service';
 
@@ -207,19 +208,23 @@ export function loadAuditEnv(source: NodeJS.ProcessEnv = process.env): AuditEnv 
         'migrator role, which owns schema audit (ADR-053 § 6).',
     );
   }
-  return loadEnv(auditEnvSchema, {
-    ...source,
-    SERVICE_NAME: source.SERVICE_NAME ?? SERVICE_NAME,
-    PORT: source.PORT ?? source.PORT_AUDIT ?? DEFAULT_PORT,
-    // Never DATABASE_URL_AUDIT_MIGRATOR, and never the generic DATABASE_URL.
-    // The migrator owns the schema and may drop it; this process must only
-    // ever hold the role that can insert and select. `AppModule` also checks
-    // the connected role at startup (PrismaService.assertRuntimeRole).
-    DATABASE_URL: source.DATABASE_URL_AUDIT,
-    KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? SERVICE_NAME,
-    KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? DOMAIN_PROJECTOR_CONSUMER,
-    CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
-  });
+  return loadEnv(
+    auditEnvSchema,
+    {
+      ...source,
+      SERVICE_NAME: source.SERVICE_NAME ?? SERVICE_NAME,
+      PORT: source.PORT ?? source.PORT_AUDIT ?? DEFAULT_PORT,
+      // Never DATABASE_URL_AUDIT_MIGRATOR, and never the generic DATABASE_URL.
+      // The migrator owns the schema and may drop it; this process must only
+      // ever hold the role that can insert and select. `AppModule` also checks
+      // the connected role at startup (PrismaService.assertRuntimeRole).
+      DATABASE_URL: source.DATABASE_URL_AUDIT,
+      KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? SERVICE_NAME,
+      KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? DOMAIN_PROJECTOR_CONSUMER,
+      CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
+    },
+    { operationBudgets: auditOperationBudgets },
+  );
 }
 
 export function corsOrigins(env: AuditEnv): string[] {

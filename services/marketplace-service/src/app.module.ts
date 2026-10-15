@@ -172,12 +172,22 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
         }),
     },
     {
-      // D-052: the relay and the purge drain together in the destroy phase,
-      // by one deadline inside SHUTDOWN_TIMEOUT_MS.
+      // D-052: the relay, the purge and the Temporal worker stop together in
+      // the destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OutboxPurgeScheduler, ENV],
-      useFactory: (relay: OutboxRelay, purge: OutboxPurgeScheduler, env: MarketplaceEnv) =>
-        new OutboxShutdown({ relay, purge, budgetMs: outboxShutdownBudgetMs(env) }),
+      inject: [OutboxRelay, OutboxPurgeScheduler, OrderSagaWorker, ENV],
+      useFactory: (
+        relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
+        saga: OrderSagaWorker,
+        env: MarketplaceEnv,
+      ) =>
+        new OutboxShutdown({
+          relay,
+          purge,
+          workers: [saga],
+          budgetMs: outboxShutdownBudgetMs(env),
+        }),
     },
 
     {
@@ -255,9 +265,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
-    // The relay and the purge already drained in OutboxShutdown's
-    // onModuleDestroy, concurrently and by one deadline; this joins that stop
-    // and returns at once.
+    // The relay, the purge and the saga worker already stopped in
+    // OutboxShutdown's onModuleDestroy, concurrently and by one deadline; this
+    // joins that stop and returns at once.
     await this.outboxShutdown.stop();
   }
 }

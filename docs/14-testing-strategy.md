@@ -141,7 +141,7 @@ URL باید صریحاً IPv4 باشد. **نشانه:** Prisma `P2028` (`Unable
 و `pnpm check:local-postgres-config` این قرارداد را فقط به‌صورت متنی روی `.env.example` می‌سنجند (نه Probe شبکه، بی خواندن
 `.env`، بی چاپ مقدار) و در `pnpm verify` و Job `quality` در CI اجرا می‌شوند؛ URLهای Service Container خودِ CI جدا و دست‌نخورده‌اند.
 این قاعده فقط پیش‌فرض محلی توسعه است؛ سیاست Production برای `connection_limit`، `pool_timeout` یا گرم کردن Pool تصمیمی جدا
-در سطح ADR است.
+در سطح ADR است (سازوکار تنظیم دو عدد نخست، بی تغییر پیش‌فرض: `DATABASE_POOL_SIZE` و `DATABASE_POOL_TIMEOUT_SECONDS`، `docs/11` § ۱۱٫۲).
 
 **اثبات فشار تجمیع رد در فاز انحصاری (2026-09-14).** `pnpm test` و `pnpm test:integration` دیگر مستقیم `turbo run` نیستند؛
 `scripts/run-test-phases.mjs` آنها را فازبندی می‌کند: (۱) **فاز Workspace** — همان `turbo run <task>` موازی برای همهٔ
@@ -948,6 +948,16 @@ pnpm verify                     # دروازه کامل کیفیت
 
 **اجرای محلی Suite یکپارچگی یک سرویس (از #131، Broker با SASL_SSL).** Suiteها `.env` را خودشان نمی‌خوانند؛ باید در Shell
 Export شود. CI همین متغیرها را صریح در `env:` هر گام می‌دهد (`.github/workflows/ci.yml`، گام «Integration tests»).
+
+**چیدمان CI (از 2026-10-14).** کار یکپارچگی که به ۳۳–۳۴ دقیقه رسیده بود، چهار Job موازی است و هرکدام PostgreSQL،
+Broker و — فقط جایی که Suiteهایش می‌خوانند — MinIO، ClamAV و Redis خودش را بالا می‌آورد: `integration-suites` (گام
+«Integration tests» و سپس نگهبان‌های فقط-PostgreSQL)، `integration-security` (استقلال تست F-25، جداسازی Tenant و
+مجوز، Retry replay)، `integration-coverage-critical` (دروازه‌های پوشش construction، contract و inventory) و
+`integration-coverage` (هفت دروازهٔ پوشش دیگر). همان دستورها، همان `env:` و همان مهلت هر گام. Job ‏`integration` با
+نام «Integration and security tests» — همان Check الزامی Branch protection و Merge queue — فقط تجمیع می‌کند: با
+`always()` اجرا می‌شود و جز وقتی هر چهار `success` باشند شکست می‌خورد (شکست، لغو یا Skip). ‏`pnpm
+test:ci-integration-split` (در Job کیفیت) رد می‌کند اگر Job ‏`integration-*`ی بیرون از آن بماند، گامی از کار قدیم در هیچ
+Jobی یا در دو Job اجرا شود، یا گامی بدون زیرساختی که می‌خواند اجرا شود.
 
 ```bash
 cp .env.example .env            # یک بار؛ پس از هر تغییر .env.example دوباره مقایسه کن
