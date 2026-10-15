@@ -1561,14 +1561,25 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
     `PENDING_SETTLEMENT` یا `SETTLED` با `disputedAt` و همان متن حل. هر رد دیگر، یا وضعیتی که این فرمان نمی‌سازد، همان رد
     می‌ماند. `createObligation` را Workflow خود می‌پوشاند (`placeHold` ⇐ `findObligation`).
   - خواندن‌ها (`readOrder`، `findObligation`) اثری ندارند و ثبت نمی‌شوند.
-- **پیش‌شرط استقرار (Codex روی #283، یافتهٔ ۳).** پیش از استقرار، با Temporal بررسی شود که هیچ Workflow سفارشی Activity
-  در انتظار ندارد:
-  `temporal workflow list --namespace "$TEMPORAL_NAMESPACE" --query 'WorkflowType="orderSaga" AND ExecutionStatus="Running"'`
-  و برای هر شناسه (`order-<orderId>`):
-  `temporal workflow describe --namespace "$TEMPORAL_NAMESPACE" --workflow-id <id> --output json | jq '.pendingActivities | length'`
-  (Visibility ـِ Temporal فعالیت در انتظار را نمایه نمی‌کند، پس `describe` لازم است). صفر یعنی هیچ Activity ـی نیست که
-  Worker قدیمی اعمالش کرده و تکمیلش ثبت نشده. اگر صفر نیست، یا بررسی ممکن نیست، استقرار با تکیه بر مسیر جایگزین تاریخچه
-  (بالا) و خواندن تعهد در economic-service پذیرفته می‌شود؛ این تصمیم در یادداشت استقرار ثبت شود.
+- **پیش‌شرط استقرار — اجباری، بی استثنا (Codex روی #283، یافتهٔ ۳؛ دور ۲).** استقراری که یک طرفش نسخه‌ای بی D-053 است
+  (نخستین استقرار همین تغییر، جلو رفتن از نسخه‌ای قدیمی‌تر، بازگشت به آن) فقط پس از اثبات این مجاز است که هیچ Workflow
+  سفارشی Activity در انتظار ندارد؛ نتوانستن از بررسی هم استقرار را متوقف می‌کند. مسیر جایگزین تاریخچه (بالا) بر ساعت تکیه
+  دارد و با اختلاف ساعت بیش از `SAGA_CLOCK_SKEW_MS` Saga را با وجه در Hold متوقف می‌کند (Codex آن را بازتولید کرد)، پس
+  جای این Gate را نمی‌گیرد. توالی: همهٔ نمونه‌های قدیمی متوقف (Scale به صفر، نه Rolling Update) ⇐ Gate ⇐ فقط با کد خروج ۰
+  نسخهٔ جدید بالا می‌آید:
+  `TEMPORAL_ADDRESS=… TEMPORAL_NAMESPACE=… MARKETPLACE_TEMPORAL_TASK_QUEUE=… node scripts/marketplace-saga-drain-check.mjs`
+  — مقادیر همان‌هایی که سرویس با آن‌ها اجرا می‌شود، هر سه اجباری و بی پیش‌فرض. Gate با Query ـِ Visibility
+  `WorkflowType="orderSaga" AND ExecutionStatus="Running"` Workflowها را می‌شمارد و فهرست می‌کند
+  (`temporal workflow count` / `temporal workflow list --query … --output json`، شمار و فهرست باید یکی باشند و شمار تا پایان
+  عوض نشود)، هر کدام را `temporal workflow describe --workflow-id <id> --run-id <runId> --output json` می‌کند (Visibility
+  فعالیت در انتظار را نمایه نمی‌کند) و `pendingActivities` باید نباشد یا خالی باشد؛ و با
+  `temporal task-queue describe --task-queue <queue> --output json` هیچ Poller ـی روی Queue نباید باشد (Worker قدیمی واقعاً
+  رفته، پس میان بررسی و جابه‌جایی کسی Activity آغاز نمی‌کند). کد ۱ = Poller یا Activity در انتظار یافت شد؛ کد ۲ = بررسی ممکن
+  نشد؛ هر دو متوقف می‌کنند. Activity در انتظار ⇐ نسخهٔ قدیمی دوباره بالا می‌آید تا کار خودش را تمام کند و توالی از نو؛
+  `terminate`/`reset` برای گذشتن از Gate ممنوع (Q-118). جزئیات و دستورهای دقیق: Runbook
+  [`marketplace-saga-deploy`](runbooks/marketplace-saga-deploy.md). مخزن اسکریپت یا Job استقراری برای marketplace-service
+  ندارد (`ci.yml` فقط می‌سازد و می‌آزماید)، پس Gate گامی دستی است و هر خط استقراری که ساخته شود باید آن را اجرا کند و با کد
+  غیرصفر متوقف شود. رفتار Gate را `scripts/marketplace-saga-drain-check.test.mjs` در CI می‌آزماید.
 - **آزمون:** `test/saga-activity-replay.int-spec.ts` — Activityها در `MockActivityEnvironment` (کلید از Context واقعی
   Activity)، با دامنه، قفل و پایگاه دادهٔ واقعی: Commit ⇐ تکمیل گم ⇐ تأیید تأمین‌کننده ⇐ Retry، دو سناریوی دیگر، تسویه‌ای که
   economic-service فراموشش کرده، و یادآور. روی پیاده‌سازی `main` هفت مورد از نه شکست می‌خورند (همان
@@ -1588,8 +1599,11 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
     economic-service و در PR جداگانه است (کار ۱۴۷ کارگر ۱). تا آن زمان، پیامدش برای Saga را خواندن تعهد (بالا) می‌پوشاند:
     همان رد وضعیتی به خواندن و پاسخ می‌رسد. برای فراخوان‌های دیگر economic-service باز است.
   - مسیر جایگزین تاریخچه بر ساعت تکیه دارد: ساعت Temporal (زمان‌بندی Activity) و ساعت نویسندهٔ تاریخچه باید کمتر از
-    `SAGA_CLOCK_SKEW_MS` اختلاف داشته باشند. اختلاف بزرگ‌تر، ردیف خود گام را نمی‌یابد (Retry مثل پیش رد می‌شود)؛ به اشتباه
-    «انجام‌شده» خواندن یالی پیشین فقط با اختلافی بیش از ۲۵ ثانیه ممکن است.
+    `SAGA_CLOCK_SKEW_MS` اختلاف داشته باشند. اختلاف بزرگ‌تر (منفی، یعنی تاریخچه بیش از ۵ ثانیه عقب‌تر)، ردیف خود گام را
+    نمی‌یابد (Retry مثل پیش رد می‌شود و Saga با وجه در Hold می‌ایستد)؛ به اشتباه «انجام‌شده» خواندن یالی پیشین با اختلاف
+    مثبت **۲۵ ثانیه یا بیشتر** ممکن است (مرز پنجره `>=` است، پس دقیقاً ۲۵ ثانیه هم). به همین دلیل این مسیر لایهٔ دوم است و
+    Gate ـِ استقرار (بالا) اجباری: با صفر Activity در انتظار هنگام جابه‌جایی، هیچ Retry ـی با کد تازه به اثر بی‌رسیدِ Worker
+    قدیمی نمی‌رسد.
   - شکست غیرقابل‌Retry یا پایان تلاش‌های یک Activity، Workflow را با وجه در Hold متوقف می‌کند و مسیر جبرانی ندارد:
     `docs/24` **Q-118**.
 - **اولویت:** بالا
