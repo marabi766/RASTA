@@ -279,6 +279,7 @@ model Order {
   history      OrderStatusHistory[]
   disputes     OrderDispute[]
   review       Review?
+  sagaSteps    SagaStep[]
 
   @@index([organizationId, status], map: "ix_order_org_status")
   @@index([supplierOrganizationId, status], map: "ix_order_supplier_status")
@@ -376,6 +377,41 @@ model OrderStatusHistory {
   @@index([orderId, occurredAt], map: "ix_order_history_order")
   @@index([organizationId], map: "ix_order_history_org")
   @@map("order_status_history")
+}
+
+/// One row per saga activity that took effect (`docs/23` D-053).
+///
+/// Temporal retries an activity whose completion it never recorded — a worker
+/// that died or shut down after the commit, a lost response. By then a party
+/// may have moved the order on, so "is the order already where this step
+/// sends it" no longer recognises the step's own work: the retry used to be
+/// refused as a business rule, and the saga failed with the buyer's money
+/// held. The row is written in the step's own transaction and keyed by the
+/// identity Temporal keeps across retries of one scheduled activity, so a
+/// retry finds it and answers what the first attempt answered.
+model SagaStep {
+  organizationId String @map("organization_id")
+
+  orderId String @map("order_id")
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  /// `<workflowId>/<runId>/<activityId>`: one scheduled activity, every attempt.
+  stepKey String @map("step_key")
+
+  /// The activity that wrote it. A key answering for another activity is a
+  /// broken invariant, never a replay.
+  activity String
+
+  /// What the step returned, replayed verbatim to a retry. Null for a step
+  /// that returns nothing.
+  result Json?
+
+  /// TIMESTAMPTZ, as every new instant column (D-048).
+  appliedAt DateTime @default(now()) @map("applied_at") @db.Timestamptz(3)
+
+  @@id([organizationId, orderId, stepKey], map: "saga_step_pkey")
+  @@index([orderId], map: "ix_saga_step_order")
+  @@map("saga_step")
 }
 
 model OrderDispute {

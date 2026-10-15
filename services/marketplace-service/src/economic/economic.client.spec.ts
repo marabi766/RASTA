@@ -281,3 +281,69 @@ describe('each command reaches the endpoint it names', () => {
     expect(calls[0]!.headers['x-correlation-id']).toBe('corr-1');
   });
 });
+
+describe('reading the order’s obligation back (D-053)', () => {
+  const original = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = original;
+  });
+
+  const obligation = {
+    id: 'TXN_1',
+    organizationId: 'ORG-BUYER',
+    counterpartyOrganizationId: 'ORG-SUPPLIER',
+    transactionType: 'MARKETPLACE_ORDER',
+    status: 'PENDING_SETTLEMENT',
+    grossAmountMinor: '500000',
+    commissionAmountMinor: '0',
+    netAmountMinor: '0',
+    currency: 'IRR',
+    sourceReference: 'ORD_1',
+    disputedAt: null,
+    disputeReason: null,
+    settlement: null,
+  };
+
+  const read = (client: EconomicClient) =>
+    client.readObligation({
+      orderId: 'ORD_1',
+      transactionId: 'TXN_1',
+      buyerOrganizationId: 'ORG-BUYER',
+      correlationId: 'corr-1',
+    });
+
+  it('reads the one transaction as its payer, with no idempotency key', async () => {
+    const { calls, impl } = stubFetch({ status: 200, body: obligation });
+    globalThis.fetch = impl as typeof fetch;
+    const tokens = recordingTokens();
+
+    await expect(read(new EconomicClient(ENV, tokens.service as never))).resolves.toEqual(
+      obligation,
+    );
+
+    expect(calls[0]!.url).toBe('http://economic.test/v1/transactions/TXN_1');
+    expect(calls[0]!.headers['idempotency-key']).toBeUndefined();
+    expect(tokens.issued).toEqual([
+      {
+        caller: 'marketplace-service',
+        target: 'economic-service',
+        purpose: 'SERVICE',
+        org: 'ORG-BUYER',
+      },
+    ]);
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['another order’s obligation', { sourceReference: 'ORD_2' }],
+    ['a transaction that is not an order obligation', { transactionType: 'CONTRACT_MILESTONE' }],
+    ['another payer’s transaction', { organizationId: 'ORG-OTHER' }],
+    ['another transaction than the one asked for', { id: 'TXN_2' }],
+  ])('proves nothing about %s', async (_label, differs) => {
+    const { impl } = stubFetch({ status: 200, body: { ...obligation, ...differs } });
+    globalThis.fetch = impl as typeof fetch;
+
+    await expect(read(new EconomicClient(ENV, recordingTokens().service as never))).resolves.toBe(
+      null,
+    );
+  });
+});
