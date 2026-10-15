@@ -48,6 +48,7 @@ export const SPLIT_STEPS = Object.freeze([
   'Runtime roles own nothing (D-045)',
   'Runtime-role check and the generic split, on a throwaway database',
   'Every database session runs in UTC (L7-37)',
+  'The runtime pool and statement timeout come from configuration',
   'Retry replay, published as ops-replay',
 ]);
 
@@ -64,6 +65,7 @@ const UNBUILT = [
   /\btest:independence\b/,
   /\btest:retry-replay\b/,
   /\btest:db-session-utc\b/,
+  /\btest:db-pool-config\b/,
 ];
 const TURBO_BUILDS = /\bpnpm run test:integration\b/;
 

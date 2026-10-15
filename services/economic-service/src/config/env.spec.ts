@@ -1,5 +1,6 @@
 import { EnvValidationError } from '@rasta/config';
 import { corsOrigins, loadEconomicEnv } from './env';
+import { economicOperationBudgets } from './operation-budgets';
 import { withUtcSession } from '@rasta/config';
 
 /**
@@ -384,5 +385,43 @@ describe('ECONOMIC_BALANCE_AUDIT_ENABLED', () => {
 
   it.each(['maybe', 'audit', '2'])('refuses %p rather than guessing', (value) => {
     expect(() => load(value)).toThrow(EnvValidationError);
+  });
+});
+
+/**
+ * #268 r4: DATABASE_STATEMENT_TIMEOUT_MS is opt-in, and when set it must be
+ * above every operation budget — so it can never cut the 60 s contention
+ * budget a settlement's FOR UPDATE queue is allowed.
+ */
+describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets', () => {
+  const at = (statementTimeoutMs: string) => () =>
+    loadEconomicEnv({ ...base, DATABASE_STATEMENT_TIMEOUT_MS: statementTimeoutMs });
+
+  it('unset, applies no statement timeout', () => {
+    const env = loadEconomicEnv(base);
+    expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+    expect(env.DATABASE_URL).not.toContain('statement_timeout');
+  });
+
+  it('declares every budget, at the defaults', () => {
+    expect(
+      economicOperationBudgets(loadEconomicEnv(base)).map((b) => [b.name, b.budgetMs]),
+    ).toEqual([
+      ['CLAIM_WAIT_MS', 7000],
+      ['CONTENTION_TRANSACTION_TIMEOUT_MS', 60_000],
+      ['AUDIT_TX_TIMEOUT_MS', 120_000],
+      ['OUTBOX_CLAIM_LEASE_SECONDS', 12_500],
+    ]);
+  });
+
+  it('refuses the old 15 s default: it would cut the contention budget', () => {
+    expect(at('15000')).toThrow(/not above CONTENTION_TRANSACTION_TIMEOUT_MS, 60000 ms/);
+  });
+
+  it('set, must be above the largest: a balance-audit page, 120 s; the bound is exact', () => {
+    expect(at('120000')).toThrow(
+      /DATABASE_STATEMENT_TIMEOUT_MS: \(120000 ms\) is not above AUDIT_TX_TIMEOUT_MS, 120000 ms/,
+    );
+    expect(at('120001')).not.toThrow();
   });
 });

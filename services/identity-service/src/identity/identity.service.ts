@@ -28,6 +28,7 @@ import {
   type ProvisioningScopePolicy,
 } from './provisioning-scope';
 import { IDENTITY_TOPIC, SERVICE_NAME } from '../config/env';
+import { APPROVAL_TRANSACTION_TIMEOUT_MS } from '../config/operation-budgets';
 import { KeycloakAdminClient, KeycloakCreateUnconfirmedError } from '../keycloak/keycloak.client';
 import { KeycloakProjector } from '../keycloak/keycloak.projector';
 import {
@@ -1302,8 +1303,19 @@ function toRegistrationView(request: RegistrationRow): RegistrationRequestView {
   };
 }
 
-/** The approval transaction's bounds: it may wait on Keycloak under the request lock. */
-const APPROVAL_TRANSACTION_OPTIONS = { maxWait: 10_000, timeout: 65_000 } as const;
+/**
+ * The approval transaction's bounds: it may wait on Keycloak under the request
+ * lock. A second approval of the same request waits on that lock as long as
+ * the first may hold it, so its statements may run as long as the transaction,
+ * whatever the session's timeout — behind PgBouncer, the runtime role's own
+ * default, which `loadEnv` cannot check (#268): `SET LOCAL`, for this
+ * transaction only.
+ */
+export const APPROVAL_TRANSACTION_OPTIONS = {
+  maxWait: 10_000,
+  timeout: APPROVAL_TRANSACTION_TIMEOUT_MS,
+  statementTimeoutMs: APPROVAL_TRANSACTION_TIMEOUT_MS,
+} as const;
 
 /** The closed codes an approval answers with when it cannot proceed (`approveRegistration`). */
 export const REGISTRATION_APPROVAL_CODES = {
