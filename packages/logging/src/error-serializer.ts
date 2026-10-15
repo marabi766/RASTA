@@ -1,0 +1,125 @@
+import { scrubMessage } from './redaction';
+
+/**
+ * Error serialisation for the logger.
+ *
+ * `pino.stdSerializers.err` copies an error's message, stack and every
+ * enumerable property verbatim. A driver error echoing its DSN, or one quoting
+ * a request header, therefore reached the log with its credential intact and
+ * with no length bound — the `logMethod` hook only sees arguments that are
+ * strings. This wraps it: text goes through {@link scrubMessage} (credentials
+ * removed, length capped) and extra properties pass only if named below.
+ */
+
+/**
+ * Own properties of an error that are logged besides `type`, `message`,
+ * `stack`, `cause` and `aggregateErrors`. Everything else — a driver's `meta`,
+ * a request or response object, a client — is dropped: such values carry
+ * request data no key-based rule could name in advance.
+ */
+export const ERROR_PROPERTY_ALLOWLIST: readonly string[] = [
+  'name',
+  'code',
+  'statusCode',
+  'status',
+  'errno',
+  'syscall',
+];
+
+/** How many `cause` links are followed. Deeper ones are dropped. */
+export const MAX_ERROR_CAUSE_DEPTH = 3;
+
+/** How many members of an `AggregateError` are logged. */
+export const MAX_AGGREGATE_ERRORS = 10;
+
+/** How many stack frame lines are kept. */
+export const MAX_STACK_FRAMES = 50;
+
+const FRAME_LINE = /^\s+at /;
+
+/** A serialised error, in the field names pino's own serializer uses. */
+export interface SerializedError {
+  type?: string;
+  message?: string;
+  stack?: string;
+  cause?: unknown;
+  aggregateErrors?: unknown[];
+  [property: string]: unknown;
+}
+
+/**
+ * The stack with the message part and every frame line scrubbed. The message
+ * part is everything before the first frame line (it may span lines and may
+ * itself quote text shaped like a frame); the frames are cut to
+ * {@link MAX_STACK_FRAMES} and scrubbed as one block, so each part is capped.
+ */
+function scrubStack(stack: string): string {
+  const lines = stack.split('\n');
+  let firstFrame = lines.findIndex((line) => FRAME_LINE.test(line));
+  if (firstFrame === -1) firstFrame = lines.length;
+  const head = scrubMessage(lines.slice(0, firstFrame).join('\n'));
+  const frames = lines.slice(firstFrame, firstFrame + MAX_STACK_FRAMES);
+  return frames.length === 0 ? head : `${head}\n${scrubMessage(frames.join('\n'))}`;
+}
+
+function typeOf(value: object): string {
+  const constructorName = (value as { constructor?: { name?: unknown } }).constructor?.name;
+  if (typeof constructorName === 'string' && constructorName !== '') return constructorName;
+  const name = (value as { name?: unknown }).name;
+  return typeof name === 'string' ? name : 'Object';
+}
+
+function read(value: object, key: string): unknown {
+  try {
+    return (value as Record<string, unknown>)[key];
+  } catch {
+    // A throwing getter must not take the log line down with it.
+    return undefined;
+  }
+}
+
+function serialize(value: unknown, depth: number): unknown {
+  if (typeof value === 'string') return scrubMessage(value);
+  if (typeof value !== 'object' || value === null) {
+    // A thrown number, boolean, bigint, symbol, function: no text to leak.
+    return typeof value === 'function' || typeof value === 'symbol' ? typeof value : value;
+  }
+
+  const out: SerializedError = { type: scrubMessage(typeOf(value)) };
+
+  const message = read(value, 'message');
+  if (typeof message === 'string') out.message = scrubMessage(message);
+  const stack = read(value, 'stack');
+  if (typeof stack === 'string') out.stack = scrubStack(stack);
+
+  for (const key of ERROR_PROPERTY_ALLOWLIST) {
+    const property = read(value, key);
+    if (typeof property === 'string') out[key] = scrubMessage(property);
+    else if (typeof property === 'number' || typeof property === 'boolean') out[key] = property;
+  }
+
+  if (depth < MAX_ERROR_CAUSE_DEPTH) {
+    const cause = read(value, 'cause');
+    if (cause !== undefined && cause !== null) out.cause = serialize(cause, depth + 1);
+
+    const members = read(value, 'errors');
+    if (Array.isArray(members)) {
+      out.aggregateErrors = members
+        .slice(0, MAX_AGGREGATE_ERRORS)
+        .map((member) => serialize(member, depth + 1));
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Replaces `pino.stdSerializers.err`: same field names (`type`, `message`,
+ * `stack`, `cause`, `aggregateErrors`, `code`…), but every text is scrubbed
+ * and capped, causes and aggregate members are bounded, and properties outside
+ * {@link ERROR_PROPERTY_ALLOWLIST} are dropped. A string or any other value
+ * thrown in place of an error is handled the same way.
+ */
+export function scrubbedErrorSerializer(value: unknown): unknown {
+  return serialize(value, 0);
+}

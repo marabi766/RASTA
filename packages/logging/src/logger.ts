@@ -1,4 +1,5 @@
-import pino, { type Logger, type LoggerOptions } from 'pino';
+import pino, { type DestinationStream, type Logger, type LoggerOptions } from 'pino';
+import { scrubbedErrorSerializer } from './error-serializer';
 import { buildRedactionPaths, REDACTED, scrubMessage } from './redaction';
 
 /**
@@ -26,6 +27,8 @@ export interface LoggerConfig {
   level?: string;
   /** Human-readable output. Never enable in production — it is slow and unparseable. */
   pretty?: boolean;
+  /** Where JSON lines go instead of stdout; for tests. Takes precedence over `pretty`. */
+  destination?: DestinationStream;
 }
 
 let contextProvider: (() => LogContext | undefined) | undefined;
@@ -50,6 +53,7 @@ export function createLogger(config: LoggerConfig): Logger {
     environment = process.env.NODE_ENV ?? 'development',
     level = process.env.LOG_LEVEL ?? 'info',
     pretty = environment === 'development',
+    destination,
   } = config;
 
   const options: LoggerOptions = {
@@ -81,15 +85,25 @@ export function createLogger(config: LoggerConfig): Logger {
         // Credentials embedded in free-text messages escape key-based
         // redaction; the classic case is a driver error echoing its DSN.
         const scrubbed = args.map((arg) => (typeof arg === 'string' ? scrubMessage(arg) : arg));
+        // `logger.error(err)`: pino would take the message for the line from
+        // the error itself, after this hook, uncapped. Make the error a field
+        // (so the serializer sees it) and the message a scrubbed string.
+        const [first, ...rest] = scrubbed;
+        if (first instanceof Error) {
+          if (typeof rest[0] !== 'string') rest.unshift(scrubMessage(first.message));
+          return method.apply(this, [{ err: first }, ...rest] as Parameters<typeof method>);
+        }
         return method.apply(this, scrubbed as Parameters<typeof method>);
       },
     },
 
     serializers: {
-      err: pino.stdSerializers.err,
-      error: pino.stdSerializers.err,
+      err: scrubbedErrorSerializer,
+      error: scrubbedErrorSerializer,
     },
   };
+
+  if (destination) return pino(options, destination);
 
   if (pretty) {
     try {
