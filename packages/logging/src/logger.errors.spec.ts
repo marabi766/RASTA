@@ -2,6 +2,7 @@ import { Writable } from 'node:stream';
 import { clearLogContextProvider, createLogger, setLogContextProvider } from './logger';
 import { MAX_AGGREGATE_ERRORS, MAX_ERROR_CAUSE_DEPTH } from './error-serializer';
 import { REDACTED, SCRUB_MESSAGE_MAX, TRUNCATED_MESSAGE } from './redaction';
+import { MAX_LOG_STRING_LENGTH } from './scrubbing-destination';
 
 const DSN = 'postgresql://u:LEAK@host';
 const SECRET_TEXT = `${DSN} Bearer LEAK`;
@@ -101,20 +102,20 @@ describe('createLogger — structured errors are scrubbed and capped', () => {
 
   it('caps a 16k message in message, stack and the generated msg', () => {
     const { logger, raw, last } = capture();
-    const long = `${'x'.repeat(16_000)} ${SECRET_TEXT}`;
+    const long = `${'x'.repeat(40_000)} ${SECRET_TEXT}`;
 
     logger.error({ err: new Error(long) }, 'failed');
     logger.error(new Error(long));
 
     // Uncapped, one line carries the 16k message three times (>48k).
-    expect(raw().length).toBeLessThan(2 * 16_000);
+    expect(raw().length).toBeLessThan(2 * 40_000);
     expect(raw()).not.toContain('LEAK');
     const line = last();
     expect(line.err.message.length).toBeLessThanOrEqual(
       SCRUB_MESSAGE_MAX + TRUNCATED_MESSAGE.length,
     );
     expect(line.err.message.endsWith(TRUNCATED_MESSAGE)).toBe(true);
-    expect(line.msg.length).toBeLessThanOrEqual(SCRUB_MESSAGE_MAX + TRUNCATED_MESSAGE.length);
+    expect(line.msg.length).toBeLessThanOrEqual(MAX_LOG_STRING_LENGTH + TRUNCATED_MESSAGE.length);
     expect(line.err.stack.length).toBeLessThan(3 * SCRUB_MESSAGE_MAX);
   });
 
@@ -212,19 +213,21 @@ describe('createLogger — the final msg is scrubbed and capped for every call s
   it('omitted message with a 16k error message is capped in msg too', () => {
     const { logger, last } = capture();
 
-    logger.error({ err: new Error(`${SECRET_TEXT} ${'x'.repeat(16_000)}`) });
+    logger.error({ err: new Error(`${SECRET_TEXT} ${'x'.repeat(40_000)}`) });
 
     // Redaction markers may lengthen the capped text; scrubMessage's bound is 2x.
-    expect(last().msg.length).toBeLessThanOrEqual(2 * SCRUB_MESSAGE_MAX + TRUNCATED_MESSAGE.length);
+    expect(last().msg.length).toBeLessThanOrEqual(
+      2 * MAX_LOG_STRING_LENGTH + TRUNCATED_MESSAGE.length,
+    );
     expect(last().msg).toContain(TRUNCATED_MESSAGE);
   });
 
   it('a 16k explicit message is capped', () => {
     const { logger, last } = capture();
 
-    logger.info({ requestId: 'r' }, 'y'.repeat(16_000));
+    logger.info({ requestId: 'r' }, 'y'.repeat(40_000));
 
-    expect(last().msg.length).toBeLessThanOrEqual(SCRUB_MESSAGE_MAX + TRUNCATED_MESSAGE.length);
+    expect(last().msg.length).toBeLessThanOrEqual(MAX_LOG_STRING_LENGTH + TRUNCATED_MESSAGE.length);
   });
 
   it('interpolation: a secret argument is scrubbed (%s, %o, %j)', () => {
@@ -242,9 +245,9 @@ describe('createLogger — the final msg is scrubbed and capped for every call s
   it('interpolation with a 16k argument is capped', () => {
     const { logger, last } = capture();
 
-    logger.warn('payload %s', 'z'.repeat(16_000));
+    logger.warn('payload %s', 'z'.repeat(40_000));
 
-    expect(last().msg.length).toBeLessThanOrEqual(SCRUB_MESSAGE_MAX + TRUNCATED_MESSAGE.length);
+    expect(last().msg.length).toBeLessThanOrEqual(MAX_LOG_STRING_LENGTH + TRUNCATED_MESSAGE.length);
   });
 
   it('a raw `msg` field is scrubbed', () => {
@@ -334,9 +337,9 @@ describe('createLogger — the final msg is scrubbed and capped for every call s
   it('caps a long message added by a child binding', () => {
     const { logger, last } = capture();
 
-    logger.child({ msg: 'w'.repeat(16_000) }).info({ requestId: 'r' });
+    logger.child({ msg: 'w'.repeat(40_000) }).info({ requestId: 'r' });
 
-    expect(last().msg.length).toBeLessThanOrEqual(SCRUB_MESSAGE_MAX + TRUNCATED_MESSAGE.length);
+    expect(last().msg.length).toBeLessThanOrEqual(MAX_LOG_STRING_LENGTH + TRUNCATED_MESSAGE.length);
   });
 
   it('does not mutate the caller’s fields object', () => {

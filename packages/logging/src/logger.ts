@@ -1,6 +1,7 @@
 import pino, { type DestinationStream, type Logger, type LoggerOptions } from 'pino';
 import { scrubbedErrorSerializer } from './error-serializer';
-import { buildRedactionPaths, REDACTED, scrubMessage } from './redaction';
+import { buildRedactionPaths, REDACTED } from './redaction';
+import { scrubbingDestination, writeFallback } from './scrubbing-destination';
 
 /**
  * Fields that identify *where* a log line came from and *which* request
@@ -47,25 +48,33 @@ export function clearLogContextProvider(): void {
 }
 
 /**
- * Scrubs and caps the `msg` of a finished log line. Runs on pino's serialised
- * record, so it sees the message however it was built: pino's own (redacting)
- * interpolation, an `err.message` it copied in, a child binding, `msgPrefix`
- * or a mixin. A line that is somehow not a JSON object is replaced, never
- * written raw.
+ * The raw stream lines go to: the caller's, else pino-pretty in development,
+ * else stdout (a closed pipe is ignored, as pino's own default does).
  */
-function scrubRecord(line: string): string {
-  try {
-    const record: unknown = JSON.parse(line);
-    if (typeof record !== 'object' || record === null || Array.isArray(record)) {
-      throw new TypeError('log record is not an object');
+function openDestination(
+  destination: DestinationStream | undefined,
+  pretty: boolean,
+): DestinationStream {
+  if (destination) return destination;
+
+  if (pretty) {
+    try {
+      return pino.transport({
+        target: 'pino-pretty',
+        options: { colorize: true, translateTime: 'HH:MM:ss.l', ignore: 'pid,hostname' },
+      }) as DestinationStream;
+    } catch {
+      // pino-pretty is an optional peer. Falling back to JSON is strictly
+      // better than failing to start because the dev formatter is missing.
     }
-    const fields = record as Record<string, unknown>;
-    // Parsing also folds duplicate `msg` keys into the last, pino's winner.
-    if (typeof fields.msg === 'string') fields.msg = scrubMessage(fields.msg);
-    return `${JSON.stringify(fields)}\n`;
-  } catch {
-    return `${JSON.stringify({ level: 'error', msg: 'log record dropped: not serialisable' })}\n`;
   }
+
+  const stdout = pino.destination({ dest: process.stdout.fd || 1, sync: true });
+  stdout.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code !== 'EPIPE') throw error;
+    stdout.write = () => true;
+  });
+  return stdout;
 }
 
 export function createLogger(config: LoggerConfig): Logger {
@@ -78,13 +87,22 @@ export function createLogger(config: LoggerConfig): Logger {
     destination,
   } = config;
 
+  // Every line leaves through this: credentials in any string of it are
+  // removed and its length is bounded, whatever produced it.
+  const output = scrubbingDestination(openDestination(destination, pretty));
+
   const options: LoggerOptions = {
     level,
     base: { service: serviceName, version: serviceVersion, env: environment },
 
     // Attached to every line, evaluated per call so late-bound context is seen.
     mixin() {
-      return contextProvider?.() ?? {};
+      try {
+        return contextProvider?.() ?? {};
+      } catch {
+        // A failing context provider costs the context, never the line.
+        return {};
+      }
     },
 
     redact: {
@@ -103,11 +121,16 @@ export function createLogger(config: LoggerConfig): Logger {
     timestamp: pino.stdTimeFunctions.isoTime,
 
     hooks: {
-      // Credentials embedded in free-text messages escape key-based redaction;
-      // the classic case is a driver error echoing its DSN. Pino builds the
-      // message its own way (redacting interpolation, unused arguments
-      // dropped); the one scrub-and-cap pass runs on the finished line.
-      streamWrite: scrubRecord,
+      // Interpolation, serializers, redaction and mixins all run inside this
+      // call. One that throws (a hostile toString or getter) must not reach
+      // the caller: a fixed line is written instead.
+      logMethod(args, method) {
+        try {
+          method.apply(this, args);
+        } catch {
+          writeFallback(output);
+        }
+      },
     },
 
     serializers: {
@@ -116,25 +139,7 @@ export function createLogger(config: LoggerConfig): Logger {
     },
   };
 
-  if (destination) return pino(options, destination);
-
-  if (pretty) {
-    try {
-      return pino({
-        ...options,
-        transport: {
-          target: 'pino-pretty',
-          options: { colorize: true, translateTime: 'HH:MM:ss.l', ignore: 'pid,hostname' },
-        },
-      });
-    } catch {
-      // pino-pretty is an optional peer. Falling back to JSON is strictly
-      // better than failing to start because the dev formatter is missing.
-      return pino(options);
-    }
-  }
-
-  return pino(options);
+  return pino(options, output);
 }
 
 /** Child logger scoped to a component, so its lines are filterable. */

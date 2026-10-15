@@ -243,18 +243,15 @@ function scrubAuthSchemes(text: string): string {
  * echoing the connection string it failed to open.
  *
  * Linear in the message, with no regular expression that could backtrack. A
- * message longer than {@link SCRUB_MESSAGE_MAX} is cut to it first — never
+ * message longer than `max` (default {@link SCRUB_MESSAGE_MAX}) is cut to it first — never
  * between the halves of a surrogate pair — the rules fail closed at the cut,
  * and it ends in {@link TRUNCATED_MESSAGE}.
  */
-export function scrubMessage(message: string): string {
-  if (message.length <= SCRUB_MESSAGE_MAX) {
+export function scrubMessage(message: string, max: number = SCRUB_MESSAGE_MAX): string {
+  if (message.length <= max) {
     return scrubAuthSchemes(scrubConnectionStrings(message, false));
   }
-  const last = message.charCodeAt(SCRUB_MESSAGE_MAX - 1);
-  const kept = message.slice(
-    0,
-    last >= 0xd800 && last <= 0xdbff ? SCRUB_MESSAGE_MAX - 1 : SCRUB_MESSAGE_MAX,
-  );
+  const last = message.charCodeAt(max - 1);
+  const kept = message.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
   return `${scrubAuthSchemes(scrubConnectionStrings(kept, true))}${TRUNCATED_MESSAGE}`;
 }

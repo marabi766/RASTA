@@ -35,6 +35,8 @@ export const MAX_AGGREGATE_ERRORS = 10;
 /** How many stack frame lines are kept. */
 export const MAX_STACK_FRAMES = 50;
 
+const UNSERIALISABLE_ERROR = '[unserialisable error]';
+
 const FRAME_LINE = /^\s+at /;
 
 /** A serialised error, in the field names pino's own serializer uses. */
@@ -62,13 +64,6 @@ function scrubStack(stack: string): string {
   return frames.length === 0 ? head : `${head}\n${scrubMessage(frames.join('\n'))}`;
 }
 
-function typeOf(value: object): string {
-  const constructorName = (value as { constructor?: { name?: unknown } }).constructor?.name;
-  if (typeof constructorName === 'string' && constructorName !== '') return constructorName;
-  const name = (value as { name?: unknown }).name;
-  return typeof name === 'string' ? name : 'Object';
-}
-
 function read(value: object, key: string): unknown {
   try {
     return (value as Record<string, unknown>)[key];
@@ -76,6 +71,14 @@ function read(value: object, key: string): unknown {
     // A throwing getter must not take the log line down with it.
     return undefined;
   }
+}
+
+function typeOf(value: object): string {
+  const constructor = read(value, 'constructor');
+  const constructorName = constructor === null ? undefined : read(Object(constructor), 'name');
+  if (typeof constructorName === 'string' && constructorName !== '') return constructorName;
+  const name = read(value, 'name');
+  return typeof name === 'string' ? name : 'Object';
 }
 
 function serialize(value: unknown, depth: number): unknown {
@@ -121,5 +124,10 @@ function serialize(value: unknown, depth: number): unknown {
  * thrown in place of an error is handled the same way.
  */
 export function scrubbedErrorSerializer(value: unknown): unknown {
-  return serialize(value, 0);
+  try {
+    return serialize(value, 0);
+  } catch {
+    // A revoked proxy, a hostile `errors` array: log that, never throw.
+    return { type: 'Error', message: UNSERIALISABLE_ERROR };
+  }
 }
