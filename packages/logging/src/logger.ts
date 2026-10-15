@@ -1,4 +1,3 @@
-import { format } from 'node:util';
 import pino, { type DestinationStream, type Logger, type LoggerOptions } from 'pino';
 import { scrubbedErrorSerializer } from './error-serializer';
 import { buildRedactionPaths, REDACTED, scrubMessage } from './redaction';
@@ -47,66 +46,26 @@ export function clearLogContextProvider(): void {
   contextProvider = undefined;
 }
 
-const PLACEHOLDER = /%[sdifjoOc]/;
-
-function isPlainFields(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** The error pino would take a message from: `{ err }` / `{ error }` fields. */
-function fieldError(fields: Record<string, unknown>): Error | undefined {
-  for (const key of ['err', 'error']) {
-    try {
-      const value = fields[key];
-      if (value instanceof Error) return value;
-    } catch {
-      // A throwing getter must not take the log line down with it.
-    }
-  }
-  return undefined;
-}
-
 /**
- * Rewrites the arguments of a log call so the message pino will print is
- * already final: `(fields?, message?, ...interpolation)` becomes
- * `(fields, scrubbedCappedMessage)`. Covers an explicit string, `%s`-style
- * interpolation (formatted here, then scrubbed as a whole, so a secret in an
- * argument is caught), a message pino would generate from `err`/`error`, and a
- * `msg` field. The structured fields themselves are left to the serializers
- * and key-based redaction.
+ * Scrubs and caps the `msg` of a finished log line. Runs on pino's serialised
+ * record, so it sees the message however it was built: pino's own (redacting)
+ * interpolation, an `err.message` it copied in, a child binding, `msgPrefix`
+ * or a mixin. A line that is somehow not a JSON object is replaced, never
+ * written raw.
  */
-function finalMessageArgs(args: unknown[]): unknown[] {
-  const first = args[0];
-  let rest = args.slice(1);
-  let fields: Record<string, unknown> | undefined;
-  if (first instanceof Error) {
-    fields = { err: first };
-  } else if (isPlainFields(first)) {
-    fields = first;
-  } else {
-    // `logger.info('text', ...args)`: the message leads.
-    rest = args;
+function scrubRecord(line: string): string {
+  try {
+    const record: unknown = JSON.parse(line);
+    if (typeof record !== 'object' || record === null || Array.isArray(record)) {
+      throw new TypeError('log record is not an object');
+    }
+    const fields = record as Record<string, unknown>;
+    // Parsing also folds duplicate `msg` keys into the last, pino's winner.
+    if (typeof fields.msg === 'string') fields.msg = scrubMessage(fields.msg);
+    return `${JSON.stringify(fields)}\n`;
+  } catch {
+    return `${JSON.stringify({ level: 'error', msg: 'log record dropped: not serialisable' })}\n`;
   }
-
-  const [text, ...interpolation] = rest;
-  let message: string | undefined;
-  if (typeof text === 'string') {
-    message =
-      interpolation.length > 0 && PLACEHOLDER.test(text) ? format(text, ...interpolation) : text;
-  } else if (fields) {
-    const source = first instanceof Error ? first : fieldError(fields);
-    if (source) message = source.message;
-    else if (typeof fields.msg === 'string') message = fields.msg;
-  }
-
-  if (message === undefined) return fields ? [fields] : args;
-  if (fields && typeof fields.msg === 'string') {
-    // pino lets an explicit message argument win over a `msg` field; drop the
-    // field's raw copy rather than rely on that.
-    const { msg: _raw, ...withoutMsg } = fields;
-    fields = withoutMsg;
-  }
-  return fields ? [fields, scrubMessage(message)] : [scrubMessage(message)];
 }
 
 export function createLogger(config: LoggerConfig): Logger {
@@ -144,14 +103,11 @@ export function createLogger(config: LoggerConfig): Logger {
     timestamp: pino.stdTimeFunctions.isoTime,
 
     hooks: {
-      logMethod(args, method) {
-        // Credentials embedded in free-text messages escape key-based
-        // redaction; the classic case is a driver error echoing its DSN.
-        // Every call shape ends here with ONE scrubbed, capped message string:
-        // pino would otherwise copy an error's raw message into `msg`, or
-        // interpolate arguments into it, after this hook and unscrubbed.
-        return method.apply(this, finalMessageArgs(args) as Parameters<typeof method>);
-      },
+      // Credentials embedded in free-text messages escape key-based redaction;
+      // the classic case is a driver error echoing its DSN. Pino builds the
+      // message its own way (redacting interpolation, unused arguments
+      // dropped); the one scrub-and-cap pass runs on the finished line.
+      streamWrite: scrubRecord,
     },
 
     serializers: {

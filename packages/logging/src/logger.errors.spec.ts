@@ -1,5 +1,5 @@
 import { Writable } from 'node:stream';
-import { createLogger } from './logger';
+import { clearLogContextProvider, createLogger, setLogContextProvider } from './logger';
 import { MAX_AGGREGATE_ERRORS, MAX_ERROR_CAUSE_DEPTH } from './error-serializer';
 import { REDACTED, SCRUB_MESSAGE_MAX, TRUNCATED_MESSAGE } from './redaction';
 
@@ -200,13 +200,13 @@ describe('createLogger — the final msg is scrubbed and capped for every call s
     expect(last().msg).toBe(SCRUBBED);
   });
 
-  it('omitted message: { error } gets a scrubbed msg', () => {
+  it('omitted message: { error } leaks nothing (pino derives no msg from `error`)', () => {
     const { logger, raw, last } = capture();
 
     logger.error({ error: new Error(SECRET_TEXT) });
 
     expect(raw()).not.toContain('LEAK');
-    expect(last().msg).toBe(SCRUBBED);
+    expect(last().error.message).toBe(SCRUBBED);
   });
 
   it('omitted message with a 16k error message is capped in msg too', () => {
@@ -277,6 +277,66 @@ describe('createLogger — the final msg is scrubbed and capped for every call s
 
     expect(last().msg).toBe('hello');
     expect(raw()).not.toContain('LEAK');
+  });
+
+  it('keeps pino’s redacting interpolation: %j, %o and a dropped trailing object', () => {
+    const { logger, raw } = capture();
+
+    logger.info('value %j', { password: 'LEAK' });
+    logger.info('value %o', { password: 'LEAK' });
+    (logger.info as (...args: unknown[]) => void)('value %s', 'ok', { password: 'LEAK' });
+
+    expect(raw()).not.toContain('LEAK');
+    expect(raw()).toContain(REDACTED);
+  });
+
+  it('never throws for %j with a bigint', () => {
+    const { logger, last } = capture();
+
+    expect(() => logger.info('value %j', { amount: 1n })).not.toThrow();
+    expect(last().msg).toContain('value');
+  });
+
+  it('scrubs a null/undefined-leading call', () => {
+    const { logger, raw } = capture();
+
+    logger.info(null, 'Bearer LEAK');
+    logger.info(undefined, 'Bearer LEAK');
+
+    expect(raw()).not.toContain('LEAK');
+  });
+
+  it('scrubs a plain error-like object’s message', () => {
+    const { logger, raw, last } = capture();
+
+    logger.error({ err: { message: 'Bearer LEAK' } });
+
+    expect(raw()).not.toContain('LEAK');
+    expect(last().msg).toBe(`Bearer ${REDACTED}`);
+  });
+
+  it('scrubs messages added after the call: child msg binding, msgPrefix, mixin', () => {
+    const { logger, raw, last } = capture();
+
+    logger.child({ msg: 'Bearer LEAK' }).info({ requestId: 'r' });
+    logger.child({}, { msgPrefix: 'Bearer LEAK ' }).info('hello');
+    expect(last().msg).toBe(`Bearer ${REDACTED} hello`);
+    setLogContextProvider(() => ({ msg: 'Bearer LEAK' }) as never);
+    try {
+      logger.info('hello');
+    } finally {
+      clearLogContextProvider();
+    }
+
+    expect(raw()).not.toContain('LEAK');
+  });
+
+  it('caps a long message added by a child binding', () => {
+    const { logger, last } = capture();
+
+    logger.child({ msg: 'w'.repeat(16_000) }).info({ requestId: 'r' });
+
+    expect(last().msg.length).toBeLessThanOrEqual(SCRUB_MESSAGE_MAX + TRUNCATED_MESSAGE.length);
   });
 
   it('does not mutate the caller’s fields object', () => {
