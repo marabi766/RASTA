@@ -72,13 +72,24 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   /** The client every repository uses. Tenant scoping is already applied. */
   readonly client: ExtendedPrismaClient;
 
-  constructor(databaseUrl: string) {
+  /**
+   * @param transactionTimeoutMs How long any interactive transaction on this
+   *   client may stay open (`CONSTRUCTION_TRANSACTION_TIMEOUT_MS`). Set on the
+   *   client, so it bounds {@link transaction}, {@link snapshot} and any
+   *   `client.$transaction` alike; a caller that names its own timeout keeps it.
+   *   Required: left out, Prisma's unwritten 5 000 ms would apply.
+   */
+  constructor(
+    databaseUrl: string,
+    readonly transactionTimeoutMs: number,
+  ) {
     this.base = new PrismaClient({
       datasources: { db: { url: databaseUrl } },
       log: [
         { emit: 'event', level: 'warn' },
         { emit: 'event', level: 'error' },
       ],
+      transactionOptions: { timeout: transactionTimeoutMs },
     });
     this.client = this.buildClient();
   }
@@ -140,6 +151,8 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    *
    * The outbox pattern requires the state change and the outbox insert to
    * share one transaction (AGENTS.md A-08, ADR-021).
+   *
+   * Bounded by {@link transactionTimeoutMs} unless `timeoutMs` names another.
    */
   transaction<T>(
     fn: (tx: ExtendedPrismaClient) => Promise<T>,
