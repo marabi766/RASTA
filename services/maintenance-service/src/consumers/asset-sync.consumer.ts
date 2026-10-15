@@ -30,6 +30,7 @@ import {
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
 import { transferOpenWorkTotal } from '../observability/metrics';
+import { REFRESH_TRANSACTION_TIMEOUT_MS } from '../config/operation-budgets';
 
 /**
  * Keeps maintenance's picture of the machines accurate.
@@ -99,13 +100,6 @@ const PROJECTIONS: Record<ConsumedEventName, Projection | null> = {
     patch: () => ({ status: 'DECOMMISSIONED' }),
   },
 };
-
-/**
- * A refresh holds the asset's locks across up to three short exchanges with
- * asset-service (each bounded by its own deadline), so its transaction is given
- * room. Replays are rare operator actions; other deliveries for that asset wait.
- */
-const REFRESH_TRANSACTION_TIMEOUT_MS = 30_000;
 
 const CONSUMER_NAME = 'maintenance-service.asset-sync';
 

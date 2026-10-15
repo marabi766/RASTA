@@ -2,9 +2,10 @@
 # -----------------------------------------------------------------------------
 # Re-applies every role's password from the current environment to an existing
 # cluster, and the UTC session default every service database and role carries
-# (lib/session-timezone.bash, L7-37). Non-destructive: ALTER ROLE ... PASSWORD
-# and ALTER ROLE/DATABASE ... SET TimeZone, nothing else — no data, no grant is
-# touched.
+# (lib/session-timezone.bash, L7-37), and the optional runtime statement_timeout
+# where POSTGRES_STATEMENT_TIMEOUT_MS_<SVC> is set (lib/session-statement-timeout.bash).
+# Non-destructive: ALTER ROLE ... PASSWORD and ALTER ROLE/DATABASE ... SET,
+# nothing else — no data, no grant is touched.
 #
 #   pnpm db:rotate-role-passwords
 #
@@ -31,6 +32,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/role-passwords.bash"
 resolve_role_passwords || exit 1
 # shellcheck source=session-timezone.bash
 source "$(dirname "${BASH_SOURCE[0]}")/session-timezone.bash"
+# shellcheck source=session-statement-timeout.bash
+source "$(dirname "${BASH_SOURCE[0]}")/session-statement-timeout.bash"
 
 : "${POSTGRES_USER:?POSTGRES_USER must name the superuser}"
 
@@ -76,6 +79,10 @@ for svc in "${RASTA_SERVICES[@]}"; do
     [[ " ${missing[*]} " == *" ${role} "* ]] || present+=("${role}")
   done
   ensure_utc_session_defaults "${db}" "${present[@]}"
+  # The optional runtime statement_timeout, where POSTGRES_STATEMENT_TIMEOUT_MS_<SVC> asks for it.
+  if [[ " ${missing[*]} " != *" rasta_${svc} "* ]]; then
+    ensure_runtime_statement_timeout "${svc}" "${db}" "rasta_${svc}" || exit 1
+  fi
   utc_databases=$((utc_databases + 1))
 done
 

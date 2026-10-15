@@ -8,6 +8,7 @@ import {
   loadEnv,
   outboxPurgeEnvSchema,
 } from '@rasta/config';
+import { notificationOperationBudgets } from './operation-budgets';
 
 export const SERVICE_NAME = 'notification-service';
 
@@ -224,15 +225,19 @@ export type NotificationEnv = z.infer<typeof notificationEnvSchema>;
  *                 database would violate A-01 quietly.
  */
 export function loadNotificationEnv(source: NodeJS.ProcessEnv = process.env): NotificationEnv {
-  return loadEnv(notificationEnvSchema, {
-    ...source,
-    SERVICE_NAME: source.SERVICE_NAME ?? SERVICE_NAME,
-    PORT: source.PORT ?? source.PORT_NOTIFICATION ?? DEFAULT_PORT,
-    DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_NOTIFICATION,
-    KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? SERVICE_NAME,
-    KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? DISPATCHER_CONSUMER_GROUP,
-    CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
-  });
+  return loadEnv(
+    notificationEnvSchema,
+    {
+      ...source,
+      SERVICE_NAME: source.SERVICE_NAME ?? SERVICE_NAME,
+      PORT: source.PORT ?? source.PORT_NOTIFICATION ?? DEFAULT_PORT,
+      DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_NOTIFICATION,
+      KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? SERVICE_NAME,
+      KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? DISPATCHER_CONSUMER_GROUP,
+      CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
+    },
+    { operationBudgets: notificationOperationBudgets },
+  );
 }
 
 export function corsOrigins(env: NotificationEnv): string[] {

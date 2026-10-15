@@ -1483,6 +1483,29 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
     Ingest بی‌پایان، تنها یا کنار Publish، Batch Purge و Batch Mail بی‌پایان؛ Ingest ـی که پس از بستن برمی‌گردد) و در
     supplier (Consumer روشن از راه Gate واقعی؛ Handler بی‌پایان کنار Publish و Batch بی‌پایان؛ Handler دیررس) ⇐ خروج ۰
     زیر مهلت، پیام Commit‌نشده؛ و `src/app.module.shutdown.spec.ts` در هر دو (سیم‌کشی و یک مهلت).
+  - **دو حلقهٔ پس‌زمینه و Worker موقتی در همان مهلت (Codex r1 روی #277، فاز ۳ خاموش‌شدن):** construction، economic و
+    marketplace تا اینجا `OutboxShutdown` نداشتند؛ حالا هر سه دارند (رله به‌اضافهٔ `workers`)، و `onApplicationShutdown`
+    فقط به همان توقف می‌پیوندد.
+    - **`StandingBootstrap` (construction):** `stop({ deadlineAt })` صفحهٔ تازه‌ای شروع نمی‌کند (پیش از هر صفحه و پس از
+      بازگشت Fetch کند بررسی می‌شود)، خواب Retry را بیدار می‌کند و برای صفحهٔ در حال اعمال تا مهلت صبر می‌کند. هر صفحه و پیشروی
+      نشانگرش در یک تراکنش Commit می‌شوند؛ پس صفحهٔ رهاشده Rollback می‌شود و شروع بعدی از Cursor ثبت‌شده ادامه می‌دهد
+      (`ALREADY_LOADED` / `STOPPED` از `runOnce`).
+    - **`LedgerBalanceAudit` (economic):** پول را جابه‌جا نمی‌کند و هر صفحه یک Snapshot فقط‌خواندنی است که خروج Rollback می‌کند.
+      جایگاه گذر (`skip`) و یافته‌ها فقط در حافظه‌اند و دو Gauge (`walletsOpenTotal`، `walletLedgerDeviationsTotal`) فقط
+      وقتی نوشته می‌شوند که گذر همهٔ کیف‌پول‌ها را دیده باشد؛ گذرِ نیمه‌کاره هیچ Gauge نمی‌نویسد (وگرنه شمارش ناقص مثل
+      انحرافِ کمتر خوانده می‌شد و می‌توانست هشدار را خاموش کند). گذر بعدی (فرایند بعدی یا هر Replica) از کیف‌پول اول شروع
+      می‌کند؛ هیچ وضعیتی برای ادامه لازم نیست. انحراف‌های صفحه‌های تمام‌شده هنوز Log می‌شوند.
+    - **`OrderSagaWorker` (marketplace):** `stop({ deadlineAt })` یک‌بار `worker.shutdown()` را صدا می‌زند، برای `run()` تا
+      مهلت صبر می‌کند و فقط پس از تخلیهٔ تمیز Connection را می‌بندد؛ `Worker.create` اکنون `shutdownForceTime` برابر
+      `outboxShutdownBudgetMs` دارد (SDK از لحظهٔ `shutdown()` می‌شمارد و `GracefulShutdownPeriodExpiredError` می‌دهد).
+      Activityها لغو را نمی‌بینند و ممکن است هر جا قطع شوند؛ درستی Saga به تکرارپذیری آن‌ها تکیه دارد: همهٔ فراخوانی‌های
+      مالی به economic-service کلید Idempotency مشتق از سفارش دارند (`idempotencyKeyFor`: hold، authorise، settle، refund،
+      cancel، dispute، resolveDispute)، `findObligation` فقط‌خواندنی است، `createObligation` اگر `economicTransactionId`
+      ثبت شده باشد دوباره نمی‌فرستد، و گذارهای محلی (`systemTransition`) در وضعیت مقصد بی‌صدا برمی‌گردند. Temporal برای
+      تلاشی که کامل نشده نتیجه‌ای ثبت نمی‌کند و Worker بعدی دوباره اجرایش می‌کند.
+    - آزمون: `standing-bootstrap.shutdown.spec.ts`، `balance-audit.shutdown.spec.ts`، `worker.shutdown.spec.ts` و
+      `app.module.shutdown.spec.ts` در هر سه سرویس. سرویس‌های contract، identity و audit (notification، supplier و
+      inventory با فاز ۲a، #276، آمدند) و Consumerهای Kafka سه سرویس بالا هنوز بیرون از Coordinatorاند.
   - **پیامد:** رله حالا پیش از بسته شدن سرور HTTP می‌ایستد، نه پس از آن. ردیفی که درخواستی در همین فاصله بنویسد در
     شروع بعدی (یا Replica دیگر) منتشر می‌شود — همان چیزی که پیش‌تر برای ردیف‌های لحظهٔ آخر هم بود.
 

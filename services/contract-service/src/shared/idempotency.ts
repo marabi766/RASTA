@@ -5,20 +5,15 @@ import type { ExtendedPrismaClient, PrismaService } from '../prisma/prisma.servi
 import { isUniqueViolation } from './prisma-errors';
 import { idempotentReplaysTotal } from '../observability/metrics';
 import { SERVICE_NAME, type ContractEnv } from '../config/env';
+import { IN_FLIGHT_WAIT_MS, WAIT_TRANSACTION_SLACK_MS } from '../config/operation-budgets';
+
+export { IN_FLIGHT_WAIT_MS };
 
 /** `Retry-After` on the in-flight 409, as docs/06 § 6.8 states it. */
 const IN_FLIGHT_RETRY_AFTER_SECONDS = 1;
 
-/**
- * How long a request waits on a key another request is still working on, before it
- * answers `409 CONFLICT` with `Retry-After`. A command takes a fraction of a second, so a
- * double submit is normally answered with the first request's own response.
- */
-export const IN_FLIGHT_WAIT_MS = 5_000;
 /** Between looks at a claim whose holder has not yet begun its transaction. */
 const IN_FLIGHT_POLL_MS = 100;
-/** Slack for the waiting transaction beyond its lock wait, so the wait ends first. */
-const WAIT_TRANSACTION_SLACK_MS = 2_000;
 
 /**
  * How many times one claim tries to reserve a key it keeps finding vanished or expired:

@@ -8,6 +8,7 @@ import {
   loadEnv,
   outboxPurgeEnvSchema,
 } from '@rasta/config';
+import { inventoryOperationBudgets } from './operation-budgets';
 
 export const SERVICE_NAME = 'inventory-service';
 
@@ -166,15 +167,22 @@ export type InventoryEnv = z.infer<typeof inventoryEnvSchema>;
  *                 database would violate A-01 quietly.
  */
 export function loadInventoryEnv(source: NodeJS.ProcessEnv = process.env): InventoryEnv {
-  return loadEnv(inventoryEnvSchema, {
-    ...source,
-    SERVICE_NAME: source.SERVICE_NAME ?? SERVICE_NAME,
-    PORT: source.PORT ?? source.PORT_INVENTORY ?? DEFAULT_PORT,
-    DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_INVENTORY,
-    KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? SERVICE_NAME,
-    KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
-    CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
-  });
+  // A command's wait for a stock row ends in lock_timeout (55P03, a retryable
+  // 409) only while the session's statement_timeout, if any, is longer than
+  // the whole command (operation budgets).
+  return loadEnv(
+    inventoryEnvSchema,
+    {
+      ...source,
+      SERVICE_NAME: source.SERVICE_NAME ?? SERVICE_NAME,
+      PORT: source.PORT ?? source.PORT_INVENTORY ?? DEFAULT_PORT,
+      DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_INVENTORY,
+      KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? SERVICE_NAME,
+      KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
+      CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
+    },
+    { operationBudgets: inventoryOperationBudgets },
+  );
 }
 
 export function corsOrigins(env: InventoryEnv): string[] {

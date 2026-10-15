@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
 import { Prisma } from '../generated/prisma';
 import { PrismaService } from '../prisma/prisma.service';
+import { INGEST_TRANSACTION_TIMEOUT_MS } from '../config/operation-budgets';
 import type { AuditEventRecord } from './audit.mapper';
 import {
   ORGANIZATION_DOMAIN_STATUSES,
@@ -57,7 +58,7 @@ export type IngestOutcome = 'WRITTEN' | 'DUPLICATE';
  * it does not weaken any guarantee — the lock, the trigger and the unique index
  * are what refuse a fork, and none of them is a timeout.
  */
-const INGEST_TRANSACTION = { maxWait: 5_000, timeout: 30_000 } as const;
+const INGEST_TRANSACTION = { maxWait: 5_000, timeout: INGEST_TRANSACTION_TIMEOUT_MS } as const;
 
 /**
  * The organization status that removes a node from every `UNION_ADMIN` subtree.

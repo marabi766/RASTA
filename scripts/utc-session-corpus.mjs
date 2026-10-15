@@ -20,3 +20,20 @@ export const UTC_SESSION_CORPUS = [
   'postgresql://db/rasta?options=-c%20TimeZone%3DUTC%20-c%20TimeZone%3DAsia%2FTehran',
   'postgresql://db/rasta?schema=public#x',
 ];
+
+/**
+ * URLs both copies refuse before reading any option (Codex r5 on #268): more
+ * than one `options` parameter (the driver keeps only the last), and a raw
+ * control character (a URL parser drops a tab, CR or LF and reads another name).
+ */
+export const UTC_SESSION_REFUSED = [
+  `postgresql://${CREDENTIALS}db.internal/rasta?options=-c%20statement_timeout%3D15000&options=-c%20TimeZone%3DUTC`,
+  'postgresql://db/rasta?options=-c%20TimeZone%3DUTC&options=-c%20statement_timeout%3D15000',
+  'postgresql://db/rasta?options=-c%20search_path%3Dx&%6Fptions=-c%20TimeZone%3DUTC',
+  'postgresql://db/rasta?options=-c%20TimeZone%3DUTC&options=',
+  ...['\t', '\r', '\n', '\u0000', '\u001f', '\u007f'].map(
+    (char) =>
+      `postgresql://${CREDENTIALS}db.internal/rasta?options=-c%20sta${char}tement_timeout%3D1000%20-c%20TimeZone%3DUTC`,
+  ),
+  'postgresql://db/rasta?schema=public&application_name=a\tb',
+];

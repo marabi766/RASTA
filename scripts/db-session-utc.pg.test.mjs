@@ -39,7 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { TIMEZONE_FINDINGS_SQL } from './check-db-runtime-privileges-lib.mjs';
 import { withUtcSession as runnerWithUtcSession } from './prisma-lib.mjs';
-import { UTC_SESSION_CORPUS } from './utc-session-corpus.mjs';
+import { UTC_SESSION_CORPUS, UTC_SESSION_REFUSED } from './utc-session-corpus.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
@@ -254,6 +254,20 @@ test('3. every demo seed opens its database through withUtcSession', () => {
 test('4. the migration runner’s copy and the services’ agree', () => {
   for (const url of [...UTC_SESSION_CORPUS, RAW_URL]) {
     assert.equal(runnerWithUtcSession(url), withUtcSession(url), url);
+  }
+  // …and refuse the same URLs, with the same message (Codex r5 on #268).
+  for (const url of UTC_SESSION_REFUSED) {
+    let runner;
+    let services;
+    assert.throws(
+      () => runnerWithUtcSession(url),
+      (error) => ((runner = error.message), true),
+    );
+    assert.throws(
+      () => withUtcSession(url),
+      (error) => ((services = error.message), true),
+    );
+    assert.equal(runner, services, JSON.stringify(url));
   }
 });
 
