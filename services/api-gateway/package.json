@@ -7,9 +7,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rimraf dist .turbo",
-    "dev": "node -r @swc-node/register --watch --env-file=../../.env src/main.ts",
+    "dev": "node -r @swc-node/register -r ./dev/telemetry.ts --watch --env-file=../../.env src/main.ts",
     "start": "node --env-file=../../.env dist/main.js",
-    "lint": "eslint src",
+    "lint": "eslint src dev",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "jest --selectProjects unit --passWithNoTests",
     "test:unit": "jest --selectProjects unit --passWithNoTests",

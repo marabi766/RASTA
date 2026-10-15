@@ -135,14 +135,6 @@ jobs:
         # `pnpm dev` resolves them (turbo dry run). Codex r1 on #271.
         run: pnpm run test:construction-turbo-env
 
-      - name: Service dev scripts load TypeScript as CommonJS
-        # `pnpm dev` ran the services through swc-node's ES-module loader,
-        # under which main.ts could not import AppModule from its CommonJS
-        # sibling: every service refused at link time. Runs each service's
-        # own dev loader flags on a two-file entry; services with a Prisma
-        # schema generate the client first.
-        run: pnpm run test:dev-loader
-
       - name: Image scope rule
         # The rule that decides which images a pull request builds and scans
         # (L7-35). A wrong rule would quietly skip a changed image.
@@ -262,6 +254,18 @@ jobs:
         # its environment, must exit naming the variable and never its value
         # (@rasta/config assertNoMigratorCredentials; Codex review of #176).
         run: pnpm run test:boot-guard
+
+      - name: Service dev scripts load TypeScript as CommonJS, telemetry first
+        # `pnpm dev` ran the services through swc-node's ES-module loader,
+        # under which main.ts could not import AppModule from its CommonJS
+        # sibling: every service refused at link time. Runs each service's
+        # own dev loader flags on a two-file entry; services with a Prisma
+        # schema generate the client first. And swc hoists main.ts's imports
+        # above its initTelemetry(), so dev preloads dev/telemetry.ts: the
+        # real main.ts, stopped as AppModule is about to load, must find the
+        # SDK started (Codex on #281). After Build: main.ts loads the built
+        # packages and the generated Prisma client.
+        run: pnpm run test:dev-loader
 
   # ---------------------------------------------------------------------------
   # Security. Every gate here fails the build rather than warning: a warning
