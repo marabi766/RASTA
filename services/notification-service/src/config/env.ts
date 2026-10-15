@@ -6,6 +6,7 @@ import {
   httpUrlSchema,
   kafkaEnvSchema,
   loadEnv,
+  outboxPurgeEnvSchema,
 } from '@rasta/config';
 import { notificationOperationBudgets } from './operation-budgets';
 
@@ -65,6 +66,7 @@ export const NOTIFICATION_DLQ_TOPIC = 'rasta.notification.v1.dlq';
 export const notificationEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
   .merge(kafkaEnvSchema)
+  .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
     /**

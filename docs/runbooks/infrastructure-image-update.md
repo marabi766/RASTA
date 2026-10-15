@@ -55,8 +55,9 @@ docker buildx imagetools inspect postgis/postgis:16-3.4 | sed -n 's/^Digest: *//
 docker buildx imagetools inspect postgis/postgis:16-3.4 | sed -n 's/^MediaType: *//p'   # index یا manifest list
 ```
 
-اگر MediaType یک Manifest تکی است (`postgis/postgis` و `clamav/clamav` فقط `amd64` منتشر می‌کنند)، همان Manifest تنها
-چیزی است که می‌شود Pin کرد؛ Index وجود ندارد.
+اگر MediaType یک Manifest تکی است (`postgis/postgis` فقط `amd64` منتشر می‌کند)، همان Manifest تنها چیزی است که می‌شود
+Pin کرد؛ Index وجود ندارد. `clamav/clamav` فقط `amd64` دارد ولی Index منتشر می‌کند (`amd64` + Attestation)؛ Digest همان
+Index را Pin کنید.
 
 ۲. Digest را در **همهٔ** جاهای جدول بالا با هم جایگزین کنید — یک Commit، نه یکی‌یکی:
 

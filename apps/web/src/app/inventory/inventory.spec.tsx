@@ -260,71 +260,39 @@ describe('the stock of the chosen warehouse', () => {
   );
 });
 
+// One test per state: each axe run gets the whole default timeout to itself.
+// All sixteen in one test overran the 5 s default on a loaded CI runner (main
+// run 38715938220), while one state takes about a tenth of a second here.
 describe('accessibility', () => {
-  it('has no violations in any state', async () => {
-    const query = { warehouse: WAREHOUSE_ID };
-    const states: Parameters<typeof InventoryScreen>[0][] = [
+  const query = { warehouse: WAREHOUSE_ID };
+  const chosen = (picked: InventorySelection): Parameters<typeof InventoryScreen>[0] => ({
+    warehouses: warehouses([WAREHOUSE]),
+    selection: picked,
+    query,
+  });
+
+  it.each<[string, Parameters<typeof InventoryScreen>[0]]>([
+    [
+      'warehouses, more to page',
       { warehouses: warehouses([WAREHOUSE], 'w2'), selection: null, query: {} },
-      { warehouses: warehouses([]), selection: null, query: {} },
-      { warehouses: { kind: 'FORBIDDEN' }, selection: null, query: {} },
-      { warehouses: { kind: 'NOT_FOUND' }, selection: null, query: {} },
-      { warehouses: UNAVAILABLE, selection: null, query: {} },
-      { warehouses: MALFORMED, selection: null, query: {} },
-      {
-        warehouses: warehouses([WAREHOUSE]),
-        selection: selection(OK_WAREHOUSE, stock([ITEM], 'SKI_2')),
-        query,
-      },
-      {
-        warehouses: warehouses([WAREHOUSE]),
-        selection: selection(OK_WAREHOUSE, stock([])),
-        query,
-      },
-      {
-        warehouses: warehouses([WAREHOUSE]),
-        selection: selection(OK_WAREHOUSE, { kind: 'FORBIDDEN' }),
-        query,
-      },
-      {
-        warehouses: warehouses([WAREHOUSE]),
-        selection: selection(OK_WAREHOUSE, { kind: 'NOT_FOUND' }),
-        query,
-      },
-      {
-        warehouses: warehouses([WAREHOUSE]),
-        selection: selection(OK_WAREHOUSE, UNAVAILABLE),
-        query,
-      },
-      {
-        warehouses: warehouses([WAREHOUSE]),
-        selection: selection(OK_WAREHOUSE, MALFORMED),
-        query,
-      },
-      {
-        warehouses: warehouses([WAREHOUSE]),
-        selection: selection({ kind: 'FORBIDDEN' }, null),
-        query,
-      },
-      {
-        warehouses: warehouses([WAREHOUSE]),
-        selection: selection({ kind: 'NOT_FOUND' }, null),
-        query,
-      },
-      {
-        warehouses: warehouses([WAREHOUSE]),
-        selection: selection(UNAVAILABLE, null),
-        query,
-      },
-      {
-        warehouses: warehouses([WAREHOUSE]),
-        selection: selection(MALFORMED, null),
-        query,
-      },
-    ];
-    for (const props of states) {
-      const { container, unmount } = render(<InventoryScreen {...props} />);
-      expect(await axe(container)).toHaveNoViolations();
-      unmount();
-    }
+    ],
+    ['no warehouses', { warehouses: warehouses([]), selection: null, query: {} }],
+    ['warehouses refused', { warehouses: { kind: 'FORBIDDEN' }, selection: null, query: {} }],
+    ['warehouses not found', { warehouses: { kind: 'NOT_FOUND' }, selection: null, query: {} }],
+    ['warehouses unavailable', { warehouses: UNAVAILABLE, selection: null, query: {} }],
+    ['warehouses malformed', { warehouses: MALFORMED, selection: null, query: {} }],
+    ['stock, more to page', chosen(selection(OK_WAREHOUSE, stock([ITEM], 'SKI_2')))],
+    ['no stock', chosen(selection(OK_WAREHOUSE, stock([])))],
+    ['stock refused', chosen(selection(OK_WAREHOUSE, { kind: 'FORBIDDEN' }))],
+    ['stock not found', chosen(selection(OK_WAREHOUSE, { kind: 'NOT_FOUND' }))],
+    ['stock unavailable', chosen(selection(OK_WAREHOUSE, UNAVAILABLE))],
+    ['stock malformed', chosen(selection(OK_WAREHOUSE, MALFORMED))],
+    ['warehouse refused', chosen(selection({ kind: 'FORBIDDEN' }, null))],
+    ['warehouse not found', chosen(selection({ kind: 'NOT_FOUND' }, null))],
+    ['warehouse unavailable', chosen(selection(UNAVAILABLE, null))],
+    ['warehouse malformed', chosen(selection(MALFORMED, null))],
+  ])('has no violations (%s)', async (_name, props) => {
+    const { container } = render(<InventoryScreen {...props} />);
+    expect(await axe(container)).toHaveNoViolations();
   });
 });
