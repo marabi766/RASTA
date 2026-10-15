@@ -6,6 +6,7 @@ import {
   key,
   newPrisma,
   publishOffer,
+  sagaStep,
   tenants,
   wire,
   type Wiring,
@@ -212,14 +213,20 @@ describe('concurrency (real database)', () => {
       );
 
     const transactionId = `TXN_${ulid()}`;
+    // Two attempts of one scheduled activity — Temporal starts the second when
+    // the first overruns its timeout — so one step key (D-053).
+    const step = sagaStep();
     const results = await Promise.allSettled([
-      saga(() => wiring.orders.markFundsHeld(order.id, transactionId)),
-      saga(() => wiring.orders.markFundsHeld(order.id, transactionId)),
+      saga(() => wiring.orders.markFundsHeld(order.id, transactionId, step)),
+      saga(() => wiring.orders.markFundsHeld(order.id, transactionId, step)),
     ]);
 
     // Both succeed, because a re-run of a completed activity is a no-op — but
-    // only one history row exists.
-    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
+    // only one history row exists, and both answer what the first did.
+    expect(results).toEqual([
+      { status: 'fulfilled', value: 'FUNDS_HELD' },
+      { status: 'fulfilled', value: 'FUNDS_HELD' },
+    ]);
 
     const history = await runUnscoped('the suite counts the transitions written', () =>
       prisma.client.orderStatusHistory.findMany({

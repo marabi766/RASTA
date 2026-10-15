@@ -10,6 +10,7 @@ import {
   key,
   newPrisma,
   publishOffer,
+  sagaStep,
   tenants,
   wire,
   type Wiring,
@@ -105,7 +106,10 @@ describe('order saga activities (real database)', () => {
   }
 
   function activitiesWith(economic: EconomicClient): OrderActivities {
-    return createActivities({ orders: wiring.orders, economic });
+    // Outside a worker there is no activity context to take a step key from.
+    // Every call here stands for a separately scheduled activity, so each gets
+    // its own; retries of one step are `saga-activity-replay.int-spec.ts`.
+    return createActivities({ orders: wiring.orders, economic, currentStep: sagaStep });
   }
 
   /** A real PENDING order, placed through the real service by a real buyer. */
