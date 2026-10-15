@@ -1,0 +1,346 @@
+import { MockActivityEnvironment } from '@temporalio/testing';
+import { RastaError, getContext, runUnscoped } from '@rasta/nest-common';
+import { ulid } from 'ulid';
+import { createActivities, type OrderActivities } from '../src/temporal/activities';
+import type { EconomicClient } from '../src/economic/economic.client';
+import type { PrismaService } from '../src/prisma/prisma.service';
+import {
+  asActor,
+  cleanup,
+  key,
+  newPrisma,
+  publishOffer,
+  tenants,
+  wire,
+  type Wiring,
+} from './helpers';
+
+/**
+ * A saga activity whose completion Temporal never recorded is run again — and
+ * by then a party may have moved the order on (D-053, Codex on #279).
+ *
+ * Each case commits a step, drops its answer (the worker died, shut down or
+ * lost the response before Temporal recorded the completion), lets a party
+ * commit, and then runs the **same scheduled activity** again: same workflow,
+ * same run, same activity id, next attempt. That is all Temporal changes on a
+ * retry, and it is what these cases vary. The retry must answer what the first
+ * attempt answered and change nothing.
+ *
+ * The activities run inside `MockActivityEnvironment`, so the step's key comes
+ * from the real activity context the way it does on a worker — not from a
+ * stand-in the suite supplies. The domain, the state machine, the row lock and
+ * the database are the real ones; only `EconomicClient` is stubbed, as in
+ * `activities.int-spec.ts`.
+ *
+ * Before the step record, the first three cases failed with a non-retryable
+ * BUSINESS_RULE_VIOLATION — the saga's end, with the obligation still HELD —
+ * and the reminder case counted one reminder twice.
+ */
+describe('a retried saga activity answers what its first attempt answered (D-053)', () => {
+  jest.setTimeout(60_000);
+
+  let prisma: PrismaService;
+  let wiring: Wiring;
+  const org = tenants();
+
+  beforeAll(() => {
+    prisma = newPrisma();
+    wiring = wire(prisma);
+  });
+
+  afterAll(async () => {
+    await cleanup(prisma, [org.buyer, org.supplier, org.other]);
+    await prisma.onModuleDestroy();
+  });
+
+  const asBuyer = <T>(fn: () => Promise<T>) =>
+    asActor({ organizationId: org.buyer, roles: ['PROCUREMENT_USER'], userId: 'USR-RPL-B' }, fn);
+  const asSupplier = <T>(fn: () => Promise<T>) =>
+    asActor({ organizationId: org.supplier, roles: ['SUPPLIER'], userId: 'USR-RPL-S' }, fn);
+  const asOperator = <T>(fn: () => Promise<T>) =>
+    asActor({ organizationId: org.other, roles: ['UNION_ADMIN'], userId: 'USR-RPL-OPS' }, fn);
+
+  /** An economic-service stub that counts what it was asked, per method. */
+  function stubEconomic(settle: () => Promise<unknown> = async () => SETTLED) {
+    const calls: string[] = [];
+    const method = (name: string, answer: () => Promise<unknown>) => async (): Promise<unknown> => {
+      // Asserted so a call can never leave without the buyer's tenant.
+      expect(getContext().organizationId).toBe(org.buyer);
+      calls.push(name);
+      return answer();
+    };
+    const economic = {
+      createObligation: method('createObligation', async () => ({ id: `TXN_${ulid()}` })),
+      authoriseSettlement: method('authoriseSettlement', async () => undefined),
+      settle: method('settle', settle),
+      refund: method('refund', async () => undefined),
+      cancel: method('cancel', async () => undefined),
+      dispute: method('dispute', async () => undefined),
+      resolveDispute: method('resolveDispute', async () => undefined),
+      findObligation: method('findObligation', async () => null),
+      // JUSTIFIED-ANY: the activities call only these eight methods, and the
+      // client's own HTTP behaviour has its own spec.
+    } as any as EconomicClient;
+    return { calls, economic };
+  }
+
+  /**
+   * One saga run. `step(n)` is the n-th activity the workflow scheduled;
+   * `attempt` is the only thing that changes when Temporal retries it.
+   */
+  function sagaRun(orderId: string, economic: EconomicClient) {
+    const activities = createActivities({ orders: wiring.orders, economic });
+    const runId = `RUN-${ulid()}`;
+    return {
+      run<R>(
+        activityId: number,
+        attempt: number,
+        fn: (acts: OrderActivities) => Promise<R>,
+      ): Promise<R> {
+        const env = new MockActivityEnvironment({
+          workflowExecution: { workflowId: `order-${orderId}`, runId },
+          activityId: String(activityId),
+          attempt,
+        });
+        return env.run(() => fn(activities));
+      },
+    };
+  }
+
+  async function placeOrder(): Promise<string> {
+    const { offerId } = await publishOffer(wiring, org.supplier, { unitPriceMinor: '500000' });
+    const order = await asBuyer(() =>
+      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('RPL')),
+    );
+    return order.id;
+  }
+
+  async function rowOf(orderId: string) {
+    return runUnscoped('the suite reads the order the saga drove', () =>
+      prisma.client.order.findUniqueOrThrow({ where: { id: orderId } }),
+    );
+  }
+
+  async function historyOf(orderId: string) {
+    return runUnscoped('the suite reads the history the saga wrote', () =>
+      prisma.client.orderStatusHistory.findMany({
+        where: { orderId },
+        orderBy: { occurredAt: 'asc' },
+        select: { kind: true, fromStatus: true, toStatus: true },
+      }),
+    );
+  }
+
+  async function eventsOf(orderId: string, eventName: string) {
+    return runUnscoped('the suite counts the events the saga wrote', () =>
+      prisma.client.outboxMessage.count({ where: { aggregateId: orderId, eventName } }),
+    );
+  }
+
+  /** Placed, held and recorded as FUNDS_HELD: activities 1-3 of the run. */
+  async function held(economic = stubEconomic().economic) {
+    const orderId = await placeOrder();
+    const saga = sagaRun(orderId, economic);
+    await saga.run(1, 1, (a) => a.readOrder(orderId));
+    const { transactionId } = await saga.run(2, 1, (a) => a.createObligation(orderId));
+    await saga.run(3, 1, (a) => a.markFundsHeld(orderId, transactionId));
+    return { orderId, saga, transactionId };
+  }
+
+  /** Held, then confirmed, fulfilled and its receipt confirmed by the parties. */
+  async function receiptConfirmed(economic = stubEconomic().economic) {
+    const run = await held(economic);
+    await asSupplier(async () => {
+      await wiring.orders.confirm(run.orderId);
+      await wiring.orders.fulfill(run.orderId, {});
+    });
+    await asBuyer(() => wiring.orders.confirmReceipt(run.orderId, {}));
+    return run;
+  }
+
+  /** Receipt confirmed, then authorised and settling (activities 4-5). */
+  async function settling(economic = stubEconomic().economic) {
+    const { orderId, saga, transactionId } = await receiptConfirmed(economic);
+    await saga.run(4, 1, (a) => a.authoriseSettlement(orderId, transactionId));
+    await expect(saga.run(5, 1, (a) => a.markSettling(orderId))).resolves.toBe('SETTLING');
+    return { orderId, saga, transactionId };
+  }
+
+  it('the hold: recorded, confirmed by the supplier, retried — still FUNDS_HELD, nothing rewritten', async () => {
+    // Codex finding 1, step for step.
+    const orderId = await placeOrder();
+    const saga = sagaRun(orderId, stubEconomic().economic);
+    const { transactionId } = await saga.run(2, 1, (a) => a.createObligation(orderId));
+
+    // Attempt 1 commits; its completion never reaches Temporal.
+    await expect(saga.run(3, 1, (a) => a.markFundsHeld(orderId, transactionId))).resolves.toBe(
+      'FUNDS_HELD',
+    );
+    // The supplier confirms through the API.
+    await asSupplier(() => wiring.orders.confirm(orderId));
+    expect((await rowOf(orderId)).status).toBe('CONFIRMED');
+
+    // Attempt 2 of the same activity. It used to be refused CONFIRMED ->
+    // FUNDS_HELD, non-retryable: the workflow failed with the obligation HELD
+    // and no saga left to settle or refund it.
+    await expect(saga.run(3, 2, (a) => a.markFundsHeld(orderId, transactionId))).resolves.toBe(
+      'FUNDS_HELD',
+    );
+
+    const row = await rowOf(orderId);
+    expect(row.status).toBe('CONFIRMED');
+    expect(row.economicTransactionId).toBe(transactionId);
+    expect(await historyOf(orderId)).toEqual([
+      { kind: 'TRANSITION', fromStatus: 'PENDING', toStatus: 'FUNDS_HELD' },
+      { kind: 'TRANSITION', fromStatus: 'FUNDS_HELD', toStatus: 'CONFIRMED' },
+    ]);
+    expect(await eventsOf(orderId, 'ORDER_FUNDS_HELD')).toBe(1);
+  });
+
+  it('a failed settlement attempt: recorded, disputed by the buyer, retried — the dispute stands', async () => {
+    // Only the step record can answer this one: nothing on the order says
+    // which settlement attempt failed, and DISPUTED -> RECEIPT_CONFIRMED is an
+    // edge the saga may never take (ADR-039 § 7, defect 2).
+    const { orderId, saga } = await settling();
+
+    await expect(saga.run(6, 1, (a) => a.markSettlementFailed(orderId))).resolves.toBe(
+      'RECEIPT_CONFIRMED',
+    );
+    await asBuyer(() =>
+      wiring.orders.raiseDispute(orderId, { reason: 'the delivered part is the wrong size' }),
+    );
+
+    await expect(saga.run(6, 2, (a) => a.markSettlementFailed(orderId))).resolves.toBe(
+      'RECEIPT_CONFIRMED',
+    );
+
+    expect((await rowOf(orderId)).status).toBe('DISPUTED');
+    expect(await eventsOf(orderId, 'ORDER_SETTLEMENT_FAILED')).toBe(1);
+  });
+
+  it('a settlement that yielded to a dispute: the dispute refunded, retried — still the yield', async () => {
+    // The saga read RECEIPT_CONFIRMED; the buyer disputed before it acted.
+    const { orderId, saga } = await receiptConfirmed();
+    await asBuyer(() =>
+      wiring.orders.raiseDispute(orderId, { reason: 'the goods arrived broken in two' }),
+    );
+
+    await expect(saga.run(5, 1, (a) => a.markSettling(orderId))).resolves.toBe('DISPUTED');
+    await asOperator(() =>
+      wiring.orders.resolveDispute(orderId, {
+        outcome: 'REFUND',
+        resolution: 'the supplier accepted the goods back',
+        responsibility: 'SUPPLIER',
+      }),
+    );
+    expect((await rowOf(orderId)).status).toBe('CANCELLING');
+
+    // Used to be refused CANCELLING -> SETTLING, non-retryable, before the
+    // saga ever reached the refund.
+    await expect(saga.run(5, 2, (a) => a.markSettling(orderId))).resolves.toBe('DISPUTED');
+    expect((await rowOf(orderId)).status).toBe('CANCELLING');
+  });
+
+  it('a later settlement attempt is a step of its own, not a replay of the first', async () => {
+    const { orderId, saga } = await settling();
+    await saga.run(6, 1, (a) => a.markSettlementFailed(orderId));
+
+    // The workflow's next attempt schedules new activities (new ids): they act.
+    await expect(saga.run(8, 1, (a) => a.markSettling(orderId))).resolves.toBe('SETTLING');
+    expect(await eventsOf(orderId, 'ORDER_SETTLEMENT_STARTED')).toBe(2);
+  });
+
+  it('a settlement: recorded, retried after economic-service forgot it — not called again', async () => {
+    // economic-service keeps its idempotent answer for a day. A retry that
+    // comes after that is judged against a SETTLED transaction and refused;
+    // the stub refuses every call after the first to stand for that.
+    let settled = 0;
+    const { calls, economic } = stubEconomic(async () => {
+      settled += 1;
+      if (settled > 1) throw RastaError.invalidStateTransition('Transaction', 'SETTLED', 'SETTLED');
+      return SETTLED;
+    });
+    const { orderId, saga, transactionId } = await settling(economic);
+
+    const first = await saga.run(7, 1, (a) => a.settle(orderId, transactionId));
+    const retry = await saga.run(7, 2, (a) => a.settle(orderId, transactionId));
+
+    expect(retry).toEqual(first);
+    expect(calls.filter((c) => c === 'settle')).toHaveLength(1);
+
+    // And it completes with the settlement the first attempt was given.
+    await expect(saga.run(10, 1, (a) => a.markCompleted(orderId, retry))).resolves.toBe(
+      'COMPLETED',
+    );
+    expect((await rowOf(orderId)).economicSettlementId).toBe(SETTLED.settlementId);
+  });
+
+  it('every economic step is asked once per scheduled activity', async () => {
+    const { calls, economic } = stubEconomic();
+    const { orderId, saga, transactionId } = await receiptConfirmed(economic);
+    await asBuyer(() =>
+      wiring.orders.raiseDispute(orderId, { reason: 'still not what we ordered' }),
+    );
+    const { dispute } = await saga.run(11, 1, (a) => a.readOrder(orderId));
+
+    for (const attempt of [1, 2, 3]) {
+      await saga.run(4, attempt, (a) => a.authoriseSettlement(orderId, transactionId));
+      await saga.run(12, attempt, (a) =>
+        a.disputeObligation(orderId, transactionId, dispute!.id, 'still not what we ordered'),
+      );
+      await saga.run(13, attempt, (a) =>
+        a.resolveObligationDispute(orderId, transactionId, dispute!.id, 'refunded'),
+      );
+      await saga.run(14, attempt, (a) => a.compensate(orderId, transactionId, 'refunded'));
+    }
+
+    expect(calls).toEqual([
+      'createObligation',
+      'authoriseSettlement',
+      'dispute',
+      'resolveDispute',
+      'refund',
+    ]);
+  });
+
+  describe('reminders (Codex finding 2)', () => {
+    it('counts a reminder once, however many attempts it took', async () => {
+      const { orderId, saga } = await held();
+
+      await saga.run(4, 1, (a) => a.recordReminder(orderId));
+      await saga.run(4, 2, (a) => a.recordReminder(orderId));
+
+      const row = await rowOf(orderId);
+      expect(row.reminderCount).toBe(1);
+      expect((await historyOf(orderId)).filter((h) => h.kind === 'REMINDER')).toHaveLength(1);
+    });
+
+    it('counts the next reminder: another scheduled activity', async () => {
+      const { orderId, saga } = await held();
+
+      await saga.run(4, 1, (a) => a.recordReminder(orderId));
+      await saga.run(4, 2, (a) => a.recordReminder(orderId));
+      await saga.run(6, 1, (a) => a.recordReminder(orderId));
+
+      expect((await rowOf(orderId)).reminderCount).toBe(2);
+      expect((await historyOf(orderId)).filter((h) => h.kind === 'REMINDER')).toHaveLength(2);
+    });
+  });
+
+  it('keeps a run’s steps apart from another run’s, for the same order and activity id', async () => {
+    // A reset starts a new run that schedules from activity 1 again; its
+    // steps are its own decisions, not replays of the old run's.
+    const { orderId } = await held();
+
+    await sagaRun(orderId, stubEconomic().economic).run(4, 1, (a) => a.recordReminder(orderId));
+    await sagaRun(orderId, stubEconomic().economic).run(4, 1, (a) => a.recordReminder(orderId));
+
+    expect((await rowOf(orderId)).reminderCount).toBe(2);
+  });
+});
+
+const SETTLED = {
+  settlementId: `STL_${ulid()}`,
+  commissionAmountMinor: '12500',
+  netAmountMinor: '487500',
+};

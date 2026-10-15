@@ -1,4 +1,4 @@
-import { ApplicationFailure } from '@temporalio/activity';
+import { ApplicationFailure, Context } from '@temporalio/activity';
 import {
   createSystemContext,
   isRastaError,
@@ -7,6 +7,7 @@ import {
 } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import type { OrderService } from '../order/order.service';
+import type { SagaActivity, SagaStep } from '../order/order.repository';
 import type { OrderStatus } from '../generated/prisma';
 import type { EconomicClient } from '../economic/economic.client';
 import { SERVICE_NAME } from '../config/env';
@@ -28,18 +29,43 @@ import { settlementsExhaustedTotal } from '../observability/metrics';
  * on that context is the **buyer's**, taken from the order row, which is what
  * makes the internal token this service mints name the right tenant (ADR-035).
  *
- * ## Idempotency
+ * ## Idempotency: a retry answers what the first attempt answered (D-053)
  *
- * Every financial call carries a key derived from the order id, so a Temporal
- * retry is a replay rather than a second act (ADR-039 § 6). The state
- * transitions are idempotent in a different way: `systemTransition` returns
- * quietly when the order is already in the target state, which is exactly what
- * a re-run of a completed activity should do.
+ * Temporal re-runs an activity whose completion it did not record: the worker
+ * crashed or shut down after the work committed, or the answer was lost on
+ * the way. Every activity with an effect is safe to re-run, and not by
+ * looking at where the order is now — a party may have moved it since:
+ *
+ * - a local transition (`mark*`) and `recordReminder` record their outcome
+ *   under the step's key in their own transaction; a retry that finds the
+ *   record returns it and changes nothing;
+ * - an economic-service call carries a key derived from the order
+ *   (ADR-039 § 6), so economic-service replays its stored answer; the answer
+ *   is also recorded here, so a retry that comes after economic-service has
+ *   let its copy expire does not call at all.
+ *
+ * The step's key is Temporal's own identity for one scheduled activity —
+ * workflow, run and activity id — which every retry of it shares and no other
+ * call does (`docs/08` § 8.8, Idempotency). Reads (`readOrder`,
+ * `findObligation`) have no effect and record nothing.
  */
 
 export interface ActivityDependencies {
   orders: OrderService;
   economic: EconomicClient;
+  /**
+   * Which scheduled activity is running. Temporal's own identity unless a
+   * suite that runs the activities outside a worker supplies one.
+   */
+  currentStep?: () => SagaStep;
+}
+
+/** The running activity's identity: the same on every retry of it, unique otherwise. */
+export function temporalStep(): SagaStep {
+  const { workflowExecution, activityId } = Context.current().info;
+  // Only a standalone activity has no workflow, and the saga schedules none.
+  if (!workflowExecution) throw new Error('A saga activity ran outside a workflow');
+  return { key: `${workflowExecution.workflowId}/${workflowExecution.runId}/${activityId}` };
 }
 
 export interface HeldResult {
@@ -84,29 +110,47 @@ export function createActivities(deps: ActivityDependencies) {
     }
   }
 
+  const currentStep = deps.currentStep ?? temporalStep;
+
+  /**
+   * An economic-service call, made at most once per scheduled activity
+   * (D-053). A refusal or an outage records nothing, so the retry calls again.
+   */
+  async function economicStep<T>(
+    orderId: string,
+    activity: SagaActivity,
+    call: (order: Awaited<ReturnType<OrderService['describe']>>) => Promise<T>,
+  ): Promise<T> {
+    const step = currentStep();
+    return asSystemFor(orderId, (order) =>
+      deps.orders.onceForSaga(
+        { id: order.id, organizationId: order.buyerOrganizationId },
+        step,
+        activity,
+        () => call(order),
+      ),
+    );
+  }
+
   return {
     /** Creates the obligation and holds the funds, in one call (ADR-040). */
     async createObligation(orderId: string): Promise<HeldResult> {
-      return asSystemFor(orderId, async (order) => {
+      return economicStep(orderId, 'createObligation', async (order) => {
         if (order.economicTransactionId) {
           // A retry after the call succeeded but the recording did not. The
           // obligation exists; do not create a second one.
           return { transactionId: order.economicTransactionId };
         }
 
-        try {
-          const transaction = await deps.economic.createObligation({
-            orderId: order.id,
-            buyerOrganizationId: order.buyerOrganizationId,
-            supplierOrganizationId: order.supplierOrganizationId,
-            totalAmountMinor: BigInt(order.totalAmountMinor),
-            currency: order.currency,
-            correlationId: order.correlationId,
-          });
-          return { transactionId: transaction.id };
-        } catch (error) {
-          throw asTemporalFailure(error);
-        }
+        const transaction = await deps.economic.createObligation({
+          orderId: order.id,
+          buyerOrganizationId: order.buyerOrganizationId,
+          supplierOrganizationId: order.supplierOrganizationId,
+          totalAmountMinor: BigInt(order.totalAmountMinor),
+          currency: order.currency,
+          correlationId: order.correlationId,
+        });
+        return { transactionId: transaction.id };
       });
     },
 
@@ -138,59 +182,56 @@ export function createActivities(deps: ActivityDependencies) {
     },
 
     async markFundsHeld(orderId: string, transactionId: string): Promise<OrderStatus> {
-      return asSystemFor(orderId, () => deps.orders.markFundsHeld(orderId, transactionId));
+      const step = currentStep();
+      return asSystemFor(orderId, () => deps.orders.markFundsHeld(orderId, transactionId, step));
     },
 
     async markFailed(orderId: string, reason: string): Promise<OrderStatus> {
-      return asSystemFor(orderId, () => deps.orders.markFailed(orderId, reason));
+      const step = currentStep();
+      return asSystemFor(orderId, () => deps.orders.markFailed(orderId, reason, step));
     },
 
     async authoriseSettlement(orderId: string, transactionId: string): Promise<void> {
-      await asSystemFor(orderId, async (order) => {
-        try {
-          await deps.economic.authoriseSettlement({
-            orderId: order.id,
-            transactionId,
-            buyerOrganizationId: order.buyerOrganizationId,
-            correlationId: order.correlationId,
-          });
-        } catch (error) {
-          throw asTemporalFailure(error);
-        }
+      await economicStep(orderId, 'authoriseSettlement', async (order) => {
+        await deps.economic.authoriseSettlement({
+          orderId: order.id,
+          transactionId,
+          buyerOrganizationId: order.buyerOrganizationId,
+          correlationId: order.correlationId,
+        });
       });
     },
 
     async markSettling(orderId: string): Promise<OrderStatus> {
-      return asSystemFor(orderId, () => deps.orders.markSettling(orderId));
+      const step = currentStep();
+      return asSystemFor(orderId, () => deps.orders.markSettling(orderId, step));
     },
 
     async settle(orderId: string, transactionId: string): Promise<SettledResult> {
-      return asSystemFor(orderId, async (order) => {
-        try {
-          const settlement = await deps.economic.settle({
-            orderId: order.id,
-            transactionId,
-            buyerOrganizationId: order.buyerOrganizationId,
-            correlationId: order.correlationId,
-          });
-          return {
-            settlementId: settlement.settlementId,
-            commissionAmountMinor: settlement.commissionAmountMinor,
-            netAmountMinor: settlement.netAmountMinor,
-          };
-        } catch (error) {
-          throw asTemporalFailure(error);
-        }
+      return economicStep(orderId, 'settle', async (order) => {
+        const settlement = await deps.economic.settle({
+          orderId: order.id,
+          transactionId,
+          buyerOrganizationId: order.buyerOrganizationId,
+          correlationId: order.correlationId,
+        });
+        return {
+          settlementId: settlement.settlementId,
+          commissionAmountMinor: settlement.commissionAmountMinor,
+          netAmountMinor: settlement.netAmountMinor,
+        };
       });
     },
 
     async markSettlementFailed(orderId: string): Promise<OrderStatus> {
       settlementsExhaustedTotal.inc({ service: SERVICE_NAME }, 0);
-      return asSystemFor(orderId, () => deps.orders.markSettlementFailed(orderId));
+      const step = currentStep();
+      return asSystemFor(orderId, () => deps.orders.markSettlementFailed(orderId, step));
     },
 
     async markCompleted(orderId: string, settlement: SettledResult): Promise<OrderStatus> {
-      return asSystemFor(orderId, () => deps.orders.markCompleted(orderId, settlement));
+      const step = currentStep();
+      return asSystemFor(orderId, () => deps.orders.markCompleted(orderId, settlement, step));
     },
 
     /**
@@ -201,18 +242,14 @@ export function createActivities(deps: ActivityDependencies) {
      * compensation entirely.
      */
     async compensate(orderId: string, transactionId: string, reason: string): Promise<void> {
-      await asSystemFor(orderId, async (order) => {
-        try {
-          await deps.economic.refund({
-            orderId: order.id,
-            transactionId,
-            buyerOrganizationId: order.buyerOrganizationId,
-            reason,
-            correlationId: order.correlationId,
-          });
-        } catch (error) {
-          throw asTemporalFailure(error);
-        }
+      await economicStep(orderId, 'compensate', async (order) => {
+        await deps.economic.refund({
+          orderId: order.id,
+          transactionId,
+          buyerOrganizationId: order.buyerOrganizationId,
+          reason,
+          correlationId: order.correlationId,
+        });
       });
     },
 
@@ -231,19 +268,15 @@ export function createActivities(deps: ActivityDependencies) {
       disputeId: string,
       reason: string,
     ): Promise<void> {
-      await asSystemFor(orderId, async (order) => {
-        try {
-          await deps.economic.dispute({
-            orderId: order.id,
-            disputeId,
-            transactionId,
-            buyerOrganizationId: order.buyerOrganizationId,
-            reason,
-            correlationId: order.correlationId,
-          });
-        } catch (error) {
-          throw asTemporalFailure(error);
-        }
+      await economicStep(orderId, 'disputeObligation', async (order) => {
+        await deps.economic.dispute({
+          orderId: order.id,
+          disputeId,
+          transactionId,
+          buyerOrganizationId: order.buyerOrganizationId,
+          reason,
+          correlationId: order.correlationId,
+        });
       });
     },
 
@@ -254,24 +287,21 @@ export function createActivities(deps: ActivityDependencies) {
       disputeId: string,
       resolution: string,
     ): Promise<void> {
-      await asSystemFor(orderId, async (order) => {
-        try {
-          await deps.economic.resolveDispute({
-            orderId: order.id,
-            disputeId,
-            transactionId,
-            buyerOrganizationId: order.buyerOrganizationId,
-            resolution,
-            correlationId: order.correlationId,
-          });
-        } catch (error) {
-          throw asTemporalFailure(error);
-        }
+      await economicStep(orderId, 'resolveObligationDispute', async (order) => {
+        await deps.economic.resolveDispute({
+          orderId: order.id,
+          disputeId,
+          transactionId,
+          buyerOrganizationId: order.buyerOrganizationId,
+          resolution,
+          correlationId: order.correlationId,
+        });
       });
     },
 
     async markCancelled(orderId: string, reason: string): Promise<OrderStatus> {
-      return asSystemFor(orderId, () => deps.orders.markCancelled(orderId, reason));
+      const step = currentStep();
+      return asSystemFor(orderId, () => deps.orders.markCancelled(orderId, reason, step));
     },
 
     /**
@@ -280,10 +310,11 @@ export function createActivities(deps: ActivityDependencies) {
      * Moves no money, changes no state, and notifies nobody —
      * notification-service does not exist (ADR-041 § 3). It writes a history
      * row and increments a counter, which is what makes an overdue order
-     * visible to an operator.
+     * visible to an operator. Once per reminder, however many attempts it took.
      */
     async recordReminder(orderId: string): Promise<void> {
-      await asSystemFor(orderId, () => deps.orders.recordReminder(orderId));
+      const step = currentStep();
+      await asSystemFor(orderId, () => deps.orders.recordReminder(orderId, step));
     },
   };
 }

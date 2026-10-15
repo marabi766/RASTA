@@ -76,6 +76,7 @@ PRهای باز را `CONFLICTING` می‌کرد و CI آن‌ها را از ن�
 | `fix/economic-scoped-cursor`            | سرور (کارگر ۲)                    | server-worker-2 | [#256](https://github.com/marabi766/RASTA/pull/256) | —              | مکان‌نمای فهرست‌های economic در دامنهٔ خود فهرست؛ در صف ادغام                |
 | `feat/inventory-shipments`              | سرور (کارگر ۴)                    | server-worker-4 | [#257](https://github.com/marabi766/RASTA/pull/257) | —              | COM-006 PR 2: محموله و رهگیری (پایه: #246)؛ Q-113 … Q-115                    |
 | `chore/ci-split-integration`            | سرور (کارگر ۱)                    | server-worker   | [#274](https://github.com/marabi766/RASTA/pull/274) | —              | Integration در CI به چهار Job موازی؛ Check قدیم تجمیعی                       |
+| `fix/marketplace-saga-activity-replay`  | سرور (کارگر ۴)                    | server-worker-4 | —                                                   | —              | Retry ایمن Activityهای Saga سفارش (یافته‌های Codex روی #279)؛ D-053، Q-118   |
 
 ## شاخه‌های بازنشسته
 
@@ -398,7 +399,8 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 | Q-113 … Q-115 | `feat/inventory-shipments`                   | رزرو (#257)                                                                                                                   |
 | Q-116         | `fix/marketplace-idempotency-gaps`           | رزرو (#253، دور ۲)                                                                                                            |
 | Q-117         | `fix/construction-audit-findings`            | رزرو (#250) — سقف واقعی پیشنهادهای هر مناقصه                                                                                  |
-| Q-118+        | آزاد                                         | —                                                                                                                             |
+| Q-118         | `fix/marketplace-saga-activity-replay`       | رزرو — Saga سفارشی که با وجه در Hold متوقف شد؛ جبرانش با کیست                                                                 |
+| Q-119+        | آزاد                                         | —                                                                                                                             |
 
 ### ریسک‌های `D-NNN` (`docs/23`)
 
@@ -416,7 +418,8 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 | D-049         | `fix/identity-one-live-membership`            | روی `main` (`92cd37f`، #219) — غیرفعال‌سازی از کنسول Keycloak در پنجرهٔ نخستین فعال‌سازی                     |
 | D-050, D-051  | `feat/contract-service-con003-pr2`            | روی `main` (`ad1cfaa`، #231) — امضا و `ORGANIZATION_MOVED` همزمان؛ علت تعلیق یا بازبینی امضا اثبات‌پذیر نیست |
 | D-052         | `fix/document-timestamptz`                    | روی `main` (`f6ef73f`، #242) — ردیف‌های منتشرشدهٔ Outbox هرگز پاک نمی‌شوند؛ فاز ۱ پاک‌سازی: #247             |
-| D-053+        | آزاد                                          | —                                                                                                            |
+| D-053         | `fix/marketplace-saga-activity-replay`        | رزرو — Retry یک Activity در Saga سفارش، کار خودش را پس از جلو رفتن سفارش نمی‌شناخت                           |
+| D-054+        | آزاد                                          | —                                                                                                            |
 
 > **چرا Q-44 قابل جابه‌جایی نیست:** یک ADR ادغام‌شده آن را به‌عنوان مرجع
 > پذیرش نقل کرده. نقل‌قول را نمی‌شود ویرایش کرد بی‌آنکه سند دروغ شود. هر
