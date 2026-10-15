@@ -129,6 +129,8 @@ describe('each down.sql, run whole with psql --file', () => {
   const ALL = readdirSync(MIGRATIONS)
     .filter((name) => /^\d{14}_/.test(name))
     .sort();
+  const STATEMENTS = '20261015120000_statements';
+  const REFUSAL_DEDUPE = '20261013100000_refusal_audit_dedupe';
   const AMENDMENTS = '20261007100000_amendments_milestones';
   const DETECTION = '20261006160000_review_detection_provenance';
   const VERSION = '20261006140000_signature_hierarchy_version';
@@ -220,7 +222,16 @@ describe('each down.sql, run whole with psql --file', () => {
     }
   });
 
-  it.each([SIGN_CANCEL, SIGNING_POLICY, SUSPENSION, REVIEW, VERSION, DETECTION, AMENDMENTS])(
+  it.each([
+    SIGN_CANCEL,
+    SIGNING_POLICY,
+    SUSPENSION,
+    REVIEW,
+    VERSION,
+    DETECTION,
+    AMENDMENTS,
+    STATEMENTS,
+  ])(
     '%s is one transaction: it opens with BEGIN and closes with COMMIT, the lock and the check inside',
     (migration) => {
       const statements = readFileSync(down(migration), 'utf8')
@@ -584,6 +595,63 @@ describe('each down.sql, run whole with psql --file', () => {
         expect(result.out).toBe('');
         expect(result.ok).toBe(true);
         expect(shape(unused)).toBe(shape(scratch(DETECTION)));
+      },
+    );
+  });
+
+  describe('statements (CON-003 PR 4)', () => {
+    /** A SIGNED contract, inserted whole: the guards fire on update, not on a plain insert. */
+    const signedContract = `INSERT INTO "contract"
+         ("id", "organization_id", "tender_id", "project_id", "winning_bid_id",
+          "contractor_organization_id", "amount_minor", "matrix_digest", "awarded_by", "awarded_at",
+          "status", "status_changed_at", "status_changed_by", "source_event_id", "created_at",
+          "created_by", "created_correlation_id", "updated_at")
+       VALUES ('CTR_rb', 'ORG_E', 'TND_1', 'PRJ_1', 'BID_1', 'ORG_C', 1000, repeat('a', 64), 'USR_1',
+               now(), 'SIGNED', now(), 'system', 'EVT_1', now(), 'system', 'COR_1', now())`;
+    const rule = `INSERT INTO "deduction_rule"
+         ("id", "organization_id", "name", "rate_bp", "base", "created_at", "created_by")
+       VALUES ('DDR_rb', 'ORG_E', 'Retention', 500, 'GROSS', now(), 'USR_1')`;
+    /** A statement with its one line, in one transaction: its totals are checked at commit. */
+    const statement = `BEGIN;
+       INSERT INTO "statement"
+         ("id", "organization_id", "contract_id", "statement_number", "gross_minor",
+          "deductions_minor", "net_minor", "created_at", "created_by", "created_correlation_id",
+          "updated_at")
+       VALUES ('STM_rb', 'ORG_E', 'CTR_rb', 1, 10, 0, 10, now(), 'USR_1', 'COR_1', now());
+       INSERT INTO "statement_line"
+         ("id", "organization_id", "contract_id", "statement_id", "line_number", "description",
+          "amount_minor")
+       VALUES ('STL_rb', 'ORG_E', 'CTR_rb', 'STM_rb', 1, 'work', 10);
+       COMMIT;`;
+
+    it.each([
+      [
+        'a deduction rule',
+        [rule],
+        /down refused: 0 statement\(s\), 0 statement line\(s\), 0 statement deduction\(s\) and 1 deduction rule\(s\)/,
+      ],
+      [
+        'a statement',
+        [signedContract, statement],
+        /down refused: 1 statement\(s\), 1 statement line\(s\), 0 statement deduction\(s\) and 0 deduction rule\(s\)/,
+      ],
+    ] as const)(
+      'over %s it refuses and changes nothing — with ON_ERROR_STOP and without it; over none it succeeds, to the exact previous shape',
+      (_what, statements, message) => {
+        const schema = scratch(STATEMENTS);
+        for (const sql of statements) mustRun(schema, ['-c', sql]);
+        const before = shape(schema);
+        for (const stop of [true, false]) {
+          const refused = psql(schema, ['--file', down(STATEMENTS)], stop);
+          expect(refused.out).toMatch(message);
+          expect(shape(schema)).toBe(before);
+        }
+
+        const unused = scratch(STATEMENTS);
+        const result = psql(unused, ['--file', down(STATEMENTS)]);
+        expect(result.out).toBe('');
+        expect(result.ok).toBe(true);
+        expect(shape(unused)).toBe(shape(scratch(REFUSAL_DEDUPE)));
       },
     );
   });

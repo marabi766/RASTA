@@ -1,8 +1,9 @@
 // contract-service — the contract boundary (CON-003, ADR-068, docs/04 § 4.13).
 // It holds the draft contract a tender award creates, and — since PR 2 — its signatures
 // and its cancellation, and — since PR 3 — the amendments and planned milestones of a signed
-// contract; statements, the separate technical and financial approvals and the settlement
-// boundary are later changes (ADR-068 § 9).
+// contract, and — since PR 4 — its statements, drafted and submitted with configured deductions;
+// the separate technical and financial approvals and the settlement boundary are later changes
+// (ADR-068 § 9).
 //
 // Everything here is owned by this service alone (AGENTS.md A-01). There is no
 // foreign key into another service's database: `organizationId` (the employer),
@@ -100,7 +101,8 @@ model Contract {
   /// The two counters of the ADR-068 § 5 cap invariant, `approved_total_minor <= amount_minor +
   /// amendments_total_minor` (`ck_contract_approved_cap`). CON-003 PR 3 moves only the first, under
   /// the contract's row lock, when an amendment becomes effective, and only to the exact sum of the
-  /// effective deltas (`contract_guard`); the second is PR 4's and stays 0 here.
+  /// effective deltas (`contract_guard`); the second moves only when a statement is APPROVED (the
+  /// approvals change, PR 5) and stays 0 until then.
   amendmentsTotalMinor BigInt @default(0) @map("amendments_total_minor")
   approvedTotalMinor   BigInt @default(0) @map("approved_total_minor")
 
@@ -111,6 +113,7 @@ model Contract {
   amendments          Amendment[]
   amendmentSignatures AmendmentSignature[]
   milestones          Milestone[]
+  statements          Statement[]
 
   // The idempotency key of the consumer: one contract per awarded tender.
   @@unique([organizationId, tenderId], map: "ux_contract_org_tender")
@@ -354,6 +357,123 @@ model Milestone {
   @@unique([organizationId, id], map: "ux_milestone_org_id")
   @@index([organizationId, contractId, plannedDate, id], map: "ix_milestone_contract")
   @@map("milestone")
+}
+
+// ---------------------------------------------------------------------------
+// Statements and deductions (CON-003 PR 4, ADR-068 § 5, docs/24 Q-96 and Q-97)
+// ---------------------------------------------------------------------------
+
+/// `src/statement/statement.state-machine.ts`. The whole ADR-068 § 5 lifecycle is declared (adding
+/// a value to a PostgreSQL enum cannot be reversed); this change reaches SUBMITTED only.
+enum StatementStatus {
+  DRAFT
+  SUBMITTED
+  TECHNICALLY_APPROVED
+  APPROVED
+  REJECTED
+}
+
+/// A deduction an employer has configured (Q-96 (6)): a name, a rate in whole basis points and the
+/// base it applies to (`GROSS`, the one there is). Configuration as data, never code; no route
+/// writes one yet (docs/24 Q-125). Never changed or deleted, only retired (`deduction_rule_guard`).
+model DeductionRule {
+  id             String @id
+  organizationId String @map("organization_id")
+
+  name   String
+  rateBp Int    @map("rate_bp")
+  base   String
+
+  createdAt DateTime  @map("created_at") @db.Timestamptz(3)
+  createdBy String    @map("created_by")
+  retiredAt DateTime? @map("retired_at") @db.Timestamptz(3)
+
+  applied StatementDeduction[]
+
+  // SQL-only: `ux_deduction_rule_name_active` — one rule in force per (organization, name).
+  @@unique([organizationId, id], map: "ux_deduction_rule_org_id")
+  @@map("deduction_rule")
+}
+
+/// A statement of work on a SIGNED contract, made and submitted by the contractor (ADR-068 § 5).
+/// `organizationId` is the contract's tenant — the employer's — and the contractor's statement is
+/// written across the tenant boundary on purpose, naming it explicitly. What it says (its lines,
+/// deductions and totals) is written once with it and never changes; `net = gross − deductions`
+/// is computed once and held by the database (`ck_statement_amounts`, `statement_totals_consistent`).
+model Statement {
+  id             String @id
+  organizationId String @map("organization_id")
+  contractId     String @map("contract_id")
+
+  /// 1, 2, 3 … per contract, taken under the contract's row lock.
+  statementNumber Int             @map("statement_number")
+  status          StatementStatus @default(DRAFT)
+
+  grossMinor      BigInt @map("gross_minor")
+  deductionsMinor BigInt @map("deductions_minor")
+  netMinor        BigInt @map("net_minor")
+
+  createdAt            DateTime @map("created_at") @db.Timestamptz(3)
+  createdBy            String   @map("created_by")
+  createdCorrelationId String   @map("created_correlation_id")
+
+  /// Set with the transition to SUBMITTED, and only then (`ck_statement_submission`): the person,
+  /// with the token's verified issuer and subject, so the approvals can keep the submitter out of
+  /// both chains (Q-96 (3), #188).
+  submittedAt        DateTime? @map("submitted_at") @db.Timestamptz(3)
+  submittedBy        String?   @map("submitted_by")
+  submittedByIssuer  String?   @map("submitted_by_issuer")
+  submittedBySubject String?   @map("submitted_by_subject")
+
+  updatedAt DateTime @map("updated_at") @db.Timestamptz(3)
+  version   Int      @default(1)
+
+  contract   Contract             @relation(fields: [organizationId, contractId], references: [organizationId, id])
+  lines      StatementLine[]
+  deductions StatementDeduction[]
+
+  @@unique([organizationId, id], map: "ux_statement_org_id")
+  @@unique([organizationId, contractId, statementNumber], map: "ux_statement_number")
+  @@map("statement")
+}
+
+/// What a statement claims: a bounded description and a positive amount. Written with its statement.
+model StatementLine {
+  id             String @id
+  organizationId String @map("organization_id")
+  contractId     String @map("contract_id")
+  statementId    String @map("statement_id")
+
+  lineNumber  Int    @map("line_number")
+  description String
+  amountMinor BigInt @map("amount_minor")
+
+  statement Statement @relation(fields: [organizationId, statementId], references: [organizationId, id])
+
+  @@unique([organizationId, statementId, lineNumber], map: "ux_statement_line_number")
+  @@map("statement_line")
+}
+
+/// A configured deduction applied to a statement: the rule, a snapshot of its name, rate and base,
+/// and the amount — the rate of the gross, rounded half up (`applyBasisPoints`).
+model StatementDeduction {
+  id              String @id
+  organizationId  String @map("organization_id")
+  contractId      String @map("contract_id")
+  statementId     String @map("statement_id")
+  deductionRuleId String @map("deduction_rule_id")
+
+  name        String
+  rateBp      Int    @map("rate_bp")
+  base        String
+  amountMinor BigInt @map("amount_minor")
+
+  statement Statement     @relation(fields: [organizationId, statementId], references: [organizationId, id])
+  rule      DeductionRule @relation(fields: [organizationId, deductionRuleId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([organizationId, statementId, deductionRuleId], map: "ux_statement_deduction_rule")
+  @@index([organizationId, deductionRuleId], map: "ix_statement_deduction_rule")
+  @@map("statement_deduction")
 }
 
 // ---------------------------------------------------------------------------
