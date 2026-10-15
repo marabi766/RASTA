@@ -259,9 +259,20 @@ const elapsedMs = (run: () => unknown): number => {
 };
 
 /**
- * How much more `long` costs than `short`: the fastest of `samples` timings of
- * `calls` back-to-back calls each, the two sampled in turn so a busy runner
- * slows both alike.
+ * CPU time `run` takes, in milliseconds. Not wall time: on a runner busy with
+ * other jobs the process is preempted, and a longer sample is preempted more
+ * often — CI measured a linear 16k/4k ratio of 23 by the wall clock.
+ */
+const cpuMs = (run: () => unknown): number => {
+  const start = process.cpuUsage();
+  run();
+  const { user, system } = process.cpuUsage(start);
+  return (user + system) / 1000;
+};
+
+/**
+ * How much more `long` costs than `short`: the least CPU time of `samples`
+ * runs of `calls` back-to-back calls each, the two sampled in turn.
  */
 function costRatio(
   short: () => unknown,
@@ -271,13 +282,38 @@ function costRatio(
   const repeated = (run: () => unknown) => () => {
     for (let call = 0; call < calls; call++) run();
   };
-  let fastestShort = Infinity;
-  let fastestLong = Infinity;
+  let leastShort = Infinity;
+  let leastLong = Infinity;
   for (let sample = 0; sample < samples; sample++) {
-    fastestShort = Math.min(fastestShort, elapsedMs(repeated(short)));
-    fastestLong = Math.min(fastestLong, elapsedMs(repeated(long)));
+    leastShort = Math.min(leastShort, cpuMs(repeated(short)));
+    leastLong = Math.min(leastLong, cpuMs(repeated(long)));
   }
-  return fastestLong / fastestShort;
+  return leastLong / leastShort;
+}
+
+/**
+ * How many code units `run` reads through `charCodeAt` and `codePointAt` —
+ * every read the scanners make outside `indexOf` and `lastIndexOf`, which are
+ * single linear searches.
+ */
+function codeUnitReads(run: () => unknown): number {
+  const { charCodeAt, codePointAt } = String.prototype;
+  let reads = 0;
+  String.prototype.charCodeAt = function (this: string, index: number) {
+    reads++;
+    return charCodeAt.call(this, index);
+  };
+  String.prototype.codePointAt = function (this: string, index: number) {
+    reads++;
+    return codePointAt.call(this, index);
+  };
+  try {
+    run();
+  } finally {
+    String.prototype.charCodeAt = charCodeAt;
+    String.prototype.codePointAt = codePointAt;
+  }
+  return reads;
 }
 
 /** Both rules over the whole text, no cut. */
@@ -316,6 +352,13 @@ describe('redaction is linear in the text, and bounded (r4 F1)', () => {
       expect(ratio).toBeLessThan(8);
     },
   );
+
+  it.each(ADVERSARIAL)('%s: each character is read a bounded number of times', (_, make) => {
+    for (const length of [ADVERSARIAL_LENGTH / 4, ADVERSARIAL_LENGTH]) {
+      const text = make(length);
+      expect(codeUnitReads(() => uncapped(text))).toBeLessThanOrEqual(4 * text.length + 4);
+    }
+  });
 
   it('a span started with header-long attributes, not sampled: the sampler still sanitizes, quickly', () => {
     const sampler = new RedactingSampler(new AlwaysOffSampler());
