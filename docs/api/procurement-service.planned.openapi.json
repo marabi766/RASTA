@@ -1,0 +1,2467 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "procurement-service (PLANNED, COM-007)",
+    "version": "0.0.0-planned",
+    "description": "DESIGN CONTRACT, not current behaviour: procurement-service does not exist. Nothing here is implemented until the PR named in x-step (docs/adr/ADR-070-implementation-plan.md) lands; each slice then moves into a generated docs/api/procurement-service.openapi.json checked byte for byte. Money is a rial bigint as a string and is on no event. Times are UTC ISO 8601 with Z. Every route needs a bearer token and an Idempotency-Key on writes; roles come from configuration (docs/24 Q-119..Q-124), never from the route. A third organization gets 404 everywhere; AUDITOR reaches no route. Quotation content is never returned before openedAt (ADR-066). Design: ADR-070."
+  },
+  "servers": [],
+  "security": [
+    {
+      "bearer": []
+    }
+  ],
+  "paths": {
+    "/v1/demand-requests": {
+      "post": {
+        "operationId": "submitDemandRequest",
+        "x-step": "PR 1",
+        "summary": "Register a need of the caller organization (roles from PROCUREMENT_DEMAND_ROLES). Joins the OPEN aggregation of (organization, productId) or opens one, under the aggregation row lock and the database clock read after it: a demand at or after closesAt never joins that window. productId is opaque and never checked against marketplace (Q-105, Q-120).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitDemand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The demand and the aggregation it joined",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Demand"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listDemandRequests",
+        "x-step": "PR 1",
+        "summary": "The caller organization's demands only.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/DemandStatus"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of demands",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemandPage"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/v1/demand-requests/{id}": {
+      "get": {
+        "operationId": "getDemandRequest",
+        "x-step": "PR 1",
+        "summary": "Own organization only; any other organization 404.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The demand",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Demand"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/demand-requests/{id}/withdraw": {
+      "post": {
+        "operationId": "withdrawDemandRequest",
+        "x-step": "PR 1",
+        "summary": "SUBMITTED to WITHDRAWN only while its aggregation is OPEN and before closesAt by the database clock; after the window ends the demand set is frozen (422; the way out is cancelling the READY aggregation). Reason required. There is no edit: withdraw and submit again.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Reason"
+        },
+        "responses": {
+          "200": {
+            "description": "The demand",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Demand"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          }
+        }
+      }
+    },
+    "/v1/aggregations": {
+      "get": {
+        "operationId": "listAggregations",
+        "x-step": "PR 1",
+        "summary": "The caller organization's aggregations (ListOpenAggregations with status=OPEN).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/AggregationStatus"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of aggregations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AggregationPage"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/v1/aggregations/{id}": {
+      "get": {
+        "operationId": "getAggregation",
+        "x-step": "PR 1",
+        "summary": "Own organization only. Carries the setting snapshot taken when the window opened.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The aggregation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Aggregation"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/aggregations/{id}/cancel": {
+      "post": {
+        "operationId": "cancelAggregation",
+        "x-step": "PR 2",
+        "summary": "READY to CANCELLED with a reason (roles of the RFQ issuer).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Reason"
+        },
+        "responses": {
+          "200": {
+            "description": "The aggregation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Aggregation"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          }
+        }
+      }
+    },
+    "/v1/aggregation-settings": {
+      "get": {
+        "operationId": "getAggregationSetting",
+        "x-step": "PR 3",
+        "summary": "The caller organization's current setting version, or the environment defaults of Q-10 if it has none.",
+        "responses": {
+          "200": {
+            "description": "The setting in force for new windows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AggregationSetting"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "operationId": "recordAggregationSetting",
+        "x-step": "PR 3",
+        "summary": "Append a new setting version for the caller organization (roles from PROCUREMENT_AGGREGATION_SETTING_ROLES, Q-119). Applies to windows opened afterwards only.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordAggregationSetting"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The new version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AggregationSetting"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          }
+        }
+      }
+    },
+    "/v1/aggregations/{id}/rfq": {
+      "post": {
+        "operationId": "issueRfq",
+        "x-step": "PR 6",
+        "summary": "READY aggregation to RFQ_ISSUED and a PUBLISHED RFQ in one transaction (roles from PROCUREMENT_RFQ_ISSUER_ROLES). procurementNature, criteria, invitees and quotationClosingAt are required and have no defaults. Every invitee must hold an approved GOODS_SUPPLY qualification and no open suspension now (supplier-service, fail closed: 503 when unreachable).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueRfq"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The RFQ",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Rfq"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/rfqs": {
+      "get": {
+        "operationId": "listRfqs",
+        "x-step": "PR 6",
+        "summary": "Buyer side: RFQs of the caller organization. Supplier side (role SUPPLIER): RFQs the caller organization is invited to, and nothing else.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "name": "side",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": ["BUYER", "SUPPLIER"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of RFQs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RfqPage"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/v1/rfqs/{id}": {
+      "get": {
+        "operationId": "getRfq",
+        "x-step": "PR 6",
+        "summary": "Buyer, or an invited supplier (product, total quantity, criteria, deadline; never requester identities). Anyone else 404.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The RFQ",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Rfq"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/rfqs/{id}/close": {
+      "post": {
+        "operationId": "closeRfq",
+        "x-step": "PR 6",
+        "summary": "PUBLISHED to CLOSED, only at or after quotationClosingAt by the database clock. Idempotent; the sweeper runs the same command.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The RFQ",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Rfq"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          }
+        }
+      }
+    },
+    "/v1/rfqs/{id}/cancel": {
+      "post": {
+        "operationId": "cancelRfq",
+        "x-step": "PR 6",
+        "summary": "Any state but AWARDED to CANCELLED, with a closed reason code (including NO_QUALIFIED_QUOTATION). The aggregation stays RFQ_ISSUED (Q-121).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelRfq"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The RFQ",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Rfq"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          }
+        }
+      }
+    },
+    "/v1/rfqs/{id}/quotations/mine": {
+      "put": {
+        "operationId": "submitOrReviseQuotation",
+        "x-step": "PR 8",
+        "summary": "Supplier side, invited organization only (role SUPPLIER). Seals the content (ADR-066) and returns the receipt. Refused at or after quotationClosingAt by the database clock; the standing is asked of supplier-service now (fail closed). Revising raises revision.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QuotationContent"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotationReceipt"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "get": {
+        "operationId": "getOwnQuotationReceipt",
+        "x-step": "PR 8",
+        "summary": "Receipt, status and revision of the caller organization quotation. Content only after opening (ADR-066 § 4). Every read is logged.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotationReceipt"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/rfqs/{id}/quotations/mine/withdraw": {
+      "post": {
+        "operationId": "withdrawQuotation",
+        "x-step": "PR 8",
+        "summary": "Before the deadline only.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotationReceipt"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          }
+        }
+      }
+    },
+    "/v1/rfqs/{id}/open-quotations": {
+      "post": {
+        "operationId": "openQuotations",
+        "x-step": "PR 9",
+        "summary": "CLOSED to EVALUATING. Four eyes by default (proposal then approval by another person, Q-91 rule). Verifies the receipt chain read from audit-service; any failure refuses the whole opening and opens no key. A member of any quoting organization is refused 403 CONFLICT_OF_INTEREST.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ExpectedVersion"
+        },
+        "responses": {
+          "200": {
+            "description": "The RFQ",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Rfq"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Proposal recorded; a second person must approve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpeningProposal"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/rfqs/{id}/quotations": {
+      "get": {
+        "operationId": "listQuotations",
+        "x-step": "PR 9",
+        "summary": "Buyer side. Before opening: count and receipt times only, no identities. After: content of every quotation. Every read is logged (QUOTATION_ACCESSED).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The quotations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotationList"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/rfqs/{id}/comparison": {
+      "get": {
+        "operationId": "compareQuotations",
+        "x-step": "PR 9",
+        "summary": "After opening only: unit price and total per quotation, side by side. Price is a column, not a formula (Q-88).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The comparison",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Comparison"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/rfqs/{id}/evaluations": {
+      "post": {
+        "operationId": "recordQuotationEvaluation",
+        "x-step": "PR 10",
+        "summary": "Qualification decision or an append-only score revision, while EVALUATING (ADR-067 § 2).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordEvaluation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Recorded"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          }
+        }
+      }
+    },
+    "/v1/rfqs/{id}/evaluate": {
+      "post": {
+        "operationId": "evaluateRfq",
+        "x-step": "PR 10",
+        "summary": "EVALUATING to EVALUATED when every QUALIFIED quotation is fully scored; freezes the matrix. QUOTATIONS_EVALUATED carries no score.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ExpectedVersion"
+        },
+        "responses": {
+          "200": {
+            "description": "The RFQ",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Rfq"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          }
+        }
+      }
+    },
+    "/v1/rfqs/{id}/evaluation": {
+      "get": {
+        "operationId": "getEvaluationMatrix",
+        "x-step": "PR 10",
+        "summary": "Integer matrix, ranks with ties, ready and readinessBlockedBy.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The matrix",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationMatrix"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/purchase-order-policies": {
+      "post": {
+        "operationId": "writePurchaseOrderPolicy",
+        "x-step": "PR 11",
+        "summary": "Approval policy for procurement.purchase_order (ADR-063 § 2; author rule Q-70 (7); DRAFT to PENDING_PLATFORM_APPROVAL to ACTIVE with SYSTEM_ADMIN four eyes). No authority or threshold lives in code (Q-122).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyDraft"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Policy"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/rfqs/{id}/purchase-order": {
+      "post": {
+        "operationId": "issuePurchaseOrder",
+        "x-step": "PR 12",
+        "summary": "Select one QUALIFIED quotation for the whole quantity and issue the order. 422 APPROVAL_POLICY_REQUIRED without an active policy (fail closed). With one: 202 and an approval request bound to the RFQ version, quotation, rank, justification, matrix digest and amount; once approved, the same command executes in one transaction (RFQ AWARDED, order ISSUED, PURCHASE_ORDER_ISSUED without amount). 409 APPROVAL_STALE if anything changed. The winner standing is asked of supplier-service now (422 WINNER_NOT_ELIGIBLE, 503).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssuePurchaseOrder"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The issued order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurchaseOrder"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The approval request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequest"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/purchase-order-approvals/{id}/decision": {
+      "post": {
+        "operationId": "decidePurchaseOrderApproval",
+        "x-step": "PR 12",
+        "summary": "Grant or reject one step. The requester never approves their own request; approvers fall under the selection conflict-of-interest rules.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalDecision"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequest"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/purchase-orders": {
+      "get": {
+        "operationId": "listPurchaseOrders",
+        "x-step": "PR 12",
+        "summary": "Buyer side: own organization. Supplier side: orders where the caller organization is the supplier.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "name": "side",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": ["BUYER", "SUPPLIER"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of orders",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurchaseOrderPage"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/v1/purchase-orders/{id}": {
+      "get": {
+        "operationId": "getPurchaseOrder",
+        "x-step": "PR 12",
+        "summary": "Buyer or supplier of the order; anyone else 404.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurchaseOrder"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/internal/purchase-orders/{id}": {
+      "get": {
+        "operationId": "getPurchaseOrderForService",
+        "x-step": "PR 12",
+        "summary": "Service only (@AllowService economic-service, inventory-service) with a token signed for the buyer organization (ADR-035). The record a future financial or stock consumer asks before any effect (A-13). No consumer exists yet (Q-123, Q-124).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurchaseOrder"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/purchase-orders/{id}/receipts": {
+      "post": {
+        "operationId": "recordReceipt",
+        "x-step": "PR 13",
+        "summary": "Buyer side (PROCUREMENT_RECEIPT_ROLES). Cumulative received quantity never exceeds the ordered quantity (422). Moves no stock and no money (Q-123, Q-124).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordReceipt"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Receipt"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          }
+        }
+      }
+    },
+    "/v1/receipts/{id}/quality-check": {
+      "post": {
+        "operationId": "recordQualityCheck",
+        "x-step": "PR 13",
+        "summary": "PASS or FAIL with a closed reason code by PROCUREMENT_QC_ROLES; the inspector is not the receiver (RECEIVER_NOT_INSPECTOR). Changes no order, stock or money state.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordQualityCheck"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The check",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QualityCheck"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          }
+        }
+      }
+    },
+    "/v1/purchase-orders/{id}/cancel": {
+      "post": {
+        "operationId": "cancelPurchaseOrder",
+        "x-step": "PR 13",
+        "summary": "ISSUED to CANCELLED before any receipt, closed reason code, behind the same approval policy gate.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelPurchaseOrder"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurchaseOrder"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The approval request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequest"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    },
+    "parameters": {
+      "Id": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "IdempotencyKeyRequired": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    },
+    "requestBodies": {
+      "ExpectedVersion": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["expectedVersion"],
+              "properties": {
+                "expectedVersion": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "Reason": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["expectedVersion", "reason"],
+              "properties": {
+                "expectedVersion": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 8,
+                  "maxLength": 500
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "NotFound": {
+        "description": "Not found, or not the caller's to know about (404, never 403)"
+      },
+      "Forbidden": {
+        "description": "The caller may see the record but not do this (FORBIDDEN, INSUFFICIENT_ROLE, CONFLICT_OF_INTEREST, …), audited"
+      },
+      "Conflict": {
+        "description": "OPTIMISTIC_LOCK_FAILED, IDEMPOTENCY_KEY_REUSED, APPROVAL_STALE or an in-flight CONFLICT"
+      },
+      "BusinessRule": {
+        "description": "BUSINESS_RULE_VIOLATION or INVALID_STATE_TRANSITION, with a closed reason code (e.g. APPROVAL_POLICY_REQUIRED, JUSTIFICATION_REQUIRED, WINNER_NOT_ELIGIBLE)"
+      },
+      "Unavailable": {
+        "description": "UPSTREAM_UNAVAILABLE or UPSTREAM_TIMEOUT: supplier-service, identity-service or audit-service could not answer; nothing was written (fail closed)"
+      }
+    },
+    "schemas": {
+      "DemandStatus": {
+        "type": "string",
+        "enum": ["SUBMITTED", "WITHDRAWN", "REFERRED", "LAPSED"]
+      },
+      "AggregationStatus": {
+        "type": "string",
+        "enum": ["OPEN", "READY", "RFQ_ISSUED", "REFERRED", "LAPSED", "CANCELLED"]
+      },
+      "ShortfallPolicy": {
+        "type": "string",
+        "enum": ["EXTEND", "REFER", "CLOSE"]
+      },
+      "RfqStatus": {
+        "type": "string",
+        "enum": ["PUBLISHED", "CLOSED", "EVALUATING", "EVALUATED", "AWARDED", "CANCELLED"]
+      },
+      "QuotationStatus": {
+        "type": "string",
+        "enum": [
+          "SUBMITTED",
+          "WITHDRAWN",
+          "OPENED",
+          "QUALIFIED",
+          "DISQUALIFIED",
+          "SELECTED",
+          "NOT_SELECTED"
+        ]
+      },
+      "PurchaseOrderStatus": {
+        "type": "string",
+        "enum": ["ISSUED", "PARTIALLY_RECEIVED", "RECEIVED", "CANCELLED"]
+      },
+      "ProcurementNature": {
+        "type": "string",
+        "enum": ["FORMAL_TENDER", "INQUIRY", "RFP", "MARKETPLACE_DEAL"],
+        "description": "Required, no default (ADR-023, Q-03)"
+      },
+      "SubmitDemand": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["productId", "quantity"],
+        "properties": {
+          "productId": {
+            "type": "string",
+            "pattern": "^PRD_[0-9A-HJKMNP-TV-Z]{26}$"
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647,
+            "description": "Whole units of the product base unit (Q-105)"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "API only, never on an event"
+          }
+        }
+      },
+      "Demand": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "organizationId",
+          "productId",
+          "quantity",
+          "status",
+          "aggregationId",
+          "submittedAt",
+          "version"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "organizationId": {
+            "type": "string"
+          },
+          "productId": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647,
+            "description": "Whole units of the product base unit (Q-105)"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DemandStatus"
+          },
+          "aggregationId": {
+            "type": "string"
+          },
+          "submittedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC, ISO 8601 with Z"
+          },
+          "version": {
+            "type": "integer"
+          }
+        }
+      },
+      "DemandPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items", "nextCursor"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Demand"
+            }
+          },
+          "nextCursor": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "SettingSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["windowHours", "minQuantity", "shortfallPolicy", "settingVersion"],
+        "properties": {
+          "windowHours": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "minQuantity": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "A quantity, not an amount (Q-10)"
+          },
+          "shortfallPolicy": {
+            "$ref": "#/components/schemas/ShortfallPolicy"
+          },
+          "settingVersion": {
+            "type": "integer",
+            "nullable": true,
+            "description": "null = environment defaults"
+          }
+        }
+      },
+      "Aggregation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "organizationId",
+          "productId",
+          "status",
+          "openedAt",
+          "closesAt",
+          "totalQuantity",
+          "demandCount",
+          "extensionCount",
+          "setting",
+          "version"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "organizationId": {
+            "type": "string"
+          },
+          "productId": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AggregationStatus"
+          },
+          "openedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC, ISO 8601 with Z"
+          },
+          "closesAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC, ISO 8601 with Z"
+          },
+          "totalQuantity": {
+            "type": "integer"
+          },
+          "demandCount": {
+            "type": "integer"
+          },
+          "extensionCount": {
+            "type": "integer"
+          },
+          "setting": {
+            "$ref": "#/components/schemas/SettingSnapshot"
+          },
+          "rfqId": {
+            "type": "string",
+            "nullable": true
+          },
+          "version": {
+            "type": "integer"
+          }
+        }
+      },
+      "AggregationPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items", "nextCursor"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Aggregation"
+            }
+          },
+          "nextCursor": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "RecordAggregationSetting": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["windowHours", "minQuantity", "shortfallPolicy"],
+        "properties": {
+          "windowHours": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "minQuantity": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "shortfallPolicy": {
+            "$ref": "#/components/schemas/ShortfallPolicy"
+          }
+        }
+      },
+      "AggregationSetting": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["windowHours", "minQuantity", "shortfallPolicy", "settingVersion"],
+        "properties": {
+          "windowHours": {
+            "type": "integer"
+          },
+          "minQuantity": {
+            "type": "integer"
+          },
+          "shortfallPolicy": {
+            "$ref": "#/components/schemas/ShortfallPolicy"
+          },
+          "settingVersion": {
+            "type": "integer",
+            "nullable": true
+          },
+          "recordedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC, ISO 8601 with Z",
+            "nullable": true
+          }
+        }
+      },
+      "Criterion": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "label", "weightBp", "scoringMethod", "maxScore"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "maxLength": 50
+          },
+          "label": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "weightBp": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000,
+            "description": "Weights sum to 10000 (ADR-067)"
+          },
+          "scoringMethod": {
+            "type": "string",
+            "enum": ["MANUAL_SCORE", "PASS_FAIL"]
+          },
+          "maxScore": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "IssueRfq": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "expectedVersion",
+          "procurementNature",
+          "quotationClosingAt",
+          "criteria",
+          "invitedSupplierOrganizationIds"
+        ],
+        "properties": {
+          "expectedVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Of the aggregation"
+          },
+          "procurementNature": {
+            "$ref": "#/components/schemas/ProcurementNature"
+          },
+          "quotationClosingAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Must be in the future by the database clock; no minimum or maximum is invented (Q-121)"
+          },
+          "criteria": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/Criterion"
+            }
+          },
+          "invitedSupplierOrganizationIds": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string"
+            },
+            "description": "At most PROCUREMENT_RFQ_MAX_INVITEES (service protection, Q-121)"
+          }
+        }
+      },
+      "Rfq": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "organizationId",
+          "aggregationId",
+          "productId",
+          "totalQuantity",
+          "status",
+          "procurementNature",
+          "quotationClosingAt",
+          "criteria",
+          "version"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "organizationId": {
+            "type": "string"
+          },
+          "aggregationId": {
+            "type": "string"
+          },
+          "productId": {
+            "type": "string"
+          },
+          "totalQuantity": {
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RfqStatus"
+          },
+          "procurementNature": {
+            "$ref": "#/components/schemas/ProcurementNature"
+          },
+          "quotationClosingAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC, ISO 8601 with Z"
+          },
+          "criteria": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Criterion"
+            }
+          },
+          "invitedSupplierOrganizationIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Buyer side only"
+          },
+          "quotationCount": {
+            "type": "integer",
+            "description": "Buyer side only"
+          },
+          "openedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC, ISO 8601 with Z",
+            "nullable": true
+          },
+          "version": {
+            "type": "integer"
+          }
+        }
+      },
+      "RfqPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items", "nextCursor"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Rfq"
+            }
+          },
+          "nextCursor": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "CancelRfq": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["expectedVersion", "reasonCode"],
+        "properties": {
+          "expectedVersion": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reasonCode": {
+            "type": "string",
+            "description": "Closed list from configuration"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500
+          }
+        }
+      },
+      "QuotationContent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["unitPriceMinor", "answers"],
+        "properties": {
+          "unitPriceMinor": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$",
+            "description": "Rial bigint as a decimal string (ADR-022)"
+          },
+          "answers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["criterionCode", "answer"],
+              "properties": {
+                "criterionCode": {
+                  "type": "string"
+                },
+                "answer": {
+                  "type": "string",
+                  "maxLength": 2000
+                }
+              }
+            }
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        }
+      },
+      "QuotationReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["quotationId", "rfqId", "status", "revision", "receipt", "receivedAt"],
+        "properties": {
+          "quotationId": {
+            "type": "string"
+          },
+          "rfqId": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/QuotationStatus"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "receipt": {
+            "type": "string",
+            "description": "Hex SHA-256 chain link (ADR-066 § 3)"
+          },
+          "receivedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC, ISO 8601 with Z"
+          },
+          "content": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/QuotationContent"
+              }
+            ],
+            "nullable": true,
+            "description": "After opening only"
+          }
+        }
+      },
+      "OpeningProposal": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rfqId", "proposedBy", "proposedAt"],
+        "properties": {
+          "rfqId": {
+            "type": "string"
+          },
+          "proposedBy": {
+            "type": "string"
+          },
+          "proposedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC, ISO 8601 with Z"
+          }
+        }
+      },
+      "QuotationList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rfqId", "opened", "count", "items"],
+        "properties": {
+          "rfqId": {
+            "type": "string"
+          },
+          "opened": {
+            "type": "boolean"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["receivedAt"],
+              "properties": {
+                "receivedAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "UTC, ISO 8601 with Z"
+                },
+                "quotationId": {
+                  "type": "string",
+                  "description": "After opening only"
+                },
+                "supplierOrganizationId": {
+                  "type": "string",
+                  "description": "After opening only"
+                },
+                "status": {
+                  "$ref": "#/components/schemas/QuotationStatus"
+                },
+                "content": {
+                  "$ref": "#/components/schemas/QuotationContent"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Comparison": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rfqId", "totalQuantity", "rows"],
+        "properties": {
+          "rfqId": {
+            "type": "string"
+          },
+          "totalQuantity": {
+            "type": "integer"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "quotationId",
+                "supplierOrganizationId",
+                "unitPriceMinor",
+                "totalMinor",
+                "status"
+              ],
+              "properties": {
+                "quotationId": {
+                  "type": "string"
+                },
+                "supplierOrganizationId": {
+                  "type": "string"
+                },
+                "unitPriceMinor": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$",
+                  "description": "Rial bigint as a decimal string (ADR-022)"
+                },
+                "totalMinor": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$",
+                  "description": "unitPriceMinor x totalQuantity, integer, no rounding"
+                },
+                "status": {
+                  "$ref": "#/components/schemas/QuotationStatus"
+                }
+              }
+            }
+          }
+        }
+      },
+      "RecordEvaluation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["quotationId", "kind"],
+        "properties": {
+          "quotationId": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["QUALIFICATION", "SCORE", "RECUSAL"]
+          },
+          "qualified": {
+            "type": "boolean"
+          },
+          "reasonCode": {
+            "type": "string"
+          },
+          "criterionCode": {
+            "type": "string"
+          },
+          "scoreScaled": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Score x 100"
+          }
+        }
+      },
+      "EvaluationMatrix": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rfqId", "ready", "readinessBlockedBy", "rows"],
+        "properties": {
+          "rfqId": {
+            "type": "string"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "readinessBlockedBy": {
+            "type": "string",
+            "nullable": true
+          },
+          "matrixDigest": {
+            "type": "string",
+            "nullable": true
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["quotationId", "totalScaled", "rank", "tied"],
+              "properties": {
+                "quotationId": {
+                  "type": "string"
+                },
+                "totalScaled": {
+                  "type": "string",
+                  "description": "bigint as string: sum of weightBp x scoreScaled"
+                },
+                "rank": {
+                  "type": "integer"
+                },
+                "tied": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      },
+      "PolicyDraft": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["organizationId", "steps"],
+        "properties": {
+          "organizationId": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["authorityOrganizationId", "role", "label"],
+              "properties": {
+                "authorityOrganizationId": {
+                  "type": "string"
+                },
+                "role": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "minAmountMinor": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$",
+                  "description": "Rial bigint as a decimal string (ADR-022)"
+                },
+                "maxAmountMinor": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$",
+                  "description": "Rial bigint as a decimal string (ADR-022)"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Policy": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "organizationId", "workflowKey", "status", "version"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "organizationId": {
+            "type": "string"
+          },
+          "workflowKey": {
+            "type": "string",
+            "enum": ["procurement.purchase_order"]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "DRAFT",
+              "PENDING_PLATFORM_APPROVAL",
+              "ACTIVE",
+              "REJECTED",
+              "RETIRED",
+              "SUSPENDED"
+            ]
+          },
+          "version": {
+            "type": "integer"
+          }
+        }
+      },
+      "IssuePurchaseOrder": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["expectedVersion", "quotationId"],
+        "properties": {
+          "expectedVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Of the RFQ"
+          },
+          "quotationId": {
+            "type": "string"
+          },
+          "justification": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "Required unless the choice is the untied first rank (Q-89)"
+          },
+          "approvalRequestId": {
+            "type": "string",
+            "description": "To execute an approved request"
+          }
+        }
+      },
+      "ApprovalRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "steps"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["PENDING", "APPROVED", "REJECTED", "CONSUMED", "STALE"]
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["label", "status"],
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "ApprovalDecision": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["decision"],
+        "properties": {
+          "decision": {
+            "type": "string",
+            "enum": ["GRANT", "REJECT"]
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500
+          }
+        }
+      },
+      "PurchaseOrder": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "organizationId",
+          "supplierOrganizationId",
+          "rfqId",
+          "quotationId",
+          "productId",
+          "quantity",
+          "unitPriceMinor",
+          "amountMinor",
+          "currency",
+          "receivedQuantity",
+          "status",
+          "issuedAt",
+          "version"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "organizationId": {
+            "type": "string",
+            "description": "Buyer"
+          },
+          "supplierOrganizationId": {
+            "type": "string"
+          },
+          "rfqId": {
+            "type": "string"
+          },
+          "quotationId": {
+            "type": "string"
+          },
+          "productId": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647,
+            "description": "Whole units of the product base unit (Q-105)"
+          },
+          "unitPriceMinor": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$",
+            "description": "Rial bigint as a decimal string (ADR-022)"
+          },
+          "amountMinor": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$",
+            "description": "Computed once at issue; on no event (ADR-070 § 8)"
+          },
+          "currency": {
+            "type": "string",
+            "enum": ["IRR"]
+          },
+          "receivedQuantity": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "status": {
+            "$ref": "#/components/schemas/PurchaseOrderStatus"
+          },
+          "issuedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC, ISO 8601 with Z"
+          },
+          "version": {
+            "type": "integer"
+          }
+        }
+      },
+      "PurchaseOrderPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items", "nextCursor"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PurchaseOrder"
+            }
+          },
+          "nextCursor": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "RecordReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["expectedVersion", "quantity"],
+        "properties": {
+          "expectedVersion": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647,
+            "description": "Whole units of the product base unit (Q-105)"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 500
+          }
+        }
+      },
+      "Receipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "purchaseOrderId", "quantity", "receivedAt", "recordedBy"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "purchaseOrderId": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647,
+            "description": "Whole units of the product base unit (Q-105)"
+          },
+          "receivedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC, ISO 8601 with Z"
+          },
+          "recordedBy": {
+            "type": "string"
+          }
+        }
+      },
+      "RecordQualityCheck": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["outcome", "reasonCode"],
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": ["PASS", "FAIL"]
+          },
+          "reasonCode": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 500
+          }
+        }
+      },
+      "QualityCheck": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "receiptId", "outcome", "reasonCode", "checkedAt", "checkedBy"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "receiptId": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": ["PASS", "FAIL"]
+          },
+          "reasonCode": {
+            "type": "string"
+          },
+          "checkedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC, ISO 8601 with Z"
+          },
+          "checkedBy": {
+            "type": "string"
+          }
+        }
+      },
+      "CancelPurchaseOrder": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["expectedVersion", "reasonCode"],
+        "properties": {
+          "expectedVersion": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reasonCode": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500
+          }
+        }
+      }
+    }
+  }
+}

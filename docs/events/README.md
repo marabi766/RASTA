@@ -457,6 +457,14 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 | `GOODS_RECEIVED`         | inventory · economic                | `receiptId`, `purchaseOrderId`                   |
 | `QUALITY_CHECK_RECORDED` | supplier (امتیاز)                   | `receiptId`, `passed`, `notes`                   |
 
+> **طراحی COM-007 ([ADR-070](../adr/ADR-070-procurement-service-boundary-and-lifecycle.md) § ۹، 2026-10-15؛ هیچ‌کدام هنوز منتشر نمی‌شود).** جدول
+> بالا طرح اولیه است و با ساخت سرویس این‌گونه جایگزین می‌شود: **هیچ رویدادی مبلغ، محتوای پیشنهاد، امتیاز یا متن آزاد ندارد** — `PURCHASE_ORDER_ISSUED`
+> بی `total`، `QUOTATIONS_EVALUATED` فقط شمار و `matrixDigest` (بی `scores[]` و بی `selectedQuotationId`)، `QUALITY_CHECK_RECORDED` با `outcome` و کد دلیل
+> بسته (بی `notes`)؛ کالا `productId` است نه `sku` (Q-105، Q-120). رویدادهای تازه: `DEMAND_WITHDRAWN`، `AGGREGATION_WINDOW_EXTENDED|REFERRED|LAPSED|CANCELLED`،
+> `QUOTATION_REVISED|WITHDRAWN|ACCESSED|NOT_SELECTED`، `RFQ_CLOSED|CANCELLED`، `QUOTATIONS_OPENED`، `PURCHASE_ORDER_APPROVAL_ACTION`،
+> `PURCHASE_ORDER_CANCELLED`، `PURCHASE_ORDER_STANDING_CONFLICT_DETECTED` (نام‌ها با مدیر پروژه). مصرف economic و inventory موکول است و هر
+> مصرف‌کنندهٔ با اثر مالی پیش از اثر از procurement می‌پرسد (A-13)؛ مصرف `QUALITY_CHECK_RECORDED` برای امتیاز کیفیت تصمیم supplier-service است (ADR-052).
+
 ## Supplier — `rasta.supplier.v1`
 
 | رویداد                                  | مصرف‌کنندگان                                                      | Payload کلیدی                                                                                                                    |
