@@ -1,4 +1,5 @@
 import type { LoggerService } from '@nestjs/common';
+import type { BaseEnv } from '@rasta/config';
 import { createLogger, scrubMessage, type Logger, type LoggerConfig } from '@rasta/logging';
 import { EXCEPTION_FILTER_LOGGER } from '../filters/exception.filter';
 
@@ -8,6 +9,10 @@ type Level = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 const MAX_CHILD_LOGGERS = 256;
 
 const SCRUB_DEPTH = 4;
+/** What stands in for a value that could not be read or scrubbed. */
+const UNREADABLE = '[Unreadable]';
+/** A Nest context is a class name; anything longer is not one. */
+const MAX_CONTEXT_LENGTH = 128;
 /** A string Nest passed as an error's stack, as opposed to a further message. */
 const STACK_LINE = /\n\s+at /;
 
@@ -35,8 +40,33 @@ function scrubValue(value: unknown, depth = 0, seen = new WeakSet<object>()): un
   }
   if (Array.isArray(value)) return value.map((item) => scrubValue(item, depth + 1, seen));
   const out: Record<string, unknown> = {};
-  for (const [key, item] of Object.entries(value)) out[key] = scrubValue(item, depth + 1, seen);
+  for (const key of Object.keys(value)) {
+    try {
+      out[key] = scrubValue((value as Record<string, unknown>)[key], depth + 1, seen);
+    } catch {
+      // A throwing getter costs its own field, not the line.
+      out[key] = UNREADABLE;
+    }
+  }
   return out;
+}
+
+/**
+ * {@link scrubValue} that never throws: a Proxy trap or an Error whose
+ * `message` throws yields a fixed placeholder instead of an exception out of a
+ * log call. Shared by the Nest, KafkaJS and Temporal adapters.
+ */
+export function scrubLogValue(value: unknown): unknown {
+  try {
+    return scrubValue(value);
+  } catch {
+    return UNREADABLE;
+  }
+}
+
+/** A Nest context name, scrubbed and capped: it becomes a child-logger binding. */
+function sanitizeContext(context: string): string {
+  return scrubMessage(context).slice(0, MAX_CONTEXT_LENGTH);
 }
 
 /**
@@ -81,20 +111,37 @@ export class NestLoggerAdapter implements LoggerService {
   }
 
   private write(level: Level, message: unknown, params: unknown[], mayCarryStack = false): void {
+    // A logging call must never take its caller down (a getter that throws, a
+    // hostile Proxy, an emit failure): fall back to a fixed line, and give up
+    // quietly if even that fails.
+    try {
+      this.emit(level, message, params, mayCarryStack);
+    } catch {
+      try {
+        this.base[level]({}, 'A log entry could not be formatted and was dropped');
+      } catch {
+        // Nothing left to try.
+      }
+    }
+  }
+
+  private emit(level: Level, message: unknown, params: unknown[], mayCarryStack: boolean): void {
     // Nest appends the context as the last string parameter; an error's stack
-    // precedes it (`error(message, stack, context)`).
+    // precedes it (`error(message, stack, context)`). The static two-argument
+    // `Logger.error(message, stack)` has the stack in the last position, so a
+    // last string that looks like a stack is a stack, never a context.
     const rest = [...params];
-    const context = typeof rest[rest.length - 1] === 'string' ? (rest.pop() as string) : undefined;
+    const isStack = (value: unknown): value is string =>
+      mayCarryStack && typeof value === 'string' && STACK_LINE.test(value);
+    const last = rest[rest.length - 1];
+    const context =
+      typeof last === 'string' && !isStack(last)
+        ? sanitizeContext(rest.pop() as string)
+        : undefined;
     const fields: Record<string, unknown> = {};
 
     let stack: string | undefined;
-    if (
-      mayCarryStack &&
-      typeof rest[rest.length - 1] === 'string' &&
-      STACK_LINE.test(rest[rest.length - 1] as string)
-    ) {
-      stack = rest.pop() as string;
-    }
+    if (isStack(rest[rest.length - 1])) stack = rest.pop() as string;
     const texts: string[] = [];
     if (message instanceof Error) {
       texts.push(message.message);
@@ -104,7 +151,7 @@ export class NestLoggerAdapter implements LoggerService {
     } else if (message !== null && typeof message === 'object') {
       // Structured by the caller: pino redacts it by key, and `scrubValue`
       // takes what key-based redaction cannot — an `err` field's message.
-      Object.assign(fields, scrubValue(message));
+      Object.assign(fields, scrubLogValue(message));
     } else {
       texts.push(String(message));
     }
@@ -113,7 +160,7 @@ export class NestLoggerAdapter implements LoggerService {
     const extra: unknown[] = [];
     for (const param of rest) {
       if (typeof param === 'string') texts.push(param);
-      else extra.push(scrubValue(param));
+      else extra.push(scrubLogValue(param));
     }
     if (stack !== undefined) fields.stack = scrubMessage(stack);
     if (extra.length > 0) fields.params = extra;
@@ -154,6 +201,29 @@ export function installNestLogger(app: LoggerHost, logger?: Logger): NestLoggerA
   );
   app.useLogger(adapter);
   return adapter;
+}
+
+/**
+ * The logger for `NestFactory.create(..., { logger })`. It exists before the
+ * application does, so a provider whose factory throws during construction
+ * (Nest logs the exception and flushes its buffer before `create` returns) is
+ * written through @rasta/logging, not Nest's console logger. The service's own
+ * logger replaces it in {@link installNestLogger}; both are built from the
+ * same configuration.
+ */
+export function bootstrapLogger(
+  env: Pick<BaseEnv, 'NODE_ENV' | 'LOG_LEVEL' | 'SERVICE_VERSION'>,
+  serviceName: string,
+): NestLoggerAdapter {
+  return new NestLoggerAdapter(
+    createLogger({
+      serviceName,
+      serviceVersion: env.SERVICE_VERSION,
+      environment: env.NODE_ENV,
+      level: env.LOG_LEVEL,
+      pretty: env.NODE_ENV === 'development',
+    }),
+  );
 }
 
 /**

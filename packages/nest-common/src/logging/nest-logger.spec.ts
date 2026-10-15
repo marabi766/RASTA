@@ -5,7 +5,7 @@ import { Injectable, Logger, Module } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { createLogger, REDACTED } from '@rasta/logging';
 import { EXCEPTION_FILTER_LOGGER } from '../filters/exception.filter';
-import { installNestLogger, logFatal } from './nest-logger';
+import { bootstrapLogger, installNestLogger, logFatal } from './nest-logger';
 
 /**
  * `new Logger(...)` from `@nestjs/common` is the logger most of the platform
@@ -131,6 +131,59 @@ describe('installNestLogger', () => {
     expect(lines[0].msg).toBe('failed');
   });
 
+  it('scrubs and caps the stack of the static two-argument Logger.error(message, stack)', async () => {
+    const stack = `Error: ${DSN}\n    at connect (${DSN})\n${'x'.repeat(200_000)}`;
+
+    const lines = await run(() => Logger.error('failed', stack));
+
+    expect(lines).toHaveLength(1);
+    expect(JSON.stringify(lines[0])).not.toContain(PASSWORD);
+    expect(JSON.stringify(lines[0]).length).toBeLessThan(40_000);
+  });
+
+  it('scrubs and caps a context string that carries a secret', async () => {
+    const lines = await run((service) =>
+      (service as unknown as { logger: Logger }).logger.error(
+        'failed',
+        undefined,
+        DSN.repeat(2000),
+      ),
+    );
+
+    expect(JSON.stringify(lines[0])).not.toContain(PASSWORD);
+    expect(JSON.stringify(lines[0]).length).toBeLessThan(40_000);
+  });
+
+  it('never throws from a log call, whatever the value', async () => {
+    const hostile = new Proxy(
+      {},
+      {
+        ownKeys: () => {
+          throw new Error('trap');
+        },
+        get: () => {
+          throw new Error('trap');
+        },
+      },
+    );
+    const lines = await run((service) => {
+      const logger = (service as unknown as { logger: Logger }).logger;
+      expect(() =>
+        logger.error({
+          err: {
+            get message(): never {
+              throw new Error('getter failed');
+            },
+          },
+        }),
+      ).not.toThrow();
+      expect(() => logger.error('failed', hostile)).not.toThrow();
+      expect(() => logger.log(hostile)).not.toThrow();
+    });
+
+    expect(JSON.stringify(lines)).not.toContain('getter failed');
+  });
+
   it('caps a very long body', async () => {
     const body = `${'x'.repeat(200_000)} ${DSN}`;
 
@@ -150,6 +203,50 @@ describe('installNestLogger', () => {
   });
 });
 
+describe('bootstrapLogger', () => {
+  it('writes a provider-construction failure scrubbed, before installNestLogger runs', async () => {
+    @Module({
+      providers: [
+        {
+          provide: 'BROKEN',
+          useFactory: () => {
+            throw new Error(`ENOENT: cannot open ${DSN} Authorization: Bearer ${TOKEN}`);
+          },
+        },
+      ],
+    })
+    class BrokenModule {}
+
+    const stderr: string[] = [];
+    const errSpy = jest.spyOn(process.stderr, 'write').mockImplementation(((chunk: unknown) => {
+      stderr.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write);
+    const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    let lines: Line[] = [];
+    try {
+      lines = await captureStdout(async () => {
+        await NestFactory.createApplicationContext(BrokenModule, {
+          logger: bootstrapLogger(
+            { NODE_ENV: 'test', LOG_LEVEL: 'trace', SERVICE_VERSION: '1' },
+            'svc-a',
+          ),
+          bufferLogs: true,
+          abortOnError: false,
+        }).catch(() => undefined);
+      });
+    } finally {
+      errSpy.mockRestore();
+      exit.mockRestore();
+    }
+
+    const text = JSON.stringify(lines) + stderr.join('');
+    expect(lines.some((line) => line.level === 'error')).toBe(true);
+    expect(text).not.toContain(PASSWORD);
+    expect(text).not.toContain(TOKEN);
+  });
+});
+
 describe('every service installs the adapter', () => {
   const servicesDir = resolve(__dirname, '../../../../services');
   const mains = readdirSync(servicesDir)
@@ -165,6 +262,10 @@ describe('every service installs the adapter', () => {
     (_name, file) => {
       const source = readFileSync(file, 'utf8');
       expect(source).toContain('installNestLogger(app)');
+      // The logger exists before the providers do (F4 on #296).
+      expect(source).toMatch(
+        /NestFactory\.create[\s\S]*?logger: bootstrapLogger\(env, SERVICE_NAME\)/,
+      );
       expect(source).not.toMatch(/console\.error\([^)]*failed to start/);
     },
   );

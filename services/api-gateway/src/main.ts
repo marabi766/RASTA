@@ -34,7 +34,12 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
-import { installGracefulShutdown, installNestLogger, logFatal } from '@rasta/nest-common';
+import {
+  bootstrapLogger,
+  installGracefulShutdown,
+  installNestLogger,
+  logFatal,
+} from '@rasta/nest-common';
 import { AppModule } from './app.module';
 import { applyTrustProxy } from './http/trust-proxy';
 import { corsOptions } from './http/cors';
@@ -43,7 +48,7 @@ async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     // Nest's own logger is replaced by pino at the module level; this keeps
     // bootstrap noise out of the structured stream.
-    logger: env.NODE_ENV === 'development' ? ['log', 'warn', 'error'] : ['warn', 'error'],
+    logger: bootstrapLogger(env, SERVICE_NAME),
     bufferLogs: true,
   });
 

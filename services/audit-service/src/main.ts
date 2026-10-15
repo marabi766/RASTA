@@ -35,6 +35,7 @@ import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
 import {
   installGracefulShutdown,
+  bootstrapLogger,
   installNestLogger,
   logFatal,
   preflightRuntimeRole,
@@ -55,7 +56,7 @@ async function bootstrap(): Promise<void> {
   );
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
-    logger: env.NODE_ENV === 'development' ? ['log', 'warn', 'error'] : ['warn', 'error'],
+    logger: bootstrapLogger(env, SERVICE_NAME),
     bufferLogs: true,
   });
 

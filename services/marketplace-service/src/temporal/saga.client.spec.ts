@@ -22,6 +22,8 @@ import type { MarketplaceEnv } from '../config/env';
  * it starts the saga with, and the two different ways a failure is treated.
  */
 
+jest.mock('./runtime-logger', () => ({ installTemporalRuntimeLogger: jest.fn() }));
+
 const connect = jest.fn();
 const ClientMock = jest.fn();
 

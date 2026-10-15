@@ -109,7 +109,14 @@ export {
   httpStatusToCode,
 } from './filters/exception.filter';
 
-export { NestLoggerAdapter, installNestLogger, logFatal } from './logging/nest-logger';
+export {
+  NestLoggerAdapter,
+  bootstrapLogger,
+  installNestLogger,
+  logFatal,
+  scrubLogValue,
+} from './logging/nest-logger';
+export { kafkaLogCreator } from './kafka/log-creator';
 export type { LoggerHost } from './logging/nest-logger';
 
 export {

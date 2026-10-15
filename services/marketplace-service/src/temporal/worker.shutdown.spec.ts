@@ -1,6 +1,7 @@
 import { NativeConnection, Worker } from '@temporalio/worker';
 import { OrderSagaWorker } from './worker';
 
+jest.mock('./runtime-logger', () => ({ installTemporalRuntimeLogger: jest.fn() }));
 jest.mock('@temporalio/worker', () => ({
   NativeConnection: { connect: jest.fn() },
   Worker: { create: jest.fn() },

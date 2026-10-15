@@ -37,6 +37,7 @@ import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
 import {
   installGracefulShutdown,
+  bootstrapLogger,
   installNestLogger,
   logFatal,
   preflightRuntimeRole,
@@ -59,7 +60,7 @@ async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     // Nest's own logger is replaced by pino at the module level; this keeps
     // bootstrap noise out of the structured stream.
-    logger: env.NODE_ENV === 'development' ? ['log', 'warn', 'error'] : ['warn', 'error'],
+    logger: bootstrapLogger(env, SERVICE_NAME),
     bufferLogs: true,
   });
 
