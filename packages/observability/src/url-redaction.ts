@@ -7,6 +7,8 @@ import type {
   TimeInput,
 } from '@opentelemetry/api';
 import {
+  ATTR_EXCEPTION_MESSAGE,
+  ATTR_EXCEPTION_STACKTRACE,
   ATTR_URL_FULL,
   ATTR_URL_QUERY,
   ATTR_USER_AGENT_ORIGINAL,
@@ -58,8 +60,17 @@ const QUOTE = 0x22; // "
 const HASH = 0x23; // #
 const AMPERSAND = 0x26; // &
 const SLASH = 0x2f; // /
+const COLON = 0x3a; // :
 const EQUALS = 0x3d; // =
 const QUESTION = 0x3f; // ?
+const AT_SIGN = 0x40; // @
+
+/**
+ * A bearer or basic credential in free text, its token captured:
+ * `@rasta/logging`'s `BEARER_TOKEN`, the rule log lines are held to. Anchored
+ * on a literal word, and the token class shares nothing with `\s`: linear.
+ */
+const BEARER_TOKEN = /\b(?:Bearer|Basic)\s+([A-Za-z0-9._~+/-]+=*)/gi;
 
 /** A character a query without a path may follow: `cb?TOKEN`. One code point, no repetition. */
 const QUERY_PRECEDER = /^[\p{L}\p{N}_.~%-]$/u;
@@ -152,8 +163,15 @@ function queryStart(text: string, start: number, end: number, lastPairMark: numb
  * have lost its `=` or `&` to the cut, so any `?` in it counts as a query's.
  */
 export function redactQueries(text: string, cut = false): string {
-  let redacted = '';
-  let copied = 0;
+  return redactRanges(text, queryRanges(text, cut));
+}
+
+/**
+ * Where {@link redactQueries} replaces: `[from, to)` pairs, in order, from
+ * just after each query's `?` or `#` to the end of its run.
+ */
+function queryRanges(text: string, cut: boolean): number[] {
+  const ranges: number[] = [];
   let at = 0;
   while (at < text.length) {
     if (isWhitespace(text.charCodeAt(at))) {
@@ -168,12 +186,100 @@ export function redactQueries(text: string, cut = false): string {
     }
     if (cut && at === text.length) lastPairMark = at;
     const query = queryStart(text, start, at, lastPairMark);
-    if (query !== -1) {
-      redacted += `${text.slice(copied, query + 1)}${REDACTED_TEXT}`;
-      copied = at;
-    }
+    if (query !== -1) ranges.push(query + 1, at);
   }
-  return copied === 0 ? text : `${redacted}${text.slice(copied)}`;
+  return ranges;
+}
+
+/**
+ * Where a credential in a URL's user-info is: `[from, to)` pairs, in order.
+ *
+ * `@rasta/logging`'s `scrubMessage` takes the password out of
+ * `scheme://user:password@` — what a driver's error says of the connection
+ * string it could not open — by a pattern that needs the `@`. This is the
+ * same rule as a scan, read from each `://` to the first `@`, `/` or
+ * whitespace: if that is an `@` with a `:` before it, the password, from just
+ * after the first `:` to the `@`, is a credential — with or without a user,
+ * whatever the scheme.
+ *
+ * A cut can take that `@` away (Codex on #261, r5 F1), so in a `cut` text a
+ * `://` whose user-info runs on to the cut — no `@`, `/` or whitespace after
+ * it — fails closed: all of it, from just after the `://`, is taken.
+ *
+ * `indexOf` and one read of each character from a `://` to its end: each scan
+ * stops at the next `/`, and so before the next `://`. Linear in the text.
+ */
+function credentialRanges(text: string, cut: boolean): number[] {
+  const ranges: number[] = [];
+  for (let scheme = text.indexOf('://'); scheme !== -1;) {
+    const userInfo = scheme + 3;
+    let colon = -1;
+    let end = userInfo;
+    for (; end < text.length; end++) {
+      const code = text.charCodeAt(end);
+      if (code === AT_SIGN || code === SLASH || isWhitespace(code)) break;
+      if (code === COLON && colon === -1) colon = end;
+    }
+    if (end === text.length) {
+      if (cut && end > userInfo) ranges.push(userInfo, end);
+      break;
+    }
+    if (text.charCodeAt(end) === AT_SIGN && colon !== -1 && end > colon + 1) {
+      ranges.push(colon + 1, end);
+    }
+    // A `/` that ends the scan may open the next `://`'s, from one before it.
+    scheme = text.indexOf('://', end - 1);
+  }
+  return ranges;
+}
+
+/**
+ * Where each bearer or basic token ({@link BEARER_TOKEN}) is: `[from, to)`
+ * pairs, in order. A token the cut runs through is matched up to the cut.
+ */
+function bearerRanges(text: string): number[] {
+  const ranges: number[] = [];
+  for (const match of text.matchAll(BEARER_TOKEN)) {
+    const to = match.index + match[0].length;
+    ranges.push(to - match[1]!.length, to);
+  }
+  return ranges;
+}
+
+/** `text` with each `[from, to)` of `ranges` — in order, apart — replaced by {@link REDACTED_TEXT}. */
+function redactRanges(text: string, ranges: readonly number[]): string {
+  if (ranges.length === 0) return text;
+  let redacted = '';
+  let copied = 0;
+  for (let i = 0; i < ranges.length; i += 2) {
+    redacted += `${text.slice(copied, ranges[i])}${REDACTED_TEXT}`;
+    copied = ranges[i + 1]!;
+  }
+  return `${redacted}${text.slice(copied)}`;
+}
+
+/** Two lists of ranges, each in order, as one: in order, overlapping ones joined. */
+function unionRanges(a: readonly number[], b: readonly number[]): number[] {
+  const union: number[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length || j < b.length) {
+    let from: number;
+    let to: number;
+    if (j >= b.length || (i < a.length && a[i]! <= b[j]!)) {
+      from = a[i]!;
+      to = a[i + 1]!;
+      i += 2;
+    } else {
+      from = b[j]!;
+      to = b[j + 1]!;
+      j += 2;
+    }
+    const last = union.length - 1;
+    if (last > 0 && from <= union[last]!) union[last] = Math.max(union[last]!, to);
+    else union.push(from, to);
+  }
+  return union;
 }
 
 /**
@@ -214,13 +320,21 @@ function jsonSourceEnd(text: string, open: number): number {
  * `indexOf` and `lastIndexOf` only: linear in the text (Codex on #261, r4 F1).
  */
 export function redactJsonSource(text: string, cut = false): string {
+  const source = jsonSource(text, cut);
+  return source ? `${text.slice(0, source.from)}${source.by}${text.slice(source.to)}` : text;
+}
+
+/** What {@link redactJsonSource} replaces, `[from, to)`, and by what. */
+function jsonSource(
+  text: string,
+  cut: boolean,
+): { from: number; to: number; by: string } | undefined {
   const open = text.indexOf('"');
-  if (open === -1) return text;
-  const start = open >= 3 && text.startsWith('...', open - 3) ? open - 3 : open;
-  if (cut) return `${text.slice(0, start)}"${REDACTED_TEXT}`;
-  const end = jsonSourceEnd(text, open);
-  if (end === -1) return text;
-  return `${text.slice(0, start)}"${REDACTED_TEXT}"${JSON_SOURCE_END}${text.slice(end)}`;
+  if (open === -1) return undefined;
+  const from = open >= 3 && text.startsWith('...', open - 3) ? open - 3 : open;
+  if (cut) return { from, to: text.length, by: `"${REDACTED_TEXT}` };
+  const to = jsonSourceEnd(text, open);
+  return to === -1 ? undefined : { from, to, by: `"${REDACTED_TEXT}"${JSON_SOURCE_END}` };
 }
 
 /** The URL, or path, without its query string and fragment. */
@@ -230,23 +344,116 @@ export function urlWithoutQuery(url: string): string {
 }
 
 /**
- * Free text with any quoted JSON source ({@link redactJsonSource}), and any
- * URL query or fragment after its `?` or `#` ({@link redactQueries}), replaced
- * by {@link REDACTED_TEXT}.
+ * Every rule {@link redactText} holds a text to, on the whole of it — no cap;
+ * `cut` says the text was cut, so each rule fails closed at its end.
+ *
+ * The quoted JSON source goes first ({@link redactJsonSource}), then each
+ * query or fragment in what is left ({@link redactQueries}) — round 4's rules,
+ * in round 4's order. The credentials `@rasta/logging` scrubs from a log line
+ * — a password in a URL's user-info ({@link credentialRanges}), a bearer or
+ * basic token ({@link bearerRanges}) — are found in the text as it came,
+ * before either rule could take away what marks them (the `@`, the word
+ * `Bearer`), and are replaced where they now stand together with the
+ * queries: what any rule takes is taken (Codex on #261, r5 F1).
+ */
+export function redactAll(text: string, cut = false): string {
+  const source = jsonSource(text, cut);
+  let credentials = unionRanges(credentialRanges(text, cut), bearerRanges(text));
+  let rest = text;
+  if (source) {
+    rest = `${text.slice(0, source.from)}${source.by}${text.slice(source.to)}`;
+    // Where the credentials stand now: before the source as they were, after it
+    // moved by what its replacement adds; anything inside it is gone already.
+    const moved = source.by.length - (source.to - source.from);
+    const outside: number[] = [];
+    for (let i = 0; i < credentials.length; i += 2) {
+      const from = credentials[i]!;
+      const to = credentials[i + 1]!;
+      if (from < source.from) outside.push(from, Math.min(to, source.from));
+      if (to > source.to) outside.push(Math.max(from, source.to) + moved, to + moved);
+    }
+    credentials = outside;
+  }
+  return redactRanges(rest, unionRanges(credentials, queryRanges(rest, cut)));
+}
+
+/**
+ * A text cut to {@link REDACT_TEXT_MAX} — never between the halves of a
+ * surrogate pair — and whether it was.
+ */
+function capped(text: string): { kept: string; cut: boolean } {
+  if (text.length <= REDACT_TEXT_MAX) return { kept: text, cut: false };
+  const last = text.charCodeAt(REDACT_TEXT_MAX - 1);
+  const end = last >= 0xd800 && last <= 0xdbff ? REDACT_TEXT_MAX - 1 : REDACT_TEXT_MAX;
+  return { kept: text.slice(0, end), cut: true };
+}
+
+/**
+ * Free text with any quoted JSON source ({@link redactJsonSource}), any URL
+ * query or fragment after its `?` or `#` ({@link redactQueries}), any password
+ * in a URL's user-info, and any bearer or basic credential replaced by
+ * {@link REDACTED_TEXT} ({@link redactAll}).
  *
  * A text longer than {@link REDACT_TEXT_MAX} is cut to it first — never
  * between the halves of a surrogate pair — the rules fail closed at the cut,
  * and it ends in {@link TRUNCATED_TEXT}. Each rule is one pass, so a text
- * costs time linear in at most {@link REDACT_TEXT_MAX} characters.
+ * costs time linear in at most {@link REDACT_TEXT_MAX} characters read. What
+ * is written is bounded too, but larger: a replacement can be longer than
+ * what it replaces (`?=` becomes `?[REDACTED]`).
  */
 export function redactText(text: string): string {
-  if (text.length <= REDACT_TEXT_MAX) return redactQueries(redactJsonSource(text));
-  const last = text.charCodeAt(REDACT_TEXT_MAX - 1);
-  const kept = text.slice(
-    0,
-    last >= 0xd800 && last <= 0xdbff ? REDACT_TEXT_MAX - 1 : REDACT_TEXT_MAX,
-  );
-  return `${redactQueries(redactJsonSource(kept, true), true)}${TRUNCATED_TEXT}`;
+  const { kept, cut } = capped(text);
+  return cut ? `${redactAll(kept, true)}${TRUNCATED_TEXT}` : redactAll(kept);
+}
+
+/**
+ * A URL attribute as it may be exported: cut to {@link REDACT_TEXT_MAX} like
+ * any text (Codex on #261, r5 F3), the password in its user-info replaced —
+ * failing closed at a cut, as {@link redactAll} does — and then without its
+ * query and fragment.
+ */
+function redactUrl(url: string): string {
+  const { kept, cut } = capped(url);
+  const credentialFree = redactRanges(kept, credentialRanges(kept, cut));
+  const bare = urlWithoutQuery(credentialFree);
+  return cut && bare.length === credentialFree.length ? `${bare}${TRUNCATED_TEXT}` : bare;
+}
+
+/**
+ * The frames of a stack trace: what follows the line, or lines, that end with
+ * the error's own `message` — `Name: message` — when they open the stack, and
+ * the rest reads `    at …` and holds no `"`. Otherwise undefined.
+ *
+ * Read on their own, frames lose nothing to the message: with no `"` after
+ * it, no quoted source runs from the message into them, and every other rule
+ * stops at whitespace — so a message too long, or too quoted, to keep no
+ * longer costs the frames (r5 L1). Where the stack is anything else, it is
+ * read whole.
+ */
+export function stackFrames(stack: string, message: string): string | undefined {
+  let end: number;
+  if (message === '') {
+    end = stack.indexOf('\n');
+  } else {
+    const at = stack.indexOf(message);
+    end = at === -1 || stack.lastIndexOf('\n', at - 1) !== -1 ? -1 : at + message.length;
+  }
+  if (end === -1 || stack.charCodeAt(end) !== 0x0a) return undefined;
+  const frames = stack.slice(end + 1);
+  return /^\s+at /.test(frames) && !frames.includes('"') ? frames : undefined;
+}
+
+/**
+ * An exception's stack trace as it may be exported: its frames
+ * ({@link stackFrames}) and the lines above them each through
+ * {@link redactText}, each under its own cap — or, where the frames cannot be
+ * told apart, the whole of it.
+ */
+export function redactStackTrace(stack: string, message: string): string {
+  const frames = stackFrames(stack, message);
+  if (frames === undefined) return redactText(stack);
+  const header = stack.slice(0, stack.length - frames.length - 1);
+  return `${redactText(header)}\n${redactText(frames)}`;
 }
 
 function redactValue(value: AttributeValue | undefined): AttributeValue | undefined {
@@ -262,8 +469,8 @@ function redactValue(value: AttributeValue | undefined): AttributeValue | undefi
 
 /**
  * An attribute as it may be exported: a URL attribute loses its query and
- * fragment, `url.query` and the user agent go — undefined, see
- * {@link DROPPED_ATTRIBUTES} — and every other string is passed through
+ * fragment ({@link redactUrl}), `url.query` and the user agent go — undefined,
+ * see {@link DROPPED_ATTRIBUTES} — and every other string is passed through
  * {@link redactText}.
  */
 function redactAttribute(
@@ -271,7 +478,7 @@ function redactAttribute(
   value: AttributeValue | undefined,
 ): AttributeValue | undefined {
   if (DROPPED_ATTRIBUTES.has(key)) return undefined;
-  if (URL_ATTRIBUTES.has(key) && typeof value === 'string') return urlWithoutQuery(value);
+  if (URL_ATTRIBUTES.has(key) && typeof value === 'string') return redactUrl(value);
   return redactValue(value);
 }
 
@@ -285,11 +492,19 @@ function redactAttributes(attributes: Attributes | undefined): void {
   }
 }
 
-/** A copy of an attribute record, redacted by {@link redactAttribute}. */
+/**
+ * A copy of an attribute record, redacted by {@link redactAttribute} — but an
+ * exception's stack trace beside its message, as `recordException` writes
+ * them, by {@link redactStackTrace}.
+ */
 function redactedAttributes(attributes: Attributes): Attributes {
   const copy: Attributes = {};
+  const message = attributes[ATTR_EXCEPTION_MESSAGE];
   for (const [key, value] of Object.entries(attributes)) {
-    const redacted = redactAttribute(key, value);
+    const redacted =
+      key === ATTR_EXCEPTION_STACKTRACE && typeof value === 'string' && typeof message === 'string'
+        ? redactStackTrace(value, message)
+        : redactAttribute(key, value);
     if (redacted !== undefined) copy[key] = redacted;
   }
   return copy;

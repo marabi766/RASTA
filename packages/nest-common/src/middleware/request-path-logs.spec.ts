@@ -74,6 +74,15 @@ const REDACTED_URLS: Record<(typeof URL_VARIANTS)[number], string> = {
 /** The prose error of `/v1/prose`: a question, no URL, logged as it is. */
 const PROSE = 'Is the ledger ready? Not yet; retry later?';
 
+/** What each error of `/v1/cut/<kind>` reads once redacted: cut at the cap, its secret gone (r5 F1). */
+const CUT_MESSAGES = {
+  credentials: 'connect ECONNREFUSED postgresql://[REDACTED]…[TRUNCATED]',
+  bearer: 'upstream said: Authorization: Bearer [REDACTED]…[TRUNCATED]',
+  password: 'POST https://idp.example/token?[REDACTED]…[TRUNCATED]',
+  quoted: `Unexpected token 'p', "[REDACTED]…[TRUNCATED]`,
+} as const;
+const CUT_PATHS = Object.keys(CUT_MESSAGES).map((kind) => `/v1/cut/${kind}`);
+
 /** The statuses of the fixture's requests, in the order it sends them. */
 const STATUSES = [
   403,
@@ -86,6 +95,7 @@ const STATUSES = [
   502,
   ...ERROR_FORMS.flatMap((form) => URL_VARIANTS.map(() => (form === 'gateway' ? 502 : 500))),
   500,
+  ...CUT_PATHS.map(() => 500),
 ];
 
 const ULID = /^[0-9A-HJKMNP-TV-Z]{26}$/;
@@ -165,6 +175,11 @@ describe('trace-correlated log records carry no client data from the request (de
           path,
         ]),
         ['error', 'Unhandled error: An unexpected error occurred', '/v1/prose'],
+        ...CUT_PATHS.map((path) => [
+          'error',
+          'Unhandled error: An unexpected error occurred',
+          path,
+        ]),
       ].map(([severityText, body, path]) => ({
         severityText,
         body,
@@ -250,6 +265,32 @@ describe('trace-correlated log records carry no client data from the request (de
     });
     const [handler] = result.spans.filter((span) => span.name === 'AssetsController.prose');
     expect(handler?.status.message).toBe(PROSE);
+  });
+
+  it('a secret an error holds past the cap — a connection string, a bearer token, a password= pair, a quoted body: logged and traced cut, none of it kept, the frames kept (r5 F1, L1)', () => {
+    expect(
+      CUT_PATHS.map((path) => {
+        const attributes = byPath(result.logs, path)?.attributes ?? {};
+        return [attributes['exception.message'], attributes['internalContext']];
+      }),
+    ).toEqual(
+      // The message, then its cause's (pino's error serializer).
+      Object.values(CUT_MESSAGES).map((message) => [
+        `${message}: ${message}`,
+        { originalMessage: message },
+      ]),
+    );
+    const handlers = result.spans.filter((span) => span.name === 'AssetsController.cut');
+    expect(handlers.map((span) => span.status.message)).toEqual(Object.values(CUT_MESSAGES));
+    for (const [i, span] of handlers.entries()) {
+      const [exception] = span.events;
+      const [header, ...frames] = String(exception?.attributes?.['exception.stacktrace']).split(
+        '\n',
+      );
+      expect(header).toBe(`Error: ${Object.values(CUT_MESSAGES)[i]}`);
+      expect(frames.length).toBeGreaterThan(0);
+      expect(frames.every((line) => /^\s+at /.test(line))).toBe(true);
+    }
   });
 });
 

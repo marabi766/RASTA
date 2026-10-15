@@ -11,7 +11,8 @@
  *
  * Every request carries "LEAK" in its query and as its correlation id
  * (`x-correlation-id: access_token=LEAK`, r2 F3); some carry it in a body or
- * in the URL an error names (r2 F2). The logger runs at the level in argv[2];
+ * in the URL an error names (r2 F2), some in a secret an error's text holds
+ * past the redaction cap (r5 F1). The logger runs at the level in argv[2];
  * the result is written as JSON to the file named by argv[1] (stdout is the
  * logger's).
  */
@@ -50,6 +51,20 @@ const ERROR_FORMS = ['plain', 'internal', 'gateway'] as const;
 
 /** Prose with a question in it: no URL, nothing to take out. */
 const PROSE = 'Is the ledger ready? Not yet; retry later?';
+
+/**
+ * Errors whose secret runs past the cap on what is redacted (4096 characters,
+ * Codex on #261, r5 F1): the cut goes through it, so what marks it — a
+ * connection string's `@`, a body's closing phrase — is past the cut. Thrown
+ * with a cause of the same text.
+ */
+const SECRET = `LEAK${'_LEAK'.repeat(1_000)}`;
+const CUT_MESSAGES = {
+  credentials: `connect ECONNREFUSED postgresql://app:${SECRET}@db/app`,
+  bearer: `upstream said: Authorization: Bearer ${SECRET}`,
+  password: `POST https://idp.example/token?password=${SECRET}`,
+  quoted: `Unexpected token 'p', "password=${SECRET}" is not valid JSON`,
+} as const;
 
 async function main(): Promise<void> {
   const [outputFile, level = 'debug'] = process.argv.slice(1);
@@ -135,6 +150,12 @@ async function main(): Promise<void> {
     prose(): never {
       throw new Error(PROSE);
     }
+
+    @Get('cut/:kind')
+    cut(@Param('kind') kind: string): never {
+      const message = CUT_MESSAGES[kind as keyof typeof CUT_MESSAGES];
+      throw new Error(message, { cause: new Error(message) });
+    }
   }
 
   @Module({
@@ -187,6 +208,7 @@ async function main(): Promise<void> {
     for (const variant of Object.keys(URL_VARIANTS)) await send(`/v1/url/${form}/${variant}`);
   }
   await send('/v1/prose');
+  for (const kind of Object.keys(CUT_MESSAGES)) await send(`/v1/cut/${kind}`);
 
   await app.close();
   // Read before shutdown, which empties the in-memory exporters. Log records

@@ -16,9 +16,12 @@ import {
   REDACT_TEXT_MAX,
   RedactingSampler,
   RedactingSpanProcessor,
+  redactAll,
   redactJsonSource,
   redactQueries,
+  redactStackTrace,
   redactText,
+  stackFrames,
   TRUNCATED_TEXT,
   urlWithoutQuery,
 } from './url-redaction';
@@ -118,6 +121,43 @@ describe('redactText', () => {
   });
 });
 
+describe('redactText takes the credentials @rasta/logging scrubs, whatever else it takes (r5 F1)', () => {
+  it.each([
+    // A driver's error naming its connection string.
+    [
+      'connect postgresql://app:s3cr3t@db:5432/app failed',
+      'connect postgresql://app:[REDACTED]@db:5432/app failed',
+    ],
+    ['amqp://:s3cr3t@mq', 'amqp://:[REDACTED]@mq'],
+    ['git+ssh://u:p:w@h', 'git+ssh://u:[REDACTED]@h'],
+    ['a://b:c://d:s3cr3t@h', 'a://b:c://d:[REDACTED]@h'],
+    // A `?`, `#`, `=` or `"` in a password: the query and JSON rules start inside
+    // it and take its `@` — the credential is still found in the text as it came.
+    // (Here the query rule takes the rest of the run, as round 4's did.)
+    ['postgresql://app:pa?ss@db/app?ssl=1', 'postgresql://app:[REDACTED]'],
+    ['postgresql://app:pa#ss@db', 'postgresql://app:[REDACTED]'],
+    ['connect x://app:p"w@db failed', 'connect x://app:[REDACTED]@db failed'],
+    ['?x://u:a=b@h', '?[REDACTED]'],
+    [
+      `Unexpected token 'x', x://u:pa"ss@h" is not valid JSON`,
+      `Unexpected token 'x', x://u:[REDACTED]"[REDACTED]" is not valid JSON`,
+    ],
+    // A bearer or basic credential.
+    ['Authorization: Bearer eyJ.abc-_~+/=', 'Authorization: Bearer [REDACTED]'],
+    ['basic\tdXNlcjpwYXNz== refused', 'basic\t[REDACTED] refused'],
+    ['Bearer t0k?x=1', 'Bearer [REDACTED]?[REDACTED]'],
+    // The query rule takes the word `Bearer`; the token is still found.
+    ['GET /x?a&Bearer t0k', 'GET /x?[REDACTED] [REDACTED]'],
+    // No credential: left alone.
+    ['at f (file:///app/dist/main.js:1:2)', 'at f (file:///app/dist/main.js:1:2)'],
+    ['https://h.example/a:b@c', 'https://h.example/a:b@c'],
+    ['postgresql://app@db/app', 'postgresql://app@db/app'],
+    ['user:pass@host', 'user:pass@host'],
+  ])('%j → %j', (text, expected) => {
+    expect(redactText(text)).toBe(expected);
+  });
+});
+
 /**
  * Round 4's two rules as regular expressions, kept as the oracle: the linear
  * scanners must redact exactly what these did (r5 ruling: same semantics). Only
@@ -130,6 +170,19 @@ const r4RedactJsonSource = (text: string): string =>
   text.replace(R4_JSON_SOURCE_IN_TEXT, `"[REDACTED]" is not valid JSON`);
 const r4RedactQueries = (text: string): string =>
   text.replace(R4_QUERY_IN_TEXT, (suffix) => `${suffix.charAt(0)}[REDACTED]`);
+
+/**
+ * `@rasta/logging`'s `scrubMessage` (packages/logging/src/redaction.ts), kept
+ * as the oracle of the credentials a log line loses: what no cut may leave a
+ * part of (r5 F1). Only ever run on short texts — its first pattern is
+ * quadratic on a long word (r5 F2, its own task).
+ */
+const LOGGING_CONNECTION_STRING_CREDENTIALS = /(\w+:\/\/)([^:@/\s]+):([^@/\s]+)@/g;
+const LOGGING_BEARER_TOKEN = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi;
+const loggingScrubMessage = (text: string): string =>
+  text
+    .replace(LOGGING_CONNECTION_STRING_CREDENTIALS, '$1$2:[REDACTED]@')
+    .replace(LOGGING_BEARER_TOKEN, '$1 [REDACTED]');
 
 /** mulberry32: a seeded generator, so a failing text can be reproduced. */
 function seeded(seed: number): () => number {
@@ -186,6 +239,7 @@ describe('the linear rules redact exactly what round 4 did (r4 F1)', () => {
       }
       if (redactJsonSource(text) !== r4RedactJsonSource(text)) differ.push({ rule: 'json', text });
       if (redactQueries(text) !== r4RedactQueries(text)) differ.push({ rule: 'query', text });
+      // No `@`, `Bearer` or `Basic` in these: the credential rules (r5 F1) find nothing.
       if (redactText(text) !== r4RedactQueries(r4RedactJsonSource(text))) {
         differ.push({ rule: 'both', text });
       }
@@ -218,8 +272,76 @@ describe('redactText cuts a text to REDACT_TEXT_MAX first, and fails closed at t
       `Unexpected token 'a', "a" is not valid JSON ${'x'.repeat(LONG)}" is not valid JSON`,
       `Unexpected token 'a', "[REDACTED]${TRUNCATED_TEXT}`,
     ],
+    // A secret the cut runs through (r5 F1): none of it is kept.
+    [
+      "a connection string's password whose `@` is past the cut",
+      `connect postgresql://user:SECRET_${'S'.repeat(4200)}@db/app failed`,
+      `connect postgresql://[REDACTED]${TRUNCATED_TEXT}`,
+    ],
+    [
+      "a connection string's user whose `:` is past the cut",
+      `${'a'.repeat(REDACT_TEXT_MAX - 15)} postgresql://us${'S'.repeat(LONG)}:pw@db`,
+      `${'a'.repeat(REDACT_TEXT_MAX - 15)} postgresql://[REDACTED]${TRUNCATED_TEXT}`,
+    ],
+    [
+      'a password= pair in a query',
+      `POST https://idp.example/token?password=${'S'.repeat(LONG)}&grant_type=password`,
+      `POST https://idp.example/token?[REDACTED]${TRUNCATED_TEXT}`,
+    ],
+    [
+      'a token= pair in a path-less query',
+      `login refused ?token=${'S'.repeat(LONG)}`,
+      `login refused ?[REDACTED]${TRUNCATED_TEXT}`,
+    ],
+    [
+      'a password= pair in a body the parser quotes',
+      `Unexpected token 'p', "password=${'S'.repeat(LONG)}" is not valid JSON`,
+      `Unexpected token 'p', "[REDACTED]${TRUNCATED_TEXT}`,
+    ],
+    [
+      'a bearer token',
+      `upstream said: Authorization: Bearer ${'S'.repeat(LONG)}`,
+      `upstream said: Authorization: Bearer [REDACTED]${TRUNCATED_TEXT}`,
+    ],
   ])('%s', (_, text, expected) => {
     expect(redactText(text)).toBe(expected);
+  });
+
+  it('wherever the cut falls in a text, it keeps no part of a secret the whole text would lose', () => {
+    // One secret, QQQQ, among the characters every rule turns on. Where any
+    // rule takes it from the whole text — the scrubber @rasta/logging applies
+    // to log lines, or round 4's query and JSON rules — no cut keeps a Q.
+    const pieces = [
+      ...['x://', 'postgresql://', 'u', ':', '@', '/', '?', '#', '=', '&', '"', '...'],
+      ...['" is not valid JSON', 'Bearer ', 'basic ', ' ', '\n', 'a', '.', '-'],
+      ...['password=', 'token='],
+    ];
+    const next = seeded(2615);
+    const caught = { logging: 0, round4: 0 };
+    const kept: { text: string; cut: number }[] = [];
+    for (let i = 0; i < 3_000; i++) {
+      const parts: string[] = [];
+      for (let length = Math.floor(next() * 14); length > 0; length--) {
+        parts.push(pieces[Math.floor(next() * pieces.length)]!);
+      }
+      parts.splice(Math.floor(next() * (parts.length + 1)), 0, 'QQQQ');
+      const text = parts.join('');
+      const byLogging = !loggingScrubMessage(text).includes('Q');
+      const byRound4 = !r4RedactQueries(r4RedactJsonSource(text)).includes('Q');
+      if (!byLogging && !byRound4) continue;
+      if (byLogging) caught.logging++;
+      if (byRound4) caught.round4++;
+      if (redactText(text).includes('Q')) kept.push({ text, cut: text.length });
+      for (let cut = 0; cut < text.length; cut++) {
+        // Spaces before it put the cut at `cut`, and start a run of their own.
+        const long = `${' '.repeat(REDACT_TEXT_MAX - cut)}${text}`;
+        if (redactText(long).includes('Q')) kept.push({ text, cut });
+      }
+    }
+    expect(kept.slice(0, 5)).toEqual([]);
+    // Enough texts each family of rules takes the secret from, to have tried.
+    expect(caught.logging).toBeGreaterThan(100);
+    expect(caught.round4).toBeGreaterThan(200);
   });
 
   it('a text of exactly REDACT_TEXT_MAX is whole', () => {
@@ -245,6 +367,13 @@ const ADVERSARIAL: [string, (length: number) => string][] = [
   ["'=' only", (length) => '='.repeat(length)],
   ['closing phrases without a quote', (length) => `"${'x is not valid JSON'.repeat(length / 19)}`],
   ['quote, then closing phrases', (length) => '" is not valid JSON'.repeat(length / 19)],
+  // The credential rules (r5 F1).
+  ["'://' only", (length) => '://'.repeat(length / 3)],
+  ["'://' then ':'", (length) => '://:'.repeat(length / 4)],
+  ['a password with no @', (length) => `x://u:${'p'.repeat(length - 6)}`],
+  ["'://' and '@' in turn", (length) => 'a://b:c@'.repeat(length / 8)],
+  ["'Bearer' then whitespace", (length) => `Bearer${'\t'.repeat(length - 6)}`],
+  ["'Bearer ' only", (length) => 'Bearer '.repeat(length / 7)],
 ];
 
 /** Header-long: Node's 16 KiB limit. */
@@ -252,10 +381,18 @@ const ADVERSARIAL_LENGTH = 16_384;
 /** Loose enough for a loaded CI runner; round 4 took ~566 ms on 15,000 characters. */
 const TIME_BOUND_MS = 50;
 
+/**
+ * The least wall time `run` takes in three tries: what one call blocks the
+ * event loop for, less what a preemption or GC pause on one try adds (r5 L2).
+ */
 const elapsedMs = (run: () => unknown): number => {
-  const start = performance.now();
-  run();
-  return performance.now() - start;
+  let least = Infinity;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const start = performance.now();
+    run();
+    least = Math.min(least, performance.now() - start);
+  }
+  return least;
 };
 
 /**
@@ -316,8 +453,8 @@ function codeUnitReads(run: () => unknown): number {
   return reads;
 }
 
-/** Both rules over the whole text, no cut. */
-const uncapped = (text: string): string => redactQueries(redactJsonSource(text));
+/** Every rule over the whole text, no cut. */
+const uncapped = (text: string): string => redactAll(text);
 
 describe('redaction is linear in the text, and bounded (r4 F1)', () => {
   it.each(ADVERSARIAL)('%s: 16,384 characters through redactText', (_, make) => {
@@ -327,7 +464,7 @@ describe('redaction is linear in the text, and bounded (r4 F1)', () => {
     expect(redacted.endsWith(TRUNCATED_TEXT)).toBe(true);
   });
 
-  it.each(ADVERSARIAL)('%s: 16,384 characters through both rules, uncut', (_, make) => {
+  it.each(ADVERSARIAL)('%s: 16,384 characters through every rule, uncut', (_, make) => {
     const text = make(ADVERSARIAL_LENGTH);
     expect(elapsedMs(() => uncapped(text))).toBeLessThan(TIME_BOUND_MS);
   });
@@ -342,8 +479,9 @@ describe('redaction is linear in the text, and bounded (r4 F1)', () => {
         uncapped(long);
       }
       // Work that is quadratic takes long enough to time in one call — and too
-      // long to time in 150.
-      const slow = elapsedMs(() => uncapped(long)) >= TIME_BOUND_MS;
+      // long to time in 150. Told by the least CPU time of three calls, not
+      // one call's wall time: a pause in that one call must not decide it (r5 L2).
+      const slow = Math.min(...[0, 1, 2].map(() => cpuMs(() => uncapped(long)))) >= TIME_BOUND_MS;
       const ratio = costRatio(
         () => uncapped(short),
         () => uncapped(long),
@@ -365,21 +503,26 @@ describe('redaction is linear in the text, and bounded (r4 F1)', () => {
     const slow: { name: string; ms: number }[] = [];
     for (const [name, make] of ADVERSARIAL) {
       const value = make(ADVERSARIAL_LENGTH);
-      const attributes = {
-        'user_agent.original': value,
-        'server.address': value,
-        'client.address': value,
-        'url.path': value,
-      };
-      const ms = elapsedMs(() =>
-        sampler.shouldSample(ROOT_CONTEXT, 'trace', 'GET', SpanKind.SERVER, attributes, []),
-      );
+      let attributes: Record<string, string> = {};
+      // Fresh attributes for each try: the sampler rewrites them in place.
+      const ms = elapsedMs(() => {
+        attributes = {
+          'user_agent.original': value,
+          'server.address': value,
+          'client.address': value,
+          'url.path': value,
+          'url.full': `https://${value}`,
+        };
+        sampler.shouldSample(ROOT_CONTEXT, 'trace', 'GET', SpanKind.SERVER, attributes, []);
+      });
       if (ms >= TIME_BOUND_MS) slow.push({ name, ms });
       expect(attributes).not.toHaveProperty(['user_agent.original']);
-      for (const key of ['server.address', 'client.address', 'url.path'] as const) {
-        expect(attributes[key].endsWith(TRUNCATED_TEXT)).toBe(true);
-        expect(attributes[key].length).toBeLessThanOrEqual(
-          REDACT_TEXT_MAX + '[REDACTED]'.length + TRUNCATED_TEXT.length,
+      // The URL attribute is capped as well (r5 F3).
+      for (const key of ['server.address', 'client.address', 'url.path', 'url.full'] as const) {
+        if (key !== 'url.full') expect(attributes[key]!.endsWith(TRUNCATED_TEXT)).toBe(true);
+        // Bounded: a replacement is at most four times what it stands for (`?= ` → `?[REDACTED] `).
+        expect(attributes[key]!.length).toBeLessThanOrEqual(
+          4 * REDACT_TEXT_MAX + TRUNCATED_TEXT.length,
         );
       }
     }
@@ -435,22 +578,24 @@ describe('RedactingSampler and RedactingSpanProcessor', () => {
     const linked = tracer.startSpan('linked');
     linked.end();
     const span = tracer.startSpan('middleware - jsonParser', {
-      links: [{ context: linked.spanContext(), attributes: { 'peer.url': '/cb?code=abc' } }],
+      links: [{ context: linked.spanContext(), attributes: { 'peer.url': '/cb?code=xyz' } }],
     });
-    const error = new SyntaxError(`Unexpected token '/', "/?code=abc" is not valid JSON`);
+    const error = new SyntaxError(`Unexpected token '/', "/?code=xyz" is not valid JSON`);
     span.recordException(error);
     span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-    span.addEvent('retry', { 'http.request.target': ['/v1/x?cursor=abc', '/v1/y'], attempt: 2 });
+    span.addEvent('retry', { 'http.request.target': ['/v1/x?cursor=xyz', '/v1/y'], attempt: 2 });
     span.setAttributes({
-      'error.detail': 'GET /v1/x?cursor=abc',
+      'error.detail': 'GET /v1/x?cursor=xyz',
       'http.response.status_code': 400,
     });
     span.end();
     await provider.forceFlush();
 
     const exported = exporter.getFinishedSpans().find((s) => s.name === 'middleware - jsonParser');
-    const { attributes, events, links, status } = exported ?? {};
-    expect(JSON.stringify({ attributes, events, links, status })).not.toContain('abc');
+    const { attributes, events, status } = exported ?? {};
+    // Link attributes apart from the link's ids, which are hex (r5 F4).
+    const links = exported?.links.map((link) => link.attributes);
+    expect(JSON.stringify({ attributes, events, links, status })).not.toContain('xyz');
     const redacted = `Unexpected token '/', "[REDACTED]" is not valid JSON`;
     expect(exported?.status).toEqual({ code: SpanStatusCode.ERROR, message: redacted });
     const [exception, retry] = exported?.events ?? [];
@@ -495,24 +640,26 @@ describe('RedactingSampler and RedactingSpanProcessor', () => {
     linked.end();
     const span = tracer.startSpan('middleware - jsonParser');
     // Cut to 40 characters, this message loses its closing `" is not valid
-    // JSON` and keeps the body: `Unexpected token 'c', "code=abc` + newline.
-    const error = new SyntaxError(`Unexpected token 'c', "code=abc\nrest" is not valid JSON`);
+    // JSON` and keeps the body: `Unexpected token 'c', "code=xyz` + newline.
+    const error = new SyntaxError(`Unexpected token 'c', "code=xyz\nrest" is not valid JSON`);
     span.recordException(error);
     span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-    span.setAttribute('error.detail', `Unexpected token 'c', "code=abc" is not valid JSON`);
+    span.setAttribute('error.detail', `Unexpected token 'c', "code=xyz" is not valid JSON`);
     span.addEvent('retry', {
-      'error.detail': `Unexpected token 'c', "code=abc" is not valid JSON`,
+      'error.detail': `Unexpected token 'c', "code=xyz" is not valid JSON`,
     });
     span.addLink({
       context: linked.spanContext(),
-      attributes: { 'error.detail': `Unexpected token 'c', "code=abc" is not valid JSON` },
+      attributes: { 'error.detail': `Unexpected token 'c', "code=xyz" is not valid JSON` },
     });
     span.end();
     await provider.forceFlush();
 
     const exported = exporter.getFinishedSpans().find((s) => s.name === 'middleware - jsonParser');
-    const { attributes, events, links, status } = exported ?? {};
-    expect(JSON.stringify({ attributes, events, links, status })).not.toContain('abc');
+    const { attributes, events, status } = exported ?? {};
+    // Link attributes apart from the link's ids, which are hex (r5 F4).
+    const links = exported?.links.map((link) => link.attributes);
+    expect(JSON.stringify({ attributes, events, links, status })).not.toContain('xyz');
     const redacted = `Unexpected token 'c', "[REDACTED]" is not valid JSON`;
     const cut = redacted.slice(0, 40);
     expect(cut).toBe(`Unexpected token 'c', "[REDACTED]" is no`);
@@ -535,16 +682,16 @@ describe('RedactingSampler and RedactingSpanProcessor', () => {
     const tracer = provider.getTracer('test');
     const linked = tracer.startSpan('linked');
     linked.end();
-    // Cut to 40 characters first, each of these would keep "abc" and lose what marks it.
-    const parserShaped = `Unexpected token 'c', "code=abc" is not valid JSON`;
+    // Cut to 40 characters first, each of these would keep "xyz" and lose what marks it.
+    const parserShaped = `Unexpected token 'c', "code=xyz" is not valid JSON`;
     tracer
       .startSpan('GET', {
         attributes: {
           'user_agent.original': parserShaped,
           'client.address': parserShaped,
-          'server.address': `h.example/a-long-path-segment?code=abc`,
-          'url.full': 'https://h.example/v1/a-long-path-segment?code=abc',
-          'url.query': 'code=abc',
+          'server.address': `h.example/a-long-path-segment?code=xyz`,
+          'url.full': 'https://h.example/v1/a-long-path-segment?code=xyz',
+          'url.query': 'code=xyz',
           'http.request.method': 'GET',
         },
         links: [{ context: linked.spanContext(), attributes: { 'error.detail': parserShaped } }],
@@ -553,9 +700,12 @@ describe('RedactingSampler and RedactingSpanProcessor', () => {
     await provider.forceFlush();
 
     const exported = exporter.getFinishedSpans().find((s) => s.name === 'GET');
-    expect(JSON.stringify({ ...exported?.attributes, links: exported?.links })).not.toContain(
-      'abc',
-    );
+    expect(
+      JSON.stringify({
+        ...exported?.attributes,
+        links: exported?.links.map((link) => link.attributes),
+      }),
+    ).not.toContain('xyz');
     const cut = `Unexpected token 'c', "[REDACTED]" is no`;
     expect(exported?.attributes).toEqual({
       'client.address': cut,
@@ -585,6 +735,79 @@ describe('RedactingSampler and RedactingSpanProcessor', () => {
       decision: SamplingDecision.RECORD,
       attributes: { 'error.detail': 'GET /cb?[REDACTED]' },
     });
+  });
+
+  it('a URL attribute is capped too, and loses the password in its user-info (r5 F3)', async () => {
+    const exporter = new InMemorySpanExporter();
+    const provider = redactingProvider(exporter);
+    const path = `/${'p'.repeat(16_000)}`;
+    const span = provider.getTracer('test').startSpan('GET', {
+      attributes: { 'url.full': `https://h.example${path}` },
+    });
+    span.setAttributes({
+      'http.url': `https://app:s3cr3t@h.example/x?q=1`,
+      'http.target': `${path}?q=1`,
+    });
+    span.setAttribute('url.full', `postgresql://app:SECRET${'S'.repeat(16_000)}@db/app`);
+    span.end();
+    await provider.forceFlush();
+
+    const [exported] = exporter.getFinishedSpans();
+    expect(exported?.attributes).toEqual({
+      'url.full': `postgresql://[REDACTED]${TRUNCATED_TEXT}`,
+      'http.url': 'https://app:[REDACTED]@h.example/x',
+      'http.target': `${path.slice(0, REDACT_TEXT_MAX)}${TRUNCATED_TEXT}`,
+    });
+  });
+
+  it('a recorded exception keeps its frames when its message is cut at a quote (r5 L1)', async () => {
+    const exporter = new InMemorySpanExporter();
+    const provider = redactingProvider(exporter);
+    const span = provider.getTracer('test').startSpan('db');
+    const error = new Error(`Invalid value: "${'S'.repeat(5_000)}" for argument "where"`);
+    span.recordException(error);
+    span.end();
+    await provider.forceFlush();
+
+    const [event] = exporter.getFinishedSpans()[0]?.events ?? [];
+    const stack = event?.attributes?.['exception.stacktrace'] as string;
+    const [header, ...frames] = stack.split('\n');
+    expect(header).toBe(`Error: Invalid value: "[REDACTED]${TRUNCATED_TEXT}`);
+    expect(frames.length).toBeGreaterThan(0);
+    expect(frames.every((line) => /^\s+at /.test(line))).toBe(true);
+    expect(frames.join('\n')).toBe(stackFrames(error.stack!, error.message));
+  });
+});
+
+describe('stackFrames and redactStackTrace (r5 L1)', () => {
+  const FRAMES = '    at f (/app/x.js:1:2)\n    at g (/app/y.js:3:4)';
+
+  it.each([
+    ['Error: boom', 'boom'],
+    ['TypeError: two\nlines', 'two\nlines'],
+    ['Error', ''],
+    // A stack whose header names the class before its own name was set.
+    ['Error: Asset not found', 'Asset not found'],
+  ])('the frames under %j', (header, message) => {
+    expect(stackFrames(`${header}\n${FRAMES}`, message)).toBe(FRAMES);
+  });
+
+  it.each([
+    ['the message is not in the first line', `Error: other\nboom\n${FRAMES}`, 'boom'],
+    ['the message is not in the stack', `Error: other\n${FRAMES}`, 'boom'],
+    ['no newline follows the message', `Error: boom!\n${FRAMES}`, 'boom'],
+    ['what follows does not read `at`', `Error: boom\nCaused by: x\n${FRAMES}`, 'boom'],
+    ['what follows holds a quote', `Error: boom\n    at "f" (/app/x.js:1:2)`, 'boom'],
+  ])('none where %s: the stack is read whole', (_, stack, message) => {
+    expect(stackFrames(stack, message)).toBeUndefined();
+    expect(redactStackTrace(stack, message)).toBe(redactText(stack));
+  });
+
+  it('the header and the frames each through redactText, each under its own cap', () => {
+    const message = `Invalid: "${'S'.repeat(5_000)}" and https://h.example/cb?code=SECRET`;
+    expect(redactStackTrace(`Error: ${message}\n${FRAMES}`, message)).toBe(
+      `Error: Invalid: "[REDACTED]${TRUNCATED_TEXT}\n${FRAMES}`,
+    );
   });
 });
 

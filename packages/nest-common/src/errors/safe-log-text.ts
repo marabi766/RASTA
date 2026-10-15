@@ -16,7 +16,11 @@ export const LOG_TEXT_MAX = 200;
  * with an ellipsis. Persian passes through.
  *
  * Redacted before it is flattened or cut, so a quoted source that runs over
- * several lines, or past `max`, is still recognised whole.
+ * several lines, or past `max`, is still recognised whole. `redactText` takes
+ * the credentials `scrubMessage` does as well, and before anything else could
+ * take what marks them: it caps what it reads, and a cut can take a
+ * connection string's `@`, after which `scrubMessage` no longer sees a
+ * credential (Codex on #261, r5 F1).
  *
  * It cannot tell a value from an identifier, so it bounds what a leak can be;
  * keeping values out of messages stays the author's job.
