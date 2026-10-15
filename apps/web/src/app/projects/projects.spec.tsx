@@ -118,19 +118,18 @@ describe('the project list', () => {
     },
   );
 
-  it('has no accessibility violations in any state', async () => {
-    for (const result of [
-      page([PROJECT], 'c2'),
-      page([]),
-      { kind: 'FORBIDDEN' } as const,
-      { kind: 'NOT_FOUND' } as const,
-      { kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-1' } as const,
-      { kind: 'MALFORMED', correlationId: 'corr-1' } as const,
-    ]) {
-      const { container, unmount } = render(<ProjectsScreen result={result} query={{}} />);
-      expect(await axe(container)).toHaveNoViolations();
-      unmount();
-    }
+  // One test per state, here and in the detail below: each axe run gets the
+  // whole default timeout to itself instead of sharing one across the states.
+  it.each([
+    ['more to page', page([PROJECT], 'c2')],
+    ['empty', page([])],
+    ['refused', { kind: 'FORBIDDEN' } as const],
+    ['not found', { kind: 'NOT_FOUND' } as const],
+    ['unavailable', { kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-1' } as const],
+    ['malformed', { kind: 'MALFORMED', correlationId: 'corr-1' } as const],
+  ])('has no accessibility violations (%s)', async (_name, result) => {
+    const { container } = render(<ProjectsScreen result={result} query={{}} />);
+    expect(await axe(container)).toHaveNoViolations();
   });
 });
 
@@ -179,18 +178,15 @@ describe('the project detail', () => {
     expect(screen.getByText(/corr-9/)).toBeInTheDocument();
   });
 
-  it('has no accessibility violations in any state', async () => {
-    for (const result of [
-      { kind: 'OK', data: DETAIL } as const,
-      { kind: 'NOT_FOUND' } as const,
-      { kind: 'FORBIDDEN' } as const,
-      { kind: 'UNAVAILABLE', status: 502, correlationId: 'corr-9' } as const,
-      { kind: 'MALFORMED', correlationId: 'corr-2' } as const,
-    ]) {
-      const { container, unmount } = render(<ProjectDetailScreen result={result} />);
-      expect(await axe(container)).toHaveNoViolations();
-      unmount();
-    }
+  it.each([
+    ['shown', { kind: 'OK', data: DETAIL } as const],
+    ['not found', { kind: 'NOT_FOUND' } as const],
+    ['refused', { kind: 'FORBIDDEN' } as const],
+    ['unavailable', { kind: 'UNAVAILABLE', status: 502, correlationId: 'corr-9' } as const],
+    ['malformed', { kind: 'MALFORMED', correlationId: 'corr-2' } as const],
+  ])('has no accessibility violations (%s)', async (_name, result) => {
+    const { container } = render(<ProjectDetailScreen result={result} />);
+    expect(await axe(container)).toHaveNoViolations();
   });
 });
 

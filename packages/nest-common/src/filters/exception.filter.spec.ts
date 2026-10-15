@@ -116,6 +116,42 @@ describe('AllExceptionsFilter, 5xx (S-09)', () => {
     expect(JSON.stringify(lines)).not.toContain('SENTINEL');
   });
 
+  // Codex on #261, r5 F1: the cap cut a connection string's `@` away, so its
+  // password reached the log. A secret the cap cuts through leaves no part of
+  // itself — in the message, the stack or a cause — and the frames stay (r5 L1).
+  it.each([
+    ['a connection string', (secret: string) => `connect postgresql://user:${secret}@db/app`],
+    ['a bearer token', (secret: string) => `upstream said: Authorization: Bearer ${secret}`],
+    ['a password= pair', (secret: string) => `POST https://idp.example/token?password=${secret}`],
+    ['a token= pair', (secret: string) => `refused ?token=${secret}`],
+    [
+      'a quoted body',
+      (secret: string) => `Unexpected token 'p', "password=${secret}" is not valid JSON`,
+    ],
+  ])('%s cut at the cap: nothing of it in the log, and the frames kept', (_, make) => {
+    const message = make(`SECRET_${'S'.repeat(5_000)}`);
+    const error = new Error(message, { cause: new Error(message) });
+
+    const { lines } = run(error);
+
+    const err = lines[0]?.payload.err;
+    expect(JSON.stringify(lines)).not.toMatch(/SECRET|SS/);
+    expect(err?.message.endsWith('[REDACTED]…[TRUNCATED]')).toBe(true);
+    expect(err?.cause?.message).toBe(err?.message);
+    expect(err?.stack).toMatch(/^\s+at /);
+    expect(err?.cause?.stack).toMatch(/^\s+at /);
+  });
+
+  it('a message cut at the cap after a quote keeps its frames (r5 L1)', () => {
+    const error = new Error(`Invalid value: "${'x'.repeat(5_000)}" for "where"`);
+
+    const err = run(error).lines[0]?.payload.err;
+
+    expect(err?.message).toBe('Invalid value: "[REDACTED]…[TRUNCATED]');
+    expect(err?.stack?.split('\n').every((line) => /^\s+at /.test(line))).toBe(true);
+    expect(err?.stack).toBe(error.stack?.split('\n').slice(1).join('\n'));
+  });
+
   it('a Nest HttpException of 5xx: its text is the server’s, so the client gets the generic one', () => {
     const { status, body, lines } = run(
       new HttpException(`upstream said ${SENTINEL}`, HttpStatus.BAD_GATEWAY),
@@ -132,6 +168,42 @@ describe('AllExceptionsFilter, 5xx (S-09)', () => {
     const { body, lines } = run(`raw\u0000string ${SENTINEL}`);
     expect(JSON.stringify(body)).not.toContain('SENTINEL');
     expect(lines[0]?.payload.err).toEqual({ type: 'string', message: `raw string ${SENTINEL}` });
+  });
+
+  it('a URL named in the message or a cause keeps its path, not its query (#261 r2 F2)', () => {
+    const error = RastaError.internal(
+      `Token exchange failed: POST https://idp.example/token?code=${SENTINEL}&state=x`,
+      new Error(`GET https://idp.example/cb?access_token=${SENTINEL} refused`),
+    );
+
+    const { lines } = run(error);
+
+    const payload = lines[0]?.payload;
+    expect(payload?.internalContext?.originalMessage).toBe(
+      'Token exchange failed: POST https://idp.example/token?[REDACTED]',
+    );
+    expect(payload?.err.message).toBe(payload?.internalContext?.originalMessage);
+    expect(payload?.err.cause?.message).toBe('GET https://idp.example/cb?[REDACTED] refused');
+    expect(JSON.stringify(lines)).not.toContain('SENTINEL');
+  });
+
+  it('a body JSON.parse quotes over several lines reaches neither the message nor the frames', () => {
+    // V8 quotes a short source whole: here over two lines, the second of which
+    // reads as a frame in the stack.
+    let error: unknown;
+    try {
+      JSON.parse('c\n    at LEAK');
+    } catch (thrown) {
+      error = thrown;
+    }
+    expect((error as Error).stack?.split('\n')[1]).toBe('    at LEAK" is not valid JSON');
+
+    const { lines } = run(error);
+
+    const err = lines[0]?.payload.err;
+    expect(err?.message).toBe(`Unexpected token 'c', "[REDACTED]" is not valid JSON`);
+    expect(err?.stack).toMatch(/^\s+at JSON\.parse/);
+    expect(JSON.stringify(lines)).not.toContain('LEAK');
   });
 });
 

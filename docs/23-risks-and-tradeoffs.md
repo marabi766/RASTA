@@ -1404,7 +1404,9 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   هر Migration بازنویسی (D-048، گام ۲) همهٔ ردیف‌های منتشرشده را حساب می‌کند.
 - **رفع:** Job زمان‌بندی‌شده در هر سرویس که `purgePublished` را با Retention از پیکربندی (اعتبارسنجی‌شده در env سرویس)
   صدا بزند، با Metric و آزمون یکپارچگی. پیاده‌سازی کار جداگانه است، نه #242.
-- **پیشرفت:** **فاز ۱ انجام شد (#247): fleet، asset، document، maintenance، organization.** زمان‌بند مشترک
+- **پیشرفت:** **فاز ۱ انجام شد (#247): fleet، asset، document، maintenance، organization. فاز ۲a انجام شد
+  (#276): notification، supplier، inventory** — همان الگو، همان تنظیم‌ها و همان پیش‌فرض‌ها. identity در فاز ۲a
+  سیم‌کشی نشد (پایین، «مانده»). زمان‌بند مشترک
   `OutboxPurgeScheduler` و دستور `purgePublishedSql` در `@rasta/nest-common`، env در `outboxPurgeEnvSchema`
   (`@rasta/config`):
   - `OUTBOX_PURGE_ENABLED` پیش‌فرض روشن است، و خاموش‌بودنش در شروع سرویس هشدار Log می‌کند.
@@ -1462,14 +1464,25 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
     در nest-common با Producer وفادار به kafkajs (`__tests__/fake-kafka.ts`)، و در fleet: `test/outbox-shutdown.int-spec.ts`
     (Handler بی‌پایان کنار Publish و Batch بی‌پایان؛ Send بی‌پایان DLQ که پس از بستن می‌رسد؛ Handler واقعی که پس از بستن
     Commit می‌کند و تحویل دوباره‌اش بی‌اثر است) و `test/insurance-parked.int-spec.ts` (جاروی منتظر asset-service در
-    توقف) ⇐ خروج ۰ زیر مهلت، پیام Commit‌نشده، اثر یک‌بار. سرویس‌های دیگر (contract، construction، economic،
-    marketplace، notification، identity، audit، supplier، inventory) هنوز Coordinator ندارند و در فاز بعد می‌آیند.
+    توقف) ⇐ خروج ۰ زیر مهلت، پیام Commit‌نشده، اثر یک‌بار. Consumerهای notification و supplier در فاز ۲a آمدند
+    (پایین). سرویس‌های دیگر (contract، construction، economic، marketplace، identity، audit) هنوز Coordinator ندارند و در
+    فاز بعد می‌آیند.
   - **بودجه برای هر سرویسِ دارای رله (Codex روی #267، Low):** `loadEnv` Grace رله را فقط در سرویسی که Purge هم داشت با
     بودجه می‌سنجید و در بقیه با کل `SHUTDOWN_TIMEOUT_MS`؛ notification (رله و کارگرها با `OutboxShutdown`، بی Purge) Grace
     ۲۴ ثانیه را زیر مهلت ۲۵ ثانیه می‌پذیرفت در حالی که Coordinator تخلیه را در ۲۳ ثانیه قطع می‌کرد. حالا هر سرویسِ دارای
     رله باید Grace را در `outboxShutdownBudgetMs` جا دهد (رله‌ای که هنوز در `onApplicationShutdown` می‌ایستد هم به همان ذخیره
     برای بقیهٔ بستن نیاز دارد)، و `SHUTDOWN_TIMEOUT_MS` ≤ ۲۰۰۰ در چنین سرویسی با نام خودش رد می‌شود. پیش‌فرض‌ها (۲۰ در ۲۳)
     تغییری نمی‌کنند.
+  - **فاز ۲a، کارگرهای هر سرویس:** notification دو کارگرش (Resolution و Mail، #267) را در همان `workers` نگه می‌دارد و
+    Purge کنارشان می‌آید. `ReservationSweeper` در inventory مانند جاروی انقضای asset کارگر `OutboxShutdown` شد: هر Batch
+    آن ردیف Outbox می‌نویسد. Consumerهای Kafka هم با `stop({ deadlineAt })` ـِ #270 در همان مهلت‌اند (Codex r1 روی #276):
+    `DispatcherConsumer` در notification (`onModuleDestroy` بی‌کرانش حذف شد؛ تراکنش Ingest تا ۳۰ ثانیه مجاز است) و
+    `PerformanceConsumer` در supplier (پیش‌تر `AppModule.onApplicationShutdown` آن را بی‌کران و پس از تخلیهٔ رله و Purge
+    متوقف می‌کرد) حالا `workers`ِ `OutboxShutdown`اند. نخستین توقف مهلت را می‌گیرد؛ `onApplicationShutdown` فقط به همان
+    می‌پیوندد. آزمون: `test/outbox-shutdown.int-spec.ts` در notification (Dispatcher واقعی روی `EventConsumer` واقعی؛
+    Ingest بی‌پایان، تنها یا کنار Publish، Batch Purge و Batch Mail بی‌پایان؛ Ingest ـی که پس از بستن برمی‌گردد) و در
+    supplier (Consumer روشن از راه Gate واقعی؛ Handler بی‌پایان کنار Publish و Batch بی‌پایان؛ Handler دیررس) ⇐ خروج ۰
+    زیر مهلت، پیام Commit‌نشده؛ و `src/app.module.shutdown.spec.ts` در هر دو (سیم‌کشی و یک مهلت).
   - **دو حلقهٔ پس‌زمینه و Worker موقتی در همان مهلت (Codex r1 روی #277، فاز ۳ خاموش‌شدن):** construction، economic و
     marketplace تا اینجا `OutboxShutdown` نداشتند؛ حالا هر سه دارند (رله به‌اضافهٔ `workers`)، و `onApplicationShutdown`
     فقط به همان توقف می‌پیوندد.
@@ -1491,8 +1504,8 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
       ثبت شده باشد دوباره نمی‌فرستد، و گذارهای محلی (`systemTransition`) در وضعیت مقصد بی‌صدا برمی‌گردند. Temporal برای
       تلاشی که کامل نشده نتیجه‌ای ثبت نمی‌کند و Worker بعدی دوباره اجرایش می‌کند.
     - آزمون: `standing-bootstrap.shutdown.spec.ts`، `balance-audit.shutdown.spec.ts`، `worker.shutdown.spec.ts` و
-      `app.module.shutdown.spec.ts` در هر سه سرویس. سرویس‌های contract، notification، identity، audit، supplier و
-      inventory و Consumerهای Kafka سه سرویس بالا هنوز بیرون از Coordinatorاند.
+      `app.module.shutdown.spec.ts` در هر سه سرویس. سرویس‌های contract، identity و audit (notification، supplier و
+      inventory با فاز ۲a، #276، آمدند) و Consumerهای Kafka سه سرویس بالا هنوز بیرون از Coordinatorاند.
   - **پیامد:** رله حالا پیش از بسته شدن سرور HTTP می‌ایستد، نه پس از آن. ردیفی که درخواستی در همین فاصله بنویسد در
     شروع بعدی (یا Replica دیگر) منتشر می‌شود — همان چیزی که پیش‌تر برای ردیف‌های لحظهٔ آخر هم بود.
 
@@ -1507,7 +1520,7 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   هزارتایی ۱۱ ms، اجرای بی‌کار ۰٫۱ ms.
 
   `stream_seq` و تشخیص Gap دست نمی‌خورند، چون تخصیص از `outbox_stream_sequence` است، نه از ردیف‌ها. آزمون
-  `test/outbox-purge.int-spec.ts` در هر پنج سرویس این را نشان می‌دهد.
+  `test/outbox-purge.int-spec.ts` در هر هشت سرویس این را نشان می‌دهد.
 
   **B2 پیش از Purge:** B2 (`outbox-b2-backfill.md`) شماره‌گذاری را از بیشینهٔ `stream_seq` باقی‌مانده در جدول می‌گیرد،
   نه از شمارنده. پس B2 هر سرویس را **پیش از روشن شدن Purge آن** اجرا کن. اگر Purge ردیف‌های شماره‌دار یک Stream را
@@ -1526,8 +1539,11 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   «B2 پیش از Purge» برای آن همچنان لازم است.
 
   **مانده (فازهای بعد، با مالک هر سرویس):**
-  - identity: `outbox_message`، و `security_event_outbox` که جدولی جداست؛
-  - economic، marketplace، supplier، construction، contract، notification.
+  - identity: `outbox_message`، و `security_event_outbox` که جدولی جداست. **در فاز ۲a متوقف شد و تصمیمش با مدیر
+    پروژه است:** `audit-gap-detected.md` گام ۵ برای فرمان اصلاح، ردیف منتشرشدهٔ `outbox_message` را با
+    `audit_correction_command` Join می‌کند و نبودن آن را **توضیح‌نداده** می‌داند و تشدید می‌کند. Purge این ردیف‌ها را
+    پس از Retention پاک می‌کند، پس آن گام را بی تصمیم می‌شکند.
+  - economic، marketplace، construction، contract.
 
 - **اولویت:** متوسط (پیش‌نیاز Production)
 - **ثبت‌شده:** 2026-10-13 (#242 r1)
