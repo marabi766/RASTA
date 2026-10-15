@@ -151,6 +151,13 @@ jobs:
         # asks for it, refused when malformed, never on a migrator (#268 r4).
         run: pnpm run test:session-statement-timeout
 
+      - name: Marketplace saga deployment gate (D-053)
+        # The check a marketplace-service deployment runs between stopping the
+        # old replicas and starting the new: passes only on no poller and no
+        # pending order-saga activity, blocks on everything it cannot verify
+        # (docs/runbooks/marketplace-saga-deploy.md). Codex r2 on #283.
+        run: pnpm run test:marketplace-saga-drain-check
+
       - name: Image scope rule
         # The rule that decides which images a pull request builds and scans
         # (L7-35). A wrong rule would quietly skip a changed image.

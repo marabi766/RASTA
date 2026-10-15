@@ -1334,9 +1334,19 @@ export const EXPECTED = {
         ],
       },
     },
-    tables: ['product', 'offer', 'order', 'order_line', 'fulfillment', 'order_status_history'],
+    tables: [
+      'product',
+      'offer',
+      'order',
+      'order_line',
+      'fulfillment',
+      'order_status_history',
+      // 20261015120000_saga_step (D-053): replay records of saga activities.
+      'saga_step',
+    ],
     triggers: [],
     constraints: [
+      'ck_saga_step_key_not_blank',
       'ck_order_settled_after_receipt',
       'ck_order_completed_has_settlement',
       'ck_order_line_total_consistent',
