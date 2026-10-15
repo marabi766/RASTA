@@ -8,10 +8,11 @@
  * given, that
  *   1. no worker polls the order task queue (the old worker is really gone,
  *      so nothing can start an activity between this check and the switch);
- *   2. visibility lists exactly as many running `orderSaga` workflows as it
- *      counts (`workflow list` against `workflow count`, before and after);
- *   3. not one of them has a pending activity (`workflow describe`, one by
- *      one: visibility does not index pending activities).
+ *   2. visibility lists exactly as many running `orderSaga` executions as it
+ *      counts, none twice (`workflow list` against `workflow count`, before
+ *      and after; a (workflow id, run id) listed twice is unverifiable);
+ *   3. not one of them has a pending activity (`workflow describe`, each
+ *      listed run exactly once: visibility does not index pending activities).
  * Exit 1: a poller or a pending activity was found. Exit 2: anything could not
  * be checked — a missing setting, the CLI absent or failing, output it does
  * not recognise. Both block the deployment; there is no exception.
@@ -139,12 +140,12 @@ function check() {
     'json',
   ]);
   if (!Array.isArray(listed)) throw new Unverifiable('temporal workflow list: not a list');
-  if (listed.length !== before) {
-    throw new Unverifiable(
-      `visibility counts ${before} running order sagas but lists ${listed.length}`,
-    );
-  }
-
+  // Every entry is checked, and no execution may be listed twice, before the
+  // list is compared with the count or anything is described: a duplicate
+  // could otherwise make up the number for a run that is not listed at all,
+  // which would then never be described (Codex r4 on #283).
+  const executions = [];
+  const seen = new Set();
   for (const entry of listed) {
     const workflowId = entry?.execution?.workflowId;
     const runId = entry?.execution?.runId;
@@ -155,6 +156,20 @@ function check() {
     ) {
       throw new Unverifiable('temporal workflow list: an entry without an orderSaga execution');
     }
+    const identity = JSON.stringify([workflowId, runId]);
+    if (seen.has(identity)) {
+      throw new Unverifiable(`temporal workflow list: ${workflowId} ${runId} is listed twice`);
+    }
+    seen.add(identity);
+    executions.push({ workflowId, runId });
+  }
+  if (executions.length !== before) {
+    throw new Unverifiable(
+      `visibility counts ${before} running order sagas but lists ${executions.length}`,
+    );
+  }
+
+  for (const { workflowId, runId } of executions) {
     const described = temporal(cli, [
       'workflow',
       'describe',

@@ -1593,8 +1593,9 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   `TEMPORAL_ADDRESS=… TEMPORAL_NAMESPACE=… MARKETPLACE_TEMPORAL_TASK_QUEUE=… node scripts/marketplace-saga-drain-check.mjs`
   — مقادیر همان‌هایی که سرویس با آن‌ها اجرا می‌شود، هر سه اجباری و بی پیش‌فرض. Gate با Query ـِ Visibility
   `WorkflowType="orderSaga" AND ExecutionStatus="Running"` Workflowها را می‌شمارد و فهرست می‌کند
-  (`temporal workflow count` / `temporal workflow list --query … --output json`، شمار و فهرست باید یکی باشند و شمار تا پایان
-  عوض نشود)، هر کدام را `temporal workflow describe --workflow-id <id> --run-id <runId> --output json` می‌کند (Visibility
+  (`temporal workflow count` / `temporal workflow list --query … --output json`، هیچ اجرایی — `workflowId` و `runId` با هم —
+  دو بار فهرست نشود، شمار با شمار اجراهای یکتا یکی باشد و تا پایان عوض نشود؛ Codex دور ۴ روی #283: `[A, A]` با شمار ۲ جای
+  اجرای فهرست‌نشدهٔ B را پر می‌کرد و B هرگز توصیف نمی‌شد)، هر اجرای فهرست‌شده را دقیقاً یک بار `temporal workflow describe --workflow-id <id> --run-id <runId> --output json` می‌کند (Visibility
   فعالیت در انتظار را نمایه نمی‌کند) و `pendingActivities` باید نباشد یا خالی باشد؛ و با
   `temporal task-queue describe --task-queue <queue> --output json` هیچ Poller ـی روی Queue نباید باشد (Worker قدیمی واقعاً
   رفته، پس میان بررسی و جابه‌جایی کسی Activity آغاز نمی‌کند). هر پاسخ پیش از هر تفسیری با شکل خروجی CLI ـِ سنجاق‌شده
@@ -1630,6 +1631,10 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
     مثبت **۲۵ ثانیه یا بیشتر** ممکن است (مرز پنجره `>=` است، پس دقیقاً ۲۵ ثانیه هم). به همین دلیل این مسیر لایهٔ دوم است و
     Gate ـِ استقرار (بالا) اجباری: با صفر Activity در انتظار هنگام جابه‌جایی، هیچ Retry ـی با کد تازه به اثر بی‌رسیدِ Worker
     قدیمی نمی‌رسد.
+  - Gate به Visibility ـِ Temporal تکیه دارد: پاسخ ناقص اما خوش‌شکل و هم‌سازگار (اجرایی که نه در شمار است نه در فهرست) را
+    نمی‌تواند تشخیص دهد؛ فقط پاسخ‌های بدشکل، ناسازگار (شمار ≠ اجراهای یکتا، شمار در حین بررسی عوض شود) و تکراری را رد می‌کند.
+    فرض این است که Visibility هر Saga ـی را که پیش از توقف نسخهٔ قدیمی آغاز شده تا زمان Gate نمایه کرده است؛ تأخیر
+    نمایه‌سازی بیش از فاصلهٔ توقف تا Gate این فرض را می‌شکند.
   - شکست غیرقابل‌Retry یا پایان تلاش‌های یک Activity، Workflow را با وجه در Hold متوقف می‌کند و مسیر جبرانی ندارد:
     `docs/24` **Q-118**.
 - **اولویت:** بالا

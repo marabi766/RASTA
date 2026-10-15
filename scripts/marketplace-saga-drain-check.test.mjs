@@ -251,6 +251,11 @@ const UNVERIFIABLE = {
     {},
     /counts 3 running order sagas but lists 2/,
   ],
+  'visibility lists more sagas than it counts': [
+    { ...drained(), 'workflow count': { stdout: { count: '1' } } },
+    {},
+    /counts 1 running order sagas but lists 2/,
+  ],
   'a saga starts during the check': [
     {
       ...drained(),
@@ -344,6 +349,54 @@ const MALFORMED = {
 for (const [name, [scenario, message]] of Object.entries(MALFORMED)) {
   UNVERIFIABLE[name] = [scenario, {}, message];
 }
+
+// Codex r4 on #283: A listed twice made up the count for B, which has a
+// pending activity and was never described — exit 0. A listed execution is
+// described exactly once, and a duplicate blocks before anything is described,
+// whether the count agrees with the whole list or with its distinct entries.
+const DUPLICATED = {
+  'the count matches the list with the duplicate': '2',
+  'the count matches the distinct executions': '1',
+};
+for (const [name, count] of Object.entries(DUPLICATED)) {
+  test(`blocks when an execution is listed twice and ${name}`, () => {
+    const scenario = {
+      ...drained(),
+      'workflow count': { stdout: { count } },
+      'workflow list': { stdout: [execution('A'), execution('A')] },
+      'workflow describe order-B': { stdout: description('B', [pendingHold]) },
+    };
+    const { status, stdout, stderr, calls } = run(scenario);
+    assert.equal(status, 2);
+    assert.match(stderr, /cannot verify — deployment blocked: /);
+    assert.match(stderr, /temporal workflow list: order-A run-A is listed twice/);
+    assert.doesNotMatch(stdout, /OK/);
+    assert.deepEqual(
+      calls.map((args) => args.slice(0, 2).join(' ')),
+      ['task-queue describe', 'workflow count', 'workflow list'],
+    );
+  });
+}
+
+test('passes two runs of one workflow id listed once each, describing each run', () => {
+  const runOf = (runId) => ({ ...execution('A'), execution: { workflowId: 'order-A', runId } });
+  const describedRun = (runId) => {
+    const answer = description('A');
+    answer.workflowExecutionInfo.execution.runId = runId;
+    return { stdout: answer };
+  };
+  const scenario = {
+    ...drained(),
+    'workflow list': { stdout: [runOf('run-A1'), runOf('run-A2')] },
+    'workflow describe order-A': { sequence: [describedRun('run-A1'), describedRun('run-A2')] },
+  };
+  const { status, calls } = run(scenario);
+  assert.equal(status, 0);
+  const described = calls
+    .filter((args) => args[1] === 'describe' && args[0] === 'workflow')
+    .map((args) => args[args.indexOf('--run-id') + 1]);
+  assert.deepEqual(described, ['run-A1', 'run-A2']);
+});
 
 for (const [name, [scenario, options, message]] of Object.entries(UNVERIFIABLE)) {
   test(`blocks when ${name}`, () => {
