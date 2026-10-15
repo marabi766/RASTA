@@ -2,8 +2,9 @@
 import { PrismaClient } from '../src/generated/prisma';
 import { assertDemoSeedAllowed, assertDemoSeedDatabase, withUtcSession } from '@rasta/config';
 import { assertDemoSeedRuntimeRole } from '@rasta/nest-common';
-import { toLabel } from '../src/organization/organization.repository';
-import { assertSeedDoesNotReparent } from '../src/organization/seed-guard';
+import { OrganizationRepository, toLabel } from '../src/organization/organization.repository';
+import { PrismaService } from '../src/prisma/prisma.service';
+import { seedOrganization, type SeedOrganizationRow } from '../src/organization/seed-organization';
 
 /**
  * Demo seed for organization-service.
@@ -44,24 +45,13 @@ function resolveDatabaseUrl(): string {
   return withUtcSession(url);
 }
 
-const prisma = new PrismaClient({ datasources: { db: { url: resolveDatabaseUrl() } } });
+// The service's own data access: each organization is written through the
+// repository's hierarchy lock, like `OrganizationService.create`.
+const database = new PrismaService(resolveDatabaseUrl());
+const prisma = database.client;
+const repository = new OrganizationRepository(database);
 
-interface SeedOrganization {
-  id: string;
-  name: string;
-  shortName?: string;
-  type:
-    | 'DEHYARI'
-    | 'MUNICIPALITY'
-    | 'UNION'
-    | 'COOPERATIVE'
-    | 'COMPANY'
-    | 'GOVERNMENT'
-    | 'PRIVATE'
-    | 'NATIONAL_ORGANIZATION';
-  parentId: string | null;
-  externalCode?: string;
-  metadata?: Record<string, unknown>;
+interface SeedOrganization extends SeedOrganizationRow {
   location?: {
     city: string;
     province: string;
@@ -209,57 +199,11 @@ async function main(): Promise<void> {
 
   console.warn('Seeding organization-service…');
 
-  const pathById = new Map<string, string>();
-
   for (const org of ORGANIZATIONS) {
-    const parentPath = org.parentId ? pathById.get(org.parentId) : null;
-    if (org.parentId && !parentPath) {
-      throw new Error(`Parent ${org.parentId} must be seeded before ${org.id}`);
-    }
-
+    // Row and path in one transaction under the hierarchy lock, never re-parented, never ACTIVE
+    // beneath a suspended or deactivated parent (`seed-organization.ts`).
+    const { depth } = await seedOrganization(repository, org);
     const label = toLabel(org.id);
-    const path = parentPath ? `${parentPath}.${label}` : label;
-    const depth = path.split('.').length - 1;
-    pathById.set(org.id, path);
-
-    // Re-parenting is a versioned move (`OrganizationService.move`), never a seed's rewrite.
-    assertSeedDoesNotReparent(
-      org.id,
-      await prisma.organization.findUnique({
-        where: { id: org.id },
-        select: { parentId: true },
-      }),
-      org.parentId,
-    );
-
-    await prisma.organization.upsert({
-      where: { id: org.id },
-      create: {
-        id: org.id,
-        name: org.name,
-        shortName: org.shortName ?? null,
-        type: org.type,
-        status: 'ACTIVE',
-        parentId: org.parentId,
-        externalCode: org.externalCode ?? null,
-        metadata: (org.metadata ?? {}) as object,
-        depth,
-        createdBy: 'SEED',
-        updatedBy: 'SEED',
-      },
-      update: {
-        name: org.name,
-        type: org.type,
-        updatedBy: 'SEED',
-      },
-    });
-
-    // The ltree column is `Unsupported` in Prisma, so it is set with raw SQL. Insert-only: a row
-    // that already has a path keeps it — a move (`OrganizationService.move`) owns the tree after the
-    // first write, and a seed rewriting it would race one (round 6).
-    await prisma.$executeRaw`
-      UPDATE organization SET path = ${path}::ltree WHERE id = ${org.id} AND path IS NULL
-    `;
 
     if (org.location) {
       const locationId = `LOC-SEED-${label}`;
@@ -340,4 +284,4 @@ main()
     console.error('Organization seed failed:', error);
     process.exit(1);
   })
-  .finally(() => void prisma.$disconnect());
+  .finally(() => void database.onModuleDestroy());

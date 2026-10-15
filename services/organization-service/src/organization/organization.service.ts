@@ -1098,9 +1098,10 @@ function rethrowConstraintViolation(aggregate: string, id: string) {
 /**
  * Refuses an operation that would leave an ACTIVE organization beneath a
  * SUSPENDED or DEACTIVATED one. `chain` is ancestors root-first, already
- * locked by the caller; the nearest blocking one is reported.
+ * locked by the caller; the nearest blocking one is reported. The demo seed
+ * applies the same rule to the rows it creates (`seed-organization.ts`).
  */
-function assertNoBlockingAncestor(chain: readonly ChainRow[], action: string): void {
+export function assertNoBlockingAncestor(chain: readonly ChainRow[], action: string): void {
   const blocking = [...chain]
     .reverse()
     .find((row) => BLOCKING_ANCESTOR_STATUSES.includes(row.status));
