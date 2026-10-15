@@ -292,12 +292,18 @@ Status. در متن، هر جا URL یا مسیری (`scheme://…` یا `/…`)
 پایان Query حساب نمی‌شود، و پاک‌کردن بیش از اندازه بر نشت ترجیح دارد. Query بی‌مسیر هم همین‌طور است: `?` چسبیده به واژه
 (`cb?…`) یا `?` با `=`/`&` در ادامه. `?`ای که پس از آن فاصله یا پایان متن می‌آید (پرسش در نثر، Placeholder در SQL) دست
 نمی‌خورد. منبع نقل‌شده در خطای `JSON.parse` به `"[REDACTED]"` بدل می‌شود، هر چند خط که باشد (با هر نویسهٔ پایان خط)، و
-تا آخرین `is not valid JSON` یکجا. پاک‌سازی هنگام نوشتن هر مقدار در Span است، **پیش از** آنکه SDK آن را به
+تا آخرین `is not valid JSON` یکجا. این پاک‌سازی برای هر Span، نمونه‌برداری‌شده یا نه، و پیش از هر احراز هویتی روی سرصفحه‌های
+درخواست اجرا می‌شود؛ پس هر دو قاعده یک پیمایش خطی‌اند (`indexOf` و پیمایش رو به جلو، بی هیچ عبارت باقاعده‌ای که Backtrack
+کند یا به عقب بنگرد) و متنی بلندتر از ۴۰۹۶ نویسه (`REDACT_TEXT_MAX`) پیش از پاک‌سازی به همین اندازه بریده و با
+`…[TRUNCATED]` نشان‌دار می‌شود. در متن بریده، هر دو قاعده در محل برش بسته عمل می‌کنند: از نخستین گیومه همه‌چیز می‌رود، چون
+پایان `is not valid JSON` ممکن است پس از برش بوده باشد، و هر `?` در آخرین تکهٔ بی‌فاصله Query حساب می‌شود، چون `=` یا `&`
+آن ممکن است بریده شده باشد. پاک‌سازی هنگام نوشتن هر مقدار در Span است، **پیش از** آنکه SDK آن را به
 `attributeValueLengthLimit` کوتاه کند، زیرا کوتاه‌شدن ممکن است همان پایان `is not valid JSON` را ببرد و بدنه را نگه دارد.
 Attributeها و Linkهایی که Span با آن‌ها آغاز می‌شود را SDK پیش از هر Span Processor ذخیره و کوتاه می‌کند. این‌ها از سرصفحه‌های
-درخواست می‌آیند: `user_agent.original`، `server.address` (از `Host`/`Forwarded`/`X-Forwarded-Host`)، `client.address` (از
-`X-Forwarded-For`/`Forwarded`) و `url.full` در Span ‏NestJS. پس `RedactingSampler` آن‌ها را در `shouldSample` پاک می‌کند، که
-SDK پیش از ساختن Span صدا می‌زند، و تصمیم نمونه‌برداری همچنان با `RastaSampler` است.
+درخواست می‌آیند: `server.address` (از `Host`/`Forwarded`/`X-Forwarded-Host`)، `client.address` (از
+`X-Forwarded-For`/`Forwarded`)، `url.path` و `url.full` در Span ‏NestJS. پس `RedactingSampler` آن‌ها را در `shouldSample` پاک
+می‌کند، که SDK پیش از ساختن Span صدا می‌زند، و تصمیم نمونه‌برداری همچنان با `RastaSampler` است. `User-Agent`
+(`user_agent.original`) اصلاً ثبت نمی‌شود: متن آزاد کلاینت است تا سقف ۱۶ کیلوبایت سرصفحه، و ردیابی چیزی از آن لازم ندارد.
 نام Span، نام Event، `url.path` و `http.route` (الگوی Route) دست نمی‌خورند. انتخاب Exporter همان است که بود: پردازشگرهای صادرکننده را همان دو
 تابعی می‌سازند که `NodeSDK` خودش می‌خواند (`OTEL_TRACES_EXPORTER`، پروتکل OTLP، `OTEL_BSP_*`، `none` یعنی بی‌Tracer Provider) و
 پاک‌ساز فقط جلوی آن‌ها می‌ایستد. Log همبسته با Trace (pino ← OTel Logs) هم دادهٔ کلاینت از درخواست ندارد: `path` بی‌Query
@@ -308,7 +314,8 @@ Frameهای Stack پس از همین پاک‌سازی جدا می‌شوند، 
 با Instrumentationهای واقعی و Exporter درون‌حافظه:
 
 - `packages/observability/src/url-redaction.spec.ts`: Span، با و بی `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT=40`، از جمله
-  `User-Agent` به شکل خطای Parser.
+  `X-Forwarded-Host` به شکل خطای Parser و سرصفحه‌ها و مسیر ۱۵٬۰۰۰ نویسه‌ای؛ برابری با دو عبارت باقاعدهٔ پیشین روی متن‌های
+  تصادفی؛ و متن‌های ۱۶٬۳۸۴ نویسه‌ای در برابر بدترین حالت هر قاعده، با سقف زمان و نسبت هزینهٔ ۱۶k به ۴k.
 - `exporter-selection.spec.ts`: مقایسه با کد پیشین در هر ترکیب محیط.
 - `packages/nest-common/src/middleware/request-path-logs.spec.ts`: Log و Span در سطح debug و info و با حد ۴۰، شامل:
   - 404 خود Nest؛
