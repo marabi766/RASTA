@@ -324,11 +324,13 @@ export interface OutboxStore {
   /**
    * Gives rows back without counting a failure. Returns rows released.
    *
-   * Only a stop releases, and `deadlineMs` is what is left of its bound: the
-   * store's own `statement_timeout`, as for {@link renew}, so a release the
-   * stop no longer waits for does not go on holding row locks either.
+   * Only a stop releases, and `bound` is that stop's bound, read again at each
+   * step: the store waits for its connection no longer than what is left of
+   * it, then issues nothing once it reads zero, and takes what is left then as
+   * its own `statement_timeout` — so a release the stop no longer waits for
+   * neither starts late nor goes on holding row locks (`releaseSql`).
    */
-  release(ids: readonly string[], token: string, deadlineMs: number): Promise<number>;
+  release(ids: readonly string[], token: string, bound: OutboxReleaseBound): Promise<number>;
 
   /**
    * Extends the lease and returns the ids **still owned**.
@@ -392,6 +394,47 @@ export interface OutboxStopOptions {
    * waits for the earlier of this and its own bound.
    */
   deadlineAt?: number;
+}
+
+/**
+ * The bound a stop gives its release: not a number of milliseconds read once,
+ * but the stop's deadline itself, read again at each step (Codex r3 on #291).
+ *
+ * A budget fixed when the release began would be spent by whatever precedes
+ * its statements — waiting for a pooled connection above all — while the stop
+ * stops waiting at its deadline regardless. Read after that wait instead, it
+ * says whether there is still a stop to release for, and how long the
+ * statement may take.
+ */
+export interface OutboxReleaseBound {
+  /**
+   * Milliseconds left of the stop's bound, on the relay's clock. Zero once its
+   * deadline has passed, the stop has stopped waiting for this release or the
+   * run has ended — and zero from then on.
+   */
+  remainingMs(): number;
+}
+
+/**
+ * A bound `ms` from now, for a release no stop is waiting on: tests, tooling.
+ * Zero once that time has passed, so nothing of such a release starts later.
+ */
+export function releaseWithin(ms: number, now: () => number = Date.now): OutboxReleaseBound {
+  const deadlineAt = now() + ms;
+  return { remainingMs: () => Math.max(0, deadlineAt - now()) };
+}
+
+/**
+ * A release that found its bound spent — before its connection, after it, or
+ * once its UPDATE had returned — and so wrote nothing: no statement after the
+ * bound, and an UPDATE that returned after it rolled back rather than
+ * committed. The rows stay claimed until their lease expires.
+ */
+export class OutboxReleaseAbandoned extends Error {
+  constructor() {
+    super('outbox release: its bound was spent, so it wrote nothing; the lease decides');
+    this.name = 'OutboxReleaseAbandoned';
+  }
 }
 
 /** ADR-050 §Heartbeat timing. Three attempts before expiry, at every lease size. */
@@ -557,6 +600,8 @@ export class OutboxRelay {
    * earlier of the two and the release by that shared deadline. A release
    * still unfinished at its bound is abandoned: nothing was sent, and the rows
    * return to the queue when their lease expires (Codex r1 on #291, finding 2).
+   * An abandoned release issues no statement after the stop has returned, and
+   * commits nothing it had not by then (Codex r3 on #291; `releaseSql`).
    *
    * Once a stop has begun the run starts nothing new: no claim, no publish
    * (the per-row fallback included), no heartbeat. A claim that returns while
@@ -596,7 +641,7 @@ export class OutboxRelay {
       const token = this.token;
       if (token) {
         const notSent = [...this.owned].filter((id) => this.state.get(id) === 'NOT_SENT');
-        if (notSent.length > 0) await this.release(notSent, token, releaseBy);
+        if (notSent.length > 0) await this.release(run, notSent, token, releaseBy);
 
         const abandoned = [...this.owned].filter((id) => this.state.get(id) === 'IN_FLIGHT');
         if (abandoned.length > 0) {
@@ -624,26 +669,47 @@ export class OutboxRelay {
   /**
    * The stop's release of rows nothing was sent for, waited for until
    * `releaseBy` and no longer. Not released is safe: the lease lapses on its
-   * own. With no time left the release is not even begun, so nothing of it
-   * reaches the store after the stop has returned.
+   * own. With no time left the release is not even begun.
+   *
+   * The store reads the bound again once it has a connection and before each
+   * statement (Codex r3 on #291). It reads zero from the moment the stop stops
+   * waiting — set here, before the stop returns, not inferred from a clock —
+   * so a release whose connection arrives after the stop has returned issues
+   * nothing, and one whose UPDATE returns then is rolled back. Its outcome,
+   * whenever it settles, is no longer this relay's to record.
    */
-  private async release(ids: string[], token: string, releaseBy: number): Promise<void> {
-    const boundMs = releaseBy - this.now();
+  private async release(
+    run: RelayRun,
+    ids: string[],
+    token: string,
+    releaseBy: number,
+  ): Promise<void> {
+    let abandoned = false;
+    const bound: OutboxReleaseBound = {
+      remainingMs: () => (abandoned || run.ended ? 0 : Math.max(0, releaseBy - this.now())),
+    };
+    const boundMs = bound.remainingMs();
     if (boundMs > 0) {
-      const releasing = this.options.store.release(ids, token, boundMs).then(
+      /** Whether the release ran: false when the store found the bound spent first. */
+      const releasing = this.options.store.release(ids, token, bound).then(
         (released) => {
+          if (abandoned) return true;
           this.recordFencing(ids.length - released, 'release');
           this.options.logger?.debug(
             { count: released, owner: this.owner },
             'Outbox shutdown released rows that had not been sent',
           );
+          return true;
         },
         (error: unknown) => {
+          if (abandoned || error instanceof OutboxReleaseAbandoned) return false;
           this.options.logger?.error({ err: error }, 'Outbox shutdown release failed');
+          return true;
         },
       );
-      if ((await withinDeadline(releasing, boundMs)) === 'finished') return;
+      if ((await withinDeadline(releasing, boundMs)) === 'finished' && (await releasing)) return;
     }
+    abandoned = true;
     this.options.logger?.warn(
       { count: ids.length, owner: this.owner, leaseSeconds: this.leaseSeconds },
       'Outbox shutdown release did not finish by the shutdown deadline; the rows ' +
@@ -771,7 +837,9 @@ export class OutboxRelay {
   ): Promise<number> {
     this.options.logger?.warn(
       { err: describeError(batchError), count: batch.length },
-      'Batch publish failed; retrying rows individually',
+      run.stopping
+        ? 'Batch publish failed while the relay is stopping; no row is retried'
+        : 'Batch publish failed; retrying rows individually',
     );
 
     const published: string[] = [];

@@ -7,7 +7,7 @@ import {
   auditTrailPayloadSchemaV1,
   parseEnvelope,
 } from '@rasta/contracts';
-import type { OutboxRow } from '@rasta/nest-common';
+import { releaseWithin, type OutboxRow } from '@rasta/nest-common';
 import {
   securityEventAggregationsTotal,
   securityEventCapturesTotal,
@@ -158,7 +158,8 @@ describe('windowed refusal aggregation (real PostgreSQL)', () => {
     const claim = await store.claimPending({ limit: 1000, owner, leaseSeconds });
     const mine = claim.rows.filter((row) => ids.includes(row.id));
     const others = claim.rows.filter((row) => !ids.includes(row.id)).map((row) => row.id);
-    if (claim.token && others.length > 0) await store.release(others, claim.token, 5_000);
+    if (claim.token && others.length > 0)
+      await store.release(others, claim.token, releaseWithin(5_000));
     return { token: claim.token, rows: mine, reclaimed: claim.reclaimed };
   }
 
@@ -660,7 +661,7 @@ describe('windowed refusal aggregation (real PostgreSQL)', () => {
           await store.release(
             others.map((row) => row.id),
             claim.token,
-            5_000,
+            releaseWithin(5_000),
           );
         }
         for (const row of mine) claimedCounts.set(row.id, countOf(row));

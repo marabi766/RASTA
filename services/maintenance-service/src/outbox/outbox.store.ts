@@ -12,6 +12,7 @@ import {
   type ClaimRequest,
   type OutboxClaim,
   type OutboxPurgeStore,
+  type OutboxReleaseBound,
   type OutboxStore,
   type PurgePublishedBatch,
   type PurgePublishedOptions,
@@ -61,13 +62,13 @@ export class PrismaOutboxStore implements OutboxStore, OutboxPurgeStore {
     return markFailedSql(this.prisma.client, id, token, error, backoff);
   }
 
-  async release(ids: readonly string[], token: string, deadlineMs: number): Promise<number> {
+  async release(ids: readonly string[], token: string, bound: OutboxReleaseBound): Promise<number> {
     return releaseSql(
       (fn, timeoutMs) =>
         this.prisma.client.$transaction(fn, { timeout: timeoutMs, maxWait: timeoutMs }),
       ids,
       token,
-      deadlineMs,
+      bound,
     );
   }
 

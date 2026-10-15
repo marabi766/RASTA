@@ -1,4 +1,10 @@
-import { OutboxRelay, type OutboxRow } from '@rasta/nest-common';
+import {
+  OutboxRelay,
+  OutboxReleaseAbandoned,
+  releaseWithin,
+  type OutboxReleaseBound,
+  type OutboxRow,
+} from '@rasta/nest-common';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import {
   createProtocolSchema,
@@ -136,7 +142,7 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     const first = await claim(storeA, 10, 0);
     const second = await claim(storeB, 10, LEASE, 'worker-b');
 
-    const released = await storeA.release(['STALE_RELEASE'], first.token!, 5_000);
+    const released = await storeA.release(['STALE_RELEASE'], first.token!, releaseWithin(5_000));
 
     expect(released).toBe(0);
     // The new owner's claim is untouched: a stale release must not hand its
@@ -324,7 +330,7 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     const first = await claim(storeA, 10);
     const firstOrder = first.rows.map((row) => row.id);
 
-    await storeA.release(firstOrder, first.token!, 5_000);
+    await storeA.release(firstOrder, first.token!, releaseWithin(5_000));
     const second = await claim(storeB, 10, LEASE, 'worker-b');
 
     expect(firstOrder).toEqual([...ids].sort());
@@ -479,7 +485,7 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     expect(await storeA.renew(ids, claimed.token!, LEASE, 5000)).toEqual([]);
     expect(await storeA.markPublished(ids, claimed.token!)).toBe(0);
     expect(await storeA.markFailed(ids[0], claimed.token!, 'x', BACKOFF)).toBe(0);
-    expect(await storeA.release(ids, claimed.token!, 5_000)).toBe(0);
+    expect(await storeA.release(ids, claimed.token!, releaseWithin(5_000))).toBe(0);
   });
 
   // -- 19 --------------------------------------------------------------------
@@ -496,8 +502,8 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
       markPublished: (ids: readonly string[], token: string) => storeA.markPublished(ids, token),
       markFailed: (id: string, token: string, error: string, backoff: typeof BACKOFF) =>
         storeA.markFailed(id, token, error, backoff),
-      release: (ids: readonly string[], token: string, deadline: number) =>
-        storeA.release(ids, token, deadline),
+      release: (ids: readonly string[], token: string, bound: OutboxReleaseBound) =>
+        storeA.release(ids, token, bound),
       oldestPendingAgeSeconds: () => storeA.oldestPendingAgeSeconds(),
       renew: async (ids: readonly string[], token: string, lease: number, deadline: number) => {
         attempts += 1;
@@ -665,7 +671,7 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     let backstop: NodeJS.Timeout | undefined;
     try {
       const outcome = await Promise.race([
-        storeA.release(['SD_BLOCKED'], claimed.token!, 300).then(
+        storeA.release(['SD_BLOCKED'], claimed.token!, releaseWithin(300)).then(
           (released) => `released ${released}`,
           (error: unknown) => String(error),
         ),
@@ -673,7 +679,13 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
           backstop = setTimeout(() => resolve('still waiting after 10 s'), 10_000);
         }),
       ]);
-      expect(outcome).toMatch(/57014|statement timeout/);
+      // Whichever bound reports first — the statement's, or Prisma's
+      // transaction timeout, both what was left of the bound (#291 r3: no
+      // margin past it) — the release did not release.
+      expect(outcome).toMatch(/57014|statement timeout|expired transaction/);
+      // And the database gave up too: no UPDATE is left waiting on the lock.
+      // Prisma's timeout alone would not end it; the statement timeout does.
+      expect(await updatesWaitingOnALock(b)).toBe(0);
     } finally {
       clearTimeout(backstop);
       await held.release();
@@ -681,6 +693,61 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
 
     // Not released: the token still holds the row, and its lease decides.
     expect((await readRow(a, 'SD_BLOCKED')).claim_token).toBe(claimed.token);
+  });
+
+  /**
+   * Release UPDATEs still waiting on a row lock, once any ending now has had
+   * a moment to (the backend reports a cancelled statement asynchronously).
+   */
+  async function updatesWaitingOnALock(prisma: PrismaService): Promise<number> {
+    let waiting = 0;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const [row] = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n
+           FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND pid <> pg_backend_pid()
+            AND state = 'active'
+            AND wait_event_type = 'Lock'
+            AND query LIKE 'UPDATE outbox_message%SET claim_token%'`,
+      );
+      waiting = row?.n ?? 0;
+      if (waiting === 0) return 0;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return waiting;
+  }
+
+  // -- a release outlived by its stop (#291 r3) ------------------------------
+
+  /**
+   * A bound that reads `ms` for its first `reads` reads and zero after: the
+   * release reads it before the transaction, for its `SET LOCAL`, before the
+   * UPDATE and after it — so `reads` picks the step at which the stop stops
+   * waiting, without a timer.
+   */
+  const spentAfter = (reads: number, ms = 5_000): OutboxReleaseBound => {
+    let left = reads;
+    return { remainingMs: () => (left-- > 0 ? ms : 0) };
+  };
+
+  it.each([
+    ['once its connection is held: nothing is written', 1],
+    ['once its UPDATE has returned: the UPDATE is rolled back, not committed', 3],
+  ])('a release whose stop stopped waiting %s', async (_when, reads) => {
+    await seedRow(a, 'SD_OUTLIVED');
+    const claimed = await claim(storeA, 10);
+
+    await expect(
+      storeA.release(['SD_OUTLIVED'], claimed.token!, spentAfter(reads)),
+    ).rejects.toThrow(OutboxReleaseAbandoned);
+
+    // Still the stop's claim, untouched: the lease decides.
+    const row = await readRow(a, 'SD_OUTLIVED');
+    expect(row.claim_token).toBe(claimed.token);
+    expect(row.claim_expires_at).not.toBeNull();
+    // And the connection came back clean: the next release on it succeeds.
+    expect(await storeA.release(['SD_OUTLIVED'], claimed.token!, releaseWithin(5_000))).toBe(1);
   });
 
   // -- 23 --------------------------------------------------------------------

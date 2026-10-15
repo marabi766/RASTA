@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import type { ErrorCode } from '@rasta/contracts';
-import type {
-  ClaimRequest,
-  OutboxClaim,
-  OutboxRow,
-  OutboxStore,
-  RetryBackoff,
+import {
+  boundedReleaseSql,
+  type ClaimRequest,
+  type OutboxClaim,
+  type OutboxReleaseBound,
+  type OutboxRow,
+  type OutboxStore,
+  type RetryBackoff,
 } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 import { toSecurityEventOutboxRow, type SecurityEventRecord } from './audit-trail-envelope';
@@ -388,16 +390,19 @@ export class SecurityEventOutboxStore implements OutboxStore {
   }
 
   /**
-   * Gives rows back without counting a failure. Bounded by its own statement
-   * timeout at what is left of the relay's stop (Codex r1 on #291, finding 2).
+   * Gives rows back without counting a failure. Bounded by the relay's stop,
+   * read again once the connection is held and before each statement, exactly
+   * as the shared release is (`boundedReleaseSql`, Codex r1 and r3 on #291);
+   * only the UPDATE is this table's.
    */
-  async release(ids: readonly string[], token: string, deadlineMs: number): Promise<number> {
+  async release(ids: readonly string[], token: string, bound: OutboxReleaseBound): Promise<number> {
     if (ids.length === 0) return 0;
-    const bound = statementTimeoutOf(deadlineMs);
-    return this.prisma.client.$transaction(
-      async (tx) => {
-        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${bound}`);
-        return tx.$executeRawUnsafe(
+    return boundedReleaseSql(
+      (fn, timeoutMs) =>
+        this.prisma.client.$transaction(fn, { timeout: timeoutMs, maxWait: timeoutMs }),
+      bound,
+      (tx) =>
+        tx.$executeRawUnsafe(
           `UPDATE security_event_outbox
               SET claim_token      = NULL,
                   claim_owner      = NULL,
@@ -406,9 +411,7 @@ export class SecurityEventOutboxStore implements OutboxStore {
               AND claim_token = $2`,
           [...ids],
           token,
-        );
-      },
-      { maxWait: bound, timeout: bound + TRANSACTION_MARGIN_MS },
+        ),
     );
   }
 

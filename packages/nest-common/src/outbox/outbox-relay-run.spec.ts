@@ -1,4 +1,10 @@
-import { OutboxRelay, type OutboxClaim, type OutboxRow, type OutboxStore } from './outbox';
+import {
+  OutboxRelay,
+  type OutboxClaim,
+  type OutboxReleaseBound,
+  type OutboxRow,
+  type OutboxStore,
+} from './outbox';
 
 /**
  * Codex r1 on #280, finding 2: a claim still pending when `stop()` returned
@@ -62,6 +68,8 @@ const claimOf = (token: string, ...ids: string[]): OutboxClaim => ({
 function gatedStore() {
   const claims: Barrier<OutboxClaim>[] = [];
   const releaseGates: Barrier<void>[] = [];
+  /** What each release's bound read when the release was called. */
+  const releaseBoundsMs: number[] = [];
   let renewGate: Barrier<string[]> | undefined;
   const store = {
     claimPending: jest.fn(
@@ -70,7 +78,8 @@ function gatedStore() {
     ),
     markPublished: jest.fn(async (ids: readonly string[]) => ids.length),
     markFailed: jest.fn(async () => 1),
-    release: jest.fn(async (ids: readonly string[], _token: string, _deadlineMs: number) => {
+    release: jest.fn(async (ids: readonly string[], _token: string, bound: OutboxReleaseBound) => {
+      releaseBoundsMs.push(bound.remainingMs());
       await releaseGates.shift()?.promise;
       return ids.length;
     }),
@@ -79,6 +88,7 @@ function gatedStore() {
   } satisfies OutboxStore;
   return {
     store,
+    releaseBoundsMs,
     /** Queues a claim the test resolves; `resolveNow` hands it out already resolved. */
     claim(resolveNow?: OutboxClaim): Barrier<OutboxClaim> {
       const next = barrier<OutboxClaim>();
@@ -181,7 +191,7 @@ describe('OutboxRelay: a claim that returns after its stop', () => {
   );
 
   it('while the stop still waits is released by it, unsent, and never renewed', async () => {
-    const { store, claim } = gatedStore();
+    const { store, claim, releaseBoundsMs } = gatedStore();
     const { publish } = gatedPublisher();
     const { relay } = relayWith(store, publish, 20);
     const pending = claim();
@@ -201,7 +211,8 @@ describe('OutboxRelay: a claim that returns after its stop', () => {
     await flush();
 
     expect(store.release).toHaveBeenCalledTimes(1);
-    expect(store.release).toHaveBeenCalledWith(['R1', 'R2'], 'tok-1', 20_000);
+    expect(store.release).toHaveBeenCalledWith(['R1', 'R2'], 'tok-1', expect.anything());
+    expect(releaseBoundsMs).toEqual([20_000]);
     expect(publish).not.toHaveBeenCalled();
     expect(store.markPublished).not.toHaveBeenCalled();
     expect(store.renew).not.toHaveBeenCalled();
@@ -290,9 +301,9 @@ describe('OutboxRelay: a publish in flight at the stop', () => {
   );
 
   it('a batch refused while the stop waits sends no row on its own; the stop releases them', async () => {
-    const { store, claim } = gatedStore();
+    const { store, claim, releaseBoundsMs } = gatedStore();
     const { publish, calls } = gatedPublisher();
-    const { relay } = relayWith(store, publish, 20);
+    const { relay, warnings } = relayWith(store, publish, 20);
     claim(claimOf('tok-1', 'R1', 'R2', 'R3'));
 
     const tick = relay.tick();
@@ -304,11 +315,15 @@ describe('OutboxRelay: a publish in flight at the stop', () => {
 
     expect(publish).toHaveBeenCalledTimes(1);
     expect(store.markFailed).not.toHaveBeenCalled();
-    expect(store.release).toHaveBeenCalledWith(['R1', 'R2', 'R3'], 'tok-1', 20_000);
+    expect(store.release).toHaveBeenCalledWith(['R1', 'R2', 'R3'], 'tok-1', expect.anything());
+    expect(releaseBoundsMs).toEqual([20_000]);
+    // And the log says so, rather than announcing a per-row retry that never comes.
+    expect(warnings).toContainEqual(expect.stringMatching(/stopping; no row is retried/));
+    expect(warnings).not.toContainEqual(expect.stringMatching(/retrying rows individually/));
   });
 
   it('in the per-row fallback, no further row is sent once the stop has begun', async () => {
-    const { store, claim } = gatedStore();
+    const { store, claim, releaseBoundsMs } = gatedStore();
     const { publish, calls } = gatedPublisher();
     const { relay } = relayWith(store, publish, 20);
     claim(claimOf('tok-1', 'R1', 'R2', 'R3'));
@@ -328,7 +343,8 @@ describe('OutboxRelay: a publish in flight at the stop', () => {
 
     expect(publish).toHaveBeenCalledTimes(2);
     expect(store.markPublished).toHaveBeenCalledWith(['R1'], 'tok-1');
-    expect(store.release).toHaveBeenCalledWith(['R2', 'R3'], 'tok-1', 20_000);
+    expect(store.release).toHaveBeenCalledWith(['R2', 'R3'], 'tok-1', expect.anything());
+    expect(releaseBoundsMs).toEqual([20_000]);
   });
 });
 
@@ -617,7 +633,7 @@ describe('OutboxRelay: a release that does not finish (Codex r1 on #291, finding
   ])(
     'the stop returns %s, abandoning the release to the lease',
     async (_how, deadlineAt, boundMs) => {
-      const { store, claim, gateRelease } = gatedStore();
+      const { store, claim, gateRelease, releaseBoundsMs } = gatedStore();
       const { publish } = gatedPublisher();
       const { relay, warnings } = relayWith(store, publish, 20);
       const pending = claim();
@@ -633,14 +649,17 @@ describe('OutboxRelay: a release that does not finish (Codex r1 on #291, finding
       expect(await tick).toBe(0);
       await flush();
       await flush();
-      // The store's own statement timeout is what is left of the bound.
-      expect(store.release).toHaveBeenCalledWith(['R1', 'R2'], 'tok-1', boundMs);
+      // The bound the store is given reads what is left of the stop's.
+      expect(store.release).toHaveBeenCalledWith(['R1', 'R2'], 'tok-1', expect.anything());
+      expect(releaseBoundsMs).toEqual([boundMs]);
 
       jest.advanceTimersByTime(boundMs - 1);
       await flush();
       expect(returned).toBe(false);
       jest.advanceTimersByTime(1);
       await stopping;
+      // And reads zero from then on: nothing of the release may start now.
+      expect(store.release.mock.calls[0]![2].remainingMs()).toBe(0);
 
       expect(warnings).toContainEqual(
         expect.stringMatching(/release did not finish by the shutdown deadline.*lease expires/),

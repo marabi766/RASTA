@@ -1,4 +1,5 @@
 import { eventEnvelopeSchema } from '@rasta/contracts';
+import { releaseWithin } from '@rasta/nest-common';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { validateInventoryPayload, type InventoryEventName } from '../src/events/events';
 import { client, orgAdmin, seedStock, startApi, type ApiHarness } from './api-helpers';
@@ -118,7 +119,7 @@ describe('the transactional outbox', () => {
     expect(mine).toHaveLength(2);
     expect(await store.markPublished(mine, 'not-the-token')).toBe(0);
     expect(await store.markPublished(mine, claim.token as string)).toBe(2);
-    if (others.length > 0) await store.release(others, claim.token as string, 5_000);
+    if (others.length > 0) await store.release(others, claim.token as string, releaseWithin(5_000));
     expect((await outboxOf(a)).every((row) => row.publishedAt !== null)).toBe(true);
   });
 });

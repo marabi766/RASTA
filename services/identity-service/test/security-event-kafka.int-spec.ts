@@ -10,6 +10,7 @@ import {
 import {
   EventConsumer,
   kafkaConnectionFor,
+  releaseWithin,
   runUnscoped,
   type EventDelivery,
   type OutboxRelay,
@@ -1015,7 +1016,7 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
         await store.release(
           second.rows.map((row) => row.id).filter((rowId) => rowId !== refusal.eventId),
           second.token!,
-          5_000,
+          releaseWithin(5_000),
         );
 
         // Both publishes actually reached the broker, each a contract-valid

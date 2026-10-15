@@ -10,6 +10,7 @@ import {
   renewSql,
   type ClaimRequest,
   type OutboxClaim,
+  type OutboxReleaseBound,
   type OutboxStore,
   type RetryBackoff,
 } from '@rasta/nest-common';
@@ -59,13 +60,13 @@ export class PrismaOutboxStore implements OutboxStore {
     return markFailedSql(this.prisma.client, id, token, error, backoff);
   }
 
-  async release(ids: readonly string[], token: string, deadlineMs: number): Promise<number> {
+  async release(ids: readonly string[], token: string, bound: OutboxReleaseBound): Promise<number> {
     return releaseSql(
       (fn, timeoutMs) =>
         this.prisma.client.$transaction(fn, { timeout: timeoutMs, maxWait: timeoutMs }),
       ids,
       token,
-      deadlineMs,
+      bound,
     );
   }
 
