@@ -149,7 +149,7 @@ describeWithKafka('event flow over Kafka', () => {
   }, 200_000);
 
   afterAll(async () => {
-    await dispatcher?.onModuleDestroy();
+    await dispatcher?.stop();
     await Promise.all([...producers.values()].map((producer) => producer.disconnect()));
     await cleanup(w.prisma, organizations);
     await w.prisma.onModuleDestroy();
