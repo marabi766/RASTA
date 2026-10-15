@@ -247,17 +247,13 @@ SELECT id, window_ends_at, occurrence_count, published_at, attempts, next_attemp
 - `security_event_outbox` جدولی جدا از `outbox_message` است و **Purge نمی‌شود** (D-052 فقط `outbox_message` را پاک
   می‌کند): ردیف منتشرشدهٔ آن در جدول می‌ماند، پس نبودنش هرگز «Purge شده» نیست.
 
-**اصلاح identity:**
+**اصلاح identity** — اول در `rasta_identity` (نقش فقط‌خواندنی):
 
-`:retention_hours` و `:purge_interval_seconds` را با مقدار **مستقرِ** `OUTBOX_PURGE_RETENTION_HOURS` و
-`OUTBOX_PURGE_INTERVAL_SECONDS` در `identity-service` پر کن (پیش‌فرض ۱۶۸ و ۳۰۰):
+```sql identity-correction-command
+SET default_transaction_read_only = on;
 
-```sql
-SELECT c.event_id, c.created_at, o.id IS NOT NULL AS outbox_row,
-       o.published_at, o.attempts, o.next_attempt_at,
-       c.created_at < (now() AT TIME ZONE 'UTC')
-                      - make_interval(hours => :retention_hours, secs => :purge_interval_seconds)
-         AS past_purge_window
+SELECT c.event_id, c.target_id, c.created_at, o.id IS NOT NULL AS outbox_row,
+       o.organization_id, o.published_at, o.attempts, o.next_attempt_at
   FROM audit_correction_command c
   LEFT JOIN outbox_message o ON o.id = c.event_id
  WHERE c.event_id = :'event_id';
@@ -268,33 +264,58 @@ SELECT c.event_id, c.created_at, o.id IS NOT NULL AS outbox_row,
 
 - `outbox_row` درست و `published_at IS NULL` ⇒ [outbox-stuck](outbox-stuck.md) برای `identity-service`.
 - `outbox_row` درست و `published_at` پر ⇒ به Kafka رسیده؛ برگرد به گام ۳ و ۴.
-- `outbox_row` نادرست و `past_purge_window` درست ⇒ ردیف **پس از انتشار Purge شده** (D-052): identity ردیف منتشرشدهٔ
-  `outbox_message` را پس از Retention پاک می‌کند. نبودِ ردیف به‌خودی‌خود شکاف نیست؛ شاهد در `audit-service` است که فقط
-  افزودنی است. Retention از `published_at` شمرده می‌شود که هرگز پیش از `created_at` فرمان نیست، پس ردیف فرمانی جوان‌تر
-  از Retention نمی‌تواند Purge شده باشد. Interval Purge حاشیه است: فقط فرمانی «Purge‌شده» شمرده می‌شود که دست‌کم یک
-  اجرای Purge پس از گذشتن Retention دیده. بررسی را از سمت `audit-service` با همان `event_id` ادامه بده
-  (`:'from'` و `:'to'` بازه‌ای دور `c.created_at`، مثلاً یک روز پیش و پس از آن؛ جدول گام ۶ معنای نتیجه را می‌گوید):
+- `outbox_row` نادرست ⇒ نبودِ ردیف را **فقط با شاهد** توضیح بده، **هرگز با سن**: `event_id` را در `audit-service` بجوی
+  (پرسش پایین).
+  - **پیدا شد** (یک ردیف) ⇒ رویداد منتشر و مصرف شده است. نبودِ ردیف Outbox با Purge (D-052) — یا هر حذفی پس از انتشار —
+    توضیح داده می‌شود و شکاف نیست.
+  - **پیدا نشد** (هیچ ردیف) ⇒ **توضیح‌نداده؛ تشدید کن،** هر سنی که فرمان داشته باشد. سن و Retention فقط زمینه‌اند: اگر
+    `c.created_at` از `OUTBOX_PURGE_RETENTION_HOURS` مستقر قدیمی‌تر است، در پرونده بنویس «احتمالاً Purge شده، انتشار
+    تأییدنشده» — نه «Purge شده». سن فقط ثابت می‌کند ردیف **واجد** Purge بوده، نه اینکه منتشر شده یا Purgeی آن را پاک کرده:
+    ردیفی که پیش از انتشار گم شده (مثلاً با حذف نادرست)، Purgeی که اجرا نشده (زمان‌بند از کار افتاده، قفل گرفته، اجرای
+    کوتاه‌شده)، Retentionی که از آن پس عوض شده، و جابه‌جایی ساعت پایگاه داده، همه با سن یکسان دیده می‌شوند.
 
-  ```sql
-  SET search_path TO audit;
+جست‌وجو در `rasta_audit` (Schema `audit`، نقش فقط‌خواندنی). هر سه شرط زیر لازم‌اند و هر کدام ستونی است که فرمان را به ردیف
+می‌بندد:
 
-  SELECT event_id, consumer_name FROM processed_event
-   WHERE event_id = :'event_id' AND consumer_name = 'audit-service.trail';
+- `:'event_id'` = `audit_correction_command.event_id` ⇐ `audit_event.source_event_id`؛ همراه با Topic مسیر B
+  (`source_topic`، که از Metadata تحویل Broker است و Producer نمی‌تواند ادعایش کند) و `source_service = 'identity-service'`.
+- `:'target_id'` = `audit_correction_command.target_id` ⇐ `audit_event.correction_of`: همان رکوردی که فرمان اصلاح کرد.
+- `:'organization_id'` = **مستأجر مورد بررسی** (قاعدهٔ ۳: از رکورد یا رویداد، نه از حدس)؛ اگر ردیف Outbox هنوز هست، همان
+  `o.organization_id`. `audit_correction_command` ستون مستأجر ندارد (فرمان پلتفرمی است)؛ identity مستأجر رکورد هدف را از
+  جست‌وجوی مورداعتماد `audit-service` در رویداد اصلاح می‌گذارد، پس `audit_event.organization_id` ردیف اصلاح همان مستأجر رکورد
+  هدف است و فقط برای رکورد واقعاً پلتفرمی تهی است. برای چنین رکوردی `organization_id=` (رشتهٔ خالی) بده: دامنهٔ **صریح**
+  پلتفرم. بی این متغیر پرسش اجرا نمی‌شود.
 
-  SELECT id, source_topic, source_service, occurred_at, recorded_at, correction_of
-    FROM audit_event
-   WHERE source_event_id = :'event_id'
-     AND occurred_at BETWEEN :'from' AND :'to';
-  ```
+`:'from'` و `:'to'` بازه‌ای دور `c.created_at` است (مثلاً یک روز پیش و پس از آن؛ `occurredAt` رویداد اصلاح همان لحظهٔ ثبت
+فرمان است). ردیفی از مستأجر دیگر، از Topic یا سرویس دیگر، یا با `correction_of` دیگر شاهدِ **این** اصلاح نیست و برنمی‌گردد؛ پس
+«پیدا نشد» است. `processed_event` ستون مستأجر ندارد و نشانگرش به‌تنهایی هیچ چیز را برای یک مستأجر ثابت نمی‌کند.
 
-- `outbox_row` نادرست و `past_purge_window` نادرست ⇒ ردیف هنوز نباید Purge شده باشد، پس این حالت را **توضیح‌نداده** بدان و
-  تشدید کن. همین‌طور اگر Purge در این استقرار خاموش است (`OUTBOX_PURGE_ENABLED=false`).
+```sql identity-correction-audit
+SET default_transaction_read_only = on;
+SET search_path TO audit;
+
+SELECT id, organization_id, source_topic, source_service, correction_of, occurred_at, recorded_at
+  FROM audit_event
+ WHERE source_event_id = :'event_id'
+   AND source_topic = 'rasta.audit.trail.v1'
+   AND source_service = 'identity-service'
+   AND correction_of = :'target_id'
+   AND organization_id IS NOT DISTINCT FROM NULLIF(:'organization_id', '')
+   AND occurred_at BETWEEN :'from' AND :'to';
+```
+
+هر دو بلوک، کلمه‌به‌کلمه از همین فایل، با `psql` اجرا می‌شوند: بلوک اول در
+`services/identity-service/test/outbox-purge.int-spec.ts` (ردیف Purge‌شدهٔ فرمان قدیمی و ردیف گمشدهٔ فرمان جوان هر دو
+`outbox_row` نادرست می‌دهند و پرسش هیچ حکمی از سن نمی‌دهد)، بلوک دوم در `services/audit-service/test/correction-linkage.int-spec.ts`
+(اصلاح ثبت‌شده برای همان مستأجر پیدا می‌شود، چه قدیمی چه جوان؛ اصلاح ثبت‌نشده، مستأجر دیگر، Topic دیگر و رکورد هدف دیگر پیدا
+نمی‌شوند؛ دامنهٔ پلتفرم فقط با رشتهٔ خالی؛ و هر نوشتنی پس از بلوک رد می‌شود).
 
 **مسیر A:** همان پرسش را روی `outbox_message` سرویس مبدأ (`sourceService` مورد انتظار) با [outbox-stuck](outbox-stuck.md) بپرس.
 fleet، asset، document، maintenance، organization و identity ردیف منتشرشده را پس از `OUTBOX_PURGE_RETENTION_HOURS` (پیش‌فرض ۱۶۸
-ساعت) پاک می‌کنند (D-052). اگر در این سرویس‌ها ردیفی نیست و `occurredAt` از این بازه قدیمی‌تر است، نبودِ ردیف به‌خودی‌خود
-شکاف نیست. ردیف Purge شده و فقط می‌گوید «زمانی منتشر شده بود». ادامهٔ بررسی از گام ۳ و ۴ و سمت `audit-service` است. در
-سرویس‌های دیگر هنوز Purge اجرا نمی‌شود.
+ساعت) پاک می‌کنند (D-052). نبودِ ردیف در این سرویس‌ها هم با **همان قاعدهٔ شاهد** سنجیده می‌شود، نه با سن: `event_id` را با
+پرسش گام ۶ بجوی و `organization_id` و `source_topic` ردیف را با مستأجر مورد بررسی و Topic مالک سرویس بسنج. پیدا شد ⇒ منتشر و
+مصرف شده، و نبودِ ردیف شکاف نیست. پیدا نشد (یا فقط در مستأجر یا Topic دیگر) ⇒ توضیح‌نداده، تشدید کن، هر قدر `occurredAt`
+قدیمی باشد («احتمالاً Purge شده، انتشار تأییدنشده»). در سرویس‌های دیگر هنوز Purge اجرا نمی‌شود.
 
 ### ۶. سمت `audit-service` — آیا مصرف و ثبت شد؟ (پایگاه دادهٔ `rasta_audit`، Schema `audit`، نقش فقط‌خواندنی)
 
@@ -305,7 +326,7 @@ SET search_path TO audit;
 SELECT event_id, consumer_name FROM processed_event WHERE event_id = :'event_id';
 
 -- ردیف؛ occurred_at را محدود کن تا فقط پارتیشن‌های لازم خوانده شوند
-SELECT id, source_topic, source_service, occurred_at, recorded_at, occurrence_count, correction_of
+SELECT id, organization_id, source_topic, source_service, occurred_at, recorded_at, occurrence_count, correction_of
   FROM audit_event
  WHERE source_event_id = :'event_id'
    AND occurred_at BETWEEN :'from' AND :'to';

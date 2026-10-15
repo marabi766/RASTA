@@ -1,3 +1,6 @@
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { withUtcSession } from '@rasta/config';
 import {
   allocateStreamSeqSql,
@@ -464,9 +467,12 @@ describe('identity-service outbox purge (D-052)', () => {
    * identity only. `security_event_outbox` is a separate queue the purge does
    * not cover, and `audit_correction_command` is the evidence that a
    * correction was accepted: both stay exactly as they were. The correction's
-   * own `outbox_message` row does go, and `audit-gap-detected.md` step 5 tells
-   * that apart from a gap by the command's age — its query is run here as the
-   * runbook gives it.
+   * own `outbox_message` row does go. `audit-gap-detected.md` step 5 then
+   * never tells a purged row from a lost one by the command's age (Codex r1 on
+   * #280, F1): its `sql identity-correction-command` block, run here byte for
+   * byte, answers the same for both, and sends both to the audit-service
+   * lookup, whose classification `correction-linkage.int-spec.ts` in
+   * audit-service runs.
    */
   it('purges only outbox_message: security_event_outbox and audit_correction_command are untouched', async () => {
     // A correction accepted long ago, its event published long ago.
@@ -487,6 +493,9 @@ describe('identity-service outbox purge (D-052)', () => {
     await command('k-young', 'CORR_YOUNG', 2);
     // A young command whose row is missing: what the runbook must still escalate.
     await command('k-missing', 'CORR_MISSING', 2);
+    // An old command whose row was lost before it was ever published: old
+    // enough to be purged, and yet no purge removed it.
+    await command('k-lost', 'CORR_LOST', 400);
 
     // Refusal evidence: one published long ago, one still queued.
     const refusal = (id: string, hoursAgo: number, published: boolean) =>
@@ -522,37 +531,85 @@ describe('identity-service outbox purge (D-052)', () => {
     });
     const before = await snapshot();
     expect(before.refusals).toHaveLength(2);
-    expect(before.commands).toHaveLength(3);
+    expect(before.commands).toHaveLength(4);
 
     expect(await purge().runOnce()).toMatchObject({ outcome: 'completed', deleted: 1 });
     expect(await ids()).toEqual(['CORR_YOUNG']);
     expect(await snapshot()).toEqual(before);
 
-    // `audit-gap-detected.md` step 5, "identity correction", with the
-    // defaults (168 h retention, 300 s interval) in place of its variables.
-    const step5 = (eventId: string) =>
-      runtime.client.$queryRawUnsafe<{ outbox_row: boolean; past_purge_window: boolean }[]>(
-        `SELECT c.event_id, c.created_at, o.id IS NOT NULL AS outbox_row,
-                o.published_at, o.attempts, o.next_attempt_at,
-                c.created_at < (now() AT TIME ZONE 'UTC')
-                               - make_interval(hours => $2::int, secs => $3::int)
-                  AS past_purge_window
-           FROM audit_correction_command c
-           LEFT JOIN outbox_message o ON o.id = c.event_id
-          WHERE c.event_id = $1`,
-        eventId,
-        RETENTION_HOURS,
-        300,
-      );
-    // Purged after publication: not a gap by itself.
-    expect(await step5('CORR_OLD')).toMatchObject([{ outbox_row: false, past_purge_window: true }]);
-    // Still there.
-    expect(await step5('CORR_YOUNG')).toMatchObject([
-      { outbox_row: true, past_purge_window: false },
-    ]);
-    // Missing while younger than the retention: unexplained, escalated.
-    expect(await step5('CORR_MISSING')).toMatchObject([
-      { outbox_row: false, past_purge_window: false },
-    ]);
+    // `audit-gap-detected.md` step 5, "identity correction": event_id,
+    // target_id, created_at, outbox_row, organization_id, published_at,
+    // attempts, next_attempt_at — and nothing derived from the age.
+    const step5 = (eventId: string) => {
+      const result = runbookPsql(runbookBlock('identity-correction-command'), eventId);
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
+      const rows = result.stdout.split('\n').filter(Boolean);
+      expect(rows).toHaveLength(1);
+      const [event, target, , outboxRow, organization, publishedAt, ...rest] = rows[0]!.split('|');
+      expect(rest).toHaveLength(2);
+      return { event, target, outboxRow, organization, published: publishedAt !== '' };
+    };
+    // Still there: the row itself answers.
+    expect(step5('CORR_YOUNG')).toEqual({
+      event: 'CORR_YOUNG',
+      target: 'AUD_TARGET',
+      outboxRow: 't',
+      organization: ORG_A,
+      published: true,
+    });
+    // Purged after publication, lost before it, or missing while young: the
+    // same answer. Only audit-service's evidence tells them apart, so all three
+    // go to that lookup, with the command's target to scope it.
+    const gone = { target: 'AUD_TARGET', outboxRow: 'f', organization: '', published: false };
+    expect(step5('CORR_OLD')).toEqual({ event: 'CORR_OLD', ...gone });
+    expect(step5('CORR_LOST')).toEqual({ event: 'CORR_LOST', ...gone });
+    expect(step5('CORR_MISSING')).toEqual({ event: 'CORR_MISSING', ...gone });
+
+    // The block's first line makes the session read-only: a write after it is refused.
+    const write = runbookPsql(
+      `${runbookBlock('identity-correction-command')}\nDELETE FROM audit_correction_command;\n`,
+      'CORR_OLD',
+    );
+    expect(write.status).not.toBe(0);
+    expect(write.stderr).toMatch(/read-only transaction/);
+    expect(await snapshot()).toEqual(before);
   });
 });
+
+const RUNBOOK = resolve(__dirname, '../../../docs/runbooks/audit-gap-detected.md');
+
+/** A runbook SQL block, byte for byte: no line is stripped, nothing is reworded. */
+function runbookBlock(name: string): string {
+  const match = new RegExp('```sql ' + name + '\\n([\\s\\S]*?)```').exec(
+    readFileSync(RUNBOOK, 'utf8'),
+  );
+  if (!match) throw new Error(`runbook has no \`sql ${name}\` block`);
+  return match[1]!;
+}
+
+/**
+ * psql as the operator runs it: the service's own role, stopping at the first
+ * error; unaligned tuples. The connection travels in libpq's environment, the
+ * password never in argv. The one line before the block points the session at
+ * this suite's schema, where the operator's is `public`.
+ */
+function runbookPsql(script: string, eventId: string) {
+  const url = new URL(databaseUrl());
+  return spawnSync(
+    'psql',
+    ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-A', '-t', '-F', '|', '-v', `event_id=${eventId}`],
+    {
+      input: `SET search_path TO "${SCHEMA}";\n${script}`,
+      env: {
+        ...process.env,
+        PGHOST: url.hostname,
+        PGPORT: url.port || '5432',
+        PGDATABASE: decodeURIComponent(url.pathname.slice(1)),
+        PGUSER: decodeURIComponent(url.username),
+        PGPASSWORD: decodeURIComponent(url.password),
+      },
+      encoding: 'utf8',
+    },
+  );
+}

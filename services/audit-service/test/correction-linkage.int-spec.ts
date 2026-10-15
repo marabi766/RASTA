@@ -1,3 +1,6 @@
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import request from 'supertest';
 import {
   AUDIT_EVENT_RECORDED,
@@ -13,7 +16,15 @@ import { AuditRepository } from '../src/audit/audit.repository';
 import { AuditTrailConsumer } from '../src/consumers/audit-trail.consumer';
 import { computeRecordHash, hashesEqual } from '../src/audit/audit.chain';
 import { internalToken, startApi, systemAdmin, unionAdmin, type ApiHarness } from './api-helpers';
-import { cleanupRun, id, instantIn, newMigratorPrisma, newPrisma, runMonth } from './helpers';
+import {
+  cleanupRun,
+  id,
+  instantIn,
+  newMigratorPrisma,
+  newPrisma,
+  runMonth,
+  runtimeUrl,
+} from './helpers';
 
 /**
  * Correction linkage and the internal target lookup, against a real PostgreSQL
@@ -262,6 +273,168 @@ describe('correction linkage and the internal target lookup (real PostgreSQL)', 
     expect((await read(unionAdmin(id('ORG')), before.id, at)).status).toBe(404);
   });
 
+  /**
+   * `audit-gap-detected.md` step 5, "identity correction" (Codex r1 on #280, F1 and F3): when
+   * identity's outbox row of a correction is gone, only this lookup explains it — found means
+   * published and consumed, not found means escalate, whatever the command's age. Its
+   * `sql identity-correction-audit` block runs here byte for byte from the document, through
+   * `psql -v …` as this service's own role.
+   */
+  describe('audit-gap-detected.md step 5: the identity-correction lookup', () => {
+    const HOUR = 60 * 60 * 1000;
+    /** A correction as old as one the purge could have removed, and one it could not have. */
+    const oldAt = new Date(Date.now() - 400 * HOUR).toISOString();
+    const youngAt = new Date(Date.now() - 2 * HOUR).toISOString();
+
+    interface Lookup {
+      eventId: string;
+      targetId: string;
+      /** `''` is the explicit platform scope; `undefined` leaves the variable unset. */
+      organizationId: string | undefined;
+      at: string;
+    }
+
+    const lookup = (query: Lookup, after = '') => {
+      const { from, to } = window(query.at);
+      const vars = [
+        `event_id=${query.eventId}`,
+        `target_id=${query.targetId}`,
+        ...(query.organizationId === undefined ? [] : [`organization_id=${query.organizationId}`]),
+        `from=${from}`,
+        `to=${to}`,
+      ].flatMap((assignment) => ['-v', assignment]);
+      return spawnSync('psql', [...vars, ...runbookPsqlArgs()], {
+        input: runbookBlock('identity-correction-audit') + after,
+        env: runbookPsqlEnv(),
+        encoding: 'utf8',
+      });
+    };
+
+    /** The rows the lookup returns: `id|organization_id|source_topic|source_service|correction_of|…`. */
+    const found = (query: Lookup): string[][] => {
+      const result = lookup(query);
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
+      return result.stdout
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => line.split('|'));
+    };
+
+    /** Ingests an original and its correction through the real path-B consumer. */
+    const corrected = async (tenant: string | null, at: string, correctionAt = at) => {
+      const source = original(tenant, at);
+      await trail.handle(source, TRAIL);
+      const target = await rowOf(source.eventId);
+      const fix = correction(tenant, target.id, correctionAt);
+      await trail.handle(fix, TRAIL);
+      return { eventId: fix.eventId, targetId: target.id, row: await rowOf(fix.eventId) };
+    };
+
+    it('finds a recorded correction in its own tenant, old or young: published and consumed', async () => {
+      const tenant = id('ORG');
+      const old = await corrected(tenant, oldAt);
+      const young = await corrected(tenant, youngAt);
+
+      // Old command, outbox row gone, audit event present ⇒ explained.
+      expect(found({ ...old, organizationId: tenant, at: oldAt })).toEqual([
+        [
+          old.row.id,
+          tenant,
+          AUDIT_TRAIL_TOPIC,
+          'identity-service',
+          old.targetId,
+          expect.any(String),
+          expect.any(String),
+        ],
+      ]);
+      // Age is no input: a young correction that was recorded is found the same way.
+      expect(found({ ...young, organizationId: tenant, at: youngAt })).toHaveLength(1);
+    });
+
+    it('finds nothing for a correction that never reached audit-service, however old: escalate', async () => {
+      const tenant = id('ORG');
+      const target = await corrected(tenant, oldAt);
+      // The commands' events: accepted by identity, never recorded here.
+      const neverRecordedOld = { eventId: id('EVT'), targetId: target.targetId, at: oldAt };
+      const neverRecordedYoung = { eventId: id('EVT'), targetId: target.targetId, at: youngAt };
+
+      // Old command, no outbox row, no audit event ⇒ unexplained.
+      expect(found({ ...neverRecordedOld, organizationId: tenant })).toEqual([]);
+      // Young and missing ⇒ unexplained.
+      expect(found({ ...neverRecordedYoung, organizationId: tenant })).toEqual([]);
+    });
+
+    it('is scoped to the investigated tenant, the corrected record and identity on the trail topic', async () => {
+      const tenantA = id('ORG');
+      const tenantB = id('ORG');
+      const recorded = await corrected(tenantA, oldAt);
+      const at = oldAt;
+
+      // Another tenant's investigation, or the platform scope, does not see A's correction.
+      expect(found({ ...recorded, organizationId: tenantB, at })).toEqual([]);
+      expect(found({ ...recorded, organizationId: '', at })).toEqual([]);
+      // Another corrected record: not this command's event.
+      expect(
+        found({ ...recorded, targetId: id('AUD').slice(0, 26), organizationId: tenantA, at }),
+      ).toEqual([]);
+
+      // A correction filed under B that names A's record is B's row, not evidence for A.
+      const foreign = correction(tenantB, recorded.targetId, oldAt);
+      await trail.handle(foreign, TRAIL);
+      const foreignRow = await rowOf(foreign.eventId);
+      const foreignQuery = { eventId: foreign.eventId, targetId: recorded.targetId, at };
+      expect(found({ ...foreignQuery, organizationId: tenantA })).toEqual([]);
+      expect(
+        found({ ...foreignQuery, organizationId: tenantB }).map(([rowId, org]) => [rowId, org]),
+      ).toEqual([[foreignRow.id, tenantB]]);
+
+      // The same shape on the trail topic, claimed by another producer: not identity's correction.
+      const impostor = {
+        ...correction(tenantA, recorded.targetId, oldAt),
+        producer: 'economic-service',
+      };
+      await trail.handle(impostor, TRAIL);
+      expect((await rowOf(impostor.eventId)).sourceService).toBe('economic-service');
+      expect(
+        found({
+          eventId: impostor.eventId,
+          targetId: recorded.targetId,
+          organizationId: tenantA,
+          at,
+        }),
+      ).toEqual([]);
+    });
+
+    it('finds a platform-scoped correction only under the explicit platform scope', async () => {
+      const at = instantIn(runMonth(8), 30).toISOString();
+      const platform = await corrected(null, at);
+
+      expect(
+        found({ ...platform, organizationId: '', at }).map(([rowId, org]) => [rowId, org]),
+      ).toEqual([[platform.row.id, '']]);
+      expect(found({ ...platform, organizationId: id('ORG'), at })).toEqual([]);
+    });
+
+    it('does not run without a scope, and its session cannot write', async () => {
+      const tenant = id('ORG');
+      const recorded = await corrected(tenant, youngAt);
+
+      // No organization_id: psql refuses the unset variable instead of searching every tenant.
+      const unscoped = lookup({ ...recorded, organizationId: undefined, at: youngAt });
+      expect(unscoped.status).not.toBe(0);
+      expect(unscoped.stdout).toBe('');
+
+      // The block's first line makes the session read-only: a write after it is refused.
+      const write = lookup(
+        { ...recorded, organizationId: tenant, at: youngAt },
+        `INSERT INTO processed_event (event_id, consumer_name) VALUES ('${id('EVT')}', 'runbook-probe');\n`,
+      );
+      expect(write.status).not.toBe(0);
+      expect(write.stderr).toMatch(/read-only transaction/);
+    });
+  });
+
   describe('GET /v1/internal/audit-events/:id', () => {
     const lookup = (token: string, recordId: string, occurredAt: string) =>
       request(api.app.getHttpServer())
@@ -355,3 +528,32 @@ describe('correction linkage and the internal target lookup (real PostgreSQL)', 
     });
   });
 });
+
+const RUNBOOK = resolve(__dirname, '../../../docs/runbooks/audit-gap-detected.md');
+
+/** A runbook SQL block, byte for byte: no line is stripped, nothing is reworded. */
+function runbookBlock(name: string): string {
+  const match = new RegExp('```sql ' + name + '\\n([\\s\\S]*?)```').exec(
+    readFileSync(RUNBOOK, 'utf8'),
+  );
+  if (!match) throw new Error(`runbook has no \`sql ${name}\` block`);
+  return match[1]!;
+}
+
+/** psql as the operator runs it: this service's own role, stopping at the first error; unaligned tuples. */
+function runbookPsqlArgs(): string[] {
+  return ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-A', '-t', '-F', '|'];
+}
+
+/** The connection travels in libpq's environment, the password never in argv. */
+function runbookPsqlEnv(): NodeJS.ProcessEnv {
+  const url = new URL(runtimeUrl());
+  return {
+    ...process.env,
+    PGHOST: url.hostname,
+    PGPORT: url.port || '5432',
+    PGDATABASE: decodeURIComponent(url.pathname.slice(1)),
+    PGUSER: decodeURIComponent(url.username),
+    PGPASSWORD: decodeURIComponent(url.password),
+  };
+}
