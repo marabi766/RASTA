@@ -1597,8 +1597,11 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   عوض نشود)، هر کدام را `temporal workflow describe --workflow-id <id> --run-id <runId> --output json` می‌کند (Visibility
   فعالیت در انتظار را نمایه نمی‌کند) و `pendingActivities` باید نباشد یا خالی باشد؛ و با
   `temporal task-queue describe --task-queue <queue> --output json` هیچ Poller ـی روی Queue نباید باشد (Worker قدیمی واقعاً
-  رفته، پس میان بررسی و جابه‌جایی کسی Activity آغاز نمی‌کند). کد ۱ = Poller یا Activity در انتظار یافت شد؛ کد ۲ = بررسی ممکن
-  نشد؛ هر دو متوقف می‌کنند. Activity در انتظار ⇐ نسخهٔ قدیمی دوباره بالا می‌آید تا کار خودش را تمام کند و توالی از نو؛
+  رفته، پس میان بررسی و جابه‌جایی کسی Activity آغاز نمی‌کند). هر پاسخ پیش از هر تفسیری با شکل خروجی CLI ـِ سنجاق‌شده
+  (`temporalio/auto-setup:1.26.2`) سنجیده می‌شود: شمار فقط `{"count": "<n>"}` یا عدد صحیح نامنفی، و `{}` برای صفر؛ پاسخ
+  Queue شیئی با `pollers` (`null` یا فهرست) و `stats`؛ توصیف فقط وقتی پذیرفته است که `workflowId` و `runId` همان ردیف فهرست،
+  نوع `orderSaga` و Queue همان Queue ـِ بررسی‌شده باشد (Codex دور ۳ روی #283). کد ۱ = Poller یا Activity در انتظار یافت شد؛
+  کد ۲ = بررسی ممکن نشد، از جمله هر پاسخ دیگر؛ هر دو متوقف می‌کنند. Activity در انتظار ⇐ نسخهٔ قدیمی دوباره بالا می‌آید تا کار خودش را تمام کند و توالی از نو؛
   `terminate`/`reset` برای گذشتن از Gate ممنوع (Q-118). جزئیات و دستورهای دقیق: Runbook
   [`marketplace-saga-deploy`](runbooks/marketplace-saga-deploy.md). مخزن اسکریپت یا Job استقراری برای marketplace-service
   ندارد (`ci.yml` فقط می‌سازد و می‌آزماید)، پس Gate گامی دستی است و هر خط استقراری که ساخته شود باید آن را اجرا کند و با کد

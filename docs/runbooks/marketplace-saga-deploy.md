@@ -51,18 +51,28 @@ Gate دقیقاً این‌ها را می‌پرسد (همان Query ـِ Visibi
 ```bash
 Q='WorkflowType="orderSaga" AND ExecutionStatus="Running"'
 C=(--address "$TEMPORAL_ADDRESS" --namespace "$TEMPORAL_NAMESPACE")
-temporal task-queue describe "${C[@]}" --task-queue "$MARKETPLACE_TEMPORAL_TASK_QUEUE" --output json  # .pollers باید خالی باشد
+temporal task-queue describe "${C[@]}" --task-queue "$MARKETPLACE_TEMPORAL_TASK_QUEUE" --output json  # .pollers باید null یا [] باشد
 temporal workflow count "${C[@]}" --query "$Q" --output json                                          # n
 temporal workflow list "${C[@]}" --query "$Q" --output json                                           # باید دقیقاً n ردیف باشد
 temporal workflow describe "${C[@]}" --workflow-id <id> --run-id <runId> --output json                 # برای هر ردیف: .pendingActivities نیست یا []
 temporal workflow count "${C[@]}" --query "$Q" --output json                                          # باز همان n
 ```
 
-| کد خروج | معنا                                                                                                                 | استقرار      |
-| ------- | -------------------------------------------------------------------------------------------------------------------- | ------------ |
-| `0`     | هیچ Poller روی Queue، شمار و فهرست یکی، هیچ Activity در انتظار                                                       | مجاز (گام ۴) |
-| `1`     | Poller یا Activity در انتظار یافت شد (هر کدام نام برده می‌شود: Workflow، نوع Activity، وضعیت، تلاش)                  | **متوقف**    |
-| `2`     | بررسی ممکن نشد: تنظیمی نیست، CLI نیست یا شکست خورد، پاسخ ناشناخته، شمار و فهرست نمی‌خوانند، شمار در حین بررسی عوض شد | **متوقف**    |
+Gate هیچ پاسخی را پیش از سنجیدن شکلش تفسیر نمی‌کند؛ شکل‌ها همان خروجی CLI ـِ Image سنجاق‌شده (`temporalio/auto-setup:1.26.2`)
+روی سرور توسعه‌اند. هر شکل دیگر کد ۲ است (Codex دور ۳ روی #283):
+
+| فرمان                 | تنها شکل پذیرفته                                                                                                                                                                          |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workflow count`      | `{"count": "<n>"}` (رشتهٔ رقمی) یا `{"count": <n>}` (عدد صحیح نامنفی)، و `{}` برای صفر (CLI صفر را نمی‌نویسد)؛ هیچ کلید دیگری نه                                                          |
+| `task-queue describe` | شیئی با کلید `pollers` (`null` یا فهرست) و `stats` (فهرست)                                                                                                                                |
+| `workflow list`       | فهرستی که هر ردیفش `execution.workflowId` و `execution.runId` و نوع `orderSaga` دارد                                                                                                      |
+| `workflow describe`   | `workflowExecutionInfo.execution` با همان `workflowId` **و** همان `runId` ردیف فهرست، نوع `orderSaga`، `executionConfig.taskQueue.name` همان Queue؛ `pendingActivities` نیست یا فهرست است |
+
+| کد خروج | معنا                                                                                                                                                                                   | استقرار      |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| `0`     | هیچ Poller روی Queue، شمار و فهرست یکی، هیچ Activity در انتظار                                                                                                                         | مجاز (گام ۴) |
+| `1`     | Poller یا Activity در انتظار یافت شد (هر کدام نام برده می‌شود: Workflow، نوع Activity، وضعیت، تلاش)                                                                                    | **متوقف**    |
+| `2`     | `cannot verify — deployment blocked`: تنظیمی نیست، CLI نیست یا شکست خورد، پاسخی با شکلی جز جدول بالا، شمار و فهرست نمی‌خوانند، شمار در حین بررسی عوض شد، Workflow ـی روی Queue ـی دیگر | **متوقف**    |
 
 ### اگر Gate متوقف کرد
 

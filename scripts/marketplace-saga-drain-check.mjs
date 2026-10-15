@@ -16,6 +16,17 @@
  * be checked — a missing setting, the CLI absent or failing, output it does
  * not recognise. Both block the deployment; there is no exception.
  *
+ * Every answer is checked against the shape the pinned CLI prints (the
+ * `temporal` of temporalio/auto-setup:1.26.2, captured against a dev server)
+ * before anything is read from it; nothing missing is taken for "none" unless
+ * that CLI leaves it out for exactly that reason (Codex r3 on #283):
+ *   workflow count       {"count": "<n>"}, and {} for zero (proto3 omits a 0)
+ *   task-queue describe  {"pollers": null | [...], "stats": [...], ...}
+ *   workflow describe    {"executionConfig": {"taskQueue": {"name"}},
+ *                         "workflowExecutionInfo": {"execution": {workflowId,
+ *                         runId}, "type": {"name"}}, "pendingActivities"
+ *                         left out when there is none}
+ *
  * Settings, all required (no default: a check against the wrong namespace or
  * queue finds nothing and would pass): TEMPORAL_ADDRESS, TEMPORAL_NAMESPACE,
  * MARKETPLACE_TEMPORAL_TASK_QUEUE — the values the service runs with. TLS or
@@ -28,6 +39,8 @@ const QUERY = 'WorkflowType="orderSaga" AND ExecutionStatus="Running"';
 const CLI_TIMEOUT_MS = 60_000;
 
 class Unverifiable extends Error {}
+
+const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 function setting(name) {
   const value = process.env[name]?.trim();
@@ -64,11 +77,23 @@ function countRunning(cli, common) {
     '--output',
     'json',
   ]);
-  const count = Number(answer?.count ?? Number.NaN);
-  if (!Number.isSafeInteger(count) || count < 0) {
-    throw new Unverifiable('temporal workflow count: no count in its answer');
+  const count = countOf(answer);
+  if (count === null) {
+    throw new Unverifiable(`temporal workflow count: not a count: ${JSON.stringify(answer)}`);
   }
   return count;
+}
+
+/** The count in an answer of the pinned CLI, or null for anything else. */
+function countOf(answer) {
+  if (!isRecord(answer) || Object.keys(answer).some((key) => key !== 'count')) return null;
+  if (!Object.hasOwn(answer, 'count')) return 0;
+  const { count } = answer;
+  if (typeof count === 'string' && /^[0-9]+$/.test(count)) {
+    const value = Number(count);
+    return Number.isSafeInteger(value) ? value : null;
+  }
+  return Number.isSafeInteger(count) && count >= 0 ? count : null;
 }
 
 function check() {
@@ -88,7 +113,12 @@ function check() {
     '--output',
     'json',
   ]);
-  if (queue === null || typeof queue !== 'object' || !Array.isArray(queue.pollers ?? [])) {
+  if (
+    !isRecord(queue) ||
+    !Object.hasOwn(queue, 'pollers') ||
+    !(queue.pollers === null || Array.isArray(queue.pollers)) ||
+    !Array.isArray(queue.stats)
+  ) {
     throw new Unverifiable('temporal task-queue describe: no poller list in its answer');
   }
   for (const poller of queue.pollers ?? []) {
@@ -136,14 +166,31 @@ function check() {
       '--output',
       'json',
     ]);
-    // An empty list is omitted from the JSON; anything else that is not a list
-    // is not an answer.
-    const pending = described?.pendingActivities ?? [];
+    // Proof only about this very run: the same workflow id AND run id, an
+    // orderSaga on the queue whose pollers were checked. An empty list is
+    // omitted from the JSON; anything else that is not a list is not an answer.
+    const info = isRecord(described) ? described.workflowExecutionInfo : undefined;
+    const pending = isRecord(described)
+      ? Object.hasOwn(described, 'pendingActivities')
+        ? described.pendingActivities
+        : []
+      : undefined;
     if (
-      described?.workflowExecutionInfo?.execution?.workflowId !== workflowId ||
+      info?.execution?.workflowId !== workflowId ||
+      info?.execution?.runId !== runId ||
+      info?.type?.name !== 'orderSaga' ||
       !Array.isArray(pending)
     ) {
-      throw new Unverifiable(`temporal workflow describe ${workflowId}: not a description of it`);
+      throw new Unverifiable(
+        `temporal workflow describe ${workflowId} ${runId}: not a description of that run`,
+      );
+    }
+    const queueOfRun = described.executionConfig?.taskQueue?.name;
+    if (queueOfRun !== taskQueue) {
+      throw new Unverifiable(
+        `${workflowId} runs on task queue ${JSON.stringify(queueOfRun)}, not ${taskQueue}: ` +
+          'its pollers were not checked',
+      );
     }
     for (const activity of pending) {
       blockers.push(
@@ -172,6 +219,6 @@ try {
   );
 } catch (error) {
   const reason = error instanceof Unverifiable ? error.message : String(error?.stack ?? error);
-  console.error(`marketplace saga drain check: BLOCKED — could not verify: ${reason}`);
+  console.error(`marketplace saga drain check: cannot verify — deployment blocked: ${reason}`);
   process.exit(2);
 }

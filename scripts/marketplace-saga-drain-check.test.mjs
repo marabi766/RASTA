@@ -6,9 +6,10 @@
 // answers from a scenario file and records every call. The answers have the
 // shapes the real CLI prints (`temporal` of the image docker-compose.yml pins,
 // temporalio/auto-setup:1.26.2, against a dev server with one workflow parked
-// in an activity and one in a timer): `workflow list` a JSON array,
-// `workflow count` `{"count": "<n>"}`, `workflow describe` with
-// `pendingActivities` left out when there is none.
+// in an activity and one in a timer, and with none): `workflow list` a JSON
+// array, `workflow count` `{"count": "<n>"}` and `{}` for zero, `task-queue
+// describe` `"pollers": null` when none polls, `workflow describe` with
+// `pendingActivities` left out when there is none. Any other shape blocks.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -50,6 +51,10 @@ const execution = (id) => ({
   type: { name: 'orderSaga' },
   status: 'WORKFLOW_EXECUTION_STATUS_RUNNING',
 });
+const stats = [
+  { buildId: 'UNVERSIONED', taskQueueType: 'workflow', approximateBacklogCount: 0 },
+  { buildId: 'UNVERSIONED', taskQueueType: 'activity', approximateBacklogCount: 0 },
+];
 const description = (id, pendingActivities) => ({
   executionConfig: { taskQueue: { name: 'rasta-order', kind: 'TASK_QUEUE_KIND_NORMAL' } },
   workflowExecutionInfo: {
@@ -69,7 +74,7 @@ const pendingHold = {
 /** Two running sagas, neither with a pending activity, no poller. */
 function drained() {
   return {
-    'task-queue describe': { stdout: { reachability: null, pollers: [], stats: [] } },
+    'task-queue describe': { stdout: { reachability: null, pollers: null, stats } },
     'workflow count': { stdout: { count: '2' } },
     'workflow list': { stdout: [execution('A'), execution('B')] },
     'workflow describe order-A': { stdout: description('A') },
@@ -141,16 +146,35 @@ test('passes a drained queue, having asked exactly what the runbook says', () =>
   ]);
 });
 
-test('passes with no running saga at all', () => {
+test('passes with no running saga at all (the CLI prints {} for a zero count)', () => {
   const scenario = {
     ...drained(),
-    'workflow count': { stdout: { count: '0' } },
+    'workflow count': { stdout: {} },
     'workflow list': { stdout: [] },
   };
   const { status, stdout } = run(scenario);
   assert.equal(status, 0);
   assert.match(stdout, /0 running order saga/);
 });
+
+const PASSING = {
+  'a count of zero printed as "0"': {
+    'workflow count': { stdout: { count: '0' } },
+    'workflow list': { stdout: [] },
+  },
+  'a count printed as a JSON number': { 'workflow count': { stdout: { count: 2 } } },
+  'an empty poller list printed as []': {
+    'task-queue describe': { stdout: { reachability: null, pollers: [], stats } },
+  },
+};
+
+for (const [name, answers] of Object.entries(PASSING)) {
+  test(`passes a drained queue with ${name}`, () => {
+    const { status, stdout } = run({ ...drained(), ...answers });
+    assert.equal(status, 0);
+    assert.match(stdout, /OK — no poller/);
+  });
+}
 
 test('blocks on a pending activity, naming the workflow and the activity', () => {
   const scenario = {
@@ -175,7 +199,7 @@ test('blocks while a worker still polls the order task queue', () => {
   };
   const scenario = {
     ...drained(),
-    'task-queue describe': { stdout: { pollers: [poller], stats: [] } },
+    'task-queue describe': { stdout: { reachability: null, pollers: [poller], stats } },
   };
   const { status, stderr } = run(scenario);
   assert.equal(status, 1);
@@ -190,7 +214,7 @@ for (const name of Object.keys(SETTINGS)) {
     const settings = { ...SETTINGS, [name]: '  ' };
     const { status, stderr, calls } = run(drained(), { settings });
     assert.equal(status, 2);
-    assert.match(stderr, new RegExp(`could not verify: ${name} is not set`));
+    assert.match(stderr, new RegExp(`cannot verify — deployment blocked: ${name} is not set`));
     assert.deepEqual(calls, []);
   });
 }
@@ -217,20 +241,10 @@ const UNVERIFIABLE = {
     {},
     /temporal workflow list did not print JSON/,
   ],
-  'the count has no number': [
-    { ...drained(), 'workflow count': { stdout: {} } },
-    {},
-    /workflow count: no count/,
-  ],
   'the list is not a list': [
     { ...drained(), 'workflow list': { stdout: {} } },
     {},
     /workflow list: not a list/,
-  ],
-  'the answer about the queue has no poller list': [
-    { ...drained(), 'task-queue describe': { stdout: { pollers: 'none' } } },
-    {},
-    /no poller list/,
   ],
   'visibility lists fewer sagas than it counts': [
     { ...drained(), 'workflow count': { stdout: { count: '3' } } },
@@ -256,20 +270,86 @@ const UNVERIFIABLE = {
   'a description is of another workflow': [
     { ...drained(), 'workflow describe order-B': { stdout: description('A') } },
     {},
-    /describe order-B: not a description of it/,
+    /describe order-B run-B: not a description of that run/,
   ],
   'pending activities that are not a list': [
     { ...drained(), 'workflow describe order-B': { stdout: description('B', { count: 0 }) } },
     {},
-    /describe order-B: not a description of it/,
+    /describe order-B run-B: not a description of that run/,
   ],
 };
+
+// Every way an answer can be malformed or ambiguous while everything around it
+// says "drained" — each would pass if a missing or odd value were read as
+// "none" (Codex r3 on #283). The counts come with an empty list, so a count
+// misread as 0 would agree with it.
+const noneListed = (count) => ({
+  ...drained(),
+  'workflow count': { stdout: count },
+  'workflow list': { stdout: [] },
+});
+const describedAs = (id, change) => {
+  const answer = description(id);
+  change(answer);
+  return { ...drained(), [`workflow describe order-${id}`]: { stdout: answer } };
+};
+const COUNT = /temporal workflow count: not a count/;
+const QUEUE = /temporal task-queue describe: no poller list/;
+const RUN = /describe order-B run-B: not a description of that run/;
+const MALFORMED = {
+  'the count is an empty string': [noneListed({ count: '' }), COUNT],
+  'the count is false': [noneListed({ count: false }), COUNT],
+  'the count is null': [noneListed({ count: null }), COUNT],
+  'the count is negative': [noneListed({ count: '-1' }), COUNT],
+  'the count is not an integer': [noneListed({ count: '0.0' }), COUNT],
+  'the count is padded': [noneListed({ count: ' 0' }), COUNT],
+  'the count is an array': [noneListed([]), COUNT],
+  'the count answer has fields it should not': [noneListed({ total: '0' }), COUNT],
+  'the count is beyond a safe integer': [noneListed({ count: '9007199254740993' }), COUNT],
+  'the queue answer is a list': [{ ...drained(), 'task-queue describe': { stdout: [] } }, QUEUE],
+  'the queue answer is empty': [{ ...drained(), 'task-queue describe': { stdout: {} } }, QUEUE],
+  'the queue answer is null': [{ ...drained(), 'task-queue describe': { stdout: null } }, QUEUE],
+  'the queue answer has no stats': [
+    { ...drained(), 'task-queue describe': { stdout: { pollers: null } } },
+    QUEUE,
+  ],
+  'the poller list is not a list': [
+    { ...drained(), 'task-queue describe': { stdout: { pollers: 'none', stats } } },
+    QUEUE,
+  ],
+  'a description is of another run of the same workflow': [
+    describedAs('B', (d) => (d.workflowExecutionInfo.execution.runId = 'run-B-earlier')),
+    RUN,
+  ],
+  'a description has no run id': [
+    describedAs('B', (d) => delete d.workflowExecutionInfo.execution.runId),
+    RUN,
+  ],
+  'a description is not of an orderSaga': [
+    describedAs('B', (d) => (d.workflowExecutionInfo.type.name = 'other')),
+    RUN,
+  ],
+  'a description is empty': [{ ...drained(), 'workflow describe order-B': { stdout: {} } }, RUN],
+  'a description is a list': [{ ...drained(), 'workflow describe order-B': { stdout: [] } }, RUN],
+  'pending activities are null': [describedAs('B', (d) => (d.pendingActivities = null)), RUN],
+  'a run is on another task queue': [
+    describedAs('B', (d) => (d.executionConfig.taskQueue.name = 'rasta-order-v2')),
+    /order-B runs on task queue "rasta-order-v2", not rasta-order: its pollers were not checked/,
+  ],
+  'a description does not say its task queue': [
+    describedAs('B', (d) => delete d.executionConfig),
+    /order-B runs on task queue undefined, not rasta-order/,
+  ],
+};
+for (const [name, [scenario, message]] of Object.entries(MALFORMED)) {
+  UNVERIFIABLE[name] = [scenario, {}, message];
+}
 
 for (const [name, [scenario, options, message]] of Object.entries(UNVERIFIABLE)) {
   test(`blocks when ${name}`, () => {
     const { status, stdout, stderr } = run(scenario, options);
     assert.equal(status, 2);
-    assert.match(stderr, /BLOCKED — could not verify: /);
+    assert.match(stderr, /cannot verify — deployment blocked: /);
     assert.match(stderr, message);
     assert.doesNotMatch(stdout, /OK/);
   });
