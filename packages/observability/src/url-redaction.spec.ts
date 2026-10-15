@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { ROOT_CONTEXT, SpanKind, SpanStatusCode } from '@opentelemetry/api';
 import {
+  AlwaysOffSampler,
   AlwaysOnSampler,
   BasicTracerProvider,
   InMemorySpanExporter,
@@ -11,9 +12,14 @@ import {
   type SpanLimits,
 } from '@opentelemetry/sdk-trace-node';
 import {
+  isWhitespace,
+  REDACT_TEXT_MAX,
   RedactingSampler,
   RedactingSpanProcessor,
+  redactJsonSource,
+  redactQueries,
   redactText,
+  TRUNCATED_TEXT,
   urlWithoutQuery,
 } from './url-redaction';
 
@@ -109,6 +115,232 @@ describe('redactText', () => {
     ['connect ECONNREFUSED 127.0.0.1:5432', 'connect ECONNREFUSED 127.0.0.1:5432'],
   ])('%j → %j', (text, expected) => {
     expect(redactText(text)).toBe(expected);
+  });
+});
+
+/**
+ * Round 4's two rules as regular expressions, kept as the oracle: the linear
+ * scanners must redact exactly what these did (r5 ruling: same semantics). Only
+ * ever run on short texts — on long ones they are the quadratic patterns Codex
+ * measured (r4 F1).
+ */
+const R4_QUERY_IN_TEXT = /(?<=\/[^\s?#]*)[?#]\S+|(?<=[\p{L}\p{N}_.~%-])\?\S+|\?(?=\S*[=&])\S+/gu;
+const R4_JSON_SOURCE_IN_TEXT = /(?:\.\.\.)?"[\s\S]*"(?:\.\.\.)? is not valid JSON/g;
+const r4RedactJsonSource = (text: string): string =>
+  text.replace(R4_JSON_SOURCE_IN_TEXT, `"[REDACTED]" is not valid JSON`);
+const r4RedactQueries = (text: string): string =>
+  text.replace(R4_QUERY_IN_TEXT, (suffix) => `${suffix.charAt(0)}[REDACTED]`);
+
+/** mulberry32: a seeded generator, so a failing text can be reproduced. */
+function seeded(seed: number): () => number {
+  let state = seed;
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** What the random texts are made of: every character, and phrase, the rules turn on. */
+const PIECES = [
+  ...['/', '//', '?', '#', '=', '&', '"', '...', '"...', ' is not valid JSON', '"... is not'],
+  ...[' ', '\n', '\t', "'", '!', ',', ':', '(', ')', 'a', 'Z', '0', '_', '.', '~', '%', '-'],
+  ...['é', 'م', '𝐀', '‽', 'https://h.example/cb', 'code=abc'],
+  // Whitespace past ASCII, and lone surrogate halves.
+  ...[0xa0, 0x1680, 0x2009, 0x2028, 0x2029, 0x202f, 0x3000, 0xfeff, 0xd835, 0xdc00].map((code) =>
+    String.fromCharCode(code),
+  ),
+];
+
+describe('the linear rules redact exactly what round 4 did (r4 F1)', () => {
+  it('isWhitespace is \\s, for every UTF-16 code unit', () => {
+    const differ: number[] = [];
+    for (let code = 0; code <= 0xffff; code++) {
+      if (isWhitespace(code) !== /^\s$/u.test(String.fromCharCode(code))) differ.push(code);
+    }
+    expect(differ).toEqual([]);
+  });
+
+  it('a `?` after each UTF-16 code unit, and after each astral letter or digit', () => {
+    const differ: string[] = [];
+    const before = [
+      ...Array.from({ length: 0x10000 }, (_, code) => String.fromCharCode(code)),
+      '𝐀',
+      '𝟘',
+      '😀',
+    ];
+    for (const text of before.map((c) => `x ${c}?q`)) {
+      if (redactQueries(text) !== r4RedactQueries(text)) differ.push(text);
+    }
+    expect(differ).toEqual([]);
+  });
+
+  it('on 30,000 random texts of the characters the rules turn on', () => {
+    const next = seeded(261);
+    const differ: { rule: string; text: string }[] = [];
+    for (let i = 0; i < 30_000; i++) {
+      let text = '';
+      for (let length = Math.floor(next() * 16); length > 0; length--) {
+        text += PIECES[Math.floor(next() * PIECES.length)];
+      }
+      if (redactJsonSource(text) !== r4RedactJsonSource(text)) differ.push({ rule: 'json', text });
+      if (redactQueries(text) !== r4RedactQueries(text)) differ.push({ rule: 'query', text });
+      if (redactText(text) !== r4RedactQueries(r4RedactJsonSource(text))) {
+        differ.push({ rule: 'both', text });
+      }
+    }
+    expect(differ.slice(0, 5)).toEqual([]);
+  });
+});
+
+describe('redactText cuts a text to REDACT_TEXT_MAX first, and fails closed at the cut (r4 F1)', () => {
+  const LONG = 16_000;
+  it.each([
+    ['no URL', 'a'.repeat(LONG), `${'a'.repeat(REDACT_TEXT_MAX)}${TRUNCATED_TEXT}`],
+    [
+      'a query running past the cut',
+      `GET https://h.example/cb?${'x'.repeat(LONG)}`,
+      `GET https://h.example/cb?[REDACTED]${TRUNCATED_TEXT}`,
+    ],
+    [
+      'a path-less query whose `=` is past the cut',
+      `bad query ?${'x'.repeat(LONG)}=abc`,
+      `bad query ?[REDACTED]${TRUNCATED_TEXT}`,
+    ],
+    [
+      'a parser source whose closing phrase is past the cut',
+      `Unexpected token 'c', "${'x'.repeat(LONG)}" is not valid JSON`,
+      `Unexpected token 'c', "[REDACTED]${TRUNCATED_TEXT}`,
+    ],
+    [
+      'a closing phrase before the cut, and a later one past it',
+      `Unexpected token 'a', "a" is not valid JSON ${'x'.repeat(LONG)}" is not valid JSON`,
+      `Unexpected token 'a', "[REDACTED]${TRUNCATED_TEXT}`,
+    ],
+  ])('%s', (_, text, expected) => {
+    expect(redactText(text)).toBe(expected);
+  });
+
+  it('a text of exactly REDACT_TEXT_MAX is whole', () => {
+    const text = `${'a'.repeat(REDACT_TEXT_MAX - 13)} /cb?code=abc`;
+    expect(redactText(text)).toBe(`${'a'.repeat(REDACT_TEXT_MAX - 13)} /cb?[REDACTED]`);
+  });
+
+  it('never between the halves of a surrogate pair', () => {
+    const text = `${'a'.repeat(REDACT_TEXT_MAX - 1)}${'𝐀'.repeat(10)}`;
+    expect(redactText(text)).toBe(`${'a'.repeat(REDACT_TEXT_MAX - 1)}${TRUNCATED_TEXT}`);
+  });
+});
+
+/** Texts against each rule's worst case (Codex on #261, r4 F1), `length` long. */
+const ADVERSARIAL: [string, (length: number) => string][] = [
+  ['no URL', (length) => 'a'.repeat(length)],
+  ['quotes only', (length) => '"'.repeat(length)],
+  ["'?' only", (length) => '?'.repeat(length)],
+  ["'?' after a word", (length) => 'a?'.repeat(length / 2)],
+  ["'#' only", (length) => '#'.repeat(length)],
+  ["'/' only", (length) => '/'.repeat(length)],
+  ["'/' then '?' glued to whitespace", (length) => '/?\t'.repeat(length / 3)],
+  ["'=' only", (length) => '='.repeat(length)],
+  ['closing phrases without a quote', (length) => `"${'x is not valid JSON'.repeat(length / 19)}`],
+  ['quote, then closing phrases', (length) => '" is not valid JSON'.repeat(length / 19)],
+];
+
+/** Header-long: Node's 16 KiB limit. */
+const ADVERSARIAL_LENGTH = 16_384;
+/** Loose enough for a loaded CI runner; round 4 took ~566 ms on 15,000 characters. */
+const TIME_BOUND_MS = 50;
+
+const elapsedMs = (run: () => unknown): number => {
+  const start = performance.now();
+  run();
+  return performance.now() - start;
+};
+
+/**
+ * How much more `long` costs than `short`: the fastest of `samples` timings of
+ * `calls` back-to-back calls each, the two sampled in turn so a busy runner
+ * slows both alike.
+ */
+function costRatio(
+  short: () => unknown,
+  long: () => unknown,
+  { samples, calls } = { samples: 15, calls: 10 },
+): number {
+  const repeated = (run: () => unknown) => () => {
+    for (let call = 0; call < calls; call++) run();
+  };
+  let fastestShort = Infinity;
+  let fastestLong = Infinity;
+  for (let sample = 0; sample < samples; sample++) {
+    fastestShort = Math.min(fastestShort, elapsedMs(repeated(short)));
+    fastestLong = Math.min(fastestLong, elapsedMs(repeated(long)));
+  }
+  return fastestLong / fastestShort;
+}
+
+/** Both rules over the whole text, no cut. */
+const uncapped = (text: string): string => redactQueries(redactJsonSource(text));
+
+describe('redaction is linear in the text, and bounded (r4 F1)', () => {
+  it.each(ADVERSARIAL)('%s: 16,384 characters through redactText', (_, make) => {
+    const text = make(ADVERSARIAL_LENGTH);
+    let redacted = '';
+    expect(elapsedMs(() => (redacted = redactText(text)))).toBeLessThan(TIME_BOUND_MS);
+    expect(redacted.endsWith(TRUNCATED_TEXT)).toBe(true);
+  });
+
+  it.each(ADVERSARIAL)('%s: 16,384 characters through both rules, uncut', (_, make) => {
+    const text = make(ADVERSARIAL_LENGTH);
+    expect(elapsedMs(() => uncapped(text))).toBeLessThan(TIME_BOUND_MS);
+  });
+
+  it.each(ADVERSARIAL)(
+    '%s: four times the text costs about four times as much, not sixteen',
+    (_, make) => {
+      const short = make(ADVERSARIAL_LENGTH / 4);
+      const long = make(ADVERSARIAL_LENGTH);
+      for (let warm = 0; warm < 3; warm++) {
+        uncapped(short);
+        uncapped(long);
+      }
+      // Work that is quadratic takes long enough to time in one call — and too
+      // long to time in 150.
+      const slow = elapsedMs(() => uncapped(long)) >= TIME_BOUND_MS;
+      const ratio = costRatio(
+        () => uncapped(short),
+        () => uncapped(long),
+        slow ? { samples: 3, calls: 1 } : undefined,
+      );
+      expect(ratio).toBeLessThan(8);
+    },
+  );
+
+  it('a span started with header-long attributes, not sampled: the sampler still sanitizes, quickly', () => {
+    const sampler = new RedactingSampler(new AlwaysOffSampler());
+    const slow: { name: string; ms: number }[] = [];
+    for (const [name, make] of ADVERSARIAL) {
+      const value = make(ADVERSARIAL_LENGTH);
+      const attributes = {
+        'user_agent.original': value,
+        'server.address': value,
+        'client.address': value,
+        'url.path': value,
+      };
+      const ms = elapsedMs(() =>
+        sampler.shouldSample(ROOT_CONTEXT, 'trace', 'GET', SpanKind.SERVER, attributes, []),
+      );
+      if (ms >= TIME_BOUND_MS) slow.push({ name, ms });
+      expect(attributes).not.toHaveProperty(['user_agent.original']);
+      for (const key of ['server.address', 'client.address', 'url.path'] as const) {
+        expect(attributes[key].endsWith(TRUNCATED_TEXT)).toBe(true);
+        expect(attributes[key].length).toBeLessThanOrEqual(
+          REDACT_TEXT_MAX + '[REDACTED]'.length + TRUNCATED_TEXT.length,
+        );
+      }
+    }
+    expect(slow).toEqual([]);
   });
 });
 
@@ -266,6 +498,7 @@ describe('RedactingSampler and RedactingSpanProcessor', () => {
       .startSpan('GET', {
         attributes: {
           'user_agent.original': parserShaped,
+          'client.address': parserShaped,
           'server.address': `h.example/a-long-path-segment?code=abc`,
           'url.full': 'https://h.example/v1/a-long-path-segment?code=abc',
           'url.query': 'code=abc',
@@ -282,7 +515,7 @@ describe('RedactingSampler and RedactingSpanProcessor', () => {
     );
     const cut = `Unexpected token 'c', "[REDACTED]" is no`;
     expect(exported?.attributes).toEqual({
-      'user_agent.original': cut,
+      'client.address': cut,
       'server.address': 'h.example/a-long-path-segment?[REDACTED]',
       'url.full': 'https://h.example/v1/a-long-path-segment',
       'http.request.method': 'GET',
@@ -469,13 +702,38 @@ describe('initTelemetry — spans from the real instrumentations carry no URL qu
     expect(exceptionMessages(handler)).toEqual([message]);
   });
 
-  it('caller-controlled headers in the server span start attributes are sanitized (r3 F2)', () => {
+  it('caller-controlled headers in the server span start attributes are sanitized, the user agent dropped (r3 F2, r4 L1)', () => {
     const [server] = find('@opentelemetry/instrumentation-http', SpanKind.SERVER, '/v1/headers');
     expect(server?.attributes).toMatchObject({
-      'user_agent.original': `Unexpected token 'c', "[REDACTED]" is not valid JSON`,
-      'server.address': 'h.example/cb?[REDACTED]',
+      'server.address': `Unexpected token 'c', "[REDACTED]" is not valid JSON`,
       'client.address': '[/cb?[REDACTED]',
     });
+    expect(server?.attributes).not.toHaveProperty(['user_agent.original']);
+  });
+
+  it('headers and a path as long as a request makes them: cut to REDACT_TEXT_MAX, then redacted (r4 F1)', () => {
+    const server = (path: string): ExportedSpan | undefined =>
+      find('@opentelemetry/instrumentation-http', SpanKind.SERVER, path)[0];
+    expect(server('/v1/headers/user-agent')?.attributes).not.toHaveProperty([
+      'user_agent.original',
+    ]);
+    expect(server('/v1/headers/quotes')?.attributes['server.address']).toBe(
+      `"[REDACTED]${TRUNCATED_TEXT}`,
+    );
+    expect(server('/v1/headers/questions')?.attributes['client.address']).toBe(
+      `[a?[REDACTED]${TRUNCATED_TEXT}`,
+    );
+    expect(server('/v1/headers/slashes')?.attributes['server.address']).toBe(
+      `${'/'.repeat(REDACT_TEXT_MAX)}${TRUNCATED_TEXT}`,
+    );
+    const [longPath] = spans.filter(
+      (span) =>
+        span.kind === SpanKind.SERVER &&
+        String(span.attributes['url.path']).startsWith('/v1/long/'),
+    );
+    expect(longPath?.attributes['url.path']).toBe(
+      `/v1/long/${'a'.repeat(REDACT_TEXT_MAX - '/v1/long/'.length)}${TRUNCATED_TEXT}`,
+    );
   });
 
   it('a failed outgoing fetch: the error is recorded, url.full has no query', () => {
@@ -521,10 +779,10 @@ describe('initTelemetry under OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT=40 — a cut val
         span.attributes['url.path'] === '/v1/headers',
     );
     expect(server?.attributes).toMatchObject({
-      'user_agent.original': `Unexpected token 'c', "[REDACTED]" is no`,
-      'server.address': 'h.example/cb?[REDACTED]',
+      'server.address': `Unexpected token 'c', "[REDACTED]" is no`,
       'client.address': '[/cb?[REDACTED]',
     });
+    expect(server?.attributes).not.toHaveProperty(['user_agent.original']);
   });
 
   it('the parser errors are recorded, redacted whole and then cut', () => {
