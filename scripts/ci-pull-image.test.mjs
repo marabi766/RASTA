@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 
@@ -132,7 +132,12 @@ test('pulls several images in order and stops at the first that fails permanentl
 });
 
 test('refuses a reference that is not pinned by digest, without calling docker', () => {
-  for (const ref of ['quay.io/keycloak/keycloak:26.0', 'redis', `redis@sha256:${'c'.repeat(63)}`]) {
+  for (const ref of [
+    'quay.io/keycloak/keycloak:26.0',
+    'redis',
+    `redis@sha256:${'c'.repeat(63)}`,
+    `redis@sha256:${'g'.repeat(64)}`,
+  ]) {
     const r = run([[0, '']], [ref]);
     assert.equal(r.status, 2, ref);
     assert.equal(r.calls.length, 0);
@@ -150,30 +155,73 @@ test('requires at least one image', () => {
 
 const workflow = parseYaml(readFileSync(resolve(ROOT, '.github/workflows/ci.yml'), 'utf8'));
 const REF = /(?:[\w.-]+\/)+[\w.-]+(?::[\w.-]+)?@sha256:[0-9a-f]{64}/g;
-const resolveRefs = (text) => {
-  const env = workflow.env ?? {};
-  const expanded = text.replace(/\$\{?(MINIO_IMAGE|MC_IMAGE)\}?/g, (_, name) => env[name]);
-  return new Set(expanded.match(REF) ?? []);
-};
+const HELPER = 'ci-pull-image.sh';
+const DOCKER_PULLS = /\bdocker\s+(?:(?:container|image)\s+)?(run|pull|create)\b/;
+
+/**
+ * Walks the commands of a `run:` block or a shell script in order. A call to
+ * the helper adds its images to `pulled`; every `docker run|pull|create` is
+ * then checked against what was pulled BEFORE it, image by image. Line
+ * continuations are joined, so `docker \⏎ run` and a split image argument are
+ * one command. `vars` maps a shell variable to its value, and plain
+ * assignments in a script extend it as they are met.
+ *
+ * `strict` (scripts): a docker command whose image does not resolve to a
+ * digest-pinned reference is a problem, not something to skip. A workflow
+ * step may run the local `rasta/clamav-pinned:ci` tag, which never pulls.
+ */
+function checkCommands(text, { label, vars, pulled, strict, learn = false }) {
+  const problems = [];
+  const lines = text.split('\n');
+  const resolveVars = (cmd) =>
+    cmd.replace(/\$\{(\w+)(?:[^}]*)\}|\$(\w+)/g, (m, a, b) => vars[a ?? b] ?? m);
+  let helperCalls = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const first = i + 1;
+    let logical = lines[i];
+    while (/\\\s*$/.test(logical) && i + 1 < lines.length) {
+      i += 1;
+      logical = logical.replace(/\\\s*$/, ' ') + lines[i];
+    }
+    if (/^\s*#/.test(logical)) continue;
+    if (learn) {
+      const assign = /^\s*(?:export\s+|readonly\s+|local\s+)?(\w+)=(.*)$/.exec(logical);
+      if (assign) vars[assign[1]] = assign[2].match(REF)?.[0] ?? assign[2];
+    }
+    for (const piece of logical.split(/\s*(?:&&|\|\||;)\s*/)) {
+      const cmd = resolveVars(piece);
+      if (cmd.includes(HELPER)) {
+        helperCalls += 1;
+        (cmd.split(HELPER)[1].match(REF) ?? []).forEach((ref) => pulled.add(ref));
+      } else if (DOCKER_PULLS.test(cmd)) {
+        const refs = cmd.match(REF) ?? [];
+        if (refs.length === 0 && strict)
+          problems.push(
+            `${label}:${first} runs docker on an image that is not a resolvable digest-pinned reference: ${piece.trim()}`,
+          );
+        for (const ref of refs)
+          if (!pulled.has(ref))
+            problems.push(`${label}:${first} uses ${ref} with no earlier pre-pull`);
+      }
+    }
+  }
+  return { problems, helperCalls };
+}
 
 test('every digest-pinned image a step pulls or runs is pre-pulled earlier in the same job', () => {
   const problems = [];
   let prepulls = 0;
   for (const [id, job] of Object.entries(workflow.jobs)) {
-    const steps = job.steps ?? [];
     const pulled = new Set();
-    steps.forEach((step, index) => {
-      const run = String(step.run ?? '');
-      if (run.includes('scripts/ci-pull-image.sh')) {
-        prepulls += 1;
-        resolveRefs(run).forEach((ref) => pulled.add(ref));
-        return;
-      }
-      if (!/docker (run|pull)\b/.test(run)) return;
-      for (const ref of resolveRefs(run)) {
-        if (!pulled.has(ref))
-          problems.push(`${id}: step ${index} "${step.name}" uses ${ref} with no earlier pre-pull`);
-      }
+    (job.steps ?? []).forEach((step, index) => {
+      const result = checkCommands(String(step.run ?? ''), {
+        label: `${id}: step ${index} "${step.name}"`,
+        vars: { ...(workflow.env ?? {}) },
+        pulled,
+        strict: false,
+      });
+      if (result.helperCalls > 0) prepulls += 1;
+      problems.push(...result.problems);
     });
   }
   assert.ok(prepulls >= 8, `expected the pre-pull steps to exist, found ${prepulls}`);
@@ -183,46 +231,74 @@ test('every digest-pinned image a step pulls or runs is pre-pulled earlier in th
 // A workflow step can hand the pull to a shell script (the Kafka bootstrap
 // does): that script's `docker run`/`pull`/`create` is as exposed to a registry
 // error as a step's, and the check above never looked inside it.
-const scriptCalls = (text) =>
-  [...text.matchAll(/(?:^|[\s"'(=])((?:\$\{?\w+\}?\/|\.\/)?(?:[\w.-]+\/)*[\w.-]+\.sh)\b/gm)]
-    .map((m) => m[1].replace(/^\$\{?\w+\}?\//, ''))
-    .filter((p) => p !== 'scripts/ci-pull-image.sh');
+const REPO_DIR_VARS = /^(ROOT|REPO_ROOT|REPO_DIR|GITHUB_WORKSPACE)$/;
+const SCRIPT_REF =
+  /(?:^|[\s"'(=])((?:\$\{\w+\}|\$\w+|\$\(dirname [^)]*\))\/)?((?:[\w.-]+\/)*[\w.-]+\.(?:sh|bash))\b/gm;
+
+/** Scripts called from `text` (located in `fromDir`), as { abs } or { unresolved }. */
+const scriptCalls = (text, fromDir) => {
+  const calls = [];
+  const code = text
+    .split('\n')
+    .filter((line) => !/^\s*(#|echo\b|printf\b)/.test(line)) // comments and messages name files without calling them
+    .join('\n');
+  for (const [, prefix, rel] of code.matchAll(SCRIPT_REF)) {
+    if (rel.endsWith(HELPER)) continue;
+    let bases;
+    if (!prefix) bases = fromDir === ROOT ? [ROOT] : [fromDir, ROOT];
+    else if (prefix.startsWith('$(dirname')) bases = [fromDir];
+    else {
+      const name = /\w+/.exec(prefix)[0];
+      bases = REPO_DIR_VARS.test(name) ? [ROOT] : [fromDir];
+    }
+    const abs = bases.map((base) => resolve(base, rel)).find((candidate) => existsSync(candidate));
+    calls.push(abs ? { abs } : { unresolved: `${prefix ?? ''}${rel}` });
+  }
+  return calls;
+};
 
 const shellScriptsCalledFrom = (runs) => {
   const found = new Map(); // repo-relative path -> source text
-  const queue = runs.flatMap(scriptCalls);
+  const unresolved = [];
+  const queue = runs.flatMap((run) =>
+    scriptCalls(run, ROOT).map((call) => ({ ...call, by: 'ci.yml' })),
+  );
   while (queue.length > 0) {
-    const rel = queue.pop();
-    for (const candidate of [rel, `${'infrastructure/docker/kafka'}/${rel}`]) {
-      const abs = resolve(ROOT, candidate);
-      if (found.has(candidate) || !existsSync(abs)) continue;
-      const text = readFileSync(abs, 'utf8');
-      found.set(candidate, text);
-      queue.push(...scriptCalls(text));
+    const call = queue.pop();
+    if (call.unresolved) {
+      unresolved.push(`${call.by} calls ${call.unresolved}, which was not found`);
+      continue;
     }
+    const path = relative(ROOT, call.abs);
+    if (found.has(path)) continue;
+    const text = readFileSync(call.abs, 'utf8');
+    found.set(path, text);
+    queue.push(...scriptCalls(text, dirname(call.abs)).map((next) => ({ ...next, by: path })));
   }
-  return found;
+  return { found, unresolved };
 };
 
 test('a shell script a workflow calls pre-pulls every digest-pinned image it runs', () => {
   const runs = Object.values(workflow.jobs).flatMap((job) =>
     (job.steps ?? []).map((step) => String(step.run ?? '')),
   );
-  const scripts = shellScriptsCalledFrom(runs);
+  const { found, unresolved } = shellScriptsCalledFrom(runs);
   assert.ok(
-    scripts.has('infrastructure/docker/kafka/ci-up.sh'),
+    found.has('infrastructure/docker/kafka/ci-up.sh'),
     'the Kafka bootstrap should be found as a script called from a workflow',
   );
-  const problems = [];
-  for (const [path, text] of scripts) {
-    const lines = text.split('\n');
-    let prepulled = false;
-    lines.forEach((line, i) => {
-      if (/^\s*#/.test(line)) return;
-      if (line.includes('ci-pull-image.sh')) prepulled = true;
-      else if (/\bdocker\s+(run|pull|create)\b/.test(line) && !prepulled)
-        problems.push(`${path}:${i + 1} runs docker with no earlier call to ci-pull-image.sh`);
-    });
+  // A call the test cannot follow is a hole in it, not something to skip.
+  const problems = [...unresolved];
+  for (const [path, text] of found) {
+    problems.push(
+      ...checkCommands(text, {
+        label: path,
+        vars: {},
+        pulled: new Set(),
+        strict: true,
+        learn: true,
+      }).problems,
+    );
   }
   assert.deepEqual(problems, []);
 });

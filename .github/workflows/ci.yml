@@ -3396,11 +3396,6 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Pre-pull the pinned image (retries transient registry errors)
-        run: |
-          scripts/ci-pull-image.sh \
-            clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
-
       - name: Pull the pinned image
         # By digest, so this job scans exactly what the integration job, the
         # E2E job and `docker-compose.yml` run. A tag here would scan a
