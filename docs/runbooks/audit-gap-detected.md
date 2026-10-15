@@ -256,10 +256,10 @@ SELECT c.event_id, c.created_at, o.published_at, o.attempts, o.next_attempt_at
 
 `published_at IS NULL` ⇒ [outbox-stuck](outbox-stuck.md) برای `identity-service`. اصلاحی که پاسخ `202` گرفته ولی ردیفی در
 `audit_correction_command` ندارد وجود ندارد: فرمان و ردیف Outbox در یک تراکنش‌اند. اگر `o.id` تهی است، ردیف Outbox دیگر نیست
-— identity هنوز Purge زمان‌بندی‌شده ندارد (D-052 فاز ۱ آن را شامل نمی‌شود)، پس این حالت را **توضیح‌نداده** بدان و تشدید کن.
+— identity هنوز Purge زمان‌بندی‌شده ندارد (D-052 فاز ۱ و ۲a آن را شامل نمی‌شوند)، پس این حالت را **توضیح‌نداده** بدان و تشدید کن.
 
 **مسیر A:** همان پرسش را روی `outbox_message` سرویس مبدأ (`sourceService` مورد انتظار) با [outbox-stuck](outbox-stuck.md) بپرس.
-fleet، asset، document، maintenance و organization ردیف منتشرشده را پس از `OUTBOX_PURGE_RETENTION_HOURS` (پیش‌فرض ۱۶۸
+fleet، asset، document، maintenance، organization، notification، supplier و inventory ردیف منتشرشده را پس از `OUTBOX_PURGE_RETENTION_HOURS` (پیش‌فرض ۱۶۸
 ساعت) پاک می‌کنند (D-052). اگر در این سرویس‌ها ردیفی نیست و `occurredAt` از این بازه قدیمی‌تر است، نبودِ ردیف به‌خودی‌خود
 شکاف نیست. ردیف Purge شده و فقط می‌گوید «زمانی منتشر شده بود». ادامهٔ بررسی از گام ۳ و ۴ و سمت `audit-service` است. در
 سرویس‌های دیگر هنوز Purge اجرا نمی‌شود.

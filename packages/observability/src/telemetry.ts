@@ -1,4 +1,9 @@
-import { NodeSDK } from '@opentelemetry/sdk-node';
+import { NodeSDK, core, logs } from '@opentelemetry/sdk-node';
+// NodeSDK's own builders for the span pipeline it derives from its config and
+// the environment. The package has no `exports` map, and `NodeSDK.start()`
+// calls exactly these; see `exportingSpanProcessors`.
+import { createBatchSpanProcessorFromEnv } from '@opentelemetry/sdk-node/build/src/create-from-env';
+import { getSpanProcessorsFromEnv } from '@opentelemetry/sdk-node/build/src/utils';
 import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
@@ -9,9 +14,12 @@ import {
   SamplingDecision,
   type Sampler,
   type SamplingResult,
+  type SpanExporter,
+  type SpanProcessor,
 } from '@opentelemetry/sdk-trace-node';
 import {
   trace,
+  metrics,
   context as otelContext,
   SpanStatusCode,
   type Span,
@@ -20,6 +28,7 @@ import {
   type SpanKind,
   type Link,
 } from '@opentelemetry/api';
+import { RedactingSampler, RedactingSpanProcessor } from './url-redaction';
 
 /**
  * OpenTelemetry bootstrap.
@@ -45,6 +54,17 @@ export interface TelemetryConfig {
    * audit is the wrong economy. See {@link RastaSampler}.
    */
   sampleRatio?: number;
+  /**
+   * Where finished spans go, in place of the OTLP exporter at `otlpEndpoint`.
+   * Tests pass an in-memory exporter here. Without either, NodeSDK chooses from
+   * the environment (`OTEL_TRACES_EXPORTER`, `OTEL_EXPORTER_OTLP_*`).
+   */
+  traceExporter?: SpanExporter;
+  /**
+   * Where log records go, in place of NodeSDK's choice from the environment
+   * (`OTEL_LOGS_EXPORTER`). Tests pass an in-memory exporter here.
+   */
+  logRecordExporter?: logs.LogRecordExporter;
 }
 
 /** Span attribute marking an operation that must always be traced. */
@@ -97,11 +117,22 @@ export function initTelemetry(config: TelemetryConfig): NodeSDK | undefined {
     'deployment.environment': config.environment ?? process.env.NODE_ENV ?? 'development',
   });
 
+  let spanProcessors: SpanProcessor[] | undefined;
+
   sdk = new NodeSDK({
     resource,
-    sampler: new RastaSampler(config.sampleRatio ?? 1),
-    traceExporter: config.otlpEndpoint
-      ? new OTLPTraceExporter({ url: `${config.otlpEndpoint.replace(/\/$/, '')}/v1/traces` })
+    // Sanitizes what a span is started with before the SDK cuts it; the
+    // redacting span processor below takes everything written after.
+    sampler: new RedactingSampler(new RastaSampler(config.sampleRatio ?? 1)),
+    // Built when `start()` reads it — after NodeSDK has registered its meter
+    // provider, at the point where it would build the same processors itself —
+    // and not at all under `OTEL_SDK_DISABLED`, where `start()` reads nothing.
+    get spanProcessors(): SpanProcessor[] {
+      spanProcessors ??= spanPipeline(config);
+      return spanProcessors;
+    },
+    logRecordProcessors: config.logRecordExporter
+      ? [new logs.SimpleLogRecordProcessor({ exporter: config.logRecordExporter })]
       : undefined,
     instrumentations: [
       getNodeAutoInstrumentations({
@@ -124,6 +155,39 @@ export function initTelemetry(config: TelemetryConfig): NodeSDK | undefined {
   return sdk;
 }
 
+/**
+ * The span pipeline: the redacting processor, then the exporting ones.
+ *
+ * The exporting processors are exactly the ones `NodeSDK.start()` would build
+ * itself from `traceExporter: <the OTLP exporter at otlpEndpoint, if any>`,
+ * through the same two functions with the same arguments — a batch processor
+ * tuned by `OTEL_BSP_*` around an explicit exporter, and otherwise the
+ * environment's choice: `OTEL_TRACES_EXPORTER` (`otlp`, `console`, `zipkin`, a
+ * list) and `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`. Building them here only lets
+ * the redacting processor stand in front of them; which exporter runs, and
+ * how, is unchanged (Codex on #261, F3; `exporter-selection.spec.ts`).
+ *
+ * The redacting processor sanitizes what a span is given as it is given, so
+ * every exporting processor only ever sees — and exports — the sanitized span. With no
+ * exporting processor (`OTEL_TRACES_EXPORTER=none`) the pipeline is empty, and
+ * NodeSDK then registers no tracer provider, as it did before.
+ */
+function spanPipeline(config: TelemetryConfig): SpanProcessor[] {
+  // NodeSDK's SDK self-metrics meter: its own provider, which `start()` has
+  // registered globally by now, when the opt-in variable is set.
+  const selfMetrics = core.getBooleanFromEnv('OTEL_NODE_EXPERIMENTAL_SDK_METRICS')
+    ? metrics.getMeterProvider()
+    : undefined;
+  const exporter =
+    config.traceExporter ??
+    (config.otlpEndpoint
+      ? new OTLPTraceExporter({ url: `${config.otlpEndpoint.replace(/\/$/, '')}/v1/traces` })
+      : undefined);
+  const exporting = exporter
+    ? [createBatchSpanProcessorFromEnv(exporter, selfMetrics)]
+    : getSpanProcessorsFromEnv(selfMetrics);
+  return exporting.length > 0 ? [new RedactingSpanProcessor(), ...exporting] : [];
+}
 export async function shutdownTelemetry(): Promise<void> {
   if (!sdk) return;
   await sdk.shutdown();
