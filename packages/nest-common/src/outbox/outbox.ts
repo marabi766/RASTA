@@ -442,10 +442,16 @@ export function outboxRenewalOperationBudget(env: {
 type PublishState = 'NOT_SENT' | 'IN_FLIGHT' | 'PUBLISHED' | 'FAILED';
 
 /**
- * One run of the relay: from construction, or the previous stop's return, to
- * the return of its stop. Stops never overlap, so neither do runs: a `stop()`
- * during a stop joins it, and a `start()` during a stop takes effect once that
- * stop has returned (Codex r1 on #291, finding 1).
+ * One run of the relay: from construction, or the first `start()` after a
+ * stop, to the return of its stop. Stops never overlap, so neither do runs: a
+ * `stop()` during a stop joins it, and a `start()` during a stop takes effect
+ * once that stop has returned (Codex r1 on #291, finding 1).
+ *
+ * Between a stop's return and the next `start()` the relay stays in the run
+ * that stop ended: a forced tick claims nothing, and a repeated `stop()` is
+ * that run's stop, already returned. A stop therefore always settles the run
+ * it was called in, and no tick runs in a run whose stop has returned (Codex
+ * r2 on #291).
  *
  * A tick and a renewal keep the run they began in, so whatever of them
  * outlives that stop (a claim, a publish or a renewal still pending at its
@@ -464,6 +470,8 @@ interface RelayRun {
    * at-least-once, deduplicated by consumers on the event id (ADR-021).
    */
   ended: boolean;
+  /** The run's one stop, once called: every later `stop()` in the run joins it. */
+  stop?: Promise<void>;
 }
 
 const newRun = (): RelayRun => ({ stopping: false, ended: false });
@@ -473,13 +481,11 @@ export class OutboxRelay {
   private heartbeat?: NodeJS.Timeout;
   private running = false;
   private stopped = true;
-  /** The one stop in progress or done since the last `start()`; later calls join it. */
-  private stopping?: Promise<void>;
-  /** Whether that stop is still in progress. */
+  /** Whether the current run's stop is in progress. */
   private draining = false;
   /** A `start()` made while a stop was in progress, applied when it returns. */
   private startDeferred = false;
-  /** The current run; replaced when a stop returns. */
+  /** The current run; replaced by the first `start()` after its stop has returned. */
   private run: RelayRun = newRun();
 
   /** Rows this relay holds and has not yet acknowledged, failed or released. */
@@ -515,7 +521,9 @@ export class OutboxRelay {
     }
     if (!this.stopped) return;
     this.stopped = false;
-    this.stopping = undefined;
+    // A run that was never stopped (forced ticks before the first start())
+    // carries on, so the next stop still fences whatever of it is pending.
+    if (this.run.ended) this.run = newRun();
     const interval = this.options.pollIntervalMs ?? 500;
     this.timer = setInterval(() => {
       if (this.stopped) return;
@@ -556,19 +564,21 @@ export class OutboxRelay {
    * then is acknowledged or failed as usual. Whatever returns after the stop
    * has returned writes nothing and is left to its lease ({@link RelayRun}).
    *
-   * One stop at a time, and one per `start()`: a call while a stop is in
-   * progress joins it — returning when it returns, by that stop's bound — and
-   * cancels a `start()` made meanwhile; a call after it has returned, with no
-   * `start()` since, returns at once rather than waiting a second grace.
+   * One stop at a time, and one per run: a call while a stop is in progress
+   * joins it — returning when it returns, by that stop's bound — and cancels a
+   * `start()` made meanwhile; a call after it has returned, with no `start()`
+   * since, is that same stop and returns at once rather than waiting a second
+   * grace. Nothing can have run since: until the next `start()` a forced tick
+   * claims nothing.
    */
   stop(options: OutboxStopOptions = {}): Promise<void> {
     this.startDeferred = false;
-    this.stopping ??= this.drain(options.deadlineAt);
-    return this.stopping;
+    const run = this.run;
+    run.stop ??= this.drain(run, options.deadlineAt);
+    return run.stop;
   }
 
-  private async drain(deadlineAt: number | undefined): Promise<void> {
-    const run = this.run;
+  private async drain(run: RelayRun, deadlineAt: number | undefined): Promise<void> {
     run.stopping = true;
     this.draining = true;
     this.stopped = true;
@@ -603,8 +613,6 @@ export class OutboxRelay {
       this.state.clear();
       this.token = null;
       run.ended = true;
-      // The next `start()`'s ticks, or an operator's forced drain, are a new run.
-      this.run = newRun();
       this.draining = false;
       if (this.startDeferred) {
         this.startDeferred = false;
@@ -650,7 +658,9 @@ export class OutboxRelay {
    * safety is the claim token's job, not this flag's. It deliberately does not
    * require the relay to be started, so an operator can force a drain during
    * incident response and a test can drive it deterministically — but it
-   * claims nothing while a stop is in progress.
+   * claims nothing once a stop has begun, until the next `start()`: a stopped
+   * relay stays stopped, and a tick it allowed would be one no `stop()` fences
+   * (Codex r2 on #291).
    */
   async tick(): Promise<number> {
     const run = this.run;

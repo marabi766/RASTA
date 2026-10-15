@@ -466,27 +466,147 @@ describe('OutboxRelay: the next run', () => {
     expect(store.claimPending).toHaveBeenCalledTimes(1);
     expect(publish).not.toHaveBeenCalled();
 
-    // Positive control: once both have returned, an operator's forced tick is
-    // a new run and publishes.
-    const forced = relay.tick();
+    // Once both have returned the relay is stopped: a forced tick claims
+    // nothing until the next start(), which opens a new run that publishes.
+    expect(await relay.tick()).toBe(0);
+    expect(store.claimPending).toHaveBeenCalledTimes(1);
+    relay.start();
+    const next = relay.tick();
     await flush();
     calls[0]!.resolve();
-    expect(await forced).toBe(1);
+    expect(await next).toBe(1);
     expect(store.markPublished).toHaveBeenCalledWith(['R2'], 'tok-2');
     secondRelease.resolve();
     await second;
+    await relay.stop();
   });
 
-  it('a tick after a stop — an operator forcing a drain — still publishes', async () => {
+  it('a stop() after a forced tick that followed a completed stop fences it: the tick claims nothing', async () => {
+    // Codex r2 on #291, its sequence exactly. Before: the first stop's return
+    // opened a fresh run, the forced tick claimed in it, and the second stop()
+    // returned the first one's settled promise without stopping that run — the
+    // late claim then published and acknowledged after the second stop returned.
     const { store, claim } = gatedStore();
     const publish = jest.fn(async () => undefined);
-    const { relay } = relayWith(store, publish, 0);
+    const { relay } = relayWith(store, publish, 20);
 
     relay.start();
     await relay.stop();
-    claim(claimOf('tok-1', 'R1'));
-    expect(await relay.tick()).toBe(1);
-    expect(store.markPublished).toHaveBeenCalledWith(['R1'], 'tok-1');
+    const pending = claim();
+    const forced = relay.tick();
+    await relay.stop();
+
+    pending.resolve(claimOf('tok-1', 'R1'));
+    expect(await forced).toBe(0);
+    jest.advanceTimersByTime(TWO_LEASES_MS);
+    await flush();
+
+    expect(store.claimPending).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+    expect(store.markPublished).not.toHaveBeenCalled();
+    expect(store.renew).not.toHaveBeenCalled();
+  });
+
+  it('a forced tick before the first start() is fenced by the stop after that start()', async () => {
+    const { store, claim } = gatedStore();
+    const publish = jest.fn(async () => undefined);
+    const { relay } = relayWith(store, publish, 0);
+    const pending = claim();
+
+    const forced = relay.tick();
+    relay.start();
+    await relay.stop();
+    pending.resolve(claimOf('tok-1', 'R1'));
+    expect(await forced).toBe(0);
+    await flush();
+
+    expect(store.claimPending).toHaveBeenCalledTimes(1);
+    expect(publish).not.toHaveBeenCalled();
+    expect(store.markPublished).not.toHaveBeenCalled();
+  });
+});
+
+describe('OutboxRelay: every sequence of start, stop, tick and claim (Codex r2 on #291)', () => {
+  type Op = 'start' | 'stop' | 'tick' | 'resolve';
+  const OPS: readonly Op[] = ['start', 'stop', 'tick', 'resolve'];
+  const MAX_LENGTH = 5;
+
+  function* sequences(length: number): Generator<Op[]> {
+    if (length === 0) {
+      yield [];
+      return;
+    }
+    for (const head of sequences(length - 1)) for (const op of OPS) yield [...head, op];
+  }
+
+  /**
+   * Model: a tick claims iff none is running and no stop has returned since
+   * the last start() (or since construction); a claim publishes and is
+   * acknowledged iff no stop returned between its tick and its return.
+   */
+  async function check(ops: readonly Op[]): Promise<void> {
+    const claims: Barrier<OutboxClaim>[] = [];
+    const published: string[] = [];
+    const store = {
+      claimPending: jest.fn((): Promise<OutboxClaim> => {
+        const next = barrier<OutboxClaim>();
+        claims.push(next);
+        return next.promise;
+      }),
+      markPublished: jest.fn(async (ids: readonly string[]) => {
+        published.push(...ids);
+        return ids.length;
+      }),
+      markFailed: jest.fn(async () => 1),
+      release: jest.fn(async (ids: readonly string[]) => ids.length),
+      renew: jest.fn(async (ids: readonly string[]) => [...ids]),
+      oldestPendingAgeSeconds: async () => 0,
+    } satisfies OutboxStore;
+    const { relay } = relayWith(store, async () => undefined, 0);
+
+    let stopped = false;
+    let pending: { tick: Promise<number>; fenced: boolean } | undefined;
+    for (const [at, op] of ops.entries()) {
+      if (op === 'start') {
+        relay.start();
+        stopped = false;
+      } else if (op === 'stop') {
+        await relay.stop();
+        stopped = true;
+        if (pending) pending.fenced = true;
+      } else if (op === 'tick') {
+        const before = claims.length;
+        const tick = relay.tick();
+        const claimsNow = !pending && !stopped;
+        expect(claims.length - before).toBe(claimsNow ? 1 : 0);
+        if (claimsNow) pending = { tick, fenced: false };
+        else expect(await tick).toBe(0);
+      } else if (pending) {
+        const id = `R${at}`;
+        claims.at(-1)!.resolve(claimOf(`tok-${at}`, id));
+        expect(await pending.tick).toBe(pending.fenced ? 0 : 1);
+        expect(published.includes(id)).toBe(!pending.fenced);
+        pending = undefined;
+      }
+      await flush();
+    }
+    expect(store.release).not.toHaveBeenCalled();
+    expect(store.markFailed).not.toHaveBeenCalled();
+    if (pending) claims.at(-1)!.resolve(claimOf('tok-end', 'R-end'));
+    await relay.stop();
+    await pending?.tick;
+  }
+
+  it(`holds for all ${(4 ** (MAX_LENGTH + 1) - 1) / 3} sequences of up to ${MAX_LENGTH} steps`, async () => {
+    for (let length = 0; length <= MAX_LENGTH; length += 1) {
+      for (const ops of sequences(length)) {
+        try {
+          await check(ops);
+        } catch (error) {
+          throw new Error(`sequence [${ops.join(', ')}]: ${String(error)}`);
+        }
+      }
+    }
   });
 });
 
