@@ -4,7 +4,7 @@ import { OrganizationRepository, toLabel } from '../src/organization/organizatio
 import { OrganizationService } from '../src/organization/organization.service';
 import type { OrganizationView } from '../src/organization/dto';
 import { seedOrganization, type SeedOrganizationRow } from '../src/organization/seed-organization';
-import type { PrismaService } from '../src/prisma/prisma.service';
+import type { PrismaService, PrismaTransactionClient } from '../src/prisma/prisma.service';
 import { asActor, newPrisma } from './helpers';
 
 /**
@@ -18,17 +18,26 @@ import { asActor, newPrisma } from './helpers';
  * Every interleaving is forced, not raced: one writer is held at a barrier inside its transaction
  * — the seed between its insert and its path, the old window; a suspension between its
  * compare-and-set and its cascade; a move before its path rewrite — the other is let run until
- * PostgreSQL reports it waiting on a lock (or until it finishes, which is the failure the
- * assertions then report), and only then is the barrier released.
+ * PostgreSQL reports its own backend waiting on the held writer's (or until it finishes, which is
+ * the failure the assertions then report), and only then is the barrier released. Both backends
+ * are the writers' own, read from their transactions: no other session of the database can
+ * release the barrier early (Codex r1 on #295).
+ *
+ * The seed also places a row only within the depth limit, read under the same lock (Codex r1 on
+ * #295): a move that deepened the parent meanwhile cannot leave its child over the limit.
  */
 describe('the demo seed takes the hierarchy lock', () => {
   let prisma: PrismaService;
   let repository: OrganizationRepository;
 
   const OPERATOR_ORG = 'ORG-ITEST-OPERATOR';
+  const MAX_DEPTH = 8;
 
-  const serviceWith = (repo: OrganizationRepository = repository) =>
-    new OrganizationService(repo, { maxDepth: 8, policySetterRoles: ['SYSTEM_ADMIN'] });
+  const serviceWith = (repo: OrganizationRepository = repository, maxDepth = MAX_DEPTH) =>
+    new OrganizationService(repo, { maxDepth, policySetterRoles: ['SYSTEM_ADMIN'] });
+
+  const runSeed = (repo: OrganizationRepository, org: SeedOrganizationRow, maxDepth = MAX_DEPTH) =>
+    seedOrganization(repo, org, { maxDepth });
 
   const operator = <T>(fn: () => Promise<T>): Promise<T> =>
     asActor({ organizationId: OPERATOR_ORG, roles: ['SYSTEM_ADMIN'] }, fn);
@@ -66,19 +75,25 @@ describe('the demo seed takes the hierarchy lock', () => {
 
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  /** The backend a transaction runs on, read from that transaction's own connection. */
+  const backendOf = async (tx: PrismaTransactionClient): Promise<number> => {
+    const [{ pid }] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+    return pid;
+  };
+
   /**
-   * Holds `method` of a fresh repository at a barrier: `reached` resolves when a call arrives,
-   * and the call goes on only after `release()`.
+   * Holds `method` of a fresh repository at a barrier: `reached` resolves, with the backend of
+   * the held transaction, when a call arrives, and the call goes on only after `release()`.
    */
   const gated = <K extends 'setPath' | 'cascadeStatus' | 'rewriteSubtreePath'>(method: K) => {
     const repo = new OrganizationRepository(prisma);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    let arrive!: () => void;
-    const reached = new Promise<void>((resolve) => (arrive = resolve));
+    let arrive!: (backend: number) => void;
+    const reached = new Promise<number>((resolve) => (arrive = resolve));
     const original = (repo[method] as (...args: unknown[]) => Promise<unknown>).bind(repo);
     (repo as unknown as Record<K, unknown>)[method] = async (...args: unknown[]) => {
-      arrive();
+      arrive(await backendOf(args[0] as PrismaTransactionClient));
       await gate;
       return original(...args);
     };
@@ -86,10 +101,33 @@ describe('the demo seed takes the hierarchy lock', () => {
   };
 
   /**
-   * Resolves once another backend of this database waits on a lock, or once `writer` has
-   * settled — without waiting, which is the race the barrier was set up to expose.
+   * A fresh repository that records the backend of its write transaction as the transaction
+   * begins, before the writer asks for any lock: the backend the tested writer waits on.
    */
-  const untilBlockedOrSettled = async (writer: Promise<unknown>, timeoutMs = 10_000) => {
+  const traced = () => {
+    const repo = new OrganizationRepository(prisma);
+    let backend: number | undefined;
+    const original = repo.transaction.bind(repo);
+    repo.transaction = <T>(fn: (tx: PrismaTransactionClient) => Promise<T>) =>
+      original(async (tx) => {
+        backend = await backendOf(tx);
+        return fn(tx);
+      });
+    return { repo, backend: () => backend };
+  };
+
+  /**
+   * Resolves once the tested writer's own backend waits on a lock the held writer's backend holds
+   * — `pg_blocking_pids` of the one names the other — or once `writer` has settled without
+   * waiting, which is the race the barrier was set up to expose. Any other session waiting on a
+   * lock is not either of them, and releases nothing.
+   */
+  const untilBlockedOrSettled = async (
+    writer: Promise<unknown>,
+    waiter: () => number | undefined,
+    holder: number,
+    timeoutMs = 10_000,
+  ) => {
     let settled = false;
     void writer.then(
       () => (settled = true),
@@ -98,13 +136,13 @@ describe('the demo seed takes the hierarchy lock', () => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (settled) return 'settled';
-      const waiting = await prisma.client.$queryRaw<{ pid: number }[]>`
-        SELECT pid FROM pg_stat_activity
-        WHERE datname = current_database()
-          AND pid <> pg_backend_pid()
-          AND wait_event_type = 'Lock'
-      `;
-      if (waiting.length > 0) return 'blocked';
+      const backend = waiter();
+      if (backend !== undefined) {
+        const [{ blockers }] = await prisma.client.$queryRaw<{ blockers: number[] }[]>`
+          SELECT pg_blocking_pids(${backend}::int) AS blockers
+        `;
+        if (blockers.includes(holder)) return 'blocked';
+      }
       await sleep(25);
     }
     throw new Error('the second writer neither blocked nor finished');
@@ -128,18 +166,22 @@ describe('the demo seed takes the hierarchy lock', () => {
 
     // Held after the insert, before the path: the window the old two-statement write left open.
     const seed = gated('setPath');
-    const seeding = seedOrganization(seed.repo, child);
+    const seeding = runSeed(seed.repo, child);
     seeding.catch(() => undefined);
-    await seed.reached;
+    const holder = await seed.reached;
     const visibleWhileHeld = await row(child.id);
 
+    const suspender = traced();
     const suspension = operator(() =>
-      serviceWith().changeStatus(parent.id, { status: 'SUSPENDED', reason: 'seed race' }),
+      serviceWith(suspender.repo).changeStatus(parent.id, {
+        status: 'SUSPENDED',
+        reason: 'seed race',
+      }),
     );
     suspension.catch(() => undefined);
     let second: string;
     try {
-      second = await untilBlockedOrSettled(suspension);
+      second = await untilBlockedOrSettled(suspension, suspender.backend, holder);
     } finally {
       seed.release();
     }
@@ -170,13 +212,14 @@ describe('the demo seed takes the hierarchy lock', () => {
       serviceWith(held.repo).changeStatus(parent.id, { status: 'SUSPENDED', reason: 'seed race' }),
     );
     suspension.catch(() => undefined);
-    await held.reached;
+    const holder = await held.reached;
 
-    const seeding = seedOrganization(repository, child);
+    const seeder = traced();
+    const seeding = runSeed(seeder.repo, child);
     seeding.catch(() => undefined);
     let second: string;
     try {
-      second = await untilBlockedOrSettled(seeding);
+      second = await untilBlockedOrSettled(seeding, seeder.backend, holder);
     } finally {
       held.release();
     }
@@ -204,13 +247,14 @@ describe('the demo seed takes the hierarchy lock', () => {
       serviceWith(held.repo).move(parent.id, { parentId: to.id, reason: 'seed race' }),
     );
     move.catch(() => undefined);
-    await held.reached;
+    const holder = await held.reached;
 
-    const seeding = seedOrganization(repository, child);
+    const seeder = traced();
+    const seeding = runSeed(seeder.repo, child);
     seeding.catch(() => undefined);
     let second: string;
     try {
-      second = await untilBlockedOrSettled(seeding);
+      second = await untilBlockedOrSettled(seeding, seeder.backend, holder);
     } finally {
       held.release();
     }
@@ -224,11 +268,81 @@ describe('the demo seed takes the hierarchy lock', () => {
     expect((await row(child.id))?.depth).toBe(2);
   });
 
+  it('a seed is held to the depth limit by the rule the service applies', async () => {
+    const root = await create();
+    const mid = await create(root.id);
+    const deep = await create(mid.id);
+
+    // At the limit: placed, like a create.
+    const atLimit = seedRow(mid.id);
+    expect(await runSeed(repository, atLimit, 2)).toMatchObject({ depth: 2 });
+
+    // One past it: refused with exactly the refusal `create` gives, and nothing written.
+    const tooDeep = seedRow(deep.id);
+    const seedError = await errorOf(runSeed(repository, tooDeep, 2));
+    const createError = await errorOf(
+      operator(() =>
+        serviceWith(repository, 2).create({
+          name: 'سازمان بیش از حد ژرف',
+          type: 'GOVERNMENT',
+          metadata: {},
+          parentId: deep.id,
+        } as never),
+      ),
+    );
+    expect(seedError.internalContext).toEqual(createError.internalContext);
+    expect(seedError.internalContext).toMatchObject({
+      rule: 'HIERARCHY_TOO_DEEP',
+      maxDepth: 2,
+      resultingDepth: 3,
+      parentDepth: 2,
+    });
+    expect(await row(tooDeep.id)).toBeNull();
+  });
+
+  it('a seed of a child while a move deepens its parent to the limit waits, then refuses it', async () => {
+    const from = await create();
+    const to = await create();
+    const mid = await create(to.id);
+    const parent = await create(from.id);
+    const child = seedRow(parent.id);
+
+    // The move is legal (the parent lands at depth 2, the limit); the child would be at 3.
+    const held = gated('rewriteSubtreePath');
+    const move = operator(() =>
+      serviceWith(held.repo, 2).move(parent.id, { parentId: mid.id, reason: 'seed race' }),
+    );
+    move.catch(() => undefined);
+    const holder = await held.reached;
+
+    const seeder = traced();
+    const seeding = runSeed(seeder.repo, child, 2);
+    seeding.catch(() => undefined);
+    let second: string;
+    try {
+      second = await untilBlockedOrSettled(seeding, seeder.backend, holder);
+    } finally {
+      held.release();
+    }
+
+    await move;
+    const error = await errorOf(seeding);
+    expect(second).toBe('blocked');
+    expect(error.internalContext).toMatchObject({
+      rule: 'HIERARCHY_TOO_DEEP',
+      maxDepth: 2,
+      resultingDepth: 3,
+      parentDepth: 2,
+    });
+    expect(await row(child.id)).toBeNull();
+    expect((await row(parent.id))?.depth).toBe(2);
+  });
+
   it('a second run converges the name, and keeps the path and a cascaded status', async () => {
     const root = await create();
     const parent = await create(root.id);
     const child = seedRow(parent.id);
-    const first = await seedOrganization(repository, child);
+    const first = await runSeed(repository, child);
 
     await operator(() =>
       serviceWith().changeStatus(parent.id, { status: 'SUSPENDED', reason: 'stopped' }),
@@ -237,7 +351,7 @@ describe('the demo seed takes the hierarchy lock', () => {
 
     // A re-seed of a development database after an operator suspended a branch is not refused:
     // nothing is created ACTIVE, and the existing row keeps the status the cascade gave it.
-    const second = await seedOrganization(repository, { ...child, name: 'دهیاری بذر دوم' });
+    const second = await runSeed(repository, { ...child, name: 'دهیاری بذر دوم' });
     expect(second).toEqual(first);
     const after = await row(child.id);
     expect(after?.name).toBe('دهیاری بذر دوم');
@@ -272,13 +386,13 @@ describe('the demo seed takes the hierarchy lock', () => {
     };
 
     const underActive = await unplaced(active.id);
-    await seedOrganization(repository, underActive);
+    await runSeed(repository, underActive);
     expect(await repository.getPath(underActive.id)).toBe(
       [root.id, active.id, underActive.id].map(toLabel).join('.'),
     );
 
     const underStopped = await unplaced(stopped.id);
-    const error = await errorOf(seedOrganization(repository, underStopped));
+    const error = await errorOf(runSeed(repository, underStopped));
     expect(error.internalContext).toMatchObject({
       rule: 'ANCESTOR_NOT_ACTIVE',
       ancestorId: stopped.id,

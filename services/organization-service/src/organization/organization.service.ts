@@ -1028,14 +1028,7 @@ export class OrganizationService {
   // =========================================================================
 
   private assertWithinDepth(resultingDepth: number, context: Record<string, unknown>): void {
-    if (resultingDepth > this.maxDepth) {
-      throw RastaError.businessRule(`Hierarchy may not exceed ${this.maxDepth} levels`, {
-        rule: 'HIERARCHY_TOO_DEEP',
-        maxDepth: this.maxDepth,
-        resultingDepth,
-        ...context,
-      });
-    }
+    assertWithinHierarchyDepth(this.maxDepth, resultingDepth, context);
   }
 
   private async insertLocation(
@@ -1110,6 +1103,27 @@ export function assertNoBlockingAncestor(chain: readonly ChainRow[], action: str
     `Cannot ${action} beneath a ${blocking.status.toLowerCase()} organization`,
     { rule: 'ANCESTOR_NOT_ACTIVE', ancestorId: blocking.id, ancestorStatus: blocking.status },
   );
+}
+
+/**
+ * Refuses a write that would put an organization deeper than `maxDepth`
+ * (`MAX_HIERARCHY_DEPTH`). `resultingDepth` is computed from rows read under
+ * the hierarchy lock. The demo seed applies the same rule to the rows it
+ * places (`seed-organization.ts`).
+ */
+export function assertWithinHierarchyDepth(
+  maxDepth: number,
+  resultingDepth: number,
+  context: Record<string, unknown>,
+): void {
+  if (resultingDepth > maxDepth) {
+    throw RastaError.businessRule(`Hierarchy may not exceed ${maxDepth} levels`, {
+      rule: 'HIERARCHY_TOO_DEEP',
+      maxDepth,
+      resultingDepth,
+      ...context,
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 import type { OrganizationRepository } from './organization.repository';
-import { assertNoBlockingAncestor } from './organization.service';
+import { assertNoBlockingAncestor, assertWithinHierarchyDepth } from './organization.service';
 import { assertSeedDoesNotReparent } from './seed-guard';
 
 /** One organization of the demo seed (`prisma/seed.ts`), with its fixed identifier. */
@@ -34,6 +34,10 @@ export interface SeedOrganizationRow {
  * parent's path is the one it has now, read under that lock — not the one the seed gave it, which
  * a move may have changed since.
  *
+ * The same holds for the depth limit: a row is placed only within `options.maxDepth`
+ * (`MAX_HIERARCHY_DEPTH`, `loadMaxHierarchyDepth`), checked against the parent's depth read under
+ * the lock, by the rule `OrganizationService.create` applies (Codex r1 on #295).
+ *
  * An existing row keeps its parent, path and status: only its name and type converge. A path a
  * seed interrupted by the old two-statement write left NULL is set here, under the same checks
  * as a new row.
@@ -41,6 +45,7 @@ export interface SeedOrganizationRow {
 export async function seedOrganization(
   repository: OrganizationRepository,
   org: SeedOrganizationRow,
+  options: { maxDepth: number },
 ): Promise<{ path: string; depth: number }> {
   return repository.transaction(async (tx) => {
     await repository.lockHierarchy(tx);
@@ -64,8 +69,16 @@ export async function seedOrganization(
     // A move (`OrganizationService.move`) owns the tree after the first write: a placed row keeps
     // its path, and a seed rewriting it would race one (round 6).
     const placed = existing ? await repository.getPath(org.id, tx) : null;
-    if (placed === null && (existing?.status ?? 'ACTIVE') === 'ACTIVE') {
-      assertNoBlockingAncestor(chain, 'seed an active organization');
+    if (placed === null) {
+      // From the parent's depth read under the lock: a move may have deepened it since.
+      if (parent) {
+        assertWithinHierarchyDepth(options.maxDepth, parent.depth + 1, {
+          parentDepth: parent.depth,
+        });
+      }
+      if ((existing?.status ?? 'ACTIVE') === 'ACTIVE') {
+        assertNoBlockingAncestor(chain, 'seed an active organization');
+      }
     }
 
     if (existing) {

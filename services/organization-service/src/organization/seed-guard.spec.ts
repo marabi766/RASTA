@@ -33,7 +33,9 @@ describe('the demo seed never re-parents an existing organization', () => {
     // seed-hierarchy-lock.int-spec.ts holds seedOrganization to the hierarchy lock; a write
     // beside it in the seed would be outside that lock again.
     const seed = readFileSync(join(__dirname, '..', '..', 'prisma', 'seed.ts'), 'utf8');
-    expect(seed).toContain('await seedOrganization(repository, org)');
+    expect(seed).toContain('await seedOrganization(repository, org, { maxDepth })');
+    // …at the depth limit the service runs with (Codex r1 on #295), not one of its own.
+    expect(seed).toContain('const maxDepth = loadMaxHierarchyDepth();');
     expect(seed).not.toMatch(/\.organization\.(upsert|create|update|updateMany)\(/);
     expect(seed).not.toMatch(/UPDATE organization SET/);
   });

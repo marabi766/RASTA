@@ -2,6 +2,7 @@
 import { PrismaClient } from '../src/generated/prisma';
 import { assertDemoSeedAllowed, assertDemoSeedDatabase, withUtcSession } from '@rasta/config';
 import { assertDemoSeedRuntimeRole } from '@rasta/nest-common';
+import { loadMaxHierarchyDepth } from '../src/config/env';
 import { OrganizationRepository, toLabel } from '../src/organization/organization.repository';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { seedOrganization, type SeedOrganizationRow } from '../src/organization/seed-organization';
@@ -197,12 +198,16 @@ async function main(): Promise<void> {
   // the shell's settings above cannot tell a production URL from a local one.
   await assertDemoSeedDatabase('organization-service', prisma);
 
+  // The depth limit the service runs with, from the same setting and schema.
+  const maxDepth = loadMaxHierarchyDepth();
+
   console.warn('Seeding organization-service…');
 
   for (const org of ORGANIZATIONS) {
-    // Row and path in one transaction under the hierarchy lock, never re-parented, never ACTIVE
-    // beneath a suspended or deactivated parent (`seed-organization.ts`).
-    const { depth } = await seedOrganization(repository, org);
+    // Row and path in one transaction under the hierarchy lock, never re-parented, never deeper
+    // than the limit, never ACTIVE beneath a suspended or deactivated parent
+    // (`seed-organization.ts`).
+    const { depth } = await seedOrganization(repository, org, { maxDepth });
     const label = toLabel(org.id);
 
     if (org.location) {
