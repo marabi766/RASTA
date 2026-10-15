@@ -28,7 +28,10 @@ export interface LoggerConfig {
   level?: string;
   /** Human-readable output. Never enable in production — it is slow and unparseable. */
   pretty?: boolean;
-  /** Where JSON lines go instead of stdout; for tests. Takes precedence over `pretty`. */
+  /**
+   * Where JSON lines go instead of stdout; for tests. Takes precedence over
+   * `pretty`. A plain stream only: a pino multistream or transport throws.
+   */
   destination?: DestinationStream;
 }
 
@@ -79,31 +82,33 @@ function openDestination(
 }
 
 /**
- * A pino transport (`pino.transport(...)`) as a destination. The worker routes
- * records to its targets by numeric level, and this logger writes the level as
- * a word, so a transport with `targets` would silently drop every record.
- * Whether a transport has one target or several cannot be read back from it,
- * so none is accepted; the built-in `pretty` option is the one supported
- * transport.
+ * Only a plain stream is accepted as `destination` (a Writable,
+ * `pino.destination`); a pino multistream or transport is refused when the
+ * logger is created (Codex on #290, r4 F5, r5 R5-2/R5-3):
+ *
+ * - a transport (`pino.transport(...)`) routes records to its targets by
+ *   numeric level, and this logger writes the level as a word, so its targets
+ *   would silently drop every record — at any depth of nesting;
+ * - a multistream stays open to its holder: a member added through the
+ *   caller's own reference, or one of a nested multistream, would have no
+ *   `error` listener, and a late write failure would be an uncaught exception.
+ *
+ * Fan-out is built here, never passed in: the only multistream a logger has
+ * is the one OpenTelemetry's pino instrumentation creates, behind the scrub.
+ * Nothing in the repository passes either; the built-in `pretty` option is the
+ * one supported transport.
  */
-function isTransport(stream: unknown): boolean {
-  return (
-    typeof stream === 'object' &&
-    stream !== null &&
-    (stream.constructor as { name?: string } | undefined)?.name === 'ThreadStream'
-  );
-}
-
-function rejectTransport(destination: DestinationStream | undefined): void {
-  const members = (destination as { streams?: { stream?: unknown }[] } | undefined)?.streams;
-  const found =
-    isTransport(destination) ||
-    (Array.isArray(members) && members.some((member) => isTransport(member?.stream)));
-  if (found) {
+function rejectComposite(destination: DestinationStream | undefined): void {
+  if (typeof destination !== 'object' || destination === null) return;
+  const candidate = destination as { streams?: unknown; add?: unknown };
+  const multistream = 'streams' in candidate || typeof candidate.add === 'function';
+  const transport =
+    (destination.constructor as { name?: string } | undefined)?.name === 'ThreadStream';
+  if (multistream || transport) {
     throw new Error(
-      '@rasta/logging: a pino transport (pino.transport) is not supported as `destination`: ' +
-        'its multi-target routing needs numeric levels, and records would be dropped. ' +
-        'Pass a stream (pino.destination, a Writable) or use `pretty`.',
+      `@rasta/logging: a pino ${transport ? 'transport (pino.transport)' : 'multistream'} ` +
+        'is not supported as `destination`: pass a plain stream (pino.destination, a Writable) ' +
+        'or use `pretty`.',
     );
   }
 }
@@ -118,7 +123,7 @@ export function createLogger(config: LoggerConfig): Logger {
     destination,
   } = config;
 
-  rejectTransport(destination);
+  rejectComposite(destination);
   const raw = openDestination(destination, pretty);
   let output: DestinationStream = raw;
 

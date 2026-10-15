@@ -1,4 +1,4 @@
-import { scrubMessage } from './redaction';
+import { scrubMessage, TRUNCATED_MESSAGE } from './redaction';
 
 /**
  * Error serialisation for the logger.
@@ -35,7 +35,10 @@ export const MAX_AGGREGATE_ERRORS = 10;
 /** How many stack frame lines are kept. */
 export const MAX_STACK_FRAMES = 50;
 
-/** How much of a stack is looked at, in UTF-16 code units; the rest is dropped. */
+/**
+ * How much of a stack is looked at, in UTF-16 code units; the rest, and the
+ * line the cut runs through, is dropped.
+ */
 export const MAX_STACK_SCAN = 64 * 1024;
 
 const UNSERIALISABLE_ERROR = '[unserialisable error]';
@@ -60,11 +63,12 @@ export interface SerializedError {
  */
 function scrubStack(stack: string): string {
   // Bounded before it is split: a stack is attacker-influenced text of any size.
-  // The cut is far past what is kept, and the parts below fail closed at their
-  // own cuts, so a secret straddling it is never kept whole.
-  const lines = (stack.length > MAX_STACK_SCAN ? stack.slice(0, MAX_STACK_SCAN) : stack).split(
-    '\n',
-  );
+  // The line the cut runs through is dropped, not scrubbed: a fragment can have
+  // lost what marks its secret (a connection string's `@`) and be short enough
+  // that nothing downstream knows it was cut (Codex on #290, r5 R5-1).
+  const scanned = stack.length > MAX_STACK_SCAN;
+  const lines = (scanned ? stack.slice(0, MAX_STACK_SCAN) : stack).split('\n');
+  if (scanned) lines[lines.length - 1] = TRUNCATED_MESSAGE;
   let firstFrame = lines.findIndex((line) => FRAME_LINE.test(line));
   if (firstFrame === -1) firstFrame = lines.length;
   const head = scrubMessage(lines.slice(0, firstFrame).join('\n'));

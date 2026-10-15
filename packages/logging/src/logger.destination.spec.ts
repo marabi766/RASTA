@@ -1,8 +1,8 @@
 import { Writable } from 'node:stream';
 import pino from 'pino';
 import { clearLogContextProvider, createLogger, setLogContextProvider } from './logger';
-import { scrubbedErrorSerializer } from './error-serializer';
-import { REDACTED, TRUNCATED_MESSAGE } from './redaction';
+import { MAX_STACK_SCAN, scrubbedErrorSerializer } from './error-serializer';
+import { REDACTED, SCRUB_MESSAGE_MAX, scrubMessage, TRUNCATED_MESSAGE } from './redaction';
 import {
   FALLBACK_LINE,
   MAX_LOG_LINE_LENGTH,
@@ -77,44 +77,47 @@ describe('destination metadata (Codex r3 F1)', () => {
   });
 });
 
-describe('multistream destinations', () => {
-  it('scrubs the line and the metadata for every member and keeps level routing', () => {
-    const everything = sink({ metadata: true });
-    const plain = sink();
-    const errorsOnly = sink({ metadata: true });
-    const logger = loggerFor(
-      pino.multistream([
-        { stream: everything },
-        { stream: plain },
-        { level: 'error', stream: errorsOnly },
-      ]),
-    );
+describe('only a plain stream is a destination (Codex on #290, r5 R5-2/R5-3)', () => {
+  it('refuses a multistream: its holder could add a member no listener guards', () => {
+    const multi = pino.multistream([{ stream: sink() }]);
 
-    logger.child({ component: 'c' }).info('Bearer LEAK');
-    logger.error({ err: new Error('postgres://u:LEAK@h') }, 'Bearer LEAK');
-
-    expect(text(everything)).not.toContain('LEAK');
-    expect(text(plain)).not.toContain('LEAK');
-    expect(text(errorsOnly)).not.toContain('LEAK');
-    expect(everything.lastMsg).toBe(`Bearer ${REDACTED}`);
-    expect(errorsOnly.lastMsg).toBe(`Bearer ${REDACTED}`);
-    expect(everything.lines).toHaveLength(2);
-    expect(plain.lines).toHaveLength(2);
-    expect(errorsOnly.lines).toHaveLength(1);
-    expect(json(errorsOnly.lines[0]!).level).toBe('error');
+    expect(() => loggerFor(multi)).toThrow(/multistream is not supported/);
   });
 
-  it('covers a member added after the logger was created', () => {
-    const first = sink();
-    const late = sink();
-    const multi = pino.multistream([{ stream: first }]);
-    const logger = loggerFor(multi);
-    multi.add({ stream: late, level: 'info' });
+  it('refuses a multistream nested in a multistream', () => {
+    const nested = pino.multistream([{ stream: pino.multistream([{ stream: sink() }]) }]);
 
-    logger.info('Bearer LEAK');
+    expect(() => loggerFor(nested)).toThrow(/multistream is not supported/);
+  });
 
-    expect(text(late)).not.toContain('LEAK');
-    expect(late.lines).toHaveLength(1);
+  it('refuses a real two-target transport, alone and nested two multistreams deep', async () => {
+    const transport = pino.transport({
+      targets: [
+        { target: 'pino/file', options: { destination: 1 } },
+        { target: 'pino/file', options: { destination: 1 } },
+      ],
+    }) as pino.DestinationStream & { end(): void; once(event: string, cb: () => void): void };
+    try {
+      expect(() => loggerFor(transport)).toThrow(/transport \(pino.transport\) is not supported/);
+      expect(() =>
+        loggerFor(pino.multistream([{ stream: pino.multistream([{ stream: transport }]) }])),
+      ).toThrow(/not supported/);
+    } finally {
+      await new Promise<void>((done) => {
+        transport.once('close', done);
+        transport.end();
+      });
+    }
+  });
+
+  it('accepts a Writable and pino.destination', () => {
+    expect(() => loggerFor(sink())).not.toThrow();
+    const file = pino.destination({ dest: '/dev/null', sync: true });
+    try {
+      expect(() => loggerFor(file)).not.toThrow();
+    } finally {
+      file.destroy();
+    }
   });
 });
 
@@ -345,29 +348,13 @@ describe('asynchronous destination failures are contained (Codex r4 F2)', () => 
     expect(await withoutUncaught(() => logger.info('hello'))).toEqual([]);
   });
 
-  it('every member of a multistream, and one added later', async () => {
-    const members = [failing(), failing()];
-    const late = failing();
-    const multi = pino.multistream([{ stream: members[0]! }, { stream: members[1]! }]);
-    const logger = loggerFor(multi);
-    (logger as unknown as { [k: symbol]: pino.MultiStreamRes })[
-      Object.getOwnPropertySymbols(logger).find((s) => s.toString() === 'Symbol(pino.stream)')!
-    ]!.add({ stream: late });
+  it('every later write to a failed destination as well', async () => {
+    const destination = failing();
+    const logger = loggerFor(destination);
 
-    expect(await withoutUncaught(() => logger.info('hello'))).toEqual([]);
-    for (const stream of [...members, late]) {
-      expect(stream.listenerCount('error')).toBeGreaterThan(0);
-    }
-  });
-
-  it('keeps logging to the stream that is left', async () => {
-    const good = sink();
-    const logger = loggerFor(pino.multistream([{ stream: failing() }, { stream: good }]));
-
-    await withoutUncaught(() => logger.info('one'));
-    await withoutUncaught(() => logger.info('two'));
-
-    expect(text(good)).toContain('two');
+    expect(await withoutUncaught(() => logger.info('one'))).toEqual([]);
+    expect(await withoutUncaught(() => logger.info('two'))).toEqual([]);
+    expect(destination.listenerCount('error')).toBeGreaterThan(0);
   });
 });
 
@@ -382,9 +369,9 @@ describe('transports as destinations (Codex r4 F5)', () => {
     );
   });
 
-  it('is refused as a multistream member too', () => {
+  it('is refused inside anything shaped like a multistream', () => {
     const multi = { write() {}, streams: [{ stream: new ThreadStream() }] };
-    expect(() => loggerFor(multi as unknown as pino.DestinationStream)).toThrow(/transport/);
+    expect(() => loggerFor(multi as unknown as pino.DestinationStream)).toThrow(/not supported/);
   });
 });
 
@@ -426,6 +413,54 @@ describe('a huge stack costs a bounded scan (Codex r4 F4)', () => {
 
     expect(out.stack.length).toBeLessThan(5000);
     expect(milliseconds).toBeLessThan(50);
+  });
+});
+
+describe('a cut drops the line it runs through (Codex on #290, r5 R5-1)', () => {
+  /** Anything of the password kept: `ZZ` occurs nowhere else in the output. */
+  const SECRET = 'ZZSECRETZZ';
+  const DSN = `postgres://u:${SECRET}@db/app`;
+
+  it('the r5 trigger: the stack scan cuts a frame-shaped line before its "@"', () => {
+    const stream = sink();
+    const err = new Error(`${'x'.repeat(65_492)}\n    at postgres://u:SYNTHETIC_SECRET@db/app`);
+    // The offsets the review gives: the password starts at 65,520, its `@` is at 65,536.
+    expect(err.stack!.indexOf('SYNTHETIC_SECRET')).toBe(65_520);
+    expect(err.stack!.indexOf('@db/app')).toBe(MAX_STACK_SCAN);
+
+    loggerFor(stream).error({ err }, 'failed');
+
+    expect(text(stream)).not.toContain('SYNTHETIC');
+    expect(json(stream.lines[0]!).err.stack).toContain(TRUNCATED_MESSAGE);
+  });
+
+  it('every cut position of a connection string across the stack scan', () => {
+    // As in the trigger: a long message, then one short frame line holding the
+    // connection string, so the frames are short enough for no later cap to hide it.
+    for (let offset = 0; offset <= DSN.length + 1; offset++) {
+      const start = MAX_STACK_SCAN - offset;
+      const stack = `Error: ${'x'.repeat(start - 15)}\n    at ${DSN}\n    at g (b.js:1:1)`;
+      expect(stack.indexOf(DSN)).toBe(start);
+
+      const out = scrubbedErrorSerializer(Object.assign(new Error('m'), { stack })) as {
+        stack: string;
+      };
+
+      expect(out.stack).not.toContain('ZZ');
+    }
+  });
+
+  it('every cut position of a connection string or bearer token at the message cap', () => {
+    for (const max of [SCRUB_MESSAGE_MAX, MAX_LOG_STRING_LENGTH, 64]) {
+      for (const secret of [DSN, `Bearer ${SECRET}`]) {
+        for (let offset = 0; offset <= secret.length + 1; offset++) {
+          const message = `${' '.repeat(max - offset)}${secret} tail`;
+          expect(message.indexOf(secret)).toBe(max - offset);
+
+          expect(scrubMessage(message, max)).not.toContain('ZZ');
+        }
+      }
+    }
   });
 });
 

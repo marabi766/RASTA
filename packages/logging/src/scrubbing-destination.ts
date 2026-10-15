@@ -105,23 +105,22 @@ function swallow(): void {
  * A stream that emits `'error'` without one throws it as an uncaught exception,
  * and a destination fails that way asynchronously (a disk error, a closed
  * pipe, a transport worker that cannot start), after the `try`/`catch` around
- * its `write` has returned. Never throws itself.
+ * its `write` has returned. The only multistream reaching here is the one
+ * OpenTelemetry's pino instrumentation builds, complete before this runs
+ * (`createLogger` refuses one passed in). Never throws itself.
  */
 export function containErrors(stream: unknown): void {
   try {
-    if (typeof stream !== 'object' || stream === null) return;
+    if (typeof stream !== 'object' || stream === null || contained.has(stream)) return;
+    contained.add(stream);
     const emitter = stream as { on?: unknown; streams?: unknown };
-    if (!contained.has(stream)) {
-      contained.add(stream);
-      if (typeof emitter.on === 'function') {
-        (emitter.on as (event: string, listener: () => void) => unknown).call(
-          stream,
-          'error',
-          swallow,
-        );
-      }
+    if (typeof emitter.on === 'function') {
+      (emitter.on as (event: string, listener: () => void) => unknown).call(
+        stream,
+        'error',
+        swallow,
+      );
     }
-    // Members are looked at every time: `add` appends to the same array.
     if (Array.isArray(emitter.streams)) {
       for (const member of emitter.streams as { stream?: unknown }[]) containErrors(member?.stream);
     }
@@ -156,16 +155,6 @@ export function scrubbingDestination(inner: DestinationStream): DestinationStrea
   return new Proxy(inner, {
     get(target, property) {
       if (property === 'write') return write;
-      if (property === 'add' && typeof Reflect.get(target, property) === 'function') {
-        // A multistream member added later fails like the others.
-        return (...args: unknown[]): unknown => {
-          const result: unknown = (target as unknown as { add: (...a: unknown[]) => unknown }).add(
-            ...args,
-          );
-          containErrors(target);
-          return result;
-        };
-      }
       const value: unknown = Reflect.get(target, property, target);
       return typeof value === 'function' ? (value as () => unknown).bind(target) : value;
     },

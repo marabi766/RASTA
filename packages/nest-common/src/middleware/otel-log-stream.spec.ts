@@ -16,6 +16,8 @@ import { promisify } from 'node:util';
 interface FixtureResult {
   lines: string[];
   records: { severityText?: string; body: unknown; attributes: Record<string, unknown> }[];
+  uncaught: string[];
+  failingMembers: number;
 }
 
 const PACKAGE_DIR = resolve(__dirname, '../..');
@@ -64,13 +66,28 @@ describe('the OTel log stream sits behind the scrub (real initTelemetry)', () =>
   }, 90_000);
 
   it('the instrumentation is really sending: every call reached the exporter', () => {
-    expect(result.records).toHaveLength(5);
-    expect(result.lines).toHaveLength(5);
+    expect(result.records).toHaveLength(6);
+    expect(result.lines).toHaveLength(6);
   });
 
   it('no credential reaches the destination or any exporter', () => {
     expect(JSON.stringify(result.lines)).not.toContain('SYNTHETIC_SECRET');
     expect(JSON.stringify(result.records)).not.toContain('SYNTHETIC_SECRET');
+  });
+
+  it('a stack cut before a password\'s "@" exports no part of it (Codex on #290, r5 R5-1)', () => {
+    const line = JSON.parse(result.lines[5]!) as { err: { stack: string } };
+    const exported = result.records[5]!.attributes['exception.stacktrace'];
+
+    expect(line.err.stack).toContain('…[TRUNCATED]');
+    expect(typeof exported).toBe('string');
+    expect(exported).toContain('…[TRUNCATED]');
+    expect(`${line.err.stack}${String(exported)}`).not.toContain('SYNTHETIC');
+  });
+
+  it("a destination failing late inside the instrumentation's multistream is contained (r5 R5-2)", () => {
+    expect(result.failingMembers).toBe(2);
+    expect(result.uncaught).toEqual([]);
   });
 
   it('an oversize record is replaced for the exporter as for the destination', () => {
