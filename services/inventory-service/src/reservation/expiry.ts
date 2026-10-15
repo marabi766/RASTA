@@ -7,6 +7,7 @@ import {
   type RequestContext,
 } from '@rasta/nest-common';
 import { SERVICE_NAME, type InventoryEnv } from '../config/env';
+import { expiryTransactionTimeoutMs } from '../config/operation-budgets';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { inventoryReservationsExpiredTotal } from '../observability/metrics';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
@@ -206,7 +207,7 @@ export class ReservationExpiry {
           if (!item) return null;
           return this.expireDue(tx, item, at, correlationId, path);
         },
-        { timeoutMs: lockTimeoutMs * 2 + 10_000, maxWaitMs: lockTimeoutMs },
+        { timeoutMs: expiryTransactionTimeoutMs(lockTimeoutMs), maxWaitMs: lockTimeoutMs },
       ),
     );
   }

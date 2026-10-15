@@ -6,6 +6,7 @@ import {
   loadSupplierEnv,
   SERVICE_NAME,
 } from './env';
+import { supplierOperationBudgets } from './operation-budgets';
 
 /**
  * Configuration parsing, and the fallbacks a deployment actually relies on.
@@ -228,5 +229,37 @@ describe('the performance consumer is off by default and fails closed (Codex rev
   it('refuses when nothing is configured', () => {
     expect(() => load(ENABLED)).toThrow(REFUSED);
     expect(brokerConnectionIsAuthenticated(load())).toBe(false);
+  });
+});
+
+describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)', () => {
+  const at = (statementTimeoutMs: string) => () =>
+    load({ DATABASE_STATEMENT_TIMEOUT_MS: statementTimeoutMs });
+
+  it('unset, applies no statement timeout', () => {
+    const env = load();
+    expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+    expect(env.DATABASE_URL).not.toContain('statement_timeout');
+  });
+
+  it('declares every budget, at the defaults', () => {
+    expect(supplierOperationBudgets(load()).map((b) => [b.name, b.budgetMs])).toEqual([
+      ['PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS', 5000],
+      ['OUTBOX_CLAIM_LEASE_SECONDS', 12_500],
+    ]);
+  });
+
+  it('set, must be above the largest: the outbox renewal, which moves with the lease', () => {
+    expect(at('12500')).toThrow(
+      /DATABASE_STATEMENT_TIMEOUT_MS: \(12500 ms\) is not above OUTBOX_CLAIM_LEASE_SECONDS, 12500 ms/,
+    );
+    expect(at('12501')).not.toThrow();
+    // A 20 s lease renews every 5 s with a 2.5 s deadline: 7.5 s.
+    expect(() =>
+      load({ OUTBOX_CLAIM_LEASE_SECONDS: '20', DATABASE_STATEMENT_TIMEOUT_MS: '7500' }),
+    ).toThrow(/not above OUTBOX_CLAIM_LEASE_SECONDS, 7500 ms/);
+    expect(() =>
+      load({ OUTBOX_CLAIM_LEASE_SECONDS: '20', DATABASE_STATEMENT_TIMEOUT_MS: '7501' }),
+    ).not.toThrow();
   });
 });

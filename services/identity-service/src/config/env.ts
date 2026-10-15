@@ -10,6 +10,7 @@ import {
 import { AGGREGATION_WINDOW_SECONDS } from '../security-events/refusal-aggregation';
 import { roleSchema, type PlatformRole } from '../identity/dto';
 import { DEFAULT_GRANTS, UNGRANTABLE_ROLES, type RoleGrantPolicy } from '../identity/role-grants';
+import { identityOperationBudgets } from './operation-budgets';
 import {
   DEFAULT_PROVISIONING_SCOPE_POLICY,
   type ProvisioningScopePolicy,
@@ -197,15 +198,19 @@ export function loadIdentityEnv(source: NodeJS.ProcessEnv = process.env): Identi
   // Each service reads its own DATABASE_URL_* variable, so a single .env can
   // describe every service without any of them being able to open another
   // service's database by accident (ADR-005).
-  return loadEnv(identityEnvSchema, {
-    ...source,
-    SERVICE_NAME: source.SERVICE_NAME ?? 'identity-service',
-    PORT: source.PORT ?? source.PORT_IDENTITY ?? '3101',
-    DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_IDENTITY,
-    KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? 'identity-service',
-    KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'identity-service.main',
-    CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
-  });
+  return loadEnv(
+    identityEnvSchema,
+    {
+      ...source,
+      SERVICE_NAME: source.SERVICE_NAME ?? 'identity-service',
+      PORT: source.PORT ?? source.PORT_IDENTITY ?? '3101',
+      DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_IDENTITY,
+      KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? 'identity-service',
+      KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'identity-service.main',
+      CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
+    },
+    { operationBudgets: identityOperationBudgets },
+  );
 }
 
 export function corsOrigins(env: IdentityEnv): string[] {

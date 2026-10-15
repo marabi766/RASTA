@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { getContext } from '@rasta/nest-common';
 import { ContractAccess, type ContractSideName } from '../access/access';
-import type { ContractEnv } from '../config/env';
+import { signingTransactionTimeoutMs, type ContractEnv } from '../config/env';
 import type { HierarchyEvidence } from '../contract/contract.repository';
 import { OrganizationDirectory } from '../organization/organization-directory';
 import { UNION_ROLE, signingRoleUnder } from '../policy/policy.access';
@@ -65,7 +65,7 @@ export class SigningAuthority {
 
   /** How long a signing transaction may run: the hierarchy question's deadline and some room. */
   transactionTimeoutMs(): number {
-    return this.env.CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS + 10_000;
+    return signingTransactionTimeoutMs(this.env);
   }
 
   /**
