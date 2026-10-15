@@ -12,7 +12,10 @@ import {
   type InsuranceEventName,
 } from '../asset/events';
 import { INSURANCE_TOPIC } from '../config/env';
+import { MAX_CLAIM_DOCUMENTS } from '../asset/dto';
 import type {
+  AttachClaimDocumentDto,
+  ClaimDocumentView,
   ClaimHistoryEntryView,
   ClaimStatus,
   DecideClaimDto,
@@ -87,7 +90,18 @@ export class ClaimService {
       orderBy: [{ occurredAt: 'asc' }, { id: 'asc' }],
     });
 
-    return { ...toClaimView(claim), history: lines.map(toHistoryEntry) };
+    // Through the tenant-scoped client: the rows are the caller's organization's own.
+    // After a transfer the new owner reads the claim without the previous owner's files.
+    const documents = await this.repository.client.insuranceClaimDocument.findMany({
+      where: { claimId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+
+    return {
+      ...toClaimView(claim),
+      history: lines.map(toHistoryEntry),
+      documents: documents.map(toDocumentView),
+    };
   }
 
   // =========================================================================
@@ -204,6 +218,108 @@ export class ClaimService {
     });
 
     return toClaimView(created);
+  }
+
+  /**
+   * Attaches a document document-service holds to the claim (docs/24 Q-128).
+   *
+   * Who owns the document is document-service's to say, never the client's: it
+   * is asked, over the authenticated internal REST call, with a token signed for
+   * the organization that owns the machine (the asset-document rule). A document
+   * of another organization, one that does not exist, one deleted, and one
+   * registered for a different machine answer the same `404 Document`, so the
+   * answer is no oracle for another tenant's ids; an outage is the upstream
+   * error and nothing is attached.
+   *
+   * Temporary rules (Q-128): only an open claim (SUBMITTED or UNDER_REVIEW)
+   * takes documents; at most {@link MAX_CLAIM_DOCUMENTS} per claim; a reference
+   * is never removed. Attaching the same document again answers the existing
+   * reference and writes nothing, so a retry needs no Idempotency-Key.
+   */
+  async attachDocument(
+    assetId: string,
+    claimId: string,
+    dto: AttachClaimDocumentDto,
+  ): Promise<ClaimDocumentView> {
+    const asset = await this.assertAssetExists(assetId);
+    await this.findClaim(assetId, claimId);
+
+    // Outside the transaction: a network call holds no lock.
+    await this.assets.assertDocumentIsTheirs(asset.organizationId, assetId, dto.documentId);
+
+    const actor = this.actor();
+    const refId = `CLD_${ulid()}`;
+
+    return this.repository.transaction(async (tx) => {
+      // Ordered against a concurrent transfer, as the claim's own writes are.
+      const locked = await this.repository.lockAsset(tx, assetId, asset.organizationId, 'SHARE');
+      if (!locked) throw RastaError.notFound('Asset', assetId);
+
+      // Serialises attaches (and a decision) on this claim, so the status and
+      // the count below are the ones the insert commits against.
+      await tx.$queryRaw`SELECT id FROM insurance_claim WHERE id = ${claimId} FOR UPDATE`;
+      const claim = await tx.insuranceClaim.findFirst({ where: { id: claimId, assetId } });
+      if (!claim) throw RastaError.notFound('InsuranceClaim', claimId);
+
+      const existing = await tx.insuranceClaimDocument.findFirst({
+        where: { claimId, documentId: dto.documentId },
+      });
+      if (existing) return toDocumentView(existing);
+
+      if (claim.status !== 'SUBMITTED' && claim.status !== 'UNDER_REVIEW') {
+        throw RastaError.businessRule('Documents can be attached only while the claim is open', {
+          rule: 'CLAIM_NOT_OPEN_FOR_DOCUMENTS',
+          status: claim.status,
+        });
+      }
+      const count = await tx.insuranceClaimDocument.count({ where: { claimId } });
+      if (count >= MAX_CLAIM_DOCUMENTS) {
+        throw RastaError.businessRule('The claim already holds the most documents it takes', {
+          rule: 'CLAIM_DOCUMENT_LIMIT',
+          limit: MAX_CLAIM_DOCUMENTS,
+        });
+      }
+
+      const row = await tx.insuranceClaimDocument.create({
+        data: {
+          id: refId,
+          claimId,
+          assetId,
+          organizationId: asset.organizationId,
+          documentId: dto.documentId,
+          createdBy: actor,
+        },
+      });
+
+      await this.enqueue(
+        tx,
+        claimId,
+        asset.organizationId,
+        INSURANCE_EVENTS.INSURANCE_CLAIM_DOCUMENT_ATTACHED,
+        {
+          assetId,
+          organizationId: asset.organizationId,
+          claimId,
+          documentId: dto.documentId,
+          attachedBy: actor,
+        },
+      );
+
+      // Its own source id: the claim's history is read back by the `<claimId>:` prefix
+      // and an attachment is not a status.
+      await this.assets.appendTimeline(tx, {
+        assetId,
+        organizationId: asset.organizationId,
+        eventName: INSURANCE_EVENTS.INSURANCE_CLAIM_DOCUMENT_ATTACHED,
+        sourceEventId: refId,
+        category: 'DOCUMENT',
+        title: 'افزودن مدرک به پرونده خسارت',
+        detail: { claimId, actor },
+        occurredAt: new Date(),
+      });
+
+      return toDocumentView(row);
+    });
   }
 
   async startReview(
@@ -547,6 +663,20 @@ function toClaimView(claim: ClaimRow): InsuranceClaimView {
     submittedBy: claim.createdBy,
     createdAt: claim.createdAt.toISOString(),
     updatedAt: claim.updatedAt.toISOString(),
+  };
+}
+
+function toDocumentView(row: {
+  id: string;
+  documentId: string;
+  createdBy: string;
+  createdAt: Date;
+}): ClaimDocumentView {
+  return {
+    id: row.id,
+    documentId: row.documentId,
+    attachedBy: row.createdBy,
+    attachedAt: row.createdAt.toISOString(),
   };
 }
 

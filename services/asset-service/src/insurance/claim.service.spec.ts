@@ -96,6 +96,8 @@ interface Harness {
   /** The claim row as the fake database currently holds it. */
   row: () => ClaimRow | null;
   updates: Array<{ where: Record<string, unknown>; data: Record<string, unknown> }>;
+  documents: Array<Record<string, unknown>>;
+  assertDocumentIsTheirs: jest.Mock;
 }
 
 function harness(
@@ -108,6 +110,8 @@ function harness(
     loseRace?: boolean;
     /** Whether the policy counts for the asset's current owner (docs/24 Q-66). */
     policyCounts?: boolean;
+    /** document-service does not vouch for the document (docs/24 Q-128). */
+    documentRefused?: boolean;
   } = {},
 ): Harness {
   const enqueued: Harness['enqueued'] = [];
@@ -153,8 +157,25 @@ function harness(
     ),
   };
 
+  const documents: Array<Record<string, unknown>> = [];
+  const insuranceClaimDocument = {
+    findMany: jest.fn(async () => documents),
+    findFirst: jest.fn(
+      async (args: { where: { documentId: string } }) =>
+        documents.find((d) => d.documentId === args.where.documentId) ?? null,
+    ),
+    count: jest.fn(async () => documents.length),
+    create: jest.fn(async (args: { data: Record<string, unknown> }) => {
+      const row = { ...args.data, createdAt: new Date() };
+      documents.push(row);
+      return row;
+    }),
+  };
+
   const client = {
     insuranceClaim,
+    insuranceClaimDocument,
+    $queryRaw: jest.fn(async () => []),
     insurancePolicy: {
       findFirst: jest.fn(async (args: { where: { id: string; assetId: string } }) =>
         policy && policy.id === args.where.id && policy.assetId === args.where.assetId
@@ -193,6 +214,9 @@ function harness(
       appended.push(entry);
     }),
     policyCountsForCurrentOwner: jest.fn(async () => options.policyCounts ?? true),
+    assertDocumentIsTheirs: jest.fn(async () => {
+      if (options.documentRefused) throw RastaError.notFound('Document');
+    }),
   } as unknown as AssetService;
 
   return {
@@ -201,6 +225,8 @@ function harness(
     appended,
     row: () => stored,
     updates,
+    documents,
+    assertDocumentIsTheirs: assets.assertDocumentIsTheirs as unknown as jest.Mock,
   };
 }
 
@@ -475,6 +501,93 @@ describe('ClaimService', () => {
       await expect(
         run(() => h.service.recordSettlement(ASSET_ID, CLAIM_ID, {})),
       ).rejects.toMatchObject({ code: 'INVALID_STATE_TRANSITION' });
+    });
+  });
+
+  describe('documents (docs/24 Q-128)', () => {
+    const DOC = 'DOC_01JDOCUMENT00000000000001';
+
+    it('asks document-service first, then writes the reference, the event and the dossier line', async () => {
+      const h = harness();
+      const view = await run(() =>
+        h.service.attachDocument(ASSET_ID, CLAIM_ID, { documentId: DOC }),
+      );
+
+      expect(h.assertDocumentIsTheirs).toHaveBeenCalledWith(DEH1, ASSET_ID, DOC);
+      expect(view).toMatchObject({ documentId: DOC, attachedBy: 'USR-SEED-DEHYARI-ADMIN' });
+      expect(h.documents).toHaveLength(1);
+      expect(h.enqueued).toEqual([
+        expect.objectContaining({
+          eventName: INSURANCE_EVENTS.INSURANCE_CLAIM_DOCUMENT_ATTACHED,
+          aggregateId: CLAIM_ID,
+          payload: expect.objectContaining({ claimId: CLAIM_ID, documentId: DOC }),
+        }),
+      ]);
+      // Not a status line: the claim's history is read back by the `<claimId>:` prefix.
+      expect(h.appended[0]?.sourceEventId).not.toMatch(new RegExp(`^${CLAIM_ID}:`));
+      expect(h.appended[0]).toMatchObject({ category: 'DOCUMENT' });
+    });
+
+    it('writes nothing when document-service does not vouch for the document', async () => {
+      const h = harness({ documentRefused: true });
+      await expect(
+        run(() => h.service.attachDocument(ASSET_ID, CLAIM_ID, { documentId: DOC })),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      expect(h.documents).toHaveLength(0);
+      expect(h.enqueued).toHaveLength(0);
+      expect(h.appended).toHaveLength(0);
+    });
+
+    it('answers the existing reference when the document is already attached', async () => {
+      const h = harness();
+      const first = await run(() =>
+        h.service.attachDocument(ASSET_ID, CLAIM_ID, { documentId: DOC }),
+      );
+      const again = await run(() =>
+        h.service.attachDocument(ASSET_ID, CLAIM_ID, { documentId: DOC }),
+      );
+
+      expect(again.id).toBe(first.id);
+      expect(h.documents).toHaveLength(1);
+      expect(h.enqueued).toHaveLength(1);
+    });
+
+    it.each(['APPROVED', 'REJECTED', 'SETTLED'])(
+      'refuses a document on a %s claim',
+      async (status) => {
+        const h = harness({ claim: claimRow({ status }) });
+        await expect(
+          run(() => h.service.attachDocument(ASSET_ID, CLAIM_ID, { documentId: DOC })),
+        ).rejects.toMatchObject({
+          internalContext: expect.objectContaining({ rule: 'CLAIM_NOT_OPEN_FOR_DOCUMENTS' }),
+        });
+        expect(h.documents).toHaveLength(0);
+      },
+    );
+
+    it('refuses the 21st document', async () => {
+      const h = harness();
+      for (let i = 0; i < 20; i += 1) h.documents.push({ documentId: `DOC_${i}` });
+      await expect(
+        run(() => h.service.attachDocument(ASSET_ID, CLAIM_ID, { documentId: DOC })),
+      ).rejects.toMatchObject({
+        internalContext: expect.objectContaining({ rule: 'CLAIM_DOCUMENT_LIMIT' }),
+      });
+    });
+
+    it('answers 404 for a claim on another asset, before document-service is asked', async () => {
+      const h = harness();
+      await expect(
+        run(() => h.service.attachDocument('AST_OTHER', CLAIM_ID, { documentId: DOC })),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      expect(h.assertDocumentIsTheirs).not.toHaveBeenCalled();
+    });
+
+    it('lists the documents on the claim read, oldest first', async () => {
+      const h = harness();
+      await run(() => h.service.attachDocument(ASSET_ID, CLAIM_ID, { documentId: DOC }));
+      const claim = await run(() => h.service.getClaim(ASSET_ID, CLAIM_ID));
+      expect(claim.documents.map((d) => d.documentId)).toEqual([DOC]);
     });
   });
 

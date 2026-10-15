@@ -611,8 +611,9 @@ GET    /v1/insurance-policies/expiring   بیمه‌های در آستانه ا�
 # ادعای خسارت پایه (docs/17 § ۱۷٫۲؛ مرز ADR-046) — پیاده‌شده زیر همان دارایی،
 # نه زیر /v1/insurance/claims که برای insurance-service آینده رزرو است
 GET    /v1/assets/{id}/insurance-claims                    ادعاهای خسارت دارایی
-GET    /v1/assets/{id}/insurance-claims/{claimId}          پرونده و تاریخچه وضعیت
+GET    /v1/assets/{id}/insurance-claims/{claimId}          پرونده، تاریخچه وضعیت و مدارک (Q-128)
 POST   /v1/assets/{id}/insurance-claims                    اعلام خسارت (SUBMITTED)
+POST   /v1/assets/{id}/insurance-claims/{claimId}/documents ارجاع به مدرک document-service، فقط پروندهٔ باز (Q-128)
 POST   /v1/assets/{id}/insurance-claims/{claimId}/review   شروع بررسی (UNDER_REVIEW)
 POST   /v1/assets/{id}/insurance-claims/{claimId}/decision تصمیم صریح مرجع پیکربندی‌شده (Q-59)
 POST   /v1/assets/{id}/insurance-claims/{claimId}/settlement ثبت تسویه‌ای که جای دیگر انجام شده

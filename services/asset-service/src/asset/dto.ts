@@ -599,9 +599,33 @@ export interface ClaimHistoryEntryView {
   notes: string | null;
 }
 
+/**
+ * Attaches a document document-service already holds to a claim (docs/24 Q-128).
+ * The file never passes through here; the id is checked against document-service.
+ */
+export const attachClaimDocumentSchema = z
+  .object({
+    documentId: documentReference.min(1),
+  })
+  .strict();
+
+export type AttachClaimDocumentDto = z.infer<typeof attachClaimDocumentSchema>;
+
+/** The most documents one claim takes (Q-128, temporary). */
+export const MAX_CLAIM_DOCUMENTS = 20;
+
+export interface ClaimDocumentView {
+  id: string;
+  documentId: string;
+  attachedBy: string;
+  attachedAt: string;
+}
+
 export interface InsuranceClaimDetailView extends InsuranceClaimView {
   /** Oldest first: the story of the claim in the order it happened. */
   history: ClaimHistoryEntryView[];
+  /** References to the documents of the caller's organization, oldest first (Q-128). */
+  documents: ClaimDocumentView[];
 }
 
 export { assetId as assetIdSchema };
