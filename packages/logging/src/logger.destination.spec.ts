@@ -402,14 +402,32 @@ describe('the cap holds after scrubbing (Codex r4 F3)', () => {
   });
 });
 
+/**
+ * CPU milliseconds `work` takes, the least of three runs: a loaded CI runner
+ * stretches wall-clock time (50.6 ms against a 50 ms bound, #290 r6 CI) but
+ * not the CPU a run uses, and one descheduled run cannot fail the bound.
+ */
+function cpuMs(work: () => void): number {
+  let least = Infinity;
+  for (let run = 0; run < 3; run++) {
+    const started = process.cpuUsage();
+    work();
+    const { user, system } = process.cpuUsage(started);
+    least = Math.min(least, (user + system) / 1000);
+  }
+  return least;
+}
+
 describe('a huge stack costs a bounded scan (Codex r4 F4)', () => {
   it('splits only the head of a 16 MB stack', () => {
-    const stack = `Error: x\n${'    at frame (file.js:1:1)\n'.repeat(700_000)}`;
-    const started = process.hrtime.bigint();
-    const out = scrubbedErrorSerializer(Object.assign(new Error('x'), { stack })) as {
-      stack: string;
-    };
-    const milliseconds = Number(process.hrtime.bigint() - started) / 1e6;
+    const error = Object.assign(new Error('x'), {
+      stack: `Error: x\n${'    at frame (file.js:1:1)\n'.repeat(700_000)}`,
+    });
+    let out = { stack: '' };
+
+    const milliseconds = cpuMs(() => {
+      out = scrubbedErrorSerializer(error) as { stack: string };
+    });
 
     expect(out.stack.length).toBeLessThan(5000);
     expect(milliseconds).toBeLessThan(50);
@@ -501,18 +519,17 @@ describe('the line cap and its cost', () => {
     ];
     for (const shape of shapes) {
       expect(shape.length).toBeLessThanOrEqual(MAX_LOG_LINE_LENGTH);
-      const started = process.hrtime.bigint();
-      scrubLine(shape);
-      const milliseconds = Number(process.hrtime.bigint() - started) / 1e6;
-      expect(milliseconds).toBeLessThan(250);
+      expect(cpuMs(() => scrubLine(shape))).toBeLessThan(250);
     }
   });
 
   it('a 16 MB line costs the same as a short one', () => {
     const huge = `{"msg":"${'x'.repeat(16 * 1024 * 1024)}"}\n`;
-    const started = process.hrtime.bigint();
-    const out = scrubLine(huge);
-    const milliseconds = Number(process.hrtime.bigint() - started) / 1e6;
+    let out = '';
+
+    const milliseconds = cpuMs(() => {
+      out = scrubLine(huge);
+    });
 
     expect(out.length).toBeLessThan(200);
     expect(milliseconds).toBeLessThan(20);
