@@ -109,6 +109,9 @@ export {
   httpStatusToCode,
 } from './filters/exception.filter';
 
+export { NestLoggerAdapter, installNestLogger, logFatal } from './logging/nest-logger';
+export type { LoggerHost } from './logging/nest-logger';
+
 export {
   ZodValidationPipe,
   zodPipe,
