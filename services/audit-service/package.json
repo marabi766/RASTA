@@ -7,9 +7,9 @@
   "scripts": {
     "build": "prisma generate && tsc -p tsconfig.json && node ../../scripts/copy-prisma-client.mjs",
     "clean": "rimraf dist .turbo",
-    "dev": "node --import @swc-node/register/esm-register --watch --env-file=../../.env src/main.ts",
+    "dev": "prisma generate && node -r @swc-node/register -r ./dev/telemetry.ts --watch --env-file=../../.env src/main.ts",
     "start": "node --env-file=../../.env dist/main.js",
-    "lint": "eslint src test",
+    "lint": "eslint src test dev",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "jest --selectProjects unit",
     "test:unit": "jest --selectProjects unit",
