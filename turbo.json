@@ -70,7 +70,8 @@
         "KAFKA_SSL*",
         "S3_*",
         "DOCUMENT_*",
-        "OUTBOX_PURGE_*"
+        "OUTBOX_PURGE_*",
+        "CONSTRUCTION_*"
       ]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
@@ -95,6 +96,9 @@
       //
       // OUTBOX_PURGE_* (D-052): the integration suites build the AppModule
       // from process.env, purge scheduler included; see "dev" below.
+      //
+      // CONSTRUCTION_* (Codex r1 on #271): the same for construction-service's
+      // own settings; see "dev" below.
       "env": [
         "DATABASE_URL",
         "DATABASE_URL_*",
@@ -104,7 +108,8 @@
         "KAFKA_SSL*",
         "S3_*",
         "DOCUMENT_*",
-        "OUTBOX_PURGE_*"
+        "OUTBOX_PURGE_*",
+        "CONSTRUCTION_*"
       ]
     },
     // identity-service's two 500-write aggregation proofs, run alone after the
@@ -156,7 +161,16 @@
     // invalid value in the shell never reached the validation that refuses
     // it. scripts/outbox-purge-turbo-env.test.mjs holds every task that starts
     // a service wiring the purge to every variable of outboxPurgeEnvSchema.
-    "dev": { "cache": false, "persistent": true, "env": ["OUTBOX_PURGE_*"] },
+    //
+    // CONSTRUCTION_* (Codex r1 on #271): construction-service's own settings,
+    // the trap again — `CONSTRUCTION_TRANSACTION_TIMEOUT_MS=60000 pnpm dev` ran
+    // on the .env value. scripts/construction-turbo-env.test.mjs holds every
+    // task that starts the service to every CONSTRUCTION_* key of its schema.
+    "dev": {
+      "cache": false,
+      "persistent": true,
+      "env": ["OUTBOX_PURGE_*", "CONSTRUCTION_*"]
+    },
     "clean": { "cache": false }
   }
 }

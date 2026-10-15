@@ -1,7 +1,6 @@
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
-import { PrismaClient } from '../src/generated/prisma';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { TenderCloseRepository } from '../src/tender/tender-close.repository';
 import {
@@ -12,7 +11,7 @@ import {
   loadStanding,
   newOrganizationId,
   outboxFor,
-  ownerDatabaseUrl,
+  ownerClient,
   publishedForBids,
   qualify,
   untilASessionWaitsOnALock,
@@ -534,7 +533,7 @@ describe('tender close sweeper', () => {
     const plansWhereOnlyThePartialIndexServes = async (
       statements: Statement[],
     ): Promise<string[]> => {
-      const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+      const owner = ownerClient();
       const rollback = new Error('the suite puts the dropped indexes back');
       const plans: string[] = [];
       try {

@@ -1,7 +1,6 @@
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { ulid } from 'ulid';
 import { EventPublisher } from '../src/events/publisher';
-import { PrismaClient } from '../src/generated/prisma';
 import type { CriterionInput } from '../src/tender/criteria.dto';
 import {
   approvedProject,
@@ -9,7 +8,7 @@ import {
   cleanup,
   newOrganizationId,
   outboxFor,
-  ownerDatabaseUrl,
+  ownerClient,
   untilASessionWaitsOnALock,
   wire,
   type Wiring,
@@ -613,7 +612,7 @@ describe('evaluation criteria', () => {
       ).rejects.toThrow(/permission denied/);
       // …and the trigger still refuses the owner, whose TRUNCATE would be a
       // migration's or an operator's.
-      const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+      const owner = ownerClient();
       try {
         await expect(owner.$executeRawUnsafe('TRUNCATE "criteria_template"')).rejects.toThrow(
           /ck_criteria_template_immutable/,

@@ -188,7 +188,8 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     {
       provide: PrismaService,
       inject: [ENV],
-      useFactory: (env: ConstructionEnv) => new PrismaService(env.DATABASE_URL),
+      useFactory: (env: ConstructionEnv) =>
+        new PrismaService(env.DATABASE_URL, env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS),
     },
 
     {
