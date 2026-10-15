@@ -310,12 +310,58 @@ SELECT id, organization_id, source_topic, source_service, correction_of, occurre
 (اصلاح ثبت‌شده برای همان مستأجر پیدا می‌شود، چه قدیمی چه جوان؛ اصلاح ثبت‌نشده، مستأجر دیگر، Topic دیگر و رکورد هدف دیگر پیدا
 نمی‌شوند؛ دامنهٔ پلتفرم فقط با رشتهٔ خالی؛ و هر نوشتنی پس از بلوک رد می‌شود).
 
+پرسش اصلاح به شرط `source_event_name` نیاز ندارد، چون نوع رویدادش از پیش بسته است. ردیف با
+`source_topic = 'rasta.audit.trail.v1'` فقط از Consumer مسیر B می‌آید (Topic از Metadata تحویل است). نگاشت آن
+(`audit-trail.mapper.ts`) هر رویداد جز `AUDIT_EVENT_RECORDED` نسخهٔ ۱ و هر تحویلی جز روی همین Topic را رد می‌کند.
+`correction_of` هم فقط در همین مسیر پر می‌شود.
+
 **مسیر A:** همان پرسش را روی `outbox_message` سرویس مبدأ (`sourceService` مورد انتظار) با [outbox-stuck](outbox-stuck.md) بپرس.
 fleet، asset، document، maintenance، organization و identity ردیف منتشرشده را پس از `OUTBOX_PURGE_RETENTION_HOURS` (پیش‌فرض ۱۶۸
-ساعت) پاک می‌کنند (D-052). نبودِ ردیف در این سرویس‌ها هم با **همان قاعدهٔ شاهد** سنجیده می‌شود، نه با سن: `event_id` را با
-پرسش گام ۶ بجوی و `organization_id` و `source_topic` ردیف را با مستأجر مورد بررسی و Topic مالک سرویس بسنج. پیدا شد ⇒ منتشر و
-مصرف شده، و نبودِ ردیف شکاف نیست. پیدا نشد (یا فقط در مستأجر یا Topic دیگر) ⇒ توضیح‌نداده، تشدید کن، هر قدر `occurredAt`
-قدیمی باشد («احتمالاً Purge شده، انتشار تأییدنشده»). در سرویس‌های دیگر هنوز Purge اجرا نمی‌شود.
+ساعت) پاک می‌کنند (D-052). نبودِ ردیف در این سرویس‌ها هم با **همان قاعدهٔ شاهد** سنجیده می‌شود، نه با سن. در سرویس‌های دیگر
+هنوز Purge اجرا نمی‌شود.
+
+شاهد مسیر A ردیفی در `rasta_audit` است که هر پنج شرط زیر را با هم دارد. مقدار هر شرط از شواهد مبدأ پرونده می‌آید، **هرگز**
+از ردیف‌های `audit_event` همان شناسه:
+
+- `:'event_id'` = شناسهٔ رویداد مورد بررسی ⇐ `source_event_id`.
+- `:'event_name'` = **نام رویداد مورد انتظار** (مثلاً `MEMBERSHIP_CREATED`) ⇐ `source_event_name`. آن را از شواهد مبدأ
+  بردار: گزارش یا هشداری که پرونده را باز کرد، Log تولیدکننده برای همان `eventId`، یا تغییر وضعیت دامنه‌ای که بررسی
+  می‌شود. نام مورد انتظار معلوم نیست ⇒ نبودِ ردیف توضیح‌پذیر نیست؛ تشدید کن. Projector مسیر A عمداً هر Envelope را با همان
+  نامی که دارد ثبت می‌کند (ingestion کامل)، و نه `EventConsumer` شناسه را به نوع رویداد می‌بندد نه Projector؛ پس این شرط
+  است که نوع را می‌بندد.
+- `:'producer'` و `:'owner_topic'` = `sourceService` مورد انتظار و Topic مالک آن (`TOPIC_PRODUCERS` در `@rasta/contracts`؛
+  مثلاً `identity-service` و `rasta.identity.v1`) ⇐ `source_service` و `source_topic`.
+- `:'organization_id'` = مستأجر مورد بررسی (قاعدهٔ ۳) ⇐ `organization_id`؛ رشتهٔ خالی دامنهٔ **صریح** پلتفرم است، مانند
+  مسیر B. بی این متغیر پرسش اجرا نمی‌شود.
+
+نسخهٔ رویداد (`eventVersion`) در `audit_event` ذخیره نمی‌شود: `source_service_version` نسخهٔ Build تولیدکننده است، نه
+نسخهٔ رویداد. اگر شواهد مبدأ نسخه را دارند، آن را در پرونده بنویس با «نسخه در audit تأییدنشده»؛ این پرسش فقط نام را ثابت
+می‌کند. `:'from'` و `:'to'` بازه‌ای دور `occurredAt` مورد انتظار است.
+
+```sql path-a-evidence
+SET default_transaction_read_only = on;
+SET search_path TO audit;
+
+SELECT id, organization_id, source_topic, source_service, source_event_name, occurred_at, recorded_at
+  FROM audit_event
+ WHERE source_event_id = :'event_id'
+   AND source_event_name = :'event_name'
+   AND source_topic = :'owner_topic'
+   AND source_service = :'producer'
+   AND organization_id IS NOT DISTINCT FROM NULLIF(:'organization_id', '')
+   AND occurred_at BETWEEN :'from' AND :'to';
+```
+
+- **پیدا شد** (یک ردیف) ⇒ منتشر و مصرف شده، و نبودِ ردیف Outbox شکاف نیست.
+- **پیدا نشد** ⇒ **توضیح‌نداده؛ تشدید کن،** هر قدر `occurredAt` قدیمی باشد («احتمالاً Purge شده، انتشار تأییدنشده»).
+- ردیفی با همین `source_event_id` که گام ۶ نشان می‌دهد ولی نام، مستأجر، Topic یا تولیدکننده‌اش با مقدار مورد انتظار فرق
+  دارد **شاهد این رویداد نیست**، حتی اگر بقیهٔ شرط‌ها بخوانند. «توضیح‌داده» ننویس: خودش ناهنجاری است (شناسهٔ تکراری در
+  Producer یا Envelope با برچسب نادرست). با شناسهٔ هر دو ردیف به مالک Producer تشدید کن.
+
+این بلوک هم کلمه‌به‌کلمه در `services/audit-service/test/correction-linkage.int-spec.ts` اجرا می‌شود، روی ردیف‌هایی که
+Projector واقعی مسیر A نوشته است. رویداد ثبت‌شده پیدا می‌شود. رویداد ثبت‌نشده پیدا نمی‌شود. ردیف همان شناسه، مستأجر،
+تولیدکننده و Topic با **نام دیگر** هم پیدا نمی‌شود، و همچنین مستأجر، Topic و تولیدکنندهٔ دیگر. بی دامنه اجرا نمی‌شود، و پس از
+بلوک هیچ نوشتنی پذیرفته نیست.
 
 ### ۶. سمت `audit-service` — آیا مصرف و ثبت شد؟ (پایگاه دادهٔ `rasta_audit`، Schema `audit`، نقش فقط‌خواندنی)
 
@@ -326,11 +372,16 @@ SET search_path TO audit;
 SELECT event_id, consumer_name FROM processed_event WHERE event_id = :'event_id';
 
 -- ردیف؛ occurred_at را محدود کن تا فقط پارتیشن‌های لازم خوانده شوند
-SELECT id, organization_id, source_topic, source_service, occurred_at, recorded_at, occurrence_count, correction_of
+SELECT id, organization_id, source_topic, source_service, source_event_name, occurred_at, recorded_at,
+       occurrence_count, correction_of
   FROM audit_event
  WHERE source_event_id = :'event_id'
    AND occurred_at BETWEEN :'from' AND :'to';
 ```
+
+در جدول زیر `audit_event` فقط وقتی «هست» است که `source_event_name`، `organization_id`، `source_topic` و `source_service`
+ردیف با رویداد مورد انتظار بخوانند (گام ۵، مسیر A). ردیفی با همین شناسه ولی نام دیگر رویداد دیگری است، نه همین رویداد.
+برایش سطر «هست / نیست» جدول را به کار نبر: ناهنجاری گام ۵ است و همان‌جا تشدید می‌شود، هرگز «توضیح‌داده».
 
 | `processed_event` | `audit_event` | معنا                                                                                                                         |
 | :---------------: | :-----------: | ---------------------------------------------------------------------------------------------------------------------------- |

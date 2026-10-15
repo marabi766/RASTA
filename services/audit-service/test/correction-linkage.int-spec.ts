@@ -14,6 +14,7 @@ import type { Logger } from '@rasta/logging';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { AuditRepository } from '../src/audit/audit.repository';
 import { AuditTrailConsumer } from '../src/consumers/audit-trail.consumer';
+import { DomainProjectorConsumer } from '../src/consumers/domain-projector.consumer';
 import { computeRecordHash, hashesEqual } from '../src/audit/audit.chain';
 import { internalToken, startApi, systemAdmin, unionAdmin, type ApiHarness } from './api-helpers';
 import {
@@ -432,6 +433,172 @@ describe('correction linkage and the internal target lookup (real PostgreSQL)', 
       // The block's first line makes the session read-only: a write after it is refused.
       const write = lookup(
         { ...recorded, organizationId: tenant, at: youngAt },
+        `INSERT INTO processed_event (event_id, consumer_name) VALUES ('${id('EVT')}', 'runbook-probe');\n`,
+      );
+      expect(write.status).not.toBe(0);
+      expect(write.stderr).toMatch(/read-only transaction/);
+    });
+  });
+
+  /**
+   * `audit-gap-detected.md` step 5, path A (Codex r2 on #280): a purged outbox row is explained
+   * only by the audit row of the *expected* event — its id, name, producer, owner topic and tenant
+   * all taken from the incident's evidence. The projector records every envelope under the name it
+   * carries, so the name is bound here, not at ingestion. The `sql path-a-evidence` block runs
+   * byte for byte from the document; rows are written by the real path-A projector.
+   */
+  describe('audit-gap-detected.md step 5: the path-A evidence lookup', () => {
+    const IDENTITY: EventDelivery = Object.freeze({ topic: 'rasta.identity.v1', partition: 0 });
+    const at = new Date(Date.now() - 400 * 60 * 60 * 1000).toISOString();
+    let projector: DomainProjectorConsumer;
+
+    beforeAll(() => {
+      projector = new DomainProjectorConsumer(
+        () => {
+          throw new Error('not started in this suite');
+        },
+        repository,
+        silentLogger,
+      );
+    });
+
+    const published = (tenant: string, eventName: string): EventEnvelope =>
+      ({
+        eventId: id('EVT'),
+        eventName,
+        eventVersion: 1,
+        occurredAt: at,
+        producer: 'identity-service',
+        producerVersion: '0.1.0',
+        aggregateType: 'Membership',
+        aggregateId: id('MEM'),
+        tenantId: tenant,
+        correlationId: id('COR'),
+        payload: {},
+      }) as EventEnvelope;
+
+    interface Expected {
+      eventId: string;
+      eventName: string;
+      producer: string;
+      ownerTopic: string;
+      /** `''` is the explicit platform scope; `undefined` leaves the variable unset. */
+      organizationId: string | undefined;
+    }
+
+    const lookup = (query: Expected, after = '') => {
+      const { from, to } = window(at);
+      const vars = [
+        `event_id=${query.eventId}`,
+        `event_name=${query.eventName}`,
+        `producer=${query.producer}`,
+        `owner_topic=${query.ownerTopic}`,
+        ...(query.organizationId === undefined ? [] : [`organization_id=${query.organizationId}`]),
+        `from=${from}`,
+        `to=${to}`,
+      ].flatMap((assignment) => ['-v', assignment]);
+      return spawnSync('psql', [...vars, ...runbookPsqlArgs()], {
+        input: runbookBlock('path-a-evidence') + after,
+        env: runbookPsqlEnv(),
+        encoding: 'utf8',
+      });
+    };
+
+    /** The rows the lookup returns: `id|organization_id|source_topic|source_service|source_event_name|…`. */
+    const found = (query: Expected): string[][] => {
+      const result = lookup(query);
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
+      return result.stdout
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => line.split('|'));
+    };
+
+    /** Ingests one identity event through the path-A projector; returns the expectation that matches it. */
+    const recorded = async (tenant: string, eventName: string) => {
+      const event = published(tenant, eventName);
+      await projector.handle(event, IDENTITY);
+      const row = await prisma.client.auditEvent.findFirstOrThrow({
+        where: { sourceEventId: event.eventId, sourceTopic: IDENTITY.topic },
+      });
+      const expected: Expected = {
+        eventId: event.eventId,
+        eventName,
+        producer: 'identity-service',
+        ownerTopic: IDENTITY.topic,
+        organizationId: tenant,
+      };
+      return { expected, row };
+    };
+
+    it('finds the expected event in its own tenant: published and consumed', async () => {
+      const tenant = id('ORG');
+      const { expected, row } = await recorded(tenant, 'MEMBERSHIP_CREATED');
+
+      expect(found(expected)).toEqual([
+        [
+          row.id,
+          tenant,
+          IDENTITY.topic,
+          'identity-service',
+          'MEMBERSHIP_CREATED',
+          expect.any(String),
+          expect.any(String),
+        ],
+      ]);
+    });
+
+    it('finds nothing for an event that never reached audit-service: escalate', async () => {
+      const tenant = id('ORG');
+      await recorded(tenant, 'MEMBERSHIP_CREATED');
+
+      expect(
+        found({
+          eventId: id('EVT'),
+          eventName: 'MEMBERSHIP_CREATED',
+          producer: 'identity-service',
+          ownerTopic: IDENTITY.topic,
+          organizationId: tenant,
+        }),
+      ).toEqual([]);
+    });
+
+    it('does not take another event type under the same id, tenant, producer and topic as evidence', async () => {
+      const tenant = id('ORG');
+      // The audit row is a USER_UPDATED; the incident is about a MEMBERSHIP_CREATED with this id.
+      const { expected, row } = await recorded(tenant, 'USER_UPDATED');
+      expect(row.sourceEventName).toBe('USER_UPDATED');
+      expect(row.organizationId).toBe(tenant);
+      expect(row.sourceService).toBe('identity-service');
+
+      expect(found({ ...expected, eventName: 'MEMBERSHIP_CREATED' })).toEqual([]);
+      // The row itself is still there for the expected name it really has.
+      expect(found(expected).map(([rowId, , , , name]) => [rowId, name])).toEqual([
+        [row.id, 'USER_UPDATED'],
+      ]);
+    });
+
+    it('is scoped to the investigated tenant, the owner topic and the producer', async () => {
+      const tenant = id('ORG');
+      const { expected } = await recorded(tenant, 'MEMBERSHIP_CREATED');
+
+      expect(found({ ...expected, organizationId: id('ORG') })).toEqual([]);
+      expect(found({ ...expected, organizationId: '' })).toEqual([]);
+      expect(found({ ...expected, ownerTopic: 'rasta.asset.v1' })).toEqual([]);
+      expect(found({ ...expected, producer: 'asset-service' })).toEqual([]);
+    });
+
+    it('does not run without a scope, and its session cannot write', async () => {
+      const tenant = id('ORG');
+      const { expected } = await recorded(tenant, 'MEMBERSHIP_CREATED');
+
+      const unscoped = lookup({ ...expected, organizationId: undefined });
+      expect(unscoped.status).not.toBe(0);
+      expect(unscoped.stdout).toBe('');
+
+      const write = lookup(
+        expected,
         `INSERT INTO processed_event (event_id, consumer_name) VALUES ('${id('EVT')}', 'runbook-probe');\n`,
       );
       expect(write.status).not.toBe(0);
