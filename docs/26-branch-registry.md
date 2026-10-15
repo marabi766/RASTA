@@ -76,7 +76,7 @@ PRهای باز را `CONFLICTING` می‌کرد و CI آن‌ها را از ن�
 | `fix/economic-scoped-cursor`            | سرور (کارگر ۲)                    | server-worker-2 | [#256](https://github.com/marabi766/RASTA/pull/256) | —              | مکان‌نمای فهرست‌های economic در دامنهٔ خود فهرست؛ در صف ادغام                |
 | `feat/inventory-shipments`              | سرور (کارگر ۴)                    | server-worker-4 | [#257](https://github.com/marabi766/RASTA/pull/257) | —              | COM-006 PR 2: محموله و رهگیری (پایه: #246)؛ Q-113 … Q-115                    |
 | `chore/ci-split-integration`            | سرور (کارگر ۱)                    | server-worker   | [#274](https://github.com/marabi766/RASTA/pull/274) | —              | Integration در CI به چهار Job موازی؛ Check قدیم تجمیعی                       |
-| `fix/fleet-dev-start`                   | سرور (کارگر ۱)                    | server-worker   | [#281](https://github.com/marabi766/RASTA/pull/281) | —              | `pnpm dev` سرویس‌ها با بارگذار CommonJS (TASK 144)                           |
+| `fix/document-outbox-shutdown-flake`    | سرور (کارگر ۳)                    | server-worker-3 | [#278](https://github.com/marabi766/RASTA/pull/278) | —              | ترتیب رویدادها به‌جای میلی‌ثانیه در int-spec خاموشی document؛ فقط تست        |
 
 ## شاخه‌های بازنشسته
 
