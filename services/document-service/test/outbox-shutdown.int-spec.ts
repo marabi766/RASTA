@@ -75,6 +75,10 @@ const probeRow = (): OutboxRow => ({
 
 const never = <T>(): Promise<T> => new Promise<T>(() => undefined);
 
+/** A strictly increasing counter: the order of events, which a clock in ms cannot give. */
+let ticks = 0;
+const tick = (): number => (ticks += 1);
+
 /** A scanner that reports CLEAN after `delayMs`, or never when `delayMs` is null. */
 class SlowScanner extends AlwaysCleanScanner implements MalwareScanner {
   scans = 0;
@@ -216,13 +220,16 @@ describe('document-service shutdown: the scan worker by the outbox deadline (D-0
       } satisfies AuthGuardOptions)
       .compile();
     const app: INestApplication = moduleRef.createNestApplication();
-    // Every claim the booted worker makes, with the moment it was made.
-    const claims: { at: number; ids: string[] }[] = [];
+    // Every claim the booted worker makes, with its place in the order of
+    // events (`tick`), stamped when the claim is issued. Not wall-clock ms: a
+    // claim and the start of the close can share a millisecond.
+    const claims: { seq: number; ids: string[] }[] = [];
     const scans = app.get(ScanRepository);
     const claim = scans.claim.bind(scans);
     jest.spyOn(scans, 'claim').mockImplementation(async (input) => {
+      const seq = tick();
       const batch = await claim(input);
-      claims.push({ at: Date.now(), ids: batch.map((d) => d.id) });
+      claims.push({ seq, ids: batch.map((d) => d.id) });
       return batch;
     });
     await app.init();
@@ -248,8 +255,11 @@ describe('document-service shutdown: the scan worker by the outbox deadline (D-0
       logger: { warn: () => undefined, error: (message) => errors.push(message) },
     });
     const startedAt = Date.now();
+    // Taken in the same synchronous run as the call, so every claim issued
+    // before it has a smaller `seq` and every later one a larger.
+    const closeSeq = tick();
     await shutdown.shutdown('SIGTERM');
-    return { exits, errors, startedAt, tookMs: Date.now() - startedAt };
+    return { exits, errors, closeSeq, tookMs: Date.now() - startedAt };
   }
 
   afterEach(() => jest.restoreAllMocks());
@@ -266,7 +276,7 @@ describe('document-service shutdown: the scan worker by the outbox deadline (D-0
     const before = await rows(ids);
     expect(before.every((r) => r.scanState === 'PENDING' && r.scanLeaseOwner !== null)).toBe(true);
 
-    const { exits, errors, tookMs, startedAt } = await closeUnderDeadline(app);
+    const { exits, errors, tookMs, closeSeq } = await closeUnderDeadline(app);
 
     // A clean close, not the timeout: exit 0 and nothing logged as an error.
     expect(exits).toEqual([0]);
@@ -277,7 +287,7 @@ describe('document-service shutdown: the scan worker by the outbox deadline (D-0
     expect(tookMs).toBeGreaterThanOrEqual(GRACE_SECONDS * 1000 - 100);
     expect(tookMs).toBeLessThan(GRACE_SECONDS * 1000 + 2000);
     // No claim once the close began, and no second scan.
-    expect(claims.filter((c) => c.at >= startedAt)).toEqual([]);
+    expect(claims.filter((c) => c.seq > closeSeq)).toEqual([]);
     expect(scanner.scans).toBe(1);
 
     // Both documents are back in the queue: still PENDING, no lease, no attempt
@@ -295,14 +305,14 @@ describe('document-service shutdown: the scan worker by the outbox deadline (D-0
     await until(() => scanner.scans === 1 && publishes.count === 1);
     expect(claims[0]?.ids).toEqual(ids);
 
-    const { exits, errors, tookMs, startedAt } = await closeUnderDeadline(app);
+    const { exits, errors, tookMs, closeSeq } = await closeUnderDeadline(app);
 
     expect(exits).toEqual([0]);
     expect(errors).toEqual([]);
     expect(tookMs).toBeLessThan(SHUTDOWN_TIMEOUT_MS);
     // Stopped at the start of the close, not after the relay's drain: nothing
     // claimed and nothing more scanned while the relay drained for 6 s.
-    expect(claims.filter((c) => c.at >= startedAt)).toEqual([]);
+    expect(claims.filter((c) => c.seq > closeSeq)).toEqual([]);
     expect(scanner.scans).toBe(1);
 
     // The first document's verdict was written; the second, never started, went
