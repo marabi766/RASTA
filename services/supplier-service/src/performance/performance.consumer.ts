@@ -8,6 +8,7 @@ import {
   type EventConsumer,
   type EventHandler,
   type HandlerOutcome,
+  type OutboxStopOptions,
 } from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
 import { SERVICE_NAME, type SupplierEnv } from '../config/env';
@@ -110,8 +111,17 @@ export class PerformanceConsumer {
     await this.consumer.start();
   }
 
-  async stop(): Promise<void> {
-    await this.consumer?.stop();
+  /**
+   * An `OutboxShutdown` worker: stopped in Nest's destroy phase, beside the
+   * relay and the purge, by the shutdown's one deadline; an event still in
+   * flight is abandoned uncommitted and delivered again, and its
+   * `processed_event` marker keeps a second fact out. Before, `AppModule`
+   * stopped it with no bound in `onApplicationShutdown`, after the relay had
+   * drained, so the two waits added up past SHUTDOWN_TIMEOUT_MS (Codex r1 on
+   * #276). Disabled, there is nothing to stop.
+   */
+  stop(options?: OutboxStopOptions): Promise<void> {
+    return this.consumer?.stop(options) ?? Promise.resolve();
   }
 
   /** One event. Public so a test can drive it without a broker. */

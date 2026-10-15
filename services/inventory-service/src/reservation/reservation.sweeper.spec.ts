@@ -157,3 +157,107 @@ describe('ReservationSweeper', () => {
     expect(reservations.dueItems).toHaveBeenCalledTimes(calls);
   });
 });
+
+/**
+ * D-052: the sweeper stops with the relay and the purge, in the destroy phase, by their shared
+ * deadline — no new batch once stopping, and no wait past the deadline for the one in flight.
+ */
+describe('ReservationSweeper.stop', () => {
+  // The sweeper's timer and the deadline's are the test's; `setImmediate` stays real to settle
+  // the promises in between.
+  beforeEach(() => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate'] });
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  const items = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ organizationId: 'ORG_1', stockItemId: `SKI_${i}` }));
+
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  /** Starts the timer and lets its first sweep begin. */
+  async function sweepInFlight(s: ReservationSweeper): Promise<void> {
+    s.start();
+    jest.advanceTimersByTime(10);
+    await settle();
+  }
+
+  const never = <T>(): Promise<T> => new Promise<T>(() => undefined);
+
+  it('starts no further batch once stopping, and waits for the one in flight', async () => {
+    let release!: () => void;
+    const expireBatch = jest.fn((_org: string, stockItemId: string) =>
+      stockItemId === 'SKI_0'
+        ? new Promise((resolve) => (release = () => resolve(batch(1))))
+        : Promise.resolve(batch(1)),
+    );
+    const { sweeper: s, reservations } = sweeper(items(3), expireBatch, 10);
+    await sweepInFlight(s);
+    expect(expireBatch).toHaveBeenCalledTimes(1);
+
+    let stopped = false;
+    const stopping = s.stop({ deadlineAt: Date.now() + 5000 }).then(() => {
+      stopped = true;
+    });
+    await settle();
+    expect(stopped).toBe(false);
+
+    release();
+    await stopping;
+    expect(expireBatch.mock.calls.map((call) => call[1])).toEqual(['SKI_0']);
+    // Nothing after the stop from the timer.
+    jest.advanceTimersByTime(100);
+    expect(reservations.dueItems).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns by the deadline when the batch in flight never finishes', async () => {
+    const { sweeper: s } = sweeper(
+      items(2),
+      jest.fn(() => never()),
+      10,
+    );
+    await sweepInFlight(s);
+
+    let stopped = false;
+    void s.stop({ deadlineAt: Date.now() + 300 }).then(() => {
+      stopped = true;
+    });
+    jest.advanceTimersByTime(299);
+    await settle();
+    expect(stopped).toBe(false);
+    jest.advanceTimersByTime(1);
+    await settle();
+    expect(stopped).toBe(true);
+  });
+
+  it('counts the items a stopped sweep did not reach as backlogged', async () => {
+    // The first batch's own transaction sees the shutdown begin.
+    const expireBatch = jest.fn();
+    const { sweeper: s } = sweeper(items(3), expireBatch);
+    expireBatch.mockImplementation(async () => {
+      void s.stop();
+      return batch(2);
+    });
+    expect(await s.runOnce()).toEqual({
+      due: 3,
+      expired: 2,
+      skipped: 0,
+      failed: 0,
+      backlogged: 2,
+    });
+    expect(expireBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears its timer, returns at once when idle, and is one stop', async () => {
+    const { sweeper: s, reservations } = sweeper([], jest.fn(), 10);
+    s.start();
+    const first = s.stop({ deadlineAt: Date.now() + 1000 });
+    expect(s.stop()).toBe(first);
+    await first;
+    s.start(); // no restart once stopped
+    jest.advanceTimersByTime(100);
+    expect(reservations.dueItems).not.toHaveBeenCalled();
+  });
+});
