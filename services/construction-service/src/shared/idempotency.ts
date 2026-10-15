@@ -6,6 +6,9 @@ import { isUniqueViolation } from '../shared/prisma-errors';
 import { idempotentReplaysTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
+import { CLAIM_WAIT_MS, WAIT_TRANSACTION_SLACK_MS } from '../config/operation-budgets';
+
+export { CLAIM_WAIT_MS };
 
 /**
  * Idempotent creation (docs/06 § 6.8).
@@ -121,14 +124,6 @@ const CLAIM_ATTEMPTS = 3;
 
 /** `Retry-After` on the in-flight 409, as docs/06 § 6.8 states it. */
 const IN_FLIGHT_RETRY_AFTER_SECONDS = 1;
-
-/**
- * The most one claim waits on another transaction's lock on its key, over all
- * its attempts — the same bound the other services' stores keep.
- */
-export const CLAIM_WAIT_MS = 5_000;
-/** Slack for a claim-side transaction beyond its lock wait, so the wait ends first. */
-const WAIT_TRANSACTION_SLACK_MS = 2_000;
 
 /** PostgreSQL's `lock_not_available`, raised when `lock_timeout` elapses. */
 const LOCK_NOT_AVAILABLE = '55P03';

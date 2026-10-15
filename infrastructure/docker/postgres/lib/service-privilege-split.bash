@@ -64,6 +64,10 @@
 #     the database, the runtime role and the migrator each carry
 #     `TimeZone = 'UTC'`, so a connection that sends no startup option — one
 #     behind PgBouncer — still runs in UTC (L7-37).
+#   * Optionally, the runtime role's sessions on the database get a
+#     `statement_timeout` (lib/session-statement-timeout.bash): only when
+#     POSTGRES_STATEMENT_TIMEOUT_MS_<SVC> is set — the way to have one behind
+#     PgBouncer, which drops the services' own startup option (#268 r4).
 #
 # ## Upgrading an existing database — the order matters
 #
@@ -85,6 +89,8 @@ _svc_split_psql() {
 
 # shellcheck source=session-timezone.bash
 source "$(dirname "${BASH_SOURCE[0]}")/session-timezone.bash"
+# shellcheck source=session-statement-timeout.bash
+source "$(dirname "${BASH_SOURCE[0]}")/session-statement-timeout.bash"
 
 # Prisma's migration ledger, exactly as its schema engine creates it on
 # PostgreSQL (prisma 6; compared column for column with a Prisma-made one by
@@ -281,6 +287,7 @@ split_service_privileges() {
   own_migration_ledger "${db}" public "${migrator}" "${runtime}"
 
   ensure_utc_session_defaults "${db}" "${runtime}" "${migrator}"
+  ensure_runtime_statement_timeout "${svc}" "${db}" "${runtime}" || return 1
 
   echo "    - ${db}: owned by ${migrator}; ${runtime} has CONNECT, USAGE on public, no CREATEDB, no EXECUTE, grants: ${mode}; ledger pre-created, no runtime rights; sessions default to UTC"
 }
@@ -334,6 +341,7 @@ split_audit_database_privileges() {
   own_migration_ledger "${db}" audit "${migrator}" "${runtime}"
 
   ensure_utc_session_defaults "${db}" "${runtime}" "${migrator}"
+  ensure_runtime_statement_timeout "${svc}" "${db}" "${runtime}" || return 1
 
   echo "    - ${db}: database, public and audit owned by ${migrator}; ${runtime} has CONNECT and USAGE on audit, no CREATEDB; ledger pre-created; sessions default to UTC"
 }
@@ -353,9 +361,9 @@ upgrade_service_split() {
   resolve_role_passwords "rasta_${svc}" "rasta_${svc}_migrator" || return 1
   echo "==> ${svc}-service privilege split"
   if [[ "${mode}" == audit ]]; then
-    split_audit_database_privileges "${db}" "${svc}"
+    split_audit_database_privileges "${db}" "${svc}" || return 1
   else
-    split_service_privileges "${svc}" "${db}" "${mode}"
+    split_service_privileges "${svc}" "${db}" "${mode}" || return 1
   fi
   rotate_and_verify_split_logins "${svc}" "${db}"
 }

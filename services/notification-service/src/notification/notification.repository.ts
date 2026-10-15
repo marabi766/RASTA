@@ -2,6 +2,10 @@ import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
 import { Prisma, type NotificationIntent } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
+import {
+  DISPATCH_TRANSACTION_TIMEOUT_MS,
+  INGEST_TRANSACTION_TIMEOUT_MS,
+} from '../config/operation-budgets';
 import { newId, type IntentInput } from '../intake/intake';
 import type { RenderedInApp } from '../rules/render';
 import { applyQuietHours } from '../channels/quiet-hours';
@@ -131,8 +135,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * its poll and is retried by at-least-once delivery rather than holding a
  * connection indefinitely.
  */
-const INGEST_TRANSACTION = { maxWait: 15_000, timeout: 30_000 } as const;
-const DISPATCH_TRANSACTION = { maxWait: 15_000, timeout: 30_000 } as const;
+const INGEST_TRANSACTION = { maxWait: 15_000, timeout: INGEST_TRANSACTION_TIMEOUT_MS } as const;
+const DISPATCH_TRANSACTION = { maxWait: 15_000, timeout: DISPATCH_TRANSACTION_TIMEOUT_MS } as const;
 
 @Injectable()
 export class NotificationRepository {

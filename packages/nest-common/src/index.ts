@@ -175,6 +175,8 @@ export {
   renewalDeadlineMs,
   RENEWAL_INTERVAL_DIVISOR,
   RENEWAL_DEADLINE_CEILING_MS,
+  RENEWAL_TRANSACTION_MARGIN_MS,
+  outboxRenewalOperationBudget,
   withinDeadline,
 } from './outbox/outbox';
 export type {

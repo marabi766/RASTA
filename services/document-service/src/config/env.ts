@@ -8,6 +8,7 @@ import {
   loadEnv,
   outboxPurgeEnvSchema,
 } from '@rasta/config';
+import { documentOperationBudgets } from './operation-budgets';
 import type { ClamdAddress } from '../scanning/clamav/clamd.client';
 
 export const SERVICE_NAME = 'document-service';
@@ -314,15 +315,19 @@ export const documentEnvSchema = baseEnvSchema
 export type DocumentEnv = z.infer<typeof documentEnvSchema>;
 
 export function loadDocumentEnv(source: NodeJS.ProcessEnv = process.env): DocumentEnv {
-  return loadEnv(documentEnvSchema, {
-    ...source,
-    SERVICE_NAME: source.SERVICE_NAME ?? SERVICE_NAME,
-    PORT: source.PORT ?? source.PORT_DOCUMENT ?? '3114',
-    DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_DOCUMENT,
-    KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? SERVICE_NAME,
-    KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
-    CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
-  });
+  return loadEnv(
+    documentEnvSchema,
+    {
+      ...source,
+      SERVICE_NAME: source.SERVICE_NAME ?? SERVICE_NAME,
+      PORT: source.PORT ?? source.PORT_DOCUMENT ?? '3114',
+      DATABASE_URL: source.DATABASE_URL ?? source.DATABASE_URL_DOCUMENT,
+      KAFKA_CLIENT_ID: source.KAFKA_CLIENT_ID ?? SERVICE_NAME,
+      KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
+      CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
+    },
+    { operationBudgets: documentOperationBudgets },
+  );
 }
 
 /**

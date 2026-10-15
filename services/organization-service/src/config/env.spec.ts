@@ -1,4 +1,5 @@
 import { loadOrganizationEnv } from './env';
+import { organizationOperationBudgets } from './operation-budgets';
 
 /**
  * `GOVERNANCE_POLICY_SETTER_ROLES` — who may set governance policy (Q-64).
@@ -40,5 +41,37 @@ describe('GOVERNANCE_POLICY_SETTER_ROLES', () => {
 
   it('refuses an empty list rather than silently admitting nobody', () => {
     expect(() => loadOrganizationEnv({ ...base, GOVERNANCE_POLICY_SETTER_ROLES: ' , ' })).toThrow();
+  });
+});
+
+describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)', () => {
+  const at = (statementTimeoutMs: string) => () =>
+    loadOrganizationEnv({ ...base, DATABASE_STATEMENT_TIMEOUT_MS: statementTimeoutMs });
+
+  it('unset, applies no statement timeout', () => {
+    const env = loadOrganizationEnv({ ...base });
+    expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+    expect(env.DATABASE_URL).not.toContain('statement_timeout');
+  });
+
+  it('declares every budget, at the defaults', () => {
+    expect(
+      organizationOperationBudgets(loadOrganizationEnv({ ...base })).map((b) => [
+        b.name,
+        b.budgetMs,
+      ]),
+    ).toEqual([
+      ['PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS', 5000],
+      ['OUTBOX_CLAIM_LEASE_SECONDS', 12_500],
+      ['OUTBOX_PURGE_STATEMENT_TIMEOUT_MS', 10_000],
+    ]);
+  });
+
+  it('set, must be above the largest: the outbox renewal; the bound is exact', () => {
+    expect(at('5000')).toThrow(/not above PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS, 5000 ms/);
+    expect(at('12500')).toThrow(
+      /DATABASE_STATEMENT_TIMEOUT_MS: \(12500 ms\) is not above OUTBOX_CLAIM_LEASE_SECONDS, 12500 ms/,
+    );
+    expect(at('12501')).not.toThrow();
   });
 });

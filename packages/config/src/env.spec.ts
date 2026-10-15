@@ -70,19 +70,417 @@ describe('loadEnv', () => {
   it.each([
     'postgresql://user:pass@localhost:5432/rasta_asset?schema=public',
     'postgres://user:pass@db.internal:5432/rasta_asset',
-  ])('accepts DATABASE_URL %p, and opens its sessions in UTC', (value) => {
-    expect(
-      loadEnv(databaseEnvSchema, { DATABASE_URL: value } as NodeJS.ProcessEnv).DATABASE_URL,
-    ).toBe(`${value}${value.includes('?') ? '&' : '?'}options=-c%20TimeZone%3DUTC`);
-  });
+  ])(
+    'accepts DATABASE_URL %p, and opens its sessions in UTC with no statement timeout',
+    (value) => {
+      expect(
+        loadEnv(databaseEnvSchema, { DATABASE_URL: value } as NodeJS.ProcessEnv).DATABASE_URL,
+      ).toBe(`${value}${value.includes('?') ? '&' : '?'}options=-c%20TimeZone%3DUTC`);
+    },
+  );
 
-  it('applies pool defaults when not specified', () => {
+  it('applies no statement timeout when DATABASE_STATEMENT_TIMEOUT_MS is unset (#268 r4: opt-in)', () => {
     const env = loadEnv(databaseEnvSchema, {
       DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
     } as NodeJS.ProcessEnv);
 
-    expect(env.DATABASE_POOL_SIZE).toBe(10);
-    expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBe(15_000);
+    expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+    expect(env.DATABASE_URL).not.toContain('statement_timeout');
+  });
+});
+
+describe('the database pool and statement timeout (databaseEnvSchema)', () => {
+  // Assembled rather than written out, so no line reads as a real connection
+  // string to a secret scanner; the tests below look for it in every message.
+  const PASSWORD = ['pool', 'spec', 'pw'].join('_');
+  const RAW_URL = `postgresql://rasta_x:${PASSWORD}@db.internal:5432/rasta_x?schema=public`;
+  /** The session options every runtime URL carries when no statement timeout is set: UTC. */
+  const SESSION = `options=${encodeURIComponent('-c TimeZone=UTC')}`;
+
+  /** A service whose operations all fit under a second, so any accepted timeout is above them. */
+  const NO_LONG_OPERATIONS = { operationBudgets: () => [] };
+
+  const load = (pool: Record<string, string>, url = RAW_URL) =>
+    loadEnv(
+      databaseEnvSchema,
+      { DATABASE_URL: url, ...pool } as NodeJS.ProcessEnv,
+      NO_LONG_OPERATIONS,
+    );
+
+  /** The refusal `load` throws, checked to name the variable and carry no part of the URL. */
+  const refusal = (pool: Record<string, string>, url = RAW_URL): EnvValidationError => {
+    let caught: unknown;
+    try {
+      load(pool, url);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(EnvValidationError);
+    const message = (caught as Error).message;
+    expect(message).not.toContain(PASSWORD);
+    expect(message).not.toContain('db.internal');
+    return caught as EnvValidationError;
+  };
+
+  it('unset, writes no pool parameter: Prisma keeps its defaults', () => {
+    const env = load({});
+    expect(env.DATABASE_POOL_SIZE).toBeUndefined();
+    expect(env.DATABASE_POOL_TIMEOUT_SECONDS).toBeUndefined();
+    expect(env.DATABASE_URL).toBe(`${RAW_URL}&${SESSION}`);
+  });
+
+  it('writes both into DATABASE_URL as Prisma reads them, after the session options', () => {
+    const env = load({ DATABASE_POOL_SIZE: '5', DATABASE_POOL_TIMEOUT_SECONDS: '3' });
+    expect(env.DATABASE_POOL_SIZE).toBe(5);
+    expect(env.DATABASE_POOL_TIMEOUT_SECONDS).toBe(3);
+    expect(env.DATABASE_URL).toBe(`${RAW_URL}&${SESSION}&connection_limit=5&pool_timeout=3`);
+  });
+
+  it('writes either one alone', () => {
+    expect(load({ DATABASE_POOL_SIZE: '8' }).DATABASE_URL).toBe(
+      `${RAW_URL}&${SESSION}&connection_limit=8`,
+    );
+    expect(load({ DATABASE_POOL_TIMEOUT_SECONDS: '4' }).DATABASE_URL).toBe(
+      `${RAW_URL}&${SESSION}&pool_timeout=4`,
+    );
+  });
+
+  it('accepts both bounds', () => {
+    expect(load({ DATABASE_POOL_SIZE: '1', DATABASE_POOL_TIMEOUT_SECONDS: '1' }).DATABASE_URL).toBe(
+      `${RAW_URL}&${SESSION}&connection_limit=1&pool_timeout=1`,
+    );
+    expect(
+      load({ DATABASE_POOL_SIZE: '100', DATABASE_POOL_TIMEOUT_SECONDS: '60' }).DATABASE_URL,
+    ).toBe(`${RAW_URL}&${SESSION}&connection_limit=100&pool_timeout=60`);
+  });
+
+  it.each(['0', '101', '', ' 5', '5 ', '5.0', '1e1', '0x10', '-1', '+5', 'ten'])(
+    'refuses DATABASE_POOL_SIZE=%p rather than guessing',
+    (value) => {
+      expect(refusal({ DATABASE_POOL_SIZE: value }).issues.map((i) => i.path)).toEqual([
+        'DATABASE_POOL_SIZE',
+      ]);
+    },
+  );
+
+  it.each(['0', '61', '', '1.5', '2s', '-3'])(
+    'refuses DATABASE_POOL_TIMEOUT_SECONDS=%p (0 would be Prisma’s wait-forever)',
+    (value) => {
+      expect(refusal({ DATABASE_POOL_TIMEOUT_SECONDS: value }).issues.map((i) => i.path)).toEqual([
+        'DATABASE_POOL_TIMEOUT_SECONDS',
+      ]);
+    },
+  );
+
+  it('refuses a size the URL already sets differently, naming neither the URL nor its password', () => {
+    const issues = refusal({ DATABASE_POOL_SIZE: '5' }, `${RAW_URL}&connection_limit=16`).issues;
+    expect(issues).toEqual([
+      { path: 'DATABASE_POOL_SIZE', message: expect.stringContaining('connection_limit') },
+    ]);
+  });
+
+  it('refuses a wait the URL already sets differently', () => {
+    expect(
+      refusal({ DATABASE_POOL_TIMEOUT_SECONDS: '3' }, `${RAW_URL}&pool_timeout=10`).issues.map(
+        (i) => i.path,
+      ),
+    ).toEqual(['DATABASE_POOL_TIMEOUT_SECONDS']);
+  });
+
+  it('keeps a URL’s own connection_limit when the variable is unset or agrees', () => {
+    const own = `${RAW_URL}&connection_limit=16`;
+    expect(load({}, own).DATABASE_URL).toBe(`${own}&${SESSION}`);
+    expect(load({ DATABASE_POOL_SIZE: '16' }, own).DATABASE_URL).toBe(`${own}&${SESSION}`);
+  });
+
+  describe('DATABASE_STATEMENT_TIMEOUT_MS (Codex r1 on #268: declared, now in effect)', () => {
+    const options = (env: { DATABASE_URL: string }) =>
+      new URL(env.DATABASE_URL).searchParams.get('options');
+
+    it('writes the configured value into the session options, before the UTC option', () => {
+      const env = load({ DATABASE_STATEMENT_TIMEOUT_MS: '30000' });
+      expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBe(30_000);
+      expect(options(env)).toBe('-c statement_timeout=30000 -c TimeZone=UTC');
+    });
+
+    it('keeps the URL’s other options, and the result is stable under withUtcSession', () => {
+      const own = `${RAW_URL}&options=${encodeURIComponent('-c search_path=x')}`;
+      const env = load({ DATABASE_STATEMENT_TIMEOUT_MS: '2000' }, own);
+      expect(options(env)).toBe('-c search_path=x -c statement_timeout=2000 -c TimeZone=UTC');
+      // Loading the loaded URL again changes nothing (a CLI handing it on).
+      expect(load({ DATABASE_STATEMENT_TIMEOUT_MS: '2000' }, env.DATABASE_URL).DATABASE_URL).toBe(
+        env.DATABASE_URL,
+      );
+    });
+
+    it('accepts both bounds', () => {
+      expect(options(load({ DATABASE_STATEMENT_TIMEOUT_MS: '1000' }))).toContain(
+        'statement_timeout=1000 ',
+      );
+      expect(options(load({ DATABASE_STATEMENT_TIMEOUT_MS: '3600000' }))).toContain(
+        'statement_timeout=3600000 ',
+      );
+    });
+
+    it.each(['0', '999', '3600001', '', ' 15000', '15000ms', '15s', '1.5e4', '-1'])(
+      'refuses DATABASE_STATEMENT_TIMEOUT_MS=%p (0 would be PostgreSQL’s no-limit)',
+      (value) => {
+        expect(refusal({ DATABASE_STATEMENT_TIMEOUT_MS: value }).issues.map((i) => i.path)).toEqual(
+          ['DATABASE_STATEMENT_TIMEOUT_MS'],
+        );
+      },
+    );
+
+    it.each([
+      '-c statement_timeout=5000',
+      '-cstatement_timeout=5000',
+      '--statement-timeout=5000',
+      '-c STATEMENT_TIMEOUT=15000 -c statement_timeout=5000',
+    ])('refuses a URL whose options %p set another value', (written) => {
+      const issues = refusal(
+        { DATABASE_STATEMENT_TIMEOUT_MS: '15000' },
+        `${RAW_URL}&options=${encodeURIComponent(written)}`,
+      ).issues;
+      expect(issues).toEqual([
+        {
+          path: 'DATABASE_STATEMENT_TIMEOUT_MS',
+          message: expect.stringContaining('different value'),
+        },
+      ]);
+    });
+
+    it.each([
+      '-c statement_timeout=15000',
+      '--statement-timeout=0',
+      // Codex r4 on #268, F1: the server removes backslash escapes before it
+      // reads a word (pg_split_opts), and reads the words with getopt.
+      '-c statement\\_timeout=1000',
+      '-c st\\atement_timeout=1000',
+      '-c\\ statement_timeout=1000',
+      '-ec statement_timeout=1000',
+      '-E-statement_timeout=1000',
+      '-E- STATEMENT-TIMEOUT=1000',
+      '-c search_path=x -- statement_timeout=1000',
+    ])(
+      'unset, refuses a URL whose options %p set a timeout of their own: it would escape the budget check',
+      (written) => {
+        const issues = refusal({}, `${RAW_URL}&options=${encodeURIComponent(written)}`).issues;
+        expect(issues).toEqual([
+          {
+            path: 'DATABASE_STATEMENT_TIMEOUT_MS',
+            message: expect.stringContaining('while DATABASE_STATEMENT_TIMEOUT_MS is unset'),
+          },
+        ]);
+      },
+    );
+
+    it.each([
+      ['every character percent-encoded', '%2D%63%20%73tatement%5Ftimeout%3D1000'],
+      ['the parameter name percent-encoded', null],
+      ['+ for the space', '-c+statement_timeout%3D1000'],
+    ])('unset, refuses the timeout however the URL encodes it (%s)', (_, encoded) => {
+      const url =
+        encoded === null
+          ? `${RAW_URL}&%6Fptions=${encodeURIComponent('-c statement_timeout=1000')}`
+          : `${RAW_URL}&options=${encoded}`;
+      expect(refusal({}, url).issues).toEqual([
+        {
+          path: 'DATABASE_STATEMENT_TIMEOUT_MS',
+          message: expect.stringContaining('while DATABASE_STATEMENT_TIMEOUT_MS is unset'),
+        },
+      ]);
+    });
+
+    it('set, refuses an escaped other value, and a mention it cannot read as a value', () => {
+      const url = (written: string) => `${RAW_URL}&options=${encodeURIComponent(written)}`;
+      expect(
+        refusal({ DATABASE_STATEMENT_TIMEOUT_MS: '15000' }, url('-c statement\\_timeout=1000'))
+          .issues,
+      ).toEqual([
+        { path: 'DATABASE_STATEMENT_TIMEOUT_MS', message: expect.stringContaining('different') },
+      ]);
+      expect(
+        refusal({ DATABASE_STATEMENT_TIMEOUT_MS: '15000' }, url('-c\\ statement_timeout=15000'))
+          .issues,
+      ).toEqual([
+        {
+          path: 'DATABASE_STATEMENT_TIMEOUT_MS',
+          message: expect.stringContaining('in a form this cannot read'),
+        },
+      ]);
+      // The same value, escaped or after a flag cluster, is the same setting.
+      expect(
+        options(
+          load({ DATABASE_STATEMENT_TIMEOUT_MS: '15000' }, url('-c statement\\_timeout=15000')),
+        ),
+      ).toBe('-c statement\\_timeout=15000 -c TimeZone=UTC');
+      expect(
+        options(
+          load({ DATABASE_STATEMENT_TIMEOUT_MS: '15000' }, url('-ec statement_timeout=15000')),
+        ),
+      ).toBe('-ec statement_timeout=15000 -c TimeZone=UTC');
+    });
+
+    it('unset, a URL whose options set other things is kept', () => {
+      const own = `${RAW_URL}&options=${encodeURIComponent('-c search_path=x -ec work_mem=4MB')}`;
+      expect(options(load({}, own))).toBe('-c search_path=x -ec work_mem=4MB -c TimeZone=UTC');
+    });
+
+    it('keeps a URL whose options already set the same value', () => {
+      const own = `${RAW_URL}&options=${encodeURIComponent('-c statement_timeout=15000')}`;
+      expect(options(load({ DATABASE_STATEMENT_TIMEOUT_MS: '15000' }, own))).toBe(
+        '-c statement_timeout=15000 -c TimeZone=UTC',
+      );
+    });
+
+    const urlRefusal = (pool: Record<string, string>, url: string, says: string) =>
+      expect(refusal(pool, url).issues).toEqual([
+        { path: 'DATABASE_URL', message: expect.stringContaining(says) },
+      ]);
+
+    describe('more than one options parameter (Codex r5 on #268, F1)', () => {
+      // The r5 example: both read together, the timeout matched and the URL came
+      // back as written — and Prisma, keeping only the last `options`, dropped it.
+      const R5 = `${RAW_URL}&options=-c%20statement_timeout%3D15000&options=-c%20TimeZone%3DUTC`;
+
+      it('refuses the r5 example, whose last options parameter carries no timeout', () => {
+        expect(new URL(R5).searchParams.getAll('options')).toHaveLength(2);
+        urlRefusal({ DATABASE_STATEMENT_TIMEOUT_MS: '15000' }, R5, '2 options parameters');
+      });
+
+      it.each([
+        ['unset', {}],
+        ['set', { DATABASE_STATEMENT_TIMEOUT_MS: '15000' }],
+      ])('refuses two however they are written, the timeout %s', (_, pool) => {
+        for (const url of [
+          R5,
+          `${RAW_URL}&options=-c%20TimeZone%3DUTC&options=-c%20statement_timeout%3D15000`,
+          `${RAW_URL}&options=-c%20search_path%3Dx&%6Fptions=-c%20TimeZone%3DUTC`,
+          `${RAW_URL}&options=-c%20TimeZone%3DUTC&options=`,
+        ]) {
+          urlRefusal(pool, url, 'options parameters');
+        }
+      });
+    });
+
+    describe('a raw control character in the URL (Codex r5 on #268, F2)', () => {
+      // The r5 example: a URL parser drops the tab and reads statement_timeout=1000.
+      const r5 = (char: string) =>
+        `${RAW_URL}&options=-c%20sta${char}tement_timeout%3D1000%20-c%20TimeZone%3DUTC`;
+
+      it.each([
+        ['TAB', '\t'],
+        ['CR', '\r'],
+        ['LF', '\n'],
+      ])(
+        'refuses the r5 example with a %s in the name, which the driver would not see',
+        (_, char) => {
+          expect(new URL(r5(char)).searchParams.get('options')).toBe(
+            '-c statement_timeout=1000 -c TimeZone=UTC',
+          );
+          urlRefusal({}, r5(char), 'control character');
+          urlRefusal({ DATABASE_STATEMENT_TIMEOUT_MS: '15000' }, r5(char), 'control character');
+        },
+      );
+
+      it.each(['\u0000', '\u0001', '\u000b', '\u001f', '\u007f'])(
+        'refuses any other C0 control or DEL (%j), anywhere in the URL',
+        (char) => {
+          urlRefusal({}, r5(char), 'control character');
+          urlRefusal({}, `${RAW_URL}&application_name=a${char}b`, 'control character');
+        },
+      );
+
+      it('reads percent-encoded whitespace as before: decoded, then a word break', () => {
+        const own = `${RAW_URL}&options=-c%20search_path%3Dx%09-c%20work_mem%3D4MB`;
+        expect(options(load({}, own))).toBe('-c search_path=x\t-c work_mem=4MB -c TimeZone=UTC');
+        expect(refusal({}, `${RAW_URL}&options=-c%09statement_timeout%3D1000`).issues).toEqual([
+          {
+            path: 'DATABASE_STATEMENT_TIMEOUT_MS',
+            message: expect.stringContaining('while DATABASE_STATEMENT_TIMEOUT_MS is unset'),
+          },
+        ]);
+      });
+    });
+  });
+
+  it('a schema without DATABASE_URL is left alone', () => {
+    const env = loadEnv(baseEnvSchema, {
+      SERVICE_NAME: 'api-gateway',
+      PORT: '3000',
+      DATABASE_POOL_SIZE: 'ten',
+    } as NodeJS.ProcessEnv);
+    expect(env).not.toHaveProperty('DATABASE_URL');
+    expect(env).not.toHaveProperty('DATABASE_POOL_SIZE');
+  });
+});
+
+describe('a configured statement timeout, against the operation budgets (#268 r4)', () => {
+  const URL = 'postgresql://u:p@localhost:5432/db';
+  const budget = (name: string, budgetMs: number) => ({
+    name,
+    budgetMs,
+    derivation: `the test operation ${name}`,
+  });
+  const BUDGETS = [budget('A_MS', 14_999), budget('B_MS', 1_000), budget('C_FIXED', 5_000)];
+  const load = (
+    timeout: string | undefined,
+    operationBudgets?: () => ReturnType<typeof budget>[],
+  ) =>
+    loadEnv(
+      databaseEnvSchema,
+      {
+        DATABASE_URL: URL,
+        ...(timeout === undefined ? {} : { DATABASE_STATEMENT_TIMEOUT_MS: timeout }),
+      } as NodeJS.ProcessEnv,
+      operationBudgets ? { operationBudgets } : {},
+    );
+  const refusal = (timeout: string, operationBudgets?: () => ReturnType<typeof budget>[]) => {
+    let thrown: unknown;
+    try {
+      load(timeout, operationBudgets);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(EnvValidationError);
+    return (thrown as EnvValidationError).issues;
+  };
+
+  it('accepts a timeout above the largest budget', () => {
+    expect(load('15000', () => BUDGETS).DATABASE_STATEMENT_TIMEOUT_MS).toBe(15_000);
+  });
+
+  it('refuses one equal to the largest budget: the two timeouts would race', () => {
+    expect(refusal('14999', () => BUDGETS).map((issue) => issue.path)).toEqual([
+      'DATABASE_STATEMENT_TIMEOUT_MS',
+    ]);
+  });
+
+  it('names every budget it would cut, with its derivation, and the value it must exceed', () => {
+    const issues = refusal('5000', () => BUDGETS);
+    expect(issues).toHaveLength(2);
+    expect(issues[0]!.message).toContain('not above A_MS, 14999 ms (the test operation A_MS)');
+    expect(issues[1]!.message).toContain('not above C_FIXED, 5000 ms (the test operation C_FIXED)');
+    for (const issue of issues) expect(issue.message).toContain('above 14999 ms');
+  });
+
+  it('refuses any timeout from a service that declares no budgets (fail closed)', () => {
+    expect(refusal('3600000')[0]!.message).toContain('declares no operation budgets');
+  });
+
+  it('checks nothing while the timeout is unset, and asks for no budgets', () => {
+    const operationBudgets = jest.fn(() => BUDGETS);
+    expect(load(undefined, operationBudgets).DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+    expect(load(undefined).DATABASE_URL).toBe(`${URL}?options=-c%20TimeZone%3DUTC`);
+    expect(operationBudgets).not.toHaveBeenCalled();
+  });
+
+  it('hands the budgets the parsed environment', () => {
+    const operationBudgets = jest.fn(() => BUDGETS);
+    load('20000', operationBudgets);
+    expect(operationBudgets).toHaveBeenCalledWith(
+      expect.objectContaining({ DATABASE_STATEMENT_TIMEOUT_MS: 20_000 }),
+    );
   });
 });
 
