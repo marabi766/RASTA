@@ -110,6 +110,12 @@ export interface DisputedObligation {
 /** What `authoriseSettlement` answers. Undefined: authorised. */
 export type AuthorisationResult = DisputedObligation | undefined;
 
+/**
+ * What `markObligationDisputed` answers: the order's status, and the dispute
+ * it filed for the one economic-service holds — null when it filed none.
+ */
+export type ObligationDisputeTaken = Awaited<ReturnType<OrderService['markObligationDisputed']>>;
+
 export function createActivities(deps: ActivityDependencies) {
   const logger = new Logger('OrderSagaActivities');
 
@@ -243,9 +249,12 @@ export function createActivities(deps: ActivityDependencies) {
       });
     },
 
-    /** The order as the database has it now. What the saga decides on (ADR-039). */
-    async readOrder(orderId: string): Promise<SagaOrderView> {
-      return asSystemFor(orderId, () => deps.orders.sagaView(orderId));
+    /**
+     * The order as the database has it now. What the saga decides on
+     * (ADR-039). With `mirroredDisputeId`, also that dispute's resolution.
+     */
+    async readOrder(orderId: string, mirroredDisputeId?: string): Promise<SagaOrderView> {
+      return asSystemFor(orderId, () => deps.orders.sagaView(orderId, mirroredDisputeId));
     },
 
     async markFundsHeld(orderId: string, transactionId: string): Promise<OrderStatus> {
@@ -356,7 +365,7 @@ export function createActivities(deps: ActivityDependencies) {
      * order's own dispute, where the saga mirrors it and waits for an
      * operator (D-053). See `OrderService.markObligationDisputed`.
      */
-    async markObligationDisputed(orderId: string, reason: string): Promise<OrderStatus> {
+    async markObligationDisputed(orderId: string, reason: string): Promise<ObligationDisputeTaken> {
       const step = currentStep();
       return asSystemFor(orderId, () => deps.orders.markObligationDisputed(orderId, reason, step));
     },

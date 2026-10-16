@@ -875,19 +875,28 @@ export class OrderService {
    * meanwhile is already `DISPUTED`, and keeps that dispute; one whose dispute
    * an operator has since resolved as a refund is `CANCELLING`, and the step
    * yields to it — the saga refunds.
+   *
+   * **Returns the dispute it filed**, recorded with the step (Codex on #318
+   * round 1, finding 1). economic-service already holds it, so the saga counts
+   * it as mirrored from the moment it exists, not from the moment it next
+   * reads the order DISPUTED. An operator can decide it before that read; the
+   * saga then still mirrors that decision back, rather than finding economic
+   * DISPUTED again and filing a second dispute over the same objection. Null
+   * when the step filed nothing: it yielded, or a party's dispute was there.
    */
   async markObligationDisputed(
     orderId: string,
     reason: string,
     saga: SagaStep,
-  ): Promise<OrderStatus> {
-    return this.systemTransition(orderId, 'DISPUTED', saga, {
+  ): Promise<{ status: OrderStatus; disputeId: string | null }> {
+    const disputeId = newId(ID_PREFIX.dispute);
+    const { status, detail } = await this.systemStep(orderId, 'DISPUTED', saga, {
       activity: 'markObligationDisputed',
       from: ['RECEIPT_CONFIRMED'],
       yieldTo: ['CANCELLING'],
       reason: 'The obligation was disputed in economic-service',
+      movedWith: { disputeId },
       apply: async (tx, order) => {
-        const disputeId = newId(ID_PREFIX.dispute);
         await runUnscoped('the saga files the dispute economic-service holds on the order', () =>
           tx.orderDispute.create({
             data: {
@@ -921,6 +930,7 @@ export class OrderService {
         });
       },
     });
+    return { status, disputeId: detail.disputeId ?? null };
   }
 
   /** Settlement succeeded. The only path to `COMPLETED`. */
@@ -1153,13 +1163,23 @@ export class OrderService {
    * text passed on to economic-service, comes from here, so a signal that was
    * lost, repeated or sent to the wrong order can make the saga look sooner
    * but can never tell it something the order does not say.
+   *
+   * `mirroredDisputeId` is the dispute economic-service holds for the order
+   * as far as the saga knows; its resolution is what the saga mirrors back.
+   * It need not be the most recent one: an operator can decide it and a party
+   * raise the next before the saga reads the order again.
    */
-  async sagaView(orderId: string): Promise<{
+  async sagaView(
+    orderId: string,
+    mirroredDisputeId?: string,
+  ): Promise<{
     status: OrderStatus;
     economicTransactionId: string | null;
     cancellationReason: string | null;
     /** The most recent dispute's reason and, once decided, its resolution. */
     dispute: { id: string; reason: string; resolution: string | null } | null;
+    /** `mirroredDisputeId`'s dispute on this order, when one was named. */
+    mirroredDispute?: { id: string; resolution: string | null } | null;
   }> {
     const row = await this.repository.findForParty(orderId);
     if (!row) throw RastaError.notFound('Order', orderId);
@@ -1171,12 +1191,22 @@ export class OrderService {
         select: { id: true, reason: true, resolution: true },
       }),
     );
+    const mirroredDispute =
+      mirroredDisputeId === undefined
+        ? undefined
+        : await runUnscoped('the saga reads the dispute it mirrored, on the order it drives', () =>
+            this.prisma.client.orderDispute.findFirst({
+              where: { id: mirroredDisputeId, orderId: row.id },
+              select: { id: true, resolution: true },
+            }),
+          );
 
     return {
       status: row.status,
       economicTransactionId: row.economicTransactionId,
       cancellationReason: row.cancellationReason,
       dispute,
+      ...(mirroredDispute === undefined ? {} : { mirroredDispute }),
     };
   }
 
@@ -1322,38 +1352,45 @@ export class OrderService {
     orderId: string,
     to: OrderStatus,
     saga: SagaStep,
-    step: {
-      activity: SagaActivity;
-      from: readonly OrderStatus[];
-      apply: (tx: ExtendedPrismaClient, order: LockedOrderRow) => Promise<unknown>;
-      yieldTo?: readonly OrderStatus[];
-      /** Runs inside the lock when the step yields. */
-      onYield?: (tx: ExtendedPrismaClient, order: LockedOrderRow) => Promise<unknown>;
-      /**
-       * Recognises this step's own effect on an order that has moved on, for
-       * a retry with no record: one whose first attempt ran before the record
-       * existed. Only a step whose effect leaves a mark on the order nothing
-       * else writes can say; every step also has its history row (below).
-       */
-      appliedTo?: (order: LockedOrderRow) => boolean;
-      reason?: string;
-    },
+    step: SystemStepOptions,
   ): Promise<OrderStatus> {
+    return (await this.systemStep(orderId, to, saga, step)).status;
+  }
+
+  /**
+   * `systemTransition`, with what the step recorded beside the status: its
+   * `movedWith` when it moved the order — for a retry, when the first attempt
+   * did — and nothing otherwise.
+   */
+  private async systemStep(
+    orderId: string,
+    to: OrderStatus,
+    saga: SagaStep,
+    step: SystemStepOptions,
+  ): Promise<{ status: OrderStatus; detail: Record<string, string> }> {
     const outcome = await this.prisma.transaction(async (tx) => {
       const order = await this.repository.lockOrder(tx, orderId);
 
       const recorded = await this.repository.findSagaStep(tx, order, saga, step.activity);
-      if (recorded) return { status: recordedStatus(order.id, recorded.result), moved: false };
+      if (recorded) {
+        return {
+          status: recordedStatus(order.id, recorded.result),
+          detail: recordedDetail(recorded.result),
+          moved: false,
+        };
+      }
 
       const result = await this.applySystemStep(tx, order, to, saga, step);
+      const detail = result.moved ? (step.movedWith ?? {}) : {};
       await this.repository.recordSagaStep(tx, order, saga, step.activity, {
+        ...detail,
         status: result.status,
       });
-      return result;
+      return { ...result, detail };
     });
 
     if (outcome.moved) orderTransitionsTotal.inc({ service: SERVICE_NAME, to });
-    return outcome.status;
+    return { status: outcome.status, detail: outcome.detail };
   }
 
   /** The decision `systemTransition` records, taken under the order's lock. */
@@ -1362,7 +1399,7 @@ export class OrderService {
     order: LockedOrderRow,
     to: OrderStatus,
     saga: SagaStep,
-    step: Parameters<OrderService['systemTransition']>[3],
+    step: SystemStepOptions,
   ): Promise<{ status: OrderStatus; moved: boolean }> {
     if (order.status === to) {
       // Already there: a retry whose first attempt predates its record. Not an
@@ -1475,6 +1512,40 @@ function recordedStatus(orderId: string, result: Prisma.JsonValue): OrderStatus 
     return status as OrderStatus;
   }
   throw new Error(`A saga step record of order ${orderId} holds no order status`);
+}
+
+/** What a recorded transition step kept beside its status: its `movedWith`. */
+function recordedDetail(result: Prisma.JsonValue): Record<string, string> {
+  if (result === null || typeof result !== 'object' || Array.isArray(result)) return {};
+  return Object.fromEntries(
+    Object.entries(result).filter(
+      (entry): entry is [string, string] => entry[0] !== 'status' && typeof entry[1] === 'string',
+    ),
+  );
+}
+
+/** How one saga step moves the order (`systemTransition`). */
+interface SystemStepOptions {
+  activity: SagaActivity;
+  from: readonly OrderStatus[];
+  apply: (tx: ExtendedPrismaClient, order: LockedOrderRow) => Promise<unknown>;
+  yieldTo?: readonly OrderStatus[];
+  /** Runs inside the lock when the step yields. */
+  onYield?: (tx: ExtendedPrismaClient, order: LockedOrderRow) => Promise<unknown>;
+  /**
+   * Recognises this step's own effect on an order that has moved on, for
+   * a retry with no record: one whose first attempt ran before the record
+   * existed. Only a step whose effect leaves a mark on the order nothing
+   * else writes can say; every step also has its history row
+   * (`hasSagaHistorySince`).
+   */
+  appliedTo?: (order: LockedOrderRow) => boolean;
+  reason?: string;
+  /**
+   * Recorded with the status when the step moves the order, and answered to
+   * a retry: what `apply` created that the saga goes on to name.
+   */
+  movedWith?: Record<string, string>;
 }
 
 type OrderRow = {

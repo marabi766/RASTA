@@ -204,6 +204,43 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   setHandler(orderCancelled, look);
   setHandler(disputeResolved, look);
 
+  // The dispute economic-service has been told about and not yet told is
+  // resolved. An id, not a flag: a second dispute on the same order is a
+  // different dispute, and is mirrored under its own key.
+  let mirroredDispute: string | undefined;
+
+  /** The order now, with the mirrored dispute's resolution when there is one. */
+  const read = (): Promise<SagaOrderView> =>
+    mirroredDispute === undefined ? readOrder(orderId) : readOrder(orderId, mirroredDispute);
+
+  /**
+   * Tells economic-service that the dispute it holds is decided, with that
+   * dispute's own resolution — read by its id, since a party may have raised
+   * the next one before the saga looked.
+   */
+  async function mirrorResolution(order: SagaOrderView, fallback: string): Promise<void> {
+    if (!mirroredDispute) return;
+    // A read recorded before `mirroredDispute` was part of it has only the
+    // most recent dispute, which then was this one.
+    const resolution = order.mirroredDispute?.resolution ?? order.dispute?.resolution ?? fallback;
+    await resolveObligationDispute(orderId, heldTransaction(order), mirroredDispute, resolution);
+    mirroredDispute = undefined;
+  }
+
+  /**
+   * The order takes the dispute economic-service holds (D-053). The dispute
+   * it files counts as mirrored at once: economic-service told the saga about
+   * it, not the other way round. Named here rather than when the saga next
+   * reads the order DISPUTED, because an operator may decide it before that
+   * read, and the saga must still mirror that decision back (Codex on #318
+   * round 1, finding 1). Unnamed, the saga read RECEIPT_CONFIRMED, found the
+   * obligation still DISPUTED, and filed a second dispute over it.
+   */
+  async function takeObligationDispute(reason: string): Promise<void> {
+    const taken = await markObligationDisputed(orderId, reason);
+    if (taken.disputeId) mirroredDispute = taken.disputeId;
+  }
+
   /**
    * Waits for the order to leave `waitingIn`, re-reading it on every signal
    * and at least every `recheckMs`.
@@ -240,7 +277,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         // read is in flight may be about a commit the read did not see, and it
         // must wake the next wait rather than be swallowed.
         nudged = false;
-        const order = await readOrder(orderId);
+        const order = await read();
         if (order.status !== waitingIn) return order;
 
         if (window && windowElapsed) {
@@ -291,7 +328,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     // before this answer existed returns undefined — authorised.
     const authorisation = await authoriseSettlement(orderId, transactionId);
     if (authorisation?.disputed) {
-      await markObligationDisputed(orderId, authorisation.reason);
+      await takeObligationDispute(authorisation.reason);
       return false;
     }
 
@@ -334,7 +371,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         // attempt can settle it until an operator decides: this one ends, and
         // the order takes the dispute instead of the next attempt.
         await markSettlementFailed(orderId);
-        await markObligationDisputed(orderId, settled.reason);
+        await takeObligationDispute(settled.reason);
         return false;
       }
       const settlement = settled;
@@ -363,7 +400,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   //
   // Not two: creating the obligation and holding the money separately leaves a
   // window in which the buyer can spend what they have just committed.
-  let order = await readOrder(orderId);
+  let order = await read();
 
   if (order.status === 'PENDING') {
     status.phase = 'CREATING_OBLIGATION';
@@ -381,15 +418,10 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
       // and the loop below refunds it.
       await markFundsHeld(orderId, hold.transactionId);
     }
-    order = await readOrder(orderId);
+    order = await read();
   }
 
   // ---- 2. Follow the order until it ends ----------------------------------
-  // The dispute economic-service has been told about and not yet told is
-  // resolved. An id, not a flag: a second dispute on the same order is a
-  // different dispute, and is mirrored under its own key.
-  let mirroredDispute: string | undefined;
-
   for (;;) {
     switch (order.status) {
       case 'FUNDS_HELD':
@@ -428,6 +460,10 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
           );
         }
         if (mirroredDispute !== order.dispute.id) {
+          // The dispute economic-service holds was decided and a party raised
+          // this one before the saga looked: economic-service hears of the
+          // decision first, or it would refuse this dispute as already there.
+          await mirrorResolution(order, 'Dispute resolved: SETTLE');
           // economic-service is told too, so a direct settlement command there
           // is refused independently of anything this service does (ADR-040 § 5).
           await disputeObligation(
@@ -445,32 +481,16 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
 
       case 'RECEIPT_CONFIRMED':
       case 'SETTLING':
-        if (mirroredDispute) {
-          // The resolution is mirrored back, or economic-service would still
-          // refuse to settle a transaction it believes is disputed.
-          await resolveObligationDispute(
-            orderId,
-            heldTransaction(order),
-            mirroredDispute,
-            order.dispute?.resolution ?? 'Dispute resolved: SETTLE',
-          );
-          mirroredDispute = undefined;
-        }
+        // The resolution is mirrored back, or economic-service would still
+        // refuse to settle a transaction it believes is disputed.
+        await mirrorResolution(order, 'Dispute resolved: SETTLE');
         if (await settleOrder(heldTransaction(order))) return 'COMPLETED';
-        order = await readOrder(orderId);
+        order = await read();
         break;
 
       // ---- Compensation ---------------------------------------------------
       case 'CANCELLING': {
-        if (mirroredDispute) {
-          await resolveObligationDispute(
-            orderId,
-            heldTransaction(order),
-            mirroredDispute,
-            order.dispute?.resolution ?? 'Dispute resolved: REFUND',
-          );
-          mirroredDispute = undefined;
-        }
+        await mirrorResolution(order, 'Dispute resolved: REFUND');
         status.phase = 'COMPENSATING';
         const reason = order.cancellationReason ?? 'Cancelled';
         // An order cancelled before its hold was recorded may still have one:
