@@ -11,6 +11,7 @@ import {
   type LockedTransaction,
 } from '../transaction/transaction.repository';
 import { CommissionService } from '../commission/commission.service';
+import type { CommissionOutcome } from '../commission/rule-engine';
 import { assertSufficient, balancesFrom } from '../wallet/balances';
 import { nextStatus } from '../transaction/state-machine';
 import { ECONOMIC_EVENTS } from '../events/events';
@@ -24,6 +25,7 @@ import {
 } from '../observability/metrics';
 import { SERVICE_NAME } from '../config/env';
 import type { DraftEntry } from '../ledger/journal';
+import type { IdempotentAnswer } from '../shared/idempotency';
 
 /**
  * Settlement — the one operation this whole service is arranged around
@@ -44,7 +46,7 @@ import type { DraftEntry } from '../ledger/journal';
  *   lock the transaction row                       ← one settlement, not two
  *   check the state machine                        ← never from DISPUTED
  *   lock both wallets, in ascending id order       ← no deadlock, ever
- *   compute commission at the transaction's date   ← not at today's rate
+ *   charge the pricing recorded with the fact      ← not at today's rate
  *   post ONE balanced journal                      ← escrow → payee + revenue
  *   release the hold                               ← no second journal
  *   recompute both balances from the ledger        ← never incremented
@@ -88,9 +90,15 @@ export class SettlementService {
    * Settles one transaction.
    *
    * `settledBy` is the acting user; the caller has already established that
-   * they may commit this organization (`access.ts`).
+   * they may commit this organization (`access.ts`). `answer`, for an
+   * idempotent request, is stored as its key's answer in the settlement's own
+   * transaction, so the money movement and the completed key commit together.
    */
-  async settle(transactionId: string, settledBy: string): Promise<SettlementResult> {
+  async settle(
+    transactionId: string,
+    settledBy: string,
+    answer?: IdempotentAnswer<SettlementResult>,
+  ): Promise<SettlementResult> {
     const stop = financialTransactionDuration.startTimer({
       service: SERVICE_NAME,
       operation: 'settle',
@@ -98,7 +106,11 @@ export class SettlementService {
 
     try {
       const result = await withFinancialSpan('economic.settle', () =>
-        this.prisma.transaction((tx) => this.settleWithin(tx, transactionId, settledBy)),
+        this.prisma.transaction(async (tx) => {
+          const settled = await this.settleWithin(tx, transactionId, settledBy);
+          await answer?.respond(tx, settled);
+          return settled;
+        }),
       );
       settlementsCompletedTotal.inc({ service: SERVICE_NAME, type: result.transactionType });
       return result;
@@ -173,12 +185,17 @@ export class SettlementService {
       );
     }
 
-    const decision = await this.commissions.decide(tx, {
+    // What was decided when the source fact was recorded (docs/23 D-057);
+    // decided now, at `occurredAt`, only for an obligation older than that.
+    const decision = await this.commissions.chargeFor(tx, {
       organizationId: payeeOrganizationId,
       transactionType: transaction.transactionType,
+      businessLine: transaction.businessLine,
       occurredAt: transaction.occurredAt,
       grossAmountMinor: transaction.grossAmountMinor,
       currency: transaction.currency,
+      pricingOutcome: transaction.pricingOutcome,
+      pricingRuleId: transaction.pricingRuleId,
     });
 
     const netAmountMinor = transaction.grossAmountMinor - decision.amountMinor;
@@ -219,6 +236,8 @@ export class SettlementService {
     await this.commissions.record(tx, {
       transactionId: transaction.id,
       organizationId: payeeOrganizationId,
+      transactionType: transaction.transactionType,
+      businessLine: transaction.businessLine,
       decision,
       grossAmountMinor: transaction.grossAmountMinor,
       currency: transaction.currency,
@@ -292,6 +311,8 @@ export class SettlementService {
       netAmountMinor,
       currency: transaction.currency,
       commissionMatched: decision.matched,
+      commissionOutcome: decision.outcome,
+      businessLine: transaction.businessLine,
       payeeOrganizationId,
       settledAt,
     };
@@ -474,6 +495,9 @@ export interface SettlementResult {
   netAmountMinor: bigint;
   currency: string;
   commissionMatched: boolean;
+  /** `RULE_APPLIED`, or `NO_ACTIVE_RULE` (ADR-045 § 2). */
+  commissionOutcome: CommissionOutcome;
+  businessLine: string | null;
   payeeOrganizationId: string;
   settledAt: Date;
 }

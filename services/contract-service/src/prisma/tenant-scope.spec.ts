@@ -80,7 +80,7 @@ describe('the schema keeps history from being erased', () => {
 });
 
 describe('the schema models nothing CON-003 has not decided so far', () => {
-  it('has the contract, its signatures, amendments and milestones, the idempotency store and the approval policies (statements are a later PR)', () => {
+  it('has the contract, its signatures, amendments, milestones and statements with their deduction rules, approval chains and decisions, the idempotency store and the approval policies (settlement is a later PR)', () => {
     // Each step adds its models here, so an unplanned one still fails this test.
     const names = [...models(SCHEMA).keys()].filter(
       (name) => !['OutboxMessage', 'OutboxStreamSequence'].includes(name),
@@ -93,6 +93,12 @@ describe('the schema models nothing CON-003 has not decided so far', () => {
       'AmendmentSignature',
       'AmendmentSignatureReview',
       'Milestone',
+      'DeductionRule',
+      'Statement',
+      'StatementLine',
+      'StatementDeduction',
+      'StatementApprovalStep',
+      'StatementDecision',
       'ApprovalPolicy',
       'PolicyReconciliationTask',
       'ApprovalPolicyStep',

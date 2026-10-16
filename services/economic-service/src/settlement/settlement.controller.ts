@@ -20,7 +20,7 @@ import {
   zodPipe,
 } from '@rasta/nest-common';
 
-import { SettlementService } from './settlement.service';
+import { SettlementService, type SettlementResult } from './settlement.service';
 import { TransactionService } from '../transaction/transaction.service';
 import { RewardService } from '../reward/reward.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -91,38 +91,39 @@ export class SettlementController {
     const key = requireIdempotencyKey(idempotencyKey);
     const actor = getContext().userId ?? SERVICE_NAME;
 
-    return this.idempotency.run('POST /v1/settlements', key, dto, 201, async () => {
-      // Authorization before the lock: the caller must be entitled to commit
-      // the paying organization. Read outside the settlement transaction so an
-      // unauthorised request never takes a row lock at all.
-      const transaction = await this.transactions.get(dto.transactionId);
-      canCommitOrganization(transaction.organizationId);
+    return this.idempotency.run(
+      'POST /v1/settlements',
+      key,
+      dto,
+      201,
+      async (answer) => {
+        // Authorization before the lock: the caller must be entitled to commit
+        // the paying organization. Read outside the settlement transaction so an
+        // unauthorised request never takes a row lock at all.
+        await this.authorizeSettlement(dto.transactionId);
 
-      const result = await this.settlements.settle(dto.transactionId, actor);
+        // The response is stored with the settlement, in its transaction: a
+        // failure after that commit replays it, never frees the key.
+        const result = await this.settlements.settle(
+          dto.transactionId,
+          actor,
+          answer.map(toSettlementView),
+        );
 
-      // Deliberately after the settlement's transaction has committed, and
-      // deliberately not awaited into it. docs/10 § 10.10: a reward never rolls
-      // a settlement back.
-      await this.grantSettlementRewards(result.payeeOrganizationId, result.transactionId);
+        // Deliberately after the settlement's transaction has committed, and
+        // deliberately not awaited into it. docs/10 § 10.10: a reward never rolls
+        // a settlement back.
+        await this.grantSettlementRewards(result.payeeOrganizationId, result.transactionId);
+      },
+      // The same check, before a stored settlement is shown to anyone.
+      { mayReplay: () => this.authorizeSettlement(dto.transactionId) },
+    );
+  }
 
-      return {
-        settlementId: result.settlementId,
-        transactionId: result.transactionId,
-        journalId: result.journalId,
-        grossAmountMinor: result.grossAmountMinor.toString(),
-        commissionAmountMinor: result.commissionAmountMinor.toString(),
-        netAmountMinor: result.netAmountMinor.toString(),
-        currency: result.currency,
-        /**
-         * False means no active commission rule matched, so nothing was
-         * charged. Reported explicitly because "zero because unconfigured" and
-         * "zero because the rate is zero" are different facts and docs/24 Q-08
-         * is open (ADR-023).
-         */
-        commissionRuleMatched: result.commissionMatched,
-        settledAt: result.settledAt.toISOString(),
-      };
-    });
+  /** Whether the caller may settle this transaction: a party, entitled to commit its payer. */
+  private async authorizeSettlement(transactionId: string): Promise<void> {
+    const transaction = await this.transactions.get(transactionId);
+    canCommitOrganization(transaction.organizationId);
   }
 
   /**
@@ -235,4 +236,28 @@ export class SettlementController {
       settledBy: row.settledBy,
     };
   }
+}
+
+/** The settlement response, built inside the settlement's own transaction. */
+function toSettlementView(result: SettlementResult) {
+  return {
+    settlementId: result.settlementId,
+    transactionId: result.transactionId,
+    journalId: result.journalId,
+    grossAmountMinor: result.grossAmountMinor.toString(),
+    commissionAmountMinor: result.commissionAmountMinor.toString(),
+    netAmountMinor: result.netAmountMinor.toString(),
+    currency: result.currency,
+    /**
+     * False means no active commission rule matched, so nothing was
+     * charged. Reported explicitly because "zero because unconfigured" and
+     * "zero because the rate is zero" are different facts and docs/24 Q-08
+     * is open (ADR-023).
+     */
+    commissionRuleMatched: result.commissionMatched,
+    /** The same fact by name, as the commission row records it (ADR-045 § 2). */
+    commissionOutcome: result.commissionOutcome,
+    businessLine: result.businessLine,
+    settledAt: result.settledAt.toISOString(),
+  };
 }

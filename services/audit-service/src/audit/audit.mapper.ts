@@ -3,6 +3,7 @@ import { SENSITIVE_KEYS, REDACTED } from '@rasta/logging';
 import type { AuditChange, EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
 import { toContractRefusalProjection } from './contract-refusal-projection';
+import { toCommissionRuleChanges } from './commission-rule-change-projection';
 import { AUDIT_DOMAIN_TOPIC_OWNERS, type AuditDomainTopic } from './audit-producer-topology';
 
 /**
@@ -78,12 +79,13 @@ export interface AuditEventRecord {
   traceparent: string | null;
   sourceStreamSeq: bigint | null;
 
-  // Path B only (AUD-004 Phase B, `audit-trail.mapper.ts`). A path-A record
-  // never carries these keys — a domain envelope has nothing to put in them,
-  // and leaving them off keeps "there is nowhere for a payload to go" a
-  // structural fact of path A rather than a convention. The repository writes
-  // an absent key as SQL NULL, and the record hash already covers all six
-  // (`CANONICAL_FIELDS`), so a path-A row hashes exactly as it did before.
+  // Path B (AUD-004 Phase B, `audit-trail.mapper.ts`). A path-A record carries
+  // none of these keys — a domain envelope has nothing to put in them — with
+  // two allow-listed exceptions, each its own projection: a contract refusal's
+  // `reason`, and a commission rule change's `changes`
+  // (`commission-rule-change-projection.ts`). The repository writes an absent
+  // key as SQL NULL, and the record hash already covers all six
+  // (`CANONICAL_FIELDS`), so every other path-A row hashes exactly as before.
 
   errorCode?: string | null;
   reason?: string | null;
@@ -166,9 +168,12 @@ export function isSensitiveKey(key: string): boolean {
  * amounts, sealed payloads and national identifiers into the one table nobody
  * is allowed to delete from.
  *
- * So `changes` stays null in AUD-001 and the payload is never persisted. This
- * function exists for the diagnostics path only — it is what a log line or an
- * error may say about a payload — and it returns key names, never values.
+ * So `changes` stays null in AUD-001 and the payload is never persisted — except
+ * for the one event that *is* a before/after pair: `COMMISSION_RULE_CHANGED`,
+ * whose allow-listed, validated delta `commission-rule-change-projection.ts`
+ * builds (docs/23 D-057). This function exists for the diagnostics path only —
+ * it is what a log line or an error may say about a payload — and it returns
+ * key names, never values.
  */
 export function describePayloadKeys(payload: unknown): string {
   if (payload === null || payload === undefined) return '(none)';
@@ -264,6 +269,10 @@ export function toAuditEventRecord(
   // payload is read.
   const refusal = toContractRefusalProjection(envelope, delivery);
 
+  // The one published before/after pair: a commission rule's terms (docs/23 D-057). Allow-listed
+  // and validated against economic's contract; refused to the dead-letter topic otherwise.
+  const ruleChanges = toCommissionRuleChanges(envelope, delivery);
+
   return {
     ...toEnvelopeProvenance(envelope, delivery),
 
@@ -288,5 +297,6 @@ export function toAuditEventRecord(
     occurrenceCount: 1,
     // Absent, not null, on every other path-A record: its hash is unchanged.
     ...(refusal ? { reason: refusal.reason } : {}),
+    ...(ruleChanges ? { changes: ruleChanges } : {}),
   };
 }

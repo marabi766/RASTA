@@ -94,11 +94,51 @@ describe('the closed reasons', () => {
       ACTOR_IDENTITY_UNKNOWN: 422,
       SIGNATURE_POLICY_REQUIRED: 422,
     });
-    expect(REFUSAL_REASONS.policy).toEqual({ AUTHORITY_NOT_GOVERNED_ORGANIZATION: 422 });
+    expect(REFUSAL_REASONS.policy).toEqual({
+      AUTHORITY_NOT_GOVERNED_ORGANIZATION: 422,
+      AMOUNT_BOUNDS_NOT_APPLICABLE: 422,
+    });
     expect(REFUSAL_REASONS.cancellation).toEqual({
       CANCEL_REASON_NOT_ALLOWED: 422,
       CONTRACT_NOT_DRAFT: 422,
       SIGNATURE_RECORDED: 422,
+    });
+  });
+
+  it('refuse a statement’s submission 422 for every gap in its chains, never 403 — the contractor lacks no authority (CON-003 PR 5)', () => {
+    expect(REFUSAL_REASONS.statement).toEqual({
+      AUTHOR_NOT_CONTRACTOR: 403,
+      CONTRACT_NOT_SIGNED: 422,
+      DEDUCTION_NOT_CONFIGURED: 422,
+      STATEMENT_NET_NEGATIVE: 422,
+      STATEMENT_EXCEEDS_LIMIT: 422,
+      MILESTONE_NOT_OF_CONTRACT: 422,
+      STATEMENT_NOT_DRAFT: 422,
+      ACTOR_IDENTITY_UNKNOWN: 422,
+      TECHNICAL_POLICY_REQUIRED: 422,
+      FINANCIAL_POLICY_REQUIRED: 422,
+      TECHNICAL_STEP_NOT_APPLICABLE: 422,
+      FINANCIAL_STEP_NOT_APPLICABLE: 422,
+      APPROVAL_STEP_NAMES_CONTRACTOR: 422,
+      POLICY_AUTHOR_NOT_GOVERNING: 422,
+    });
+  });
+
+  it('refuse a decision 403 for want of authority, 422 for separation of duties and for the statement’s state, 409 for a step decided meanwhile (CON-003 PR 6)', () => {
+    expect(REFUSAL_REASONS.decision).toEqual({
+      NOT_STEP_AUTHORITY: 403,
+      MEMBER_OF_CONTRACTOR: 403,
+      SUBMITTER_MAY_NOT_DECIDE: 422,
+      ALREADY_DECIDED_STATEMENT: 422,
+      ACTOR_IDENTITY_UNKNOWN: 422,
+      CONTRACT_NOT_SIGNED: 422,
+      STATEMENT_NOT_SUBMITTED: 422,
+      STATEMENT_DECIDED: 422,
+      STEP_NOT_IN_CHAIN: 422,
+      CHAIN_NOT_OPEN: 422,
+      STEP_NOT_NEXT: 422,
+      STEP_DECIDED: 409,
+      APPROVED_TOTAL_EXCEEDS_CAP: 422,
     });
   });
 });

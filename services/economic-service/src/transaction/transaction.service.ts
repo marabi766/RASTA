@@ -7,15 +7,22 @@ import { WalletService } from '../wallet/wallet.service';
 import { WalletRepository } from '../wallet/wallet.repository';
 import { TransactionRepository, type TransactionFilter } from './transaction.repository';
 import { nextStatus } from './state-machine';
-import { assertMayRefund, assertTransactionVisible, canCommitOrganization } from '../access/access';
+import {
+  assertMayRefund,
+  assertTransactionVisible,
+  canCommitOrganization,
+  type RefundableTransaction,
+} from '../access/access';
 import { formatMinor, parseMinor } from '../shared/money';
 import { isUniqueViolation } from '../ledger/ledger.repository';
 import { LedgerService } from '../ledger/ledger.service';
+import { CommissionService } from '../commission/commission.service';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { financialTransactionDuration, transactionsCreatedTotal } from '../observability/metrics';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { ENV } from '../tokens';
-import type { Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
+import type { IdempotentAnswer } from '../shared/idempotency';
+import type { BusinessLine, Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
 import type { CreateTransactionDto, DisputeTransactionDto, ResolveDisputeDto } from './dto';
 
 /**
@@ -40,6 +47,7 @@ export class TransactionService {
     private readonly walletRepository: WalletRepository,
     @Inject(ENV) private readonly env: EconomicEnv,
     private readonly ledger: LedgerService,
+    private readonly commissions: CommissionService,
   ) {}
 
   // ==========================================================================
@@ -58,7 +66,10 @@ export class TransactionService {
    * Both happen in one transaction, so a hold that fails for insufficient
    * balance leaves no orphaned obligation behind.
    */
-  async create(dto: CreateTransactionDto): Promise<TransactionDetail> {
+  async create(
+    dto: CreateTransactionDto,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const organizationId = getOrganizationId();
     const actor = getContext().userId ?? SERVICE_NAME;
     const grossAmountMinor = parseMinor(dto.grossAmountMinor, 'grossAmountMinor');
@@ -88,6 +99,16 @@ export class TransactionService {
       const created = await this.prisma.transaction(async (tx) => {
         const id = `${ID_PREFIXES.transaction}_${ulid()}`;
         const occurredAt = dto.occurredAt ? new Date(dto.occurredAt) : new Date();
+        const pricing = dto.counterpartyOrganizationId
+          ? await this.commissions.pricingOf(tx, {
+              organizationId: dto.counterpartyOrganizationId,
+              transactionType: dto.transactionType,
+              businessLine: dto.businessLine ?? null,
+              occurredAt,
+              grossAmountMinor,
+              currency: dto.currency ?? 'IRR',
+            })
+          : UNPRICED;
 
         await this.repository.create(
           tx,
@@ -96,6 +117,8 @@ export class TransactionService {
             organizationId,
             counterpartyOrganizationId: dto.counterpartyOrganizationId ?? null,
             transactionType: dto.transactionType,
+            businessLine: dto.businessLine ?? null,
+            ...pricing,
             status: 'CREATED',
             grossAmountMinor,
             currency: dto.currency ?? 'IRR',
@@ -157,7 +180,7 @@ export class TransactionService {
           },
         );
 
-        return id;
+        return this.answered(tx, id, answer);
       });
 
       transactionsCreatedTotal.inc({
@@ -166,7 +189,7 @@ export class TransactionService {
         source: 'api',
       });
 
-      return this.get(created);
+      return created;
     } catch (error) {
       throw await this.duplicateSourceOr(error, organizationId, dto);
     } finally {
@@ -226,6 +249,8 @@ export class TransactionService {
       organizationId: string;
       counterpartyOrganizationId: string;
       transactionType: TransactionType;
+      /** Stated by the consumer that knows what the fact is (ADR-045 § 4). */
+      businessLine: BusinessLine;
       grossAmountMinor: bigint;
       currency: string;
       occurredAt: Date;
@@ -243,6 +268,16 @@ export class TransactionService {
     if (existing) return { id: existing.id, created: false };
 
     const id = `${ID_PREFIXES.transaction}_${ulid()}`;
+    // At the approval's own time, under the cutover: an approval given before
+    // business lines priced anything is priced as it would have been then.
+    const pricing = await this.commissions.pricingOf(tx, {
+      organizationId: input.counterpartyOrganizationId,
+      transactionType: input.transactionType,
+      businessLine: input.businessLine,
+      occurredAt: input.occurredAt,
+      grossAmountMinor: input.grossAmountMinor,
+      currency: input.currency,
+    });
 
     const written = await this.repository.createForSource(
       tx,
@@ -251,6 +286,8 @@ export class TransactionService {
         organizationId: input.organizationId,
         counterpartyOrganizationId: input.counterpartyOrganizationId,
         transactionType: input.transactionType,
+        businessLine: input.businessLine,
+        ...pricing,
         // Straight to PENDING_SETTLEMENT: the authorising fact is the event
         // itself. The state machine permits this edge from CREATED, and the
         // row is written in its post-transition state rather than moved twice.
@@ -318,10 +355,9 @@ export class TransactionService {
   /**
    * The parties to a transaction and what each is owed.
    *
-   * At creation both legs carry the gross: the commission split is not known
-   * until settlement selects the rule in force, and writing a guess here would
-   * be a number nobody computed. The settlement records the actual split on
-   * the transaction and on the `commission` row.
+   * At creation both legs carry the gross: the rule is chosen now
+   * (`pricing_*`), but the split is computed and posted at settlement, which
+   * records it on the transaction and on the `commission` row.
    */
   private legsFor(
     transactionId: string,
@@ -365,13 +401,20 @@ export class TransactionService {
    * releasing the money. Collapsing them would make the product document's
    * "تأیید دریافت" control indistinguishable from the payment.
    */
-  async authoriseSettlement(transactionId: string): Promise<TransactionDetail> {
+  async authoriseSettlement(
+    transactionId: string,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
     const at = new Date();
-    return this.move(transactionId, 'AUTHORISE_SETTLEMENT', actor, at, {
-      settlementAuthorisedAt: at,
-      settlementAuthorisedBy: actor,
-    });
+    return this.move(
+      transactionId,
+      'AUTHORISE_SETTLEMENT',
+      actor,
+      at,
+      { settlementAuthorisedAt: at, settlementAuthorisedBy: actor },
+      answer,
+    );
   }
 
   /**
@@ -381,14 +424,21 @@ export class TransactionService {
    * machine has no edge from `DISPUTED` to `SETTLED`, only to
    * `PENDING_SETTLEMENT` by an explicit human decision, or to `REFUNDED`.
    */
-  async dispute(transactionId: string, dto: DisputeTransactionDto): Promise<TransactionDetail> {
+  async dispute(
+    transactionId: string,
+    dto: DisputeTransactionDto,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
     const at = new Date();
-    return this.move(transactionId, 'DISPUTE', actor, at, {
-      disputedAt: at,
-      disputedBy: actor,
-      disputeReason: dto.reason,
-    });
+    return this.move(
+      transactionId,
+      'DISPUTE',
+      actor,
+      at,
+      { disputedAt: at, disputedBy: actor, disputeReason: dto.reason },
+      answer,
+    );
   }
 
   /**
@@ -397,14 +447,21 @@ export class TransactionService {
    * A human decision, recorded with who made it. It does not settle — it only
    * unblocks, so that releasing the money remains a separate, deliberate act.
    */
-  async resolveDispute(transactionId: string, dto: ResolveDisputeDto): Promise<TransactionDetail> {
+  async resolveDispute(
+    transactionId: string,
+    dto: ResolveDisputeDto,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
     const at = new Date();
-    return this.move(transactionId, 'RESOLVE_DISPUTE', actor, at, {
-      disputeResolvedAt: at,
-      disputeResolvedBy: actor,
-      disputeReason: dto.resolution,
-    });
+    return this.move(
+      transactionId,
+      'RESOLVE_DISPUTE',
+      actor,
+      at,
+      { disputeResolvedAt: at, disputeResolvedBy: actor, disputeReason: dto.resolution },
+      answer,
+    );
   }
 
   /**
@@ -419,7 +476,11 @@ export class TransactionService {
    * Q-62). Checked under the row lock, against the status the state machine is
    * about to read, so the two cannot disagree.
    */
-  async refund(transactionId: string, reason: string): Promise<TransactionDetail> {
+  async refund(
+    transactionId: string,
+    reason: string,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
     const stop = financialTransactionDuration.startTimer({
       service: SERVICE_NAME,
@@ -427,10 +488,10 @@ export class TransactionService {
     });
 
     try {
-      await this.prisma.transaction(async (tx) => {
+      return await this.prisma.transaction(async (tx) => {
         const transaction = await this.repository.lockForUpdate(tx, transactionId);
         if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-        assertMayRefund(transaction, { payeeMayRefund: this.env.ECONOMIC_REFUND_BY_PAYEE_ENABLED });
+        this.authorizeAct(transaction, 'REFUND');
 
         const target = nextStatus(transactionId, transaction.status, 'REFUND');
 
@@ -483,23 +544,30 @@ export class TransactionService {
           by: actor,
           at: refundedAt,
         });
-      });
 
-      return this.get(transactionId);
+        return this.answered(tx, transactionId, answer);
+      });
     } finally {
       stop();
     }
   }
 
   /** Cancels a transaction nothing has moved against yet. */
-  async cancel(transactionId: string, reason: string): Promise<TransactionDetail> {
+  async cancel(
+    transactionId: string,
+    reason: string,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
     const at = new Date();
-    return this.move(transactionId, 'CANCEL', actor, at, {
-      failureReason: reason,
-      cancelledAt: at,
-      cancelledBy: actor,
-    });
+    return this.move(
+      transactionId,
+      'CANCEL',
+      actor,
+      at,
+      { failureReason: reason, cancelledAt: at, cancelledBy: actor },
+      answer,
+    );
   }
 
   /**
@@ -510,7 +578,8 @@ export class TransactionService {
    * that a caller who is neither payer nor payee gets a 404 rather than
    * discovering the transaction exists. The actor and the instant go on the
    * row (through `extra`) and on the `TRANSACTION_STATUS_CHANGED` record, in
-   * the same transaction as the move.
+   * the same transaction as the move — and so does the answer, read from the
+   * row the move wrote (see {@link answered}).
    */
   private async move(
     transactionId: string,
@@ -518,12 +587,12 @@ export class TransactionService {
     actor: string,
     at: Date,
     extra: Prisma.TransactionUncheckedUpdateManyInput,
+    answer?: IdempotentAnswer<TransactionDetail>,
   ): Promise<TransactionDetail> {
-    await this.prisma.transaction(async (tx) => {
+    return this.prisma.transaction(async (tx) => {
       const transaction = await this.repository.lockForUpdate(tx, transactionId);
       if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-      assertTransactionVisible(transaction);
-      canCommitOrganization(transaction.organizationId);
+      this.authorizeAct(transaction, 'COMMIT');
 
       const target = nextStatus(transactionId, transaction.status, event);
       const moved = await this.repository.transition(
@@ -542,9 +611,64 @@ export class TransactionService {
         by: actor,
         at,
       });
-    });
 
-    return this.get(transactionId);
+      return this.answered(tx, transactionId, answer);
+    });
+  }
+
+  /**
+   * Who may act on this transaction, as a command asks it: `COMMIT` for a
+   * lifecycle move, `REFUND` for a refund (docs/24 Q-62), `READ` for what only
+   * shows it. A non-party learns nothing — `NOT_FOUND` first, always.
+   */
+  private authorizeAct(transaction: RefundableTransaction, act: TransactionAct): void {
+    switch (act) {
+      case 'READ':
+        assertTransactionVisible(transaction);
+        return;
+      case 'COMMIT':
+        assertTransactionVisible(transaction);
+        canCommitOrganization(transaction.organizationId);
+        return;
+      case 'REFUND':
+        assertMayRefund(transaction, { payeeMayRefund: this.env.ECONOMIC_REFUND_BY_PAYEE_ENABLED });
+        return;
+    }
+  }
+
+  /**
+   * The checks of {@link authorizeAct}, against the transaction as it is now,
+   * without the command — the replay guard of an idempotent command on it
+   * (review of #287, finding 1). A caller who could not make the command now
+   * is refused exactly as that command would refuse them: a stored answer
+   * shows the transaction, so it goes only to whom the transaction would.
+   */
+  async assertMayReplay(transactionId: string, act: TransactionAct): Promise<void> {
+    const transaction = await this.repository.findByIdForParty(transactionId);
+    if (!transaction) throw RastaError.notFound('Transaction', transactionId);
+    this.authorizeAct(transaction, act);
+  }
+
+  /**
+   * The transaction as the command that just changed it leaves it, read in
+   * that command's own transaction `tx` — and, for an idempotent request,
+   * stored there as its key's answer.
+   *
+   * It used to be read after the commit, and that read was a failure point
+   * after the effect: inside the idempotency store's work, a read that failed
+   * released the key of a state change that had happened, and the same-key
+   * retry was refused `INVALID_STATE_TRANSITION` against the state it had
+   * itself moved (review of #283, finding 2). Read here, a failure rolls the
+   * change back with it; once this commits, the key is COMPLETED.
+   */
+  private async answered(
+    tx: ExtendedPrismaClient,
+    transactionId: string,
+    answer: IdempotentAnswer<TransactionDetail> | undefined,
+  ): Promise<TransactionDetail> {
+    const detail = await this.get(transactionId, tx);
+    await answer?.respond(tx, detail);
+    return detail;
   }
 
   /**
@@ -605,8 +729,8 @@ export class TransactionService {
    * would hide it from the payee, who is legitimately a party to it. The
    * explicit check refuses everyone else with a 404 (docs/09).
    */
-  async get(id: string): Promise<TransactionDetail> {
-    const transaction = await this.repository.findByIdForParty(id);
+  async get(id: string, client?: ExtendedPrismaClient): Promise<TransactionDetail> {
+    const transaction = await this.repository.findByIdForParty(id, client);
     // Not logged: a settlement passes the client's body text here, and one that
     // names nothing is just that text (S-09). A path id is in the logged path.
     if (!transaction) throw RastaError.notFound('Transaction');
@@ -618,6 +742,15 @@ export class TransactionService {
     return this.repository.list(getOrganizationId(), filter);
   }
 }
+
+/**
+ * A transaction without a payee — a top-up — attracts no commission and never
+ * settles, so there is nothing to price.
+ */
+const UNPRICED = { pricingOutcome: null, pricingRuleId: null } as const;
+
+/** What a caller asks to do to a transaction — see `TransactionService.authorizeAct`. */
+export type TransactionAct = 'READ' | 'COMMIT' | 'REFUND';
 
 type StatusChangeAction =
   | 'CREATE'

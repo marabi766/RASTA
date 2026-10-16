@@ -1,7 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
-import type { Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
+import type {
+  BusinessLine,
+  CommissionOutcome,
+  Prisma,
+  TransactionStatus,
+  TransactionType,
+} from '../generated/prisma';
 import { after, resolveCursor } from '../shared/cursor';
 
 /** How a transaction list may be narrowed. */
@@ -102,6 +108,9 @@ export class TransactionRepository {
                  organization_id                 AS "organizationId",
                  counterparty_organization_id    AS "counterpartyOrganizationId",
                  transaction_type                AS "transactionType",
+                 business_line                   AS "businessLine",
+                 pricing_outcome                 AS "pricingOutcome",
+                 pricing_rule_id                 AS "pricingRuleId",
                  status,
                  gross_amount_minor              AS "grossAmountMinor",
                  commission_amount_minor         AS "commissionAmountMinor",
@@ -157,9 +166,10 @@ export class TransactionRepository {
    * because "the tenant guard let it through" is not an authorization decision
    * for a row that names two tenants.
    */
-  findByIdForParty(id: string) {
+  /** `client` is the caller's transaction when the read answers for what it just wrote. */
+  findByIdForParty(id: string, client: ExtendedPrismaClient = this.client) {
     return runUnscoped('a transaction is visible to both its payer and its payee', () =>
-      this.client.transaction.findUnique({
+      client.transaction.findUnique({
         where: { id },
         include: { legs: true, commission: true, settlement: true },
       }),
@@ -264,6 +274,10 @@ export interface LockedTransaction {
   organizationId: string;
   counterpartyOrganizationId: string | null;
   transactionType: TransactionType;
+  businessLine: BusinessLine | null;
+  /** Recorded with the source fact; null on rows from before that (docs/23 D-057). */
+  pricingOutcome: CommissionOutcome | null;
+  pricingRuleId: string | null;
   status: TransactionStatus;
   grossAmountMinor: bigint;
   commissionAmountMinor: bigint;
@@ -280,6 +294,7 @@ export interface TransactionRow {
   organizationId: string;
   counterpartyOrganizationId: string | null;
   transactionType: string;
+  businessLine: string | null;
   status: string;
   grossAmountMinor: bigint;
   commissionAmountMinor: bigint;

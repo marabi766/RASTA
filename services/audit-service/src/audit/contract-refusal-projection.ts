@@ -10,9 +10,11 @@ import { UnprocessableEventError, type EventDelivery } from '@rasta/nest-common'
  * was refused for want of a policy) and `APPROVAL_POLICY_APPROVAL_REFUSED` (a policy's approval
  * refused by four eyes) are *published* — they are the durable record of a refusal — so the path-A
  * default of "an event on a topic is a success under its own name" is wrong for them:
- * `outcome=REFUSED` searches missed every contract, amendment, milestone and policy-approval
- * refusal. These events are stored as `REFUSED`, under the closed action the refusal names
- * (`SIGN_CONTRACT`, `SIGN_AMENDMENT`, …, `APPROVE_POLICY`) and the closed reason.
+ * `outcome=REFUSED` searches missed every contract, amendment, milestone, statement and
+ * policy-approval refusal. These events are stored as `REFUSED`, under the closed action the
+ * refusal names (`SIGN_CONTRACT`, `SIGN_AMENDMENT`, …, `DRAFT_STATEMENT`, `SUBMIT_STATEMENT`,
+ * `APPROVE_STATEMENT`, `REJECT_STATEMENT`, `APPROVE_POLICY`) and the
+ * closed reason.
  *
  * Only authority and separation-of-duties refusals are published as refusals; contract-service
  * answers a refusal of a contract's state (a contract no longer a draft) without a record.
@@ -51,18 +53,31 @@ export const CONTRACT_REFUSAL_ACTIONS = [
   'SIGN_AMENDMENT',
   'PLAN_MILESTONE',
   'CHANGE_MILESTONE',
+  'DRAFT_STATEMENT',
+  'SUBMIT_STATEMENT',
+  'APPROVE_STATEMENT',
+  'REJECT_STATEMENT',
 ] as const;
 
 /** Contract-service's `AUTHORITY_REFUSED_REASONS`. */
 export const CONTRACT_REFUSAL_REASONS = [
   'ROLE_NOT_PERMITTED',
   'NOT_EMPLOYER',
+  'NOT_CONTRACTOR',
   'SIGNATURE_POLICY_REQUIRED',
   'POLICY_AUTHOR_NOT_GOVERNING',
   'MEMBER_OF_BOTH_PARTIES',
   'SAME_PERSON_BOTH_SIDES',
   'PLATFORM_ADMINISTRATOR',
+  'NOT_STEP_AUTHORITY',
+  'MEMBER_OF_CONTRACTOR',
+  'SUBMITTER_MAY_NOT_DECIDE',
+  'ALREADY_DECIDED_STATEMENT',
+  'ACTOR_IDENTITY_UNKNOWN',
 ] as const;
+
+/** Contract-service's `AUTHORITY_REFUSED_SIDES`: a party, or an organization a statement's chain names. */
+export const CONTRACT_REFUSAL_SIDES = ['EMPLOYER', 'CONTRACTOR', 'APPROVER'] as const;
 
 const id = z.string().min(1).max(128);
 const instant = z.string().datetime({ offset: true });
@@ -72,7 +87,7 @@ const authorityRefused = z
     contractId: id,
     organizationId: id,
     action: z.enum(CONTRACT_REFUSAL_ACTIONS),
-    side: z.enum(['EMPLOYER', 'CONTRACTOR']),
+    side: z.enum(CONTRACT_REFUSAL_SIDES),
     subjectId: id.nullable(),
     reason: z.enum(CONTRACT_REFUSAL_REASONS),
     policyId: id.nullable(),

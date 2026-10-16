@@ -272,7 +272,7 @@ describe('service-to-service access', () => {
     const response = await request(http)
       .post('/v1/commissions/rules')
       .set('x-internal-token', await forTenant(payer))
-      .send({ organizationId: payer, transactionType: 'LOGISTICS', rateBasisPoints: 100 })
+      .send({ organizationId: payer, businessLine: 'LOGISTICS', rateBasisPoints: 100 })
       .expect(403);
 
     expect(response.body.code).toBe('FORBIDDEN');

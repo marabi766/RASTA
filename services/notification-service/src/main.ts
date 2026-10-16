@@ -32,7 +32,13 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { VersioningType } from '@nestjs/common';
 import helmet from 'helmet';
 import { SwaggerModule } from '@nestjs/swagger';
-import { installGracefulShutdown, preflightRuntimeRole } from '@rasta/nest-common';
+import {
+  installGracefulShutdown,
+  bootstrapLogger,
+  installNestLogger,
+  logFatal,
+  preflightRuntimeRole,
+} from '@rasta/nest-common';
 import { PrismaClient } from './generated/prisma';
 import { AppModule } from './app.module';
 import { buildNotificationOpenApiDocument } from './openapi/document';
@@ -49,9 +55,13 @@ async function bootstrap(): Promise<void> {
   );
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
-    logger: env.NODE_ENV === 'development' ? ['log', 'warn', 'error'] : ['warn', 'error'],
+    logger: bootstrapLogger(env, SERVICE_NAME),
     bufferLogs: true,
   });
+
+  // Every `new Logger(...)` and Nest itself write through the pino logger, so
+  // message scrubbing and capping apply to them too (installNestLogger).
+  installNestLogger(app);
 
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
 
@@ -111,6 +121,6 @@ async function bootstrap(): Promise<void> {
 }
 
 bootstrap().catch((error) => {
-  console.error(`[${SERVICE_NAME}] failed to start`, error);
+  logFatal({ serviceName: SERVICE_NAME }, `[${SERVICE_NAME}] failed to start`, error);
   process.exit(1);
 });

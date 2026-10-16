@@ -35,6 +35,12 @@ const PROJECTS_ITEM: SidebarItem = { href: '/projects', label: 'پروژه‌ه�
 /** Shown only to a role that may read tenders, on either side (`server/portal-nav.ts`). */
 const TENDERS_ITEM: SidebarItem = { href: '/tenders', label: 'مناقصه‌ها' };
 
+/** Shown only to a role that may read contracts, on either side (`server/portal-nav.ts`). */
+const CONTRACTS_ITEM: SidebarItem = { href: '/contracts', label: 'قراردادها' };
+
+/** Shown only to a role that may read the supplier directory (`server/portal-nav.ts`). */
+const SUPPLIERS_ITEM: SidebarItem = { href: '/suppliers', label: 'تأمین‌کنندگان' };
+
 const NAV_AFTER_PROJECTS: readonly SidebarItem[] = [
   { href: '/wallet', label: 'کیف پول' },
   { href: '/organizations', label: 'سازمان و اعضا' },
@@ -56,14 +62,18 @@ export const INVENTORY_NAV_ITEM: SidebarItem = { href: '/inventory', label: 'ا�
 export function portalNavFor(options: {
   readonly canReadProjects: boolean;
   readonly canReadTenders?: boolean;
+  readonly canReadContracts?: boolean;
   readonly canReadSettlements?: boolean;
   readonly canReadInventory?: boolean;
+  readonly canReadSuppliers?: boolean;
 }): readonly SidebarItem[] {
   const items = [
     ...NAV_BEFORE_PROJECTS,
     ...(options.canReadProjects ? [PROJECTS_ITEM] : []),
     ...(options.canReadTenders ? [TENDERS_ITEM] : []),
+    ...(options.canReadContracts ? [CONTRACTS_ITEM] : []),
     ...(options.canReadInventory ? [INVENTORY_NAV_ITEM] : []),
+    ...(options.canReadSuppliers ? [SUPPLIERS_ITEM] : []),
     ...NAV_AFTER_PROJECTS,
   ];
   if (!options.canReadSettlements) return items;

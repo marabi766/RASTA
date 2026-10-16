@@ -208,7 +208,7 @@ describe('tenant isolation (real database)', () => {
     it('shows a platform-wide rule to every organization', async () => {
       await asActor({ organizationId: org.a, roles: ['SYSTEM_ADMIN'] }, () =>
         wiring.commissions.createRule({
-          transactionType: 'LOGISTICS',
+          businessLine: 'LOGISTICS',
           rateBasisPoints: 100,
           status: 'ACTIVE',
           label: 'itest-global',
@@ -216,7 +216,7 @@ describe('tenant isolation (real database)', () => {
       );
 
       const seenByB = await asActor({ organizationId: org.b }, () =>
-        wiring.commissions.listRules('LOGISTICS'),
+        wiring.commissions.listRules({ businessLine: 'LOGISTICS' }),
       );
       expect(seenByB.map((rule) => rule.label)).toContain('itest-global');
     });
@@ -228,6 +228,7 @@ describe('tenant isolation (real database)', () => {
       await asActor({ organizationId: org.a, roles: ['SYSTEM_ADMIN'] }, () =>
         wiring.commissions.createRule({
           organizationId: org.a,
+          businessLine: 'PROCUREMENT',
           transactionType: 'PROCUREMENT_ORDER',
           rateBasisPoints: 42,
           status: 'ACTIVE',
@@ -236,12 +237,17 @@ describe('tenant isolation (real database)', () => {
       );
 
       const seenByB = await asActor({ organizationId: org.b }, () =>
-        wiring.commissions.listRules('PROCUREMENT_ORDER'),
+        wiring.commissions.listRules({ transactionType: 'PROCUREMENT_ORDER' }),
       );
       expect(seenByB.map((rule) => rule.label)).not.toContain('itest-private-to-a');
+      // Nor through the business-line filter (ADR-045).
+      const seenByBPerLine = await asActor({ organizationId: org.b }, () =>
+        wiring.commissions.listRules({ businessLine: 'PROCUREMENT' }),
+      );
+      expect(seenByBPerLine.map((rule) => rule.label)).not.toContain('itest-private-to-a');
 
       const seenByA = await asActor({ organizationId: org.a }, () =>
-        wiring.commissions.listRules('PROCUREMENT_ORDER'),
+        wiring.commissions.listRules({ transactionType: 'PROCUREMENT_ORDER' }),
       );
       expect(seenByA.map((rule) => rule.label)).toContain('itest-private-to-a');
     });
@@ -254,6 +260,7 @@ describe('tenant isolation (real database)', () => {
           wiring.commissions.decide(tx, {
             organizationId: org.b,
             transactionType: 'PROCUREMENT_ORDER',
+            businessLine: 'PROCUREMENT',
             occurredAt: new Date(),
             grossAmountMinor: 1_000_000n,
             currency: 'IRR',
@@ -262,6 +269,7 @@ describe('tenant isolation (real database)', () => {
       );
 
       expect(decision.matched).toBe(false);
+      expect(decision.outcome).toBe('NO_ACTIVE_RULE');
       expect(decision.amountMinor).toBe(0n);
     });
 

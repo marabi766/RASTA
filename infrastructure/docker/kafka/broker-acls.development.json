@@ -60,6 +60,20 @@
     {
       "principal": "asset-service",
       "resourceType": "TOPIC",
+      "resourceName": "rasta.document.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "asset-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.document.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "asset-service",
+      "resourceType": "TOPIC",
       "resourceName": "rasta.fleet.v1.retry",
       "patternType": "LITERAL",
       "operation": "READ"

@@ -110,6 +110,16 @@ export {
 } from './filters/exception.filter';
 
 export {
+  NestLoggerAdapter,
+  bootstrapLogger,
+  installNestLogger,
+  logFatal,
+  scrubLogValue,
+} from './logging/nest-logger';
+export { kafkaLogCreator } from './kafka/log-creator';
+export type { LoggerHost } from './logging/nest-logger';
+
+export {
   ZodValidationPipe,
   zodPipe,
   toErrorDetails,
@@ -136,6 +146,23 @@ export {
   KafkaConnectionConfigError,
 } from './kafka/connection';
 export type { KafkaConnectionOptions, KafkaConnectionEnv } from './kafka/connection';
+export { boundedDisconnect, kafkaShutdownDeadline } from './kafka/bounded-disconnect';
+export type {
+  BoundedDisconnectOptions,
+  Disconnectable,
+  DisconnectLogger,
+  DisconnectOutcome,
+} from './kafka/bounded-disconnect';
+export {
+  KafkaReadinessProbe,
+  kafkaProbeTimeoutMs,
+  KAFKA_PROBE_MAX_TIMEOUT_MS,
+} from './kafka/readiness-probe';
+export type {
+  AdminFactory,
+  KafkaReadinessProbeOptions,
+  ProbeLogger,
+} from './kafka/readiness-probe';
 
 // Event consumption ----------------------------------------------------------
 export {
@@ -171,6 +198,8 @@ export {
   buildHeaders as envelopeHeaders,
   orderForPublish,
   OutboxRelay,
+  OutboxReleaseAbandoned,
+  releaseWithin,
   renewalIntervalMs,
   renewalDeadlineMs,
   RENEWAL_INTERVAL_DIVISOR,
@@ -186,6 +215,7 @@ export type {
   EventPublisher,
   OutboxRelayOptions,
   OutboxStopOptions,
+  OutboxReleaseBound,
   BuildOutboxOptions,
   OutboxClaim,
   ClaimRequest,
@@ -196,6 +226,7 @@ export {
   markPublishedSql,
   markFailedSql,
   releaseSql,
+  boundedReleaseSql,
   renewSql,
   oldestPendingAgeSecondsSql,
   activeLeaseCountSql,

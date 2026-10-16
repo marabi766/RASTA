@@ -159,7 +159,7 @@ describe('the economic suite mutates only what it owns', () => {
     const commissionRule = await asActor({ organizationId, userId: author }, () =>
       wiring.commissions.createRule({
         organizationId,
-        transactionType: 'LOGISTICS',
+        businessLine: 'LOGISTICS',
         rateBasisPoints: 150,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } as any),

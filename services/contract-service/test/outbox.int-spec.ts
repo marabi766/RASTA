@@ -1,4 +1,5 @@
 import { eventEnvelopeSchema } from '@rasta/contracts';
+import { releaseWithin } from '@rasta/nest-common';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { validateContractPayload } from '../src/events/events';
 import { cleanup, newAward, newOrganizationId, tenderAwarded, wire, type Wiring } from './helpers';
@@ -81,7 +82,7 @@ describe('the transactional outbox', () => {
 
     expect(await store.markPublished(mine, 'not-the-token')).toBe(0);
     expect(await store.markPublished(mine, claim.token as string)).toBe(1);
-    if (others.length > 0) await store.release(others, claim.token as string);
+    if (others.length > 0) await store.release(others, claim.token as string, releaseWithin(5_000));
 
     const [row] = await outboxOf(a);
     expect(row?.publishedAt).not.toBeNull();
@@ -107,7 +108,7 @@ describe('the transactional outbox', () => {
       await store.markFailed(failed, token, 'broker down', { baseSeconds: 5, maxSeconds: 60 }),
     ).toBe(1);
     expect(await store.markPublished([published], token)).toBe(1);
-    if (others.length > 0) await store.release(others, token);
+    if (others.length > 0) await store.release(others, token, releaseWithin(5_000));
 
     const rows = await outboxOf(a);
     const failedRow = rows.find((row) => row.id === failed)!;
@@ -116,12 +117,26 @@ describe('the transactional outbox', () => {
     expect(await store.pendingCount()).toBeGreaterThanOrEqual(1);
     expect(await store.oldestPendingAgeSeconds()).toBeGreaterThanOrEqual(0);
 
+    // One bounded batch, as `OutboxPurgeScheduler` issues it (D-052). The isolated proof of what
+    // the purge keeps is `outbox-purge.int-spec.ts`.
+    const purge = () =>
+      store.purgePublished({
+        retentionSeconds: 7 * 24 * 60 * 60,
+        limit: 10_000,
+        statementTimeoutMs: 5000,
+        maxWaitMs: 2000,
+      });
     // Nothing published is older than the retention window yet, so nothing goes.
     const before = (await outboxOf(a)).length;
-    await store.purgePublished(7);
+    await purge();
     expect(await outboxOf(a)).toHaveLength(before);
-    // With a zero-day window the published row goes and the failed one stays.
-    await store.purgePublished(0);
+    // Published past the window, the published row goes and the failed one stays.
+    await w.prisma.client.$executeRaw`
+      UPDATE outbox_message
+         SET created_at = now() - interval '30 days',
+             published_at = now() - interval '30 days' + interval '1 second'
+       WHERE id = ${published}`;
+    await purge();
     expect((await outboxOf(a)).map((row) => row.id)).toEqual([failed]);
   });
 });

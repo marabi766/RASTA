@@ -153,6 +153,92 @@ export class ContractAccess {
   }
 
   /**
+   * The caller of a statement command (CON-003 PR 4 and 5): the same person-for-an-organization as
+   * {@link assertCanCommand}, and never the platform administrator — the contractor drafts and
+   * submits its own statements (Q-96). Like the other commands, the platform administrator's refusal
+   * is recorded when it acts for a party to the contract (`AuthorityRefusals.commandingCaller`).
+   */
+  assertCanCommandStatements(): Acting {
+    assertNotAuditor();
+    assertNotServiceCaller();
+    const context = getContext();
+    if (context.roles.includes(SUPER_ROLE)) {
+      throw platformAdministratorRefused(
+        'The platform administrator does not draft or submit a statement for a party',
+        context.organizationId,
+      );
+    }
+    if (!context.organizationId) {
+      throw RastaError.forbidden('A statement is drafted and submitted for an organization');
+    }
+    return { organizationId: context.organizationId };
+  }
+
+  /**
+   * The caller of a decision on a statement's approval chain (CON-003 PR 6): a person acting for an
+   * organization, never the platform administrator — the operator approves nothing for anyone, and
+   * a chain's step names an organization and a role, never `SYSTEM_ADMIN`
+   * (`ck_statement_approval_step_terms`). Which step the organization is the authority of, and
+   * whether the caller holds its role, is judged once the statement is found.
+   */
+  assertCanDecideStatements(): Acting {
+    assertNotAuditor();
+    assertNotServiceCaller();
+    const context = getContext();
+    if (context.roles.includes(SUPER_ROLE)) {
+      throw platformAdministratorRefused(
+        'The platform administrator does not approve or reject a statement for anyone',
+        context.organizationId,
+      );
+    }
+    if (!context.organizationId) {
+      throw RastaError.forbidden('A statement is decided for an organization');
+    }
+    return { organizationId: context.organizationId };
+  }
+
+  /**
+   * Whether the caller is a member of `organizationId` as the identity provider signed it — never
+   * the tenant it selects. A decider who is also a member of the contractor's organization would
+   * be judging its own organization's claim.
+   */
+  isMemberOf(organizationId: string): boolean {
+    return getContext().organizationIds.includes(organizationId);
+  }
+
+  /**
+   * The organization and roles an approver reads a statement with (CON-003 PR 6): a signed-in
+   * person acting for an organization, never the oversight role, a service or the platform
+   * administrator. `null` for anyone else. Which statement it may read is the snapshot's to say.
+   */
+  approverReader(): { organizationId: string; roles: readonly string[] } | null {
+    const context = getContext();
+    if (
+      context.authType !== 'USER' ||
+      !context.organizationId ||
+      context.roles.includes(OVERSIGHT_ROLE) ||
+      context.roles.includes(SUPER_ROLE)
+    ) {
+      return null;
+    }
+    return { organizationId: context.organizationId, roles: context.roles };
+  }
+
+  /** Whether the caller holds `role` in the organization it acts for. */
+  holdsRole(role: string): boolean {
+    return getContext().roles.includes(role);
+  }
+
+  /** Whether the caller holds the contractor's role (`CONTRACTOR`, not configurable, Q-95 (1)). */
+  isContractor(): boolean {
+    return getContext().roles.includes(CONTRACTOR_ROLE);
+  }
+
+  contractorRole(): string {
+    return CONTRACTOR_ROLE;
+  }
+
+  /**
    * The contractor's signing role: the `CONTRACTOR` role of its own organization, which is not
    * configurable (Q-95 (1)). The employer's side has no role here: who signs for it is the
    * `contract.signature` policy of the employer's organization (`employerSigningRole`), read
