@@ -137,6 +137,14 @@ export type DisputeTransactionDto = z.infer<typeof disputeTransactionSchema>;
 export const resolveDisputeSchema = z
   .object({
     resolution: z.string().trim().min(10).max(1000),
+    /**
+     * The dispute this resolution decides, as `GET /v1/transactions/{id}`
+     * names it (`disputeId`). Optional; when sent, the transaction must still
+     * hold that dispute, checked under its row lock, or the command is refused
+     * `INVALID_STATE_TRANSITION`. Without it, a decision about one dispute
+     * could resolve another raised since (docs/23 D-053).
+     */
+    disputeId: z.string().trim().min(1).max(64).optional(),
   })
   .strict();
 
@@ -189,6 +197,24 @@ export interface TransactionView {
 }
 
 export interface TransactionDetailView extends TransactionView {
+  /**
+   * When it was authorised for settlement and, if a service did it, which
+   * service and under which `Idempotency-Key` — kept for good, unlike the
+   * command's stored answer (docs/23 D-053). Null if never authorised, or
+   * recorded already authorised (ADR-032). `service` and `idempotencyKey`
+   * are null for a person, and on rows authorised before they were kept.
+   */
+  settlementAuthorisation: {
+    authorisedAt: string;
+    service: string | null;
+    idempotencyKey: string | null;
+  } | null;
+  /**
+   * The latest dispute's identity: a new one each time the transaction is
+   * disputed, kept through its resolution. Null if never disputed. What
+   * `resolve-dispute` names to decide exactly this dispute (docs/23 D-053).
+   */
+  disputeId: string | null;
   legs: { role: string; organizationId: string; amountMinor: string; currency: string }[];
   commission: {
     id: string;
