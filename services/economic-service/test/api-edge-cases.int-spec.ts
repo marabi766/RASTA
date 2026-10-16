@@ -58,7 +58,8 @@ describe('economic edge cases', () => {
 
   describe('a commission rule', () => {
     it('accepts a floor, a ceiling, a window and a provenance label', async () => {
-      const from = new Date(Date.now() - 3600_000).toISOString();
+      // From now on: a rule is never backdated (docs/23 D-057), so it starts
+      // at the database's present and prices the transactions below.
       const to = new Date(Date.now() + 86_400_000).toISOString();
 
       const created = await request(http)
@@ -75,7 +76,6 @@ describe('economic edge cases', () => {
           // without limit (docs/10 § 10.7).
           minAmountMinor: '5000',
           maxAmountMinor: '20000',
-          validFrom: from,
           validTo: to,
           status: 'ACTIVE',
           label: 'نمونه — نیازمند تصویب',
@@ -214,18 +214,24 @@ describe('economic edge cases', () => {
         .expect(400);
       expect(repriced.body.code).toBe('VALIDATION_FAILED');
 
+      // Deactivating a rule in force ends it now (docs/23 D-057): its status
+      // stays, so whatever occurred under it is still priced by it.
+      const before = Date.now();
       const relabelled = await request(http)
         .patch(`/v1/commissions/rules/${created.body.id}`)
         .set('authorization', asSystem())
         .send({ status: 'INACTIVE', label: 'بازبینی‌شده' })
         .expect(200);
       expect(relabelled.body.rateBasisPoints).toBe(100);
-      expect(relabelled.body.status).toBe('INACTIVE');
+      expect(relabelled.body.status).toBe('ACTIVE');
+      expect(new Date(relabelled.body.validTo).getTime()).toBeGreaterThanOrEqual(before - 1000);
+      expect(new Date(relabelled.body.validTo).getTime()).toBeLessThanOrEqual(Date.now() + 1000);
       expect(relabelled.body.label).toBe('بازبینی‌شده');
     });
 
-    it('refuses to move or reopen a rule that has already ended', async () => {
-      const ended = await request(http)
+    it('refuses to backdate a rule, or to move or reopen one that has ended', async () => {
+      // A rule inserted into the past would reprice what occurred there.
+      const backdated = await request(http)
         .post('/v1/commissions/rules')
         .set('authorization', asSystem())
         .send({
@@ -235,7 +241,21 @@ describe('economic edge cases', () => {
           validFrom: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
           validTo: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
         })
+        .expect(422);
+      expect(backdated.body.code).toBe('BUSINESS_RULE_VIOLATION');
+
+      // The previous test ended this organization's LOGISTICS rule now, so a
+      // new one may start; ended in its turn, it is past moving.
+      const ended = await request(http)
+        .post('/v1/commissions/rules')
+        .set('authorization', asSystem())
+        .send({ organizationId: org, businessLine: 'LOGISTICS', rateBasisPoints: 90 })
         .expect(201);
+      await request(http)
+        .patch(`/v1/commissions/rules/${ended.body.id}`)
+        .set('authorization', asSystem())
+        .send({ status: 'INACTIVE' })
+        .expect(200);
 
       // Reopening it would pull occurrences decided under another rule back
       // under this one.

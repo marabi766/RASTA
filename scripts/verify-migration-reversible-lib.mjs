@@ -757,6 +757,36 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
       END $$;`,
   },
   {
+    label: 'commission: the pricing cutover is recorded once, by this migration',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "commission_pricing_cutover"
+         WHERE id = 1 AND migration_name = '${COMMISSION_BUSINESS_LINES}';
+        IF found <> 1 THEN RAISE EXCEPTION 'the pricing cutover is not recorded (found %)', found; END IF;
+      END $$;`,
+  },
+  {
+    label: 'commission: a rule that has been in force keeps its status (D-057)',
+    sql: `INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
+            "valid_from", "valid_to", "status", "created_by", "updated_at", "updated_by")
+          VALUES ('CMR_MIGCHECK_PAST', 'ORG-MIGCHECK-OTHER', 'LOGISTICS', 100,
+            '2020-01-01', '2020-02-01', 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK');
+          UPDATE "commission_rule" SET "status" = 'INACTIVE' WHERE id = 'CMR_MIGCHECK_PAST';`,
+    mustFail: 'keeps its status',
+  },
+  {
+    label: 'commission: two active rules of one scope never overlap (D-057)',
+    sql: `INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
+            "valid_from", "valid_to", "status", "created_by", "updated_at", "updated_by")
+          VALUES ('CMR_MIGCHECK_EARLIER', 'ORG-MIGCHECK-OVERLAP', 'LOGISTICS', 100,
+            '2020-01-01', '2020-02-01', 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK'),
+                 ('CMR_MIGCHECK_OVERLAP', 'ORG-MIGCHECK-OVERLAP', 'LOGISTICS', 500,
+            '2020-01-15', NULL, 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
+    mustFail: 'ex_commission_rule_type_only_no_overlap',
+  },
+  {
     label: 'commission: a posted charge is append-only',
     sql: `UPDATE "commission" SET amount_minor = 0 WHERE id = 'CMS_MIGCHECK_PRICED';`,
     mustFail: 'append-only',
@@ -844,6 +874,28 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
   },
   { label: 'commission: down (no line anywhere)', runDownScript: [COMMISSION_BUSINESS_LINES] },
   {
+    label: 'commission: two active type-only rules for one organization and type, overlapping',
+    sql: `INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
+            "valid_from", "status", "created_by", "updated_at", "updated_by")
+          VALUES ('CMR_MIGCHECK_DUP_A', 'ORG-MIGCHECK-DUP', 'LOGISTICS', 100, '2020-01-01', 'ACTIVE',
+                  'USR-MIGCHECK', now(), 'USR-MIGCHECK'),
+                 ('CMR_MIGCHECK_DUP_B', 'ORG-MIGCHECK-DUP', 'LOGISTICS', 500, '2020-06-01', 'ACTIVE',
+                  'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
+  },
+  {
+    label: 'commission: the forward migration refuses them, naming the query that finds them',
+    deployMustFail:
+      'pair(s) of active rules for one organization and type in force at the same time',
+  },
+  {
+    label: 'commission: an operator closes one (in the probe: removes both)',
+    sql: `DELETE FROM "commission_rule" WHERE id LIKE 'CMR_MIGCHECK_DUP_%';`,
+  },
+  {
+    label: 'commission: resolve the migration refused for overlap',
+    resolveRolledBack: COMMISSION_BUSINESS_LINES,
+  },
+  {
     label: 'commission: a charge with no rule behind it, which nothing can classify',
     sql: [
       TRANSACTION_MIGCHECK('TXN_MIGCHECK_ORPHAN'),
@@ -868,6 +920,10 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
                     WHERE typname IN ('BusinessLine', 'CommissionOutcome')
                       AND typnamespace = current_schema()::regnamespace) THEN
           RAISE EXCEPTION 'the refused migration left a type behind';
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_tables
+                    WHERE schemaname = current_schema() AND tablename = 'commission_pricing_cutover') THEN
+          RAISE EXCEPTION 'the refused migration left the pricing cutover behind';
         END IF;
       END $$;`,
   },
@@ -1482,6 +1538,12 @@ export const EXPECTED = {
     // D-045: the runtime role owns nothing and cannot create the scratch schema
     // or database; the migrator owns rasta_economic.
     connectAs: 'migrator',
+    // `CREATE EXTENSION IF NOT EXISTS btree_gist` for the commission rules'
+    // no-overlap exclusions (docs/23 D-057); its down script leaves it, as
+    // organization-service's does, because the bootstrap installs it too.
+    keptExtensions: {
+      '20261016120000_commission_business_lines': ['btree_gist'],
+    },
     tables: [
       'wallet',
       'ledger_account',
@@ -1493,6 +1555,8 @@ export const EXPECTED = {
       'payment_reconciliation_resolution',
       'payment_reconciliation_requeue',
       'payment_refund_decline',
+      // The instant line rules began to price (docs/23 D-057).
+      'commission_pricing_cutover',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -1503,16 +1567,34 @@ export const EXPECTED = {
       'trg_payment_requeue_append_only',
       // A posted commission is corrected by a reversal entry, never edited (ADR-045 § 3).
       'trg_commission_append_only',
+      // What was in force at an instant stays what it was (docs/23 D-057).
+      'trg_commission_rule_effective_dated',
+      'trg_commission_pricing_cutover_fixed',
+      'trg_transaction_pricing_fixed',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: ['BusinessLine', 'CommissionOutcome'],
-    functions: ['reject_commission_mutation'],
+    functions: [
+      'reject_commission_mutation',
+      'commission_rule_effective_dated',
+      'reject_commission_pricing_cutover_mutation',
+      'reject_transaction_repricing',
+    ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
       'ck_wallet_balances',
       // A rule names a line or a type; an outcome never contradicts its rule (ADR-045 § 2).
       'ck_commission_rule_scope',
       'ck_commission_outcome',
+      // Two active rules of one scope never overlap in time (docs/23 D-057).
+      'ex_commission_rule_type_only_no_overlap',
+      'ex_commission_rule_line_no_overlap',
+      'ex_commission_rule_line_type_no_overlap',
+      'ck_commission_rule_organization_not_blank',
+      // An obligation's recorded pricing names a rule exactly when one applied.
+      'ck_transaction_pricing',
+      'transaction_pricing_rule_id_fkey',
+      'ck_commission_pricing_cutover_single',
       'ck_payment_reconciliation_done_complete',
       'ck_payment_reconciliation_lease_pair',
       // Separation of duties on an operator resolution (ADR-064 § 6).

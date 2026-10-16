@@ -105,9 +105,27 @@ describe('rule change audit records', () => {
       before: { rateBasisPoints: 120, validTo: null, label: null },
       after: { rateBasisPoints: 120, validTo: inAnHour, label: 'بسته — جایگزین دارد' },
     });
+
+    // Deactivated while in force: recorded as the end it is, the status kept
+    // (docs/23 D-057) — the terms audit-service keeps (F5).
+    await request(http)
+      .patch(`/v1/commissions/rules/${ruleId}`)
+      .set('authorization', asSystem())
+      .send({ status: 'INACTIVE' })
+      .expect(200);
+    const [, , deactivation] = await recordsFor('COMMISSION_RULE_CHANGED', ruleId);
+    expect(deactivation).toMatchObject({
+      change: 'UPDATED',
+      before: { status: 'ACTIVE', validTo: inAnHour },
+      after: { status: 'ACTIVE' },
+    });
+    expect(deactivation?.after.validTo).not.toBe(inAnHour);
   });
 
-  it('records a platform-wide rule under the organization the administrator acted from', async () => {
+  it('publishes the record as v2, the shape audit-service decodes (docs/07 § 7.8)', async () => {
+    // A platform-wide rule far in the future: in force for nothing any suite
+    // prices, and in no other run's window.
+    const start = Date.now() + (365 + Math.floor(Math.random() * 100_000)) * 86_400_000;
     const created = await request(http)
       .post('/v1/commissions/rules')
       .set('authorization', asSystem())
@@ -115,7 +133,8 @@ describe('rule change audit records', () => {
         businessLine: 'PROCUREMENT',
         transactionType: 'PROCUREMENT_ORDER',
         rateBasisPoints: 0,
-        status: 'INACTIVE',
+        validFrom: new Date(start).toISOString(),
+        validTo: new Date(start + 60_000).toISOString(),
       })
       .expect(201);
 
@@ -124,9 +143,17 @@ describe('rule change audit records', () => {
         where: { eventName: 'COMMISSION_RULE_CHANGED', aggregateId: created.body.id },
       }),
     );
+    // Recorded under the organization the administrator acted from.
     expect(row?.organizationId).toBe(org);
-    const record = (row?.payload as unknown as { payload: ChangeRecord }).payload;
-    expect(record.after.organizationId).toBeNull();
+    expect(row?.eventVersion).toBe(2);
+    const envelope = row?.payload as unknown as { eventVersion: number; payload: ChangeRecord };
+    expect(envelope.eventVersion).toBe(2);
+    expect(envelope.payload.after).toMatchObject({
+      organizationId: null,
+      businessLine: 'PROCUREMENT',
+      transactionType: 'PROCUREMENT_ORDER',
+      rateBasisPoints: 0,
+    });
   });
 
   it('records a reward rule’s creation and close, and not a refused change of terms', async () => {

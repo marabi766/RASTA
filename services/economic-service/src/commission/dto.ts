@@ -44,11 +44,21 @@ export const createCommissionRuleSchema = z
     /** Floor and ceiling on the commission itself, not on the transaction. */
     minAmountMinor: amountMinorSchema.optional(),
     maxAmountMinor: amountMinorSchema.optional(),
-    /** Defaults to now. Rules are versioned in time (docs/10 § 10.7). */
+    /**
+     * Defaults to now, by the database's clock, and may not be earlier: a rule
+     * is never backdated, because a rule inserted into the past would reprice
+     * what already occurred there (docs/23 D-057). Rules are versioned in time
+     * (docs/10 § 10.7), and an active rule of the same scope may not overlap
+     * this one's window (409).
+     */
     validFrom: z.string().datetime().optional(),
     /** Exclusive, so a replacement can start exactly where this one ends. */
     validTo: z.string().datetime().optional(),
-    status: z.enum(RULE_STATUSES).default('ACTIVE'),
+    /**
+     * Always `ACTIVE`: a rule that should not apply is not created. Accepted
+     * for the clients that send it; `INACTIVE` is refused (docs/23 D-057).
+     */
+    status: z.literal('ACTIVE').default('ACTIVE'),
     /**
      * Provenance, shown wherever the rule is displayed.
      *
@@ -72,6 +82,12 @@ export type CreateCommissionRuleDto = z.infer<typeof createCommissionRuleSchema>
  */
 export const updateCommissionRuleSchema = z
   .object({
+    /**
+     * Effective-dated (docs/23 D-057). `INACTIVE` on a rule in force ends it
+     * now — `validTo` becomes the present and the status stays, so what it
+     * priced it still prices; before its start it withdraws the rule. `ACTIVE`
+     * reinstates a withdrawn rule only while its start is still ahead.
+     */
     status: z.enum(RULE_STATUSES).optional(),
     /**
      * Closing a rule is `validTo`, never a delete.

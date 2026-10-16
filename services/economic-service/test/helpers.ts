@@ -180,6 +180,7 @@ export function wire(prisma: PrismaService): Wiring {
   const walletRepository = new WalletRepository(prisma);
   const wallets = new WalletService(walletRepository, ledger, prisma);
   const transactionRepository = new TransactionRepository(prisma);
+  const commissions = new CommissionService(prisma, ledger);
   const transactions = new TransactionService(
     prisma,
     transactionRepository,
@@ -187,8 +188,8 @@ export function wire(prisma: PrismaService): Wiring {
     walletRepository,
     env,
     ledger,
+    commissions,
   );
-  const commissions = new CommissionService(prisma, ledger);
   const rewards = new RewardService(prisma, ledger, wallets, env);
   const settlements = new SettlementService(
     prisma,
@@ -587,6 +588,28 @@ export async function cleanup(
         // ISOLATION-ALLOW-UNBOUNDED: as above.
         await tx.$executeRawUnsafe(
           'ALTER TABLE commission ENABLE TRIGGER trg_commission_append_only',
+        );
+
+        // And an obligation names the rule it was priced with (docs/23
+        // D-057), RESTRICT as well and fixed by a trigger. One filed under
+        // another run's organizations may name a platform-wide rule of this
+        // run; its pricing is unlinked rather than the row deleted.
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE "transaction" DISABLE TRIGGER trg_transaction_pricing_fixed',
+        );
+        await tx.$executeRawUnsafe(
+          `UPDATE "transaction" SET pricing_outcome = NULL, pricing_rule_id = NULL
+            WHERE pricing_rule_id IN (
+                    SELECT id FROM commission_rule
+                     WHERE organization_id LIKE ANY($1::text[])
+                        OR created_by LIKE $2)`,
+          orgs,
+          author,
+        );
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE "transaction" ENABLE TRIGGER trg_transaction_pricing_fixed',
         );
 
         for (const [table, trigger] of [
