@@ -33,6 +33,7 @@ export const TENANT_SCOPED_MODELS = [
   'OrderDispute',
   'Review',
   'IdempotencyKey',
+  'SagaStep',
 ] as const;
 
 /**

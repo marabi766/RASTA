@@ -18,7 +18,7 @@ import { AUDIT_DOMAIN_TOPIC_OWNERS, type AuditDomainTopic } from './audit-produc
  */
 
 /** The domain-projector consumer group. Also the `processed_event` key. */
-export const DOMAIN_PROJECTOR_CONSUMER = 'audit-service.domain-projector';
+export { DOMAIN_PROJECTOR_CONSUMER } from './domain-projector-consumer';
 
 /**
  * The ten topics AUD-001 subscribes to.

@@ -139,7 +139,7 @@ Logهای مالی).
 
 `OutboxPurgeScheduler` (`@rasta/nest-common`) ردیف‌های منتشرشده را پس از `OUTBOX_PURGE_RETENTION_HOURS` پاک می‌کند. فاز ۱
 (#247) این سرویس‌ها را دارد: fleet، asset، document، maintenance، organization؛ فاز ۲a (#276): notification، supplier،
-inventory. سرویس‌های دیگر هنوز Purge ندارند.
+inventory؛ و identity (#280، فقط `outbox_message`، نه `security_event_outbox`). سرویس‌های دیگر هنوز Purge ندارند.
 
 | متریک                                               | نوع     | برچسب            | دقیقاً چه چیزی را می‌شمارد                                                 |
 | --------------------------------------------------- | ------- | ---------------- | -------------------------------------------------------------------------- |

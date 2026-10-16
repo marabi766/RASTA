@@ -7,7 +7,12 @@ import {
   auditTrailPayloadSchemaV1,
   parseEnvelope,
 } from '@rasta/contracts';
-import { runUnscoped, type EventPublisher, type OutboxRow } from '@rasta/nest-common';
+import {
+  releaseWithin,
+  runUnscoped,
+  type EventPublisher,
+  type OutboxRow,
+} from '@rasta/nest-common';
 import { securityEventCapturesTotal } from '../src/observability/security-event.metrics';
 import { REFUSAL_SITES } from '../src/security-events/refusal-sites';
 import { createSecurityEventRelay } from '../src/security-events/security-event.relay';
@@ -484,7 +489,7 @@ describe('security_event_outbox (real PostgreSQL)', () => {
       expect(await harness.store.markPublished([id], second.token!)).toBe(1);
 
       const others = second.rows.map((row) => row.id).filter((other) => other !== id);
-      await harness.store.release(others, second.token!);
+      await harness.store.release(others, second.token!, releaseWithin(5_000));
 
       const row = await prisma.client.securityEventOutbox.findUniqueOrThrow({ where: { id } });
       expect(row.publishedAt).not.toBeNull();
