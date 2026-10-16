@@ -316,6 +316,45 @@ describe('each command reaches the endpoint it names', () => {
   });
 });
 
+describe('a resolution names economic-service’s dispute (Codex on #318 round 2, N1)', () => {
+  const original = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = original;
+  });
+
+  const resolve = async (economicDisputeId?: string) => {
+    const { calls, impl } = stubFetch({ status: 200, body: { id: 'TXN_1' } });
+    globalThis.fetch = impl as typeof fetch;
+    await new EconomicClient(ENV, recordingTokens().service as never).resolveDispute({
+      orderId: 'ORD_1',
+      disputeId: 'DSP_1',
+      ...(economicDisputeId === undefined ? {} : { economicDisputeId }),
+      transactionId: 'TXN_1',
+      buyerOrganizationId: 'ORG-BUYER',
+      resolution: 'the supplier showed a signed delivery note',
+      correlationId: 'corr-1',
+    });
+    return calls[0]!;
+  };
+
+  it('sends the identity as the body’s disputeId, under the order dispute’s own key', async () => {
+    const request = await resolve('TXD_1');
+    expect(request.body).toEqual({
+      resolution: 'the supplier showed a signed delivery note',
+      disputeId: 'TXD_1',
+    });
+    expect(request.headers['idempotency-key']).toBe(
+      idempotencyKeyFor.resolveDispute('ORD_1', 'DSP_1'),
+    );
+  });
+
+  it('sends no disputeId without one, as before', async () => {
+    expect((await resolve()).body).toEqual({
+      resolution: 'the supplier showed a signed delivery note',
+    });
+  });
+});
+
 describe('reading the order’s obligation back (D-053)', () => {
   const original = globalThis.fetch;
   afterEach(() => {

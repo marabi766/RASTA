@@ -47,8 +47,8 @@ type ChainPolicies = Record<StatementChain, PolicyWithSteps | null>;
 /**
  * A signed contract's statements (ADR-068 § 5; CON-003 PR 4 and 5): the contractor drafts one — its
  * lines, each optionally against a milestone of the contract, and the configured deductions it
- * applies — and submits it, which snapshots both approval chains; both parties read them. The
- * decisions of the chains are the next change.
+ * applies — and submits it, which snapshots both approval chains; both parties read them, and so
+ * does an organization a step of its chains names. The decisions are `StatementDecisionService`'s.
  *
  * Built like the amendment and milestone commands:
  *
@@ -90,11 +90,37 @@ export class StatementService {
 
   // -- reads ----------------------------------------------------------------------------
 
+  /**
+   * One statement, for a party to its contract — or, failing that, for an organization a step of its
+   * approval chains names, acting with that step's role (CON-003 PR 6): an approver reads what it
+   * decides, whether or not it is a party, and only that statement — never the contract, the other
+   * statements or the list. Anyone else gets the party read's refusal: `404`, or the `403` a caller
+   * with no reading role gets before anything is looked up.
+   */
   async get(contractId: string, statementId: string): Promise<StatementView> {
-    const contract = await this.readableContract(contractId);
-    const row = await this.repository.findOne(contract.organizationId, contract.id, statementId);
-    if (!row) throw RastaError.notFound('Statement', statementId);
-    return toStatementView(row, contract.contractorOrganizationId);
+    let refusal: RastaError;
+    try {
+      const contract = await this.readableContract(contractId);
+      const row = await this.repository.findOne(contract.organizationId, contract.id, statementId);
+      if (row) return toStatementView(row, contract.contractorOrganizationId);
+      refusal = RastaError.notFound('Statement', statementId);
+    } catch (error) {
+      if (!(error instanceof RastaError)) throw error;
+      refusal = error;
+    }
+    const reader = this.access.approverReader();
+    const approver = reader
+      ? await this.repository.findAsApprover(
+          reader.organizationId,
+          reader.roles,
+          contractId,
+          statementId,
+        )
+      : null;
+    if (approver) {
+      return toStatementView(approver.statement, approver.contract.contractorOrganizationId);
+    }
+    throw refusal;
   }
 
   /** The contract's statements, oldest first. */
@@ -118,6 +144,11 @@ export class StatementService {
   /** Whether the caller may still see this contract's statements (replay of a command). */
   async assertContractVisible(contractId: string): Promise<void> {
     await this.readableContract(contractId);
+  }
+
+  /** Whether the caller may still read this statement — as a party or as its approver (a decision's replay). */
+  async assertStatementVisible(contractId: string, statementId: string): Promise<void> {
+    await this.get(contractId, statementId);
   }
 
   private async readableContract(contractId: string): Promise<Contract> {
