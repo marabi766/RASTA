@@ -56,7 +56,9 @@ export class CommissionController {
       '`NO_ACTIVE_RULE` (and a null `ruleId`) means no active rule matched — evidence that the ' +
       'step ran, which its absence could not provide, and never the same thing as a rule ' +
       'configured at zero (ADR-045 § 2). Filter by `businessLine` and `outcome` to report ' +
-      'revenue per line and the transactions no rule priced.',
+      'revenue per line and the transactions no rule priced. A `cursor` pages the filtered view ' +
+      'it came from: one from the same organization under another `businessLine` or `outcome` ' +
+      'is refused like any other cursor that is not a row of this list.',
   })
   async list(@Query(zodPipe(listCommissionsQuerySchema)) query: ListCommissionsQuery) {
     assertNotAuditor();

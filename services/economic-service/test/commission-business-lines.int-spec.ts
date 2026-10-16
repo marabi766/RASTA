@@ -3,8 +3,9 @@ import type { Server } from 'node:http';
 import { BUSINESS_LINES, type BusinessLine } from '@rasta/contracts';
 import { runUnscoped } from '@rasta/nest-common';
 import { PrismaClient } from '../src/generated/prisma';
+import { INVALID_CURSOR_MESSAGE } from '../src/shared/cursor';
 import { admin, apiTenant, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, databaseUrl, id } from './helpers';
+import { cleanup, databaseUrl, id, ownerDatabaseUrl } from './helpers';
 
 /**
  * Commission by business line (ADR-045; COM-011; docs/23 D-057), over HTTP
@@ -39,6 +40,8 @@ describe('commission by business line (ADR-045)', () => {
   const unpriced = apiTenant('CBL-UNPRICED');
   /** A third tenant that must see none of the above. */
   const stranger = apiTenant('CBL-STRANGER');
+  /** Paged by filtered view: charges on two lines, priced and unpriced. */
+  const pager = apiTenant('CBL-PAGER');
 
   const as = (organizationId: string) => `Bearer ${admin(organizationId)}`;
   const asSystem = () => `Bearer ${admin(payer, ['SYSTEM_ADMIN'])}`;
@@ -74,7 +77,7 @@ describe('commission by business line (ADR-045)', () => {
       .set('idempotency-key', id('cbl-fund'))
       .send({ amountMinor: String(GROSS * 20n) })
       .expect(201);
-    for (const organizationId of [payee, unpriced, stranger]) {
+    for (const organizationId of [payee, unpriced, stranger, pager]) {
       await request(http).get('/v1/wallets/me').set('authorization', as(organizationId));
     }
 
@@ -94,7 +97,7 @@ describe('commission by business line (ADR-045)', () => {
   });
 
   afterAll(async () => {
-    await cleanup(harness.prisma, [payer, payee, unpriced, stranger]);
+    await cleanup(harness.prisma, [payer, payee, unpriced, stranger, pager]);
     await harness.close();
   });
 
@@ -473,6 +476,211 @@ describe('commission by business line (ADR-045)', () => {
           .expect(400);
         expect(refused.body.code).toBe('VALIDATION_FAILED');
       }
+    });
+  });
+
+  /**
+   * A cursor pages the filtered view it came from (shared/cursor.ts; Codex
+   * review of #308). `pager` holds charges in every combination the filters
+   * separate, all applied in the same millisecond, so the order within a view
+   * is decided by the id tie-break alone and a cursor from a neighbouring view
+   * would land between this view's rows: accepted, it would silently skip some.
+   */
+  describe('paging a filtered view', () => {
+    const PARTS_APPLIED = '/v1/commissions?businessLine=PARTS&outcome=RULE_APPLIED';
+    /** Plainly not an id anywhere: the "does not exist" probe. */
+    const MISSING = 'NOT-A-ROW-OF-ANY-LIST';
+
+    let partsUnpriced: string;
+    let insuranceUnpriced: string;
+    let insuranceApplied: string;
+    const partsApplied: string[] = [];
+
+    async function commissionOf(transactionId: string): Promise<string> {
+      const [row] = await commissionRowsOf(transactionId);
+      expect(row).toBeDefined();
+      return row!.id;
+    }
+
+    async function settleFor(label: string, line: BusinessLine): Promise<string> {
+      const { transactionId } = await settle(`pager-${label}`, {
+        transactionType: TYPE[line],
+        businessLine: line,
+        counterpartyOrganizationId: pager,
+      });
+      return commissionOf(transactionId);
+    }
+
+    function get(path: string, cursor?: string, limit = 5) {
+      const query = new URLSearchParams({ limit: String(limit) });
+      if (cursor) query.set('cursor', cursor);
+      return request(http)
+        .get(`${path}${path.includes('?') ? '&' : '?'}${query.toString()}`)
+        .set('authorization', as(pager));
+    }
+
+    /** The refusal minus what differs per request whatever the cause. */
+    function refusalOf(response: request.Response) {
+      const {
+        correlationId: _correlationId,
+        traceId: _traceId,
+        timestamp: _timestamp,
+        path: _path,
+        ...rest
+      } = response.body as Record<string, unknown>;
+      return { status: response.status, ...rest };
+    }
+
+    /** Walks `path` `limit` rows at a time, each cursor the last row seen. */
+    async function walk(path: string, limit: number): Promise<string[]> {
+      const ids: string[] = [];
+      let cursor: string | undefined;
+      for (let guard = 0; guard < 20; guard += 1) {
+        const response = await get(path, cursor, limit).expect(200);
+        const items = (response.body.items as { id: string }[]).map((item) => item.id);
+        if (items.length === 0) return ids;
+        ids.push(...items);
+        cursor = items[items.length - 1];
+      }
+      throw new Error(`${path} did not end within 20 pages`);
+    }
+
+    async function allIds(path: string): Promise<string[]> {
+      const response = await get(path, undefined, 100).expect(200);
+      return (response.body.items as { id: string }[]).map((item) => item.id);
+    }
+
+    beforeAll(async () => {
+      // Before any rule of `pager`'s: one unpriced charge on each line.
+      partsUnpriced = await settleFor('parts-unpriced', 'PARTS');
+      insuranceUnpriced = await settleFor('insurance-unpriced', 'INSURANCE');
+      for (const line of ['PARTS', 'INSURANCE'] as const) {
+        await request(http)
+          .post('/v1/commissions/rules')
+          .set('authorization', asSystem())
+          .send({ organizationId: pager, businessLine: line, rateBasisPoints: RATE[line] })
+          .expect(201);
+      }
+      for (const n of [1, 2, 3, 4]) partsApplied.push(await settleFor(`parts-${n}`, 'PARTS'));
+      insuranceApplied = await settleFor('insurance-applied', 'INSURANCE');
+
+      // One instant for all seven, by the owner connection with the append-only
+      // trigger lifted inside one transaction (as helpers.ts `cleanup` does):
+      // no API can set when a charge was applied, and that is the point.
+      const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+      try {
+        await owner.$transaction(async (tx) => {
+          // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
+          await tx.$executeRawUnsafe(
+            'ALTER TABLE commission DISABLE TRIGGER trg_commission_append_only',
+          );
+          await tx.$executeRawUnsafe(
+            'UPDATE commission SET applied_at = $1 WHERE organization_id = $2',
+            new Date('2026-10-16T09:00:00.000Z'),
+            pager,
+          );
+          // ISOLATION-ALLOW-UNBOUNDED: as above.
+          await tx.$executeRawUnsafe(
+            'ALTER TABLE commission ENABLE TRIGGER trg_commission_append_only',
+          );
+        });
+      } finally {
+        await owner.$disconnect();
+      }
+    });
+
+    it('was given what it asks about: seven charges, four views, one instant', async () => {
+      const rows = await runUnscoped('the suite checks its own fixture', () =>
+        harness.prisma.client.commission.findMany({ where: { organizationId: pager } }),
+      );
+      expect(rows).toHaveLength(7);
+      expect(new Set(rows.map((row) => row.appliedAt.getTime())).size).toBe(1);
+      expect(
+        rows
+          .filter((row) => row.outcome === 'NO_ACTIVE_RULE')
+          .map((row) => row.id)
+          .sort(),
+      ).toEqual([partsUnpriced, insuranceUnpriced].sort());
+    });
+
+    it.each([1, 2, 3])(
+      'pages PARTS + RULE_APPLIED %i at a time across tied instants, skipping and repeating nothing',
+      async (limit) => {
+        const all = await allIds(PARTS_APPLIED);
+        expect([...all].sort()).toEqual([...partsApplied].sort());
+        // Tied on appliedAt, so the order is the id tie-break, descending.
+        expect(all).toEqual([...all].sort().reverse());
+        await expect(walk(PARTS_APPLIED, limit)).resolves.toEqual(all);
+      },
+    );
+
+    it.each([
+      ['/v1/commissions?businessLine=PARTS', 5],
+      ['/v1/commissions?outcome=RULE_APPLIED', 5],
+      ['/v1/commissions?outcome=NO_ACTIVE_RULE', 2],
+      ['/v1/commissions', 7],
+    ])('pages %s by its own cursors across tied instants', async (path, n) => {
+      const all = await allIds(path);
+      expect(all).toHaveLength(n);
+      await expect(walk(path, 2)).resolves.toEqual(all);
+    });
+
+    it('refuses a cursor from another line, the outcome the same, with 400', async () => {
+      // INSURANCE + RULE_APPLIED: the caller's own charge, inside the tie.
+      const refused = await get(PARTS_APPLIED, insuranceApplied).expect(400);
+      expect(refused.body).toMatchObject({
+        code: 'VALIDATION_FAILED',
+        details: [{ path: 'cursor', message: INVALID_CURSOR_MESSAGE }],
+      });
+      await get('/v1/commissions?businessLine=PARTS', insuranceApplied).expect(400);
+    });
+
+    it('refuses a cursor with another outcome, the line the same, with 400', async () => {
+      const refused = await get(PARTS_APPLIED, partsUnpriced).expect(400);
+      expect(refused.body).toMatchObject({
+        code: 'VALIDATION_FAILED',
+        details: [{ path: 'cursor', message: INVALID_CURSOR_MESSAGE }],
+      });
+      await get('/v1/commissions?outcome=RULE_APPLIED', partsUnpriced).expect(400);
+      await get('/v1/commissions?outcome=NO_ACTIVE_RULE', partsApplied[0]).expect(400);
+    });
+
+    it('answers other-line, other-outcome, foreign and missing cursors identically', async () => {
+      const [foreign] = await runUnscoped('the suite picks another tenant’s charge', () =>
+        harness.prisma.client.commission.findMany({
+          where: { organizationId: payee, businessLine: 'PARTS', outcome: 'RULE_APPLIED' },
+          take: 1,
+        }),
+      );
+      const cursors = {
+        otherLine: insuranceApplied,
+        otherOutcome: partsUnpriced,
+        otherBoth: insuranceUnpriced,
+        foreign: foreign!.id,
+        missing: MISSING,
+      };
+      const expected = {
+        status: 400,
+        code: 'VALIDATION_FAILED',
+        message: 'Request validation failed',
+        details: [{ path: 'cursor', message: INVALID_CURSOR_MESSAGE }],
+      };
+      for (const [label, cursor] of Object.entries(cursors)) {
+        const refusal = refusalOf(await get(PARTS_APPLIED, cursor));
+        expect({ label, ...refusal }).toEqual({ label, ...expected });
+        expect(JSON.stringify(refusal)).not.toContain(cursor);
+      }
+    });
+
+    it('accepts a cursor of the view itself, the last one ending the list', async () => {
+      const all = await allIds(PARTS_APPLIED);
+      const rest = await get(PARTS_APPLIED, all[0]).expect(200);
+      expect(rest.body.items.map((row: { id: string }) => row.id)).toEqual(all.slice(1));
+      const end = await get(PARTS_APPLIED, all[all.length - 1]).expect(200);
+      expect(end.body.items).toEqual([]);
+      // A wider view contains the narrower one's rows, so their cursors page it.
+      await get('/v1/commissions?businessLine=PARTS', partsUnpriced).expect(200);
+      await get('/v1/commissions', insuranceApplied).expect(200);
     });
   });
 });
