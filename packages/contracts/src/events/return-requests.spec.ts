@@ -177,6 +177,31 @@ describe('the physical half, as the request states it', () => {
     ).toBe(false);
   });
 
+  it('resolves with no outcome only as inventory does: nothing arrived (Q-133 (4))', () => {
+    // RETURN_SHIPMENT_RESOLVED may carry `dispositions: []` for that one case (Codex r1 on #313);
+    // a mirror that refused it would leave the request INSPECTED for ever.
+    const nothing = { ...resolvedEvent, outcomes: [] };
+    expect(returnResolvedPayloadSchema.parse(nothing)).toEqual(nothing);
+  });
+
+  it('names an order line once per received row, and once per line and outcome', () => {
+    const line = { orderLineId: 'OLN_1', receivedQuantity: 1 };
+    expect(
+      returnReceivedPayloadSchema.safeParse({ ...receivedEvent, receivedLines: [line, line] })
+        .success,
+    ).toBe(false);
+    const row = { orderLineId: 'OLN_1', disposition: 'SCRAP', quantity: 1 };
+    expect(
+      returnResolvedPayloadSchema.safeParse({ ...resolvedEvent, outcomes: [row, row] }).success,
+    ).toBe(false);
+    expect(
+      returnResolvedPayloadSchema.safeParse({
+        ...resolvedEvent,
+        outcomes: [row, { ...row, disposition: 'RECYCLE' }],
+      }).success,
+    ).toBe(true);
+  });
+
   it('carries no refund, amount or free text, and only the six outcomes', () => {
     expect(
       returnResolvedPayloadSchema.safeParse({ ...resolvedEvent, refundAmountMinor: '1' }).success,

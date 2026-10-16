@@ -12,15 +12,17 @@ import { RETURN_DISPOSITIONS } from './inventory-returns';
  *
  * ## Who owns what (ADR-048 § 2)
  *
- * `marketplace` owns the return request and the commercial decision about it: these four events
+ * `marketplace` owns the return request and the commercial decision about it: the first four events
  * are its. The physical half — the return shipment, its receipt, inspection and disposition — is
- * `inventory-service`'s and has its own events (`inventory-returns.ts`). `economic` owns every
- * Hold, Refund and Reversal; no event here moves money or asks for it to move.
+ * `inventory-service`'s and has its own events (`inventory-returns.ts`); the last four are
+ * marketplace stating, on its own request, a physical step it has checked against that request
+ * (RUN-005 PR 3). `economic` owns every Hold, Refund and Reversal; no event here moves money or
+ * asks for it to move.
  *
  * ## One stream per return request, in order
  *
  * Every event is keyed by `returnRequestId`. `returnVersion` is the request's position in its own
- * history (1 = REQUESTED, 2 = its second status, 3 = its third). Like the shipment stream (D-027),
+ * history (1 = REQUESTED, 2 = its second status, and so on to 6 = RESOLVED). Like the shipment stream (D-027),
  * delivery order is not guaranteed: a consumer orders and de-duplicates by the envelope's
  * `streamSeq` and never reads arrival order as the order things happened in.
  *
@@ -134,6 +136,9 @@ export const returnCancelledPayloadSchema = z
 
 const returnShipmentId = z.string().regex(new RegExp(`^${ID_PREFIXES.returnShipment}_${ulid}$`));
 
+const distinctLines = (lines: readonly { orderLineId: string }[]) =>
+  new Set(lines.map((line) => line.orderLineId)).size === lines.length;
+
 /** The goods left the buyer: AUTHORIZED → IN_TRANSIT. From here the buyer cannot cancel. */
 export const returnInTransitPayloadSchema = z
   .object({
@@ -153,7 +158,8 @@ export const returnReceivedPayloadSchema = z
     receivedLines: z
       .array(z.object({ orderLineId, receivedQuantity: z.number().int().min(0) }).strict())
       .min(1)
-      .max(100),
+      .max(100)
+      .refine(distinctLines, { message: 'an order line appears once' }),
     receivedAt: instant,
   })
   .strict();
@@ -178,6 +184,8 @@ export const returnResolvedPayloadSchema = z
     ...returnFacts,
     returnVersion: z.literal(6),
     returnShipmentId,
+    // Empty exactly when nothing arrived and the deployment resolves such a return (Q-133 (4)):
+    // the same list `RETURN_SHIPMENT_RESOLVED` carries, which may be empty for that one case.
     outcomes: z
       .array(
         z
@@ -188,8 +196,12 @@ export const returnResolvedPayloadSchema = z
           })
           .strict(),
       )
-      .min(1)
-      .max(300),
+      .max(300)
+      .refine(
+        (rows) =>
+          new Set(rows.map((row) => `${row.orderLineId}|${row.disposition}`)).size === rows.length,
+        { message: 'a line has one row per disposition' },
+      ),
     resolvedAt: instant,
   })
   .strict();
