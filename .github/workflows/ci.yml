@@ -2409,6 +2409,9 @@ jobs:
     if: ${{ always() }}
     steps:
       - name: Every integration job passed
+        # Named, not the runner's default (bash -e, no pipefail): the split
+        # guard runs this script under exactly the shell set here.
+        shell: bash
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: |

@@ -1,5 +1,5 @@
 -- =============================================================================
--- Reverse of `migration.sql` (20261015120000_commission_business_lines).
+-- Reverse of `migration.sql` (20261016120000_commission_business_lines).
 --
 -- Refuses while ANY row carries a business line — a transaction, a rule or a
 -- commission. The schema before this migration cannot say what those rows
@@ -61,6 +61,6 @@ ALTER TABLE "transaction" DROP COLUMN IF EXISTS "business_line";
 DROP TYPE IF EXISTS "CommissionOutcome";
 DROP TYPE IF EXISTS "BusinessLine";
 
-DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261015120000_commission_business_lines';
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261016120000_commission_business_lines';
 
 COMMIT;
