@@ -93,7 +93,7 @@ describe('the database keeps the amendments and the cap counters', () => {
       await refuses(contractInsert({ amount_minor: 0 }).sql, /ck_contract_amount_positive/);
     });
 
-    it('move only by an effective amendment: not on a contract that is not SIGNED, not to anything but the exact sum, never the approved total', async () => {
+    it('move only by what they count: not on a contract that is not SIGNED, not to anything but the exact sum of the effective amendments and the approved statements (CON-003 PR 6)', async () => {
       const c = await seedSigned(api, w, organizations);
       await refuses(
         `UPDATE contract SET amendments_total_minor = 5 WHERE id = $1`,
@@ -102,13 +102,18 @@ describe('the database keeps the amendments and the cap counters', () => {
       );
       await refuses(
         `UPDATE contract SET approved_total_minor = 1 WHERE id = $1`,
-        /ck_contract_approved_total_fixed/,
+        /ck_contract_approved_total_exact/,
         c.id,
       );
       const draft = await seedDraft(w, organizations);
       await refuses(
         `UPDATE contract SET amendments_total_minor = 5 WHERE id = $1`,
         /ck_contract_amendments_signed/,
+        draft.id,
+      );
+      await refuses(
+        `UPDATE contract SET approved_total_minor = 1 WHERE id = $1`,
+        /ck_contract_approved_signed/,
         draft.id,
       );
       await refuses(

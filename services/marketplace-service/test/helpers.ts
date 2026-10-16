@@ -8,6 +8,7 @@ import { OrderRepository, type SagaStep } from '../src/order/order.repository';
 import { OrderService } from '../src/order/order.service';
 import { CatalogueService } from '../src/offer/catalogue.service';
 import { loadMarketplaceEnv, type MarketplaceEnv } from '../src/config/env';
+import type { DisputedObligation, SettledResult } from '../src/temporal/activities';
 
 /**
  * Scaffolding for the integration tests.
@@ -187,6 +188,13 @@ export function key(prefix: string): string {
  */
 export function sagaStep(scheduledAt: Date = new Date()): SagaStep {
   return { key: `order-test/run-test/${ulid()}`, scheduledAt };
+}
+
+/** A settlement the case expects to have happened, not a dispute found instead. */
+export function settledResult(result: SettledResult | DisputedObligation): SettledResult {
+  if ('disputed' in result)
+    throw new Error(`Expected a settlement, found a dispute: ${result.reason}`);
+  return result;
 }
 
 /** Removes everything the named organizations wrote. */

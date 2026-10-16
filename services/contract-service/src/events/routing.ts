@@ -40,6 +40,11 @@ export const AGGREGATE_OF = {
   CONTRACT_AUTHORITY_REFUSED: AGGREGATE_TYPE,
   // A statement is part of its contract (docs/03 § 3.3): on the contract's stream.
   STATEMENT_DRAFTED: AGGREGATE_TYPE,
+  STATEMENT_SUBMITTED: AGGREGATE_TYPE,
+  STATEMENT_DECISION_RECORDED: AGGREGATE_TYPE,
+  STATEMENT_TECHNICALLY_APPROVED: AGGREGATE_TYPE,
+  STATEMENT_APPROVED: AGGREGATE_TYPE,
+  STATEMENT_REJECTED: AGGREGATE_TYPE,
 } as const satisfies Record<ContractEventName, string>;
 
 export interface PartitionDecision {

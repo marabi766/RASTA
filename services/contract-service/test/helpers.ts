@@ -362,23 +362,81 @@ export async function activateSigningPolicy(
   organizationId: string,
   roles: string[] = ['ORGANIZATION_ADMIN'],
 ): Promise<string> {
-  const policy = await asSetter(organizationId, () =>
+  return activatePolicy(
+    w,
+    organizationId,
+    'contract.signature',
+    roles.map((role) => ({ authorityOrganizationId: organizationId, authorityRole: role })),
+  );
+}
+
+/** One step of a policy the suites write: the authority, and a statement chain step's bounds. */
+export interface SuiteStep {
+  authorityOrganizationId: string;
+  authorityRole: string;
+  minAmountMinor?: string;
+  maxAmountMinor?: string;
+}
+
+/**
+ * A policy of `workflowKey` in force for `organizationId`, written the decided way (Q-70 (7)): a
+ * union administrator of `author` (the organization itself unless given) writes and submits it, a
+ * different platform administrator approves it — replacing the one in force. Returns its id.
+ */
+export async function activatePolicy(
+  w: Wiring,
+  organizationId: string,
+  workflowKey:
+    'contract.signature' | 'contract.statement.technical' | 'contract.statement.financial',
+  steps: SuiteStep[],
+  author: string = organizationId,
+): Promise<string> {
+  const policy = await asSetter(author, () =>
     w.policies.create({
       organizationId,
-      workflowKey: 'contract.signature',
-      label: 'Who signs for the employer',
-      rationale: 'Written by the integration suite to exercise the signature',
+      workflowKey,
+      label: `The suite's ${workflowKey}`,
+      rationale: 'Written by the integration suite to exercise the workflow',
       isSample: true,
-      steps: roles.map((role, index) => ({
-        authorityOrganizationId: organizationId,
-        authorityRole: role as 'ORGANIZATION_ADMIN',
-        authorityLabel: `Signer ${index + 1}`,
+      steps: steps.map((step, index) => ({
+        ...step,
+        authorityRole: step.authorityRole as 'ORGANIZATION_ADMIN',
+        authorityLabel: `Authority ${index + 1}`,
       })),
     }),
   );
-  await asSetter(organizationId, () => w.policies.submit(policy.id, { expectedVersion: 1 }));
+  await asSetter(author, () => w.policies.submit(policy.id, { expectedVersion: 1 }));
   await asPlatform(() => w.policies.approve(policy.id, { expectedVersion: 2 }));
   return policy.id;
+}
+
+/**
+ * Both statement chains in force for `employer` (ADR-068 § 5): by default one step each, an
+ * administrator of the employer's own organization. Returns the two policies' ids.
+ */
+export async function activateStatementPolicies(
+  w: Wiring,
+  employer: string,
+  chains: { technical?: SuiteStep[]; financial?: SuiteStep[]; author?: string } = {},
+): Promise<{ technical: string; financial: string }> {
+  const own: SuiteStep[] = [
+    { authorityOrganizationId: employer, authorityRole: 'ORGANIZATION_ADMIN' },
+  ];
+  const technical = await activatePolicy(
+    w,
+    employer,
+    'contract.statement.technical',
+    chains.technical ?? own,
+    chains.author,
+  );
+  const financial = await activatePolicy(
+    w,
+    employer,
+    'contract.statement.financial',
+    chains.financial ?? own,
+    chains.author,
+  );
+  return { technical, financial };
 }
 
 /**
@@ -509,9 +567,12 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
   const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
   try {
     await owner.$transaction(async (tx) => {
-      // The statements (CON-003 PR 4) hang off the contract and the deduction rules: their parts,
-      // then the statements, then the rules — none ever deleted by the service.
+      // The statements (CON-003 PR 4) hang off the contract and the deduction rules: their chains'
+      // decisions (PR 6), approval chains (PR 5) and parts, then the statements, then the rules —
+      // none ever deleted by the service.
       for (const [table, trigger] of [
+        ['statement_decision', 'tg_statement_decision_guard'],
+        ['statement_approval_step', 'tg_statement_approval_step_guard'],
         ['statement_deduction', 'tg_statement_deduction_guard'],
         ['statement_line', 'tg_statement_line_guard'],
         ['statement', 'tg_statement_guard'],

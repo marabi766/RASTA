@@ -11,6 +11,7 @@ import {
   type LockedTransaction,
 } from '../transaction/transaction.repository';
 import { CommissionService } from '../commission/commission.service';
+import type { CommissionOutcome } from '../commission/rule-engine';
 import { assertSufficient, balancesFrom } from '../wallet/balances';
 import { nextStatus } from '../transaction/state-machine';
 import { ECONOMIC_EVENTS } from '../events/events';
@@ -52,7 +53,7 @@ import { OrganizationHierarchy } from '../organization/organization-hierarchy';
  *   lock the transaction row                       ← one settlement, not two
  *   check the state machine                        ← never from DISPUTED
  *   lock both wallets, in ascending id order       ← no deadlock, ever
- *   compute commission at the transaction's date   ← not at today's rate
+ *   charge the pricing recorded with the fact      ← not at today's rate
  *   post ONE balanced journal                      ← escrow → payee + revenue
  *   release the hold                               ← no second journal
  *   recompute both balances from the ledger        ← never incremented
@@ -201,12 +202,17 @@ export class SettlementService {
       );
     }
 
-    const decision = await this.commissions.decide(tx, {
+    // What was decided when the source fact was recorded (docs/23 D-057);
+    // decided now, at `occurredAt`, only for an obligation older than that.
+    const decision = await this.commissions.chargeFor(tx, {
       organizationId: payeeOrganizationId,
       transactionType: transaction.transactionType,
+      businessLine: transaction.businessLine,
       occurredAt: transaction.occurredAt,
       grossAmountMinor: transaction.grossAmountMinor,
       currency: transaction.currency,
+      pricingOutcome: transaction.pricingOutcome,
+      pricingRuleId: transaction.pricingRuleId,
     });
 
     const netAmountMinor = transaction.grossAmountMinor - decision.amountMinor;
@@ -248,6 +254,8 @@ export class SettlementService {
     await this.commissions.record(tx, {
       transactionId: transaction.id,
       organizationId: payeeOrganizationId,
+      transactionType: transaction.transactionType,
+      businessLine: transaction.businessLine,
       decision,
       grossAmountMinor: transaction.grossAmountMinor,
       currency: transaction.currency,
@@ -325,6 +333,8 @@ export class SettlementService {
         netAmountMinor,
         currency: transaction.currency,
         commissionMatched: decision.matched,
+        commissionOutcome: decision.outcome,
+        businessLine: transaction.businessLine,
         payeeOrganizationId,
         settledAt,
       },
@@ -511,6 +521,9 @@ export interface SettlementResult {
   netAmountMinor: bigint;
   currency: string;
   commissionMatched: boolean;
+  /** `RULE_APPLIED`, or `NO_ACTIVE_RULE` (ADR-045 § 2). */
+  commissionOutcome: CommissionOutcome;
+  businessLine: string | null;
   payeeOrganizationId: string;
   settledAt: Date;
 }

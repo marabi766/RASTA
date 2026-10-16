@@ -12,7 +12,8 @@ import { UnprocessableEventError, type EventDelivery } from '@rasta/nest-common'
  * default of "an event on a topic is a success under its own name" is wrong for them:
  * `outcome=REFUSED` searches missed every contract, amendment, milestone, statement and
  * policy-approval refusal. These events are stored as `REFUSED`, under the closed action the
- * refusal names (`SIGN_CONTRACT`, `SIGN_AMENDMENT`, …, `DRAFT_STATEMENT`, `APPROVE_POLICY`) and the
+ * refusal names (`SIGN_CONTRACT`, `SIGN_AMENDMENT`, …, `DRAFT_STATEMENT`, `SUBMIT_STATEMENT`,
+ * `APPROVE_STATEMENT`, `REJECT_STATEMENT`, `APPROVE_POLICY`) and the
  * closed reason.
  *
  * Only authority and separation-of-duties refusals are published as refusals; contract-service
@@ -53,6 +54,9 @@ export const CONTRACT_REFUSAL_ACTIONS = [
   'PLAN_MILESTONE',
   'CHANGE_MILESTONE',
   'DRAFT_STATEMENT',
+  'SUBMIT_STATEMENT',
+  'APPROVE_STATEMENT',
+  'REJECT_STATEMENT',
 ] as const;
 
 /** Contract-service's `AUTHORITY_REFUSED_REASONS`. */
@@ -65,7 +69,15 @@ export const CONTRACT_REFUSAL_REASONS = [
   'MEMBER_OF_BOTH_PARTIES',
   'SAME_PERSON_BOTH_SIDES',
   'PLATFORM_ADMINISTRATOR',
+  'NOT_STEP_AUTHORITY',
+  'MEMBER_OF_CONTRACTOR',
+  'SUBMITTER_MAY_NOT_DECIDE',
+  'ALREADY_DECIDED_STATEMENT',
+  'ACTOR_IDENTITY_UNKNOWN',
 ] as const;
+
+/** Contract-service's `AUTHORITY_REFUSED_SIDES`: a party, or an organization a statement's chain names. */
+export const CONTRACT_REFUSAL_SIDES = ['EMPLOYER', 'CONTRACTOR', 'APPROVER'] as const;
 
 const id = z.string().min(1).max(128);
 const instant = z.string().datetime({ offset: true });
@@ -75,7 +87,7 @@ const authorityRefused = z
     contractId: id,
     organizationId: id,
     action: z.enum(CONTRACT_REFUSAL_ACTIONS),
-    side: z.enum(['EMPLOYER', 'CONTRACTOR']),
+    side: z.enum(CONTRACT_REFUSAL_SIDES),
     subjectId: id.nullable(),
     reason: z.enum(CONTRACT_REFUSAL_REASONS),
     policyId: id.nullable(),

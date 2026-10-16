@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { amountMinorSchema, currencySchema, organizationIdSchema } from '@rasta/contracts';
+import {
+  amountMinorSchema,
+  businessLineSchema,
+  currencySchema,
+  organizationIdSchema,
+} from '@rasta/contracts';
 import { queryBoolean } from '@rasta/config';
 import { cursorQueryParameter } from '../shared/cursor';
 
@@ -45,6 +50,16 @@ export const createTransactionSchema = z
      * conjure a credit with no payment behind it.
      */
     transactionType: z.enum(TRANSACTION_TYPES),
+    /**
+     * Why the platform may earn from it (ADR-045 § 1), as the service that
+     * owns the fact knows it. Never inferred from the type here: an order may
+     * sell parts or broker a service.
+     *
+     * Optional for now (docs/24 Q-130): a transaction without a line is priced
+     * only by the type-only rules that predate business lines, and with none
+     * its commission is recorded as `NO_ACTIVE_RULE`.
+     */
+    businessLine: businessLineSchema.optional(),
     counterpartyOrganizationId: organizationIdSchema.optional(),
     grossAmountMinor: amountMinorSchema,
     currency: currencySchema.default('IRR'),
@@ -122,6 +137,14 @@ export type DisputeTransactionDto = z.infer<typeof disputeTransactionSchema>;
 export const resolveDisputeSchema = z
   .object({
     resolution: z.string().trim().min(10).max(1000),
+    /**
+     * The dispute this resolution decides, as `GET /v1/transactions/{id}`
+     * names it (`disputeId`). Optional; when sent, the transaction must still
+     * hold that dispute, checked under its row lock, or the command is refused
+     * `INVALID_STATE_TRANSITION`. Without it, a decision about one dispute
+     * could resolve another raised since (docs/23 D-053).
+     */
+    disputeId: z.string().trim().min(1).max(64).optional(),
   })
   .strict();
 
@@ -155,6 +178,8 @@ export interface TransactionView {
   organizationId: string;
   counterpartyOrganizationId: string | null;
   transactionType: string;
+  /** Why the platform may earn from it (ADR-045); null where the source sent none. */
+  businessLine: string | null;
   status: string;
   grossAmountMinor: string;
   commissionAmountMinor: string;
@@ -172,13 +197,33 @@ export interface TransactionView {
 }
 
 export interface TransactionDetailView extends TransactionView {
+  /**
+   * When it was authorised for settlement and, if a service did it, which
+   * service and under which `Idempotency-Key` — kept for good, unlike the
+   * command's stored answer (docs/23 D-053). Null if never authorised, or
+   * recorded already authorised (ADR-032). `service` and `idempotencyKey`
+   * are null for a person, and on rows authorised before they were kept.
+   */
+  settlementAuthorisation: {
+    authorisedAt: string;
+    service: string | null;
+    idempotencyKey: string | null;
+  } | null;
+  /**
+   * The latest dispute's identity: a new one each time the transaction is
+   * disputed, kept through its resolution. Null if never disputed. What
+   * `resolve-dispute` names to decide exactly this dispute (docs/23 D-053).
+   */
+  disputeId: string | null;
   legs: { role: string; organizationId: string; amountMinor: string; currency: string }[];
   commission: {
     id: string;
     rateBasisPoints: number;
     amountMinor: string;
-    /** False when no rule matched — zero because unconfigured, not free. */
+    /** Null when no rule matched — zero because unconfigured, not free. */
     ruleId: string | null;
+    /** `RULE_APPLIED`, or `NO_ACTIVE_RULE` (ADR-045 § 2). */
+    outcome: string;
   } | null;
   settlement: { id: string; journalId: string; settledAt: string } | null;
 }

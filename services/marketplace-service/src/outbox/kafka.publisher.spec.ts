@@ -206,13 +206,13 @@ describe('shutdown', () => {
   it('disconnects a producer that was opened', async () => {
     const p = publisher();
     await p.publish([row()]);
-    await p.onModuleDestroy();
+    await p.stop();
 
     expect(disconnect).toHaveBeenCalledTimes(1);
   });
 
   it('is a no-op when nothing was ever published', async () => {
-    await publisher().onModuleDestroy();
+    await publisher().stop();
     expect(disconnect).not.toHaveBeenCalled();
   });
 });
