@@ -1,7 +1,7 @@
 /**
  * @jest-environment node
  */
-import { globalRealmRoles, requestRoles } from './realm-roles';
+import { globalRealmRoles, requestRoles, tokenAuthority } from './realm-roles';
 import { tenderDoorsFor, tenderSidesFor } from './portal-nav';
 
 const token = (claims: unknown): string =>
@@ -55,5 +55,71 @@ describe('requestRoles', () => {
     );
     expect(tenderSidesFor(roles, DEFAULTS)).toEqual({ owner: true, bidder: false });
     expect(tenderDoorsFor(roles, DEFAULTS)).toEqual({ own: true, open: false });
+  });
+});
+
+describe('tokenAuthority — the roles the service will act on, from the token', () => {
+  const ORG = 'ORG-DEH-0001';
+  const OTHER = 'ORG-DEH-0002';
+
+  it('is the resolved organization’s org_roles plus the global realm roles', () => {
+    const jwt = token({
+      org_id: ORG,
+      org_ids: [ORG, OTHER],
+      org_roles: [`${ORG}:ORGANIZATION_ADMIN`, `${OTHER}:UNION_ADMIN`, `${ORG}:ORGANIZATION_ADMIN`],
+      realm_access: { roles: ['SYSTEM_ADMIN', 'offline_access'] },
+    });
+    expect(tokenAuthority(jwt)).toEqual({
+      organizationId: ORG,
+      roles: ['ORGANIZATION_ADMIN', 'SYSTEM_ADMIN'],
+    });
+  });
+
+  it('reads pairs as strictly as the guard: malformed, unknown-role and padded values are ignored', () => {
+    const jwt = token({
+      org_id: ORG,
+      org_ids: [ORG],
+      org_roles: [
+        `${ORG}:FLEET_MANAGER`,
+        `${ORG}:ADMIN`,
+        `${ORG}: UNION_ADMIN`,
+        `A:${ORG}:UNION_ADMIN`,
+        42,
+      ],
+    });
+    expect(tokenAuthority(jwt)).toEqual({ organizationId: ORG, roles: ['FLEET_MANAGER'] });
+  });
+
+  it.each([
+    {
+      name: 'an organization the token is not a member of',
+      claims: { org_id: ORG, org_ids: [OTHER], org_roles: [`${ORG}:ORGANIZATION_ADMIN`] },
+    },
+    {
+      name: 'a membership granting no role',
+      claims: { org_id: ORG, org_ids: [ORG], org_roles: [`${OTHER}:ORGANIZATION_ADMIN`] },
+    },
+    { name: 'a malformed org_id', claims: { org_id: 'A:B', org_ids: ['A:B'], org_roles: [] } },
+  ])('is null for $name — the guard answers TENANT_MISMATCH', ({ claims }) => {
+    expect(tokenAuthority(token(claims))).toBeNull();
+  });
+
+  it('with no org_id, only the global realm roles remain', () => {
+    expect(tokenAuthority(token({ realm_access: { roles: ['SYSTEM_ADMIN'] } }))).toEqual({
+      organizationId: null,
+      roles: ['SYSTEM_ADMIN'],
+    });
+  });
+
+  it.each(['opaque', 'h.!!!.s', token('x'), token(['a'])])(
+    'is null for an unreadable token %#',
+    (jwt) => {
+      expect(tokenAuthority(jwt)).toBeNull();
+    },
+  );
+
+  it('ignores the membership rows entirely: what identity-service reports now is not an input', () => {
+    // The function takes only the token: there is no parameter for the rows.
+    expect(tokenAuthority.length).toBe(1);
   });
 });

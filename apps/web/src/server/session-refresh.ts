@@ -73,7 +73,9 @@ export type SessionRenewal =
   /**
    * The refresh was refused or went unanswered. Leave the browser's cookie
    * alone (see above); `usable` says whether this request may still act on
-   * the session — true while its access token has not yet expired.
+   * the session — true while its access token has not yet expired, judged by
+   * the clock once the refresh settled. Either way the failure may pass: the
+   * login itself is not known to have ended (`session-state.ts`).
    */
   | { readonly kind: 'REFUSED'; readonly usable: boolean }
   /**
@@ -110,6 +112,15 @@ export interface RenewalDependencies {
   /** Who shares the refresh. Defaults to the process-wide one for this env. */
   readonly coordinator?: RefreshCoordinator;
   readonly now?: number;
+  /**
+   * The clock read once the refresh has settled — for whether the access
+   * token is still usable, and for the rejection grace. Defaults to `now` when
+   * that is given (a test with a fixed instant), and to the real clock
+   * otherwise. A refresh can take seconds; a decision taken from the instant
+   * before it started could call a token usable that has expired meanwhile
+   * (PR 319 review 3, finding 2).
+   */
+  readonly clock?: () => number;
 }
 
 /**
@@ -149,13 +160,15 @@ export async function renewSession(
 
   const coordinator = deps.coordinator ?? defaultCoordinator(env);
   const outcome = await coordinator.refresh(session.refreshToken, refresh);
-  const usable = session.accessTokenExpiresAt > Math.floor(now / 1000);
+  // Read after the await: the token may have run out while the refresh was out.
+  const settledAt = deps.clock?.() ?? deps.now ?? Date.now();
+  const usable = session.accessTokenExpiresAt > Math.floor(settledAt / 1000);
   if (outcome.kind === 'REFUSED') return { kind: 'REFUSED', usable };
   if (outcome.kind === 'REJECTED') {
     // Terminal for the token — once the grace has passed with no rotation of
     // it having appeared anywhere (a rotation would have been returned here
     // instead: it outranks a rejection in the shared store).
-    if (now - outcome.firstRejectedAt >= REJECTION_GRACE_MS) return { kind: 'ENDED' };
+    if (settledAt - outcome.firstRejectedAt >= REJECTION_GRACE_MS) return { kind: 'ENDED' };
     return { kind: 'REFUSED', usable };
   }
   const { tokens } = outcome;

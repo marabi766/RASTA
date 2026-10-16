@@ -18,6 +18,17 @@ import type {
  * is not mocked, so `TopUpForm` renders in its ordinary idle shape.
  */
 
+// A plain anchor: `next/link` prefetches through an intersection observer whose
+// state updates land outside `act` and drown the output in warnings.
+jest.mock('next/link', () => ({
+  __esModule: true,
+  default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => (
+    <a href={href} {...rest}>
+      {children}
+    </a>
+  ),
+}));
+
 const WALLET: Wallet = {
   id: 'WLT_1',
   organizationId: 'ORG_1',
@@ -143,6 +154,16 @@ describe('escrow holds', () => {
 });
 
 describe('transaction history', () => {
+  it('links each transaction to its own page, where its dispute is shown', () => {
+    const { getAllByRole } = render_();
+    const links = getAllByRole('link').filter((link) =>
+      link.getAttribute('href')?.startsWith('/transactions/'),
+    );
+    expect(links.map((link) => link.getAttribute('href'))).toEqual(
+      TRANSACTIONS.items.map((item) => `/transactions/${encodeURIComponent(item.id)}`),
+    );
+  });
+
   it('shows each transaction’s type, amount and status', () => {
     // Scoped to the row: the filter form's own <option> repeats the same
     // label text, so an unscoped match is ambiguous.
