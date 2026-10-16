@@ -461,6 +461,12 @@ export class TransactionService {
   /**
    * Resolves a dispute back into the settlement queue.
    *
+   * With `dto.disputeId`, the decision is about that dispute and no other:
+   * refused unless the transaction still holds it (Codex on #318 round 2, N1).
+   * The order saga names the dispute its operator decided; without the name,
+   * a dispute resolved here and replaced by another meanwhile was the one
+   * decided, and the new one was cleared with it.
+   *
    * A human decision, recorded with who made it. It does not settle — it only
    * unblocks, so that releasing the money remains a separate, deliberate act.
    */
@@ -478,6 +484,7 @@ export class TransactionService {
       at,
       { disputeResolvedAt: at, disputeResolvedBy: actor, disputeReason: dto.resolution },
       answer,
+      dto.disputeId,
     );
   }
 
@@ -597,6 +604,10 @@ export class TransactionService {
    * row (through `extra`) and on the `TRANSACTION_STATUS_CHANGED` record, in
    * the same transaction as the move — and so does the answer, read from the
    * row the move wrote (see {@link answered}).
+   *
+   * `heldDispute`, when given, is the dispute the transaction must hold for
+   * the move to happen — read under the same lock, so it cannot be replaced
+   * between the check and the write (see {@link resolveDispute}).
    */
   private async move(
     transactionId: string,
@@ -605,6 +616,7 @@ export class TransactionService {
     at: Date,
     extra: Prisma.TransactionUncheckedUpdateManyInput,
     answer?: IdempotentAnswer<TransactionDetail>,
+    heldDispute?: string,
   ): Promise<TransactionDetail> {
     return this.prisma.transaction(async (tx) => {
       const transaction = await this.repository.lockForUpdate(tx, transactionId);
@@ -612,6 +624,15 @@ export class TransactionService {
       this.authorizeAct(transaction, 'COMMIT');
 
       const target = nextStatus(transactionId, transaction.status, event);
+      if (heldDispute !== undefined && transaction.disputeId !== heldDispute) {
+        // Fixed words: the identities stay out of the envelope and the log.
+        throw RastaError.invalidStateTransition(
+          'Transaction',
+          transaction.status,
+          target,
+          'The transaction no longer holds the dispute this decision is about',
+        );
+      }
       const moved = await this.repository.transition(
         tx,
         transactionId,
@@ -800,6 +821,7 @@ export interface TransactionDetail {
   settlementAuthorisedAt: Date | null;
   settlementAuthorisedService: string | null;
   settlementAuthorisationKey: string | null;
+  disputeId: string | null;
   legs: {
     id: string;
     organizationId: string;

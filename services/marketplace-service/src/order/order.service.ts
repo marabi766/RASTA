@@ -883,19 +883,26 @@ export class OrderService {
    * saga then still mirrors that decision back, rather than finding economic
    * DISPUTED again and filing a second dispute over the same objection. Null
    * when the step filed nothing: it yielded, or a party's dispute was there.
+   *
+   * **Recorded with economic-service's identity of the dispute it takes**
+   * (`economicDisputeId`, read with `reason`), and answered with it: the pair
+   * is what the saga resolves by — this order's dispute, decided here, is that
+   * one there and no other raised since (Codex on #318 round 2, N1). Null when
+   * the step filed nothing, or economic-service gave no identity.
    */
   async markObligationDisputed(
     orderId: string,
     reason: string,
     saga: SagaStep,
-  ): Promise<{ status: OrderStatus; disputeId: string | null }> {
+    economicDisputeId: string | null = null,
+  ): Promise<{ status: OrderStatus; disputeId: string | null; economicDisputeId: string | null }> {
     const disputeId = newId(ID_PREFIX.dispute);
     const { status, detail } = await this.systemStep(orderId, 'DISPUTED', saga, {
       activity: 'markObligationDisputed',
       from: ['RECEIPT_CONFIRMED'],
       yieldTo: ['CANCELLING'],
       reason: 'The obligation was disputed in economic-service',
-      movedWith: { disputeId },
+      movedWith: economicDisputeId === null ? { disputeId } : { disputeId, economicDisputeId },
       apply: async (tx, order) => {
         await runUnscoped('the saga files the dispute economic-service holds on the order', () =>
           tx.orderDispute.create({
@@ -930,7 +937,11 @@ export class OrderService {
         });
       },
     });
-    return { status, disputeId: detail.disputeId ?? null };
+    return {
+      status,
+      disputeId: detail.disputeId ?? null,
+      economicDisputeId: detail.economicDisputeId ?? null,
+    };
   }
 
   /** Settlement succeeded. The only path to `COMPLETED`. */

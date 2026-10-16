@@ -95,7 +95,7 @@ describe('order saga activities (real database)', () => {
       }),
       refund: method('refund', undefined),
       cancel: method('cancel', undefined),
-      dispute: method('dispute', undefined),
+      dispute: method('dispute', { disputeId: 'TXD_STUB' }),
       resolveDispute: method('resolveDispute', undefined),
       findObligation: method('findObligation', null),
       // JUSTIFIED-ANY: only the eight methods the activities call are needed,

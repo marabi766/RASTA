@@ -160,12 +160,17 @@ describe('a saga command retried after its stored answer expired', () => {
   });
 
   describe('authorised by the saga, then disputed here (Codex on #287 round 4, finding 2)', () => {
-    /** A dispute registered by the payer's administrator, not by the saga. */
-    const disputeAsPayer = async (transactionId: string, reason: string) =>
+    /**
+     * A dispute that is not the authorising step's: the order's, as the saga
+     * mirrors it — the only way an order's transaction is disputed (the
+     * product owner's answer to Q-138). Who raised it does not matter here;
+     * what the record says after it does.
+     */
+    const disputeThroughOrder = async (transactionId: string, reason: string) =>
       request(http)
         .post(`/v1/transactions/${transactionId}/dispute`)
-        .set('authorization', `Bearer ${admin(payer)}`)
-        .set('idempotency-key', id('ttl-dispute'))
+        .set('x-internal-token', await asSaga())
+        .set('idempotency-key', `order:${id('ORD')}:dispute:${id('DSP')}`)
         .send({ reason })
         .expect(200);
 
@@ -173,7 +178,7 @@ describe('a saga command retried after its stored answer expired', () => {
       const order = id('ORD');
       const held = await holdFor(order);
       expect((await authorise(order, held.id)).status).toBe(200);
-      await disputeAsPayer(held.id, 'the delivery was two pallets short');
+      await disputeThroughOrder(held.id, 'the delivery was two pallets short');
 
       await expireAnswers();
       const retried = await authorise(order, held.id);
@@ -199,7 +204,7 @@ describe('a saga command retried after its stored answer expired', () => {
     it('a dispute from HELD carries no authorisation at all', async () => {
       const order = id('ORD');
       const held = await holdFor(order);
-      await disputeAsPayer(held.id, 'the goods never left the warehouse');
+      await disputeThroughOrder(held.id, 'the goods never left the warehouse');
 
       const read = await readAsPayer(held.id);
       expect(read.status).toBe('DISPUTED');
@@ -215,7 +220,7 @@ describe('a saga command retried after its stored answer expired', () => {
         // The saga's key, sent by a person: still not the saga's command.
         .set('idempotency-key', `order:${order}:authorise`)
         .expect(200);
-      await disputeAsPayer(held.id, 'the invoice does not match the delivery');
+      await disputeThroughOrder(held.id, 'the invoice does not match the delivery');
 
       const read = await readAsPayer(held.id);
       expect(read.status).toBe('DISPUTED');

@@ -105,6 +105,14 @@ export interface DisputedObligation {
   disputed: true;
   /** The objection as economic-service has it: what the order's dispute says. */
   reason: string;
+  /**
+   * economic-service's identity of that dispute, read with its words. The
+   * order's dispute is taken with it, and the operator's decision is mirrored
+   * naming it: a dispute raised there since is not the one decided (Codex on
+   * #318 round 2, N1). Null from an economic-service older than the identity;
+   * absent from an answer recorded before it existed.
+   */
+  economicDisputeId?: string | null;
 }
 
 /** What `authoriseSettlement` answers. Undefined: authorised. */
@@ -365,9 +373,15 @@ export function createActivities(deps: ActivityDependencies) {
      * order's own dispute, where the saga mirrors it and waits for an
      * operator (D-053). See `OrderService.markObligationDisputed`.
      */
-    async markObligationDisputed(orderId: string, reason: string): Promise<ObligationDisputeTaken> {
+    async markObligationDisputed(
+      orderId: string,
+      reason: string,
+      economicDisputeId?: string | null,
+    ): Promise<ObligationDisputeTaken> {
       const step = currentStep();
-      return asSystemFor(orderId, () => deps.orders.markObligationDisputed(orderId, reason, step));
+      return asSystemFor(orderId, () =>
+        deps.orders.markObligationDisputed(orderId, reason, step, economicDisputeId ?? null),
+      );
     },
 
     async markSettlementFailed(orderId: string): Promise<OrderStatus> {
@@ -419,18 +433,22 @@ export function createActivities(deps: ActivityDependencies) {
      * the order could not say why it was stuck. The transaction moves to
      * DISPUTED there, and economic-service refuses to settle it independently
      * of anything this service does.
+     *
+     * Answers economic-service's identity of the dispute it filed — what the
+     * saga names when it mirrors the decision (Codex on #318 round 2, N1) —
+     * or null from an economic-service older than the identity.
      */
     async disputeObligation(
       orderId: string,
       transactionId: string,
       disputeId: string,
       reason: string,
-    ): Promise<void> {
-      await economicStep(
+    ): Promise<string | null> {
+      return economicStep(
         orderId,
         'disputeObligation',
         async (order) => {
-          await deps.economic.dispute({
+          const disputed = await deps.economic.dispute({
             orderId: order.id,
             disputeId,
             transactionId,
@@ -438,6 +456,7 @@ export function createActivities(deps: ActivityDependencies) {
             reason,
             correlationId: order.correlationId,
           });
+          return disputed.disputeId ?? null;
         },
         {
           transactionId,
@@ -446,18 +465,28 @@ export function createActivities(deps: ActivityDependencies) {
           // them.
           answer: (transaction) =>
             transaction.status === 'DISPUTED' && transaction.disputeReason === reason
-              ? { result: undefined }
+              ? { result: transaction.disputeId ?? null }
               : null,
         },
       );
     },
 
-    /** Reopens the transaction so a dispute decided for the supplier can settle. */
+    /**
+     * Reopens the transaction so a dispute decided for the supplier can settle.
+     *
+     * With `economicDisputeId`, only that dispute: economic-service refuses the
+     * resolution, under its row lock, once the transaction holds another — one
+     * raised since the dispute decided here was taken, after that one was
+     * resolved there (Codex on #318 round 2, N1). The refusal stands, and the
+     * saga stops with the funds held for an operator, as it did before the
+     * order took economic-service's disputes at all.
+     */
     async resolveObligationDispute(
       orderId: string,
       transactionId: string,
       disputeId: string,
       resolution: string,
+      economicDisputeId?: string,
     ): Promise<void> {
       await economicStep(
         orderId,
@@ -466,6 +495,7 @@ export function createActivities(deps: ActivityDependencies) {
           await deps.economic.resolveDispute({
             orderId: order.id,
             disputeId,
+            ...(economicDisputeId === undefined ? {} : { economicDisputeId }),
             transactionId,
             buyerOrganizationId: order.buyerOrganizationId,
             resolution,
@@ -475,14 +505,22 @@ export function createActivities(deps: ActivityDependencies) {
         {
           transactionId,
           // Out of the dispute and back in the settlement queue (or since
-          // settled), carrying this resolution's words, which the resolution
-          // writes over the objection.
-          answer: (transaction) =>
-            (transaction.status === 'PENDING_SETTLEMENT' || transaction.status === 'SETTLED') &&
-            transaction.disputedAt !== null &&
-            transaction.disputeReason === resolution
-              ? { result: undefined }
-              : null,
+          // settled). With the dispute's identity, out of THAT dispute — by
+          // whoever resolved it, since economic-service's resolution only
+          // releases the transaction and the order's decision is what moves
+          // the money (Q-138). Without it, carrying this resolution's
+          // words: in the field economic-service keeps them in, or over the
+          // objection where it has none.
+          answer: (transaction) => {
+            const released =
+              (transaction.status === 'PENDING_SETTLEMENT' || transaction.status === 'SETTLED') &&
+              transaction.disputedAt !== null;
+            const ours =
+              economicDisputeId === undefined
+                ? (transaction.disputeResolution ?? transaction.disputeReason) === resolution
+                : transaction.disputeId === economicDisputeId;
+            return released && ours ? { result: undefined } : null;
+          },
         },
       );
     },
@@ -564,7 +602,11 @@ function disputedSinceAuthorised(
     authorisation?.service === SERVICE_NAME &&
     authorisation.idempotencyKey === idempotencyKeyFor.authorise(orderId);
   return transaction.status === 'DISPUTED' && ours && transaction.disputeReason
-    ? { disputed: true, reason: transaction.disputeReason }
+    ? {
+        disputed: true,
+        reason: transaction.disputeReason,
+        economicDisputeId: transaction.disputeId ?? null,
+      }
     : null;
 }
 

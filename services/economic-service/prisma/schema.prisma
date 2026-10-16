@@ -486,6 +486,14 @@ model Transaction {
   settlementAuthorisedService String? @map("settlement_authorised_service")
   settlementAuthorisationKey  String? @map("settlement_authorisation_key")
 
+  /// The latest dispute's identity. Assigned by the database, never by a
+  /// writer: trigger `trg_transaction_dispute_identity` gives every move into
+  /// DISPUTED a new one and keeps it otherwise, whatever an UPDATE sets
+  /// (migration `20261016170000_transaction_dispute_identity`). Kept through
+  /// the resolution. A resolution that names it is applied only while the
+  /// transaction still holds that dispute (docs/23 D-053).
+  disputeId String? @map("dispute_id")
+
   settledAt DateTime? @map("settled_at")
 
   failureReason String? @map("failure_reason")

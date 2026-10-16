@@ -55,8 +55,20 @@ export interface TransactionView {
  */
 export interface TransactionDetailView extends TransactionView {
   disputedAt: string | null;
-  /** The objection while DISPUTED; the resolution once resolved. */
+  /**
+   * The objection while DISPUTED. Once resolved, the resolution — or, from an
+   * economic-service that keeps the resolution apart, still the objection.
+   */
   disputeReason: string | null;
+  /** The resolution, from an economic-service that keeps it apart; absent otherwise. */
+  disputeResolution?: string | null;
+  /**
+   * The latest dispute's identity: new each time the transaction is disputed,
+   * assigned by economic-service and kept through the resolution. What a
+   * resolution names so that it decides that dispute and no other (D-053).
+   * Absent from an economic-service older than the field.
+   */
+  disputeId?: string | null;
   settlement: { id: string; journalId: string; settledAt: string } | null;
   /**
    * When it was authorised for settlement and, if a service did it, which
@@ -312,8 +324,8 @@ export class EconomicClient {
     buyerOrganizationId: string;
     reason: string;
     correlationId: string;
-  }): Promise<TransactionView> {
-    return this.call<TransactionView>('dispute', {
+  }): Promise<TransactionDetailView> {
+    return this.call<TransactionDetailView>('dispute', {
       method: 'POST',
       path: `/v1/transactions/${input.transactionId}/dispute`,
       organizationId: input.buyerOrganizationId,
@@ -330,11 +342,18 @@ export class EconomicClient {
    * economic-service refuses to settle a DISPUTED transaction, and only this
    * call reopens it. The decision itself was made by a platform operator —
    * `assertDisputeResolver` required that before the saga ever got here.
+   *
+   * With `economicDisputeId`, economic-service applies it only while the
+   * transaction still holds that dispute, and refuses it
+   * `INVALID_STATE_TRANSITION` otherwise: the operator decided that one, not
+   * whichever economic-service holds now (Codex on #318 round 2, N1).
    */
   async resolveDispute(input: {
     orderId: string;
     /** The dispute being resolved. Part of the idempotency key. */
     disputeId: string;
+    /** economic-service's identity of the same dispute, when the saga has it. */
+    economicDisputeId?: string;
     transactionId: string;
     buyerOrganizationId: string;
     resolution: string;
@@ -346,7 +365,10 @@ export class EconomicClient {
       organizationId: input.buyerOrganizationId,
       idempotencyKey: idempotencyKeyFor.resolveDispute(input.orderId, input.disputeId),
       correlationId: input.correlationId,
-      body: { resolution: input.resolution },
+      body: {
+        resolution: input.resolution,
+        ...(input.economicDisputeId === undefined ? {} : { disputeId: input.economicDisputeId }),
+      },
     });
   }
 

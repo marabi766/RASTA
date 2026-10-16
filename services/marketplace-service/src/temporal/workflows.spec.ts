@@ -120,13 +120,19 @@ class FakeOrder {
   }
   /**
    * `markObligationDisputed`: the saga files economic-service's dispute, and
-   * names it — null when it filed none.
+   * names it, beside economic-service's identity of it — nulls when it filed
+   * none.
    */
-  fileObligationDispute(reason: string): { status: Status; disputeId: string | null } {
+  fileObligationDispute(
+    reason: string,
+    economicDisputeId: string | null = null,
+  ): { status: Status; disputeId: string | null; economicDisputeId: string | null } {
     const before = this.status;
     const status = this.step('DISPUTED', ['RECEIPT_CONFIRMED'], ['CANCELLING']);
     const filed = before !== 'DISPUTED' && status === 'DISPUTED';
-    return { status, disputeId: filed ? this.file(reason) : null };
+    return filed
+      ? { status, disputeId: this.file(reason), economicDisputeId }
+      : { status, disputeId: null, economicDisputeId: null };
   }
   resolveDispute(outcome: 'SETTLE' | 'REFUND', resolution: string): void {
     this.move(['DISPUTED'], outcome === 'SETTLE' ? 'RECEIPT_CONFIRMED' : 'CANCELLING');
@@ -175,8 +181,10 @@ function recordingActivities(order: FakeOrder, overrides: Partial<OrderActivitie
     markSettlementFailed: recorded('markSettlementFailed', () =>
       order.step('RECEIPT_CONFIRMED', ['SETTLING']),
     ),
-    markObligationDisputed: recorded('markObligationDisputed', (_id: string, reason: string) =>
-      order.fileObligationDispute(reason),
+    markObligationDisputed: recorded(
+      'markObligationDisputed',
+      (_id: string, reason: string, economicDisputeId?: string | null) =>
+        order.fileObligationDispute(reason, economicDisputeId ?? null),
     ),
     markCompleted: recorded('markCompleted', () => order.step('COMPLETED', ['SETTLING'])),
     compensate: recorded('compensate', () => undefined),
@@ -487,20 +495,42 @@ describe('the order saga', () => {
     /**
      * economic-service's side: DISPUTED by someone there until the saga
      * mirrors a resolution, and refusing authorisation and settlement while
-     * it is. `resolved` is every resolution mirrored, as dispute id and words.
+     * it is. Every dispute it holds has an identity of its own (`current`),
+     * and a resolution that names one is refused once it holds another, as
+     * its row-locked check does. `resolved` is every resolution applied, as
+     * dispute id and words; `named` is the identity each resolution sent.
      */
     function disputedThere(order: FakeOrder) {
-      const economic = { disputed: true, resolved: [] as [string, string][] };
+      const economic = {
+        disputed: true,
+        reason: OBJECTION,
+        current: 'TXD_1',
+        opened: 1,
+        resolved: [] as [string, string][],
+        named: [] as (string | undefined)[],
+      };
+      /** A dispute raised there: a new identity, with its own words. */
+      const open = (reason: string): string => {
+        economic.opened += 1;
+        economic.current = `TXD_${economic.opened}`;
+        economic.reason = reason;
+        economic.disputed = true;
+        return economic.current;
+      };
       const recording = recordingActivities(order);
       const { activities, calls } = recording;
-      const disputedAnswer = { disputed: true as const, reason: OBJECTION };
+      const disputedAnswer = () => ({
+        disputed: true as const,
+        reason: economic.reason,
+        economicDisputeId: economic.current,
+      });
       activities.authoriseSettlement = async () => {
         calls.push('authoriseSettlement');
-        return economic.disputed ? disputedAnswer : undefined;
+        return economic.disputed ? disputedAnswer() : undefined;
       };
       activities.settle = async () => {
         calls.push('settle');
-        if (economic.disputed) return disputedAnswer;
+        if (economic.disputed) return disputedAnswer();
         return { settlementId: 'STL_1', commissionAmountMinor: '12500', netAmountMinor: '487500' };
       };
       activities.resolveObligationDispute = async (
@@ -508,16 +538,24 @@ describe('the order saga', () => {
         _t: string,
         disputeId: string,
         resolution: string,
+        economicDisputeId?: string,
       ) => {
         calls.push('resolveObligationDispute');
+        economic.named.push(economicDisputeId);
+        if (economicDisputeId !== undefined && economicDisputeId !== economic.current) {
+          throw ApplicationFailure.retryable(
+            'The transaction no longer holds the dispute this decision is about',
+            'INVALID_STATE_TRANSITION',
+          );
+        }
         economic.resolved.push([disputeId, resolution]);
         economic.disputed = false;
       };
-      activities.disputeObligation = async () => {
+      activities.disputeObligation = async (_o: string, _t: string, _d: string, reason: string) => {
         calls.push('disputeObligation');
-        economic.disputed = true;
+        return open(reason);
       };
-      return { ...recording, economic };
+      return { ...recording, economic, open };
     }
 
     /** What the saga runs once it filed economic-service's dispute, before it reads the order. */
@@ -573,6 +611,8 @@ describe('the order saga', () => {
         'markCompleted',
       ]);
       expect(economic.resolved).toEqual([['DSP_1', 'the supplier showed a signed delivery note']]);
+      // Named: that dispute, as economic-service identified it.
+      expect(economic.named).toEqual(['TXD_1']);
     });
 
     it('settlement answers the dispute: that attempt ends, the order takes it, REFUND refunds', async () => {
@@ -619,6 +659,7 @@ describe('the order saga', () => {
       // One settlement call: the dispute was not retried as a failed attempt.
       expect(calls.filter((c) => c === 'settle')).toHaveLength(1);
       expect(economic.resolved).toEqual([['DSP_1', 'the supplier could not show a delivery']]);
+      expect(economic.named).toEqual(['TXD_1']);
     });
 
     describe('an operator decides it before the saga reads the order again (Codex on #318 round 1, finding 1)', () => {
@@ -663,6 +704,7 @@ describe('the order saga', () => {
         expect(economic.resolved).toEqual([
           ['DSP_1', 'the supplier showed a signed delivery note'],
         ]);
+        expect(economic.named).toEqual(['TXD_1']);
         expect(order.history.filter((s) => s === 'DISPUTED')).toHaveLength(1);
       });
 
@@ -691,6 +733,7 @@ describe('the order saga', () => {
           'markCancelled',
         ]);
         expect(economic.resolved).toEqual([['DSP_1', 'the supplier could not show a delivery']]);
+        expect(economic.named).toEqual(['TXD_1']);
       });
 
       it('decided, then disputed again by a party: the decision is mirrored before the next dispute', async () => {
@@ -699,13 +742,18 @@ describe('the order saga', () => {
         // "already disputed" with different words, and the saga failed.
         const order = new FakeOrder();
         const mirrored: string[] = [];
-        const { calls, effects, activities, economic } = disputedThere(order);
-        activities.disputeObligation = async (_o: string, _t: string, disputeId: string) => {
+        const { calls, effects, activities, economic, open } = disputedThere(order);
+        activities.disputeObligation = async (
+          _o: string,
+          _t: string,
+          disputeId: string,
+          reason: string,
+        ) => {
           calls.push('disputeObligation');
           // economic-service refuses a second dispute while it holds one.
           expect(economic.disputed).toBe(false);
-          economic.disputed = true;
           mirrored.push(disputeId);
+          return open(reason);
         };
         afterFiling(activities, () => {
           order.resolveDispute('SETTLE', 'the supplier showed a signed delivery note');
@@ -727,6 +775,9 @@ describe('the order saga', () => {
           ['DSP_1', 'the supplier showed a signed delivery note'],
           ['DSP_2', 'the note names this order after all'],
         ]);
+        // Each decision names its own dispute: the imported one, then the one
+        // the saga filed, as economic-service identified each.
+        expect(economic.named).toEqual(['TXD_1', 'TXD_2']);
         expect(effects()).toEqual([
           'createObligation',
           'markFundsHeld',
@@ -741,6 +792,49 @@ describe('the order saga', () => {
           'markCompleted',
         ]);
       });
+    });
+
+    it('resolved there and replaced before the order took it: the decision about the stale dispute settles nothing (Codex on #318 round 2, N1)', async () => {
+      // Authorisation read dispute A. Before the step that files it ran, A was
+      // resolved in economic-service and B raised there, on other grounds.
+      // The order took A's words, its operator decided A — and the
+      // resolution, naming nothing, cleared B: settlement went ahead on a
+      // decision nobody took about B. Named, economic-service refuses it, and
+      // the saga stops with the funds held, as before it took disputes.
+      const order = new FakeOrder();
+      const { calls, activities, economic, open } = disputedThere(order);
+      const file = activities.markObligationDisputed;
+      activities.markObligationDisputed = async (...args) => {
+        open('the invoice names another supplier');
+        return file(...args);
+      };
+      afterFiling(activities, () =>
+        order.resolveDispute('SETTLE', 'the supplier showed a signed delivery note'),
+      );
+
+      await expect(
+        run(order, activities, async ({ party, held }) => {
+          await held();
+          await party.confirm();
+          await party.fulfil();
+          await party.confirmReceipt();
+        }),
+      ).rejects.toBeInstanceOf(WorkflowFailedError);
+
+      // The order took A, by A's identity; every attempt named it.
+      expect(order.dispute).toMatchObject({ id: 'DSP_1', reason: OBJECTION });
+      expect(new Set(economic.named)).toEqual(new Set(['TXD_1']));
+      // B stands, and nothing moved.
+      expect(economic).toMatchObject({
+        disputed: true,
+        current: 'TXD_2',
+        reason: 'the invoice names another supplier',
+        resolved: [],
+      });
+      expect(calls).not.toContain('markSettling');
+      expect(calls).not.toContain('settle');
+      expect(calls).not.toContain('compensate');
+      expect(calls.filter((c) => c === 'authoriseSettlement')).toHaveLength(1);
     });
   });
 
@@ -967,6 +1061,7 @@ describe('the order saga', () => {
       disputeObligation: async (_o: string, _t: string, disputeId: string) => {
         calls.push('disputeObligation');
         mirrored.push(disputeId);
+        return null;
       },
       resolveObligationDispute: async (_o: string, _t: string, disputeId: string) => {
         calls.push('resolveObligationDispute');

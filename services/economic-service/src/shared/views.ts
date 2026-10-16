@@ -245,9 +245,13 @@ export function toTransactionDetailView(
       amountMinor: bigint;
     } | null;
     settlement: { id: string; journalId: string; settledAt: Date } | null;
-    settlementAuthorisedAt: Date | null;
-    settlementAuthorisedService: string | null;
-    settlementAuthorisationKey: string | null;
+    // Optional so that a row built by hand without them — the documented
+    // view's own spec builds one — still makes a view; absent reads as null.
+    // A row read from the database always has them.
+    settlementAuthorisedAt?: Date | null;
+    settlementAuthorisedService?: string | null;
+    settlementAuthorisationKey?: string | null;
+    disputeId?: string | null;
   },
 ): TransactionDetailView {
   return {
@@ -255,10 +259,11 @@ export function toTransactionDetailView(
     settlementAuthorisation: row.settlementAuthorisedAt
       ? {
           authorisedAt: row.settlementAuthorisedAt.toISOString(),
-          service: row.settlementAuthorisedService,
-          idempotencyKey: row.settlementAuthorisationKey,
+          service: row.settlementAuthorisedService ?? null,
+          idempotencyKey: row.settlementAuthorisationKey ?? null,
         }
       : null,
+    disputeId: row.disputeId ?? null,
     legs: row.legs.map((leg) => ({
       role: leg.role,
       organizationId: leg.organizationId,

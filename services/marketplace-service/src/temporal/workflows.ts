@@ -208,6 +208,11 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   // resolved. An id, not a flag: a second dispute on the same order is a
   // different dispute, and is mirrored under its own key.
   let mirroredDispute: string | undefined;
+  // economic-service's identity of that same dispute, when it gave one. The
+  // resolution names it, so it decides that dispute and not one raised there
+  // since (Codex on #318 round 2, N1). Undefined for a dispute mirrored by a
+  // step recorded before economic-service had identities: resolved unnamed.
+  let mirroredEconomicDispute: string | undefined;
 
   /** The order now, with the mirrored dispute's resolution when there is one. */
   const read = (): Promise<SagaOrderView> =>
@@ -223,8 +228,18 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     // A read recorded before `mirroredDispute` was part of it has only the
     // most recent dispute, which then was this one.
     const resolution = order.mirroredDispute?.resolution ?? order.dispute?.resolution ?? fallback;
-    await resolveObligationDispute(orderId, heldTransaction(order), mirroredDispute, resolution);
+    const transactionId = heldTransaction(order);
+    await (mirroredEconomicDispute === undefined
+      ? resolveObligationDispute(orderId, transactionId, mirroredDispute, resolution)
+      : resolveObligationDispute(
+          orderId,
+          transactionId,
+          mirroredDispute,
+          resolution,
+          mirroredEconomicDispute,
+        ));
     mirroredDispute = undefined;
+    mirroredEconomicDispute = undefined;
   }
 
   /**
@@ -235,10 +250,24 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
    * read, and the saga must still mirror that decision back (Codex on #318
    * round 1, finding 1). Unnamed, the saga read RECEIPT_CONFIRMED, found the
    * obligation still DISPUTED, and filed a second dispute over it.
+   *
+   * The step records economic-service's identity of the dispute beside the
+   * order's, and the decision is mirrored naming it: if that dispute was
+   * resolved there and another raised before the step ran, the order took
+   * stale words, and economic-service refuses to let a decision about them
+   * clear the new one (Codex on #318 round 2, N1).
    */
-  async function takeObligationDispute(reason: string): Promise<void> {
-    const taken = await markObligationDisputed(orderId, reason);
-    if (taken.disputeId) mirroredDispute = taken.disputeId;
+  async function takeObligationDispute(obligation: DisputedObligation): Promise<void> {
+    const taken = await markObligationDisputed(
+      orderId,
+      obligation.reason,
+      obligation.economicDisputeId ?? null,
+    );
+    if (taken.disputeId) {
+      mirroredDispute = taken.disputeId;
+      // Absent from a step recorded before the identity existed.
+      mirroredEconomicDispute = taken.economicDisputeId ?? undefined;
+    }
   }
 
   /**
@@ -328,7 +357,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     // before this answer existed returns undefined — authorised.
     const authorisation = await authoriseSettlement(orderId, transactionId);
     if (authorisation?.disputed) {
-      await takeObligationDispute(authorisation.reason);
+      await takeObligationDispute(authorisation);
       return false;
     }
 
@@ -371,7 +400,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         // attempt can settle it until an operator decides: this one ends, and
         // the order takes the dispute instead of the next attempt.
         await markSettlementFailed(orderId);
-        await takeObligationDispute(settled.reason);
+        await takeObligationDispute(settled);
         return false;
       }
       const settlement = settled;
@@ -466,13 +495,16 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
           await mirrorResolution(order, 'Dispute resolved: SETTLE');
           // economic-service is told too, so a direct settlement command there
           // is refused independently of anything this service does (ADR-040 § 5).
-          await disputeObligation(
+          const economicDispute = await disputeObligation(
             orderId,
             heldTransaction(order),
             order.dispute.id,
             order.dispute.reason,
           );
           mirroredDispute = order.dispute.id;
+          // Null from an economic-service without identities; undefined from
+          // a step recorded before this one answered with it.
+          mirroredEconomicDispute = economicDispute ?? undefined;
         }
         // No window. A dispute that expired into anything would be worse than
         // one that waits: money would move because nobody looked.
