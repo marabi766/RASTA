@@ -257,3 +257,9 @@ PR 1 بدون نوشتن هیچ API کاربریِ تغییردهنده مرز �
 - **رویدادها (فقط شناسه، بی مبلغ، Q-97 (۲)):** `STATEMENT_DECISION_RECORDED` برای هر تصمیم، و با گذار `STATEMENT_TECHNICALLY_APPROVED`، `STATEMENT_APPROVED` (یک واقعیت، نه فرمان پرداخت — § ۶ (۱)) یا `STATEMENT_REJECTED`، همه در تراکنش تصمیم.
 - Migration `20261016180000_statement_decisions` برگشت‌پذیر است: `down.sql` روی هر تصمیم، صورت‌وضعیتِ تصمیم‌گرفته یا شمارندهٔ غیرصفر رد می‌کند و روی دادهٔ استفاده‌نشده `statement_guard` و `contract_guard` پیشین را حرف‌به‌حرف برمی‌گرداند.
 - بیرون از این PR: کشیدن تعهد تسویه توسط economic و `GET /v1/internal/statements/{id}` (§ ۶، PR بعد)، رابط وب.
+
+## Implementation notes (CON-003 PR 7 — مسیر Gateway و E2E، 2026-10-16)
+
+- **مسیر Gateway تازه‌ای افزوده نشد:** همهٔ مسیرهای صورت‌وضعیت زیر `/v1/contracts/{id}/statements` است و پیشوند `contracts` (از نخستین Gateway؛ `contract-approval-policies` از #243) از پیش به `contract-service` می‌رود؛ `Idempotency-Key` را خود سرویس می‌خواهد (`400` بی آن).
+- **E2E** (`tests/e2e/specs/contract/01-contract-lifecycle.e2e-spec.ts`، همان بازیگران و قرارداد A): پیش‌نویس و ارسال، Snapshot دو زنجیره، تصمیم فنی سپس مالی به دست اشخاص متفاوت، `ALREADY_DECIDED_STATEMENT`، `MEMBER_OF_CONTRACTOR`، `NOT_STEP_AUTHORITY` (کارفرما و مشاور)، Replay تصمیم، `APPROVED_TOTAL_EXCEEDS_CAP`، `404` هر خواندن تازه برای سازمان دیگر، `AUDITOR` و `SYSTEM_ADMIN` طبق § ۷، و ترتیب رویدادها در `audit-service`.
+- **آزموده‌نشده:** کسر واقعی روی صورت‌وضعیت — هیچ مسیری ردیف کسر نمی‌نویسد (Q-125)؛ و خواندن تسویه (PR 6a) و تسویهٔ economic.
