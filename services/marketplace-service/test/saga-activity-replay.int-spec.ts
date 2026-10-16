@@ -10,6 +10,7 @@ import {
   key,
   newPrisma,
   publishOffer,
+  settledResult,
   tenants,
   wire,
   type Wiring,
@@ -75,7 +76,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       settle: method('settle', settle),
       refund: method('refund', async () => undefined),
       cancel: method('cancel', async () => undefined),
-      dispute: method('dispute', async () => undefined),
+      dispute: method('dispute', async () => ({ disputeId: 'TXD_STUB' })),
       resolveDispute: method('resolveDispute', async () => undefined),
       findObligation: method('findObligation', async () => null),
       // JUSTIFIED-ANY: the activities call only these eight methods, and the
@@ -134,9 +135,27 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       netAmountMinor: '0',
       disputedAt: null as string | null,
       disputeReason: null as string | null,
+      // Kept by an economic-service that keeps the resolution apart; this
+      // stand-in writes it over the reason, as one that does not.
+      disputeResolution: undefined as string | null | undefined,
+      // A new identity each time it is disputed, kept through the resolution.
+      disputeId: null as string | null,
       settlement: null as { id: string; journalId: string; settledAt: string } | null,
+      // What economic-service keeps of the command that authorised it.
+      settlementAuthorisation: null as {
+        authorisedAt: string;
+        service: string | null;
+        idempotencyKey: string | null;
+      } | null,
     };
     let loseNext = false;
+    let disputes = 0;
+    const disputed = (reason: string) => {
+      disputes += 1;
+      obligation.disputedAt = new Date().toISOString();
+      obligation.disputeReason = reason;
+      obligation.disputeId = `TXD_${disputes}`;
+    };
 
     const move = (name: string, from: string[], to: string, effect: () => void = () => {}) => {
       expect(getContext().organizationId).toBe(org.buyer);
@@ -158,7 +177,40 @@ describe('a retried saga activity answers what its first attempt answered (D-053
         obligation.orderId = input.orderId;
         return { id: obligation.id };
       },
-      authoriseSettlement: async () => move('authoriseSettlement', ['HELD'], 'PENDING_SETTLEMENT'),
+      authoriseSettlement: async (input: { orderId: string }) =>
+        move('authoriseSettlement', ['HELD'], 'PENDING_SETTLEMENT', () => {
+          // This service's signed token, and the client's own key for it.
+          obligation.settlementAuthorisation = {
+            authorisedAt: new Date().toISOString(),
+            service: 'marketplace-service',
+            idempotencyKey: `order:${input.orderId}:authorise`,
+          };
+        }),
+      dispute: async (input: { reason: string }) => {
+        move('dispute', ['HELD', 'PENDING_SETTLEMENT'], 'DISPUTED', () => disputed(input.reason));
+        return { disputeId: obligation.disputeId };
+      },
+      resolveDispute: async (input: { resolution: string; economicDisputeId?: string }) => {
+        // economic-service's check, under its row lock: the dispute named must
+        // be the one it holds.
+        const named = input.economicDisputeId;
+        if (
+          obligation.status === 'DISPUTED' &&
+          named !== undefined &&
+          named !== obligation.disputeId
+        ) {
+          calls.push('resolveDispute');
+          throw RastaError.invalidStateTransition(
+            'Transaction',
+            'DISPUTED',
+            'PENDING_SETTLEMENT',
+            'The transaction no longer holds the dispute this decision is about',
+          );
+        }
+        return move('resolveDispute', ['DISPUTED'], 'PENDING_SETTLEMENT', () => {
+          obligation.disputeReason = input.resolution;
+        });
+      },
       settle: async () => {
         move('settle', ['PENDING_SETTLEMENT'], 'SETTLED', () => {
           obligation.commissionAmountMinor = SETTLED.commissionAmountMinor;
@@ -192,7 +244,12 @@ describe('a retried saga activity answers what its first attempt answered (D-053
           sourceReference: obligation.orderId,
           disputedAt: obligation.disputedAt,
           disputeReason: obligation.disputeReason,
+          ...(obligation.disputeResolution === undefined
+            ? {}
+            : { disputeResolution: obligation.disputeResolution }),
+          disputeId: obligation.disputeId,
           settlement: obligation.settlement,
+          settlementAuthorisation: obligation.settlementAuthorisation,
         };
       },
       // JUSTIFIED-ANY: the methods these cases reach; the client's HTTP
@@ -205,6 +262,27 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       obligation,
       loseNextAnswer: () => {
         loseNext = true;
+      },
+      /**
+       * Someone with authority over the transaction disputes it in
+       * economic-service directly — not through this service, and not a call
+       * the saga sees.
+       */
+      disputeThere: (reason: string) => {
+        expect(['HELD', 'PENDING_SETTLEMENT']).toContain(obligation.status);
+        obligation.status = 'DISPUTED';
+        disputed(reason);
+      },
+      /**
+       * Someone resolves the dispute in economic-service directly: back in the
+       * settlement queue, with their words — over the reason, or apart from
+       * it with `kept`, as an economic-service that keeps the resolution.
+       */
+      resolveThere: (resolution: string, kept = false) => {
+        expect(obligation.status).toBe('DISPUTED');
+        obligation.status = 'PENDING_SETTLEMENT';
+        if (kept) obligation.disputeResolution = resolution;
+        else obligation.disputeReason = resolution;
       },
     };
   }
@@ -384,9 +462,9 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     expect(calls.filter((c) => c === 'settle')).toHaveLength(1);
 
     // And it completes with the settlement the first attempt was given.
-    await expect(saga.run(10, 1, (a) => a.markCompleted(orderId, retry))).resolves.toBe(
-      'COMPLETED',
-    );
+    await expect(
+      saga.run(10, 1, (a) => a.markCompleted(orderId, settledResult(retry))),
+    ).resolves.toBe('COMPLETED');
     expect((await rowOf(orderId)).economicSettlementId).toBe(SETTLED.settlementId);
   });
 
@@ -400,9 +478,13 @@ describe('a retried saga activity answers what its first attempt answered (D-053
 
     for (const attempt of [1, 2, 3]) {
       await saga.run(4, attempt, (a) => a.authoriseSettlement(orderId, transactionId));
-      await saga.run(12, attempt, (a) =>
-        a.disputeObligation(orderId, transactionId, dispute!.id, 'still not what we ordered'),
-      );
+      // economic-service's identity of the dispute it filed, answered by
+      // every attempt from the record of the first.
+      await expect(
+        saga.run(12, attempt, (a) =>
+          a.disputeObligation(orderId, transactionId, dispute!.id, 'still not what we ordered'),
+        ),
+      ).resolves.toBe('TXD_STUB');
       await saga.run(13, attempt, (a) =>
         a.resolveObligationDispute(orderId, transactionId, dispute!.id, 'refunded'),
       );
@@ -516,9 +598,9 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       expect(econ.calls.filter((c) => c === 'readObligation')).toHaveLength(1);
 
       // Without it: SETTLEMENT_EXHAUSTED, "funds remain held", on a paid order.
-      await expect(saga.run(7, 1, (a) => a.markCompleted(orderId, retried))).resolves.toBe(
-        'COMPLETED',
-      );
+      await expect(
+        saga.run(7, 1, (a) => a.markCompleted(orderId, settledResult(retried))),
+      ).resolves.toBe('COMPLETED');
       expect((await rowOf(orderId)).economicSettlementId).toBe(SETTLED.settlementId);
     });
 
@@ -560,6 +642,473 @@ describe('a retried saga activity answers what its first attempt answered (D-053
         nonRetryable: true,
       });
       expect(calls).not.toContain('readObligation');
+    });
+  });
+
+  describe('authorised, then disputed in economic-service, retried past the TTL (Codex on #287 round 4, finding 2)', () => {
+    async function disputesOf(orderId: string) {
+      return runUnscoped('the suite reads the disputes on the order', () =>
+        prisma.client.orderDispute.findMany({
+          where: { orderId },
+          select: { id: true, reason: true, status: true, raisedBy: true },
+        }),
+      );
+    }
+
+    const OBJECTION = 'the payer counted two pallets short on arrival';
+
+    it('the exact trigger ends in the dispute path, and an operator’s SETTLE settles it', async () => {
+      const econ = expiredEconomic();
+      const { orderId, saga, transactionId } = await receiptConfirmed(econ.economic);
+
+      // Attempt 1 commits HELD -> PENDING_SETTLEMENT; its answer and its
+      // record are lost.
+      econ.loseNextAnswer();
+      await expect(
+        saga.run(4, 1, (a) => a.authoriseSettlement(orderId, transactionId)),
+      ).rejects.toMatchObject({ type: 'UPSTREAM_UNAVAILABLE', nonRetryable: false });
+      // Someone with authority disputes the transaction in economic-service.
+      econ.disputeThere(OBJECTION);
+
+      // Attempt 2, after the TTL: refused DISPUTED, read back DISPUTED — which
+      // used to be refused until the attempts ran out. economic-service's
+      // record says this order's own command authorised it: the dispute is
+      // the answer, and it is recorded.
+      await expect(
+        saga.run(4, 2, (a) => a.authoriseSettlement(orderId, transactionId)),
+      ).resolves.toEqual({ disputed: true, reason: OBJECTION, economicDisputeId: 'TXD_1' });
+      await expect(
+        saga.run(4, 3, (a) => a.authoriseSettlement(orderId, transactionId)),
+      ).resolves.toEqual({ disputed: true, reason: OBJECTION, economicDisputeId: 'TXD_1' });
+      expect(econ.calls.slice(1)).toEqual([
+        'authoriseSettlement',
+        'authoriseSettlement',
+        'readObligation',
+      ]);
+
+      // The order takes the dispute, with economic-service's words, and the
+      // step names it; its retry names the same one.
+      const taken = await saga.run(5, 1, (a) =>
+        a.markObligationDisputed(orderId, OBJECTION, 'TXD_1'),
+      );
+      await expect(
+        saga.run(5, 2, (a) => a.markObligationDisputed(orderId, OBJECTION, 'TXD_1')),
+      ).resolves.toEqual(taken);
+      const [dispute] = await disputesOf(orderId);
+      expect(taken).toEqual({
+        status: 'DISPUTED',
+        disputeId: dispute!.id,
+        economicDisputeId: 'TXD_1',
+      });
+      expect(await disputesOf(orderId)).toEqual([
+        { id: dispute!.id, reason: OBJECTION, status: 'OPEN', raisedBy: 'economic-service' },
+      ]);
+      expect((await historyOf(orderId)).at(-1)).toEqual({
+        kind: 'TRANSITION',
+        fromStatus: 'RECEIPT_CONFIRMED',
+        toStatus: 'DISPUTED',
+      });
+      expect(await eventsOf(orderId, 'ORDER_DISPUTED')).toBe(1);
+
+      // The workflow's DISPUTED case: the dispute it reads is the one it
+      // named, which economic-service holds already. Nothing to mirror.
+      const view = await saga.run(6, 1, (a) => a.readOrder(orderId, taken.disputeId!));
+      expect(view.status).toBe('DISPUTED');
+      expect(view.dispute).toMatchObject({ id: taken.disputeId, reason: OBJECTION });
+      expect(view.mirroredDispute).toEqual({ id: taken.disputeId, resolution: null });
+
+      // An operator decides for the supplier; the saga mirrors it back, and
+      // settles in a new attempt of its own.
+      await asOperator(() =>
+        wiring.orders.resolveDispute(orderId, {
+          outcome: 'SETTLE',
+          resolution: 'the supplier showed a signed delivery note',
+          responsibility: 'BUYER',
+        }),
+      );
+      await saga.run(8, 1, (a) =>
+        a.resolveObligationDispute(
+          orderId,
+          transactionId,
+          taken.disputeId!,
+          'the supplier showed a signed delivery note',
+          taken.economicDisputeId!,
+        ),
+      );
+      expect(econ.obligation.status).toBe('PENDING_SETTLEMENT');
+      await expect(
+        saga.run(9, 1, (a) => a.authoriseSettlement(orderId, transactionId)),
+      ).resolves.toBeUndefined();
+      await expect(saga.run(10, 1, (a) => a.markSettling(orderId))).resolves.toBe('SETTLING');
+      const settled = await saga.run(11, 1, (a) => a.settle(orderId, transactionId));
+      await expect(
+        saga.run(12, 1, (a) => a.markCompleted(orderId, settledResult(settled))),
+      ).resolves.toBe('COMPLETED');
+      expect(econ.obligation.status).toBe('SETTLED');
+    });
+
+    it('a dispute found by settlement, within the TTL: the attempt ends and the order takes the dispute', async () => {
+      // The retry of the authorisation was answered by economic-service's
+      // replay (or the first attempt's answer arrived), then the transaction
+      // was disputed there: settlement is refused, and it is the dispute.
+      const econ = expiredEconomic();
+      const { orderId, saga, transactionId } = await settling(econ.economic);
+      econ.disputeThere(OBJECTION);
+
+      await expect(saga.run(6, 1, (a) => a.settle(orderId, transactionId))).resolves.toEqual({
+        disputed: true,
+        reason: OBJECTION,
+        economicDisputeId: 'TXD_1',
+      });
+      await expect(saga.run(7, 1, (a) => a.markSettlementFailed(orderId))).resolves.toBe(
+        'RECEIPT_CONFIRMED',
+      );
+      await expect(
+        saga.run(8, 1, (a) => a.markObligationDisputed(orderId, OBJECTION, 'TXD_1')),
+      ).resolves.toMatchObject({
+        status: 'DISPUTED',
+        disputeId: expect.any(String),
+        economicDisputeId: 'TXD_1',
+      });
+      expect(await disputesOf(orderId)).toMatchObject([{ reason: OBJECTION, status: 'OPEN' }]);
+    });
+
+    it('an operator decides before the saga reads again: that dispute’s decision is mirrored, and no second dispute is filed (Codex on #318 round 1, finding 1)', async () => {
+      const econ = expiredEconomic();
+      const { orderId, saga, transactionId } = await receiptConfirmed(econ.economic);
+      econ.loseNextAnswer();
+      await expect(
+        saga.run(4, 1, (a) => a.authoriseSettlement(orderId, transactionId)),
+      ).rejects.toMatchObject({ type: 'UPSTREAM_UNAVAILABLE' });
+      econ.disputeThere(OBJECTION);
+      await expect(
+        saga.run(4, 2, (a) => a.authoriseSettlement(orderId, transactionId)),
+      ).resolves.toEqual({ disputed: true, reason: OBJECTION, economicDisputeId: 'TXD_1' });
+      const taken = await saga.run(5, 1, (a) =>
+        a.markObligationDisputed(orderId, OBJECTION, 'TXD_1'),
+      );
+      expect(taken.disputeId).toEqual(expect.any(String));
+
+      // Decided before the saga's next read: it never sees the order DISPUTED.
+      await asOperator(() =>
+        wiring.orders.resolveDispute(orderId, {
+          outcome: 'SETTLE',
+          resolution: 'the supplier showed a signed delivery note',
+          responsibility: 'BUYER',
+        }),
+      );
+
+      // A worker restarted here replays `taken` from the workflow's history;
+      // the step's own record answers a retry of it with the same dispute.
+      await expect(
+        saga.run(5, 2, (a) => a.markObligationDisputed(orderId, OBJECTION, 'TXD_1')),
+      ).resolves.toEqual(taken);
+
+      // The saga reads RECEIPT_CONFIRMED, and that dispute's decision.
+      const view = await saga.run(6, 1, (a) => a.readOrder(orderId, taken.disputeId!));
+      expect(view.status).toBe('RECEIPT_CONFIRMED');
+      expect(view.mirroredDispute).toEqual({
+        id: taken.disputeId,
+        resolution: 'the supplier showed a signed delivery note',
+      });
+      // economic-service still has it DISPUTED: authorising now would answer
+      // the dispute again, and the order would take a second one.
+      expect(econ.obligation.status).toBe('DISPUTED');
+
+      await saga.run(7, 1, (a) =>
+        a.resolveObligationDispute(
+          orderId,
+          transactionId,
+          taken.disputeId!,
+          view.mirroredDispute!.resolution!,
+          taken.economicDisputeId!,
+        ),
+      );
+      expect(econ.obligation.status).toBe('PENDING_SETTLEMENT');
+      await expect(
+        saga.run(8, 1, (a) => a.authoriseSettlement(orderId, transactionId)),
+      ).resolves.toBeUndefined();
+      await expect(saga.run(9, 1, (a) => a.markSettling(orderId))).resolves.toBe('SETTLING');
+      const settled = await saga.run(10, 1, (a) => a.settle(orderId, transactionId));
+      await expect(
+        saga.run(11, 1, (a) => a.markCompleted(orderId, settledResult(settled))),
+      ).resolves.toBe('COMPLETED');
+      expect(econ.obligation.status).toBe('SETTLED');
+      expect(await disputesOf(orderId)).toEqual([
+        {
+          id: taken.disputeId,
+          reason: OBJECTION,
+          status: 'RESOLVED_SETTLE',
+          raisedBy: 'economic-service',
+        },
+      ]);
+    });
+
+    it('reads the mirrored dispute by its id, not as the most recent one', async () => {
+      const econ = expiredEconomic();
+      const { orderId, saga } = await receiptConfirmed(econ.economic);
+      const taken = await saga.run(5, 1, (a) => a.markObligationDisputed(orderId, OBJECTION));
+      await asOperator(() =>
+        wiring.orders.resolveDispute(orderId, {
+          outcome: 'SETTLE',
+          resolution: 'the supplier showed a signed delivery note',
+          responsibility: 'BUYER',
+        }),
+      );
+      await asBuyer(() =>
+        wiring.orders.raiseDispute(orderId, { reason: 'the delivery note is for another order' }),
+      );
+
+      const view = await saga.run(6, 1, (a) => a.readOrder(orderId, taken.disputeId!));
+      expect(view.status).toBe('DISPUTED');
+      expect(view.dispute).toMatchObject({ reason: 'the delivery note is for another order' });
+      expect(view.dispute!.id).not.toBe(taken.disputeId);
+      expect(view.mirroredDispute).toEqual({
+        id: taken.disputeId,
+        resolution: 'the supplier showed a signed delivery note',
+      });
+      // Without an id, nothing about it; with another order's, nothing found.
+      expect(await saga.run(7, 1, (a) => a.readOrder(orderId))).not.toHaveProperty(
+        'mirroredDispute',
+      );
+      const other = await receiptConfirmed(expiredEconomic().economic);
+      const elsewhere = await other.saga.run(5, 1, (a) =>
+        a.markObligationDisputed(other.orderId, OBJECTION),
+      );
+      await expect(
+        saga.run(8, 1, (a) => a.readOrder(orderId, elsewhere.disputeId!)),
+      ).resolves.toMatchObject({ mirroredDispute: null });
+    });
+
+    it('yields to a dispute a party raised here meanwhile, and files no second one', async () => {
+      const econ = expiredEconomic();
+      const { orderId, saga } = await receiptConfirmed(econ.economic);
+      await asBuyer(() =>
+        wiring.orders.raiseDispute(orderId, { reason: 'the buyer disputes it here too' }),
+      );
+
+      // It files nothing, so it names nothing — not economic-service's dispute
+      // either: the saga mirrors the party's.
+      await expect(
+        saga.run(5, 1, (a) => a.markObligationDisputed(orderId, OBJECTION, 'TXD_1')),
+      ).resolves.toEqual({ status: 'DISPUTED', disputeId: null, economicDisputeId: null });
+      expect(await disputesOf(orderId)).toMatchObject([
+        { reason: 'the buyer disputes it here too' },
+      ]);
+    });
+
+    it('yields to a refund an operator decided meanwhile: the saga refunds', async () => {
+      const econ = expiredEconomic();
+      const { orderId, saga } = await receiptConfirmed(econ.economic);
+      await asBuyer(() =>
+        wiring.orders.raiseDispute(orderId, { reason: 'the buyer disputes it here as well' }),
+      );
+      await asOperator(() =>
+        wiring.orders.resolveDispute(orderId, {
+          outcome: 'REFUND',
+          resolution: 'the supplier took the goods back',
+          responsibility: 'SUPPLIER',
+        }),
+      );
+
+      await expect(
+        saga.run(5, 1, (a) => a.markObligationDisputed(orderId, OBJECTION, 'TXD_1')),
+      ).resolves.toEqual({ status: 'CANCELLING', disputeId: null, economicDisputeId: null });
+      expect((await rowOf(orderId)).status).toBe('CANCELLING');
+      expect(await disputesOf(orderId)).toMatchObject([{ status: 'RESOLVED_REFUND' }]);
+    });
+
+    // DISPUTED is reachable from HELD with no authorisation, and a record
+    // that is not this order's own command proves nothing either.
+    it.each([
+      ['disputed from HELD: never authorised', null],
+      ['authorised by a person', { service: null, idempotencyKey: null }],
+      [
+        'authorised by another service under this order’s key',
+        { service: 'contract-service', idempotencyKey: 'ORDER_KEY' },
+      ],
+      [
+        'authorised by this service under another order’s key',
+        { service: 'marketplace-service', idempotencyKey: 'order:ORD_OTHER:authorise' },
+      ],
+    ])('%s, then disputed: still refused, and nothing recorded', async (_case, authorisation) => {
+      const econ = expiredEconomic();
+      const { orderId, saga, transactionId } = await receiptConfirmed(econ.economic);
+      econ.disputeThere(OBJECTION);
+      econ.obligation.settlementAuthorisation = authorisation && {
+        authorisedAt: new Date().toISOString(),
+        service: authorisation.service,
+        idempotencyKey:
+          authorisation.idempotencyKey === 'ORDER_KEY'
+            ? `order:${orderId}:authorise`
+            : authorisation.idempotencyKey,
+      };
+
+      await expect(
+        saga.run(4, 1, (a) => a.authoriseSettlement(orderId, transactionId)),
+      ).rejects.toMatchObject({ type: 'INVALID_STATE_TRANSITION' });
+      expect(econ.calls.slice(1)).toEqual(['authoriseSettlement', 'readObligation']);
+      expect(await recordsOf(orderId)).not.toContainEqual({ activity: 'authoriseSettlement' });
+      expect((await rowOf(orderId)).status).toBe('RECEIPT_CONFIRMED');
+    });
+  });
+
+  describe('a decision mirrored by economic-service’s identity of the dispute (Codex on #318 round 2, N1)', () => {
+    const A = 'the payer counted two pallets short on arrival';
+    const B = 'the invoice names another supplier';
+    const DECIDED = 'the supplier showed a signed delivery note';
+
+    /** Authorised, its answer lost, disputed there (A), and the retry's answer: A. */
+    async function disputedAfterAuthorisation() {
+      const econ = expiredEconomic();
+      const run = await receiptConfirmed(econ.economic);
+      econ.loseNextAnswer();
+      await expect(
+        run.saga.run(4, 1, (a) => a.authoriseSettlement(run.orderId, run.transactionId)),
+      ).rejects.toMatchObject({ type: 'UPSTREAM_UNAVAILABLE' });
+      econ.disputeThere(A);
+      const answer = await run.saga.run(4, 2, (a) =>
+        a.authoriseSettlement(run.orderId, run.transactionId),
+      );
+      expect(answer).toEqual({ disputed: true, reason: A, economicDisputeId: 'TXD_1' });
+      return { econ, ...run, answer: answer! };
+    }
+
+    async function decide(orderId: string): Promise<void> {
+      await asOperator(() =>
+        wiring.orders.resolveDispute(orderId, {
+          outcome: 'SETTLE',
+          resolution: DECIDED,
+          responsibility: 'BUYER',
+        }),
+      );
+    }
+
+    it('A resolved there and B raised before the order took A: the decision about A is refused, B stands, and nothing is recorded', async () => {
+      const { econ, orderId, saga, transactionId, answer } = await disputedAfterAuthorisation();
+      // Before the step that files A runs.
+      econ.resolveThere('counted again: complete');
+      econ.disputeThere(B);
+
+      const taken = await saga.run(5, 1, (a) =>
+        a.markObligationDisputed(orderId, answer.reason, answer.economicDisputeId),
+      );
+      // The order took A's words — stale — and A's identity with them.
+      expect(taken).toMatchObject({ status: 'DISPUTED', economicDisputeId: 'TXD_1' });
+      await decide(orderId);
+
+      // Every attempt: economic-service holds B, and refuses a decision about A.
+      for (const attempt of [1, 2, 3]) {
+        await expect(
+          saga.run(6, attempt, (a) =>
+            a.resolveObligationDispute(
+              orderId,
+              transactionId,
+              taken.disputeId!,
+              DECIDED,
+              taken.economicDisputeId!,
+            ),
+          ),
+        ).rejects.toMatchObject({ type: 'INVALID_STATE_TRANSITION' });
+      }
+      expect(econ.obligation).toMatchObject({
+        status: 'DISPUTED',
+        disputeId: 'TXD_2',
+        disputeReason: B,
+      });
+      expect(await recordsOf(orderId)).not.toContainEqual({
+        activity: 'resolveObligationDispute',
+      });
+    });
+
+    it('A resolved there before the decision is mirrored: A is out of the dispute, and the step is answered from the record', async () => {
+      // D-053 (3), which a resolution's words could not reconcile: X there, the
+      // operator's Y here. economic-service's resolution only releases the
+      // transaction; the order's decision is what moves the money (Q-138).
+      const { econ, orderId, saga, transactionId, answer } = await disputedAfterAuthorisation();
+      const taken = await saga.run(5, 1, (a) =>
+        a.markObligationDisputed(orderId, answer.reason, answer.economicDisputeId),
+      );
+      econ.resolveThere('counted again: complete');
+      await decide(orderId);
+
+      await saga.run(6, 1, (a) =>
+        a.resolveObligationDispute(
+          orderId,
+          transactionId,
+          taken.disputeId!,
+          DECIDED,
+          taken.economicDisputeId!,
+        ),
+      );
+      expect(econ.calls.slice(-2)).toEqual(['resolveDispute', 'readObligation']);
+      expect(await recordsOf(orderId)).toContainEqual({ activity: 'resolveObligationDispute' });
+      await expect(
+        saga.run(7, 1, (a) => a.authoriseSettlement(orderId, transactionId)),
+      ).resolves.toBeUndefined();
+    });
+
+    it('A resolved there, then B raised and resolved there too: not A — refused', async () => {
+      const { econ, orderId, saga, transactionId, answer } = await disputedAfterAuthorisation();
+      const taken = await saga.run(5, 1, (a) =>
+        a.markObligationDisputed(orderId, answer.reason, answer.economicDisputeId),
+      );
+      econ.resolveThere('counted again: complete');
+      econ.disputeThere(B);
+      econ.resolveThere('the invoice was reissued');
+      await decide(orderId);
+
+      await expect(
+        saga.run(6, 1, (a) =>
+          a.resolveObligationDispute(
+            orderId,
+            transactionId,
+            taken.disputeId!,
+            DECIDED,
+            taken.economicDisputeId!,
+          ),
+        ),
+      ).rejects.toMatchObject({ type: 'INVALID_STATE_TRANSITION' });
+    });
+
+    // A dispute mirrored before economic-service had identities, or by one
+    // that has none: the words still decide, in the field economic-service
+    // keeps them in.
+    it.each([
+      ['the same words, over the reason', false, DECIDED, true],
+      ['the same words, kept apart from it', true, DECIDED, true],
+      ['other words', false, 'counted again: complete', false],
+    ])(
+      'without an identity, resolved there with %s: answered only on the same words',
+      async (_case, kept, words, answered) => {
+        const { econ, orderId, saga, transactionId, answer } = await disputedAfterAuthorisation();
+        const taken = await saga.run(5, 1, (a) => a.markObligationDisputed(orderId, answer.reason));
+        expect(taken.economicDisputeId).toBeNull();
+        econ.resolveThere(words, kept);
+        await decide(orderId);
+
+        const step = saga.run(6, 1, (a) =>
+          a.resolveObligationDispute(orderId, transactionId, taken.disputeId!, DECIDED),
+        );
+        if (answered) await expect(step).resolves.toBeUndefined();
+        else await expect(step).rejects.toMatchObject({ type: 'INVALID_STATE_TRANSITION' });
+      },
+    );
+
+    it('a dispute the saga files: economic-service’s identity of it, also when read back after its answer was lost', async () => {
+      const econ = expiredEconomic();
+      const { orderId, saga, transactionId } = await receiptConfirmed(econ.economic);
+      await asBuyer(() => wiring.orders.raiseDispute(orderId, { reason: A }));
+      const { dispute } = await saga.run(5, 1, (a) => a.readOrder(orderId));
+
+      econ.loseNextAnswer();
+      await expect(
+        saga.run(6, 1, (a) => a.disputeObligation(orderId, transactionId, dispute!.id, A)),
+      ).rejects.toMatchObject({ type: 'UPSTREAM_UNAVAILABLE' });
+      await expect(
+        saga.run(6, 2, (a) => a.disputeObligation(orderId, transactionId, dispute!.id, A)),
+      ).resolves.toBe('TXD_1');
+      expect(econ.calls.slice(-2)).toEqual(['dispute', 'readObligation']);
     });
   });
 

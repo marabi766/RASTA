@@ -274,3 +274,9 @@ PR 1 بدون نوشتن هیچ API کاربریِ تغییردهنده مرز �
 - **`STATEMENT_APPROVED` دست نخورد:** همچنان فقط شناسه و لحظه (Q-97 (۲))؛ مبلغ فقط از این پاسخ (§ ۶ (۲)). آزمون یکپارچگی همین را می‌سنجد.
 - آزمون‌ها: Unit (`settlement-fact.spec.ts`: فراخواننده، نگاشت، `approvedAt` فقط از گام آخر مالی و نبودش = خطا، رشتهٔ دقیق 2^63 − 1)، یکپارچگی و جداسازی مستأجر (`test/statement-settlement-read.int-spec.ts`: کارفرما ۲۰۰، پیمانکار/مشاور/بیگانه/ناموجود همان ۴۰۴، کاربران و سرویس‌های دیگر ۴۰۳، توکن بی سازمان ۴۰۳، بی توکن ۴۰۱، دو کارفرما).
 - بیرون از این PR: مصرف `STATEMENT_APPROVED` و ساخت تعهد در economic (PR 6b)، مصرف `SETTLEMENT_COMPLETED` و گذار `SETTLED` (PR 6c)، مسیرهای Gateway و E2E (PR 7).
+
+## Implementation notes (CON-003 PR 7 — مسیر Gateway و E2E، 2026-10-16)
+
+- **مسیر Gateway تازه‌ای افزوده نشد:** همهٔ مسیرهای صورت‌وضعیت زیر `/v1/contracts/{id}/statements` است و پیشوند `contracts` (از نخستین Gateway؛ `contract-approval-policies` از #243) از پیش به `contract-service` می‌رود؛ `Idempotency-Key` را خود سرویس می‌خواهد (`400` بی آن).
+- **E2E** (`tests/e2e/specs/contract/01-contract-lifecycle.e2e-spec.ts`، همان بازیگران و قرارداد A): پیش‌نویس و ارسال، Snapshot دو زنجیره، تصمیم فنی سپس مالی به دست اشخاص متفاوت، `ALREADY_DECIDED_STATEMENT`، `MEMBER_OF_CONTRACTOR`، `NOT_STEP_AUTHORITY` (کارفرما و مشاور)، Replay تصمیم، `APPROVED_TOTAL_EXCEEDS_CAP`، `404` هر خواندن تازه برای سازمان دیگر، `AUDITOR` و `SYSTEM_ADMIN` طبق § ۷، و ترتیب رویدادها در `audit-service`.
+- **آزموده‌نشده:** کسر واقعی روی صورت‌وضعیت — هیچ مسیری ردیف کسر نمی‌نویسد (Q-125)؛ و خواندن تسویه (PR 6a) و تسویهٔ economic.
