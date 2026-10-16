@@ -20,7 +20,12 @@
 // Most services' own settings were withheld long before this check. Those are
 // listed in service-env-turbo-withheld.json, exactly: a setting withheld and
 // not listed fails (declare it in turbo.json), and a listed one turbo now
-// passes fails too (delete the entry), so the list only shrinks.
+// passes fails too (delete the entry). Exactness alone would let a change add
+// a new setting and list it in the same diff, so the list is also compared
+// with the base's: every (service, task, setting) must already be listed
+// there (Codex r3 on #304). The base is a git revision,
+// SERVICE_ENV_WITHHELD_BASE — CI's merge commit's first parent, i.e. the
+// branch it merges into — and origin/main when unset.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -101,7 +106,11 @@ function withheldSettings() {
 
 /** The listed withholdings, flattened as `service task SETTING`. */
 function baseline() {
-  const listed = readJson(join(ROOT, BASELINE_FILE));
+  return flatten(readJson(join(ROOT, BASELINE_FILE)));
+}
+
+/** A withheld list, as `service task SETTING` entries. */
+function flatten(listed) {
   const entries = [];
   for (const [service, settings] of Object.entries(listed)) {
     if (service.startsWith('$')) continue;
@@ -110,6 +119,30 @@ function baseline() {
     }
   }
   return entries;
+}
+
+/**
+ * The list as the base revision has it. The revision must resolve: a base
+ * that cannot be read fails rather than passing unchecked. A base without the
+ * file lists nothing, so nothing may be listed against it.
+ */
+function baseBaseline() {
+  const ref = process.env.SERVICE_ENV_WITHHELD_BASE || 'origin/main';
+  const git = (...args) => spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' });
+  const commit = git('rev-parse', '--verify', '--quiet', `${ref}^{commit}`);
+  assert.equal(
+    commit.status,
+    0,
+    `cannot resolve the base revision ${ref} (SERVICE_ENV_WITHHELD_BASE); fetch it`,
+  );
+  const file = git('show', `${commit.stdout.trim()}:${BASELINE_FILE}`);
+  return { ref, entries: file.status === 0 ? flatten(JSON.parse(file.stdout)) : [] };
+}
+
+/** The entries of `listed` that `base` does not list: growth, or a replacement's new half. */
+function notListedIn(listed, base) {
+  const known = new Set(base);
+  return listed.filter((entry) => !known.has(entry));
 }
 
 /** The variables turbo's plan for `<package>#<task>` configures, given `env` (a dry run). */
@@ -159,6 +192,32 @@ test('the list of withheld settings holds only what turbo still withholds', () =
   const withheld = new Set(withheldSettings());
   const stale = baseline().filter((entry) => !withheld.has(entry));
   assert.deepEqual(stale, [], `turbo passes these now: delete them from ${BASELINE_FILE}`);
+});
+
+test('the list of withheld settings lists nothing the base does not', () => {
+  const { ref, entries } = baseBaseline();
+  assert.deepEqual(
+    notListedIn(baseline(), entries),
+    [],
+    `not listed at ${ref}: declare each in turbo.json instead of listing it in ${BASELINE_FILE}`,
+  );
+});
+
+test('the comparison with the base refuses growth and replacement, and allows shrinking', () => {
+  const base = ['asset-service dev A', 'asset-service test A', 'economic-service dev B'];
+  // Growth: one more entry.
+  assert.deepEqual(notListedIn([...base, 'asset-service dev C'], base), ['asset-service dev C']);
+  // Replacement: same size, one entry swapped for a new one.
+  assert.deepEqual(notListedIn([...base.slice(1), 'asset-service dev C'], base), [
+    'asset-service dev C',
+  ]);
+  // A known setting listed for a task it was not listed for is growth too.
+  assert.deepEqual(notListedIn([...base, 'economic-service test B'], base), [
+    'economic-service test B',
+  ]);
+  assert.deepEqual(notListedIn(base.slice(1), base), []);
+  assert.deepEqual(notListedIn(base, base), []);
+  assert.deepEqual(notListedIn(['asset-service dev A'], []), ['asset-service dev A']);
 });
 
 test('every task that starts asset-service allows its claim-document settings', () => {
