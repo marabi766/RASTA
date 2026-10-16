@@ -126,8 +126,11 @@ export function canReadInventory(
  * together with it: `SYSTEM_ADMIN`, `UNION_ADMIN` (`PLATFORM_ROLES`),
  * `ORGANIZATION_ADMIN`, `SUPPLIER`, `WORKSHOP`, `CONTRACTOR`
  * (`SUPPLIER_SIDE_ROLES`), plus `PROCUREMENT_USER` and `FLEET_MANAGER`.
- * `AUDITOR` is absent from that list already, so it is refused here too
- * without a separate check.
+ *
+ * `AUDITOR` is refused first, whatever else the person holds: the service
+ * calls `assertNotAuditor()` before it looks at `DIRECTORY_ROLES`, so
+ * `AUDITOR` + `SUPPLIER` or `AUDITOR` + `SYSTEM_ADMIN` is a 403 there and no
+ * link here.
  */
 const SUPPLIER_DIRECTORY_ROLES: readonly string[] = [
   'SYSTEM_ADMIN',
@@ -141,6 +144,7 @@ const SUPPLIER_DIRECTORY_ROLES: readonly string[] = [
 ];
 
 export function canReadSuppliers(roles: readonly string[]): boolean {
+  if (roles.includes('AUDITOR')) return false;
   return roles.some((role) => SUPPLIER_DIRECTORY_ROLES.includes(role));
 }
 

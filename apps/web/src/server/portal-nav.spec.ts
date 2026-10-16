@@ -173,6 +173,22 @@ describe('canReadSuppliers', () => {
     }
     expect(canReadSuppliers([])).toBe(false);
   });
+
+  it('hides it whenever AUDITOR is held, whatever else is — the service vetoes the auditor first', () => {
+    for (const role of [
+      'SYSTEM_ADMIN',
+      'UNION_ADMIN',
+      'ORGANIZATION_ADMIN',
+      'SUPPLIER',
+      'WORKSHOP',
+      'CONTRACTOR',
+      'PROCUREMENT_USER',
+      'FLEET_MANAGER',
+    ]) {
+      expect(canReadSuppliers(['AUDITOR', role])).toBe(false);
+      expect(canReadSuppliers([role, 'AUDITOR'])).toBe(false);
+    }
+  });
 });
 
 describe('portalNavFor', () => {
@@ -321,6 +337,22 @@ describe('loadPortalNav', () => {
     expect(hrefs(await loadPortalNav(SESSION, user(['CONTRACTOR'])))).toContain('/suppliers');
     expect(hrefs(await loadPortalNav(SESSION, user(['AUDITOR'])))).not.toContain('/suppliers');
     expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/suppliers');
+  });
+
+  it('withholds the Suppliers link from mixed roles that include AUDITOR', async () => {
+    expect(hrefs(await loadPortalNav(SESSION, user(['AUDITOR', 'SUPPLIER'])))).not.toContain(
+      '/suppliers',
+    );
+    expect(
+      hrefs(await loadPortalNav(SESSION, user(['ORGANIZATION_ADMIN', 'AUDITOR']))),
+    ).not.toContain('/suppliers');
+    // A realm SYSTEM_ADMIN alone is admitted; with AUDITOR membership it is not.
+    expect(hrefs(await loadPortalNav(sessionWith(['SYSTEM_ADMIN']), user([])))).toContain(
+      '/suppliers',
+    );
+    expect(
+      hrefs(await loadPortalNav(sessionWith(['SYSTEM_ADMIN']), user(['AUDITOR']))),
+    ).not.toContain('/suppliers');
   });
 
   it('keeps the settlements link for the roles that read settlements, next to Projects', async () => {

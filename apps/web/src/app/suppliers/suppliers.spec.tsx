@@ -241,6 +241,10 @@ describe('the supplier detail', () => {
 
   it.each<[string, ReadResult<SupplierDetail>]>([
     ['record with history', { kind: 'OK', data: DETAIL }],
+    [
+      'no qualification, no suspension',
+      { kind: 'OK', data: { ...DETAIL, qualifications: [], suspensions: [] } },
+    ],
     ['not found', { kind: 'NOT_FOUND' }],
     ['refused', { kind: 'FORBIDDEN' }],
     ['unavailable', { kind: 'UNAVAILABLE', status: 502, correlationId: 'corr-9' }],
@@ -325,5 +329,131 @@ describe('a malformed timestamp, from the response to the page', () => {
 
     render(<SupplierDetailScreen result={result} />);
     expect(screen.getByRole('heading', { name: SUPPLIER.displayName })).toBeInTheDocument();
+  });
+});
+
+/**
+ * Read to render, for a required field that is absent rather than invalid: the
+ * page shows the fixed malformed-response text, never the fact a default would
+ * have invented ("never suspended", "closed", "no active qualification", "not
+ * currently valid", "no documents", no next page).
+ */
+describe('a missing required field, from the response to the page', () => {
+  beforeEach(() => {
+    Object.assign(process.env, {
+      API_GATEWAY_URL: 'http://gateway.test:3000',
+      OIDC_ISSUER_URL: 'http://keycloak.test/realms/rasta',
+      OIDC_CLIENT_ID: 'rasta-web',
+      WEB_PUBLIC_ORIGIN: 'http://localhost:3200',
+      WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
+    });
+  });
+
+  afterEach(() => {
+    mockCallGateway.mockReset();
+  });
+
+  const session = {
+    subject: 'USR_1',
+    username: 'owner',
+    organizationId: 'ORG_OWNER',
+    accessToken: 'access-token-value',
+    accessTokenExpiresAt: 2_000_000_000,
+    refreshToken: 'refresh-token-value',
+    csrfToken: 'csrf',
+    issuedAt: 1_900_000_000,
+  };
+
+  // What supplier-service sends for DETAIL's qualification (`evidence`, not `evidenceCount`).
+  const QUALIFICATION_WIRE = {
+    id: 'QUAL_1',
+    capability: 'WORKSHOP_SERVICE',
+    state: 'APPROVED',
+    statement: 'مجهز به دستگاه بالانس',
+    submittedBy: 'USR_A',
+    submittedAt: '2026-08-02T08:00:00.000Z',
+    decidedBy: 'USR_A',
+    decidedAt: '2026-08-03T08:00:00.000Z',
+    decisionNote: 'مستندات کامل بود',
+    evidence: [{ documentId: 'DOC_1', label: null }],
+    current: true,
+  };
+  const SUSPENSION_WIRE = { ...DETAIL.suspensions[0]!, suspendedBy: 'USR_A', reinstatedBy: null };
+  const DETAIL_WIRE = {
+    ...SUPPLIER,
+    registeredBy: 'USR_A',
+    qualifications: [QUALIFICATION_WIRE],
+    suspensions: [SUSPENSION_WIRE],
+  };
+
+  function without<T extends object>(value: T, field: keyof T): unknown {
+    const copy: Partial<T> = { ...value };
+    delete copy[field];
+    return copy;
+  }
+
+  async function renderDetail(data: unknown) {
+    mockCallGateway.mockResolvedValue({ data, correlationId: 'corr-omit' });
+    const result = await fetchSupplier(session, 'SUP_1');
+    return render(<SupplierDetailScreen result={result} />);
+  }
+
+  it.each<[string, unknown, string]>([
+    ['suspensions', without(DETAIL_WIRE, 'suspensions'), 'این تأمین‌کننده تا کنون تعلیق نشده است.'],
+    [
+      'qualifications',
+      without(DETAIL_WIRE, 'qualifications'),
+      'این تأمین‌کننده هنوز برای هیچ دسته‌ای صلاحیت ارسال نکرده است.',
+    ],
+    [
+      'a suspension’s open',
+      { ...DETAIL_WIRE, suspensions: [without(SUSPENSION_WIRE, 'open')] },
+      'بسته‌شده',
+    ],
+    [
+      'a qualification’s current',
+      { ...DETAIL_WIRE, qualifications: [without(QUALIFICATION_WIRE, 'current')] },
+      'در حال حاضر معتبر نیست',
+    ],
+    [
+      'a qualification’s evidence',
+      { ...DETAIL_WIRE, qualifications: [without(QUALIFICATION_WIRE, 'evidence')] },
+      'بدون سند پیوست‌شده',
+    ],
+    ['qualifiedFor', without(DETAIL_WIRE, 'qualifiedFor'), 'در حال حاضر هیچ دسته‌ای'],
+  ])(
+    'shows the fixed detail text, and no invented fact, when %s is missing',
+    async (_f, data, fact) => {
+      const { container } = await renderDetail(data);
+      expect(screen.getByText(/پروندهٔ تأمین‌کننده خوانده نشد/)).toBeInTheDocument();
+      expect(screen.getByText(/corr-omit/)).toBeInTheDocument();
+      expect(container.textContent).not.toContain(fact);
+    },
+  );
+
+  it.each<[string, unknown]>([
+    ['hasMore', { items: [SUPPLIER], nextCursor: 'c2' }],
+    ['nextCursor', { items: [SUPPLIER], hasMore: true }],
+    [
+      'qualifiedFor',
+      { items: [without(SUPPLIER, 'qualifiedFor')], nextCursor: null, hasMore: false },
+    ],
+  ])('shows the fixed list text, and no rows, when %s is missing', async (_f, data) => {
+    mockCallGateway.mockResolvedValue({ data, correlationId: 'corr-omit-list' });
+    const result = await fetchSuppliers(session);
+
+    const { container } = render(<SuppliersScreen result={result} query={{}} />);
+    expect(screen.getByText(/فهرست تأمین‌کنندگان خوانده نشد/)).toBeInTheDocument();
+    expect(screen.getByText(/corr-omit-list/)).toBeInTheDocument();
+    expect(container.textContent).not.toContain(SUPPLIER.displayName);
+    expect(container.textContent).not.toContain('در حال حاضر برای هیچ دسته‌ای صلاحیت فعال ندارد');
+    expect(screen.queryByRole('link', { name: 'صفحهٔ بعد' })).not.toBeInTheDocument();
+  });
+
+  it('renders the same record, complete, as the facts it states', async () => {
+    await renderDetail(DETAIL_WIRE);
+    expect(screen.getByRole('heading', { name: SUPPLIER.displayName })).toBeInTheDocument();
+    expect(screen.getByText('در حال حاضر معتبر')).toBeInTheDocument();
+    expect(screen.getByText('باز')).toBeInTheDocument();
   });
 });

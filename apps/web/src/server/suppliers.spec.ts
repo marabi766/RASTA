@@ -96,6 +96,17 @@ const SUPPLIER_DETAIL = {
   ],
 };
 
+const pageOf = (items: unknown[]) => ({ items, nextCursor: null, hasMore: false });
+
+function omit<T extends object>(value: T, field: keyof T): unknown {
+  const copy: Partial<T> = { ...value };
+  delete copy[field];
+  return copy;
+}
+
+const QUALIFICATION = SUPPLIER_DETAIL.qualifications[0]!;
+const SUSPENSION = SUPPLIER_DETAIL.suspensions[0]!;
+
 describe('reading suppliers', () => {
   it('reads the directory with a page size and the filters that were set, and only those', async () => {
     const { impl, urls } = answering({
@@ -153,7 +164,7 @@ describe('reading suppliers', () => {
     const BAD_INSTANTS = ['UPSTREAM_INVALID_TIMESTAMP', '', '2026-09-20', '2026-09-20T08:00:00'];
 
     it.each(BAD_INSTANTS)('refuses %j as a list registeredAt', async (bad) => {
-      const { impl } = answering({ items: [{ ...SUPPLIER_SUMMARY, registeredAt: bad }] });
+      const { impl } = answering(pageOf([{ ...SUPPLIER_SUMMARY, registeredAt: bad }]));
       const result = await withFetch(impl, () => fetchSuppliers(SESSION));
       expect(result.kind).toBe('MALFORMED');
       expect(JSON.stringify(result)).not.toContain('UPSTREAM_INVALID');
@@ -173,20 +184,18 @@ describe('reading suppliers', () => {
     );
 
     it('accepts a UTC instant with or without an offset', async () => {
-      const { impl } = answering({
-        items: [
+      const { impl } = answering(
+        pageOf([
           { ...SUPPLIER_SUMMARY, registeredAt: '2026-08-01T08:00:00Z' },
           { ...SUPPLIER_SUMMARY, registeredAt: '2026-08-01T11:30:00+03:30' },
-        ],
-      });
+        ]),
+      );
       const result = await withFetch(impl, () => fetchSuppliers(SESSION));
       expect(result.kind).toBe('OK');
     });
 
     it('does not read a field the list never renders', async () => {
-      const { impl } = answering({
-        items: [{ ...SUPPLIER_SUMMARY, registeredBy: 'not rendered' }],
-      });
+      const { impl } = answering(pageOf([{ ...SUPPLIER_SUMMARY, registeredBy: 'not rendered' }]));
       const result = await withFetch(impl, () => fetchSuppliers(SESSION));
       expect(result.kind).toBe('OK');
       expect(JSON.stringify(result)).not.toContain('registeredBy');
@@ -194,8 +203,120 @@ describe('reading suppliers', () => {
   });
 
   it('treats a body that does not match the schema as malformed', async () => {
-    const { impl } = answering({ items: 'nope' });
+    const { impl } = answering({ items: 'nope', nextCursor: null, hasMore: false });
     const result = await withFetch(impl, () => fetchSuppliers(SESSION));
     expect(result.kind).toBe('MALFORMED');
+  });
+});
+
+/**
+ * Distinct from an invalid value: a field supplier-service's response schema
+ * requires (`supplier/dto.ts`, `openapi/document.ts`) that is simply absent.
+ * None may default into a fact — "never suspended", "closed", "not currently
+ * valid", "no documents", "end of the directory" — so each omission is
+ * `MALFORMED`, never `OK`.
+ */
+describe('a response missing a required field, not merely an invalid one', () => {
+  async function detailWith(body: unknown) {
+    const { impl } = answering(body);
+    return withFetch(impl, () => fetchSupplier(SESSION, 'SUP_1'));
+  }
+
+  it.each(['items', 'nextCursor', 'hasMore'] as const)(
+    'reads a directory page missing %s as MALFORMED',
+    async (field) => {
+      const { impl } = answering(omit(pageOf([SUPPLIER_SUMMARY]), field));
+      expect((await withFetch(impl, () => fetchSuppliers(SESSION))).kind).toBe('MALFORMED');
+    },
+  );
+
+  it.each(Object.keys(SUPPLIER_SUMMARY) as (keyof typeof SUPPLIER_SUMMARY)[])(
+    'reads a directory entry missing %s as MALFORMED',
+    async (field) => {
+      const { impl } = answering(pageOf([omit(SUPPLIER_SUMMARY, field)]));
+      expect((await withFetch(impl, () => fetchSuppliers(SESSION))).kind).toBe('MALFORMED');
+    },
+  );
+
+  it.each<keyof typeof SUPPLIER_DETAIL>([
+    ...(Object.keys(SUPPLIER_SUMMARY) as (keyof typeof SUPPLIER_SUMMARY)[]),
+    'qualifications',
+    'suspensions',
+  ])('reads a detail missing %s as MALFORMED', async (field) => {
+    expect((await detailWith(omit(SUPPLIER_DETAIL, field))).kind).toBe('MALFORMED');
+  });
+
+  it.each([
+    'id',
+    'capability',
+    'state',
+    'statement',
+    'submittedAt',
+    'decidedAt',
+    'decisionNote',
+    'evidence',
+    'current',
+  ] as const)('reads a qualification missing %s as MALFORMED', async (field) => {
+    expect(
+      (await detailWith({ ...SUPPLIER_DETAIL, qualifications: [omit(QUALIFICATION, field)] })).kind,
+    ).toBe('MALFORMED');
+  });
+
+  it.each(['id', 'reason', 'suspendedAt', 'reinstatedAt', 'reinstatementNote', 'open'] as const)(
+    'reads a suspension missing %s as MALFORMED',
+    async (field) => {
+      expect(
+        (await detailWith({ ...SUPPLIER_DETAIL, suspensions: [omit(SUSPENSION, field)] })).kind,
+      ).toBe('MALFORMED');
+    },
+  );
+
+  it('keeps an explicit [], false and null as the facts they are', async () => {
+    const result = await detailWith({
+      ...SUPPLIER_DETAIL,
+      capabilities: [],
+      qualifiedFor: [],
+      qualifications: [
+        {
+          ...QUALIFICATION,
+          state: 'SUBMITTED',
+          statement: null,
+          decidedBy: null,
+          decidedAt: null,
+          decisionNote: null,
+          evidence: [],
+          current: false,
+        },
+      ],
+      suspensions: [
+        { ...SUSPENSION, reinstatedBy: null, reinstatedAt: null, reinstatementNote: null },
+        {
+          ...SUSPENSION,
+          id: 'SUS_0',
+          open: false,
+          reinstatedAt: '2026-08-20T08:00:00.000Z',
+          reinstatementNote: 'رفع شد',
+        },
+      ],
+    });
+
+    expect(result.kind).toBe('OK');
+    if (result.kind !== 'OK') return;
+    expect(result.data.qualifiedFor).toEqual([]);
+    expect(result.data.qualifications[0]).toMatchObject({
+      statement: null,
+      decidedAt: null,
+      decisionNote: null,
+      evidenceCount: 0,
+      current: false,
+    });
+    expect(result.data.suspensions.map((s) => s.open)).toEqual([true, false]);
+
+    const empty = await detailWith({ ...SUPPLIER_DETAIL, qualifications: [], suspensions: [] });
+    expect(empty.kind === 'OK' && empty.data.suspensions).toEqual([]);
+
+    const { impl } = answering({ items: [], nextCursor: null, hasMore: false });
+    const page = await withFetch(impl, () => fetchSuppliers(SESSION));
+    expect(page).toEqual({ kind: 'OK', data: { items: [], nextCursor: null, hasMore: false } });
   });
 });

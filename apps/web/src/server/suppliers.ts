@@ -35,13 +35,23 @@ export type { ReadResult };
  * reads should not travel with the page. Evidence document ids are dropped
  * too; they are opaque document-service handles this slice has no viewer
  * for, so only how many is kept.
+ *
+ * ## Nothing required is defaulted
+ *
+ * Every field supplier-service's response schemas (`supplier/dto.ts`,
+ * `openapi/document.ts`) mark required is required here too, nullable ones
+ * included: a missing `suspensions` would otherwise read as "never
+ * suspended", a missing `open` as a closed episode, a missing `current` as
+ * "not currently valid", a missing `hasMore` as the end of the directory.
+ * Omission is `MALFORMED`; an explicit `[]`, `false` or `null` is a fact and
+ * is rendered as one.
  */
 
 function pageSchema<S extends z.ZodTypeAny>(item: S) {
   return z.object({
     items: z.array(item),
-    nextCursor: z.string().nullable().default(null),
-    hasMore: z.boolean().default(false),
+    nextCursor: z.string().nullable(),
+    hasMore: z.boolean(),
   });
 }
 
@@ -62,8 +72,8 @@ const supplierSummarySchema = z.object({
   organizationId: z.string(),
   displayName: z.string(),
   status: supplierStatus,
-  capabilities: z.array(capability).default([]),
-  qualifiedFor: z.array(capability).default([]),
+  capabilities: z.array(capability),
+  qualifiedFor: z.array(capability),
   registeredAt: utcInstant,
 });
 
@@ -84,12 +94,12 @@ const rawQualificationSchema = z.object({
   id: z.string(),
   capability,
   state: z.string(),
-  statement: z.string().nullable().default(null),
+  statement: z.string().nullable(),
   submittedAt: utcInstant,
-  decidedAt: utcInstant.nullable().default(null),
-  decisionNote: z.string().nullable().default(null),
-  evidence: z.array(z.unknown()).default([]),
-  current: z.boolean().default(false),
+  decidedAt: utcInstant.nullable(),
+  decisionNote: z.string().nullable(),
+  evidence: z.array(z.unknown()),
+  current: z.boolean(),
 });
 
 const qualificationSchema = rawQualificationSchema.transform(({ evidence, ...rest }) => ({
@@ -104,17 +114,17 @@ const suspensionSchema = z.object({
   id: z.string(),
   reason: z.string(),
   suspendedAt: utcInstant,
-  reinstatedAt: utcInstant.nullable().default(null),
-  reinstatementNote: z.string().nullable().default(null),
-  open: z.boolean().default(false),
+  reinstatedAt: utcInstant.nullable(),
+  reinstatementNote: z.string().nullable(),
+  open: z.boolean(),
 });
 
 export type SuspensionRecord = z.infer<typeof suspensionSchema>;
 
 /** The private record: the caller's own organization, or a platform operator. */
 const supplierDetailSchema = supplierSummarySchema.extend({
-  qualifications: z.array(qualificationSchema).default([]),
-  suspensions: z.array(suspensionSchema).default([]),
+  qualifications: z.array(qualificationSchema),
+  suspensions: z.array(suspensionSchema),
 });
 
 export type SupplierDetail = z.infer<typeof supplierDetailSchema>;
