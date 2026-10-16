@@ -382,6 +382,7 @@ import {
         ResolutionWorker,
         MailWorker,
         DispatcherConsumer,
+        KafkaEventPublisher,
         ENV,
       ],
       useFactory: (
@@ -390,12 +391,15 @@ import {
         resolution: ResolutionWorker,
         mail: MailWorker,
         dispatcher: DispatcherConsumer,
+        publisher: KafkaEventPublisher,
         env: NotificationEnv,
       ): OutboxShutdown =>
         new OutboxShutdown({
           relay,
           purge,
           workers: [resolution, mail, dispatcher],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

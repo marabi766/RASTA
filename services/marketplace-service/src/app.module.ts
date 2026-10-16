@@ -161,9 +161,20 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
       // D-052: the relay and the Temporal worker stop together in the destroy
       // phase, by one deadline inside SHUTDOWN_TIMEOUT_MS.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OrderSagaWorker, ENV],
-      useFactory: (relay: OutboxRelay, saga: OrderSagaWorker, env: MarketplaceEnv) =>
-        new OutboxShutdown({ relay, workers: [saga], budgetMs: outboxShutdownBudgetMs(env) }),
+      inject: [OutboxRelay, OrderSagaWorker, KafkaEventPublisher, ENV],
+      useFactory: (
+        relay: OutboxRelay,
+        saga: OrderSagaWorker,
+        publisher: KafkaEventPublisher,
+        env: MarketplaceEnv,
+      ) =>
+        new OutboxShutdown({
+          relay,
+          workers: [saga],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
+          budgetMs: outboxShutdownBudgetMs(env),
+        }),
     },
 
     {

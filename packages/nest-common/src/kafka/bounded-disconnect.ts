@@ -113,14 +113,14 @@ function race(
 }
 
 /**
- * When a close that begins now must return: the outbox shutdown budget the
- * connection carries (`kafkaConnection`, from SHUTDOWN_TIMEOUT_MS), from now.
+ * When a close that begins now, with no deadline handed to it, must return:
+ * the outbox shutdown budget the connection carries (`kafkaConnection`, from
+ * SHUTDOWN_TIMEOUT_MS), from now.
  *
- * The same deadline `OutboxShutdown` drains the relay and the purge by. Both
- * are measured from the start of Nest's destroy phase — a publisher's
- * `onModuleDestroy` and the coordinator's run in the same pass — so they land
- * on the same instant. A connection built without SHUTDOWN_TIMEOUT_MS (a
- * script's) gets the default timeout's budget.
+ * A service's publisher is not closed this way: `OutboxShutdown` closes it
+ * after the drain, by the drain's own deadline (`publishers`). This is the
+ * bound of a stop called without one. A connection built without
+ * SHUTDOWN_TIMEOUT_MS (a script's) gets the default timeout's budget.
  */
 export function kafkaShutdownDeadline(
   connection: Pick<KafkaConnectionOptions, 'shutdownBudgetMs'>,

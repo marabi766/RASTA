@@ -313,11 +313,18 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
       // D-052: the relay and the balance audit stop together in the destroy
       // phase, by one deadline inside SHUTDOWN_TIMEOUT_MS.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, LedgerBalanceAudit, ENV],
-      useFactory: (relay: OutboxRelay, audit: LedgerBalanceAudit, env: EconomicEnv) =>
+      inject: [OutboxRelay, LedgerBalanceAudit, KafkaEventPublisher, ENV],
+      useFactory: (
+        relay: OutboxRelay,
+        audit: LedgerBalanceAudit,
+        publisher: KafkaEventPublisher,
+        env: EconomicEnv,
+      ) =>
         new OutboxShutdown({
           relay,
           workers: [audit],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

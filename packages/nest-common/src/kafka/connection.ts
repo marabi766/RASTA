@@ -29,11 +29,12 @@ export interface KafkaConnectionOptions {
   /** `true` trusts the system store; `{ ca }` pins the broker's CA. */
   ssl?: true | { ca: string[]; rejectUnauthorized: true };
   /**
-   * How long a client of this connection may take to close at shutdown:
-   * `outboxShutdownBudgetMs`, the budget `OutboxShutdown` drains by, so a
-   * broker that stops answering cannot hold `app.close()` past
-   * SHUTDOWN_TIMEOUT_MS (`boundedDisconnect`, D-052 phase 4b). Absent when
-   * the environment has no SHUTDOWN_TIMEOUT_MS: a script's connection.
+   * `outboxShutdownBudgetMs`, the budget `OutboxShutdown` drains by: the bound
+   * of a client close handed no deadline (`kafkaShutdownDeadline`), and what a
+   * readiness probe's bound is cut from (`kafkaProbeTimeoutMs`), so a broker
+   * that stops answering cannot hold `app.close()` past SHUTDOWN_TIMEOUT_MS
+   * (D-052 phase 4b). Absent when the environment has no SHUTDOWN_TIMEOUT_MS:
+   * a script's connection.
    */
   shutdownBudgetMs?: number;
 }

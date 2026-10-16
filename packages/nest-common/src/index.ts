@@ -143,6 +143,16 @@ export type {
   DisconnectLogger,
   DisconnectOutcome,
 } from './kafka/bounded-disconnect';
+export {
+  KafkaReadinessProbe,
+  kafkaProbeTimeoutMs,
+  KAFKA_PROBE_MAX_TIMEOUT_MS,
+} from './kafka/readiness-probe';
+export type {
+  AdminFactory,
+  KafkaReadinessProbeOptions,
+  ProbeLogger,
+} from './kafka/readiness-probe';
 
 // Event consumption ----------------------------------------------------------
 export {

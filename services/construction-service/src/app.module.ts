@@ -401,11 +401,18 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
       // D-052: the relay and the standing bootstrap stop together in the destroy
       // phase, by one deadline inside SHUTDOWN_TIMEOUT_MS.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, StandingBootstrap, ENV],
-      useFactory: (relay: OutboxRelay, bootstrap: StandingBootstrap, env: ConstructionEnv) =>
+      inject: [OutboxRelay, StandingBootstrap, KafkaEventPublisher, ENV],
+      useFactory: (
+        relay: OutboxRelay,
+        bootstrap: StandingBootstrap,
+        publisher: KafkaEventPublisher,
+        env: ConstructionEnv,
+      ) =>
         new OutboxShutdown({
           relay,
           workers: [bootstrap],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

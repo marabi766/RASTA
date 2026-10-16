@@ -336,6 +336,7 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
         SECURITY_EVENT_RELAY,
         MembershipExpiryScanner,
         KeycloakProjectionConsumer,
+        KafkaEventPublisher,
         ENV,
       ],
       useFactory: (
@@ -344,12 +345,15 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
         securityRelay: OutboxRelay,
         scanner: MembershipExpiryScanner,
         projection: KeycloakProjectionConsumer,
+        publisher: KafkaEventPublisher,
         env: IdentityEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
           workers: [securityRelay, scanner, projection],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },
