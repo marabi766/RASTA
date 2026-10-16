@@ -5,6 +5,7 @@ import type { EventEnvelope } from '@rasta/contracts';
 import {
   CONTRACT_REFUSAL_ACTIONS,
   CONTRACT_REFUSAL_REASONS,
+  CONTRACT_REFUSAL_SIDES,
   POLICY_APPROVAL_REFUSAL_REASONS,
   toContractRefusalProjection,
 } from './contract-refusal-projection';
@@ -141,6 +142,40 @@ describe('the contract refusal projection', () => {
     expect(JSON.stringify(record)).not.toContain('STM_1');
   });
 
+  it.each([
+    ['APPROVE_STATEMENT', 'APPROVER', 'NOT_STEP_AUTHORITY'],
+    ['APPROVE_STATEMENT', 'EMPLOYER', 'SUBMITTER_MAY_NOT_DECIDE'],
+    ['REJECT_STATEMENT', 'EMPLOYER', 'ALREADY_DECIDED_STATEMENT'],
+    ['REJECT_STATEMENT', 'APPROVER', 'MEMBER_OF_CONTRACTOR'],
+    ['APPROVE_STATEMENT', 'APPROVER', 'ACTOR_IDENTITY_UNKNOWN'],
+  ])(
+    'stores a statement decision refused (%s, side %s, %s) under its closed action and reason (CON-003 PR 6)',
+    (action, side, reason) => {
+      const record = toAuditEventRecord(
+        envelope('CONTRACT_AUTHORITY_REFUSED', {
+          ...authorityPayload,
+          action,
+          side,
+          subjectId: 'STM_1',
+          reason,
+        }),
+        delivery(),
+      );
+
+      expect([record.outcome, record.action, record.reason]).toEqual(['REFUSED', action, reason]);
+      expect(JSON.stringify(record)).not.toContain('STM_1');
+    },
+  );
+
+  it('refuses a side outside the closed list without storing anything', () => {
+    expect(() =>
+      toAuditEventRecord(
+        envelope('CONTRACT_AUTHORITY_REFUSED', { ...authorityPayload, side: 'BYSTANDER' }),
+        delivery(),
+      ),
+    ).toThrow(UnprocessableEventError);
+  });
+
   it('stores a policy approval refused by four eyes as a refused APPROVE_POLICY', () => {
     const record = toAuditEventRecord(
       envelope('APPROVAL_POLICY_APPROVAL_REFUSED', policyApprovalPayload),
@@ -241,6 +276,10 @@ describe('the contract refusal projection', () => {
       expect([...CONTRACT_REFUSAL_REASONS].sort()).toEqual(
         listOf('AUTHORITY_REFUSED_REASONS').sort(),
       );
+    });
+
+    it('lists the same sides', () => {
+      expect([...CONTRACT_REFUSAL_SIDES].sort()).toEqual(listOf('AUTHORITY_REFUSED_SIDES').sort());
     });
 
     it('lists the same policy approval reasons', () => {

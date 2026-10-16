@@ -192,7 +192,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded.",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator.",
             "content": {
               "application/json": {
                 "schema": {
@@ -364,7 +364,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded.",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator.",
             "content": {
               "application/json": {
                 "schema": {
@@ -374,7 +374,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor (nor, for one statement and its decisions, an organization a step of that statement’s approval chains names), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -567,7 +567,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES, SAME_PERSON_BOTH_SIDES)",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES, SAME_PERSON_BOTH_SIDES)",
             "content": {
               "application/json": {
                 "schema": {
@@ -614,7 +614,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor (nor, for one statement and its decisions, an organization a step of that statement’s approval chains names), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -624,7 +624,7 @@
             }
           },
           "409": {
-            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: SIDE_ALREADY_SIGNED)",
+            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on deciding a statement, a step already decided — by another person or at the same moment (STEP_DECIDED); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: SIDE_ALREADY_SIGNED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -678,7 +678,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: SIGNATURE_POLICY_REQUIRED, CONTRACT_NOT_DRAFT, ACTOR_IDENTITY_UNKNOWN)",
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). On a statement’s decisions: a draft (STATEMENT_NOT_SUBMITTED) or an approved or rejected statement (STATEMENT_DECIDED), a step its chains do not have (STEP_NOT_IN_CHAIN), the financial chain before the technical one is approved (CHAIN_NOT_OPEN), a step before an earlier one (STEP_NOT_NEXT), a contract that is not signed (CONTRACT_NOT_SIGNED), an approval that would take the approved gross past the price and the effective amendments (APPROVED_TOTAL_EXCEEDS_CAP, Q-96 (5)), and the separation of duties — the submitter (SUBMITTER_MAY_NOT_DECIDE), a person who already decided the statement (ALREADY_DECIDED_STATEMENT), two people who cannot be told apart (ACTOR_IDENTITY_UNKNOWN). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: SIGNATURE_POLICY_REQUIRED, CONTRACT_NOT_DRAFT, ACTOR_IDENTITY_UNKNOWN)",
             "content": {
               "application/json": {
                 "schema": {
@@ -735,7 +735,7 @@
             }
           },
           "503": {
-            "description": "On sign, cancel, amendment, milestone and statement commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
+            "description": "On sign, cancel, amendment, milestone, statement and decision commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -936,7 +936,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded.",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator.",
             "content": {
               "application/json": {
                 "schema": {
@@ -946,7 +946,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor (nor, for one statement and its decisions, an organization a step of that statement’s approval chains names), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -956,7 +956,7 @@
             }
           },
           "409": {
-            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
+            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on deciding a statement, a step already decided — by another person or at the same moment (STEP_DECIDED); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -977,7 +977,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (cancellation: CANCEL_REASON_NOT_ALLOWED, CONTRACT_NOT_DRAFT, SIGNATURE_RECORDED)",
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). On a statement’s decisions: a draft (STATEMENT_NOT_SUBMITTED) or an approved or rejected statement (STATEMENT_DECIDED), a step its chains do not have (STEP_NOT_IN_CHAIN), the financial chain before the technical one is approved (CHAIN_NOT_OPEN), a step before an earlier one (STEP_NOT_NEXT), a contract that is not signed (CONTRACT_NOT_SIGNED), an approval that would take the approved gross past the price and the effective amendments (APPROVED_TOTAL_EXCEEDS_CAP, Q-96 (5)), and the separation of duties — the submitter (SUBMITTER_MAY_NOT_DECIDE), a person who already decided the statement (ALREADY_DECIDED_STATEMENT), two people who cannot be told apart (ACTOR_IDENTITY_UNKNOWN). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (cancellation: CANCEL_REASON_NOT_ALLOWED, CONTRACT_NOT_DRAFT, SIGNATURE_RECORDED)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1034,7 +1034,7 @@
             }
           },
           "503": {
-            "description": "On sign, cancel, amendment, milestone and statement commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
+            "description": "On sign, cancel, amendment, milestone, statement and decision commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1244,7 +1244,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded.",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1254,7 +1254,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor (nor, for one statement and its decisions, an organization a step of that statement’s approval chains names), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1414,7 +1414,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: PROPOSER_NOT_EMPLOYER, POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES, SAME_PERSON_BOTH_SIDES)",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: PROPOSER_NOT_EMPLOYER, POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES, SAME_PERSON_BOTH_SIDES)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1462,7 +1462,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor (nor, for one statement and its decisions, an organization a step of that statement’s approval chains names), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1472,7 +1472,7 @@
             }
           },
           "409": {
-            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: SIDE_ALREADY_SIGNED)",
+            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on deciding a statement, a step already decided — by another person or at the same moment (STEP_DECIDED); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: SIDE_ALREADY_SIGNED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -1526,7 +1526,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: SIGNATURE_POLICY_REQUIRED, ACTOR_IDENTITY_UNKNOWN, CONTRACT_NOT_SIGNED, AMENDMENT_NOT_PROPOSED, AMENDMENT_DELTA_NOT_POSITIVE, AMENDMENT_EXCEEDS_LIMIT, AMENDMENT_REASON_NOT_ALLOWED)",
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). On a statement’s decisions: a draft (STATEMENT_NOT_SUBMITTED) or an approved or rejected statement (STATEMENT_DECIDED), a step its chains do not have (STEP_NOT_IN_CHAIN), the financial chain before the technical one is approved (CHAIN_NOT_OPEN), a step before an earlier one (STEP_NOT_NEXT), a contract that is not signed (CONTRACT_NOT_SIGNED), an approval that would take the approved gross past the price and the effective amendments (APPROVED_TOTAL_EXCEEDS_CAP, Q-96 (5)), and the separation of duties — the submitter (SUBMITTER_MAY_NOT_DECIDE), a person who already decided the statement (ALREADY_DECIDED_STATEMENT), two people who cannot be told apart (ACTOR_IDENTITY_UNKNOWN). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: SIGNATURE_POLICY_REQUIRED, ACTOR_IDENTITY_UNKNOWN, CONTRACT_NOT_SIGNED, AMENDMENT_NOT_PROPOSED, AMENDMENT_DELTA_NOT_POSITIVE, AMENDMENT_EXCEEDS_LIMIT, AMENDMENT_REASON_NOT_ALLOWED)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1587,7 +1587,7 @@
             }
           },
           "503": {
-            "description": "On sign, cancel, amendment, milestone and statement commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
+            "description": "On sign, cancel, amendment, milestone, statement and decision commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1762,7 +1762,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded.",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1772,7 +1772,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor (nor, for one statement and its decisions, an organization a step of that statement’s approval chains names), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1942,7 +1942,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: PROPOSER_NOT_EMPLOYER, POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES, SAME_PERSON_BOTH_SIDES)",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: PROPOSER_NOT_EMPLOYER, POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES, SAME_PERSON_BOTH_SIDES)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1990,7 +1990,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor (nor, for one statement and its decisions, an organization a step of that statement’s approval chains names), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2000,7 +2000,7 @@
             }
           },
           "409": {
-            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: SIDE_ALREADY_SIGNED)",
+            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on deciding a statement, a step already decided — by another person or at the same moment (STEP_DECIDED); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: SIDE_ALREADY_SIGNED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -2054,7 +2054,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: SIGNATURE_POLICY_REQUIRED, ACTOR_IDENTITY_UNKNOWN, CONTRACT_NOT_SIGNED, AMENDMENT_NOT_PROPOSED, AMENDMENT_DELTA_NOT_POSITIVE, AMENDMENT_EXCEEDS_LIMIT, AMENDMENT_REASON_NOT_ALLOWED)",
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). On a statement’s decisions: a draft (STATEMENT_NOT_SUBMITTED) or an approved or rejected statement (STATEMENT_DECIDED), a step its chains do not have (STEP_NOT_IN_CHAIN), the financial chain before the technical one is approved (CHAIN_NOT_OPEN), a step before an earlier one (STEP_NOT_NEXT), a contract that is not signed (CONTRACT_NOT_SIGNED), an approval that would take the approved gross past the price and the effective amendments (APPROVED_TOTAL_EXCEEDS_CAP, Q-96 (5)), and the separation of duties — the submitter (SUBMITTER_MAY_NOT_DECIDE), a person who already decided the statement (ALREADY_DECIDED_STATEMENT), two people who cannot be told apart (ACTOR_IDENTITY_UNKNOWN). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: SIGNATURE_POLICY_REQUIRED, ACTOR_IDENTITY_UNKNOWN, CONTRACT_NOT_SIGNED, AMENDMENT_NOT_PROPOSED, AMENDMENT_DELTA_NOT_POSITIVE, AMENDMENT_EXCEEDS_LIMIT, AMENDMENT_REASON_NOT_ALLOWED)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2115,7 +2115,7 @@
             }
           },
           "503": {
-            "description": "On sign, cancel, amendment, milestone and statement commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
+            "description": "On sign, cancel, amendment, milestone, statement and decision commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2264,7 +2264,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded.",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2274,7 +2274,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor (nor, for one statement and its decisions, an organization a step of that statement’s approval chains names), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2407,7 +2407,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (milestone: EDITOR_NOT_EMPLOYER)",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (milestone: EDITOR_NOT_EMPLOYER)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2450,7 +2450,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor (nor, for one statement and its decisions, an organization a step of that statement’s approval chains names), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2460,7 +2460,7 @@
             }
           },
           "409": {
-            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
+            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on deciding a statement, a step already decided — by another person or at the same moment (STEP_DECIDED); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -2481,7 +2481,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (milestone: CONTRACT_NOT_SIGNED, MILESTONE_REFERENCED, MILESTONE_LIMIT_REACHED)",
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). On a statement’s decisions: a draft (STATEMENT_NOT_SUBMITTED) or an approved or rejected statement (STATEMENT_DECIDED), a step its chains do not have (STEP_NOT_IN_CHAIN), the financial chain before the technical one is approved (CHAIN_NOT_OPEN), a step before an earlier one (STEP_NOT_NEXT), a contract that is not signed (CONTRACT_NOT_SIGNED), an approval that would take the approved gross past the price and the effective amendments (APPROVED_TOTAL_EXCEEDS_CAP, Q-96 (5)), and the separation of duties — the submitter (SUBMITTER_MAY_NOT_DECIDE), a person who already decided the statement (ALREADY_DECIDED_STATEMENT), two people who cannot be told apart (ACTOR_IDENTITY_UNKNOWN). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (milestone: CONTRACT_NOT_SIGNED, MILESTONE_REFERENCED, MILESTONE_LIMIT_REACHED)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2538,7 +2538,7 @@
             }
           },
           "503": {
-            "description": "On sign, cancel, amendment, milestone and statement commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
+            "description": "On sign, cancel, amendment, milestone, statement and decision commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2682,7 +2682,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded.",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2692,7 +2692,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor (nor, for one statement and its decisions, an organization a step of that statement’s approval chains names), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2833,7 +2833,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (milestone: EDITOR_NOT_EMPLOYER)",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (milestone: EDITOR_NOT_EMPLOYER)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2876,7 +2876,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor (nor, for one statement and its decisions, an organization a step of that statement’s approval chains names), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2886,7 +2886,7 @@
             }
           },
           "409": {
-            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
+            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on deciding a statement, a step already decided — by another person or at the same moment (STEP_DECIDED); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -2907,7 +2907,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (milestone: CONTRACT_NOT_SIGNED, MILESTONE_REFERENCED, MILESTONE_LIMIT_REACHED)",
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). On a statement’s decisions: a draft (STATEMENT_NOT_SUBMITTED) or an approved or rejected statement (STATEMENT_DECIDED), a step its chains do not have (STEP_NOT_IN_CHAIN), the financial chain before the technical one is approved (CHAIN_NOT_OPEN), a step before an earlier one (STEP_NOT_NEXT), a contract that is not signed (CONTRACT_NOT_SIGNED), an approval that would take the approved gross past the price and the effective amendments (APPROVED_TOTAL_EXCEEDS_CAP, Q-96 (5)), and the separation of duties — the submitter (SUBMITTER_MAY_NOT_DECIDE), a person who already decided the statement (ALREADY_DECIDED_STATEMENT), two people who cannot be told apart (ACTOR_IDENTITY_UNKNOWN). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (milestone: CONTRACT_NOT_SIGNED, MILESTONE_REFERENCED, MILESTONE_LIMIT_REACHED)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2964,7 +2964,7 @@
             }
           },
           "503": {
-            "description": "On sign, cancel, amendment, milestone and statement commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
+            "description": "On sign, cancel, amendment, milestone, statement and decision commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3209,13 +3209,31 @@
                                         },
                                         "authorityLabel": {
                                           "type": "string"
+                                        },
+                                        "decision": {
+                                          "type": "object",
+                                          "properties": {
+                                            "outcome": {
+                                              "type": "string",
+                                              "enum": ["APPROVED", "REJECTED"]
+                                            },
+                                            "decidedAt": {
+                                              "type": "string",
+                                              "description": "When (ISO 8601, UTC)."
+                                            }
+                                          },
+                                          "required": ["outcome", "decidedAt"],
+                                          "additionalProperties": false,
+                                          "nullable": true,
+                                          "description": "The step’s decision, or null while undecided — never by which person."
                                         }
                                       },
                                       "required": [
                                         "stepOrder",
                                         "authorityOrganizationId",
                                         "authorityRole",
-                                        "authorityLabel"
+                                        "authorityLabel",
+                                        "decision"
                                       ],
                                       "additionalProperties": false
                                     }
@@ -3250,13 +3268,31 @@
                                         },
                                         "authorityLabel": {
                                           "type": "string"
+                                        },
+                                        "decision": {
+                                          "type": "object",
+                                          "properties": {
+                                            "outcome": {
+                                              "type": "string",
+                                              "enum": ["APPROVED", "REJECTED"]
+                                            },
+                                            "decidedAt": {
+                                              "type": "string",
+                                              "description": "When (ISO 8601, UTC)."
+                                            }
+                                          },
+                                          "required": ["outcome", "decidedAt"],
+                                          "additionalProperties": false,
+                                          "nullable": true,
+                                          "description": "The step’s decision, or null while undecided — never by which person."
                                         }
                                       },
                                       "required": [
                                         "stepOrder",
                                         "authorityOrganizationId",
                                         "authorityRole",
-                                        "authorityLabel"
+                                        "authorityLabel",
+                                        "decision"
                                       ],
                                       "additionalProperties": false
                                     }
@@ -3334,7 +3370,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded.",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3344,7 +3380,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor (nor, for one statement and its decisions, an organization a step of that statement’s approval chains names), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3528,13 +3564,31 @@
                                   },
                                   "authorityLabel": {
                                     "type": "string"
+                                  },
+                                  "decision": {
+                                    "type": "object",
+                                    "properties": {
+                                      "outcome": {
+                                        "type": "string",
+                                        "enum": ["APPROVED", "REJECTED"]
+                                      },
+                                      "decidedAt": {
+                                        "type": "string",
+                                        "description": "When (ISO 8601, UTC)."
+                                      }
+                                    },
+                                    "required": ["outcome", "decidedAt"],
+                                    "additionalProperties": false,
+                                    "nullable": true,
+                                    "description": "The step’s decision, or null while undecided — never by which person."
                                   }
                                 },
                                 "required": [
                                   "stepOrder",
                                   "authorityOrganizationId",
                                   "authorityRole",
-                                  "authorityLabel"
+                                  "authorityLabel",
+                                  "decision"
                                 ],
                                 "additionalProperties": false
                               }
@@ -3569,13 +3623,31 @@
                                   },
                                   "authorityLabel": {
                                     "type": "string"
+                                  },
+                                  "decision": {
+                                    "type": "object",
+                                    "properties": {
+                                      "outcome": {
+                                        "type": "string",
+                                        "enum": ["APPROVED", "REJECTED"]
+                                      },
+                                      "decidedAt": {
+                                        "type": "string",
+                                        "description": "When (ISO 8601, UTC)."
+                                      }
+                                    },
+                                    "required": ["outcome", "decidedAt"],
+                                    "additionalProperties": false,
+                                    "nullable": true,
+                                    "description": "The step’s decision, or null while undecided — never by which person."
                                   }
                                 },
                                 "required": [
                                   "stepOrder",
                                   "authorityOrganizationId",
                                   "authorityRole",
-                                  "authorityLabel"
+                                  "authorityLabel",
+                                  "decision"
                                 ],
                                 "additionalProperties": false
                               }
@@ -3641,7 +3713,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (statement: AUTHOR_NOT_CONTRACTOR)",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (statement: AUTHOR_NOT_CONTRACTOR)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3684,7 +3756,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor (nor, for one statement and its decisions, an organization a step of that statement’s approval chains names), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3694,7 +3766,7 @@
             }
           },
           "409": {
-            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
+            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on deciding a statement, a step already decided — by another person or at the same moment (STEP_DECIDED); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -3715,7 +3787,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (statement: CONTRACT_NOT_SIGNED, DEDUCTION_NOT_CONFIGURED, STATEMENT_NET_NEGATIVE, STATEMENT_EXCEEDS_LIMIT, MILESTONE_NOT_OF_CONTRACT, STATEMENT_NOT_DRAFT, ACTOR_IDENTITY_UNKNOWN, TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED, TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE, APPROVAL_STEP_NAMES_CONTRACTOR, POLICY_AUTHOR_NOT_GOVERNING)",
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). On a statement’s decisions: a draft (STATEMENT_NOT_SUBMITTED) or an approved or rejected statement (STATEMENT_DECIDED), a step its chains do not have (STEP_NOT_IN_CHAIN), the financial chain before the technical one is approved (CHAIN_NOT_OPEN), a step before an earlier one (STEP_NOT_NEXT), a contract that is not signed (CONTRACT_NOT_SIGNED), an approval that would take the approved gross past the price and the effective amendments (APPROVED_TOTAL_EXCEEDS_CAP, Q-96 (5)), and the separation of duties — the submitter (SUBMITTER_MAY_NOT_DECIDE), a person who already decided the statement (ALREADY_DECIDED_STATEMENT), two people who cannot be told apart (ACTOR_IDENTITY_UNKNOWN). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (statement: CONTRACT_NOT_SIGNED, DEDUCTION_NOT_CONFIGURED, STATEMENT_NET_NEGATIVE, STATEMENT_EXCEEDS_LIMIT, MILESTONE_NOT_OF_CONTRACT, STATEMENT_NOT_DRAFT, ACTOR_IDENTITY_UNKNOWN, TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED, TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE, APPROVAL_STEP_NAMES_CONTRACTOR, POLICY_AUTHOR_NOT_GOVERNING)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3782,7 +3854,7 @@
             }
           },
           "503": {
-            "description": "On sign, cancel, amendment, milestone and statement commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
+            "description": "On sign, cancel, amendment, milestone, statement and decision commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3867,7 +3939,7 @@
     },
     "/v1/contracts/{id}/statements/{statementId}": {
       "get": {
-        "description": "One statement of the contract. Closed by default (S-02). Read by the same two parties as the contract: the employer’s organization — the roles of CONTRACT_READER_ROLES, and SYSTEM_ADMIN acting for an organization it selected with X-Organization-Id — and the winning contractor’s organization (the CONTRACTOR role, in its own organization). Any other organization, a contract or statement that does not exist and one of someone else are all 404, never 403 (S-03). AUDITOR and a service token are refused.",
+        "description": "One statement of the contract, each step of its approval chains with its decision. Closed by default (S-02). Read by the same two parties as the contract: the employer’s organization — the roles of CONTRACT_READER_ROLES, and SYSTEM_ADMIN acting for an organization it selected with X-Organization-Id — and the winning contractor’s organization (the CONTRACTOR role, in its own organization). Any other organization, a contract or statement that does not exist and one of someone else are all 404, never 403 (S-03). AUDITOR and a service token are refused. Also read by an organization a step of its approval chains names, acting with that step’s role (CON-003 PR 6) — this statement only, never the contract or its other statements.",
         "operationId": "StatementController_get_v1",
         "parameters": [
           {
@@ -4019,13 +4091,31 @@
                                   },
                                   "authorityLabel": {
                                     "type": "string"
+                                  },
+                                  "decision": {
+                                    "type": "object",
+                                    "properties": {
+                                      "outcome": {
+                                        "type": "string",
+                                        "enum": ["APPROVED", "REJECTED"]
+                                      },
+                                      "decidedAt": {
+                                        "type": "string",
+                                        "description": "When (ISO 8601, UTC)."
+                                      }
+                                    },
+                                    "required": ["outcome", "decidedAt"],
+                                    "additionalProperties": false,
+                                    "nullable": true,
+                                    "description": "The step’s decision, or null while undecided — never by which person."
                                   }
                                 },
                                 "required": [
                                   "stepOrder",
                                   "authorityOrganizationId",
                                   "authorityRole",
-                                  "authorityLabel"
+                                  "authorityLabel",
+                                  "decision"
                                 ],
                                 "additionalProperties": false
                               }
@@ -4060,13 +4150,31 @@
                                   },
                                   "authorityLabel": {
                                     "type": "string"
+                                  },
+                                  "decision": {
+                                    "type": "object",
+                                    "properties": {
+                                      "outcome": {
+                                        "type": "string",
+                                        "enum": ["APPROVED", "REJECTED"]
+                                      },
+                                      "decidedAt": {
+                                        "type": "string",
+                                        "description": "When (ISO 8601, UTC)."
+                                      }
+                                    },
+                                    "required": ["outcome", "decidedAt"],
+                                    "additionalProperties": false,
+                                    "nullable": true,
+                                    "description": "The step’s decision, or null while undecided — never by which person."
                                   }
                                 },
                                 "required": [
                                   "stepOrder",
                                   "authorityOrganizationId",
                                   "authorityRole",
-                                  "authorityLabel"
+                                  "authorityLabel",
+                                  "decision"
                                 ],
                                 "additionalProperties": false
                               }
@@ -4122,7 +4230,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded.",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4132,7 +4240,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor (nor, for one statement and its decisions, an organization a step of that statement’s approval chains names), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4326,13 +4434,31 @@
                                   },
                                   "authorityLabel": {
                                     "type": "string"
+                                  },
+                                  "decision": {
+                                    "type": "object",
+                                    "properties": {
+                                      "outcome": {
+                                        "type": "string",
+                                        "enum": ["APPROVED", "REJECTED"]
+                                      },
+                                      "decidedAt": {
+                                        "type": "string",
+                                        "description": "When (ISO 8601, UTC)."
+                                      }
+                                    },
+                                    "required": ["outcome", "decidedAt"],
+                                    "additionalProperties": false,
+                                    "nullable": true,
+                                    "description": "The step’s decision, or null while undecided — never by which person."
                                   }
                                 },
                                 "required": [
                                   "stepOrder",
                                   "authorityOrganizationId",
                                   "authorityRole",
-                                  "authorityLabel"
+                                  "authorityLabel",
+                                  "decision"
                                 ],
                                 "additionalProperties": false
                               }
@@ -4367,13 +4493,31 @@
                                   },
                                   "authorityLabel": {
                                     "type": "string"
+                                  },
+                                  "decision": {
+                                    "type": "object",
+                                    "properties": {
+                                      "outcome": {
+                                        "type": "string",
+                                        "enum": ["APPROVED", "REJECTED"]
+                                      },
+                                      "decidedAt": {
+                                        "type": "string",
+                                        "description": "When (ISO 8601, UTC)."
+                                      }
+                                    },
+                                    "required": ["outcome", "decidedAt"],
+                                    "additionalProperties": false,
+                                    "nullable": true,
+                                    "description": "The step’s decision, or null while undecided — never by which person."
                                   }
                                 },
                                 "required": [
                                   "stepOrder",
                                   "authorityOrganizationId",
                                   "authorityRole",
-                                  "authorityLabel"
+                                  "authorityLabel",
+                                  "decision"
                                 ],
                                 "additionalProperties": false
                               }
@@ -4439,7 +4583,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (statement: AUTHOR_NOT_CONTRACTOR)",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (statement: AUTHOR_NOT_CONTRACTOR)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4482,7 +4626,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor (nor, for one statement and its decisions, an organization a step of that statement’s approval chains names), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4492,7 +4636,7 @@
             }
           },
           "409": {
-            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
+            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on deciding a statement, a step already decided — by another person or at the same moment (STEP_DECIDED); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -4513,7 +4657,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (statement: CONTRACT_NOT_SIGNED, DEDUCTION_NOT_CONFIGURED, STATEMENT_NET_NEGATIVE, STATEMENT_EXCEEDS_LIMIT, MILESTONE_NOT_OF_CONTRACT, STATEMENT_NOT_DRAFT, ACTOR_IDENTITY_UNKNOWN, TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED, TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE, APPROVAL_STEP_NAMES_CONTRACTOR, POLICY_AUTHOR_NOT_GOVERNING)",
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). On a statement’s decisions: a draft (STATEMENT_NOT_SUBMITTED) or an approved or rejected statement (STATEMENT_DECIDED), a step its chains do not have (STEP_NOT_IN_CHAIN), the financial chain before the technical one is approved (CHAIN_NOT_OPEN), a step before an earlier one (STEP_NOT_NEXT), a contract that is not signed (CONTRACT_NOT_SIGNED), an approval that would take the approved gross past the price and the effective amendments (APPROVED_TOTAL_EXCEEDS_CAP, Q-96 (5)), and the separation of duties — the submitter (SUBMITTER_MAY_NOT_DECIDE), a person who already decided the statement (ALREADY_DECIDED_STATEMENT), two people who cannot be told apart (ACTOR_IDENTITY_UNKNOWN). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (statement: CONTRACT_NOT_SIGNED, DEDUCTION_NOT_CONFIGURED, STATEMENT_NET_NEGATIVE, STATEMENT_EXCEEDS_LIMIT, MILESTONE_NOT_OF_CONTRACT, STATEMENT_NOT_DRAFT, ACTOR_IDENTITY_UNKNOWN, TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED, TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE, APPROVAL_STEP_NAMES_CONTRACTOR, POLICY_AUTHOR_NOT_GOVERNING)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4580,7 +4724,7 @@
             }
           },
           "503": {
-            "description": "On sign, cancel, amendment, milestone and statement commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
+            "description": "On sign, cancel, amendment, milestone, statement and decision commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4621,6 +4765,546 @@
                     "description": "The statement’s `version` the caller read. When given, the submission applies only to that version (409 OPTIMISTIC_LOCK_FAILED otherwise)."
                   }
                 },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/contracts/{id}/statements/{statementId}/decisions": {
+      "post": {
+        "description": "The step’s authority decides the named step (`chain`, `stepOrder`) of the chains snapshotted at submission (ADR-068 § 5): the technical chain while the statement is SUBMITTED, the financial one once it is TECHNICALLY_APPROVED (422 `CHAIN_NOT_OPEN`), each chain in its step order (422 `STEP_NOT_NEXT`). Approving the technical chain’s last step makes it TECHNICALLY_APPROVED; approving the financial chain’s last step makes it APPROVED — immutable — and adds its gross to the contract’s approved total, which never passes the price plus the effective amendments (422 `APPROVED_TOTAL_EXCEEDS_CAP`, nothing written; Q-96 (5)). A rejection at any step makes it REJECTED, final for its number (Q-96 (7)). A step decided already — by someone else, or at the same moment, the decision that ended the statement included — is 409 `STEP_DECIDED`; a draft 422 `STATEMENT_NOT_SUBMITTED`; any other step of an approved or rejected statement 422 `STATEMENT_DECIDED`; a step its chains do not have 422 `STEP_NOT_IN_CHAIN`; a contract that is not signed 422 `CONTRACT_NOT_SIGNED`. No timer and no default: a step waits for its authority (ADR-043). STATEMENT_DECISION_RECORDED, and STATEMENT_TECHNICALLY_APPROVED, STATEMENT_APPROVED or STATEMENT_REJECTED with a transition, carry identifiers and instants only — no amount (Q-97 (2)); approval moves no money (ADR-068 § 6). Requires an `Idempotency-Key` (docs/06 § 6.8), with the same replay rules as every command. The caller must be a signed-in person with a platform user id (403 otherwise); the platform administrator, the oversight role and a service token are refused. The caller acts for the organization the named step’s authority is and holds its role: another organization that is a party or is named by another step is 403 `NOT_STEP_AUTHORITY`, a person of that organization without the role 403 INSUFFICIENT_ROLE. Separation of duties (Q-96 (3)), on the stable identity (the token’s issuer and subject): a member of the contractor’s organization is 403 `MEMBER_OF_CONTRACTOR`; the person who submitted the statement is 422 `SUBMITTER_MAY_NOT_DECIDE`; a person who already decided a step of it, in either chain, is 422 `ALREADY_DECIDED_STATEMENT`; a pair that cannot be told apart is 422 `ACTOR_IDENTITY_UNKNOWN`. Each of these refusals is recorded (CONTRACT_AUTHORITY_REFUSED, action APPROVE_STATEMENT or REJECT_STATEMENT, side EMPLOYER, CONTRACTOR or APPROVER); when that record cannot be written the answer is 503 and nothing was done. Any organization that is neither a party nor named by the statement’s chains, and a statement or contract that does not exist, is 404 — never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "StatementController_decide_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "statementId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for CONTRACT_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "contractId": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The employer: the tender’s owner and the contract’s tenant."
+                    },
+                    "contractorOrganizationId": {
+                      "type": "string"
+                    },
+                    "statementNumber": {
+                      "type": "integer",
+                      "description": "1, 2, 3 … per contract."
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["DRAFT", "SUBMITTED", "TECHNICALLY_APPROVED", "APPROVED", "REJECTED"]
+                    },
+                    "grossMinor": {
+                      "type": "string",
+                      "description": "The sum of the lines in minor units (rials), a decimal string."
+                    },
+                    "deductionsMinor": {
+                      "type": "string",
+                      "description": "The sum of the deductions in minor units (rials), a decimal string."
+                    },
+                    "netMinor": {
+                      "type": "string",
+                      "description": "The gross less the deductions, never negative, in minor units (rials), a decimal string."
+                    },
+                    "lines": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "lineNumber": {
+                            "type": "integer"
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "amountMinor": {
+                            "type": "string",
+                            "description": "The amount claimed in minor units (rials), a decimal string."
+                          },
+                          "milestoneId": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "The milestone it is against, or null."
+                          }
+                        },
+                        "required": ["lineNumber", "description", "amountMinor", "milestoneId"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "deductions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "deductionRuleId": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string",
+                            "description": "The rule’s name when the statement was drafted."
+                          },
+                          "rateBp": {
+                            "type": "integer",
+                            "description": "The rule’s rate in basis points when it was drafted."
+                          },
+                          "base": {
+                            "type": "string",
+                            "enum": ["GROSS"]
+                          },
+                          "amountMinor": {
+                            "type": "string",
+                            "description": "The rate of the base, rounded half up, in minor units (rials), a decimal string."
+                          }
+                        },
+                        "required": ["deductionRuleId", "name", "rateBp", "base", "amountMinor"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When it was submitted (ISO 8601, UTC), or null."
+                    },
+                    "approvalChains": {
+                      "type": "object",
+                      "properties": {
+                        "technical": {
+                          "type": "object",
+                          "properties": {
+                            "policyId": {
+                              "type": "string"
+                            },
+                            "policyVersion": {
+                              "type": "integer"
+                            },
+                            "steps": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "stepOrder": {
+                                    "type": "integer",
+                                    "description": "The policy step’s order; asked in this order."
+                                  },
+                                  "authorityOrganizationId": {
+                                    "type": "string"
+                                  },
+                                  "authorityRole": {
+                                    "type": "string"
+                                  },
+                                  "authorityLabel": {
+                                    "type": "string"
+                                  },
+                                  "decision": {
+                                    "type": "object",
+                                    "properties": {
+                                      "outcome": {
+                                        "type": "string",
+                                        "enum": ["APPROVED", "REJECTED"]
+                                      },
+                                      "decidedAt": {
+                                        "type": "string",
+                                        "description": "When (ISO 8601, UTC)."
+                                      }
+                                    },
+                                    "required": ["outcome", "decidedAt"],
+                                    "additionalProperties": false,
+                                    "nullable": true,
+                                    "description": "The step’s decision, or null while undecided — never by which person."
+                                  }
+                                },
+                                "required": [
+                                  "stepOrder",
+                                  "authorityOrganizationId",
+                                  "authorityRole",
+                                  "authorityLabel",
+                                  "decision"
+                                ],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": ["policyId", "policyVersion", "steps"],
+                          "additionalProperties": false
+                        },
+                        "financial": {
+                          "type": "object",
+                          "properties": {
+                            "policyId": {
+                              "type": "string"
+                            },
+                            "policyVersion": {
+                              "type": "integer"
+                            },
+                            "steps": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "stepOrder": {
+                                    "type": "integer",
+                                    "description": "The policy step’s order; asked in this order."
+                                  },
+                                  "authorityOrganizationId": {
+                                    "type": "string"
+                                  },
+                                  "authorityRole": {
+                                    "type": "string"
+                                  },
+                                  "authorityLabel": {
+                                    "type": "string"
+                                  },
+                                  "decision": {
+                                    "type": "object",
+                                    "properties": {
+                                      "outcome": {
+                                        "type": "string",
+                                        "enum": ["APPROVED", "REJECTED"]
+                                      },
+                                      "decidedAt": {
+                                        "type": "string",
+                                        "description": "When (ISO 8601, UTC)."
+                                      }
+                                    },
+                                    "required": ["outcome", "decidedAt"],
+                                    "additionalProperties": false,
+                                    "nullable": true,
+                                    "description": "The step’s decision, or null while undecided — never by which person."
+                                  }
+                                },
+                                "required": [
+                                  "stepOrder",
+                                  "authorityOrganizationId",
+                                  "authorityRole",
+                                  "authorityLabel",
+                                  "decision"
+                                ],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": ["policyId", "policyVersion", "steps"],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": ["technical", "financial"],
+                      "additionalProperties": false,
+                      "nullable": true,
+                      "description": "The two approval chains as the policies in force said them when the statement was submitted — technical first, then financial (Q-96 (2)) — or null while it is a draft. A policy changed later never changes them (ADR-068 § 5)."
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "contractId",
+                    "organizationId",
+                    "contractorOrganizationId",
+                    "statementNumber",
+                    "status",
+                    "grossMinor",
+                    "deductionsMinor",
+                    "netMinor",
+                    "lines",
+                    "deductions",
+                    "createdAt",
+                    "submittedAt",
+                    "approvalChains",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded. On a statement’s decisions: only the organization the named step names, with its role (NOT_STEP_AUTHORITY, INSUFFICIENT_ROLE), never a member of the contractor’s organization (MEMBER_OF_CONTRACTOR) and never the platform administrator. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (decision: NOT_STEP_AUTHORITY, MEMBER_OF_CONTRACTOR)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "decision"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["NOT_STEP_AUTHORITY", "MEMBER_OF_CONTRACTOR"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor (nor, for one statement and its decisions, an organization a step of that statement’s approval chains names), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on deciding a statement, a step already decided — by another person or at the same moment (STEP_DECIDED); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (decision: STEP_DECIDED)",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "decision"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["STEP_DECIDED"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING). On a statement’s decisions: a draft (STATEMENT_NOT_SUBMITTED) or an approved or rejected statement (STATEMENT_DECIDED), a step its chains do not have (STEP_NOT_IN_CHAIN), the financial chain before the technical one is approved (CHAIN_NOT_OPEN), a step before an earlier one (STEP_NOT_NEXT), a contract that is not signed (CONTRACT_NOT_SIGNED), an approval that would take the approved gross past the price and the effective amendments (APPROVED_TOTAL_EXCEEDS_CAP, Q-96 (5)), and the separation of duties — the submitter (SUBMITTER_MAY_NOT_DECIDE), a person who already decided the statement (ALREADY_DECIDED_STATEMENT), two people who cannot be told apart (ACTOR_IDENTITY_UNKNOWN). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (decision: SUBMITTER_MAY_NOT_DECIDE, ALREADY_DECIDED_STATEMENT, ACTOR_IDENTITY_UNKNOWN, CONTRACT_NOT_SIGNED, STATEMENT_NOT_SUBMITTED, STATEMENT_DECIDED, STEP_NOT_IN_CHAIN, CHAIN_NOT_OPEN, STEP_NOT_NEXT, APPROVED_TOTAL_EXCEEDS_CAP)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "decision"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "SUBMITTER_MAY_NOT_DECIDE",
+                              "ALREADY_DECIDED_STATEMENT",
+                              "ACTOR_IDENTITY_UNKNOWN",
+                              "CONTRACT_NOT_SIGNED",
+                              "STATEMENT_NOT_SUBMITTED",
+                              "STATEMENT_DECIDED",
+                              "STEP_NOT_IN_CHAIN",
+                              "CHAIN_NOT_OPEN",
+                              "STEP_NOT_NEXT",
+                              "APPROVED_TOTAL_EXCEEDS_CAP"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "On sign, cancel, amendment, milestone, statement and decision commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Approve or reject a step of a submitted statement’s approval chain",
+        "tags": ["statements"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "chain": {
+                    "type": "string",
+                    "enum": ["TECHNICAL", "FINANCIAL"],
+                    "description": "The chain of the step decided. The technical chain is open while the statement is SUBMITTED, the financial one once it is TECHNICALLY_APPROVED (Q-96 (2))."
+                  },
+                  "stepOrder": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647,
+                    "description": "The step’s `stepOrder` in that chain, as the statement’s `approvalChains` shows it."
+                  },
+                  "decision": {
+                    "type": "string",
+                    "enum": ["APPROVE", "REJECT"],
+                    "description": "APPROVE records the step approved; the last step of a chain completes it. REJECT rejects the statement, final for its number (Q-96 (7))."
+                  },
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647,
+                    "description": "The statement’s `version` the caller read. When given, the decision applies only to that version (409 OPTIMISTIC_LOCK_FAILED otherwise)."
+                  }
+                },
+                "required": ["chain", "stepOrder", "decision"],
                 "additionalProperties": false
               }
             }
@@ -4862,7 +5546,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused (BUSINESS_RULE_VIOLATION): a transition the lifecycle does not have (DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED; ACTIVE → RETIRED), a signing step that names another organization’s role (AUTHORITY_NOT_GOVERNED_ORGANIZATION), amount bounds on a step of a workflow that is not a statement chain (AMOUNT_BOUNDS_NOT_APPLICABLE), or an author or submitter whose identity was not recorded (ACTOR_IDENTITY_UNKNOWN, fail closed). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (policy: AUTHORITY_NOT_GOVERNED_ORGANIZATION, AMOUNT_BOUNDS_NOT_APPLICABLE)",
+            "description": "Well-formed but refused (BUSINESS_RULE_VIOLATION): a transition the lifecycle does not have (DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED; ACTIVE → RETIRED), a signing step that names another organization’s role (AUTHORITY_NOT_GOVERNED_ORGANIZATION), amount bounds on a step of a workflow that is not a statement chain (AMOUNT_BOUNDS_NOT_APPLICABLE), or an author or submitter whose identity was not recorded (ACTOR_IDENTITY_UNKNOWN, fail closed). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone, statement, decision) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (policy: AUTHORITY_NOT_GOVERNED_ORGANIZATION, AMOUNT_BOUNDS_NOT_APPLICABLE)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6994,7 +7678,7 @@
   },
   "info": {
     "title": "Rasta — Contract Service",
-    "description": "The contract boundary (CON-003, ADR-068). The draft contract that a tender award creates: the system makes it when construction-service publishes TENDER_AWARDED, after reading the award — and its amount, which is on no event — from construction-service itself (ADR-061 § 4); no user creates one. A contract is read, signed and (while a draft) cancelled by its two parties only: the employer’s organization and the winning contractor’s; anyone else gets 404. Each party signs separately — a recorded acceptance, not a legal signature (Q-95) — and the contract is SIGNED only when both have; the employer may cancel a draft for a closed reason. Who may sign for the employer is the `contract.signature` approval policy of its own organization (/v1/contract-approval-policies): written by a union or the platform, put in force by a platform administrator who is not its author, and never an environment setting; with none in force nobody signs for the employer (422). Amounts are decimal strings of minor units (rials). A SIGNED contract is amended by its employer (a positive change to the price, with a closed reason code and a text), and the amendment takes effect only when both parties have signed it the way they signed the contract; the employer also plans milestones (a title, a planned day and an optional share in basis points) that both parties read. The contractor drafts statements of a signed contract — lines, each optionally against a milestone, the deductions the employer has configured, and the gross, deductions and net computed once by the service — and submits them, which snapshots the separate technical and financial approval chains from the employer’s `contract.statement.technical` and `contract.statement.financial` policies. Recording the approvals, and the settlement boundary with economic-service, follow (ADR-068 § 9); no money is ever held here.",
+    "description": "The contract boundary (CON-003, ADR-068). The draft contract that a tender award creates: the system makes it when construction-service publishes TENDER_AWARDED, after reading the award — and its amount, which is on no event — from construction-service itself (ADR-061 § 4); no user creates one. A contract is read, signed and (while a draft) cancelled by its two parties only: the employer’s organization and the winning contractor’s; anyone else gets 404. Each party signs separately — a recorded acceptance, not a legal signature (Q-95) — and the contract is SIGNED only when both have; the employer may cancel a draft for a closed reason. Who may sign for the employer is the `contract.signature` approval policy of its own organization (/v1/contract-approval-policies): written by a union or the platform, put in force by a platform administrator who is not its author, and never an environment setting; with none in force nobody signs for the employer (422). Amounts are decimal strings of minor units (rials). A SIGNED contract is amended by its employer (a positive change to the price, with a closed reason code and a text), and the amendment takes effect only when both parties have signed it the way they signed the contract; the employer also plans milestones (a title, a planned day and an optional share in basis points) that both parties read. The contractor drafts statements of a signed contract — lines, each optionally against a milestone, the deductions the employer has configured, and the gross, deductions and net computed once by the service — and submits them, which snapshots the separate technical and financial approval chains from the employer’s `contract.statement.technical` and `contract.statement.financial` policies. Each step is then decided by the organization and role it names — technical first, then financial; a person decides a statement at most once and never the one who submitted it — and the last financial approval makes the statement APPROVED, within the contract’s price and its amendments. The settlement boundary with economic-service follows (ADR-068 § 9); no money is ever held or moved here.",
     "version": "0.1.0",
     "contact": {}
   },
