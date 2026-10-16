@@ -1553,19 +1553,33 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
       فرایند بعدی دوباره منتشرشان می‌کند و Consumerها تکرار را با `eventId` حذف می‌کنند. بستنی که شکست بخورد هم فقط
       هشدار است و خاموش‌شدن را شکست نمی‌دهد (Client در هر دو حالت رها می‌شود). فراخوانی دوم برای همان Client به بستنِ
       جاری و مهلتِ آن می‌پیوندد و `disconnect()` دوباره‌ای شروع نمی‌کند.
-    - **مهلت:** `kafkaConnection(env)` حالا `shutdownBudgetMs` = `outboxShutdownBudgetMs(env)` را حمل می‌کند و Publisher
-      آن را از شروع `onModuleDestroy` خودش می‌شمارد. این همان گذر Destroy است که `OutboxShutdown` در آن شروع می‌شود: هر دو
-      Provider همان AppModuleاند و Nest Hookهای یک Module را در یک حلقه شروع می‌کند، پس هر دو مهلت به یک لحظه می‌رسند.
-      `app.module.ts` هیچ سرویسی دست نخورد.
+    - **مهلت — یک بودجه، نه دو (Codex r1 روی #293، F1):** Publisher دیگر در `onModuleDestroy` خودش و با بودجه‌ای از آن
+      لحظه بسته نمی‌شود. در r1 چنین بود و در چهار سرویسی که رله هنوز در `onApplicationShutdown` تخلیه می‌شد (inventory،
+      identity، contract، supplier) تخلیهٔ رله تازه پس از خرج شدن بودجهٔ Publisher شروع می‌شد ⇐ دو بودجه پشت سر هم و خروج
+      ۱. حالا Publisher شرکت‌کنندهٔ `OutboxShutdown` است (`publishers`): Coordinator او را **پس از** بازگشت رله، Purge و همهٔ
+      Workerها — چه ایستاده باشند چه شکست خورده باشند — و با **همان `deadlineAt`** می‌بندد (`stop({ deadlineAt })`). پس
+      Publisher آنچه را از همان یک بودجه مانده می‌گیرد؛ اگر رله تا مهلت روی Publishی بی‌پاسخ ماند، چیزی نمانده و بستن
+      فوراً رها می‌شود. رله هم هرگز از Producerی که در حال بسته شدن است منتشر نمی‌کند. AppModule هر سیزده سرویس
+      `KafkaEventPublisher` را به `OutboxShutdown` می‌دهد؛ `InMemoryEventPublisher` یک `stop()` بی‌اثر دارد.
+      `shutdownBudgetMs` اتصال فقط مهلت `stop()`ی است که بی‌مهلت صدا زده شود (CLI، آزمون) و پایهٔ مهلت Probe.
     - **دو شکل:** ساده (asset، document، economic، fleet، identity، maintenance، marketplace، organization، supplier) یک
-      Producer دارد و Hook دوم از راه `boundedDisconnect` به بستن جاری می‌پیوندد. Pending (construction، contract، inventory،
-      notification) Producerی را که هنوز وصل می‌شود هم با همان مهلت می‌بندد و بستنش یک Promise است. Admin Client
-      Probe آمادگی (`isHealthy`) جزو مسیر Destroy نیست و دست نخورد.
-    - آزمون: `bounded-disconnect.spec.ts` در nest-common (با `Connection` خود kafkajs و درخواستی در پرواز)، و
-      `kafka.publisher.shutdown.spec.ts` در fleet (شکل ساده) و inventory (Pending و Admin). در این دو، Publisher، kafkajs،
-      رله، `OutboxShutdown`، بستن Nest و `installGracefulShutdown` واقعی‌اند و روبه‌روی `StubKafkaBroker` (`@rasta/testing`،
-      Brokerی روی loopback که Produce یا ApiVersions را بی‌پاسخ نگه می‌دارد) اجرا می‌شوند ⇐ خروج ۰ در مهلت، یک هشدار و یک
-      `disconnect()`. Fence رله در برابر Claim دیر پس از توقف (فاز ۴a) در #291 است؛ با این دو، فاز ۴ کامل است.
+      Producer دارد. Pending (construction، contract، inventory، notification) Producerی را که هنوز وصل می‌شود هم با همان
+      مهلت می‌بندد. در هر دو، بستن یک Promise است و فراخوانی دوم به آن می‌پیوندد.
+    - **Probe آمادگی (Codex r1 روی #293، F2):** `isHealthy()` یک Admin Client کوتاه‌عمر است (connect، `listTopics`، بستن)
+      و هیچ‌کدام از این سه کرانی کوتاه‌تر از Retry و `requestTimeout` kafkajs نداشت؛ سرور HTTP هنگام بسته شدن منتظر
+      درخواست‌های باز می‌ماند، پس `/health/ready`ی که روی Broker ساکت در پرواز بود `app.close()` را از مهلت رد می‌کرد.
+      `KafkaReadinessProbe` (`@rasta/nest-common`) هر Probe را در `kafkaProbeTimeoutMs` (یک‌چهارم بودجه، حداکثر ۲ ثانیه)
+      جواب می‌دهد و Client را در لحظهٔ جواب، بی‌انتظار و با `boundedDisconnect`، می‌بندد. `onModuleDestroy` Publisher —
+      نخستین Hook `app.close()` — حالا فقط Probe را می‌بندد: از آن پس Probeی شروع نمی‌شود و Probe در پرواز همان لحظه
+      «سالم نیست» جواب می‌دهد. Kafka در پاسخ آمادگی فقط Degradation است، پس این جواب فقط `degraded: ['kafka']` می‌دهد.
+    - آزمون: `bounded-disconnect.spec.ts` و `readiness-probe.spec.ts` در nest-common، و ترتیب و مهلت در
+      `outbox-shutdown.spec.ts`. `kafka.publisher.shutdown.spec.ts` در fleet (شکل ساده) و inventory (Pending) دیگر
+      Coordinator خودش را نمی‌سازد: Providerهای خود AppModule (`KafkaEventPublisher`، `OutboxRelay`، `OutboxShutdown`، همان
+      اشیای متادیتای `@Module`)، `HealthController` و `onApplicationShutdown` خود AppModule، با kafkajs و سرور HTTP واقعی
+      روبه‌روی `StubKafkaBroker` (`@rasta/testing`) ⇐ خروج ۰ در مهلت، بستن Publisher پس از بازگشت رله و با همان مهلت، و
+      Probe در پرواز که با شروع خاموش‌شدن جواب می‌دهد. هر سیزده سرویس `app.module.publisher-close.spec.ts` دارند که Factory
+      خود AppModule را اجرا می‌کند: Publisher یک بار، آخر و با همان مهلت. Fence رله در برابر Claim دیر پس از توقف (فاز ۴a)
+      در #291 است؛ با این دو، فاز ۴ کامل است.
 
   هر Batch یک تراکنش کوتاه است:
   - `SET LOCAL statement_timeout`؛
