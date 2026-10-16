@@ -550,10 +550,16 @@ describe('the database keeps the statements and their deductions', () => {
         stepSql(c, id, 'TECHNICAL', p.technical),
         stepSql(c, id, 'FINANCIAL', p.financial),
       );
+      // Once SUBMITTED, only a decision moves it (CON-003 PR 6: statement-decision.int-spec): a
+      // bare move, or a change without its version, is refused here or at commit.
       for (const to of ['DRAFT', 'SUBMITTED', 'TECHNICALLY_APPROVED', 'APPROVED', 'REJECTED']) {
         await refuses(
           exec(`UPDATE statement SET status = '${to}' WHERE id = '${id}'`),
-          /ck_statement_transition|ck_statement_submission|ck_statement_chain_counts/,
+          /ck_statement_transition|ck_statement_submission|ck_statement_chain_counts|ck_statement_version/,
+        );
+        await refuses(
+          exec(`UPDATE statement SET status = '${to}', version = version + 1 WHERE id = '${id}'`),
+          /ck_statement_transition|ck_statement_submission|ck_statement_chain_counts|ck_statement_decisions_consistent/,
         );
       }
       for (const change of [

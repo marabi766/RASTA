@@ -446,6 +446,7 @@ model Statement {
   lines         StatementLine[]
   deductions    StatementDeduction[]
   approvalSteps StatementApprovalStep[]
+  decisions     StatementDecision[]
 
   @@unique([organizationId, id], map: "ux_statement_org_id")
   @@unique([organizationId, contractId, statementNumber], map: "ux_statement_number")
@@ -500,8 +501,8 @@ model StatementDeduction {
 /// that chain said it when the statement was submitted (ADR-068 § 5: "the policy is snapshotted at
 /// submission"): the policy's id and version, the step's order and its authority. Every step of the
 /// policy that applies to the statement's gross, written in the submitting transaction, never
-/// changed (`statement_approval_step_guard`, `statement_submission_consistent`). The decisions
-/// recorded against these steps are the next change.
+/// changed (`statement_approval_step_guard`, `statement_submission_consistent`). Each is decided at
+/// most once (`StatementDecision`, CON-003 PR 6).
 model StatementApprovalStep {
   id             String @id
   organizationId String @map("organization_id")
@@ -523,12 +524,51 @@ model StatementApprovalStep {
   /// The statement's submission instant.
   createdAt DateTime @map("created_at") @db.Timestamptz(3)
 
-  statement Statement      @relation(fields: [organizationId, statementId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
-  policy    ApprovalPolicy @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  statement Statement          @relation(fields: [organizationId, statementId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  policy    ApprovalPolicy     @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  decision  StatementDecision?
 
   @@unique([organizationId, statementId, chain, stepOrder], map: "ux_statement_approval_step")
   @@index([organizationId, policyId], map: "ix_statement_approval_step_policy")
   @@map("statement_approval_step")
+}
+
+/// The decision on one step of a submitted statement's approval chain (CON-003 PR 6, ADR-068 § 5):
+/// APPROVED or REJECTED, by the step's authority — the organization and role the snapshot names —
+/// and by a person named with their user id and the token's verified issuer and subject. Written
+/// once, for the next undecided step of the open chain (technical, then financial: Q-96 (2)), and
+/// never changed (`statement_decision_guard`). A person decides a statement at most once across
+/// both chains, and never the one who submitted it (Q-96 (3); `ux_statement_decision_person`,
+/// `ux_statement_decision_user`). The statement's status is what its decisions say, checked at
+/// commit (`statement_decisions_consistent`).
+model StatementDecision {
+  id             String @id
+  organizationId String @map("organization_id")
+  contractId     String @map("contract_id")
+  statementId    String @map("statement_id")
+
+  /// The step decided: `TECHNICAL` or `FINANCIAL`, and its order in the snapshot.
+  chain     String
+  stepOrder Int    @map("step_order")
+  /// `APPROVED` or `REJECTED` (`ck_statement_decision_terms`).
+  outcome   String
+
+  /// The organization the decider acted for and the role it decided under: the step's authority.
+  deciderOrganizationId String   @map("decider_organization_id")
+  deciderRole           String   @map("decider_role")
+  decidedBy             String   @map("decided_by")
+  decidedByIssuer       String   @map("decided_by_issuer")
+  decidedBySubject      String   @map("decided_by_subject")
+  decidedAt             DateTime @map("decided_at") @db.Timestamptz(3)
+  correlationId         String   @map("correlation_id")
+
+  statement Statement             @relation(fields: [organizationId, statementId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  step      StatementApprovalStep @relation(fields: [organizationId, statementId, chain, stepOrder], references: [organizationId, statementId, chain, stepOrder], onDelete: Restrict, onUpdate: Restrict, map: "statement_decision_step_fkey")
+
+  @@unique([organizationId, statementId, chain, stepOrder], map: "ux_statement_decision_step")
+  @@unique([organizationId, statementId, decidedByIssuer, decidedBySubject], map: "ux_statement_decision_person")
+  @@unique([organizationId, statementId, decidedBy], map: "ux_statement_decision_user")
+  @@map("statement_decision")
 }
 
 // ---------------------------------------------------------------------------

@@ -3,7 +3,11 @@ import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError, getContext } from '@rasta/nest-common';
 import { PlatformAdministratorRefused, sideOf, type Acting } from '../access/access';
 import { ContractRepository } from '../contract/contract.repository';
-import type { AUTHORITY_REFUSED_ACTIONS, AUTHORITY_REFUSED_REASONS } from '../events/events';
+import type {
+  AUTHORITY_REFUSED_ACTIONS,
+  AUTHORITY_REFUSED_REASONS,
+  AUTHORITY_REFUSED_SIDES,
+} from '../events/events';
 import { EventPublisher } from '../events/publisher';
 import { PrismaService } from '../prisma/prisma.service';
 import { transactionNow } from '../shared/clock';
@@ -14,11 +18,12 @@ export type AuthorityRefusedReason = (typeof AUTHORITY_REFUSED_REASONS)[number];
 
 export interface AuthorityRefusal {
   readonly action: AuthorityRefusedAction;
-  readonly side: 'EMPLOYER' | 'CONTRACTOR';
+  /** A party, or for a decision an organization the statement's chains name (`APPROVER`). */
+  readonly side: (typeof AUTHORITY_REFUSED_SIDES)[number];
   readonly contractId: string;
   /** The contract's organization — the employer's. */
   readonly organizationId: string;
-  /** The amendment or milestone the action named; null when it was to create one or a statement. */
+  /** The amendment, milestone or statement the action named; null when it was to create one. */
   readonly subjectId: string | null;
   readonly reason: AuthorityRefusedReason;
   /** The policy that was in force and stranded; null otherwise. */

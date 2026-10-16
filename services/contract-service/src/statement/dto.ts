@@ -3,7 +3,7 @@ import { amountMinorSchema, plainText } from '@rasta/contracts';
 import { STATEMENT_STATES } from './statement.state-machine';
 
 /**
- * The request and response shapes of the statement API (ADR-068 § 5, CON-003 PR 4).
+ * The request and response shapes of the statement API (ADR-068 § 5, CON-003 PR 4 to 6).
  *
  * A statement is drafted whole: its lines and the configured deductions it applies, in one strict
  * body. Nothing in it decides who acts, for which side, when, or how much is withheld: the totals
@@ -99,6 +99,47 @@ export const submitStatementSchema = z
   .strict();
 export type SubmitStatementDto = z.infer<typeof submitStatementSchema>;
 
+/**
+ * `POST /v1/contracts/{id}/statements/{statementId}/decisions`: a step's authority approves or
+ * rejects that step. The step is named — not inferred — so two approvers of one step racing each
+ * other never land the second on the next step: the one who comes second is told it was decided.
+ */
+export const decideStatementSchema = z
+  .object({
+    chain: z
+      .enum(['TECHNICAL', 'FINANCIAL'])
+      .describe(
+        'The chain of the step decided. The technical chain is open while the statement is ' +
+          'SUBMITTED, the financial one once it is TECHNICALLY_APPROVED (Q-96 (2)).',
+      ),
+    stepOrder: z
+      .number()
+      .int()
+      .min(1)
+      .max(2_147_483_647)
+      .describe(
+        'The step’s `stepOrder` in that chain, as the statement’s `approvalChains` shows it.',
+      ),
+    decision: z
+      .enum(['APPROVE', 'REJECT'])
+      .describe(
+        'APPROVE records the step approved; the last step of a chain completes it. REJECT rejects ' +
+          'the statement, final for its number (Q-96 (7)).',
+      ),
+    expectedVersion: z
+      .number()
+      .int()
+      .min(1)
+      .max(2_147_483_647)
+      .optional()
+      .describe(
+        'The statement’s `version` the caller read. When given, the decision applies only to ' +
+          'that version (409 OPTIMISTIC_LOCK_FAILED otherwise).',
+      ),
+  })
+  .strict();
+export type DecideStatementDto = z.infer<typeof decideStatementSchema>;
+
 /** `GET /v1/contracts/{id}/statements`: oldest first, a cursor being the last statement number. */
 export const listStatementsQuerySchema = z
   .object({
@@ -129,6 +170,14 @@ const approvalChainView = z
           authorityOrganizationId: z.string(),
           authorityRole: z.string(),
           authorityLabel: z.string(),
+          decision: z
+            .object({
+              outcome: z.enum(['APPROVED', 'REJECTED']),
+              decidedAt: z.string().describe('When (ISO 8601, UTC).'),
+            })
+            .strict()
+            .nullable()
+            .describe('The step’s decision, or null while undecided — never by which person.'),
         })
         .strict(),
     ),
@@ -136,8 +185,9 @@ const approvalChainView = z
   .strict();
 
 /**
- * A statement as either party sees it: what was claimed, what was withheld and why, the net, and
- * when it was drafted and submitted — never by which person.
+ * A statement as either party — or an approver its chains name — sees it: what was claimed, what
+ * was withheld and why, the net, and when it was drafted, submitted and decided — never by which
+ * person.
  */
 export const statementViewSchema = z
   .object({

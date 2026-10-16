@@ -4,19 +4,24 @@ import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
 import type { CursorPage } from '../contract/dto';
 import { IdempotencyStore, requiredIdempotencyKey } from '../shared/idempotency';
 import {
+  decideStatementSchema,
   draftStatementSchema,
   listStatementsQuerySchema,
   submitStatementSchema,
+  type DecideStatementDto,
   type DraftStatementDto,
   type ListStatementsQuery,
   type StatementView,
   type SubmitStatementDto,
 } from './dto';
+import { StatementDecisionService } from './statement-decision.service';
 import { StatementService } from './statement.service';
 
 /** The route templates the idempotency store keys on: a closed set, never an id. */
 export const DRAFT_STATEMENT_ENDPOINT = 'POST /v1/contracts/{id}/statements';
 export const SUBMIT_STATEMENT_ENDPOINT = 'POST /v1/contracts/{id}/statements/{statementId}/submit';
+export const DECIDE_STATEMENT_ENDPOINT =
+  'POST /v1/contracts/{id}/statements/{statementId}/decisions';
 
 const PARTIES_NOTE =
   'Closed by default (S-02). Read by the same two parties as the contract: the employer’s ' +
@@ -40,16 +45,34 @@ const COMMAND_NOTE =
   'organization, or one that does not exist, is 404 — never 403. Refusals carry their closed ' +
   'reason in `details[].code` (docs/06 § 6.7).';
 
+const DECISION_NOTE =
+  'Requires an `Idempotency-Key` (docs/06 § 6.8), with the same replay rules as every command. ' +
+  'The caller must be a signed-in person with a platform user id (403 otherwise); the platform ' +
+  'administrator, the oversight role and a service token are refused. The caller acts for the ' +
+  'organization the named step’s authority is and holds its role: another organization that is a ' +
+  'party or is named by another step is 403 `NOT_STEP_AUTHORITY`, a person of that organization ' +
+  'without the role 403 INSUFFICIENT_ROLE. Separation of duties (Q-96 (3)), on the stable identity ' +
+  '(the token’s issuer and subject): a member of the contractor’s organization is 403 ' +
+  '`MEMBER_OF_CONTRACTOR`; the person who submitted the statement is 422 ' +
+  '`SUBMITTER_MAY_NOT_DECIDE`; a person who already decided a step of it, in either chain, is 422 ' +
+  '`ALREADY_DECIDED_STATEMENT`; a pair that cannot be told apart is 422 `ACTOR_IDENTITY_UNKNOWN`. ' +
+  'Each of these refusals is recorded (CONTRACT_AUTHORITY_REFUSED, action APPROVE_STATEMENT or ' +
+  'REJECT_STATEMENT, side EMPLOYER, CONTRACTOR or APPROVER); when that record cannot be written ' +
+  'the answer is 503 and nothing was done. Any organization that is neither a party nor named by ' +
+  'the statement’s chains, and a statement or contract that does not exist, is 404 — never 403. ' +
+  'Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).';
+
 /**
- * The statement API of a contract (ADR-068 § 5, CON-003 PR 4 and 5). HTTP ↔ DTO and nothing else
+ * The statement API of a contract (ADR-068 § 5, CON-003 PR 4 to 6). HTTP ↔ DTO and nothing else
  * (AGENTS.md A-10); no handler names a role. A statement is drafted, submitted — with the snapshot
- * of both approval chains — and read here; the chains' decisions are the next change.
+ * of both approval chains — decided step by step, and read here.
  */
 @ApiTags('statements')
 @Controller({ path: 'contracts/:id/statements', version: '1' })
 export class StatementController {
   constructor(
     private readonly statements: StatementService,
+    private readonly decisions: StatementDecisionService,
     private readonly idempotency: IdempotencyStore,
   ) {}
 
@@ -70,7 +93,10 @@ export class StatementController {
   @Get(':statementId')
   @ApiOperation({
     summary: 'Read one statement',
-    description: `One statement of the contract. ${PARTIES_NOTE}`,
+    description:
+      `One statement of the contract, each step of its approval chains with its decision. ${PARTIES_NOTE} ` +
+      'Also read by an organization a step of its approval chains names, acting with that step’s ' +
+      'role (CON-003 PR 6) — this statement only, never the contract or its other statements.',
   })
   async get(
     @Param('id') id: string,
@@ -162,6 +188,51 @@ export class StatementController {
       200,
       (fence) => this.statements.submit(id, statementId, dto, fence),
       (stored) => this.statements.assertContractVisible(stored.contractId),
+    );
+    return result;
+  }
+
+  @RequirePlatformUserId()
+  @Post(':statementId/decisions')
+  @HttpCode(200)
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: true,
+    description: '8 to 255 characters. Scoped to the organization.',
+  })
+  @ApiOperation({
+    summary: 'Approve or reject a step of a submitted statement’s approval chain',
+    description:
+      'The step’s authority decides the named step (`chain`, `stepOrder`) of the chains snapshotted ' +
+      'at submission (ADR-068 § 5): the technical chain while the statement is SUBMITTED, the ' +
+      'financial one once it is TECHNICALLY_APPROVED (422 `CHAIN_NOT_OPEN`), each chain in its ' +
+      'step order (422 `STEP_NOT_NEXT`). Approving the technical chain’s last step makes it ' +
+      'TECHNICALLY_APPROVED; approving the financial chain’s last step makes it APPROVED — immutable ' +
+      '— and adds its gross to the contract’s approved total, which never passes the price plus ' +
+      'the effective amendments (422 `APPROVED_TOTAL_EXCEEDS_CAP`, nothing written; Q-96 (5)). A ' +
+      'rejection at any step makes it REJECTED, final for its number (Q-96 (7)). A step decided ' +
+      'already — by someone else, or at the same moment — is 409 `STEP_DECIDED`; a draft 422 ' +
+      '`STATEMENT_NOT_SUBMITTED`; an approved or rejected statement 422 `STATEMENT_DECIDED`; a step ' +
+      'its chains do not have 422 `STEP_NOT_IN_CHAIN`; a contract that is not signed 422 ' +
+      '`CONTRACT_NOT_SIGNED`. No timer and no default: a step waits for its authority (ADR-043). ' +
+      'STATEMENT_DECISION_RECORDED, and STATEMENT_TECHNICALLY_APPROVED, STATEMENT_APPROVED or ' +
+      'STATEMENT_REJECTED with a transition, carry identifiers and instants only — no amount ' +
+      `(Q-97 (2)); approval moves no money (ADR-068 § 6). ${DECISION_NOTE}`,
+  })
+  async decide(
+    @Param('id') id: string,
+    @Param('statementId') statementId: string,
+    @Body(zodPipe(decideStatementSchema)) dto: DecideStatementDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ): Promise<StatementView> {
+    const key = requiredIdempotencyKey(idempotencyKey);
+    const { result } = await this.idempotency.execute<StatementView>(
+      DECIDE_STATEMENT_ENDPOINT,
+      key,
+      { id, statementId, ...dto },
+      200,
+      (fence) => this.decisions.decide(id, statementId, dto, fence),
+      (stored) => this.statements.assertStatementVisible(stored.contractId, stored.id),
     );
     return result;
   }

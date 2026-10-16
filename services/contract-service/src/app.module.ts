@@ -60,6 +60,7 @@ import { MilestoneController } from './milestone/milestone.controller';
 import { MilestoneRepository } from './milestone/milestone.repository';
 import { MilestoneService } from './milestone/milestone.service';
 import { StatementController } from './statement/statement.controller';
+import { StatementDecisionService } from './statement/statement-decision.service';
 import { StatementRepository } from './statement/statement.repository';
 import { StatementService } from './statement/statement.service';
 import { AuthorityRefusals } from './signing/authority-refusals';
@@ -145,6 +146,7 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
     MilestoneService,
     StatementRepository,
     StatementService,
+    StatementDecisionService,
     PolicyAccess,
     PolicyRepository,
     PolicyService,
