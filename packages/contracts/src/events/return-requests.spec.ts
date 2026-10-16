@@ -3,7 +3,11 @@ import {
   RETURN_REQUEST_EVENT_SCHEMAS,
   returnAuthorizedPayloadSchema,
   returnCancelledPayloadSchema,
+  returnInTransitPayloadSchema,
+  returnInspectedPayloadSchema,
+  returnReceivedPayloadSchema,
   returnRejectedPayloadSchema,
+  returnResolvedPayloadSchema,
   returnRequestedPayloadSchema,
 } from './return-requests';
 
@@ -25,12 +29,16 @@ const requested = {
 };
 
 describe('return request event contracts (ADR-048)', () => {
-  it('names four events, each with its schema', () => {
+  it('names eight events, each with its schema', () => {
     expect(Object.keys(RETURN_REQUEST_EVENTS)).toEqual([
       'RETURN_REQUESTED',
       'RETURN_AUTHORIZED',
       'RETURN_REJECTED',
       'RETURN_CANCELLED',
+      'RETURN_IN_TRANSIT',
+      'RETURN_RECEIVED',
+      'RETURN_INSPECTED',
+      'RETURN_RESOLVED',
     ]);
     expect(Object.keys(RETURN_REQUEST_EVENT_SCHEMAS)).toEqual(Object.keys(RETURN_REQUEST_EVENTS));
   });
@@ -109,5 +117,76 @@ describe('return request event contracts (ADR-048)', () => {
       false,
     );
     expect(returnRequestedPayloadSchema.safeParse({ ...requested, lines: [] }).success).toBe(false);
+  });
+});
+
+describe('the physical half, as the request states it', () => {
+  const shipment = { returnShipmentId: `RSP_${ULID}` };
+  const inTransit = {
+    ...facts,
+    ...shipment,
+    returnVersion: 3,
+    inTransitAt: '2026-10-16T10:00:00.000Z',
+  };
+  const receivedEvent = {
+    ...facts,
+    ...shipment,
+    returnVersion: 4,
+    receivedLines: [{ orderLineId: 'OLN_1', receivedQuantity: 2 }],
+    receivedAt: '2026-10-16T11:00:00.000Z',
+  };
+  const inspectedEvent = {
+    ...facts,
+    ...shipment,
+    returnVersion: 5,
+    reportDocumentId: null,
+    inspectedAt: '2026-10-16T12:00:00.000Z',
+  };
+  const resolvedEvent = {
+    ...facts,
+    ...shipment,
+    returnVersion: 6,
+    outcomes: [{ orderLineId: 'OLN_1', disposition: 'SCRAP', quantity: 2 }],
+    resolvedAt: '2026-10-16T13:00:00.000Z',
+  };
+
+  it('continues the request’s own history: 3, 4, 5, 6', () => {
+    expect(returnInTransitPayloadSchema.parse(inTransit)).toEqual(inTransit);
+    expect(returnReceivedPayloadSchema.parse(receivedEvent)).toEqual(receivedEvent);
+    expect(returnInspectedPayloadSchema.parse(inspectedEvent)).toEqual(inspectedEvent);
+    expect(returnResolvedPayloadSchema.parse(resolvedEvent)).toEqual(resolvedEvent);
+    for (const [schema, event] of [
+      [returnInTransitPayloadSchema, inTransit],
+      [returnReceivedPayloadSchema, receivedEvent],
+      [returnInspectedPayloadSchema, inspectedEvent],
+      [returnResolvedPayloadSchema, resolvedEvent],
+    ] as const) {
+      expect(schema.safeParse({ ...event, returnVersion: event.returnVersion + 1 }).success).toBe(
+        false,
+      );
+    }
+  });
+
+  it('links to the return shipment by id, and refuses a missing or foreign one', () => {
+    expect(
+      returnInTransitPayloadSchema.safeParse({ ...inTransit, returnShipmentId: undefined }).success,
+    ).toBe(false);
+    expect(
+      returnInTransitPayloadSchema.safeParse({ ...inTransit, returnShipmentId: `SHP_${ULID}` })
+        .success,
+    ).toBe(false);
+  });
+
+  it('carries no refund, amount or free text, and only the six outcomes', () => {
+    expect(
+      returnResolvedPayloadSchema.safeParse({ ...resolvedEvent, refundAmountMinor: '1' }).success,
+    ).toBe(false);
+    const outcomes = [{ orderLineId: 'OLN_1', disposition: 'REFUND', quantity: 1 }];
+    expect(returnResolvedPayloadSchema.safeParse({ ...resolvedEvent, outcomes }).success).toBe(
+      false,
+    );
+    expect(returnInspectedPayloadSchema.safeParse({ ...inspectedEvent, note: 'x' }).success).toBe(
+      false,
+    );
   });
 });
