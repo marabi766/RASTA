@@ -3,6 +3,7 @@ import { ulid } from 'ulid';
 import request from 'supertest';
 import type { PrismaClient } from '../src/generated/prisma';
 import { validateInventoryPayload, type InventoryEventName } from '../src/events/events';
+import { ReturnShipmentRepository } from '../src/return-shipment/return-shipment.repository';
 import {
   actor,
   client,
@@ -406,6 +407,54 @@ describe('return shipments', () => {
         ).status,
       ).toBe(404);
     });
+
+    it.each(['detail', 'list'] as const)(
+      'reads the %s from one snapshot, though a receipt commits between the shipment and its lines (Codex r1 on #311)',
+      async (read) => {
+        const s = await inTransit(3);
+        const repository = api.app.get(ReturnShipmentRepository);
+        const linesOf = repository.linesOf.bind(repository);
+        let committedBetween = false;
+        // The shipment row has been read; the receipt commits now, before its lines are.
+        const between = jest
+          .spyOn(repository, 'linesOf')
+          .mockImplementationOnce(async (shipments, reader) => {
+            const received = await s.ops.receiveReturn(s.id, {
+              lines: [{ orderLineId: s.orderLineId, receivedQuantity: 3 }],
+            });
+            expect(received.status).toBe(200);
+            committedBetween = true;
+            return linesOf(shipments, reader);
+          });
+        try {
+          const response =
+            read === 'detail'
+              ? await s.ops.returnShipment(s.id)
+              : await s.ops.get('/v1/return-shipments');
+          expect(response.status).toBe(200);
+          const view = read === 'detail' ? response.body : response.body.items[0];
+
+          // What the database held before the receipt — never IN_TRANSIT with what arrived.
+          expect(view).toMatchObject({
+            id: s.id,
+            status: 'IN_TRANSIT',
+            version: 1,
+            receivedAt: null,
+            lines: [{ orderLineId: s.orderLineId, expectedQuantity: 3, receivedQuantity: null }],
+          });
+          expect(committedBetween).toBe(true);
+        } finally {
+          between.mockRestore();
+        }
+
+        // And the next read is the state after it, whole.
+        expect((await s.ops.returnShipment(s.id)).body).toMatchObject({
+          status: 'RECEIVED',
+          version: 2,
+          lines: [{ receivedQuantity: 3 }],
+        });
+      },
+    );
 
     it('lists the owner’s return shipments newest first, by status and by return request', async () => {
       const s = await setup();
