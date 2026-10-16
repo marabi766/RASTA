@@ -38,11 +38,14 @@ import { SESSION_COOKIE, newCsrfToken, sealSession } from '../src/server/session
  *   seeds give it a machine, a driver and a schedule of its own, so a
  *   scenario can show that what it owns is invisible to `orgAdmin` and the
  *   reverse.
+ * - `unionAdmin` — `union.admin`, ORG-UNION-YAZD, `UNION_ADMIN`: a platform
+ *   role, the one that may resolve a transaction dispute (EXP-003).
  */
 export const LIVE_PERSONAS = {
   operator: 'operator.one',
   orgAdmin: 'dehyari.admin',
   orgAdminB: 'dehyari.admin.b',
+  unionAdmin: 'union.admin',
 } as const;
 
 export type LivePersona = keyof typeof LIVE_PERSONAS;
