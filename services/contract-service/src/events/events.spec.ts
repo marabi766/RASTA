@@ -34,7 +34,7 @@ const cancelled = {
 };
 
 describe('the contract events', () => {
-  it('are the lifecycle’s four, the approval policy’s seven, the authority review’s two, amendments’ and milestones’ seven and statements’ two, each with a schema and an aggregate', () => {
+  it('are the lifecycle’s four, the approval policy’s seven, the authority review’s two, amendments’ and milestones’ seven and the statement’s one, each with a schema and an aggregate', () => {
     const names = [
       'CONTRACT_DRAFTED',
       'CONTRACT_SIGNATURE_RECORDED',
@@ -57,7 +57,6 @@ describe('the contract events', () => {
       'CONTRACT_MILESTONE_CHANGED',
       'CONTRACT_AUTHORITY_REFUSED',
       'STATEMENT_DRAFTED',
-      'STATEMENT_SUBMITTED',
     ];
     expect(Object.keys(CONTRACT_EVENTS)).toEqual(names);
     expect(Object.keys(CONTRACT_EVENT_SCHEMAS)).toEqual(names);
@@ -505,6 +504,7 @@ describe('the amendment and milestone events (CON-003 PR 3)', () => {
       'SIGN_AMENDMENT',
       'PLAN_MILESTONE',
       'CHANGE_MILESTONE',
+      'DRAFT_STATEMENT',
     ]) {
       expect(
         validateContractPayload('CONTRACT_AUTHORITY_REFUSED', { ...refused, action }),
@@ -513,6 +513,7 @@ describe('the amendment and milestone events (CON-003 PR 3)', () => {
     for (const reason of [
       'ROLE_NOT_PERMITTED',
       'NOT_EMPLOYER',
+      'NOT_CONTRACTOR',
       'SIGNATURE_POLICY_REQUIRED',
       'POLICY_AUTHOR_NOT_GOVERNING',
       'MEMBER_OF_BOTH_PARTIES',
@@ -624,7 +625,7 @@ describe('CONTRACT_DRAFTED', () => {
   });
 });
 
-describe('the statement events (CON-003 PR 4)', () => {
+describe('the statement event (CON-003 PR 4)', () => {
   const statementDrafted = {
     contractId: 'CTR_1',
     statementId: 'STM_1',
@@ -634,21 +635,12 @@ describe('the statement events (CON-003 PR 4)', () => {
     draftedBy: 'USR_1',
     draftedAt: '2026-10-15T10:00:00.000Z',
   };
-  const { draftedBy: _by, draftedAt: _at, ...common } = statementDrafted;
-  const statementSubmitted = {
-    ...common,
-    submittedBy: 'USR_1',
-    submittedAt: '2026-10-15T11:00:00.000Z',
-  };
 
-  it('accept the payloads as published, keyed by the contract the statement belongs to', () => {
+  it('accepts the payload as published, keyed by the contract the statement belongs to', () => {
     expect(validateContractPayload('STATEMENT_DRAFTED', statementDrafted)).toEqual(
       statementDrafted,
     );
-    expect(validateContractPayload('STATEMENT_SUBMITTED', statementSubmitted)).toEqual(
-      statementSubmitted,
-    );
-    expect(resolvePartitionKey('STATEMENT_SUBMITTED', statementSubmitted).key).toBe('CTR_1');
+    expect(resolvePartitionKey('STATEMENT_DRAFTED', statementDrafted).key).toBe('CTR_1');
   });
 
   it.each([
@@ -659,25 +651,20 @@ describe('the statement events (CON-003 PR 4)', () => {
     'deductions',
     'lines',
     'description',
-  ])('refuse %s: identifiers and instants only, no amount (Q-97 (2)) and no text', (field) => {
-    for (const [name, payload] of [
-      ['STATEMENT_DRAFTED', statementDrafted],
-      ['STATEMENT_SUBMITTED', statementSubmitted],
-    ] as const) {
-      expect(() => validateContractPayload(name, { ...payload, [field]: '1' })).toThrow(
-        /does not match its published contract/,
-      );
-    }
+  ])('refuses %s: identifiers and instants only, no amount (Q-97 (2)) and no text', (field) => {
+    expect(() =>
+      validateContractPayload('STATEMENT_DRAFTED', { ...statementDrafted, [field]: '1' }),
+    ).toThrow(/does not match its published contract/);
   });
 
-  it('refuse a statement number below 1 and an instant with an offset', () => {
+  it('refuses a statement number below 1 and an instant with an offset', () => {
     expect(() =>
       validateContractPayload('STATEMENT_DRAFTED', { ...statementDrafted, statementNumber: 0 }),
     ).toThrow();
     expect(() =>
-      validateContractPayload('STATEMENT_SUBMITTED', {
-        ...statementSubmitted,
-        submittedAt: '2026-10-15T14:30:00+03:30',
+      validateContractPayload('STATEMENT_DRAFTED', {
+        ...statementDrafted,
+        draftedAt: '2026-10-15T14:30:00+03:30',
       }),
     ).toThrow();
   });

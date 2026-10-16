@@ -43,7 +43,6 @@ export const CONTRACT_EVENTS = {
   CONTRACT_MILESTONE_CHANGED: 'CONTRACT_MILESTONE_CHANGED',
   CONTRACT_AUTHORITY_REFUSED: 'CONTRACT_AUTHORITY_REFUSED',
   STATEMENT_DRAFTED: 'STATEMENT_DRAFTED',
-  STATEMENT_SUBMITTED: 'STATEMENT_SUBMITTED',
 } as const;
 
 export type ContractEventName = keyof typeof CONTRACT_EVENTS;
@@ -460,11 +459,12 @@ export const contractMilestoneChangedPayload = z
  * A party's attempt at an authority-bound action on a contract was refused for want of authority
  * (the audit record of the refusal, written in a transaction of its own so it survives the request
  * failing): signing or cancelling the contract, proposing or signing an amendment, planning or
- * editing a milestone — refused for want of authority or for separation of duties. Who asked, for
- * which contract, the closed action and reason — no free text. Never written for a caller who is
- * not a party: such a caller is told the contract does not exist. A refusal of the contract's
- * state (a contract no longer a draft, a version moved on) is not one of these: it is answered and
- * not audited.
+ * editing a milestone, drafting a statement — refused for want of authority or for separation of
+ * duties. Who asked, for which contract, the closed action and reason — no free text. Never
+ * written for a caller who is not a party: such a caller is told the contract does not exist. A
+ * refusal of the contract's state (a contract no longer a draft, a version moved on) is not one of
+ * these: it is answered and not audited. audit-service projects the same two closed lists
+ * (`contract-refusal-projection.ts`): a value added here is added there in the same change.
  */
 export const AUTHORITY_REFUSED_ACTIONS = [
   'SIGN_CONTRACT',
@@ -473,12 +473,16 @@ export const AUTHORITY_REFUSED_ACTIONS = [
   'SIGN_AMENDMENT',
   'PLAN_MILESTONE',
   'CHANGE_MILESTONE',
+  /** The contractor drafts a statement of a signed contract (CON-003 PR 4). */
+  'DRAFT_STATEMENT',
 ] as const;
 export const AUTHORITY_REFUSED_REASONS = [
   /** The caller's role is not one the configuration or the policy in force names. */
   'ROLE_NOT_PERMITTED',
   /** The action is the employer's and the caller acts for the contractor. */
   'NOT_EMPLOYER',
+  /** The action is the contractor's and the caller acts for the employer (a statement). */
+  'NOT_CONTRACTOR',
   'SIGNATURE_POLICY_REQUIRED',
   'POLICY_AUTHOR_NOT_GOVERNING',
   /** Separation of duties: the caller is a member of both parties to the contract. */
@@ -495,7 +499,7 @@ export const contractAuthorityRefusedPayload = z
     organizationId: id,
     action: z.enum(AUTHORITY_REFUSED_ACTIONS),
     side: z.enum(['EMPLOYER', 'CONTRACTOR']),
-    /** The amendment or milestone the action named; null when it created one. */
+    /** The amendment or milestone the action named; null when it created one (or a statement). */
     subjectId: id.nullable(),
     reason: z.enum(AUTHORITY_REFUSED_REASONS),
     /** The policy that was in force and stranded; null when none was or the reason is not a policy's. */
@@ -523,24 +527,6 @@ export const statementDraftedPayload = z
   })
   .strict();
 
-/**
- * The contractor submitted a draft statement for approval (`DRAFT → SUBMITTED`). The catalogue's
- * `STATEMENT_SUBMITTED`, without its `grossAmount` (Q-97 (2): ids only, the amount is read through
- * the API). The submitter is named by user id; the identity pair the approvals compare stays in this
- * service's database.
- */
-export const statementSubmittedPayload = z
-  .object({
-    contractId: id,
-    statementId: id,
-    statementNumber: positive,
-    organizationId: id,
-    contractorOrganizationId: id,
-    submittedBy: id,
-    submittedAt: instant,
-  })
-  .strict();
-
 export const CONTRACT_EVENT_SCHEMAS = {
   CONTRACT_DRAFTED: contractDraftedPayload,
   CONTRACT_SIGNATURE_RECORDED: contractSignatureRecordedPayload,
@@ -563,7 +549,6 @@ export const CONTRACT_EVENT_SCHEMAS = {
   CONTRACT_MILESTONE_CHANGED: contractMilestoneChangedPayload,
   CONTRACT_AUTHORITY_REFUSED: contractAuthorityRefusedPayload,
   STATEMENT_DRAFTED: statementDraftedPayload,
-  STATEMENT_SUBMITTED: statementSubmittedPayload,
 } as const satisfies Record<ContractEventName, z.ZodTypeAny>;
 
 export type ContractEventPayload<N extends ContractEventName> = z.infer<

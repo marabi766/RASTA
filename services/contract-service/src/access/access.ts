@@ -154,16 +154,19 @@ export class ContractAccess {
 
   /**
    * The caller of a statement command (CON-003 PR 4): the same person-for-an-organization as
-   * {@link assertCanCommand}, and never the platform administrator — the contractor drafts and
-   * submits its own statements (Q-96). Not recorded as a refusal: the refusal audit
-   * (`CONTRACT_AUTHORITY_REFUSED`) names a closed list of actions that has no statement action yet.
+   * {@link assertCanCommand}, and never the platform administrator — the contractor drafts its own
+   * statements (Q-96). Like the other commands, the platform administrator's refusal is recorded
+   * when it acts for a party to the contract (`AuthorityRefusals.commandingCaller`).
    */
   assertCanCommandStatements(): Acting {
     assertNotAuditor();
     assertNotServiceCaller();
     const context = getContext();
     if (context.roles.includes(SUPER_ROLE)) {
-      throw RastaError.forbidden('The platform administrator does not draft or submit a statement');
+      throw platformAdministratorRefused(
+        'The platform administrator does not draft a statement for a party',
+        context.organizationId,
+      );
     }
     if (!context.organizationId) {
       throw RastaError.forbidden('A statement is drafted for an organization');

@@ -113,7 +113,8 @@ export class StatementRepository {
 
   /**
    * The statement with its lines and deductions, in the caller's transaction. The database checks
-   * at commit that the totals are the sums of the parts (`statement_totals_consistent`).
+   * at commit that the totals are the sums of the parts and that there are exactly as many parts
+   * as the statement says (`statement_totals_consistent`).
    */
   async insert(tx: ExtendedPrismaClient, input: StatementInput): Promise<StatementWithParts> {
     const { organizationId, contractId } = input;
@@ -130,6 +131,9 @@ export class StatementRepository {
             grossMinor: input.amounts.grossMinor,
             deductionsMinor: input.amounts.deductionsMinor,
             netMinor: input.amounts.netMinor,
+            // What it is written with, checked at commit with the totals: nothing is added later.
+            lineCount: input.lines.length,
+            deductionCount: input.amounts.deductions.length,
             createdAt: input.at,
             createdBy: input.actor,
             createdCorrelationId: input.correlationId,
@@ -168,55 +172,5 @@ export class StatementRepository {
         });
       },
     );
-  }
-
-  /** Takes the statement's row lock and reads it as it now stands (after the contract's). */
-  async lock(
-    tx: ExtendedPrismaClient,
-    organizationId: string,
-    contractId: string,
-    id: string,
-  ): Promise<StatementWithParts | null> {
-    await tx.$queryRaw`SELECT 1 FROM statement WHERE organization_id = ${organizationId} AND contract_id = ${contractId} AND id = ${id} FOR UPDATE`;
-    return this.findOne(organizationId, contractId, id, tx);
-  }
-
-  /**
-   * DRAFT → SUBMITTED: a compare-and-set on `organization_id`, `id`, the status it was read in and
-   * its `version`, which it increments, recording who submitted it with their stable identity.
-   * `false` when the row is no longer that.
-   */
-  async submit(
-    tx: ExtendedPrismaClient,
-    input: {
-      organizationId: string;
-      id: string;
-      version: number;
-      person: { userId: string; issuer: string; subject: string };
-      at: Date;
-    },
-  ): Promise<boolean> {
-    const { count } = await runUnscoped(
-      'the contractor submits the statement it holds the lock of, matched on its organization, id, status and version',
-      () =>
-        tx.statement.updateMany({
-          where: {
-            organizationId: input.organizationId,
-            id: input.id,
-            status: 'DRAFT',
-            version: input.version,
-          },
-          data: {
-            status: 'SUBMITTED',
-            submittedAt: input.at,
-            submittedBy: input.person.userId,
-            submittedByIssuer: input.person.issuer,
-            submittedBySubject: input.person.subject,
-            updatedAt: input.at,
-            version: { increment: 1 },
-          },
-        }),
-    );
-    return count === 1;
   }
 }

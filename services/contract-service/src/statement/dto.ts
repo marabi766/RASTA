@@ -17,16 +17,6 @@ export const MAX_LINE_DESCRIPTION_LENGTH = 500;
 export const MAX_STATEMENT_LINES = 100;
 export const MAX_STATEMENT_DEDUCTIONS = 20;
 
-const expectedVersion = z
-  .number()
-  .int()
-  .min(1)
-  .optional()
-  .describe(
-    'The statement’s `version` the caller read. When given, the command applies only to that ' +
-      'version (409 OPTIMISTIC_LOCK_FAILED otherwise).',
-  );
-
 const line = z
   .object({
     description: plainText()
@@ -80,10 +70,6 @@ export const draftStatementSchema = z
   })
   .strict();
 export type DraftStatementDto = z.infer<typeof draftStatementSchema>;
-
-/** `POST /v1/contracts/{id}/statements/{statementId}/submit`: the contractor submits a draft. */
-export const submitStatementSchema = z.object({ expectedVersion }).strict();
-export type SubmitStatementDto = z.infer<typeof submitStatementSchema>;
 
 /** `GET /v1/contracts/{id}/statements`: oldest first, a cursor being the last statement number. */
 export const listStatementsQuerySchema = z
@@ -141,7 +127,13 @@ export const statementViewSchema = z
         .strict(),
     ),
     createdAt: z.string(),
-    submittedAt: z.string().nullable().describe('When it was submitted (ISO 8601, UTC), or null.'),
+    submittedAt: z
+      .string()
+      .nullable()
+      .describe(
+        'When it was submitted (ISO 8601, UTC), or null. Always null for now: submission opens ' +
+          'with the approval chains (ADR-068 § 5).',
+      ),
     updatedAt: z.string(),
     version: z.number().int(),
   })

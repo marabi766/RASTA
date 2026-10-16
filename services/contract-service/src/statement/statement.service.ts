@@ -1,8 +1,7 @@
 import { Injectable } from '@nestjs/common';
-import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError, currentActor, getContext } from '@rasta/nest-common';
 import type { Contract } from '../generated/prisma';
-import { ContractAccess, assertPartyOf, sideOf, type ContractSideName } from '../access/access';
+import { ContractAccess, assertPartyOf, sideOf } from '../access/access';
 import { SERVICE_NAME } from '../config/env';
 import { ContractRepository } from '../contract/contract.repository';
 import type { CursorPage } from '../contract/dto';
@@ -10,30 +9,31 @@ import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { contractCommandsTotal } from '../observability/metrics';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { databaseClock } from '../shared/clock';
-import type { ClaimFence } from '../shared/idempotency';
-import { forbiddenRefusal, refusal, ruleRefusal, type ReasonOf } from '../shared/refusal';
+import type { ClaimFence, RefusalFence } from '../shared/idempotency';
+import { forbiddenRefusal, ruleRefusal, type ReasonOf } from '../shared/refusal';
+import { AuthorityRefusals } from '../signing/authority-refusals';
 import { computeStatementAmounts } from './amounts';
-import type {
-  DraftStatementDto,
-  ListStatementsQuery,
-  StatementView,
-  SubmitStatementDto,
-} from './dto';
+import type { DraftStatementDto, ListStatementsQuery, StatementView } from './dto';
 import { StatementRepository } from './statement.repository';
-import { statementTransitionFor, type StatementStateName } from './statement.state-machine';
 import { toStatementView } from './views';
 
-type StatementCommand = 'draft_statement' | 'submit_statement';
+type StatementCommand = 'draft_statement';
 
 /**
  * A signed contract's statements (ADR-068 § 5; CON-003 PR 4): the contractor drafts one — its lines
- * and the configured deductions it applies — and submits it; both parties read them.
+ * and the configured deductions it applies — and both parties read them. Submission is not here:
+ * it needs the approval policies of both chains and their snapshot at submission (ADR-068 § 5),
+ * and comes with them in the next change; until then a statement stays a DRAFT, which the
+ * database holds too (`statement_guard`).
  *
  * Built like the amendment and milestone commands:
  *
  * - **Object-level authorization first.** The contract is found as a party; anyone else gets the
- *   `404` a missing contract gets (S-03). Only then is the side judged — the contractor drafts and
- *   submits, the employer is `403 AUTHOR_NOT_CONTRACTOR` — and then the `CONTRACTOR` role.
+ *   `404` a missing contract gets (S-03), and nothing is audited. Only then is the side judged —
+ *   the contractor drafts, the employer is `403 AUTHOR_NOT_CONTRACTOR` — and then the `CONTRACTOR`
+ *   role. A party's refusal, and the platform administrator's acting for a party, is recorded
+ *   (`CONTRACT_AUTHORITY_REFUSED`, `DRAFT_STATEMENT`) through the request's idempotency fence, as
+ *   for the other commands; when it cannot be recorded the answer is a retryable `503`.
  * - **One lock, then the state.** The contract's row lock is taken first, and everything is decided
  *   under it: the contract still SIGNED, the deduction rules still in force, and the next number,
  *   so two drafts at once get two consecutive numbers (`ux_statement_number` is the backstop).
@@ -41,19 +41,15 @@ type StatementCommand = 'draft_statement' | 'submit_statement';
  *   each deduction the configured rate of the gross; the database checks the same at commit.
  * - **Deductions only from configuration** (Q-96 (6)): a rule id that is not one the employer keeps
  *   in force is `422 DEDUCTION_NOT_CONFIGURED`; with none applied the net is the gross.
- * - **The submitter's stable identity is recorded** (issuer and subject, #188) for the separation of
- *   duties of the approvals (Q-96 (3)); a token without one is `422 ACTOR_IDENTITY_UNKNOWN`.
- * - **Every state change has its event in the same transaction** (`STATEMENT_DRAFTED`,
- *   `STATEMENT_SUBMITTED`): identifiers only, no amount (Q-97 (2)).
- *
- * A refusal is answered, not recorded: the refusal audit's closed list of actions has no statement
- * action (`CONTRACT_AUTHORITY_REFUSED`, read by audit-service with the same list).
+ * - **The draft has its event in the same transaction** (`STATEMENT_DRAFTED`): identifiers only,
+ *   no amount (Q-97 (2)).
  */
 @Injectable()
 export class StatementService {
   constructor(
     private readonly repository: StatementRepository,
     private readonly contracts: ContractRepository,
+    private readonly refusals: AuthorityRefusals,
     private readonly access: ContractAccess,
     private readonly prisma: PrismaService,
     private readonly publisher: EventPublisher,
@@ -107,7 +103,7 @@ export class StatementService {
     dto: DraftStatementDto,
     fence?: ClaimFence<StatementView>,
   ): Promise<StatementView> {
-    const found = await this.contractorsContract(contractId, 'draft_statement');
+    const found = await this.contractorsContract(contractId, 'draft_statement', fence);
     const person = currentActor({ requirePlatformUserId: true });
     const ruleIds = dto.deductions.map((entry) => entry.deductionRuleId);
 
@@ -195,130 +191,59 @@ export class StatementService {
     });
   }
 
-  // -- submit ---------------------------------------------------------------------------
-
-  /** The contractor submits a draft (`DRAFT → SUBMITTED`), recording who, with their stable identity. */
-  async submit(
-    contractId: string,
-    statementId: string,
-    dto: SubmitStatementDto,
-    fence?: ClaimFence<StatementView>,
-  ): Promise<StatementView> {
-    const found = await this.contractorsContract(contractId, 'submit_statement');
-    const person = currentActor({ requirePlatformUserId: true });
-    if (person.issuer === null || person.subject === null) {
-      throw this.refused(
-        'submit_statement',
-        refusal(
-          ERROR_CODES.ACTOR_IDENTITY_UNKNOWN,
-          'The submitter names no stable identity, so no approval could be kept from them',
-          'statement',
-          ['ACTOR_IDENTITY_UNKNOWN'],
-          { contractId: found.id },
-        ),
-      );
-    }
-    const submitter = { userId: person.userId, issuer: person.issuer, subject: person.subject };
-
-    return this.prisma.transaction(async (tx) => {
-      if (fence) await fence.hold(tx);
-      const contract = await this.lockAsContractor(tx, found);
-      const statement = await this.repository.lock(
-        tx,
-        contract.organizationId,
-        contract.id,
-        statementId,
-      );
-      if (!statement) throw RastaError.notFound('Statement', statementId);
-      this.assertSigned(contract, 'submit_statement');
-      const transition = statementTransitionFor(statement.status as StatementStateName, 'submit');
-      if (!transition) {
-        throw this.rule(
-          'submit_statement',
-          'Only a draft statement is submitted',
-          'STATEMENT_NOT_DRAFT',
-          contract.id,
-        );
-      }
-      if (dto.expectedVersion !== undefined && dto.expectedVersion !== statement.version) {
-        throw RastaError.optimisticLockFailed('Statement', statement.id);
-      }
-
-      const at = await databaseClock(tx);
-      const moved = await this.repository.submit(tx, {
-        organizationId: contract.organizationId,
-        id: statement.id,
-        version: statement.version,
-        person: submitter,
-        at,
-      });
-      if (!moved) throw RastaError.optimisticLockFailed('Statement', statement.id);
-      await this.publisher.enqueue(tx, {
-        eventName: 'STATEMENT_SUBMITTED',
-        aggregateId: contract.id,
-        organizationId: contract.organizationId,
-        occurredAt: at,
-        payload: {
-          contractId: contract.id,
-          statementId: statement.id,
-          statementNumber: statement.statementNumber,
-          organizationId: contract.organizationId,
-          contractorOrganizationId: contract.contractorOrganizationId,
-          submittedBy: submitter.userId,
-          submittedAt: at.toISOString(),
-        },
-      });
-      contractCommandsTotal.inc({
-        service: SERVICE_NAME,
-        command: 'submit_statement',
-        outcome: 'submitted',
-      });
-      const view = toStatementView(
-        {
-          ...statement,
-          status: transition.to,
-          submittedAt: at,
-          submittedBy: submitter.userId,
-          submittedByIssuer: submitter.issuer,
-          submittedBySubject: submitter.subject,
-          updatedAt: at,
-          version: statement.version + 1,
-        },
-        contract.contractorOrganizationId,
-      );
-      return fence ? fence.complete(tx, view) : view;
-    });
-  }
-
   // -- shared ---------------------------------------------------------------------------
 
   /**
-   * The contract named, found as a party (anyone else: `404`), and the caller the contractor's
-   * person with the `CONTRACTOR` role: the employer is `403 AUTHOR_NOT_CONTRACTOR`.
+   * The contract named, found as a party (anyone else: `404`, not audited), and the caller the
+   * contractor's person with the `CONTRACTOR` role. A party refused — the employer
+   * (`403 AUTHOR_NOT_CONTRACTOR`, audited `NOT_CONTRACTOR`), the contractor's people without the
+   * role (`403 INSUFFICIENT_ROLE`, audited `ROLE_NOT_PERMITTED`) — and the platform administrator
+   * acting for a party (`PLATFORM_ADMINISTRATOR`) are recorded before they are answered, through
+   * the request's `fence`: the same refusal repeated under the same key is recorded once.
    */
   private async contractorsContract(
     contractId: string,
     command: StatementCommand,
+    fence: RefusalFence | undefined,
   ): Promise<Contract> {
-    const acting = this.access.assertCanCommandStatements();
+    const acting = await this.refusals.commandingCaller(
+      () => this.access.assertCanCommandStatements(),
+      { action: 'DRAFT_STATEMENT', contractId, subjectId: null },
+      fence,
+    );
     const row = await this.contracts.findParty(acting.organizationId, contractId);
-    const side: ContractSideName | null = row ? sideOf(row, acting.organizationId) : null;
+    const side = row ? sideOf(row, acting.organizationId) : null;
     if (!row || !side) throw RastaError.notFound('Contract', contractId);
+    const refused = {
+      action: 'DRAFT_STATEMENT',
+      side,
+      contractId: row.id,
+      organizationId: row.organizationId,
+      subjectId: null,
+    } as const;
     if (side !== 'CONTRACTOR') {
-      throw this.refused(
-        command,
-        forbiddenRefusal(
-          'Only the contractor drafts and submits a statement',
-          'statement',
-          ['AUTHOR_NOT_CONTRACTOR'],
-          { contractId: row.id },
+      await this.refusals.refuse(
+        { ...refused, reason: 'NOT_CONTRACTOR' },
+        this.refused(
+          command,
+          forbiddenRefusal(
+            'Only the contractor drafts a statement',
+            'statement',
+            ['AUTHOR_NOT_CONTRACTOR'],
+            { contractId: row.id },
+          ),
         ),
+        fence,
       );
     }
     if (!this.access.isContractor()) {
-      throw this.refused(
-        command,
-        RastaError.insufficientRole([this.access.contractorRole()], getContext().roles),
+      await this.refusals.refuse(
+        { ...refused, reason: 'ROLE_NOT_PERMITTED' },
+        this.refused(
+          command,
+          RastaError.insufficientRole([this.access.contractorRole()], getContext().roles),
+        ),
+        fence,
       );
     }
     return row;
@@ -333,12 +258,12 @@ export class StatementService {
     return contract;
   }
 
-  /** Statements are drafted and submitted on a SIGNED contract only (ADR-068 § 5). */
+  /** Statements are drafted on a SIGNED contract only (ADR-068 § 5). */
   private assertSigned(contract: Contract, command: StatementCommand): void {
     if (contract.status !== 'SIGNED') {
       throw this.rule(
         command,
-        'Statements are drafted and submitted on a signed contract',
+        'Statements are drafted on a signed contract',
         'CONTRACT_NOT_SIGNED',
         contract.id,
       );

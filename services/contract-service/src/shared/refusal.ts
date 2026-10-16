@@ -15,7 +15,7 @@ export const REFUSAL_AREAS = {
   policy: 'Approval policy cannot be written',
   amendment: 'Amendment cannot be made',
   milestone: 'Milestone cannot be planned',
-  statement: 'Statement cannot be drafted or submitted',
+  statement: 'Statement cannot be drafted',
 } as const;
 export type RefusalArea = keyof typeof REFUSAL_AREAS;
 
@@ -69,20 +69,17 @@ export const REFUSAL_REASONS = {
     MILESTONE_REFERENCED: 422,
     MILESTONE_LIMIT_REACHED: 422,
   },
-  /** Drafting and submitting a statement (CON-003 PR 4, ADR-068 § 5, Q-96). */
+  /** Drafting a statement (CON-003 PR 4, ADR-068 § 5, Q-96). */
   statement: {
-    /** The contractor drafts and submits; the employer approves (Q-96). */
+    /** The contractor drafts; the employer approves (Q-96). */
     AUTHOR_NOT_CONTRACTOR: 403,
     CONTRACT_NOT_SIGNED: 422,
-    STATEMENT_NOT_DRAFT: 422,
     /** A deduction that is not a rule the employer configured and keeps in force (Q-96 (6)). */
     DEDUCTION_NOT_CONFIGURED: 422,
     /** The deductions would take more than the gross (ADR-068 § 5: net ≥ 0). */
     STATEMENT_NET_NEGATIVE: 422,
     /** The lines sum past the largest amount a bigint stores. */
     STATEMENT_EXCEEDS_LIMIT: 422,
-    /** The submitter's stable identity is unknown, so no approval could keep them out (#188). */
-    ACTOR_IDENTITY_UNKNOWN: 422,
   },
 } as const satisfies Record<RefusalArea, Record<string, 403 | 409 | 422>>;
 

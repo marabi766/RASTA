@@ -76,7 +76,6 @@ describe('the committed OpenAPI document', () => {
       'POST /v1/contracts/{id}/milestones',
       'POST /v1/contracts/{id}/sign',
       'POST /v1/contracts/{id}/statements',
-      'POST /v1/contracts/{id}/statements/{statementId}/submit',
     ]);
     for (const { key, operation } of operations) {
       expect(operation.security).toEqual([{ bearer: [] }]);

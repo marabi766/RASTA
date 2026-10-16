@@ -1,6 +1,6 @@
-import { runUnscoped, runWithContext } from '@rasta/nest-common';
+import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
-import { StatementService } from '../src/statement/statement.service';
+import { EventPublisher } from '../src/events/publisher';
 import {
   auditor,
   internalToken,
@@ -9,10 +9,9 @@ import {
   systemAdminOf,
   type ApiHarness,
 } from './api-helpers';
-import { http, idemKey, reasons, seedSigned, type SignedContract } from './amendment-helpers';
+import { http, idemKey, reasons, seedSigned } from './amendment-helpers';
 import {
   cleanup,
-  context,
   eventsOf,
   newOrganizationId,
   seedDraft,
@@ -24,9 +23,10 @@ import {
 /**
  * CON-003 PR 4 (ADR-068 § 5, Q-96, Q-97): the statements of a SIGNED contract, from the real
  * `AppModule` over real guards and a real database. The contractor drafts one — its lines and the
- * deductions the employer has configured — and submits it; the service computes the gross, each
- * deduction and the net once, in bigint; both parties read; anyone else is told `404`. Every state
- * change has its event, with identifiers only.
+ * deductions the employer has configured; the service computes the gross, each deduction and the
+ * net once, in bigint; both parties read; anyone else is told `404`. A draft has its event, with
+ * identifiers only; a party refused is recorded (`CONTRACT_AUTHORITY_REFUSED`, `DRAFT_STATEMENT`).
+ * No route submits a statement yet: submission comes with the approval chains (review #302 r1).
  */
 describe('statements of a signed contract', () => {
   let api: ApiHarness;
@@ -48,19 +48,6 @@ describe('statements of a signed contract', () => {
     key = idemKey('stm'),
   ) => {
     const r = http(api).post(`/v1/contracts/${contractId}/statements`).set('idempotency-key', key);
-    if (token) r.set('authorization', `Bearer ${token}`);
-    return r.send(payload);
-  };
-  const submit = (
-    contractId: string,
-    statementId: string,
-    token: string | undefined,
-    payload: object = {},
-    key = idemKey('stm-submit'),
-  ) => {
-    const r = http(api)
-      .post(`/v1/contracts/${contractId}/statements/${statementId}/submit`)
-      .set('idempotency-key', key);
     if (token) r.set('authorization', `Bearer ${token}`);
     return r.send(payload);
   };
@@ -98,6 +85,14 @@ describe('statements of a signed contract', () => {
     );
   const statementEvents = async (employer: string) =>
     (await eventsOf(w.prisma, employer)).filter((e) => e.eventName.startsWith('STATEMENT_'));
+  const refusedEvents = (employer: string) =>
+    eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED');
+  const refusalsOf = async (employer: string) =>
+    (await refusedEvents(employer)).map((e) => [
+      e.payload.action,
+      e.payload.side,
+      e.payload.reason,
+    ]);
 
   beforeAll(async () => {
     api = await startApi();
@@ -139,6 +134,8 @@ describe('statements of a signed contract', () => {
         grossMinor: 1_500_000_001n,
         deductionsMinor: 0n,
         netMinor: 1_500_000_001n,
+        lineCount: 2,
+        deductionCount: 0,
         submittedBy: null,
       });
       expect(row!.lines.map((line) => line.amountMinor)).toEqual([1_200_000_000n, 300_000_001n]);
@@ -214,7 +211,9 @@ describe('statements of a signed contract', () => {
           },
         ]),
       );
-      expect((await statementRows(c.id))[0]!.deductions).toHaveLength(2);
+      const [row] = await statementRows(c.id);
+      expect(row!.deductions).toHaveLength(2);
+      expect([row!.lineCount, row!.deductionCount]).toEqual([1, 2]);
     });
 
     it('refuses a deduction outside the configured rows: unknown, another organization’s, or retired — 422 DEDUCTION_NOT_CONFIGURED, nothing written (Q-96 (6))', async () => {
@@ -259,6 +258,22 @@ describe('statements of a signed contract', () => {
         body({ deductions: [{ deductionRuleId: all.id }] }),
       ).expect(201);
       expect(zero.body).toMatchObject({ grossMinor: '1500000001', netMinor: '0' });
+      // Review #301 r1: at this gross the database's old numeric division expected one more than
+      // the service computes, and refused the draft. Both now compute in exact integers.
+      const boundary = await draft(
+        c.id,
+        c.contractorToken,
+        body({
+          lines: [{ description: 'Boundary', amountMinor: '20000000000000000' }],
+          deductions: [{ deductionRuleId: all.id }],
+        }),
+      ).expect(201);
+      expect(boundary.body).toMatchObject({
+        grossMinor: '20000000000000000',
+        deductionsMinor: '20000000000000000',
+        netMinor: '0',
+      });
+      expect(boundary.body.deductions[0].amountMinor).toBe('20000000000000000');
     });
 
     it('refuses lines past the largest bigint (422 STATEMENT_EXCEEDS_LIMIT)', async () => {
@@ -305,13 +320,74 @@ describe('statements of a signed contract', () => {
     });
 
     describe('who drafts', () => {
-      it('the employer is 403 AUTHOR_NOT_CONTRACTOR; the contractor’s people without CONTRACTOR are 403 INSUFFICIENT_ROLE', async () => {
+      it('the employer is 403 AUTHOR_NOT_CONTRACTOR, recorded NOT_CONTRACTOR; the contractor’s people without CONTRACTOR are 403 INSUFFICIENT_ROLE, recorded ROLE_NOT_PERMITTED (review #302 r1)', async () => {
         const c = await signed();
         const asEmployer = await draft(c.id, c.employerToken).expect(403);
         expect(reasons(asEmployer.body)).toEqual(['statement:AUTHOR_NOT_CONTRACTOR']);
         const asOther = await draft(c.id, person(c.contractor, ['FLEET_MANAGER'])).expect(403);
         expect(asOther.body.code).toBe('INSUFFICIENT_ROLE');
         expect(await statementRows(c.id)).toEqual([]);
+        expect(await statementEvents(c.employer)).toEqual([]);
+
+        const refused = await refusedEvents(c.employer);
+        expect(refused.map((e) => [e.payload.action, e.payload.side, e.payload.reason])).toEqual([
+          ['DRAFT_STATEMENT', 'EMPLOYER', 'NOT_CONTRACTOR'],
+          ['DRAFT_STATEMENT', 'CONTRACTOR', 'ROLE_NOT_PERMITTED'],
+        ]);
+        // The contract's own record: its tenant, no statement named (none was made), no policy.
+        expect(refused[0]!.payload).toMatchObject({
+          contractId: c.id,
+          organizationId: c.employer,
+          subjectId: null,
+          policyId: null,
+          refusedBy: expect.stringMatching(/^USR-APITEST-/),
+        });
+      });
+
+      it('a refused draft repeated under the same key and user is refused again and recorded once; another body is its own request and its own record', async () => {
+        const c = await signed();
+        const key = idemKey('refused-stm');
+        const first = await draft(c.id, c.employerToken, body(), key).expect(403);
+        const again = await draft(c.id, c.employerToken, body(), key).expect(403);
+        expect(reasons(again.body)).toEqual(reasons(first.body));
+        expect(await refusedEvents(c.employer)).toHaveLength(1);
+        await draft(
+          c.id,
+          c.employerToken,
+          body({ lines: [{ description: 'Other', amountMinor: '1' }] }),
+          key,
+        ).expect(403);
+        expect(await refusedEvents(c.employer)).toHaveLength(2);
+        expect(await statementRows(c.id)).toEqual([]);
+      });
+
+      it('a refusal that cannot be recorded is a retryable 503: nothing is drafted, the key is released, and the repeated request leaves its trace', async () => {
+        const c = await signed();
+        const key = idemKey('stm-refusal-down');
+        const publisher = api.app.get(EventPublisher);
+        const original = publisher.enqueue.bind(publisher);
+        const failing = jest
+          .spyOn(publisher, 'enqueue')
+          .mockImplementation(async (...args: Parameters<typeof original>) => {
+            if (args[1].eventName === 'CONTRACT_AUTHORITY_REFUSED') throw new Error('outbox down');
+            return original(...args);
+          });
+        try {
+          const down = await draft(c.id, c.employerToken, body(), key).expect(503);
+          expect(down.body.code).toBe('UPSTREAM_UNAVAILABLE');
+          expect(down.headers['retry-after']).toBe('1');
+          expect(JSON.stringify(down.body)).not.toContain('outbox');
+        } finally {
+          failing.mockRestore();
+        }
+        expect(await refusedEvents(c.employer)).toEqual([]);
+        expect(await statementRows(c.id)).toEqual([]);
+
+        const answered = await draft(c.id, c.employerToken, body(), key).expect(403);
+        expect(reasons(answered.body)).toEqual(['statement:AUTHOR_NOT_CONTRACTOR']);
+        expect(await refusalsOf(c.employer)).toEqual([
+          ['DRAFT_STATEMENT', 'EMPLOYER', 'NOT_CONTRACTOR'],
+        ]);
       });
 
       it('another organization — even a contractor of its own — is 404, the same as a contract that does not exist (tenant isolation)', async () => {
@@ -322,14 +398,22 @@ describe('statements of a signed contract', () => {
         const missing = await draft(`CTR_${ulid()}`, person(stranger, ['CONTRACTOR'])).expect(404);
         expect(strangers.body.code).toBe(missing.body.code);
         await draft(c.id, person(stranger, ['ORGANIZATION_ADMIN'])).expect(404);
+        // The platform administrator acting for a stranger is answered 403, and nothing is recorded.
+        await draft(c.id, systemAdminOf(stranger)).expect(403);
         expect(await statementRows(c.id)).toEqual([]);
         expect(await statementEvents(c.employer)).toEqual([]);
+        // Not a party: told the contract does not exist, and no refusal is recorded (S-03).
+        expect(await refusedEvents(c.employer)).toEqual([]);
       });
 
-      it('the platform administrator, the oversight role, a service token and a token without a user id draft nothing', async () => {
+      it('the platform administrator, the oversight role, a service token and a token without a user id draft nothing; only the platform administrator acting for a party is recorded', async () => {
         const c = await signed();
         await draft(c.id, systemAdminOf(c.contractor)).expect(403);
         await draft(c.id, systemAdminOf(c.employer)).expect(403);
+        expect(await refusalsOf(c.employer)).toEqual([
+          ['DRAFT_STATEMENT', 'CONTRACTOR', 'PLATFORM_ADMINISTRATOR'],
+          ['DRAFT_STATEMENT', 'EMPLOYER', 'PLATFORM_ADMINISTRATOR'],
+        ]);
         await draft(c.id, auditor(c.contractor)).expect(403);
         await http(api)
           .post(`/v1/contracts/${c.id}/statements`)
@@ -345,6 +429,7 @@ describe('statements of a signed contract', () => {
         );
         await draft(c.id, undefined).expect(401);
         expect(await statementRows(c.id)).toEqual([]);
+        expect(await refusedEvents(c.employer)).toHaveLength(2);
       });
     });
 
@@ -411,93 +496,19 @@ describe('statements of a signed contract', () => {
     });
   });
 
-  describe('POST /v1/contracts/{id}/statements/{statementId}/submit', () => {
-    const drafted = async (c: SignedContract) =>
-      (await draft(c.id, c.contractorToken).expect(201)).body as { id: string; version: number };
-
-    it('the contractor submits a draft: SUBMITTED, with the submitter’s stable identity recorded, and an event with no amount', async () => {
-      const c = await signed();
-      const made = await drafted(c);
-      const submitter = person(c.contractor, ['CONTRACTOR'], { sub: 'sub-submitter-stm' });
-      const res = await submit(c.id, made.id, submitter, { expectedVersion: 1 }).expect(200);
-      expect(res.body).toMatchObject({ id: made.id, status: 'SUBMITTED', version: 2 });
-      expect(res.body.submittedAt).toEqual(expect.any(String));
-
-      const [row] = await statementRows(c.id);
-      expect(row).toMatchObject({ status: 'SUBMITTED', submittedBySubject: 'sub-submitter-stm' });
-      expect(row!.submittedBy).toMatch(/^USR-APITEST-/);
-      expect(row!.submittedByIssuer).toEqual(expect.any(String));
-      expect(row!.submittedByIssuer!.length).toBeGreaterThan(0);
-
-      const events = await statementEvents(c.employer);
-      expect(events.map((e) => e.eventName)).toEqual(['STATEMENT_DRAFTED', 'STATEMENT_SUBMITTED']);
-      expect(events[1]!.payload).toEqual({
-        contractId: c.id,
-        statementId: made.id,
-        statementNumber: 1,
-        organizationId: c.employer,
-        contractorOrganizationId: c.contractor,
-        submittedBy: row!.submittedBy,
-        submittedAt: res.body.submittedAt,
-      });
-      expect(JSON.stringify(events[1])).not.toContain('1500000001');
-      // What it says did not move with it.
-      expect(row).toMatchObject({ grossMinor: 1_500_000_001n, netMinor: 1_500_000_001n });
-    });
-
-    it('a statement that is no longer a draft is 422 STATEMENT_NOT_DRAFT; a stale version is 409; neither writes', async () => {
-      const c = await signed();
-      const made = await drafted(c);
-      await submit(c.id, made.id, c.contractorToken, { expectedVersion: 4 }).expect(409);
-      await submit(c.id, made.id, c.contractorToken).expect(200);
-      const again = await submit(c.id, made.id, c.contractorToken).expect(422);
-      expect(reasons(again.body)).toEqual(['statement:STATEMENT_NOT_DRAFT']);
-      expect((await statementRows(c.id))[0]!.version).toBe(2);
-      expect((await statementEvents(c.employer)).map((e) => e.eventName)).toEqual([
-        'STATEMENT_DRAFTED',
-        'STATEMENT_SUBMITTED',
-      ]);
-    });
-
-    it('the employer is 403 AUTHOR_NOT_CONTRACTOR; another organization and another contract’s statement are 404', async () => {
-      const c = await signed();
-      const other = await signed();
-      const made = await drafted(c);
-      const theirs = await drafted(other);
-      const asEmployer = await submit(c.id, made.id, c.employerToken).expect(403);
-      expect(reasons(asEmployer.body)).toEqual(['statement:AUTHOR_NOT_CONTRACTOR']);
-      await submit(c.id, made.id, other.contractorToken).expect(404);
-      const crossed = await submit(c.id, theirs.id, c.contractorToken).expect(404);
-      expect(crossed.body.code).toBe('NOT_FOUND');
-      expect((await statementRows(c.id))[0]!.status).toBe('DRAFT');
-      expect((await statementRows(other.id))[0]!.status).toBe('DRAFT');
-    });
-
-    it('a submitter without a stable identity is 422 ACTOR_IDENTITY_UNKNOWN: fail closed, nothing submitted (#188)', async () => {
-      const c = await signed();
-      const made = await drafted(c);
-      const service = api.app.get(StatementService);
-      const withoutIdentity = context({
-        organizationId: c.contractor,
-        organizationIds: [c.contractor],
-        userId: `USR-ITEST-${ulid().slice(-10)}`,
-        roles: ['CONTRACTOR'],
-        issuer: undefined,
-        subject: undefined,
-      });
-      await expect(
-        runWithContext(withoutIdentity, () => service.submit(c.id, made.id, {})),
-      ).rejects.toMatchObject({ code: 'ACTOR_IDENTITY_UNKNOWN' });
-      expect((await statementRows(c.id))[0]!.status).toBe('DRAFT');
-
-      // The database refuses a submission that names no identity, to a write path that forgot.
-      await expect(
-        w.prisma.client.$executeRawUnsafe(
-          `UPDATE statement SET status = 'SUBMITTED', submitted_at = now(), submitted_by = 'USR_x',
-                  updated_at = now() WHERE id = '${made.id}'`,
-        ),
-      ).rejects.toThrow(/ck_statement_submission/);
-    });
+  it('no route submits a statement yet: submission comes with the approval chains and their snapshot (review #302 r1)', async () => {
+    const c = await signed();
+    const made = (await draft(c.id, c.contractorToken).expect(201)).body as { id: string };
+    await http(api)
+      .post(`/v1/contracts/${c.id}/statements/${made.id}/submit`)
+      .set('authorization', `Bearer ${c.contractorToken}`)
+      .set('idempotency-key', idemKey('stm-submit'))
+      .send({})
+      .expect(404);
+    expect((await statementRows(c.id))[0]).toMatchObject({ status: 'DRAFT', submittedAt: null });
+    expect((await statementEvents(c.employer)).map((e) => e.eventName)).toEqual([
+      'STATEMENT_DRAFTED',
+    ]);
   });
 
   describe('reading', () => {
