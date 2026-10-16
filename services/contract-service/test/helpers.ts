@@ -567,10 +567,11 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
   const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
   try {
     await owner.$transaction(async (tx) => {
-      // The statements (CON-003 PR 4) hang off the contract and the deduction rules: their approval
-      // chains (PR 5) and parts, then the statements, then the rules — none ever deleted by the
-      // service.
+      // The statements (CON-003 PR 4) hang off the contract and the deduction rules: their chains'
+      // decisions (PR 6), approval chains (PR 5) and parts, then the statements, then the rules —
+      // none ever deleted by the service.
       for (const [table, trigger] of [
+        ['statement_decision', 'tg_statement_decision_guard'],
         ['statement_approval_step', 'tg_statement_approval_step_guard'],
         ['statement_deduction', 'tg_statement_deduction_guard'],
         ['statement_line', 'tg_statement_line_guard'],

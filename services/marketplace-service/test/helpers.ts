@@ -11,6 +11,7 @@ import { ReturnRepository } from '../src/returns/return.repository';
 import { ReturnService } from '../src/returns/return.service';
 import { CatalogueService } from '../src/offer/catalogue.service';
 import { loadMarketplaceEnv, type MarketplaceEnv } from '../src/config/env';
+import type { DisputedObligation, SettledResult } from '../src/temporal/activities';
 
 /**
  * Scaffolding for the integration tests.
@@ -223,6 +224,13 @@ async function purgeReturns(orgs: readonly string[]): Promise<void> {
   } finally {
     await owner.$disconnect();
   }
+}
+
+/** A settlement the case expects to have happened, not a dispute found instead. */
+export function settledResult(result: SettledResult | DisputedObligation): SettledResult {
+  if ('disputed' in result)
+    throw new Error(`Expected a settlement, found a dispute: ${result.reason}`);
+  return result;
 }
 
 /** Removes everything the named organizations wrote. */

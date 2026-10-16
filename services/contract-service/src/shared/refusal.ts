@@ -16,6 +16,7 @@ export const REFUSAL_AREAS = {
   amendment: 'Amendment cannot be made',
   milestone: 'Milestone cannot be planned',
   statement: 'Statement cannot be drafted or submitted',
+  decision: 'Statement cannot be decided',
 } as const;
 export type RefusalArea = keyof typeof REFUSAL_AREAS;
 
@@ -100,6 +101,34 @@ export const REFUSAL_REASONS = {
     APPROVAL_STEP_NAMES_CONTRACTOR: 422,
     /** The union that wrote a chain's policy in force no longer governs the employer (Q-70 (7)). */
     POLICY_AUTHOR_NOT_GOVERNING: 422,
+  },
+  /** Deciding a step of a submitted statement's approval chain (CON-003 PR 6, ADR-068 § 5, Q-96). */
+  decision: {
+    /** The caller's organization is not the authority the named step's snapshot names. */
+    NOT_STEP_AUTHORITY: 403,
+    /** Separation of duties: the decider is also a member of the contractor's organization. */
+    MEMBER_OF_CONTRACTOR: 403,
+    /** Separation of duties: the decider is the person who submitted the statement (Q-96 (3)). */
+    SUBMITTER_MAY_NOT_DECIDE: 422,
+    /** Separation of duties: the decider already decided a step of this statement, in either chain. */
+    ALREADY_DECIDED_STATEMENT: 422,
+    /** The decider and the submitter, or an earlier decider, cannot be told apart (#188). */
+    ACTOR_IDENTITY_UNKNOWN: 422,
+    CONTRACT_NOT_SIGNED: 422,
+    /** A draft: nothing to decide yet. */
+    STATEMENT_NOT_SUBMITTED: 422,
+    /** APPROVED or REJECTED: final (Q-96 (7)). */
+    STATEMENT_DECIDED: 422,
+    /** The named step is not one of the statement's snapshot. */
+    STEP_NOT_IN_CHAIN: 422,
+    /** The financial chain opens only after the technical one is done (Q-96 (2)). */
+    CHAIN_NOT_OPEN: 422,
+    /** An earlier step of the chain is still undecided: the steps are decided in their order. */
+    STEP_NOT_NEXT: 422,
+    /** The named step has been decided (by another person, or at the same moment). */
+    STEP_DECIDED: 409,
+    /** Approving it would take the approved gross past the price and the amendments (Q-96 (5)). */
+    APPROVED_TOTAL_EXCEEDS_CAP: 422,
   },
 } as const satisfies Record<RefusalArea, Record<string, 403 | 409 | 422>>;
 

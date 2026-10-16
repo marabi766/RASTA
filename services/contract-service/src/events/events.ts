@@ -44,6 +44,10 @@ export const CONTRACT_EVENTS = {
   CONTRACT_AUTHORITY_REFUSED: 'CONTRACT_AUTHORITY_REFUSED',
   STATEMENT_DRAFTED: 'STATEMENT_DRAFTED',
   STATEMENT_SUBMITTED: 'STATEMENT_SUBMITTED',
+  STATEMENT_DECISION_RECORDED: 'STATEMENT_DECISION_RECORDED',
+  STATEMENT_TECHNICALLY_APPROVED: 'STATEMENT_TECHNICALLY_APPROVED',
+  STATEMENT_APPROVED: 'STATEMENT_APPROVED',
+  STATEMENT_REJECTED: 'STATEMENT_REJECTED',
 } as const;
 
 export type ContractEventName = keyof typeof CONTRACT_EVENTS;
@@ -460,11 +464,13 @@ export const contractMilestoneChangedPayload = z
  * A party's attempt at an authority-bound action on a contract was refused for want of authority
  * (the audit record of the refusal, written in a transaction of its own so it survives the request
  * failing): signing or cancelling the contract, proposing or signing an amendment, planning or
- * editing a milestone, drafting or submitting a statement — refused for want of authority or for
- * separation of duties. Who asked, for which contract, the closed action and reason — no free text. Never
- * written for a caller who is not a party: such a caller is told the contract does not exist. A
- * refusal of the contract's state (a contract no longer a draft, a version moved on) is not one of
- * these: it is answered and not audited. audit-service projects the same two closed lists
+ * editing a milestone, drafting or submitting a statement, approving or rejecting a step of its
+ * approval chains — refused for want of authority or for separation of duties. Who asked, for which
+ * contract, the closed action and reason — no free text. Never written for a caller who is neither a
+ * party nor an organization a submitted statement's chains name (`side` `APPROVER`, CON-003 PR 6):
+ * such a caller is told the contract does not exist. A refusal of the contract's or statement's state
+ * (a contract no longer a draft, a version moved on, a step not open) is not one of these: it is
+ * answered and not audited. audit-service projects the same closed lists
  * (`contract-refusal-projection.ts`): a value added here is added there in the same change.
  */
 export const AUTHORITY_REFUSED_ACTIONS = [
@@ -478,6 +484,9 @@ export const AUTHORITY_REFUSED_ACTIONS = [
   'DRAFT_STATEMENT',
   /** The contractor submits a draft statement for approval (CON-003 PR 5). */
   'SUBMIT_STATEMENT',
+  /** A step's authority approves or rejects a step of a submitted statement's chain (CON-003 PR 6). */
+  'APPROVE_STATEMENT',
+  'REJECT_STATEMENT',
 ] as const;
 export const AUTHORITY_REFUSED_REASONS = [
   /** The caller's role is not one the configuration or the policy in force names. */
@@ -494,14 +503,30 @@ export const AUTHORITY_REFUSED_REASONS = [
   'SAME_PERSON_BOTH_SIDES',
   /** The platform administrator, acting for a party's organization, does not act for a party. */
   'PLATFORM_ADMINISTRATOR',
+  /** A decision: the caller's organization is not the authority of the step it named (CON-003 PR 6). */
+  'NOT_STEP_AUTHORITY',
+  /** Separation of duties: the decider is also a member of the contractor's organization. */
+  'MEMBER_OF_CONTRACTOR',
+  /** Separation of duties: the decider submitted the statement (Q-96 (3)). */
+  'SUBMITTER_MAY_NOT_DECIDE',
+  /** Separation of duties: the decider already decided a step of the statement, in either chain. */
+  'ALREADY_DECIDED_STATEMENT',
+  /** Separation of duties cannot be shown: the decider and another cannot be told apart (#188). */
+  'ACTOR_IDENTITY_UNKNOWN',
 ] as const;
+
+/**
+ * Which side the refused caller acted for: one of the two parties, or — for a decision only — an
+ * organization a submitted statement's chain names that is neither (a supervising consultant, Q-96 (1)).
+ */
+export const AUTHORITY_REFUSED_SIDES = ['EMPLOYER', 'CONTRACTOR', 'APPROVER'] as const;
 
 export const contractAuthorityRefusedPayload = z
   .object({
     contractId: id,
     organizationId: id,
     action: z.enum(AUTHORITY_REFUSED_ACTIONS),
-    side: z.enum(['EMPLOYER', 'CONTRACTOR']),
+    side: z.enum(AUTHORITY_REFUSED_SIDES),
     /**
      * The amendment, milestone or statement the action named; null when it created one (an
      * amendment, a milestone or a statement draft).
@@ -559,6 +584,59 @@ export const statementSubmittedPayload = z
   })
   .strict();
 
+const statementChain = z.enum(['TECHNICAL', 'FINANCIAL']);
+const statementFacts = {
+  contractId: id,
+  statementId: id,
+  statementNumber: positive,
+  /** The employer — the tender's owner and the tenant of the contract. */
+  organizationId: id,
+  contractorOrganizationId: id,
+};
+
+/**
+ * One step of a submitted statement's chain was decided (CON-003 PR 6, ADR-068 § 5): the audit fact
+ * of each decision, like `CONTRACT_SIGNATURE_RECORDED` for a signature, in the transaction that
+ * records it. The decider is named by user id and the organization and role the step's authority
+ * is; the identity pair the separation of duties compares stays in this service's database. **No
+ * amount.**
+ */
+export const statementDecisionRecordedPayload = z
+  .object({
+    ...statementFacts,
+    chain: statementChain,
+    stepOrder: positive,
+    outcome: z.enum(['APPROVED', 'REJECTED']),
+    deciderOrganizationId: id,
+    deciderRole: z.string().regex(/^[A-Z][A-Z_]*$/),
+    decidedBy: id,
+    decidedAt: instant,
+  })
+  .strict();
+
+/** The technical chain's last step was approved: SUBMITTED → TECHNICALLY_APPROVED, the financial chain opens. */
+export const statementTechnicallyApprovedPayload = z
+  .object({ ...statementFacts, technicallyApprovedAt: instant })
+  .strict();
+
+/**
+ * The financial chain's last step was approved: TECHNICALLY_APPROVED → APPROVED, in the transaction
+ * that moved the contract's approved total under its row lock (ADR-068 § 5, § 6 (1)). A **fact**,
+ * not a payment order: identifiers and the instant only (Q-97 (2)) — the catalogue's `netAmount`,
+ * `deductions` and approvers are not here; economic-service reads the statement through the API.
+ */
+export const statementApprovedPayload = z
+  .object({ ...statementFacts, approvedAt: instant })
+  .strict();
+
+/**
+ * A step of either chain was rejected: the statement is REJECTED, final for its number (Q-96 (7)).
+ * Which step; no reason text (the catalogue's `reason` — none is collected).
+ */
+export const statementRejectedPayload = z
+  .object({ ...statementFacts, chain: statementChain, stepOrder: positive, rejectedAt: instant })
+  .strict();
+
 export const CONTRACT_EVENT_SCHEMAS = {
   CONTRACT_DRAFTED: contractDraftedPayload,
   CONTRACT_SIGNATURE_RECORDED: contractSignatureRecordedPayload,
@@ -582,6 +660,10 @@ export const CONTRACT_EVENT_SCHEMAS = {
   CONTRACT_AUTHORITY_REFUSED: contractAuthorityRefusedPayload,
   STATEMENT_DRAFTED: statementDraftedPayload,
   STATEMENT_SUBMITTED: statementSubmittedPayload,
+  STATEMENT_DECISION_RECORDED: statementDecisionRecordedPayload,
+  STATEMENT_TECHNICALLY_APPROVED: statementTechnicallyApprovedPayload,
+  STATEMENT_APPROVED: statementApprovedPayload,
+  STATEMENT_REJECTED: statementRejectedPayload,
 } as const satisfies Record<ContractEventName, z.ZodTypeAny>;
 
 export type ContractEventPayload<N extends ContractEventName> = z.infer<

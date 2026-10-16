@@ -511,9 +511,27 @@ export class CommissionService {
    * one organization can never read another's charges — including through
    * the cursor, which is resolved in the same scope as the page
    * (shared/cursor.ts).
+   *
+   * "The same scope" includes the filters: the tenant and the requested
+   * `businessLine` / `outcome` form one predicate, and both the cursor lookup
+   * and the page read through it. A cursor naming the caller's own commission
+   * from another filtered view is therefore refused like an unknown or foreign
+   * one, instead of being accepted as a boundary that silently skips the rows
+   * of this view between it and the real last row seen (Codex review of #308).
+   * Unlike a transaction's status, which the transactions list deliberately
+   * leaves out of its cursor scope, a commission's line and outcome never
+   * change (the row is append-only), so no row can leave the view mid-paging.
    */
-  async listCommissions(limit: number, cursor?: string) {
-    const scope = { organizationId: getOrganizationId() };
+  async listCommissions(
+    limit: number,
+    cursor?: string,
+    filter: { businessLine?: BusinessLine; outcome?: CommissionOutcome } = {},
+  ) {
+    const scope = {
+      organizationId: getOrganizationId(),
+      ...(filter.businessLine ? { businessLine: filter.businessLine } : {}),
+      ...(filter.outcome ? { outcome: filter.outcome } : {}),
+    };
     const boundary = await resolveCursor(cursor, (id) =>
       this.prisma.client.commission
         .findFirst({ where: { ...scope, id }, select: { id: true, appliedAt: true } })
