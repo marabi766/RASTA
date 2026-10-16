@@ -6,6 +6,8 @@ import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 import { DISPUTE_COMMANDS, EMPTY_DISPUTE_FORM } from '@/lib/transaction-dispute-fields';
 import { readFlash } from '@/server/flash';
+import { mintReplayStamp, replayWindowSeconds } from '@/server/dispute-replay';
+import { REPLAY_FIELD } from '@/lib/form-fields';
 
 import { IDLE_DISPUTE_FORM, type UnconfirmedDispute } from './form-state';
 
@@ -13,7 +15,8 @@ import { IDLE_DISPUTE_FORM, type UnconfirmedDispute } from './form-state';
  * The dispute commands' one write path — the order of checks of
  * `place-order-actions.spec.ts`, then what each answer becomes, then the
  * unconfirmed path: a retry under the same key whose refusal or doubt never
- * settles the first request.
+ * settles the first request — and, PR 319 review 2, the server's replay
+ * deadline (finding 2) and a session that is only unavailable (finding 3).
  */
 
 Object.assign(process.env, {
@@ -25,12 +28,16 @@ Object.assign(process.env, {
 });
 
 const currentSession = jest.fn();
+const sessionTemporarilyUnavailable = jest.fn();
 const issueDisputeCommand = jest.fn();
 const redirect = jest.fn((url: string) => {
   throw new Error(`NEXT_REDIRECT:${url}`);
 });
 
-jest.mock('@/server/current-session', () => ({ currentSession: () => currentSession() }));
+jest.mock('@/server/current-session', () => ({
+  currentSession: () => currentSession(),
+  sessionTemporarilyUnavailable: () => sessionTemporarilyUnavailable(),
+}));
 jest.mock('next/navigation', () => ({ redirect: (url: string) => redirect(url) }));
 jest.mock('@/server/transactions', () => {
   const actual = jest.requireActual('@/server/transactions');
@@ -61,7 +68,7 @@ const GOOD = { command: 'DISPUTE', reason: REASON };
 
 function formData(
   fields: Record<string, string>,
-  options: { csrf?: string | null; submission?: string | null } = {},
+  options: { csrf?: string | null; submission?: string | null; replay?: string | null } = {},
 ): FormData {
   const form = new FormData();
   for (const [key, value] of Object.entries(fields)) form.set(key, value);
@@ -70,11 +77,20 @@ function formData(
   const submission =
     options.submission === undefined ? mintSubmissionId(SESSION) : options.submission;
   if (submission !== null) form.set(SUBMISSION_FIELD, submission);
+  // The stamp the page signed for this transaction and key, unless told otherwise.
+  const replay =
+    options.replay === undefined
+      ? submission === null
+        ? null
+        : mintReplayStamp(SESSION, TXN, submission).token
+      : options.replay;
+  if (replay !== null) form.set(REPLAY_FIELD, replay);
   return form;
 }
 
 beforeEach(() => {
   currentSession.mockResolvedValue(SESSION);
+  sessionTemporarilyUnavailable.mockResolvedValue(false);
   issueDisputeCommand.mockReset();
   issueDisputeCommand.mockResolvedValue({
     kind: 'CREATED',
@@ -224,6 +240,10 @@ describe('what the answer becomes', () => {
         correlationId: 'corr-1',
         submissionId: submission,
         values: { ...EMPTY_DISPUTE_FORM, reason: REASON },
+        replay: {
+          token: mintReplayStamp(SESSION, TXN, submission).token,
+          until: expect.any(Number),
+        },
       });
     },
   );
@@ -237,8 +257,10 @@ describe('a retry of an unconfirmed command', () => {
     correlationId: 'corr-original',
     submissionId: submission,
     values: { ...EMPTY_DISPUTE_FORM, reason: REASON },
+    replay: mintReplayStamp(SESSION, TXN, submission),
   };
-  const retry = (options: { csrf?: string } = {}) => formData(GOOD, { submission, ...options });
+  const retry = (options: { csrf?: string; replay?: string } = {}) =>
+    formData(GOOD, { submission, replay: UNCONFIRMED.replay!.token, ...options });
 
   it('sends the same body under the same key', async () => {
     await expect(submitDisputeCommand(TXN, UNCONFIRMED, retry())).rejects.toThrow('NEXT_REDIRECT');
@@ -290,5 +312,139 @@ describe('a retry of an unconfirmed command', () => {
     expect(
       await submitDisputeCommand(TXN, { ...UNCONFIRMED, retryRefused: true }, retry()),
     ).toEqual({ ...UNCONFIRMED, retryUnknown: true });
+  });
+});
+
+describe('a session that is only unavailable, not ended (PR 319 review 2, finding 3)', () => {
+  // Valid login cookie, expired access token, refresh temporarily failing:
+  // middleware hid the session and marked the request (`session-state.ts`).
+  beforeEach(() => {
+    currentSession.mockResolvedValue(null);
+    sessionTemporarilyUnavailable.mockResolvedValue(true);
+  });
+
+  it('a first send is refused as unavailable — not "ended" — and nothing is sent', async () => {
+    expect(await submitDisputeCommand(TXN, IDLE_DISPUTE_FORM, formData(GOOD))).toEqual({
+      kind: 'REFUSED',
+      reason: 'SESSION_UNAVAILABLE',
+    });
+    expect(issueDisputeCommand).not.toHaveBeenCalled();
+  });
+
+  it('a retry stays unknown, with its retry: the session may come back', async () => {
+    const submission = mintSubmissionId(SESSION);
+    const previous: UnconfirmedDispute = {
+      kind: 'UNCONFIRMED',
+      command: 'DISPUTE',
+      correlationId: 'corr-original',
+      submissionId: submission,
+      values: { ...EMPTY_DISPUTE_FORM, reason: REASON },
+      replay: mintReplayStamp(SESSION, TXN, submission),
+    };
+    const state = await submitDisputeCommand(TXN, previous, formData(GOOD, { submission }));
+    expect(state).toEqual({ ...previous, retryUnknown: true });
+    expect(state).not.toHaveProperty('sessionEnded');
+    expect(issueDisputeCommand).not.toHaveBeenCalled();
+  });
+});
+
+describe('the replay deadline, decided here (PR 319 review 2, finding 2)', () => {
+  const window = replayWindowSeconds();
+  const submission = mintSubmissionId(SESSION);
+
+  it('is economic-service’s retention less the margin, by default inside its one-hour floor', () => {
+    // Defaults: WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS=1 (the service's floor),
+    // WEB_DISPUTE_REPLAY_MARGIN_SECONDS=600.
+    expect(window).toBe(60 * 60 - 600);
+    expect(
+      replayWindowSeconds({
+        WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS: 24,
+        WEB_DISPUTE_REPLAY_MARGIN_SECONDS: 900,
+      }),
+    ).toBe(24 * 60 * 60 - 900);
+  });
+
+  it('a retry delayed past the deadline is refused here, never sent, and stays view-only', async () => {
+    // The page was drawn (and the stamp signed) just over the window ago: a
+    // retry let through now could reach economic after its record expired and
+    // run as a new command.
+    const stamp = mintReplayStamp(SESSION, TXN, submission, Date.now() - (window + 1) * 1000);
+    const previous: UnconfirmedDispute = {
+      kind: 'UNCONFIRMED',
+      command: 'RESOLVE_DISPUTE',
+      correlationId: 'corr-original',
+      submissionId: submission,
+      values: { ...EMPTY_DISPUTE_FORM, resolution: REASON },
+      replay: stamp,
+    };
+    const state = await submitDisputeCommand(
+      TXN,
+      previous,
+      formData(
+        { command: 'RESOLVE_DISPUTE', resolution: REASON },
+        { submission, replay: stamp.token },
+      ),
+    );
+    expect(issueDisputeCommand).not.toHaveBeenCalled();
+    expect(state).toEqual({
+      ...previous,
+      replay: null,
+      viewOnly: true,
+      replayExpired: true,
+    });
+  });
+
+  it('a retry just inside the deadline is sent, under the same key', async () => {
+    const stamp = mintReplayStamp(SESSION, TXN, submission, Date.now() - (window - 5) * 1000);
+    const previous: UnconfirmedDispute = {
+      kind: 'UNCONFIRMED',
+      command: 'DISPUTE',
+      correlationId: 'corr-original',
+      submissionId: submission,
+      values: { ...EMPTY_DISPUTE_FORM, reason: REASON },
+      replay: stamp,
+    };
+    await expect(
+      submitDisputeCommand(TXN, previous, formData(GOOD, { submission, replay: stamp.token })),
+    ).rejects.toThrow('NEXT_REDIRECT');
+    expect(issueDisputeCommand.mock.calls[0]![3]).toBe(submission);
+  });
+
+  it('a first send past the deadline is refused as an outdated form, and nothing is sent', async () => {
+    const stamp = mintReplayStamp(SESSION, TXN, submission, Date.now() - (window + 1) * 1000);
+    expect(
+      await submitDisputeCommand(
+        TXN,
+        IDLE_DISPUTE_FORM,
+        formData(GOOD, { submission, replay: stamp.token }),
+      ),
+    ).toEqual({ kind: 'REFUSED', reason: 'REPLAY' });
+    expect(issueDisputeCommand).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['missing', null],
+    ['typed by the client', 'a-deadline-i-chose'],
+    ['for another key', mintReplayStamp(SESSION, TXN, mintSubmissionId(SESSION)).token],
+    ['for another transaction', mintReplayStamp(SESSION, 'TXN_OTHER', submission).token],
+    [
+      'from another login',
+      mintReplayStamp({ ...SESSION, csrfToken: 'another-login' }, TXN, submission).token,
+    ],
+  ])('refuses a stamp that is %s, and sends nothing', async (_label, replay) => {
+    expect(
+      await submitDisputeCommand(TXN, IDLE_DISPUTE_FORM, formData(GOOD, { submission, replay })),
+    ).toEqual({ kind: 'REFUSED', reason: 'REPLAY' });
+    expect(issueDisputeCommand).not.toHaveBeenCalled();
+  });
+
+  it('cannot be extended from the browser: its own copy of the deadline is not read', async () => {
+    const stamp = mintReplayStamp(SESSION, TXN, submission, Date.now() - (window + 1) * 1000);
+    const form = formData(GOOD, { submission, replay: stamp.token });
+    form.set('until', String(Date.now() + 60 * 60 * 1000));
+    expect(await submitDisputeCommand(TXN, IDLE_DISPUTE_FORM, form)).toEqual({
+      kind: 'REFUSED',
+      reason: 'REPLAY',
+    });
   });
 });

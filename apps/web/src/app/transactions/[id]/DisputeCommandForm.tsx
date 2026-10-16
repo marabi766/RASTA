@@ -3,12 +3,13 @@
 import { useActionState, useCallback } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
-import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
+import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { normalizePersianText, toPersianDigits } from '@/lib/format';
 import {
   clearUnresolvedDispute,
   restoreUnresolvedDispute,
   saveUnresolvedDispute,
+  type ReplayStamp,
   type RestoredDispute,
 } from '@/lib/unresolved-dispute';
 import type { Binding } from '@/lib/unresolved-order';
@@ -58,8 +59,17 @@ import {
  *
  * Next rejects a dropped response and the request gate's `401` to an action
  * POST the same way. Only `/auth/session` answering `401` lets the view say the
- * session has ended; any other failure is "no answer came back" and the same
- * request may still be sent again (PR 319 review 1, finding 4).
+ * session has ended; any other failure — its `503` for a refresh that is only
+ * unavailable for now among them (PR 319 review 2, finding 3) — is "no answer
+ * came back" and the same request may still be sent again (PR 319 review 1,
+ * finding 4).
+ *
+ * ## Until when
+ *
+ * Every send carries the replay stamp the page signed with the submission id;
+ * the action refuses a send past its deadline (`server/dispute-replay.ts`).
+ * Such a refusal of a retry turns the view read-only for good, its outcome
+ * still unknown — never back into a fresh form.
  */
 
 export interface DisputeCommandFormProps {
@@ -67,6 +77,8 @@ export interface DisputeCommandFormProps {
   readonly command: DisputeCommand;
   readonly csrfToken: string;
   readonly submissionId: string;
+  /** That submission id's signed replay deadline; null for a restored entry that has none any more. */
+  readonly replay: ReplayStamp | null;
   /** Whose login this page was drawn for (`submissionBinding`); one-way tags, not session values. */
   readonly binding: Binding;
   /** How long a remembered submission outlives its login at most: the session's lifetime. */
@@ -77,21 +89,23 @@ export interface DisputeCommandFormProps {
 
 /** The remembered submission as the form's starting state. */
 export function unconfirmedFrom(restored: RestoredDispute): UnconfirmedDispute {
-  const { command, correlationId, submissionId, values } = restored.dispute;
+  const { command, correlationId, submissionId, values, replay, marker } = restored.dispute;
   return {
     kind: 'UNCONFIRMED',
     command,
     correlationId,
     submissionId,
     values,
+    replay,
     ...(restored.kind === 'VIEW_ONLY' ? { viewOnly: true as const } : {}),
+    ...(marker ? { marker: true as const } : {}),
   };
 }
 
 /**
  * Whether the portal says, authoritatively, that this browser's session has
- * ended (`/auth/session` → `401`). Anything else — `204`, another status, no
- * answer — is not that.
+ * ended (`/auth/session` → `401`). Anything else — `204`, `503` (the refresh is
+ * unavailable for now), another status, no answer — is not that.
  */
 async function sessionHasEnded(): Promise<boolean> {
   try {
@@ -115,7 +129,11 @@ function isRedirect(error: unknown): boolean {
  * The submission as the action will send it, or null when the action would
  * refuse it before sending anything.
  */
-function pendingFrom(form: FormData, command: DisputeCommand): UnconfirmedDispute | null {
+function pendingFrom(
+  form: FormData,
+  command: DisputeCommand,
+  replay: ReplayStamp | null,
+): UnconfirmedDispute | null {
   const submissionId = form.get(SUBMISSION_FIELD);
   const field = DISPUTE_COMMAND_FIELDS[command];
   const raw = form.get(field);
@@ -128,6 +146,7 @@ function pendingFrom(form: FormData, command: DisputeCommand): UnconfirmedDisput
     correlationId: null,
     submissionId,
     values: { ...EMPTY_DISPUTE_FORM, [field]: text },
+    replay,
   };
 }
 
@@ -136,6 +155,7 @@ export function DisputeCommandForm({
   command,
   csrfToken,
   submissionId,
+  replay,
   binding,
   sessionMaxAgeSeconds,
   initial = IDLE_DISPUTE_FORM,
@@ -155,7 +175,7 @@ export function DisputeCommandForm({
       // Remembered BEFORE it is sent: from here until an answer, a reload or a
       // lost response must find the same key, not mint another. Not sent if it
       // cannot be remembered.
-      const unsent = firstSend ? pendingFrom(form, command) : null;
+      const unsent = firstSend ? pendingFrom(form, command, replay) : null;
       if (unsent && !saveUnresolvedDispute(transactionId, unsent, binding)) {
         return { kind: 'STORAGE_UNAVAILABLE' };
       }
@@ -179,15 +199,15 @@ export function DisputeCommandForm({
         throw error;
       }
 
-      if (firstSend) {
-        // Answered: still in doubt (kept, now with its tracking code), or a
-        // definite refusal of a request that was never in doubt (dropped).
-        if (next.kind === 'UNCONFIRMED') saveUnresolvedDispute(transactionId, next, binding);
-        else clearUnresolvedDispute(transactionId);
-      }
+      // Answered: still in doubt (kept — now with its tracking code, or, after a
+      // retry past the deadline, without its stamp for good), or a definite
+      // refusal of a first send that never left (dropped). A retry is always
+      // answered in doubt: only the redirect above ends it.
+      if (next.kind === 'UNCONFIRMED') saveUnresolvedDispute(transactionId, next, binding);
+      else if (firstSend) clearUnresolvedDispute(transactionId);
       return next;
     },
-    [transactionId, command, binding, sessionMaxAgeSeconds],
+    [transactionId, command, replay, binding, sessionMaxAgeSeconds],
   );
   const [state, action, pending] = useActionState(send, initial);
   const headingId = `command-${command}`;
@@ -220,6 +240,7 @@ export function DisputeCommandForm({
     >
       <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
       <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId} />
+      <input type="hidden" name={REPLAY_FIELD} value={replay?.token ?? ''} />
       <input type="hidden" name={DISPUTE_COMMAND_FIELD} value={command} />
 
       <h3 id={headingId} className="text-base font-medium">
@@ -258,19 +279,24 @@ export function DisputeCommandForm({
   );
 }
 
+/** Nothing was sent in any of these. */
+const REFUSAL_MESSAGES: Record<Extract<DisputeFormState, { kind: 'REFUSED' }>['reason'], string> = {
+  NO_SESSION: 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.',
+  SESSION_UNAVAILABLE:
+    'نشست شما همین حالا در دسترس نیست و درخواست ارسال نشد. چند لحظه بعد دوباره بفرستید؛ اگر باز هم نشد، دوباره وارد شوید.',
+  REPLAY: 'مهلت این فرم گذشته است و درخواست ارسال نشد. صفحه را تازه کنید و دوباره تلاش کنید.',
+  CSRF: 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.',
+  SUBMISSION: 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.',
+  COMMAND: 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.',
+};
+
 function CommandBanner({ state }: { state: DisputeFormState }) {
   if (state.kind === 'INVALID' && state.message) {
     return <Alert tone="warning">{state.message}</Alert>;
   }
 
   if (state.kind === 'REFUSED') {
-    return (
-      <Alert tone="danger">
-        {state.reason === 'NO_SESSION'
-          ? 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.'
-          : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.'}
-      </Alert>
-    );
+    return <Alert tone="danger">{REFUSAL_MESSAGES[state.reason]}</Alert>;
   }
 
   if (state.kind === 'FORBIDDEN') {
@@ -322,8 +348,8 @@ function UnconfirmedCommand({
   onForget: () => void;
 }) {
   const field = DISPUTE_COMMAND_FIELDS[state.command];
-  // Not re-sent from another login, past the replay window, or with the session
-  // ended (its id is bound to the old login).
+  // Not re-sent from another login, past the replay deadline, as a marker, or
+  // with the session ended (its id is bound to the old login).
   const canRetry = !state.viewOnly && !state.sessionEnded;
   // Put aside only once the same request has been tried again and refused, or
   // can no longer be sent: never before the original key had its chance.
@@ -338,6 +364,7 @@ function UnconfirmedCommand({
     >
       <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
       <input type="hidden" name={SUBMISSION_FIELD} value={state.submissionId} />
+      <input type="hidden" name={REPLAY_FIELD} value={state.replay?.token ?? ''} />
       <input type="hidden" name={DISPUTE_COMMAND_FIELD} value={state.command} />
       <input type="hidden" name={field} value={state.values[field]} />
 
@@ -370,10 +397,20 @@ function UnconfirmedCommand({
           ممکن است درخواست انجام شده باشد.
         </Alert>
       ) : null}
-      {state.viewOnly ? (
+      {state.marker ? (
         <Alert tone="warning">
-          این درخواست در نشست پیشین یا بیش از یک ساعت پیش فرستاده شده است و دیگر نمی‌توان همان را با
-          اطمینان دوباره فرستاد؛ ممکن است انجام شده باشد. وضعیت تراکنش را ببینید.
+          نتیجهٔ این درخواست هنوز معلوم نیست و متن آن دیگر نگه داشته نمی‌شود؛ ممکن است انجام شده
+          باشد. پیش از هر اقدام تازه، وضعیت تراکنش را ببینید.
+        </Alert>
+      ) : state.replayExpired ? (
+        <Alert tone="warning">
+          مهلت ارسال دوبارهٔ همین درخواست گذشته است و چیزی فرستاده نشد؛ نتیجهٔ درخواست نخست همچنان
+          معلوم نیست و ممکن است انجام شده باشد. وضعیت تراکنش را ببینید.
+        </Alert>
+      ) : state.viewOnly ? (
+        <Alert tone="warning">
+          این درخواست در نشست پیشین فرستاده شده یا مهلت ارسال دوباره‌اش گذشته است و دیگر نمی‌توان
+          همان را با اطمینان دوباره فرستاد؛ ممکن است انجام شده باشد. وضعیت تراکنش را ببینید.
         </Alert>
       ) : null}
       {canRetry ? (

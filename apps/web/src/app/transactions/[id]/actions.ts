@@ -3,21 +3,26 @@
 import { redirect } from 'next/navigation';
 
 import { EMPTY_DISPUTE_FORM, DISPUTE_COMMAND_FIELDS } from '@/lib/transaction-dispute-fields';
-import { currentSession } from '@/server/current-session';
+import { currentSession, sessionTemporarilyUnavailable } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
+import { verifyReplayStamp } from '@/server/dispute-replay';
 import { mintFlash } from '@/server/flash';
-import { FLASH_PARAM } from '@/lib/form-fields';
+import { FLASH_PARAM, REPLAY_FIELD } from '@/lib/form-fields';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { disputeFormValues, issueDisputeCommand, parseDisputeCommand } from '@/server/transactions';
 
-import { withRetryNote, type DisputeFormState } from './form-state';
+import { pastReplayDeadline, withRetryNote, type DisputeFormState } from './form-state';
 
 /**
  * The one server action behind both dispute commands on `/transactions/[id]`.
  *
  * Same order as every write in this portal (ADR-059 § 3, § 5): session, CSRF,
  * submission id, the form, then the gateway — each gate returning before the
- * next runs. The transaction is bound, not posted, so a form cannot aim a
+ * next runs. One gate more than the others: the submission's **replay
+ * deadline** (`server/dispute-replay.ts`), checked against the server's own
+ * signed stamp before every send under the key, so a re-send cannot reach
+ * economic-service after its idempotency record may have gone (PR 319 review
+ * 2, finding 2). The transaction is bound, not posted, so a form cannot aim a
  * command at another transaction than the page it sits on.
  *
  * **Whether the command is allowed is not checked here.** economic-service
@@ -40,22 +45,35 @@ export async function submitDisputeCommand(
   // expired and the state can have moved, so a 403, 404, 409 or 422 on the
   // retry says nothing about the original. The original correlation id, key and
   // values stay; only the note changes. The one authoritative thing a retry can
-  // learn is that this browser's session has ended (`NO_SESSION`).
-  if (state.kind === 'REFUSED' && state.reason === 'NO_SESSION') {
-    return withRetryNote(previous, 'sessionEnded');
+  // learn is that this browser's session has ended (`NO_SESSION`) — not one
+  // whose refresh is only unavailable for now (PR 319 review 2, finding 3).
+  // Past the replay deadline nothing was sent, and nothing may be again.
+  if (state.kind === 'REFUSED') {
+    if (state.reason === 'NO_SESSION') return withRetryNote(previous, 'sessionEnded');
+    if (state.reason === 'SESSION_UNAVAILABLE') return withRetryNote(previous, 'retryUnknown');
+    if (state.reason === 'REPLAY') return pastReplayDeadline(previous);
   }
   return withRetryNote(previous, state.kind === 'UNCONFIRMED' ? 'retryUnknown' : 'retryRefused');
 }
 
 async function attempt(transactionId: string, form: FormData): Promise<DisputeFormState> {
   const session = await currentSession();
-  if (!session) return { kind: 'REFUSED', reason: 'NO_SESSION' };
+  if (!session) {
+    // Ended, or only unavailable while its refresh is (`server/session-state.ts`).
+    const unavailable = await sessionTemporarilyUnavailable();
+    return { kind: 'REFUSED', reason: unavailable ? 'SESSION_UNAVAILABLE' : 'NO_SESSION' };
+  }
 
   const csrf = verifyCsrf(session, form);
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };
 
   const submissionId = form.get(SUBMISSION_FIELD);
   if (!isBoundSubmissionId(submissionId, session)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
+
+  // Checked here, just before the call, on every send under this key — the
+  // first and each retry — against the deadline signed when the form was drawn.
+  const replay = verifyReplayStamp(session, form.get(REPLAY_FIELD), transactionId, submissionId);
+  if (!replay) return { kind: 'REFUSED', reason: 'REPLAY' };
 
   const input = disputeFormValues(form);
   const parsed = parseDisputeCommand(input);
@@ -110,6 +128,7 @@ async function attempt(transactionId: string, form: FormData): Promise<DisputeFo
         correlationId: result.correlationId,
         submissionId,
         values: { ...EMPTY_DISPUTE_FORM, [field]: parsed.request.body[field] ?? '' },
+        replay,
       };
     }
   }

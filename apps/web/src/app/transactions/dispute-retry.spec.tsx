@@ -3,9 +3,13 @@ import { axe } from 'jest-axe';
 
 import { EMPTY_DISPUTE_FORM } from '@/lib/transaction-dispute-fields';
 import {
-  DISPUTE_REPLAY_WINDOW_SECONDS,
+  markDisputesOpen,
+  purgeAllUnresolvedDisputes,
+  purgeForeignUnresolvedDisputes,
   restoreUnresolvedDispute,
   saveUnresolvedDispute,
+  type ReplayStamp,
+  type UnresolvedDispute,
 } from '@/lib/unresolved-dispute';
 
 import { DisputeCommandForm } from './[id]/DisputeCommandForm';
@@ -21,7 +25,13 @@ import type { DisputeFormState } from './[id]/form-state';
  *   transaction and per login, and nothing fresh is offered on that
  *   transaction until it is reconciled (PR 319 review 1, finding 2);
  * - a call that itself fails is "session ended" only when `/auth/session`
- *   says so; otherwise the same request may still be sent (finding 4).
+ *   says so; otherwise the same request may still be sent (finding 4) — a
+ *   `503` (refresh unavailable for now) included (PR 319 review 2, finding 3);
+ * - past the session's lifetime, and at logout, the entry is reduced to an
+ *   outcome-unknown marker, never removed into fresh controls (review 2,
+ *   finding 1);
+ * - every send carries the signed replay stamp, and a retry the server refuses
+ *   past its deadline stays view-only for good (review 2, finding 2).
  */
 
 const submit = jest.fn<Promise<DisputeFormState>, [string, DisputeFormState, FormData]>();
@@ -39,6 +49,28 @@ const RESOLUTION = 'کالا با تأخیر رسید و پذیرفته شد';
 const BINDING = { owner: 'owner-tag-A', session: 'session-tag-1' };
 const SESSION_MAX_AGE = 12 * 60 * 60;
 const STORE_KEY = 'rasta.unresolved-dispute.TXN_1';
+/** What the page signed with the key (`server/dispute-replay.ts`); opaque here. */
+const STAMP: ReplayStamp = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };
+const FRESH_STAMP: ReplayStamp = { token: 'signed-fresh-stamp', until: STAMP.until };
+
+/** What a remembered dispute looks like, as the form saves it. */
+function remembered(
+  overrides: Partial<Omit<UnresolvedDispute, 'savedAt' | 'marker'>> = {},
+): Omit<UnresolvedDispute, 'savedAt' | 'marker'> {
+  return {
+    command: 'DISPUTE',
+    submissionId: KEY,
+    values: { ...EMPTY_DISPUTE_FORM, reason: REASON },
+    correlationId: 'COR_ORIGINAL',
+    replay: STAMP,
+    ...overrides,
+  };
+}
+
+function stored(): Record<string, unknown> | null {
+  const raw = window.sessionStorage.getItem(STORE_KEY);
+  return raw === null ? null : (JSON.parse(raw) as Record<string, unknown>);
+}
 
 const lostResponse = () => new Error('An unexpected response was received from the server.');
 
@@ -49,6 +81,7 @@ function renderForm(props: Partial<React.ComponentProps<typeof DisputeCommandFor
       command="DISPUTE"
       csrfToken="csrf"
       submissionId={KEY}
+      replay={STAMP}
       binding={BINDING}
       sessionMaxAgeSeconds={SESSION_MAX_AGE}
       {...props}
@@ -66,7 +99,10 @@ function renderCommands(
       transactionId="TXN_1"
       commands={commands}
       csrfToken="csrf"
-      submissionIds={{ DISPUTE: FRESH, RESOLVE_DISPUTE: FRESH }}
+      submissions={{
+        DISPUTE: { id: FRESH, replay: FRESH_STAMP },
+        RESOLVE_DISPUTE: { id: FRESH, replay: FRESH_STAMP },
+      }}
       binding={binding}
       sessionMaxAgeSeconds={SESSION_MAX_AGE}
     />,
@@ -85,6 +121,7 @@ const unconfirmed = (correlationId: string | null = 'COR_ORIGINAL'): DisputeForm
   correlationId,
   submissionId: KEY,
   values: { ...EMPTY_DISPUTE_FORM, reason: REASON },
+  replay: STAMP,
 });
 
 beforeEach(() => {
@@ -95,7 +132,10 @@ beforeEach(() => {
   window.sessionStorage.clear();
 });
 
-afterEach(() => jest.restoreAllMocks());
+afterEach(() => {
+  jest.restoreAllMocks();
+  markDisputesOpen();
+});
 
 describe('the same request again', () => {
   it('re-sends the first request’s key and text, and keeps its tracking code', async () => {
@@ -115,8 +155,11 @@ describe('the same request again', () => {
     expect(id).toBe('TXN_1');
     expect(previous.kind).toBe('UNCONFIRMED');
     expect(form.get('submission')).toBe(KEY);
+    expect(form.get('replay')).toBe(STAMP.token);
     expect(form.get('reason')).toBe(REASON);
     expect(form.get('command')).toBe('DISPUTE');
+    // The first send carried the same stamp: it is never re-issued for a key.
+    expect(submit.mock.calls[0]![2].get('replay')).toBe(STAMP.token);
     await waitFor(() => expect(screen.getByText(/نتیجهٔ روشنی نداشت/)).toBeInTheDocument());
     expect(container.textContent).toContain('COR_ORIGINAL');
   });
@@ -209,12 +252,11 @@ describe('remembered across a reload (finding 2)', () => {
     // dispute, so the record allows RESOLVE_DISPUTE again.
     saveUnresolvedDispute(
       'TXN_1',
-      {
+      remembered({
         command: 'RESOLVE_DISPUTE',
-        submissionId: KEY,
         values: { ...EMPTY_DISPUTE_FORM, resolution: RESOLUTION },
         correlationId: 'COR_RESOLVE',
-      },
+      }),
       BINDING,
     );
     const { container } = renderCommands(['RESOLVE_DISPUTE']);
@@ -254,16 +296,7 @@ describe('remembered across a reload (finding 2)', () => {
   });
 
   it('a refused retry does not forget it: the person decides, after seeing the record', async () => {
-    saveUnresolvedDispute(
-      'TXN_1',
-      {
-        command: 'DISPUTE',
-        submissionId: KEY,
-        values: { ...EMPTY_DISPUTE_FORM, reason: REASON },
-        correlationId: 'COR_ORIGINAL',
-      },
-      BINDING,
-    );
+    saveUnresolvedDispute('TXN_1', remembered(), BINDING);
     const { container } = renderCommands();
     await waitFor(() => expect(screen.getByText(/نتوانستیم تأیید کنیم/)).toBeInTheDocument());
     // Before the same request has been tried again, there is no way to put it aside.
@@ -285,21 +318,16 @@ describe('remembered across a reload (finding 2)', () => {
     expect(window.sessionStorage.getItem(STORE_KEY)).toBeNull();
   });
 
-  it('past the replay window: shown, never re-sent, and only then may be put aside', async () => {
-    const now = Date.now();
+  it('past the signed replay deadline: shown, never re-sent, and only then may be put aside', async () => {
     saveUnresolvedDispute(
       'TXN_1',
-      {
-        command: 'DISPUTE',
-        submissionId: KEY,
-        values: { ...EMPTY_DISPUTE_FORM, reason: REASON },
-        correlationId: 'COR_ORIGINAL',
-      },
+      remembered({ replay: { token: STAMP.token, until: Date.now() - 1 } }),
       BINDING,
-      now - (DISPUTE_REPLAY_WINDOW_SECONDS + 1) * 1000,
     );
     const { container } = renderCommands();
-    await waitFor(() => expect(screen.getByText(/بیش از یک ساعت پیش/)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText(/مهلت ارسال دوباره‌اش گذشته است/)).toBeInTheDocument(),
+    );
     expect(screen.queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
     expect(screen.getByRole('link', { name: /این درخواست را کنار بگذار/ })).toBeInTheDocument();
     expect(container.querySelector('textarea')).toBeNull();
@@ -314,40 +342,23 @@ describe('remembered across a reload (finding 2)', () => {
     await submitForm(container);
     await waitFor(() => expect(screen.getByText(/نتوانستیم تأیید کنیم/)).toBeInTheDocument());
 
-    const later = realNow() + (DISPUTE_REPLAY_WINDOW_SECONDS + 5) * 1000;
-    jest.spyOn(Date, 'now').mockReturnValue(later);
+    jest.spyOn(Date, 'now').mockReturnValue(Math.max(realNow(), STAMP.until) + 5_000);
     await submitForm(container);
     expect(submit).toHaveBeenCalledTimes(1);
-    await waitFor(() => expect(screen.getByText(/بیش از یک ساعت پیش/)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText(/مهلت ارسال دوباره‌اش گذشته است/)).toBeInTheDocument(),
+    );
   });
 
   it('from another login: shown, never re-sent (the key is bound to the old login)', async () => {
-    saveUnresolvedDispute(
-      'TXN_1',
-      {
-        command: 'DISPUTE',
-        submissionId: KEY,
-        values: { ...EMPTY_DISPUTE_FORM, reason: REASON },
-        correlationId: 'COR_ORIGINAL',
-      },
-      BINDING,
-    );
+    saveUnresolvedDispute('TXN_1', remembered(), BINDING);
     renderCommands(['DISPUTE'], { owner: BINDING.owner, session: 'session-tag-2' });
     await waitFor(() => expect(screen.getByText(/نشست پیشین/)).toBeInTheDocument());
     expect(screen.queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
   });
 
   it('someone else’s entry is never shown, and is removed', async () => {
-    saveUnresolvedDispute(
-      'TXN_1',
-      {
-        command: 'DISPUTE',
-        submissionId: KEY,
-        values: { ...EMPTY_DISPUTE_FORM, reason: REASON },
-        correlationId: 'COR_ORIGINAL',
-      },
-      BINDING,
-    );
+    saveUnresolvedDispute('TXN_1', remembered(), BINDING);
     const { container } = renderCommands(['DISPUTE'], { owner: 'owner-tag-B', session: 'x' });
     await waitFor(() => expect(container.querySelector('textarea')).not.toBeNull());
     expect(container.querySelector('[name="submission"]')).toHaveValue(FRESH);
@@ -367,19 +378,206 @@ describe('remembered across a reload (finding 2)', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  it('keeps the first send’s time across the answer, so the window runs from the first send', () => {
+  it('keeps the first send’s time across the answer, so the lifetime runs from the first send', () => {
     const first = Date.now() - 10_000;
-    const dispute = {
-      command: 'DISPUTE' as const,
-      submissionId: KEY,
-      values: { ...EMPTY_DISPUTE_FORM, reason: REASON },
-      correlationId: null,
-    };
+    const dispute = remembered({ correlationId: null });
     saveUnresolvedDispute('TXN_1', dispute, BINDING, first);
     saveUnresolvedDispute('TXN_1', { ...dispute, correlationId: 'COR_LATER' }, BINDING);
     expect(restoreUnresolvedDispute('TXN_1', BINDING, SESSION_MAX_AGE)).toMatchObject({
       kind: 'RETRYABLE',
       dispute: { savedAt: first, correlationId: 'COR_LATER' },
     });
+  });
+});
+
+describe('never silently forgotten: the outcome-unknown marker (PR 319 review 2, finding 1)', () => {
+  it('past the session lifetime: reduced to a view-only marker, never fresh controls', async () => {
+    // A resolution sent under KEY, response lost; the payer opened a new
+    // dispute; the operator signs in again after the stored entry outlived
+    // WEB_SESSION_MAX_AGE_SECONDS. A fresh form here would let the old decision
+    // resolve the new dispute under a fresh key.
+    saveUnresolvedDispute(
+      'TXN_1',
+      remembered({
+        command: 'RESOLVE_DISPUTE',
+        values: { ...EMPTY_DISPUTE_FORM, resolution: RESOLUTION },
+        correlationId: 'COR_RESOLVE',
+      }),
+      BINDING,
+      Date.now() - (SESSION_MAX_AGE + 1) * 1000,
+    );
+
+    const first = renderCommands(['RESOLVE_DISPUTE'], { owner: BINDING.owner, session: 's-new' });
+    await waitFor(() =>
+      expect(screen.getByText(/متن آن دیگر نگه داشته نمی‌شود/)).toBeInTheDocument(),
+    );
+    expect(first.container.querySelector('textarea')).toBeNull();
+    expect(first.container.querySelector(`[value="${FRESH}"]`)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
+    expect(first.container.textContent).toContain('COR_RESOLVE');
+    expect(screen.getByRole('link', { name: /این درخواست را کنار بگذار/ })).toBeInTheDocument();
+    expect(await axe(first.container)).toHaveNoViolations();
+
+    // The text, the login tag and the stamp are gone; the marker is not.
+    expect(stored()).toMatchObject({ marker: true, submissionId: KEY, owner: BINDING.owner });
+    expect(stored()).not.toHaveProperty('text');
+    expect(stored()).not.toHaveProperty('session');
+    expect(stored()).not.toHaveProperty('replay');
+    expect(window.sessionStorage.getItem(STORE_KEY)).not.toContain(RESOLUTION);
+    first.unmount();
+
+    // Another reload: still the marker, still no fresh form.
+    const again = renderCommands(['RESOLVE_DISPUTE'], { owner: BINDING.owner, session: 's-new' });
+    await waitFor(() =>
+      expect(screen.getByText(/متن آن دیگر نگه داشته نمی‌شود/)).toBeInTheDocument(),
+    );
+    expect(again.container.querySelector('textarea')).toBeNull();
+
+    // Only the person's explicit acknowledgement removes it.
+    const forget = screen.getByRole('link', { name: /این درخواست را کنار بگذار/ });
+    forget.addEventListener('click', (event) => event.preventDefault());
+    fireEvent.click(forget);
+    expect(window.sessionStorage.getItem(STORE_KEY)).toBeNull();
+    again.unmount();
+
+    const acknowledged = renderCommands(['RESOLVE_DISPUTE']);
+    await waitFor(() => expect(acknowledged.container.querySelector('textarea')).not.toBeNull());
+    expect(acknowledged.container.querySelector('[name="submission"]')).toHaveValue(FRESH);
+  });
+
+  it('a marker is never turned back into something that can be re-sent', () => {
+    saveUnresolvedDispute(
+      'TXN_1',
+      remembered(),
+      BINDING,
+      Date.now() - (SESSION_MAX_AGE + 1) * 1000,
+    );
+    expect(restoreUnresolvedDispute('TXN_1', BINDING, SESSION_MAX_AGE)?.dispute.marker).toBe(true);
+
+    expect(saveUnresolvedDispute('TXN_1', remembered(), BINDING)).toBe(true);
+    expect(restoreUnresolvedDispute('TXN_1', BINDING, SESSION_MAX_AGE)).toMatchObject({
+      kind: 'VIEW_ONLY',
+      dispute: { marker: true, replay: null },
+    });
+  });
+
+  it('logout keeps only the marker; the same person sees it after signing in again', async () => {
+    saveUnresolvedDispute('TXN_1', remembered(), BINDING);
+    purgeAllUnresolvedDisputes();
+
+    expect(stored()).toMatchObject({ marker: true, submissionId: KEY });
+    expect(window.sessionStorage.getItem(STORE_KEY)).not.toContain(REASON);
+    expect(stored()).not.toHaveProperty('session');
+
+    // Signed in again (`AccountBoundary`): same owner, a new login.
+    markDisputesOpen();
+    purgeForeignUnresolvedDisputes(BINDING.owner);
+    const { container } = renderCommands(['DISPUTE'], { owner: BINDING.owner, session: 's-new' });
+    await waitFor(() =>
+      expect(screen.getByText(/متن آن دیگر نگه داشته نمی‌شود/)).toBeInTheDocument(),
+    );
+    expect(container.querySelector('textarea')).toBeNull();
+  });
+
+  it('another person’s page removes the marker, as it removes any entry of someone else', () => {
+    saveUnresolvedDispute('TXN_1', remembered(), BINDING);
+    purgeAllUnresolvedDisputes();
+    markDisputesOpen();
+    purgeForeignUnresolvedDisputes('owner-tag-B');
+    expect(window.sessionStorage.getItem(STORE_KEY)).toBeNull();
+  });
+});
+
+describe('the server’s replay deadline (PR 319 review 2, finding 2)', () => {
+  it('a retry refused past the deadline: nothing sent, view-only for good, across a reload', async () => {
+    submit.mockResolvedValueOnce(unconfirmed());
+    const first = renderForm();
+    fireEvent.change(first.container.querySelector('[name="reason"]')!, {
+      target: { value: REASON },
+    });
+    await submitForm(first.container);
+    await waitFor(() => expect(screen.getByText(/نتوانستیم تأیید کنیم/)).toBeInTheDocument());
+
+    // What the action answers when the stamp's signed deadline has passed.
+    submit.mockImplementationOnce(async (_id, previous) => ({
+      ...(previous as Extract<DisputeFormState, { kind: 'UNCONFIRMED' }>),
+      replay: null,
+      viewOnly: true,
+      replayExpired: true,
+    }));
+    await submitForm(first.container);
+    await waitFor(() =>
+      expect(screen.getByText(/مهلت ارسال دوبارهٔ همین درخواست گذشته است/)).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
+    expect(screen.getByRole('link', { name: /این درخواست را کنار بگذار/ })).toBeInTheDocument();
+    expect(first.container.textContent).toContain('COR_ORIGINAL');
+    expect(stored()).toMatchObject({ submissionId: KEY, replay: null });
+    first.unmount();
+
+    // Even though the browser's own copy of the deadline had not passed.
+    const reloaded = renderCommands(['DISPUTE']);
+    await waitFor(() =>
+      expect(screen.getByText(/مهلت ارسال دوباره‌اش گذشته است/)).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
+    expect(reloaded.container.querySelector('textarea')).toBeNull();
+
+    // And a later save under the same key never brings the stamp back.
+    saveUnresolvedDispute('TXN_1', remembered(), BINDING);
+    expect(restoreUnresolvedDispute('TXN_1', BINDING, SESSION_MAX_AGE)?.kind).toBe('VIEW_ONLY');
+  });
+
+  it('a first send refused for an outdated form: nothing sent, nothing remembered', async () => {
+    submit.mockResolvedValueOnce({ kind: 'REFUSED', reason: 'REPLAY' });
+    const { container } = renderForm();
+    fireEvent.change(container.querySelector('[name="reason"]')!, { target: { value: REASON } });
+    await submitForm(container);
+    await waitFor(() => expect(screen.getByText(/مهلت این فرم گذشته است/)).toBeInTheDocument());
+    expect(window.sessionStorage.getItem(STORE_KEY)).toBeNull();
+    expect(container.querySelector('textarea')).not.toBeNull();
+  });
+});
+
+describe('a refresh that is only unavailable for now (PR 319 review 2, finding 3)', () => {
+  it('a retry whose call fails while /auth/session says 503: unknown, the retry stays', async () => {
+    submit.mockResolvedValueOnce(unconfirmed());
+    const { container } = renderForm();
+    fireEvent.change(container.querySelector('[name="reason"]')!, { target: { value: REASON } });
+    await submitForm(container);
+    await waitFor(() => expect(screen.getByText(/نتوانستیم تأیید کنیم/)).toBeInTheDocument());
+
+    sessionProbe.mockResolvedValueOnce({ status: 503 });
+    submit.mockRejectedValueOnce(lostResponse());
+    await submitForm(container);
+
+    await waitFor(() => expect(screen.getByText(/نتیجهٔ روشنی نداشت/)).toBeInTheDocument());
+    expect(container.textContent).not.toContain('نشست شما پایان یافته است');
+    expect(screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeEnabled();
+    expect(stored()).toMatchObject({ submissionId: KEY });
+  });
+
+  it('a first send whose call fails while /auth/session says 503: unconfirmed, not ended', async () => {
+    sessionProbe.mockResolvedValueOnce({ status: 503 });
+    submit.mockRejectedValueOnce(lostResponse());
+    const { container } = renderForm();
+    fireEvent.change(container.querySelector('[name="reason"]')!, { target: { value: REASON } });
+    await submitForm(container);
+
+    await waitFor(() => expect(screen.getByText(/نتوانستیم تأیید کنیم/)).toBeInTheDocument());
+    expect(container.textContent).not.toContain('نشست شما پایان یافته است');
+    expect(screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeEnabled();
+  });
+
+  it('a first send the action refuses as unavailable: nothing sent, says so, not "ended"', async () => {
+    submit.mockResolvedValueOnce({ kind: 'REFUSED', reason: 'SESSION_UNAVAILABLE' });
+    const { container } = renderForm();
+    fireEvent.change(container.querySelector('[name="reason"]')!, { target: { value: REASON } });
+    await submitForm(container);
+    await waitFor(() =>
+      expect(screen.getByText(/نشست شما همین حالا در دسترس نیست/)).toBeInTheDocument(),
+    );
+    expect(container.textContent).not.toContain('نشست شما پایان یافته است');
+    expect(window.sessionStorage.getItem(STORE_KEY)).toBeNull();
   });
 });

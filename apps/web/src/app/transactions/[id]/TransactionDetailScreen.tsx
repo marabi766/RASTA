@@ -13,6 +13,7 @@ import {
 import { formatJalaliDateLong } from '@/lib/format';
 import { transactionStatusLabel, transactionTypeLabel } from '@/lib/labels';
 import { disputedThroughOrder, type DisputeCommand } from '@/lib/transaction-dispute-fields';
+import type { DisputeSubmission } from '@/lib/unresolved-dispute';
 import type { Binding } from '@/lib/unresolved-order';
 import { formatOrderAmount } from '@/app/orders/OrdersScreen';
 import type { ReadResult, Transaction } from '@/server/transactions';
@@ -57,8 +58,11 @@ export interface TransactionDetailScreenProps {
   /** The commands to draw a form for — computed by the page, for this viewer. */
   readonly commands: readonly DisputeCommand[];
   readonly csrfToken: string;
-  /** One fresh submission id per form: each is its own idempotency key. */
-  readonly mintSubmissionId: () => string;
+  /**
+   * One fresh submission id per form — each its own idempotency key — with
+   * its signed replay deadline for this transaction (`server/dispute-replay.ts`).
+   */
+  readonly mintSubmission: (transactionId: string) => DisputeSubmission;
   /** Whose login this page is for (`submissionBinding`): one-way tags. */
   readonly binding: Binding;
   readonly sessionMaxAgeSeconds: number;
@@ -79,7 +83,7 @@ export function TransactionDetailScreen({
   result,
   commands,
   csrfToken,
-  mintSubmissionId,
+  mintSubmission,
   binding,
   sessionMaxAgeSeconds,
   notice,
@@ -102,8 +106,8 @@ export function TransactionDetailScreen({
   const t = result.data;
   const money = (minor: string) => formatOrderAmount(minor, t.currency);
   const throughOrder = disputedThroughOrder(t);
-  const submissionIds: Partial<Record<DisputeCommand, string>> = {};
-  for (const command of commands) submissionIds[command] = mintSubmissionId();
+  const submissions: Partial<Record<DisputeCommand, DisputeSubmission>> = {};
+  for (const command of commands) submissions[command] = mintSubmission(t.id);
 
   return (
     <div className="flex flex-col gap-4">
@@ -197,7 +201,7 @@ export function TransactionDetailScreen({
             transactionId={t.id}
             commands={commands}
             csrfToken={csrfToken}
-            submissionIds={submissionIds}
+            submissions={submissions}
             binding={binding}
             sessionMaxAgeSeconds={sessionMaxAgeSeconds}
           />

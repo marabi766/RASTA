@@ -3,7 +3,11 @@
 import { useEffect, useState } from 'react';
 
 import type { DisputeCommand } from '@/lib/transaction-dispute-fields';
-import { restoreUnresolvedDispute, type RestoredDispute } from '@/lib/unresolved-dispute';
+import {
+  restoreUnresolvedDispute,
+  type DisputeSubmission,
+  type RestoredDispute,
+} from '@/lib/unresolved-dispute';
 import type { Binding } from '@/lib/unresolved-order';
 
 import { DisputeCommandForm, unconfirmedFrom } from './DisputeCommandForm';
@@ -13,8 +17,8 @@ export interface DisputeCommandsProps {
   /** The commands this viewer may issue now (`disputeCommandsFor`). */
   readonly commands: readonly DisputeCommand[];
   readonly csrfToken: string;
-  /** One fresh submission id per command: each is its own idempotency key. */
-  readonly submissionIds: Readonly<Partial<Record<DisputeCommand, string>>>;
+  /** One fresh submission per command: each id is its own idempotency key, with its replay deadline. */
+  readonly submissions: Readonly<Partial<Record<DisputeCommand, DisputeSubmission>>>;
   readonly binding: Binding;
   readonly sessionMaxAgeSeconds: number;
 }
@@ -25,7 +29,9 @@ export interface DisputeCommandsProps {
  *
  * If one is, only its uncertainty view is drawn — whatever the record now
  * allows: the same request is reconciled under its original key before any
- * fresh action is offered (PR 319 review 1, finding 2). Nothing is drawn until
+ * fresh action is offered (PR 319 review 1, finding 2). That includes the
+ * outcome-unknown marker an expired or logged-out entry is reduced to: no
+ * fresh form until the person acknowledges it (PR 319 review 2, finding 1). Nothing is drawn until
  * that question is answered, so no fresh form with a new key is on screen in
  * between.
  */
@@ -33,7 +39,7 @@ export function DisputeCommands({
   transactionId,
   commands,
   csrfToken,
-  submissionIds,
+  submissions,
   binding,
   sessionMaxAgeSeconds,
 }: DisputeCommandsProps) {
@@ -60,6 +66,7 @@ export function DisputeCommands({
           command={restored.dispute.command}
           csrfToken={csrfToken}
           submissionId={restored.dispute.submissionId}
+          replay={restored.dispute.replay}
           binding={binding}
           sessionMaxAgeSeconds={sessionMaxAgeSeconds}
           initial={unconfirmedFrom(restored)}
@@ -68,17 +75,21 @@ export function DisputeCommands({
     );
   }
 
-  const offered = commands.filter((command) => submissionIds[command] !== undefined);
+  const offered = commands.flatMap((command) => {
+    const submission = submissions[command];
+    return submission ? [{ command, submission }] : [];
+  });
   if (offered.length === 0) return null;
   return (
     <div className="mt-4 flex flex-col gap-4">
-      {offered.map((command) => (
+      {offered.map(({ command, submission }) => (
         <DisputeCommandForm
           key={command}
           transactionId={transactionId}
           command={command}
           csrfToken={csrfToken}
-          submissionId={submissionIds[command] as string}
+          submissionId={submission.id}
+          replay={submission.replay}
           binding={binding}
           sessionMaxAgeSeconds={sessionMaxAgeSeconds}
         />

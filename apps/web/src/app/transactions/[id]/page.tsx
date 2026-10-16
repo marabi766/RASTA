@@ -7,7 +7,8 @@ import { currentSession } from '@/server/current-session';
 import { webServerEnv } from '@/server/env';
 import { readFlash } from '@/server/flash';
 import { tokenAuthority } from '@/server/realm-roles';
-import { mintSubmissionId, submissionBinding } from '@/server/submission';
+import { mintDisputeSubmission } from '@/server/dispute-replay';
+import { submissionBinding } from '@/server/submission';
 import { disputeCommandsFor, fetchTransaction } from '@/server/transactions';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
@@ -91,7 +92,7 @@ export default async function TransactionPage({
           result={result}
           commands={commands}
           csrfToken={session.csrfToken}
-          mintSubmissionId={() => mintSubmissionId(session)}
+          mintSubmission={(transactionId) => mintDisputeSubmission(session, transactionId)}
           binding={submissionBinding(session)}
           sessionMaxAgeSeconds={webServerEnv().WEB_SESSION_MAX_AGE_SECONDS}
           notice={notice}

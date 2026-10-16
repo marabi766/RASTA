@@ -20,7 +20,12 @@ import {
  *
  * - **Logout.** Any form posting to `/auth/logout` — every portal page has its
  *   own — empties every remembered order before the navigation leaves. A capture
- *   listener on the document, so no page has to remember to wire it.
+ *   listener on the document, so no page has to remember to wire it. A
+ *   remembered dispute command is reduced instead, to a marker with no text,
+ *   no login tag and no stamp that still says its outcome is unknown: a dispute
+ *   command repeated under a fresh key can act on a newer dispute, so the same
+ *   person signing in again must not be offered a fresh form over it (PR 319
+ *   review 2, finding 1). The next point removes it for anyone else.
  * - **A page for another person.** A page drawn for `owner` removes the entries
  *   of anyone else (and any it cannot read) on its first load, so a tab handed
  *   from one person to the next never shows the first one's offer, quantity or

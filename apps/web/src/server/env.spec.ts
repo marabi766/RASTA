@@ -155,6 +155,34 @@ describe('who is shown the Contracts link', () => {
   });
 });
 
+describe('the dispute replay deadline (PR 319 review 2, finding 2)', () => {
+  it('defaults to economic-service’s floor, not its default, less ten minutes', () => {
+    const env = loadWebServerEnv(REQUIRED);
+    expect(env.WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS).toBe(1);
+    expect(env.WEB_DISPUTE_REPLAY_MARGIN_SECONDS).toBe(600);
+  });
+
+  it('mirrors the service’s bounds for the retention (1..168 hours)', () => {
+    for (const value of ['0', '169', 'soon']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS: value }),
+      ).toThrow('WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS');
+    }
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS: '24' })
+        .WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS,
+    ).toBe(24);
+  });
+
+  it('bounds the margin so the window is never shorter than half an hour', () => {
+    for (const value of ['59', '1801']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_DISPUTE_REPLAY_MARGIN_SECONDS: value }),
+      ).toThrow('WEB_DISPUTE_REPLAY_MARGIN_SECONDS');
+    }
+  });
+});
+
 describe('refresh coordination in production (ADR-059 addendum)', () => {
   it('refuses to start in production without WEB_REDIS_URL', () => {
     // Two replicas are the documented topology; without shared coordination

@@ -52,6 +52,7 @@ const CSRF = 'csrf-token-for-this-session';
 const BINDING = { owner: 'owner-tag', session: 'session-tag' };
 const SESSION_MAX_AGE = 12 * 60 * 60;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
+const STAMP = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };
 const REASON = 'کالا تحویل نشده و پاسخی هم نیامده است';
 
 const HELD: Transaction = {
@@ -94,7 +95,7 @@ function renderScreen(
       result={result}
       commands={commands}
       csrfToken={CSRF}
-      mintSubmissionId={() => SUBMISSION}
+      mintSubmission={() => ({ id: SUBMISSION, replay: STAMP })}
       binding={BINDING}
       sessionMaxAgeSeconds={SESSION_MAX_AGE}
       notice={notice}
@@ -344,6 +345,7 @@ function renderForm(state: DisputeFormState, command: DisputeCommand = 'DISPUTE'
       command={command}
       csrfToken={CSRF}
       submissionId={SUBMISSION}
+      replay={STAMP}
       binding={BINDING}
       sessionMaxAgeSeconds={SESSION_MAX_AGE}
     />,
@@ -356,6 +358,7 @@ const UNCONFIRMED: DisputeFormState = {
   correlationId: 'COR_ORIGINAL',
   submissionId: 'sub_ORIGINALORIGINALORIG',
   values: { ...EMPTY_DISPUTE_FORM, reason: REASON },
+  replay: { token: 'signed-original-stamp', until: Date.now() + 60_000 },
 };
 
 describe('a dispute form, in each state', () => {
@@ -363,6 +366,7 @@ describe('a dispute form, in each state', () => {
     const { container } = renderForm({ kind: 'IDLE' });
     expect(container.querySelector('[name="csrf"]')).toHaveValue(CSRF);
     expect(container.querySelector('[name="submission"]')).toHaveValue(SUBMISSION);
+    expect(container.querySelector('[name="replay"]')).toHaveValue(STAMP.token);
     expect(container.querySelector('[name="command"]')).toHaveValue('DISPUTE');
     expect(container.querySelector('[name="reason"]')).toHaveAttribute('minlength', '10');
     expect(container.querySelector('[name="resolution"]')).toBeNull();
@@ -403,6 +407,8 @@ describe('a dispute form, in each state', () => {
   it.each([
     [{ kind: 'REFUSED', reason: 'NO_SESSION' } as const, 'نشست شما پایان یافته است'],
     [{ kind: 'REFUSED', reason: 'CSRF' } as const, 'معتبر شناخته نشد'],
+    [{ kind: 'REFUSED', reason: 'SESSION_UNAVAILABLE' } as const, 'همین حالا در دسترس نیست'],
+    [{ kind: 'REFUSED', reason: 'REPLAY' } as const, 'مهلت این فرم گذشته است'],
     [{ kind: 'FORBIDDEN', correlationId: 'C-403' } as const, 'در اختیار شما نیست'],
     [{ kind: 'NOT_FOUND' } as const, 'دیگر در دسترس نیست'],
   ])('%j: a fixed sentence', async (state, words) => {
@@ -419,6 +425,7 @@ describe('a dispute form, in each state', () => {
     expect(text).toContain('COR_ORIGINAL');
     expect(text).not.toMatch(/انجام نشد|تغییری نکرد|ثبت نشد/);
     expect(container.querySelector('[name="submission"]')).toHaveValue('sub_ORIGINALORIGINALORIG');
+    expect(container.querySelector('[name="replay"]')).toHaveValue('signed-original-stamp');
     expect(container.querySelector('[name="reason"]')).toHaveValue(REASON);
     expect(container.querySelector('[name="command"]')).toHaveValue('DISPUTE');
     expect(getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeEnabled();
@@ -473,7 +480,38 @@ describe('a dispute form, in each state', () => {
 
   it('unconfirmed, view only: shown, not re-sent, may be put aside', async () => {
     const { container, getByRole, queryByRole } = renderForm({ ...UNCONFIRMED, viewOnly: true });
-    expect(container.textContent).toContain('نشست پیشین یا بیش از یک ساعت پیش');
+    expect(container.textContent).toContain('مهلت ارسال دوباره‌اش گذشته است');
+    expect(queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
+    expect(getByRole('link', { name: /کنار بگذار/ })).toBeInTheDocument();
+    await expectAccessible(container);
+  });
+
+  it('unconfirmed, refused past the replay deadline: says nothing was sent; view only', async () => {
+    const { container, getByRole, queryByRole } = renderForm({
+      ...UNCONFIRMED,
+      replay: null,
+      viewOnly: true,
+      replayExpired: true,
+    });
+    expect(container.textContent).toContain('مهلت ارسال دوبارهٔ همین درخواست گذشته است');
+    expect(container.textContent).toContain('COR_ORIGINAL');
+    expect(queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
+    expect(getByRole('link', { name: /کنار بگذار/ })).toBeInTheDocument();
+    await expectAccessible(container);
+  });
+
+  it('the outcome-unknown marker: no text, never re-sent, still says it may be done', async () => {
+    const { container, getByRole, queryByRole } = renderForm({
+      ...UNCONFIRMED,
+      values: EMPTY_DISPUTE_FORM,
+      replay: null,
+      viewOnly: true,
+      marker: true,
+    });
+    expect(container.textContent).toContain('نتیجهٔ این درخواست هنوز معلوم نیست');
+    expect(container.textContent).toContain('ممکن است انجام شده باشد');
+    expect(container.textContent).not.toContain(REASON);
+    expect(container.querySelector('textarea')).toBeNull();
     expect(queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
     expect(getByRole('link', { name: /کنار بگذار/ })).toBeInTheDocument();
     await expectAccessible(container);
