@@ -215,6 +215,116 @@ describe('OutboxShutdown', () => {
     expect(purgeStop).toHaveBeenCalledTimes(2);
   });
 
+  describe('the publishers (D-052 phase 4b, Codex r1 on #293)', () => {
+    /** A part whose stop is recorded and returns only when its gate opens. */
+    function gatedParts() {
+      const calls: { name: string; deadlineAt?: number }[] = [];
+      const gates = new Map<string, () => void>();
+      const part = (name: string): OutboxStoppable => ({
+        stop: (options) => {
+          calls.push({ name, deadlineAt: options?.deadlineAt });
+          return new Promise<void>((resolve) => gates.set(name, resolve));
+        },
+      });
+      const open = async (name: string): Promise<void> => {
+        gates.get(name)!();
+        await new Promise((resolve) => setImmediate(resolve));
+      };
+      return { calls, part, open };
+    }
+
+    it('closes the publishers only once the relay, the purge and every worker have returned', async () => {
+      const { calls, part, open } = gatedParts();
+      const shutdown = new OutboxShutdown({
+        relay: part('relay'),
+        purge: part('purge'),
+        workers: [part('sweep')],
+        publishers: [part('publisher')],
+        budgetMs: 23_000,
+        now: () => 1_000_000,
+      });
+
+      const stopping = shutdown.stop();
+      const names = () => calls.map((call) => call.name);
+      expect(names()).toEqual(['relay', 'purge', 'sweep']);
+      await open('relay');
+      await open('sweep');
+      // The purge still runs: the publisher is not asked yet.
+      expect(names()).toEqual(['relay', 'purge', 'sweep']);
+      await open('purge');
+      expect(names()).toEqual(['relay', 'purge', 'sweep', 'publisher']);
+      await open('publisher');
+      await stopping;
+    });
+
+    it('hands the publishers the drain’s deadline — one budget, not a second one from their start', async () => {
+      let now = 1_000_000;
+      const { calls, part, open } = gatedParts();
+      const shutdown = new OutboxShutdown({
+        relay: part('relay'),
+        publishers: [part('publisher')],
+        budgetMs: 23_000,
+        now: () => now,
+      });
+
+      const stopping = shutdown.stop();
+      // The relay drains for 20 s of the 23 s budget.
+      now += 20_000;
+      await open('relay');
+      expect(calls).toEqual([
+        { name: 'relay', deadlineAt: 1_023_000 },
+        { name: 'publisher', deadlineAt: 1_023_000 },
+      ]);
+      await open('publisher');
+      await stopping;
+    });
+
+    it('a stuck relay and a stuck producer close: the whole stop still ends at the one deadline', async () => {
+      const relay = await relayStuckInPublish(1);
+      // A publisher that honours the deadline, with a close that never ends.
+      let publisherAskedAfterMs = -1;
+      const startedAt = Date.now();
+      const publisher: OutboxStoppable = {
+        stop: async (options) => {
+          publisherAskedAfterMs = Date.now() - startedAt;
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.max(0, (options?.deadlineAt ?? Infinity) - Date.now())),
+          );
+        },
+      };
+      const shutdown = new OutboxShutdown({ relay, publishers: [publisher], budgetMs: 1500 });
+
+      const ms = await elapsed(() => shutdown.stop());
+      // After the relay's 1 s grace, and within the 1.5 s: 1.5 s, not 1 s + 1.5 s.
+      expect(publisherAskedAfterMs).toBeGreaterThanOrEqual(950);
+      expect(ms).toBeGreaterThanOrEqual(1400);
+      expect(ms).toBeLessThan(2200);
+    });
+
+    it('closes the publishers even when a drain fails, and still reports the failure', async () => {
+      const closed: string[] = [];
+      const shutdown = new OutboxShutdown({
+        relay: { stop: async () => Promise.reject(new Error('relay stop failed')) },
+        publishers: [{ stop: async () => void closed.push('publisher') }],
+        budgetMs: 1000,
+      });
+      await expect(shutdown.stop()).rejects.toThrow('relay stop failed');
+      expect(closed).toEqual(['publisher']);
+    });
+
+    it('a repeated stop joins: each publisher is closed once', async () => {
+      const stop = jest.fn(async () => undefined);
+      const shutdown = new OutboxShutdown({
+        relay: { stop: async () => undefined },
+        publishers: [{ stop }],
+        budgetMs: 1000,
+      });
+      await Promise.all([shutdown.stop(), shutdown.onModuleDestroy()]);
+      await shutdown.stop();
+      expect(stop).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('refuses a budget that is not a positive integer', () => {
     const relay = { stop: async () => undefined };
     for (const budgetMs of [0, -1, 1.5, Number.NaN]) {

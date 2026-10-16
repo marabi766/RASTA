@@ -16,12 +16,13 @@ import {
 import { formatMinor, parseMinor } from '../shared/money';
 import { isUniqueViolation } from '../ledger/ledger.repository';
 import { LedgerService } from '../ledger/ledger.service';
+import { CommissionService } from '../commission/commission.service';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { financialTransactionDuration, transactionsCreatedTotal } from '../observability/metrics';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { ENV } from '../tokens';
 import type { IdempotentAnswer } from '../shared/idempotency';
-import type { Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
+import type { BusinessLine, Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
 import type { CreateTransactionDto, DisputeTransactionDto, ResolveDisputeDto } from './dto';
 
 /**
@@ -46,6 +47,7 @@ export class TransactionService {
     private readonly walletRepository: WalletRepository,
     @Inject(ENV) private readonly env: EconomicEnv,
     private readonly ledger: LedgerService,
+    private readonly commissions: CommissionService,
   ) {}
 
   // ==========================================================================
@@ -97,6 +99,16 @@ export class TransactionService {
       const created = await this.prisma.transaction(async (tx) => {
         const id = `${ID_PREFIXES.transaction}_${ulid()}`;
         const occurredAt = dto.occurredAt ? new Date(dto.occurredAt) : new Date();
+        const pricing = dto.counterpartyOrganizationId
+          ? await this.commissions.pricingOf(tx, {
+              organizationId: dto.counterpartyOrganizationId,
+              transactionType: dto.transactionType,
+              businessLine: dto.businessLine ?? null,
+              occurredAt,
+              grossAmountMinor,
+              currency: dto.currency ?? 'IRR',
+            })
+          : UNPRICED;
 
         await this.repository.create(
           tx,
@@ -105,6 +117,8 @@ export class TransactionService {
             organizationId,
             counterpartyOrganizationId: dto.counterpartyOrganizationId ?? null,
             transactionType: dto.transactionType,
+            businessLine: dto.businessLine ?? null,
+            ...pricing,
             status: 'CREATED',
             grossAmountMinor,
             currency: dto.currency ?? 'IRR',
@@ -235,6 +249,8 @@ export class TransactionService {
       organizationId: string;
       counterpartyOrganizationId: string;
       transactionType: TransactionType;
+      /** Stated by the consumer that knows what the fact is (ADR-045 § 4). */
+      businessLine: BusinessLine;
       grossAmountMinor: bigint;
       currency: string;
       occurredAt: Date;
@@ -252,6 +268,16 @@ export class TransactionService {
     if (existing) return { id: existing.id, created: false };
 
     const id = `${ID_PREFIXES.transaction}_${ulid()}`;
+    // At the approval's own time, under the cutover: an approval given before
+    // business lines priced anything is priced as it would have been then.
+    const pricing = await this.commissions.pricingOf(tx, {
+      organizationId: input.counterpartyOrganizationId,
+      transactionType: input.transactionType,
+      businessLine: input.businessLine,
+      occurredAt: input.occurredAt,
+      grossAmountMinor: input.grossAmountMinor,
+      currency: input.currency,
+    });
 
     const written = await this.repository.createForSource(
       tx,
@@ -260,6 +286,8 @@ export class TransactionService {
         organizationId: input.organizationId,
         counterpartyOrganizationId: input.counterpartyOrganizationId,
         transactionType: input.transactionType,
+        businessLine: input.businessLine,
+        ...pricing,
         // Straight to PENDING_SETTLEMENT: the authorising fact is the event
         // itself. The state machine permits this edge from CREATED, and the
         // row is written in its post-transition state rather than moved twice.
@@ -327,10 +355,9 @@ export class TransactionService {
   /**
    * The parties to a transaction and what each is owed.
    *
-   * At creation both legs carry the gross: the commission split is not known
-   * until settlement selects the rule in force, and writing a guess here would
-   * be a number nobody computed. The settlement records the actual split on
-   * the transaction and on the `commission` row.
+   * At creation both legs carry the gross: the rule is chosen now
+   * (`pricing_*`), but the split is computed and posted at settlement, which
+   * records it on the transaction and on the `commission` row.
    */
   private legsFor(
     transactionId: string,
@@ -715,6 +742,12 @@ export class TransactionService {
     return this.repository.list(getOrganizationId(), filter);
   }
 }
+
+/**
+ * A transaction without a payee — a top-up — attracts no commission and never
+ * settles, so there is nothing to price.
+ */
+const UNPRICED = { pricingOutcome: null, pricingRuleId: null } as const;
 
 /** What a caller asks to do to a transaction — see `TransactionService.authorizeAct`. */
 export type TransactionAct = 'READ' | 'COMMIT' | 'REFUND';

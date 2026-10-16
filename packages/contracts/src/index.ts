@@ -45,6 +45,9 @@ export {
 } from './common/money';
 export type { Currency, Money, SignedMoney } from './common/money';
 
+export { BUSINESS_LINES, businessLineSchema } from './common/business-line';
+export type { BusinessLine } from './common/business-line';
+
 export { ERROR_CODES, ERROR_STATUS, errorDetailSchema, apiErrorSchema } from './common/errors';
 export type { ErrorCode, ErrorDetail, ApiError } from './common/errors';
 

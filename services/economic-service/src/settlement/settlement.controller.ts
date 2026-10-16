@@ -255,6 +255,9 @@ function toSettlementView(result: SettlementResult) {
      * is open (ADR-023).
      */
     commissionRuleMatched: result.commissionMatched,
+    /** The same fact by name, as the commission row records it (ADR-045 § 2). */
+    commissionOutcome: result.commissionOutcome,
+    businessLine: result.businessLine,
     settledAt: result.settledAt.toISOString(),
   };
 }

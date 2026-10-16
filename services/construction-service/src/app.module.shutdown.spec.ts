@@ -10,6 +10,7 @@ import { AppModule } from './app.module';
 import { PolicyReconciliationSweeper } from './approval/policy-reconciliation.sweeper';
 import { OrganizationMovedConsumer } from './events/organization-moved.consumer';
 import { SupplierStandingConsumer } from './events/supplier-standing.consumer';
+import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { AwardStandingCheckSweeper } from './tender/award-standing-check.sweeper';
 import { StandingBootstrap } from './tender/standing-bootstrap';
 import { TenderCloseSweeper } from './tender/tender-close.sweeper';
@@ -88,6 +89,9 @@ describe('AppModule shutdown wiring (D-052)', () => {
       OrganizationMovedConsumer,
       SupplierStandingConsumer,
       StandingBootstrap,
+      // Closed last, after the drain, by the same deadline (D-052 phase 4b):
+      // app.module.publisher-close.spec.ts.
+      KafkaEventPublisher,
     ];
     expect(new Set(inject)).toEqual(new Set([...expected, ENV]));
     expect(inject).toHaveLength(expected.length + 1);
@@ -99,7 +103,9 @@ describe('AppModule shutdown wiring (D-052)', () => {
     const { inject, stops } = await stopThroughFactory();
     const deadlines = new Map([...stops].map(([token, calls]) => [token, calls[0]?.deadlineAt]));
 
-    expect(inject).toEqual(expect.arrayContaining([OutboxRelay, StandingBootstrap]));
+    expect(inject).toEqual(
+      expect.arrayContaining([OutboxRelay, StandingBootstrap, KafkaEventPublisher]),
+    );
     expect(deadlines.size).toBe(inject.length - 1);
     expect(new Set(deadlines.values()).size).toBe(1);
     expect(deadlines.get(StandingBootstrap)).toBeGreaterThan(Date.now());

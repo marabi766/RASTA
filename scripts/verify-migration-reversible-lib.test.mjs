@@ -647,13 +647,14 @@ test('every kept-extension allowance is for an extension its migration creates a
   }
 });
 
-test('the only kept-extension allowances are marketplace pg_trgm and organization btree_gist', () => {
+test('the only kept-extension allowances are economic and organization btree_gist, marketplace pg_trgm', () => {
   const allowances = Object.entries(EXPECTED).flatMap(([service, entry]) =>
     Object.entries(entry.keptExtensions ?? {}).flatMap(([name, extensions]) =>
       extensions.map((extension) => `${service}/${name}: ${extension}`),
     ),
   );
   assert.deepEqual(allowances, [
+    'economic/20261016120000_commission_business_lines: btree_gist',
     'marketplace/20260829185748_init_marketplace: pg_trgm',
     'organization/20260925150000_policy_timeline_and_primary_contact: btree_gist',
   ]);
