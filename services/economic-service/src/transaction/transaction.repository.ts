@@ -307,7 +307,11 @@ export interface TransactionRow {
   sourceType: string | null;
   sourceReference: string | null;
   disputedAt: Date | null;
+  disputedBy: string | null;
   disputeReason: string | null;
+  disputeResolvedAt: Date | null;
+  disputeResolvedBy: string | null;
+  disputeResolution: string | null;
   settledAt: Date | null;
   failureReason: string | null;
   createdAt: Date;

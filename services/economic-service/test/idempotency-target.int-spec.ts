@@ -33,7 +33,9 @@ describe('idempotency key reuse across resources', () => {
       .set('authorization', asPayer())
       .set('idempotency-key', id('idt-create'))
       .send({
-        transactionType: 'MARKETPLACE_ORDER',
+        // Not an order's obligation, which only the order saga disputes
+        // (docs/24 Q-138): the payer disputes it here.
+        transactionType: 'LOGISTICS',
         counterpartyOrganizationId: payee,
         grossAmountMinor: '1500',
         currency: 'IRR',

@@ -354,7 +354,9 @@ describe('financial consistency (real database)', () => {
 
       const transaction = await asActor({ organizationId: org.a }, () =>
         wiring.transactions.create({
-          transactionType: 'MARKETPLACE_ORDER',
+          // Not an order's obligation, which only the order saga disputes
+          // (docs/24 Q-138): the payer objects here.
+          transactionType: 'LOGISTICS',
           counterpartyOrganizationId: org.b,
           grossAmountMinor: '2000000',
           currency: 'IRR',

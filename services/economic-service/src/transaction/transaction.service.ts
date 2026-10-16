@@ -8,6 +8,7 @@ import { WalletRepository } from '../wallet/wallet.repository';
 import { TransactionRepository, type TransactionFilter } from './transaction.repository';
 import { nextStatus } from './state-machine';
 import {
+  assertMayDisputeDirectly,
   assertMayRefund,
   assertTransactionVisible,
   canCommitOrganization,
@@ -440,6 +441,9 @@ export class TransactionService {
    * There is no timeout that clears it and no automatic resolution: the state
    * machine has no edge from `DISPUTED` to `SETTLED`, only to
    * `PENDING_SETTLEMENT` by an explicit human decision, or to `REFUNDED`.
+   *
+   * An order's obligation is disputed only by the order saga (docs/24 Q-138,
+   * `assertMayDisputeDirectly`).
    */
   async dispute(
     transactionId: string,
@@ -469,6 +473,12 @@ export class TransactionService {
    *
    * A human decision, recorded with who made it. It does not settle — it only
    * unblocks, so that releasing the money remains a separate, deliberate act.
+   *
+   * The resolution goes in a column of its own. It used to be written over
+   * `disputeReason`, so a resolved transaction no longer said what the dispute
+   * had been about; rows resolved before migration
+   * `20261016160000_transaction_dispute_resolution` still hold the resolution
+   * there, with `disputeResolution` NULL (docs/23 D-060).
    */
   async resolveDispute(
     transactionId: string,
@@ -482,7 +492,7 @@ export class TransactionService {
       'RESOLVE_DISPUTE',
       actor,
       at,
-      { disputeResolvedAt: at, disputeResolvedBy: actor, disputeReason: dto.resolution },
+      { disputeResolvedAt: at, disputeResolvedBy: actor, disputeResolution: dto.resolution },
       answer,
       dto.disputeId,
     );
@@ -621,7 +631,7 @@ export class TransactionService {
     return this.prisma.transaction(async (tx) => {
       const transaction = await this.repository.lockForUpdate(tx, transactionId);
       if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-      this.authorizeAct(transaction, 'COMMIT');
+      this.authorizeAct(transaction, actOf(event));
 
       const target = nextStatus(transactionId, transaction.status, event);
       if (heldDispute !== undefined && transaction.disputeId !== heldDispute) {
@@ -656,10 +666,11 @@ export class TransactionService {
 
   /**
    * Who may act on this transaction, as a command asks it: `COMMIT` for a
-   * lifecycle move, `REFUND` for a refund (docs/24 Q-62), `READ` for what only
-   * shows it. A non-party learns nothing — `NOT_FOUND` first, always.
+   * lifecycle move, `DISPUTE` for a dispute or its resolution (docs/24 Q-138),
+   * `REFUND` for a refund (docs/24 Q-62), `READ` for what only shows it. A
+   * non-party learns nothing — `NOT_FOUND` first, always.
    */
-  private authorizeAct(transaction: RefundableTransaction, act: TransactionAct): void {
+  private authorizeAct(transaction: ActedTransaction, act: TransactionAct): void {
     switch (act) {
       case 'READ':
         assertTransactionVisible(transaction);
@@ -667,6 +678,11 @@ export class TransactionService {
       case 'COMMIT':
         assertTransactionVisible(transaction);
         canCommitOrganization(transaction.organizationId);
+        return;
+      case 'DISPUTE':
+        assertTransactionVisible(transaction);
+        canCommitOrganization(transaction.organizationId);
+        assertMayDisputeDirectly(transaction);
         return;
       case 'REFUND':
         assertMayRefund(transaction, { payeeMayRefund: this.env.ECONOMIC_REFUND_BY_PAYEE_ENABLED });
@@ -788,7 +804,15 @@ export class TransactionService {
 const UNPRICED = { pricingOutcome: null, pricingRuleId: null } as const;
 
 /** What a caller asks to do to a transaction — see `TransactionService.authorizeAct`. */
-export type TransactionAct = 'READ' | 'COMMIT' | 'REFUND';
+export type TransactionAct = 'READ' | 'COMMIT' | 'DISPUTE' | 'REFUND';
+
+/** The facts `authorizeAct` reads off a transaction. */
+type ActedTransaction = RefundableTransaction & { transactionType: string };
+
+/** The act a lifecycle move asks to make. */
+function actOf(event: 'AUTHORISE_SETTLEMENT' | 'DISPUTE' | 'RESOLVE_DISPUTE' | 'CANCEL') {
+  return event === 'DISPUTE' || event === 'RESOLVE_DISPUTE' ? 'DISPUTE' : 'COMMIT';
+}
 
 type StatusChangeAction =
   | 'CREATE'
@@ -813,7 +837,11 @@ export interface TransactionDetail {
   sourceType: string | null;
   sourceReference: string | null;
   disputedAt: Date | null;
+  disputedBy: string | null;
   disputeReason: string | null;
+  disputeResolvedAt: Date | null;
+  disputeResolvedBy: string | null;
+  disputeResolution: string | null;
   settledAt: Date | null;
   failureReason: string | null;
   createdAt: Date;
