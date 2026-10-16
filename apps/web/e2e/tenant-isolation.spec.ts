@@ -70,6 +70,41 @@ const MISSING_ID = 'AST-SEED-9999';
 const OWN_DRIVER_NUMBERS = ['OP-104', 'OP-108'] as const;
 const OTHER_TENANT_DRIVER_NUMBER = 'OP-201';
 
+/**
+ * Under `CI`, this file must run, not skip. The "Portal in a browser" job
+ * (`.github/workflows/ci.yml`, `web-browser`) is the one that provides the
+ * evidence, and it sets both flags: `WEB_LIVE_STACK_E2E` for the whole file
+ * and `WEB_LIVE_STACK_E2E_EXP004` for the EXP-004 block. If either is missing
+ * there, this test fails the job instead of letting it go green with the
+ * scenarios skipped.
+ *
+ * It sits at the top level, outside every `describe`, on purpose: a
+ * `test.skip` in an enclosing block skips everything registered inside it,
+ * guard included. The earlier guard lived inside the live-stack block, so
+ * losing `WEB_LIVE_STACK_E2E` skipped it along with the scenarios it was
+ * there to protect (PR #305 review rounds 1 and 2).
+ * `src/test/tenant-isolation-gate.spec.ts` lists this file under every
+ * combination of the two flags and pins the outcome.
+ *
+ * Locally, without `CI`, the plain skips below apply: nobody who has not
+ * started the live stack is forced to.
+ */
+const LIVE_STACK_FLAGS = ['WEB_LIVE_STACK_E2E', 'WEB_LIVE_STACK_E2E_EXP004'] as const;
+const missingLiveStackFlags = process.env.CI
+  ? LIVE_STACK_FLAGS.filter((flag) => process.env[flag] !== 'true')
+  : [];
+if (missingLiveStackFlags.length > 0) {
+  test('CI runs every live tenant-isolation scenario, none skipped', () => {
+    throw new Error(
+      `${missingLiveStackFlags.join(' and ')} must be 'true' in CI. The "Portal in a browser" ` +
+        'job (.github/workflows/ci.yml, web-browser) starts the live stack, including ' +
+        'construction-service and inventory-service, and sets both flags; without them the ' +
+        'scenarios in this file would be skipped and the job would go green with no ' +
+        'live-isolation evidence.',
+    );
+  });
+}
+
 test.describe('tenant isolation through the live stack', () => {
   test.skip(
     process.env.WEB_LIVE_STACK_E2E !== 'true',
@@ -415,31 +450,15 @@ test.describe('tenant isolation through the live stack', () => {
    * locally against the smaller EXP-002 set should not have to also start
    * these two services.
    *
-   * The guard below turns a would-be skip into a hard failure whenever `CI` is
-   * set: the job that is supposed to provide this coverage must never again go
-   * green while silently skipping it, which is exactly how it went unnoticed
-   * before (PR #305 review round 1, finding 3). Locally, without `CI` set,
-   * the plain `test.skip` still applies — nobody who has not started
-   * construction-service and inventory-service alongside the usual live
-   * stack is forced to.
+   * Under `CI`, a skip of this block fails the job: see the guard at the top
+   * of this file (`LIVE_STACK_FLAGS`), which checks both flags.
    */
-  if (process.env.CI && process.env.WEB_LIVE_STACK_E2E_EXP004 !== 'true') {
-    test('WEB_LIVE_STACK_E2E_EXP004 must be set in the required "Portal in a browser" job', () => {
-      throw new Error(
-        'This CI job must start construction-service and inventory-service and set ' +
-          'WEB_LIVE_STACK_E2E_EXP004=true (.github/workflows/ci.yml, web-browser) — ' +
-          'otherwise the block below would be skipped and CI would go green with no ' +
-          'EXP-004 live-isolation evidence for /projects and /inventory (PR #305 review ' +
-          'round 1, finding 3).',
-      );
-    });
-  }
   test.describe('EXP-004 — projects and inventory, created live for this run', () => {
     test.skip(
       process.env.WEB_LIVE_STACK_E2E_EXP004 !== 'true',
       'needs construction-service and inventory-service alongside the usual live stack — set ' +
         'WEB_LIVE_STACK_E2E_EXP004=true locally after starting them (the "Portal in a browser" ' +
-        'CI job always does; see the guard above)',
+        'CI job always does; see the guard at the top of this file)',
     );
 
     const RUN = randomUUID().slice(0, 8);
