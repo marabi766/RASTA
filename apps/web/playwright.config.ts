@@ -22,7 +22,10 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
-  reporter: process.env.CI ? 'github' : 'list',
+  // In CI, `list` as well as `github`: the job log then names every test with
+  // its outcome (passed, failed, skipped) per project, which is the evidence
+  // that the live scenarios ran rather than skipped (PR #305 review round 2).
+  reporter: process.env.CI ? [['github'], ['list']] : 'list',
   use: {
     baseURL: 'http://localhost:3200',
     trace: 'on-first-retry',

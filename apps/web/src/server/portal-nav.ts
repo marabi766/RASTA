@@ -10,16 +10,20 @@ import type { WebSession } from './session';
 /**
  * Which navigation a signed-in person is shown.
  *
- * The entries that depend on the person are Projects and Tenders. Whether they
- * may read them is construction-service's decision and stays there: this only
- * decides whether to *draw the link*, from a setting that mirrors the
- * service's (`WEB_PROJECT_ROLES` / `WEB_PROJECT_READER_ROLES`, which must be
- * changed together with `CONSTRUCTION_PROJECT_ROLES` /
+ * The entries that depend on the person are Projects, Tenders and Contracts.
+ * Whether they may read them is the owning service's decision and stays
+ * there: this only decides whether to *draw the link*, from a setting that
+ * mirrors the service's (`WEB_PROJECT_ROLES` / `WEB_PROJECT_READER_ROLES`,
+ * which must be changed together with `CONSTRUCTION_PROJECT_ROLES` /
  * `CONSTRUCTION_PROJECT_READER_ROLES`). Tenders reuse those two settings for the
  * owner's side — the service gates tender reads by the same configured roles —
  * and add the bidder's side, whose `CONTRACTOR` role is fixed in the service.
- * A person who types `/projects` or `/tenders` anyway is given the service's
- * own answer.
+ * Contracts has its own setting for the employer's side
+ * (`WEB_CONTRACT_READER_ROLES`, mirroring contract-service's
+ * `CONTRACT_READER_ROLES`, ADR-068 § 7) and, like Tenders, adds the
+ * contractor's side on the fixed `CONTRACTOR` role. A person who types
+ * `/projects`, `/tenders` or `/contracts` anyway is given the service's own
+ * answer.
  */
 
 /** Always accepted by construction-service, so always shown the link. */
@@ -97,6 +101,45 @@ export function canReadTenders(
 }
 
 /**
+ * Which of contract-service's two doors (ADR-068 § 7) a person is worth
+ * *offering* the link for — the same shape as {@link tenderSidesFor}:
+ *
+ * - `employer` — `GET /v1/contracts` gated by `CONTRACT_READER_ROLES`, plus
+ *   `SYSTEM_ADMIN` always (it may act for an organization it selects) and
+ *   `AUDITOR` never;
+ * - `contractor` — the winning contractor's own organization, which needs the
+ *   fixed `CONTRACTOR` role and refuses `SYSTEM_ADMIN` and `AUDITOR` whenever
+ *   present, exactly like the tender bidder's side.
+ *
+ * A single `GET /v1/contracts` already returns a caller's contracts on
+ * whichever side it is a party to (the controller's own `PARTIES_NOTE`), so —
+ * unlike tenders — there is only one list and one detail route: no `?view=`
+ * is needed to choose between two different endpoints.
+ */
+export function contractSidesFor(
+  roles: readonly string[],
+  settings: Pick<WebServerEnv, 'WEB_CONTRACT_READER_ROLES'>,
+): { readonly employer: boolean; readonly contractor: boolean } {
+  return {
+    employer:
+      !roles.includes(NEVER_READS_PROJECTS) &&
+      (roles.includes(ALWAYS_READS_PROJECTS) ||
+        roles.some((role) => settings.WEB_CONTRACT_READER_ROLES.includes(role))),
+    contractor:
+      roles.includes(BIDDER_ROLE) && !BIDDER_EXCLUDED_ROLES.some((role) => roles.includes(role)),
+  };
+}
+
+/** Whether the Contracts link is worth drawing for these roles. */
+export function canReadContracts(
+  roles: readonly string[],
+  settings: Pick<WebServerEnv, 'WEB_CONTRACT_READER_ROLES'>,
+): boolean {
+  const sides = contractSidesFor(roles, settings);
+  return sides.employer || sides.contractor;
+}
+
+/**
  * Whether inventory-service would let these roles read, so the Inventory link
  * is worth drawing. Unlike projects, `SYSTEM_ADMIN` is not admitted: the
  * service refuses the platform administrator, and `AUDITOR`, whatever else the
@@ -135,6 +178,7 @@ export async function loadPortalNav(
   return portalNavFor({
     canReadProjects: canReadProjects(roles, webServerEnv()),
     canReadTenders: canReadTenders(roles, webServerEnv()),
+    canReadContracts: canReadContracts(roles, webServerEnv()),
     canReadSettlements: canReadSettlements(result.kind === 'USER' ? roles : null),
     canReadInventory: canReadInventory(roles, webServerEnv()),
   });
