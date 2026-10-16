@@ -1047,7 +1047,7 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
 ### D-055 · تدارکات (طراحی): پنجرهٔ تجمیع و مهلت RFQ با جاروکننده بسته می‌شوند، و پیشنهاد قیمت همان سطح محرمانگی D-043 را دارد
 
 - **چه چیزی:** (الف) ADR-070 § ۲ و § ۱۱ پایان پنجرهٔ تجمیع (`OPEN → READY | EXTEND | REFERRED | LAPSED`) و بستن مهلت RFQ (`PUBLISHED → CLOSED`)
-  را به `AggregationWindowSweeper` و `RfqCloseSweeper` می‌سپارد، نه به `DemandAggregationWorkflow` در Temporal که `docs/04` § ۴٫۹ و `docs/08` § ۸٫۶
+  را به `AggregationWindowSweeper` و `RfqCloseSweeper` می‌سپارد (پنجره را نیازی هم که پس از پایانش برسد در همان تراکنش می‌بندد، از PR 1)، نه به `DemandAggregationWorkflow` در Temporal که `docs/04` § ۴٫۹ و `docs/08` § ۸٫۶
   می‌خواستند. (ب) پیشنهاد قیمت مثل پیشنهاد مناقصه **اجراشده در برنامه و افشاگر دستکاری** است (ADR-066)؛ `docs/09` M5 («بدون دسترسی اپراتور») و
   `docs/04` § ۴٫۹ («غیرقابل مشاهده حتی برای اپراتور») چیزی قوی‌تر می‌گفتند و اصلاح شدند. (پ) لفافهٔ `RFQ_ISSUED` و `QUOTATION_*` هویت تأمین‌کنندگان
   دعوت‌شده و پیشنهاددهنده را نام می‌برد.

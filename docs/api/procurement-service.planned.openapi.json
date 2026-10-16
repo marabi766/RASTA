@@ -3,7 +3,7 @@
   "info": {
     "title": "procurement-service (PLANNED, COM-007)",
     "version": "0.0.0-planned",
-    "description": "DESIGN CONTRACT, not current behaviour: procurement-service does not exist. Nothing here is implemented until the PR named in x-step (docs/adr/ADR-070-implementation-plan.md) lands; each slice then moves into a generated docs/api/procurement-service.openapi.json checked byte for byte. Money is a rial bigint as a string and is on no event. Times are UTC ISO 8601 with Z. Every route needs a bearer token and an Idempotency-Key on writes, except /v1/internal/, which takes an internal token in X-Internal-Token only (internalToken scheme; the gateway routes that prefix nowhere); roles come from configuration (docs/24 Q-119..Q-124), never from the route. A third organization gets 404 everywhere; AUDITOR reaches no route. Quotation content is never returned before openedAt (ADR-066). Design: ADR-070."
+    "description": "DESIGN CONTRACT, not current behaviour: procurement-service does not exist. Nothing here is implemented until the PR named in x-step (docs/adr/ADR-070-implementation-plan.md) lands; each slice then moves into a generated docs/api/procurement-service.openapi.json checked byte for byte. Money is a rial bigint as a string and is on no event. Times are UTC ISO 8601 with Z. Every route needs a bearer token and an Idempotency-Key on writes, except /v1/internal/, which takes an internal token in X-Internal-Token only (internalToken scheme; the gateway routes that prefix nowhere); roles come from configuration (docs/24 Q-119..Q-124), never from the route. A third organization gets 404 everywhere; AUDITOR reaches no route. Quotation content is never returned before openedAt (ADR-066). Design: ADR-070. Every quantity (demand, aggregation total, RFQ, order, receipts) is a whole number up to 2147483647 (MAX_QUANTITY, ADR-070 § 2): a JSON number, never a string. The gateway already routes demand-requests, aggregations, rfqs and purchase-orders here (ADR-070 § 10); until PR 14 sets the gateway flag on all four, the service itself requires the Idempotency-Key."
   },
   "servers": [],
   "security": [
@@ -16,7 +16,7 @@
       "post": {
         "operationId": "submitDemandRequest",
         "x-step": "PR 1",
-        "summary": "Register a need of the caller organization (roles from PROCUREMENT_DEMAND_ROLES). Joins the OPEN aggregation of (organization, productId) or opens one, under the aggregation row lock and the database clock read after it: a demand at or after closesAt never joins that window. productId is opaque and never checked against marketplace (Q-105, Q-120).",
+        "summary": "Register a need of the caller organization (roles from PROCUREMENT_DEMAND_ROLES). Joins the OPEN aggregation of (organization, productId) or opens one, under the aggregation row lock and the database clock read after it: a demand at or after closesAt never joins that window. productId is opaque and never checked against marketplace (Q-105, Q-120). Such a demand first ends the window in the same transaction, with the window-end transition and its event (READY, REFERRED or LAPSED: the demand opens the next window; EXTEND: it joins the same window moved on by as many whole lengths as make it open now, one transition). A demand that would take the total of the window it joins past 2147483647 is 422 AGGREGATION_QUANTITY_LIMIT_EXCEEDED and writes nothing (ADR-070 § 2).",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKeyRequired"
@@ -461,10 +461,13 @@
       "post": {
         "operationId": "closeRfq",
         "x-step": "PR 6",
-        "summary": "PUBLISHED to CLOSED, only at or after quotationClosingAt by the database clock. Idempotent; the sweeper runs the same command.",
+        "summary": "PUBLISHED to CLOSED, only at or after quotationClosingAt by the database clock. Idempotent; the sweeper runs the same command. Roles: PROCUREMENT_RFQ_ISSUER_ROLES of the buyer organization (another buyer role 403; a supplier or a third organization 404).",
         "parameters": [
           {
             "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
           }
         ],
         "responses": {
@@ -477,6 +480,9 @@
                 }
               }
             }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -540,7 +546,7 @@
       "put": {
         "operationId": "submitOrReviseQuotation",
         "x-step": "PR 8",
-        "summary": "Supplier side, invited organization only (role SUPPLIER). Seals the content (ADR-066) and returns the receipt. Refused at or after quotationClosingAt by the database clock; the standing is asked of supplier-service now (fail closed). Revising raises revision.",
+        "summary": "Supplier side, invited organization only (role SUPPLIER). Seals the content (ADR-066) and returns the receipt. Refused at or after quotationClosingAt by the database clock; the standing is asked of supplier-service now (fail closed). Revising raises revision. The server, which seals the plaintext, refuses unitPriceMinor × quantity above 2^63 − 1 with 422 QUOTATION_AMOUNT_OUT_OF_RANGE before sealing (ADR-070 § 4); the order issue keeps the same check as a backstop.",
         "parameters": [
           {
             "$ref": "#/components/parameters/Id"
@@ -940,13 +946,291 @@
             "$ref": "#/components/responses/Unavailable"
           }
         }
+      },
+      "get": {
+        "operationId": "listPurchaseOrderPolicies",
+        "x-step": "PR 11",
+        "summary": "The policies governing, or written by, the organization the request acts for (contract-service GET /v1/contract-approval-policies).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "DRAFT",
+                "PENDING_PLATFORM_APPROVAL",
+                "ACTIVE",
+                "REJECTED",
+                "RETIRED",
+                "SUSPENDED"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyPage"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/v1/purchase-order-policies/pending-platform-approval": {
+      "get": {
+        "operationId": "listPurchaseOrderPoliciesPendingPlatformApproval",
+        "x-step": "PR 11",
+        "summary": "The platform administrator's queue: every organization's policies awaiting approval. SYSTEM_ADMIN only.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyPage"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/v1/purchase-order-policies/{id}": {
+      "get": {
+        "operationId": "getPurchaseOrderPolicy",
+        "x-step": "PR 11",
+        "summary": "One policy with its steps. Visible to its author organization, to the governed organization and to a platform administrator; anyone else 404.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Policy"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/purchase-order-policies/{id}/submit": {
+      "post": {
+        "operationId": "submitPurchaseOrderPolicy",
+        "x-step": "PR 11",
+        "summary": "DRAFT to PENDING_PLATFORM_APPROVAL, by the author organization; a union author’s hierarchy is confirmed again with organization-service (fail closed).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ExpectedVersion"
+        },
+        "responses": {
+          "200": {
+            "description": "The policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Policy"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/purchase-order-policies/{id}/approve": {
+      "post": {
+        "operationId": "approvePurchaseOrderPolicy",
+        "x-step": "PR 11",
+        "summary": "PENDING_PLATFORM_APPROVAL to ACTIVE; retires the policy in force for the same organization in the same transaction. SYSTEM_ADMIN only; with four eyes (default on) neither the author nor the submitter (403). Requests already open keep the policy snapshot they were opened with.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ExpectedVersion"
+        },
+        "responses": {
+          "200": {
+            "description": "The policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Policy"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/purchase-order-policies/{id}/reject": {
+      "post": {
+        "operationId": "rejectPurchaseOrderPolicy",
+        "x-step": "PR 11",
+        "summary": "PENDING_PLATFORM_APPROVAL to REJECTED with a reason (kept with the policy, never on the event). SYSTEM_ADMIN only.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Reason"
+        },
+        "responses": {
+          "200": {
+            "description": "The policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Policy"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          }
+        }
+      }
+    },
+    "/v1/purchase-order-policies/{id}/retire": {
+      "post": {
+        "operationId": "retirePurchaseOrderPolicy",
+        "x-step": "PR 11",
+        "summary": "ACTIVE to RETIRED with no replacement, by the author organization or a platform administrator. From then on an order is 422 APPROVAL_POLICY_REQUIRED (no policy never means approved); a request already open keeps its snapshot.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyRequired"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ExpectedVersion"
+        },
+        "responses": {
+          "200": {
+            "description": "The policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Policy"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/BusinessRule"
+          }
+        }
       }
     },
     "/v1/rfqs/{id}/purchase-order": {
       "post": {
         "operationId": "issuePurchaseOrder",
         "x-step": "PR 12",
-        "summary": "Select one QUALIFIED quotation for the whole quantity and issue the order. 422 APPROVAL_POLICY_REQUIRED without an active policy (fail closed). With one: 202 and an approval request bound to the RFQ version, quotation, rank, justification, matrix digest and amount; once approved, the same command executes in one transaction (RFQ AWARDED, order ISSUED, PURCHASE_ORDER_ISSUED without amount). 409 APPROVAL_STALE if anything changed. The winner standing is asked of supplier-service now (422 WINNER_NOT_ELIGIBLE, 503).",
+        "summary": "Select one QUALIFIED quotation for the whole quantity and issue the order. 422 APPROVAL_POLICY_REQUIRED without an active policy (fail closed). With one: 202 and an approval request bound to the RFQ version, quotation, rank, justification, matrix digest and amount; once approved, the same command executes in one transaction (RFQ AWARDED, order ISSUED, PURCHASE_ORDER_ISSUED without amount). 409 APPROVAL_STALE if anything changed. The winner standing is asked of supplier-service now (422 WINNER_NOT_ELIGIBLE, 503). Every remote read happens before the transaction (ADR-070 § 6): the winner standing (supplier-service), the caller membership (identity-service) and the RFQ receipt chain (audit-service); under the RFQ lock the RFQ version and the winner receipt are compared with what was read, 409 PURCHASE_ORDER_INPUT_CHANGED if either moved. The decision that executes an approved request follows the same order.",
         "parameters": [
           {
             "$ref": "#/components/parameters/Id"
@@ -1004,11 +1288,119 @@
         }
       }
     },
+    "/v1/rfqs/{id}/purchase-order-approvals": {
+      "get": {
+        "operationId": "listRfqPurchaseOrderApprovals",
+        "x-step": "PR 12",
+        "summary": "The buyer side: an RFQ’s approval requests, newest first, by status and steps only (no binding). Another organization’s RFQ is 404.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequestPage"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/purchase-order-approvals": {
+      "get": {
+        "operationId": "listPurchaseOrderApprovals",
+        "x-step": "PR 12",
+        "summary": "The step authority’s inbox: requests with a step addressed to the organization the request acts for and to one of the caller’s roles there (PENDING by default).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["PENDING", "APPROVED", "REJECTED", "CONSUMED", "STALE"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequestPage"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/v1/purchase-order-approvals/{id}": {
+      "get": {
+        "operationId": "getPurchaseOrderApproval",
+        "x-step": "PR 12",
+        "summary": "One request. A step authority (unscoped, predicate on the step) reads it with its binding — the RFQ, quotation, supplier, rank, justification, matrix digest, quantity, unit price and amount — under the same conflict-of-interest rules as the decision (403 CONFLICT_OF_INTEREST, audited; identity-service unable to answer: UPSTREAM_UNAVAILABLE or UPSTREAM_TIMEOUT, nothing shown); the buyer’s order readers see status and steps only; anyone else, SYSTEM_ADMIN and AUDITOR included, 404.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequest"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
     "/v1/purchase-order-approvals/{id}/decision": {
       "post": {
         "operationId": "decidePurchaseOrderApproval",
         "x-step": "PR 12",
-        "summary": "Grant or reject one step. The requester never approves their own request; approvers fall under the selection conflict-of-interest rules.",
+        "summary": "Grant or reject one PENDING step. Only a caller acting for the step’s authorityOrganizationId and holding its role there (possibly another organization than the buyer: an unscoped read whose predicate is the step) decides; anyone else 404. The requester never approves their own request (compareActors); approvers fall under the selection conflict-of-interest rules, asked of identity-service now (fail closed). The last grant executes the order with every remote read before the transaction (ADR-070 § 6).",
         "parameters": [
           {
             "$ref": "#/components/parameters/Id"
@@ -1425,10 +1817,10 @@
         "description": "The caller may see the record but not do this (FORBIDDEN, INSUFFICIENT_ROLE, CONFLICT_OF_INTEREST, …), audited"
       },
       "Conflict": {
-        "description": "OPTIMISTIC_LOCK_FAILED, IDEMPOTENCY_KEY_REUSED, APPROVAL_STALE or an in-flight CONFLICT"
+        "description": "OPTIMISTIC_LOCK_FAILED, IDEMPOTENCY_KEY_REUSED, APPROVAL_STALE, PURCHASE_ORDER_INPUT_CHANGED or an in-flight CONFLICT"
       },
       "BusinessRule": {
-        "description": "BUSINESS_RULE_VIOLATION or INVALID_STATE_TRANSITION, with a closed reason code (e.g. APPROVAL_POLICY_REQUIRED, JUSTIFICATION_REQUIRED, WINNER_NOT_ELIGIBLE)"
+        "description": "BUSINESS_RULE_VIOLATION or INVALID_STATE_TRANSITION, with a closed reason code (e.g. AGGREGATION_QUANTITY_LIMIT_EXCEEDED, QUOTATION_AMOUNT_OUT_OF_RANGE, APPROVAL_POLICY_REQUIRED, JUSTIFICATION_REQUIRED, WINNER_NOT_ELIGIBLE)"
       },
       "Unavailable": {
         "description": "UPSTREAM_UNAVAILABLE or UPSTREAM_TIMEOUT: supplier-service, identity-service, audit-service or organization-service could not answer; nothing was written (fail closed)"
@@ -1620,7 +2012,10 @@
             "description": "UTC, ISO 8601 with Z"
           },
           "totalQuantity": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "Sum of the live demands; never above MAX_QUANTITY: a demand that would take it past is 422 AGGREGATION_QUANTITY_LIMIT_EXCEEDED (ADR-070 § 2)"
           },
           "demandCount": {
             "type": "integer"
@@ -1801,7 +2196,10 @@
             "type": "string"
           },
           "totalQuantity": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647,
+            "description": "The aggregation's total, frozen at issue; the order's quantity"
           },
           "status": {
             "$ref": "#/components/schemas/RfqStatus"
@@ -2020,7 +2418,9 @@
             "type": "string"
           },
           "totalQuantity": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
           },
           "rows": {
             "type": "array",
@@ -2175,13 +2575,27 @@
       "Policy": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "organizationId", "workflowKey", "status", "version"],
+        "required": [
+          "id",
+          "organizationId",
+          "authorOrganizationId",
+          "workflowKey",
+          "status",
+          "steps",
+          "createdAt",
+          "version"
+        ],
         "properties": {
           "id": {
             "type": "string"
           },
           "organizationId": {
-            "type": "string"
+            "type": "string",
+            "description": "The governed organization"
+          },
+          "authorOrganizationId": {
+            "type": "string",
+            "description": "The governed organization or a union above it (Q-70 (7))"
           },
           "workflowKey": {
             "type": "string",
@@ -2198,8 +2612,79 @@
               "SUSPENDED"
             ]
           },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["stepOrder", "authorityOrganizationId", "role", "label"],
+              "properties": {
+                "stepOrder": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "authorityOrganizationId": {
+                  "type": "string"
+                },
+                "role": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "minAmountMinor": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$",
+                  "description": "Rial bigint as a decimal string (ADR-022)"
+                },
+                "maxAmountMinor": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$",
+                  "description": "Rial bigint as a decimal string (ADR-022)"
+                }
+              }
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC, ISO 8601 with Z"
+          },
+          "submittedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "decidedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "rejectionReason": {
+            "type": "string",
+            "nullable": true,
+            "description": "Stays with the policy; never on an event"
+          },
           "version": {
             "type": "integer"
+          }
+        }
+      },
+      "PolicyPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items", "nextCursor"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Policy"
+            }
+          },
+          "nextCursor": {
+            "type": "string",
+            "nullable": true
           }
         }
       },
@@ -2230,30 +2715,146 @@
       "ApprovalRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "status", "steps"],
+        "description": "Who sees what (ADR-070 § 6): a step authority — acting for a step’s authorityOrganizationId with its role there, possibly another organization (a union) — sees the binding; the buyer’s order readers see status and steps only; anyone else 404.",
+        "required": [
+          "id",
+          "rfqId",
+          "status",
+          "policyId",
+          "policyVersion",
+          "requestedBy",
+          "requestedAt",
+          "steps"
+        ],
         "properties": {
           "id": {
+            "type": "string"
+          },
+          "rfqId": {
             "type": "string"
           },
           "status": {
             "type": "string",
             "enum": ["PENDING", "APPROVED", "REJECTED", "CONSUMED", "STALE"]
           },
+          "policyId": {
+            "type": "string"
+          },
+          "policyVersion": {
+            "type": "integer"
+          },
+          "requestedBy": {
+            "type": "string"
+          },
+          "requestedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC, ISO 8601 with Z"
+          },
           "steps": {
             "type": "array",
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["label", "status"],
+              "required": ["stepOrder", "authorityOrganizationId", "role", "label", "status"],
               "properties": {
+                "stepOrder": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "authorityOrganizationId": {
+                  "type": "string"
+                },
+                "role": {
+                  "type": "string"
+                },
                 "label": {
                   "type": "string"
                 },
                 "status": {
                   "type": "string"
+                },
+                "decidedAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "nullable": true
                 }
               }
             }
+          },
+          "binding": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "What the approval binds to. Step authority only (absent for the buyer-side list and read); changing any of it after a grant is 409 APPROVAL_STALE.",
+            "required": [
+              "rfqVersion",
+              "quotationId",
+              "supplierOrganizationId",
+              "rank",
+              "matrixDigest",
+              "quantity",
+              "unitPriceMinor",
+              "amountMinor",
+              "currency"
+            ],
+            "properties": {
+              "rfqVersion": {
+                "type": "integer"
+              },
+              "quotationId": {
+                "type": "string"
+              },
+              "supplierOrganizationId": {
+                "type": "string"
+              },
+              "rank": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "justification": {
+                "type": "string",
+                "nullable": true
+              },
+              "matrixDigest": {
+                "type": "string"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647
+              },
+              "unitPriceMinor": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*$",
+                "description": "Rial bigint as a decimal string (ADR-022)"
+              },
+              "amountMinor": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*$",
+                "description": "Rial bigint as a decimal string (ADR-022)"
+              },
+              "currency": {
+                "type": "string",
+                "enum": ["IRR"]
+              }
+            }
+          }
+        }
+      },
+      "ApprovalRequestPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items", "nextCursor"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApprovalRequest"
+            }
+          },
+          "nextCursor": {
+            "type": "string",
+            "nullable": true
           }
         }
       },
