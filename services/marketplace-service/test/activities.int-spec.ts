@@ -11,6 +11,7 @@ import {
   newPrisma,
   publishOffer,
   sagaStep,
+  settledResult,
   tenants,
   wire,
   type Wiring,
@@ -311,7 +312,7 @@ describe('order saga activities (real database)', () => {
       await acts.authoriseSettlement(orderId, held.transactionId);
       await acts.markSettling(orderId);
       const settled = await acts.settle(orderId, held.transactionId);
-      await acts.markCompleted(orderId, settled);
+      await acts.markCompleted(orderId, settledResult(settled));
 
       const row = await runUnscoped('the suite reads the order it drove', () =>
         prisma.client.order.findUniqueOrThrow({ where: { id: orderId } }),

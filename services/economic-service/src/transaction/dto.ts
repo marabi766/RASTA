@@ -172,6 +172,18 @@ export interface TransactionView {
 }
 
 export interface TransactionDetailView extends TransactionView {
+  /**
+   * When it was authorised for settlement and, if a service did it, which
+   * service and under which `Idempotency-Key` — kept for good, unlike the
+   * command's stored answer (docs/23 D-053). Null if never authorised, or
+   * recorded already authorised (ADR-032). `service` and `idempotencyKey`
+   * are null for a person, and on rows authorised before they were kept.
+   */
+  settlementAuthorisation: {
+    authorisedAt: string;
+    service: string | null;
+    idempotencyKey: string | null;
+  } | null;
   legs: { role: string; organizationId: string; amountMinor: string; currency: string }[];
   commission: {
     id: string;

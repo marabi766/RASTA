@@ -373,19 +373,36 @@ export class TransactionService {
    * potentially two different people: confirming that the goods arrived, and
    * releasing the money. Collapsing them would make the product document's
    * "تأیید دریافت" control indistinguishable from the payment.
+   *
+   * A service's authorisation also keeps which service asked and under which
+   * `idempotencyKey`, on the row, for good. The stored answer expires; this
+   * does not. It is how the order saga proves its own authorisation took
+   * effect when its retry comes after that expiry and finds the transaction
+   * DISPUTED — a state a dispute reaches from HELD too, with no authorisation
+   * at all (docs/23 D-053). A person's key is their client's, and the row is
+   * shown to the payee, so it is not kept.
    */
   async authoriseSettlement(
     transactionId: string,
     answer?: IdempotentAnswer<TransactionDetail>,
+    idempotencyKey?: string,
   ): Promise<TransactionDetail> {
-    const actor = getContext().userId ?? SERVICE_NAME;
+    const context = getContext();
+    const actor = context.userId ?? SERVICE_NAME;
+    // The signed caller, never a header (ADR-035).
+    const service = context.authType === 'SERVICE' ? (context.callerService ?? null) : null;
     const at = new Date();
     return this.move(
       transactionId,
       'AUTHORISE_SETTLEMENT',
       actor,
       at,
-      { settlementAuthorisedAt: at, settlementAuthorisedBy: actor },
+      {
+        settlementAuthorisedAt: at,
+        settlementAuthorisedBy: actor,
+        settlementAuthorisedService: service,
+        settlementAuthorisationKey: service ? (idempotencyKey ?? null) : null,
+      },
       answer,
     );
   }
@@ -747,6 +764,9 @@ export interface TransactionDetail {
   failureReason: string | null;
   createdAt: Date;
   createdBy: string;
+  settlementAuthorisedAt: Date | null;
+  settlementAuthorisedService: string | null;
+  settlementAuthorisationKey: string | null;
   legs: {
     id: string;
     organizationId: string;

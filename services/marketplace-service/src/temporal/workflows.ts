@@ -10,7 +10,12 @@ import {
   setHandler,
   sleep,
 } from '@temporalio/workflow';
-import type { OrderActivities, SagaOrderView, SettledResult } from './activities';
+import type {
+  DisputedObligation,
+  OrderActivities,
+  SagaOrderView,
+  SettledResult,
+} from './activities';
 
 /**
  * `OrderSagaWorkflow` — the platform's first real Temporal workflow (ADR-039).
@@ -143,6 +148,7 @@ const {
   markFailed,
   markSettling,
   markSettlementFailed,
+  markObligationDisputed,
   markCompleted,
   markCancelled,
   recordReminder,
@@ -279,7 +285,15 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
    */
   async function settleOrder(transactionId: string): Promise<boolean> {
     status.phase = 'SETTLING';
-    await authoriseSettlement(orderId, transactionId);
+    // Disputed in economic-service after the saga's own authorisation, and
+    // found so by a retry once the stored answer had expired: the order takes
+    // the dispute and the saga reads it again (D-053). An activity recorded
+    // before this answer existed returns undefined — authorised.
+    const authorisation = await authoriseSettlement(orderId, transactionId);
+    if (authorisation?.disputed) {
+      await markObligationDisputed(orderId, authorisation.reason);
+      return false;
+    }
 
     for (let attempt = 1; attempt <= SETTLEMENT_ATTEMPTS; attempt += 1) {
       status.settlementAttempts = attempt;
@@ -291,9 +305,9 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
       // `DISPUTED -> RECEIPT_CONFIRMED` — erasing the dispute.
       if ((await markSettling(orderId)) !== 'SETTLING') return false;
 
-      let settlement: SettledResult;
+      let settled: SettledResult | DisputedObligation;
       try {
-        settlement = await settle(orderId, transactionId);
+        settled = await settle(orderId, transactionId);
       } catch (error) {
         await markSettlementFailed(orderId);
         if (attempt === SETTLEMENT_ATTEMPTS) {
@@ -314,6 +328,16 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         await sleep(`${attempt * 30} seconds`);
         continue;
       }
+
+      if ('disputed' in settled) {
+        // Disputed in economic-service since it was authorised (D-053). No
+        // attempt can settle it until an operator decides: this one ends, and
+        // the order takes the dispute instead of the next attempt.
+        await markSettlementFailed(orderId);
+        await markObligationDisputed(orderId, settled.reason);
+        return false;
+      }
+      const settlement = settled;
 
       // The money has moved. Recording it is not part of the settlement and
       // cannot fail it: it shared a `catch` with `settle()` once, and a local

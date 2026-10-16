@@ -106,6 +106,16 @@ class FakeOrder {
     this.disputes += 1;
     this.dispute = { id: `DSP_${this.disputes}`, reason, resolution: null };
   }
+  /** `markObligationDisputed`: the saga files economic-service's dispute. */
+  fileObligationDispute(reason: string): Status {
+    const before = this.status;
+    const status = this.step('DISPUTED', ['RECEIPT_CONFIRMED'], ['CANCELLING']);
+    if (before !== 'DISPUTED' && status === 'DISPUTED') {
+      this.disputes += 1;
+      this.dispute = { id: `DSP_${this.disputes}`, reason, resolution: null };
+    }
+    return status;
+  }
   resolveDispute(outcome: 'SETTLE' | 'REFUND', resolution: string): void {
     this.move(['DISPUTED'], outcome === 'SETTLE' ? 'RECEIPT_CONFIRMED' : 'CANCELLING');
     if (this.dispute) this.dispute.resolution = resolution;
@@ -150,6 +160,9 @@ function recordingActivities(order: FakeOrder, overrides: Partial<OrderActivitie
     })),
     markSettlementFailed: recorded('markSettlementFailed', () =>
       order.step('RECEIPT_CONFIRMED', ['SETTLING']),
+    ),
+    markObligationDisputed: recorded('markObligationDisputed', (_id: string, reason: string) =>
+      order.fileObligationDispute(reason),
     ),
     markCompleted: recorded('markCompleted', () => order.step('COMPLETED', ['SETTLING'])),
     compensate: recorded('compensate', () => undefined),
@@ -452,6 +465,101 @@ describe('the order saga', () => {
     // And the resolution is mirrored back, or economic-service would still
     // refuse to settle a transaction it believes is disputed.
     expect(calls.indexOf('resolveObligationDispute')).toBeLessThan(calls.indexOf('settle'));
+  });
+
+  describe('an obligation disputed in economic-service after the saga authorised it (D-053; Codex on #287 round 4, finding 2)', () => {
+    const OBJECTION = 'the payer counted two pallets short on arrival';
+
+    it('authorisation answers the dispute: the order takes it, the saga mirrors it, waits, and settles on SETTLE', async () => {
+      // The activity's answer when its retry, past the TTL, finds its own
+      // authorisation DISPUTED. It used to fail its three attempts, and the
+      // workflow ended before any dispute handling with the funds held.
+      const order = new FakeOrder();
+      let authorisations = 0;
+      const { calls, effects, activities } = recordingActivities(order, {});
+      const authorise = activities.authoriseSettlement;
+      activities.authoriseSettlement = async (...args) => {
+        await authorise(...args);
+        authorisations += 1;
+        return authorisations === 1 ? { disputed: true, reason: OBJECTION } : undefined;
+      };
+
+      const result = await run(
+        order,
+        activities,
+        async ({ party, held }) => {
+          await held();
+          await party.confirm();
+          await party.fulfil();
+          await party.confirmReceipt();
+          await until(() => calls.includes('disputeObligation'), 'the dispute to be mirrored');
+          expect(order.status).toBe('DISPUTED');
+          expect(order.dispute).toMatchObject({ reason: OBJECTION });
+          // Nothing settles while it waits for an operator.
+          await env.sleep('30 days');
+          expect(calls).not.toContain('settle');
+          await party.resolve('SETTLE', 'the supplier showed a signed delivery note');
+        },
+        { input: NO_RECHECK },
+      );
+
+      expect(result).toBe('COMPLETED');
+      expect(effects()).toEqual([
+        'createObligation',
+        'markFundsHeld',
+        'authoriseSettlement',
+        'markObligationDisputed',
+        'disputeObligation',
+        'resolveObligationDispute',
+        'authoriseSettlement',
+        'markSettling',
+        'settle',
+        'markCompleted',
+      ]);
+    });
+
+    it('settlement answers the dispute: that attempt ends, the order takes it, REFUND refunds', async () => {
+      const order = new FakeOrder();
+      let settlements = 0;
+      const { calls, effects, activities } = recordingActivities(order);
+      const settle = activities.settle;
+      activities.settle = async (...args) => {
+        const settled = await settle(...args);
+        settlements += 1;
+        return settlements === 1 ? { disputed: true, reason: OBJECTION } : settled;
+      };
+
+      const result = await run(
+        order,
+        activities,
+        async ({ party, held }) => {
+          await held();
+          await party.confirm();
+          await party.fulfil();
+          await party.confirmReceipt();
+          await until(() => calls.includes('disputeObligation'), 'the dispute to be mirrored');
+          await party.resolve('REFUND', 'the supplier could not show a delivery');
+        },
+        { input: NO_RECHECK },
+      );
+
+      expect(result).toBe('CANCELLED');
+      expect(effects()).toEqual([
+        'createObligation',
+        'markFundsHeld',
+        'authoriseSettlement',
+        'markSettling',
+        'settle',
+        'markSettlementFailed',
+        'markObligationDisputed',
+        'disputeObligation',
+        'resolveObligationDispute',
+        'compensate',
+        'markCancelled',
+      ]);
+      // One settlement call: the dispute was not retried as a failed attempt.
+      expect(settlements).toBe(1);
+    });
   });
 
   it('refunds when a dispute is resolved against the supplier', async () => {

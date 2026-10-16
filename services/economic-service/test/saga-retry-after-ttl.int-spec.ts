@@ -158,4 +158,68 @@ describe('a saga command retried after its stored answer expired', () => {
     );
     expect(settlements).toBe(1);
   });
+
+  describe('authorised by the saga, then disputed here (Codex on #287 round 4, finding 2)', () => {
+    /** A dispute registered by the payer's administrator, not by the saga. */
+    const disputeAsPayer = async (transactionId: string, reason: string) =>
+      request(http)
+        .post(`/v1/transactions/${transactionId}/dispute`)
+        .set('authorization', `Bearer ${admin(payer)}`)
+        .set('idempotency-key', id('ttl-dispute'))
+        .send({ reason })
+        .expect(200);
+
+    it('refused after expiry, and the payer reads DISPUTED with the saga’s own authorisation', async () => {
+      const order = id('ORD');
+      const held = await holdFor(order);
+      expect((await authorise(order, held.id)).status).toBe(200);
+      await disputeAsPayer(held.id, 'the delivery was two pallets short');
+
+      await expireAnswers();
+      const retried = await authorise(order, held.id);
+      expect(retried.status).toBe(409);
+      expect(retried.body.code).toBe('INVALID_STATE_TRANSITION');
+
+      // DISPUTED alone proves nothing; the record of the command does: the
+      // saga's signed service and the key only this order's authorisation sends.
+      const read = await readAsPayer(held.id);
+      expect(read).toMatchObject({
+        id: held.id,
+        sourceReference: order,
+        status: 'DISPUTED',
+        disputeReason: 'the delivery was two pallets short',
+        settlementAuthorisation: {
+          service: 'marketplace-service',
+          idempotencyKey: `order:${order}:authorise`,
+        },
+      });
+      expect(Date.parse(read.settlementAuthorisation.authorisedAt)).not.toBeNaN();
+    });
+
+    it('a dispute from HELD carries no authorisation at all', async () => {
+      const order = id('ORD');
+      const held = await holdFor(order);
+      await disputeAsPayer(held.id, 'the goods never left the warehouse');
+
+      const read = await readAsPayer(held.id);
+      expect(read.status).toBe('DISPUTED');
+      expect(read.settlementAuthorisation).toBeNull();
+    });
+
+    it('a person’s authorisation names neither a service nor their key', async () => {
+      const order = id('ORD');
+      const held = await holdFor(order);
+      await request(http)
+        .post(`/v1/transactions/${held.id}/authorise-settlement`)
+        .set('authorization', `Bearer ${admin(payer)}`)
+        // The saga's key, sent by a person: still not the saga's command.
+        .set('idempotency-key', `order:${order}:authorise`)
+        .expect(200);
+      await disputeAsPayer(held.id, 'the invoice does not match the delivery');
+
+      const read = await readAsPayer(held.id);
+      expect(read.status).toBe('DISPUTED');
+      expect(read.settlementAuthorisation).toMatchObject({ service: null, idempotencyKey: null });
+    });
+  });
 });

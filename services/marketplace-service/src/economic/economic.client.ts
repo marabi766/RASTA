@@ -58,6 +58,18 @@ export interface TransactionDetailView extends TransactionView {
   /** The objection while DISPUTED; the resolution once resolved. */
   disputeReason: string | null;
   settlement: { id: string; journalId: string; settledAt: string } | null;
+  /**
+   * When it was authorised for settlement and, if a service did it, which
+   * service and under which `Idempotency-Key`. economic-service keeps this for
+   * good, unlike the command's stored answer: it is how the saga knows its own
+   * authorisation took effect on a transaction disputed since (D-053). Absent
+   * from an economic-service older than the field.
+   */
+  settlementAuthorisation?: {
+    authorisedAt: string;
+    service: string | null;
+    idempotencyKey: string | null;
+  } | null;
 }
 
 /**

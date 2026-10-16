@@ -242,10 +242,20 @@ export function toTransactionDetailView(
       amountMinor: bigint;
     } | null;
     settlement: { id: string; journalId: string; settledAt: Date } | null;
+    settlementAuthorisedAt: Date | null;
+    settlementAuthorisedService: string | null;
+    settlementAuthorisationKey: string | null;
   },
 ): TransactionDetailView {
   return {
     ...toTransactionView(row),
+    settlementAuthorisation: row.settlementAuthorisedAt
+      ? {
+          authorisedAt: row.settlementAuthorisedAt.toISOString(),
+          service: row.settlementAuthorisedService,
+          idempotencyKey: row.settlementAuthorisationKey,
+        }
+      : null,
     legs: row.legs.map((leg) => ({
       role: leg.role,
       organizationId: leg.organizationId,

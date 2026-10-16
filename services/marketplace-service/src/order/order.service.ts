@@ -12,7 +12,7 @@ import {
   type OrderParties,
 } from '../access/access';
 import { ENV } from '../tokens';
-import { SERVICE_NAME, type MarketplaceEnv } from '../config/env';
+import { ECONOMIC_SERVICE, SERVICE_NAME, type MarketplaceEnv } from '../config/env';
 import {
   disputesRaisedTotal,
   orderRefusalsTotal,
@@ -852,6 +852,72 @@ export class OrderService {
           aggregateId: order.id,
           organizationId: order.organizationId,
           payload: { ...this.partiesOf(order), failedAt: new Date().toISOString() },
+        });
+      },
+    });
+  }
+
+  /**
+   * economic-service has the obligation DISPUTED, and the saga authorised it
+   * first: the order is disputed too, with the objection economic-service
+   * holds (D-053; Codex on #287 round 4, finding 2).
+   *
+   * Someone with authority over the transaction disputed it there rather than
+   * here, after the saga's authorisation committed. Settlement is refused for
+   * as long as the dispute stands, so trying it only spends the saga's
+   * attempts and ends it with the funds held. As the order's own dispute,
+   * it takes the path every dispute takes: the saga mirrors it (economic
+   * already holds it, with these words), waits, and mirrors an operator's
+   * decision back — `SETTLE` settles, `REFUND` refunds.
+   *
+   * **From `RECEIPT_CONFIRMED` only**, the state the saga authorises and
+   * returns a failed settlement attempt to. An order a party disputed here
+   * meanwhile is already `DISPUTED`, and keeps that dispute; one whose dispute
+   * an operator has since resolved as a refund is `CANCELLING`, and the step
+   * yields to it — the saga refunds.
+   */
+  async markObligationDisputed(
+    orderId: string,
+    reason: string,
+    saga: SagaStep,
+  ): Promise<OrderStatus> {
+    return this.systemTransition(orderId, 'DISPUTED', saga, {
+      activity: 'markObligationDisputed',
+      from: ['RECEIPT_CONFIRMED'],
+      yieldTo: ['CANCELLING'],
+      reason: 'The obligation was disputed in economic-service',
+      apply: async (tx, order) => {
+        const disputeId = newId(ID_PREFIX.dispute);
+        await runUnscoped('the saga files the dispute economic-service holds on the order', () =>
+          tx.orderDispute.create({
+            data: {
+              id: disputeId,
+              organizationId: order.organizationId,
+              orderId: order.id,
+              reason,
+              status: 'OPEN',
+              // Raised there, by whoever economic-service recorded.
+              raisedBy: ECONOMIC_SERVICE,
+            },
+          }),
+        );
+        await runUnscoped(
+          'the saga records the dispute on an order on behalf of neither party',
+          () => tx.order.update({ where: { id: order.id }, data: { status: 'DISPUTED' } }),
+        );
+        await this.events.enqueue(tx, {
+          eventName: MARKETPLACE_EVENTS.ORDER_DISPUTED,
+          aggregateId: order.id,
+          organizationId: order.organizationId,
+          payload: {
+            orderId: order.id,
+            disputeId,
+            buyerOrganizationId: order.organizationId,
+            supplierOrganizationId: order.supplierOrganizationId,
+            reason,
+            raisedBy: ECONOMIC_SERVICE,
+            raisedAt: new Date().toISOString(),
+          },
         });
       },
     });

@@ -335,6 +335,7 @@ export type SagaActivity =
   | 'markSettling'
   | 'settle'
   | 'markSettlementFailed'
+  | 'markObligationDisputed'
   | 'markCompleted'
   | 'compensate'
   | 'disputeObligation'

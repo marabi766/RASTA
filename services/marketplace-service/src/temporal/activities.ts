@@ -10,7 +10,11 @@ import { ulid } from 'ulid';
 import type { OrderService } from '../order/order.service';
 import type { SagaActivity, SagaStep } from '../order/order.repository';
 import type { OrderStatus } from '../generated/prisma';
-import type { EconomicClient, TransactionDetailView } from '../economic/economic.client';
+import {
+  idempotencyKeyFor,
+  type EconomicClient,
+  type TransactionDetailView,
+} from '../economic/economic.client';
 import { SERVICE_NAME } from '../config/env';
 import { settlementsExhaustedTotal } from '../observability/metrics';
 
@@ -90,6 +94,22 @@ export interface SettledResult {
   netAmountMinor: string;
 }
 
+/**
+ * The saga authorised the obligation and economic-service has it DISPUTED
+ * since — by someone who disputed it there, not through this service. It
+ * cannot settle until that dispute is decided, so the saga takes it to the
+ * order's dispute (`markObligationDisputed`) instead of failing settlement
+ * attempts against it (D-053).
+ */
+export interface DisputedObligation {
+  disputed: true;
+  /** The objection as economic-service has it: what the order's dispute says. */
+  reason: string;
+}
+
+/** What `authoriseSettlement` answers. Undefined: authorised. */
+export type AuthorisationResult = DisputedObligation | undefined;
+
 export function createActivities(deps: ActivityDependencies) {
   const logger = new Logger('OrderSagaActivities');
 
@@ -133,9 +153,11 @@ export function createActivities(deps: ActivityDependencies) {
    * — or lost it after committing — and the first attempt's effect is exactly
    * the state that refuses it. So the order's own obligation is read, as its
    * payer; if it shows this command's effect, that is the answer, recorded
-   * like any other. Anything else — another refusal, a transaction that is
-   * not this order's, a state the command does not produce — stays the
-   * refusal it was.
+   * like any other. For authorisation and settlement, so is a dispute on a
+   * transaction economic-service records this order's saga as having
+   * authorised (`disputedSinceAuthorised`): the saga takes it to the order's
+   * dispute. Anything else — another refusal, a transaction that is not this
+   * order's, a state the command does not produce — stays the refusal it was.
    */
   async function economicStep<T>(
     orderId: string,
@@ -236,8 +258,16 @@ export function createActivities(deps: ActivityDependencies) {
       return asSystemFor(orderId, () => deps.orders.markFailed(orderId, reason, step));
     },
 
-    async authoriseSettlement(orderId: string, transactionId: string): Promise<void> {
-      await economicStep(
+    /**
+     * Authorises settlement. Undefined once authorised; a
+     * {@link DisputedObligation} when a retry finds its own authorisation
+     * disputed since in economic-service.
+     */
+    async authoriseSettlement(
+      orderId: string,
+      transactionId: string,
+    ): Promise<AuthorisationResult> {
+      return economicStep<AuthorisationResult>(
         orderId,
         'authoriseSettlement',
         async (order) => {
@@ -247,15 +277,22 @@ export function createActivities(deps: ActivityDependencies) {
             buyerOrganizationId: order.buyerOrganizationId,
             correlationId: order.correlationId,
           });
+          return undefined;
         },
         {
           transactionId,
-          // Authorised, or authorised and since settled. Not DISPUTED or
-          // REFUNDED: both are reachable from HELD without an authorisation.
-          answer: (transaction) =>
-            transaction.status === 'PENDING_SETTLEMENT' || transaction.status === 'SETTLED'
-              ? { result: undefined }
-              : null,
+          // Authorised, or authorised and since settled. REFUNDED never: it is
+          // reachable from HELD without an authorisation. DISPUTED is too, so
+          // the state alone proves nothing there — only economic-service's
+          // record that this order's own command authorised it (Codex on #287
+          // round 4, finding 2). With it, the dispute is the answer.
+          answer: (transaction) => {
+            if (transaction.status === 'PENDING_SETTLEMENT' || transaction.status === 'SETTLED') {
+              return { result: undefined };
+            }
+            const disputed = disputedSinceAuthorised(transaction, orderId);
+            return disputed ? { result: disputed } : null;
+          },
         },
       );
     },
@@ -265,8 +302,16 @@ export function createActivities(deps: ActivityDependencies) {
       return asSystemFor(orderId, () => deps.orders.markSettling(orderId, step));
     },
 
-    async settle(orderId: string, transactionId: string): Promise<SettledResult> {
-      return economicStep(
+    /**
+     * Moves the money. A {@link DisputedObligation} instead when the
+     * authorised transaction was disputed in economic-service before it could
+     * settle: refused for its state, and every further attempt would be too.
+     */
+    async settle(
+      orderId: string,
+      transactionId: string,
+    ): Promise<SettledResult | DisputedObligation> {
+      return economicStep<SettledResult | DisputedObligation>(
         orderId,
         'settle',
         async (order) => {
@@ -287,18 +332,33 @@ export function createActivities(deps: ActivityDependencies) {
           // A transaction settles once (`settlement.transaction_id` is unique),
           // and the settlement writes its commission and net onto it: the same
           // three values its answer carried.
-          answer: (transaction) =>
-            transaction.status === 'SETTLED' && transaction.settlement
-              ? {
-                  result: {
-                    settlementId: transaction.settlement.id,
-                    commissionAmountMinor: transaction.commissionAmountMinor,
-                    netAmountMinor: transaction.netAmountMinor,
-                  },
-                }
-              : null,
+          answer: (transaction) => {
+            if (transaction.status === 'SETTLED' && transaction.settlement) {
+              return {
+                result: {
+                  settlementId: transaction.settlement.id,
+                  commissionAmountMinor: transaction.commissionAmountMinor,
+                  netAmountMinor: transaction.netAmountMinor,
+                },
+              };
+            }
+            // Not this command's effect, but the reason no attempt of it can
+            // succeed. The same proof as for authorisation: this order's own.
+            const disputed = disputedSinceAuthorised(transaction, orderId);
+            return disputed ? { result: disputed } : null;
+          },
         },
       );
+    },
+
+    /**
+     * Takes an order whose obligation economic-service has DISPUTED to the
+     * order's own dispute, where the saga mirrors it and waits for an
+     * operator (D-053). See `OrderService.markObligationDisputed`.
+     */
+    async markObligationDisputed(orderId: string, reason: string): Promise<OrderStatus> {
+      const step = currentStep();
+      return asSystemFor(orderId, () => deps.orders.markObligationDisputed(orderId, reason, step));
     },
 
     async markSettlementFailed(orderId: string): Promise<OrderStatus> {
@@ -472,6 +532,31 @@ function systemContext(organizationId: string | undefined, correlationId: string
  */
 function refusedForState(error: unknown): boolean {
   return isRastaError(error) && error.code === 'INVALID_STATE_TRANSITION';
+}
+
+/**
+ * The obligation is DISPUTED, and this order's saga authorised it first: a
+ * {@link DisputedObligation}, else null.
+ *
+ * DISPUTED by itself proves no authorisation — a dispute starts from HELD too.
+ * The proof is economic-service's own record of the command that authorised
+ * the transaction, kept for good: made by this service's signed token, under
+ * the key only this order's `authoriseSettlement` sends. A person who
+ * authorised, another service, another key, or a transaction authorised
+ * before economic-service kept the record — none of them is this saga's
+ * authorisation, and the refusal stands.
+ */
+function disputedSinceAuthorised(
+  transaction: TransactionDetailView,
+  orderId: string,
+): DisputedObligation | null {
+  const authorisation = transaction.settlementAuthorisation;
+  const ours =
+    authorisation?.service === SERVICE_NAME &&
+    authorisation.idempotencyKey === idempotencyKeyFor.authorise(orderId);
+  return transaction.status === 'DISPUTED' && ours && transaction.disputeReason
+    ? { disputed: true, reason: transaction.disputeReason }
+    : null;
 }
 
 function asTemporalFailure(error: unknown): Error {
