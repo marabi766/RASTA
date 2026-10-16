@@ -40,6 +40,9 @@ export interface StepInput {
   authorityOrganizationId: string;
   authorityRole: string;
   authorityLabel: string;
+  /** A statement chain step's bounds on the gross; null for a signing step. */
+  minAmountMinor: bigint | null;
+  maxAmountMinor: bigint | null;
 }
 
 const STEPS_IN_ORDER = {

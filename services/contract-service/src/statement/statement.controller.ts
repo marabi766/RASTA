@@ -6,14 +6,17 @@ import { IdempotencyStore, requiredIdempotencyKey } from '../shared/idempotency'
 import {
   draftStatementSchema,
   listStatementsQuerySchema,
+  submitStatementSchema,
   type DraftStatementDto,
   type ListStatementsQuery,
   type StatementView,
+  type SubmitStatementDto,
 } from './dto';
 import { StatementService } from './statement.service';
 
-/** The route template the idempotency store keys on: a closed set, never an id. */
+/** The route templates the idempotency store keys on: a closed set, never an id. */
 export const DRAFT_STATEMENT_ENDPOINT = 'POST /v1/contracts/{id}/statements';
+export const SUBMIT_STATEMENT_ENDPOINT = 'POST /v1/contracts/{id}/statements/{statementId}/submit';
 
 const PARTIES_NOTE =
   'Closed by default (S-02). Read by the same two parties as the contract: the employer’s ' +
@@ -32,15 +35,15 @@ const COMMAND_NOTE =
   'the platform administrator, the oversight role and a service token are refused. Only the ' +
   'winning contractor, with the CONTRACTOR role; the employer is 403 `AUTHOR_NOT_CONTRACTOR`. A ' +
   'refusal of a party for want of authority — and of the platform administrator acting for one — ' +
-  'is recorded (CONTRACT_AUTHORITY_REFUSED, action DRAFT_STATEMENT); when that record cannot be ' +
-  'written the answer is 503 and nothing was done. A contract of another organization, or one ' +
-  'that does not exist, is 404 — never 403. Refusals carry their closed reason in ' +
-  '`details[].code` (docs/06 § 6.7).';
+  'is recorded (CONTRACT_AUTHORITY_REFUSED, action DRAFT_STATEMENT or SUBMIT_STATEMENT); when that ' +
+  'record cannot be written the answer is 503 and nothing was done. A contract of another ' +
+  'organization, or one that does not exist, is 404 — never 403. Refusals carry their closed ' +
+  'reason in `details[].code` (docs/06 § 6.7).';
 
 /**
- * The statement API of a contract (ADR-068 § 5, CON-003 PR 4). HTTP ↔ DTO and nothing else
- * (AGENTS.md A-10); no handler names a role. A statement is drafted and read here; its submission
- * comes with the approval chains and their snapshot at submission (ADR-068 § 5, the next change).
+ * The statement API of a contract (ADR-068 § 5, CON-003 PR 4 and 5). HTTP ↔ DTO and nothing else
+ * (AGENTS.md A-10); no handler names a role. A statement is drafted, submitted — with the snapshot
+ * of both approval chains — and read here; the chains' decisions are the next change.
  */
 @ApiTags('statements')
 @Controller({ path: 'contracts/:id/statements', version: '1' })
@@ -92,10 +95,10 @@ export class StatementController {
       'and computes, once, the gross (the sum of the lines), each deduction (its configured rate ' +
       'of the gross, rounded half up) and the net (gross less deductions); none of these is taken ' +
       'from the request. Only on a SIGNED contract (422 `CONTRACT_NOT_SIGNED`); a deduction that is ' +
-      'not a rule the employer keeps in force is 422 `DEDUCTION_NOT_CONFIGURED` (Q-96 (6)); ' +
+      'not a rule the employer keeps in force is 422 `DEDUCTION_NOT_CONFIGURED` (Q-96 (6)); a line ' +
+      'against a milestone that is not one of this contract is 422 `MILESTONE_NOT_OF_CONTRACT`; ' +
       'deductions past the gross are 422 `STATEMENT_NET_NEGATIVE`, a gross past the largest bigint ' +
-      '422 `STATEMENT_EXCEEDS_LIMIT`. What a statement says never changes once drafted, and it ' +
-      'stays a DRAFT: submission opens with the approval chains (ADR-068 § 5). ' +
+      '422 `STATEMENT_EXCEEDS_LIMIT`. What a statement says never changes once drafted. ' +
       `STATEMENT_DRAFTED carries identifiers and instants only — no amount. ${COMMAND_NOTE}`,
   })
   async draft(
@@ -110,6 +113,54 @@ export class StatementController {
       { id, ...dto },
       201,
       (fence) => this.statements.draft(id, dto, fence),
+      (stored) => this.statements.assertContractVisible(stored.contractId),
+    );
+    return result;
+  }
+
+  @RequirePlatformUserId()
+  @Post(':statementId/submit')
+  @HttpCode(200)
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: true,
+    description: '8 to 255 characters. Scoped to the organization.',
+  })
+  @ApiOperation({
+    summary: 'Submit a draft statement for approval, contractor only',
+    description:
+      '`DRAFT → SUBMITTED`, with both approval chains snapshotted in the same transaction ' +
+      '(ADR-068 § 5): each is the policy the employer has in force for ' +
+      '`contract.statement.technical` and `contract.statement.financial`, reduced to the steps ' +
+      'that apply to the statement’s gross (a step’s minAmountMinor inclusive, maxAmountMinor ' +
+      'exclusive). A policy changed later never changes them. No policy in force is 422 ' +
+      '`TECHNICAL_POLICY_REQUIRED` / `FINANCIAL_POLICY_REQUIRED`, no step that applies 422 ' +
+      '`TECHNICAL_STEP_NOT_APPLICABLE` / `FINANCIAL_STEP_NOT_APPLICABLE`, a step that applies and ' +
+      'names the contractor’s own organization 422 `APPROVAL_STEP_NAMES_CONTRACTOR` — the platform ' +
+      'never approves by default. A union-written policy whose union organization-service no ' +
+      'longer places above the employer is 422 `POLICY_AUTHOR_NOT_GOVERNING` (503/504 when it ' +
+      'cannot answer: nothing is submitted); a policy put in force or retired at the same moment ' +
+      'is 409 CONFLICT (retry). Records who submitted it with their stable identity (the token’s ' +
+      'issuer and subject), which the approvals keep out of both chains (Q-96 (3)); a token without ' +
+      'one is 422 `ACTOR_IDENTITY_UNKNOWN`. The milestones its lines refer to are marked referenced ' +
+      'and can no longer be changed (Q-100 (4)). A statement that is not a draft is 422 ' +
+      '`STATEMENT_NOT_DRAFT`, a contract that is not signed 422 `CONTRACT_NOT_SIGNED`; ' +
+      '`expectedVersion` is optional. STATEMENT_SUBMITTED carries identifiers, versions and ' +
+      `instants only — no amount (Q-97 (2)). ${COMMAND_NOTE}`,
+  })
+  async submit(
+    @Param('id') id: string,
+    @Param('statementId') statementId: string,
+    @Body(zodPipe(submitStatementSchema)) dto: SubmitStatementDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ): Promise<StatementView> {
+    const key = requiredIdempotencyKey(idempotencyKey);
+    const { result } = await this.idempotency.execute<StatementView>(
+      SUBMIT_STATEMENT_ENDPOINT,
+      key,
+      { id, statementId, ...dto },
+      200,
+      (fence) => this.statements.submit(id, statementId, dto, fence),
       (stored) => this.statements.assertContractVisible(stored.contractId),
     );
     return result;
