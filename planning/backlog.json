@@ -2,7 +2,7 @@
   "$schema": "./backlog.schema.json",
   "version": 2,
   "project": "RASTA",
-  "asOf": "2026-10-15",
+  "asOf": "2026-10-16",
   "governance": {
     "baselineState": "APPROVED",
     "approvedBy": "Product Owner",
@@ -722,7 +722,7 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 13,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Policy registry and expiry events are operational",
         "A base claim has tenant-safe status history and documents without claiming insurer integration"
@@ -749,6 +749,16 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/240",
           "note": "Downstream consumer proving the registry is live and load-bearing: fleet dispatch now verifies in-force insurance at assignment time against this same registry. Merge commit 9ec2f17, merged 2026-10-14."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/304",
+          "note": "Second criterion, now MET: claim documents. Existing document-service ids are attached to a claim as references (insurance_claim_document), verified with document-service over authenticated REST signed for the asset owner (A-13), with one 404 for foreign, missing, deleted or other-asset documents (no existence oracle); only open claims (configurable statuses) and a configurable per-claim limit; idempotent re-attach without remote calls; DOCUMENT_DELETED consumed to mark a reference DOCUMENT_REMOVED without deleting history; claim reads return documents; documents stay with the attaching organization on asset transfer (Q-99 (a)). Reviewed by Codex in three rounds; merge commit 9e51a772, merged 2026-10-16, main CI 38866096623 green."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "https://github.com/marabi766/RASTA/pull/304",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-16, in the project-manager chat, on the criterion-by-criterion evidence recorded above (criterion 1: registry and expiry events, Codex review of PR #299 round 1; criterion 2: claim documents, PR #304, Codex rounds 1-3). The Product Owner also accepted the Q-128 temporary decisions as the answer. Limitation disclosed: if a document is deleted in the milliseconds between the document-service check and the attach commit, the reference can stay ATTACHED (Q-128)."
         }
       ]
     },
@@ -2336,6 +2346,14 @@
       "recordedBy": "Claude Opus 5.5",
       "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-15, relayed to PR #299 by the project manager at 19:55 UTC",
       "recordIds": ["RUN-006"]
+    },
+    {
+      "date": "2026-10-16",
+      "type": "ITEM_ACCEPTED",
+      "reason": "COM-010 (13 SP) moves from IN_PROGRESS to ACCEPTED. Criterion 1 was verified in the Codex review of PR #299 round 1; criterion 2 (claim documents) was delivered by PR #304 (merge 9e51a772, main CI 38866096623 green) and reviewed by Codex in three rounds. Its dependency COM-008 remains IN_PROGRESS; the Product Owner accepted COM-010 on its own criteria, with the Q-128 deletion-window limitation disclosed.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-16",
+      "recordIds": ["COM-010"]
     }
   ]
 }
