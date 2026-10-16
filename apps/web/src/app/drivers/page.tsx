@@ -2,7 +2,7 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, PageHeader, Section, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { canManageDrivers, fetchDrivers, type DriverListQuery } from '@/server/drivers';
-import { tokenRoles } from '@/server/realm-roles';
+import { tokenWriteRoles } from '@/server/realm-roles';
 import { mintSubmissionId } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { DriversScreen } from './DriversScreen';
@@ -39,10 +39,10 @@ export default async function DriversPage({
 }) {
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/drivers');
-  // What the forms are offered on: the access token's own roles (`tokenRoles`),
+  // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
   // the set the service decides on — not `/v1/users/me`, which runs ahead of the
   // token until it is refreshed.
-  const roles = tokenRoles(session.accessToken);
+  const roles = tokenWriteRoles(session.accessToken);
 
   const params = await searchParams;
   const query: DriverListQuery = {

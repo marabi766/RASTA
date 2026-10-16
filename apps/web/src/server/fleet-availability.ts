@@ -23,6 +23,7 @@ import { renderableDate } from './instant';
 import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
+import { rolesGuardAdmits } from './roles-guard';
 
 /**
  * A machine's availability, through the gateway (EXP-002, slice 7).
@@ -68,8 +69,8 @@ const AVAILABILITY_ROLES: readonly string[] = [
   'UNION_ADMIN',
 ];
 
-export const canManageAvailability = (effectiveRoles: readonly string[]): boolean =>
-  effectiveRoles.some((role) => AVAILABILITY_ROLES.includes(role));
+export const canManageAvailability = (roles: readonly string[]): boolean =>
+  rolesGuardAdmits(roles, AVAILABILITY_ROLES);
 
 // ---------------------------------------------------------------------------
 // Which asset, and which window, a form is for

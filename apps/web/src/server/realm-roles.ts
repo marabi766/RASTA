@@ -136,3 +136,16 @@ export function tokenAuthority(accessToken: string): TokenAuthority | null {
 export function tokenRoles(accessToken: string): readonly string[] | null {
   return tokenAuthority(accessToken)?.roles ?? null;
 }
+
+/**
+ * The roles a write form is offered on: {@link tokenRoles}, but only for a
+ * token that resolves to an organization. Every write the portal sends is
+ * tenant-scoped — the service acts for the request's organization
+ * (`getOrganizationId`) and cannot act for none — so a token with no `org_id`,
+ * a platform administrator's included, is offered no write form; the role rule
+ * itself is `rolesGuardAdmits`.
+ */
+export function tokenWriteRoles(accessToken: string): readonly string[] | null {
+  const authority = tokenAuthority(accessToken);
+  return authority?.organizationId ? authority.roles : null;
+}

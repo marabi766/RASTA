@@ -11,6 +11,7 @@ import {
 
 import type { WebSession } from './session';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
+import { rolesGuardAdmits } from './roles-guard';
 
 /**
  * Placing an order, through the gateway: `POST /v1/orders`.
@@ -51,8 +52,8 @@ const PLACING_ROLES: readonly string[] = [
   'PROCUREMENT_USER',
 ];
 
-export function canPlaceOrder(effectiveRoles: readonly string[]): boolean {
-  return effectiveRoles.some((role) => PLACING_ROLES.includes(role));
+export function canPlaceOrder(roles: readonly string[]): boolean {
+  return rolesGuardAdmits(roles, PLACING_ROLES);
 }
 
 export function placeOrderFormValues(form: FormData): PlaceOrderFormValues {

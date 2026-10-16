@@ -9,7 +9,12 @@ import { verifyReplayStamp } from '@/server/dispute-replay';
 import { mintFlash } from '@/server/flash';
 import { FLASH_PARAM, REPLAY_FIELD } from '@/lib/form-fields';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
-import { disputeFormValues, issueDisputeCommand, parseDisputeCommand } from '@/server/transactions';
+import {
+  boundDisputeRequest,
+  disputeFormValues,
+  issueDisputeCommand,
+  parseDisputeCommand,
+} from '@/server/transactions';
 
 import { pastReplayDeadline, withRetryNote, type DisputeFormState } from './form-state';
 
@@ -88,8 +93,14 @@ async function attempt(transactionId: string, form: FormData): Promise<DisputeFo
     };
   }
 
-  const { command } = parsed.request;
-  const result = await issueDisputeCommand(session, transactionId, parsed.request, submissionId);
+  // A resolution names the dispute the page showed, from the stamp just
+  // verified — the same on every send under this key (PR 325 review 1,
+  // finding 1). A stamp that names none cannot carry a resolution.
+  const request = boundDisputeRequest(parsed.request, replay.disputeId);
+  if (!request) return { kind: 'REFUSED', reason: 'COMMAND' };
+
+  const { command } = request;
+  const result = await issueDisputeCommand(session, transactionId, request, submissionId);
 
   switch (result.kind) {
     case 'CREATED':
@@ -126,8 +137,9 @@ async function attempt(transactionId: string, form: FormData): Promise<DisputeFo
         command,
         correlationId: result.correlationId,
         submissionId,
-        values: { ...EMPTY_DISPUTE_FORM, [field]: parsed.request.body[field] ?? '' },
-        replay,
+        values: { ...EMPTY_DISPUTE_FORM, [field]: request.body[field] ?? '' },
+        // The stamp as the browser keeps it; the dispute it names stays inside it.
+        replay: { token: replay.token, until: replay.until },
       };
     }
   }

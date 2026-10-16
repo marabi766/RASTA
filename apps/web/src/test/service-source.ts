@@ -98,3 +98,13 @@ export function rolesOf(controller: ts.SourceFile, method: string): string[] {
     return argument.text;
   });
 }
+
+/**
+ * `RolesGuard`'s answer for a person holding only `role`, on a route whose
+ * `@Roles` lists `admitted`: the administrator (`SUPER_ROLE`) passes every
+ * route that names roles; every other role, the oversight role included, only
+ * where it is listed. The rule `server/roles-guard.ts` mirrors, pinned to the
+ * guard's source by `roles-guard.spec.ts`.
+ */
+export const guardAdmitsAlone = (role: string, admitted: readonly string[]): boolean =>
+  role === 'SYSTEM_ADMIN' || admitted.includes(role);

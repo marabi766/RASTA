@@ -472,3 +472,140 @@ describe('the replay deadline, decided here (PR 319 review 2, finding 2)', () =>
     });
   });
 });
+
+/**
+ * PR 325 review 1, finding 1: a resolution names the dispute its form was drawn
+ * for, from the stamp the page signed — so a decision about dispute A can never
+ * clear dispute B, opened after A was resolved elsewhere. economic-service is
+ * played by its own rule (`transaction.service.ts`, `move`): a resolution that
+ * names a dispute the transaction no longer holds is `409
+ * INVALID_STATE_TRANSITION`, under the row lock.
+ */
+describe('a resolution names the dispute its form was drawn for', () => {
+  const RESOLUTION = 'بررسی شد؛ تحویل با تأخیر انجام شده بود';
+  const RESOLVE = { command: 'RESOLVE_DISPUTE', resolution: RESOLUTION };
+  const actual = jest.requireActual(
+    '@/server/transactions',
+  ) as typeof import('@/server/transactions');
+
+  /** economic-service holding `held`: what it answers a resolution, and every body it was sent. */
+  function economicHolding(held: string) {
+    const bodies: unknown[] = [];
+    const fetchImpl = jest.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { disputeId?: string };
+      bodies.push(body);
+      // Only a resolution that names a dispute is checked (`heldDispute`);
+      // one that names none resolves whichever is held — the defect.
+      if (body.disputeId !== undefined && body.disputeId !== held) {
+        return new Response(
+          JSON.stringify({
+            code: 'INVALID_STATE_TRANSITION',
+            message: 'The transaction no longer holds the dispute this decision is about',
+            correlationId: 'corr-stale',
+          }),
+          { status: 409, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify({ id: TXN, status: 'PENDING_SETTLEMENT' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    issueDisputeCommand.mockImplementation(
+      (session: WebSession, transactionId: string, request: never, key: string) =>
+        actual.issueDisputeCommand(session, transactionId, request, key, fetchImpl),
+    );
+    return bodies;
+  }
+
+  /** The form as the page drew it while the transaction held `disputeId`. */
+  function resolutionForm(disputeId: string | null, extra: Record<string, string> = {}) {
+    const submission = mintSubmissionId(SESSION);
+    const stamp = mintReplayStamp(SESSION, { transactionId: TXN, disputeId }, submission);
+    return {
+      submission,
+      stamp,
+      form: formData({ ...RESOLVE, ...extra }, { submission, replay: stamp.token }),
+    };
+  }
+
+  it('sends the dispute from the signed stamp — a disputeId posted in the form is ignored', async () => {
+    const bodies = economicHolding('TXD_A');
+    const { form } = resolutionForm('TXD_A', { disputeId: 'TXD_B' });
+    await expect(submitDisputeCommand(TXN, IDLE_DISPUTE_FORM, form)).rejects.toThrow(
+      'NEXT_REDIRECT',
+    );
+    expect(bodies).toEqual([{ resolution: RESOLUTION, disputeId: 'TXD_A' }]);
+  });
+
+  it('A → resolved elsewhere → B opened: the stale form is refused with the fixed text, B untouched', async () => {
+    // Drawn while A was held; by the time it is sent, A was resolved and the
+    // payer opened B. The key was never used, so economic runs it — and refuses.
+    const bodies = economicHolding('TXD_B');
+    const { form, submission } = resolutionForm('TXD_A');
+    expect(await submitDisputeCommand(TXN, IDLE_DISPUTE_FORM, form)).toEqual({
+      kind: 'INVALID',
+      command: 'RESOLVE_DISPUTE',
+      submissionId: submission,
+      values: { ...EMPTY_DISPUTE_FORM, resolution: RESOLUTION },
+      fieldErrors: {},
+      message:
+        'وضعیت کنونی این تراکنش اجازهٔ این اقدام را نمی‌دهد؛ ممکن است در این فاصله تغییر کرده باشد. صفحه را تازه کنید و وضعیت را ببینید.',
+    });
+    expect(bodies).toEqual([{ resolution: RESOLUTION, disputeId: 'TXD_A' }]);
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it('the retry path keeps A’s identity: same key, same body, never the dispute held now', async () => {
+    const bodies = economicHolding('TXD_B');
+    const { form, submission, stamp } = resolutionForm('TXD_A');
+    // The first send's answer was lost.
+    issueDisputeCommand.mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-1' });
+    const first = await submitDisputeCommand(TXN, IDLE_DISPUTE_FORM, form);
+    expect(first).toEqual({
+      kind: 'UNCONFIRMED',
+      command: 'RESOLVE_DISPUTE',
+      correlationId: 'corr-1',
+      submissionId: submission,
+      values: { ...EMPTY_DISPUTE_FORM, resolution: RESOLUTION },
+      replay: { token: stamp.token, until: stamp.until },
+    });
+    if (first.kind !== 'UNCONFIRMED' || !first.replay) throw new Error('expected UNCONFIRMED');
+
+    // The retry, as the browser sends it from what it kept: the same stamp.
+    const retry = formData(RESOLVE, { submission, replay: first.replay.token });
+    expect(await submitDisputeCommand(TXN, first, retry)).toEqual({
+      ...first,
+      retryRefused: true,
+    });
+    expect(bodies).toEqual([{ resolution: RESOLUTION, disputeId: 'TXD_A' }]);
+    expect(issueDisputeCommand).toHaveBeenLastCalledWith(
+      SESSION,
+      TXN,
+      { command: 'RESOLVE_DISPUTE', body: { resolution: RESOLUTION, disputeId: 'TXD_A' } },
+      submission,
+    );
+  });
+
+  it('a stamp that names no dispute cannot carry a resolution: refused, nothing sent', async () => {
+    const bodies = economicHolding('TXD_A');
+    const { form } = resolutionForm(null);
+    expect(await submitDisputeCommand(TXN, IDLE_DISPUTE_FORM, form)).toEqual({
+      kind: 'REFUSED',
+      reason: 'COMMAND',
+    });
+    expect(bodies).toEqual([]);
+  });
+
+  it('opening a dispute names none, whatever the form posts', async () => {
+    const bodies = economicHolding('unused');
+    issueDisputeCommand.mockImplementationOnce(async (...args: unknown[]) => {
+      bodies.push((args[2] as { body: unknown }).body);
+      return { kind: 'CREATED', data: { id: TXN, status: 'DISPUTED' }, correlationId: 'c' };
+    });
+    await expect(
+      submitDisputeCommand(TXN, IDLE_DISPUTE_FORM, formData({ ...GOOD, disputeId: 'TXD_X' })),
+    ).rejects.toThrow('NEXT_REDIRECT');
+    expect(bodies).toEqual([{ reason: REASON }]);
+  });
+});

@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
-import { tokenRoles } from '@/server/realm-roles';
+import { tokenWriteRoles } from '@/server/realm-roles';
 import { canPlaceOrder } from '@/server/place-order';
 import { webServerEnv } from '@/server/env';
 import { mintSubmissionId, submissionBinding } from '@/server/submission';
@@ -49,10 +49,10 @@ export default async function ProductOffersPage({
   ]);
 
   // A Route Guard as UX, not as security: offered on the access token's own
-  // roles (`tokenRoles`), the set marketplace-service decides on — not
+  // roles (`tokenWriteRoles`), the set marketplace-service decides on — not
   // `/v1/users/me`, which runs ahead of the token until it is refreshed. A token
   // whose roles cannot be read shows no form, and the service decides again.
-  const roles = tokenRoles(session.accessToken);
+  const roles = tokenWriteRoles(session.accessToken);
   const canOrder = roles !== null && canPlaceOrder(roles);
 
   return (

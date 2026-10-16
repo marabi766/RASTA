@@ -279,6 +279,56 @@ describe.each(SCREENS)('$name', ({ path, params, admitted, refused, offered }) =
   });
 });
 
+/**
+ * PR 325 review 1, finding 2: what a screen offers follows `RolesGuard` — the
+ * oversight role refused whatever else is held, the administrator admitted —
+ * and a write needs the organization it is for.
+ */
+describe.each(SCREENS)(
+  '$name — combined roles, as the guard decides',
+  ({ path, params, admitted, refused, offered }) => {
+    /** A session whose token carries these claims. */
+    const withClaims = (claims: Record<string, unknown>) => ({
+      ...signedInWith([]),
+      accessToken: jwt(claims),
+    });
+
+    it('an admitted role with AUDITOR in the same organization: not offered', async () => {
+      mockSession.current = signedInWith([admitted, 'AUDITOR']);
+      identityReports([admitted]);
+      expect(offered(await run(path, params))).toBe(false);
+    });
+
+    it('a scoped role the route does not list, with the global SYSTEM_ADMIN: offered', async () => {
+      mockSession.current = withClaims({
+        org_id: ORG,
+        org_ids: [ORG],
+        org_roles: [`${ORG}:${refused}`],
+        realm_access: { roles: ['SYSTEM_ADMIN'] },
+      });
+      identityReports([refused]);
+      expect(offered(await run(path, params))).toBe(true);
+    });
+
+    it('the global SYSTEM_ADMIN with AUDITOR in the organization: not offered', async () => {
+      mockSession.current = withClaims({
+        org_id: ORG,
+        org_ids: [ORG],
+        org_roles: [`${ORG}:AUDITOR`],
+        realm_access: { roles: ['SYSTEM_ADMIN'] },
+      });
+      identityReports([admitted]);
+      expect(offered(await run(path, params))).toBe(false);
+    });
+
+    it('the global SYSTEM_ADMIN alone, acting for no organization: not offered — the write is tenant-scoped', async () => {
+      mockSession.current = withClaims({ realm_access: { roles: ['SYSTEM_ADMIN'] } });
+      identityReports([admitted]);
+      expect(offered(await run(path, params))).toBe(false);
+    });
+  },
+);
+
 describe('/tenders — which doors are asked', () => {
   it('a CONTRACTOR role removed in identity but still in the token: the bidder’s door', async () => {
     mockSession.current = signedInWith(['CONTRACTOR']);

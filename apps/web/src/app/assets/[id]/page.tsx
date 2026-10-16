@@ -33,7 +33,7 @@ import {
   type AssetLifecycleCommand,
 } from '@/lib/asset-lifecycle-fields';
 import type { WebSession } from '@/server/session';
-import { tokenRoles } from '@/server/realm-roles';
+import { tokenWriteRoles } from '@/server/realm-roles';
 import { FLASH_PARAM } from '@/lib/form-fields';
 import { readFlash } from '@/server/flash';
 import { mintSubmissionId } from '@/server/submission';
@@ -119,10 +119,10 @@ export default async function AssetDossierPage({
 
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/assets/${id}`)}`);
-  // What the forms are offered on: the access token's own roles (`tokenRoles`),
+  // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
   // the set the service decides on — not `/v1/users/me`, which runs ahead of the
   // token until it is refreshed.
-  const roles = tokenRoles(session.accessToken);
+  const roles = tokenWriteRoles(session.accessToken);
 
   // The server's clock, taken once: every record's "in force" on this page is
   // judged against this instant, here and not in the browser.

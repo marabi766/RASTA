@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
-import { tokenRoles } from '@/server/realm-roles';
+import { tokenWriteRoles } from '@/server/realm-roles';
 import { fetchMaintenanceRequest, fetchRepairOrder } from '@/server/maintenance';
 import { canManageMaintenance, sealApprovalBaseline } from '@/server/maintenance-commands';
 import { isRepairOrderId, sealRepairOrderBaseline } from '@/server/repair-order-commands';
@@ -50,10 +50,10 @@ export default async function MaintenanceRequestPage({
 
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/maintenance/${id}`)}`);
-  // What the forms are offered on: the access token's own roles (`tokenRoles`),
+  // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
   // the set the service decides on — not `/v1/users/me`, which runs ahead of the
   // token until it is refreshed.
-  const roles = tokenRoles(session.accessToken);
+  const roles = tokenWriteRoles(session.accessToken);
 
   const result = await fetchMaintenanceRequest(session, id);
 
