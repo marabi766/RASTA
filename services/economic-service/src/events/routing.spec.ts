@@ -184,6 +184,8 @@ const PAYLOADS = {
     transactionId: TXN,
     organizationId: ORG,
     ruleId: 'CRL_1',
+    businessLine: 'PARTS',
+    outcome: 'RULE_APPLIED',
     rateBasisPoints: 250,
     grossAmountMinor: '1000',
     amountMinor: '25',
@@ -258,6 +260,7 @@ const PAYLOADS = {
     before: null,
     after: {
       organizationId: null,
+      businessLine: 'PARTS',
       transactionType: 'MARKETPLACE_ORDER',
       rateBasisPoints: 250,
       minAmountMinor: null,
