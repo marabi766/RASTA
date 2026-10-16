@@ -2,3 +2,5 @@
 41d8ae23979eba6f82104ed45d323d07c58fd5d0:apps/web/src/app/marketplace/[productId]/place-order-recovery.spec.tsx:generic-api-key:62
 # #241: fake canary password in a tests/e2e URL-userinfo test, not a secret (PM-verified). The final tree no longer flags.
 487919cecfe0ebaaaa058592632d5bec69011756:tests/e2e/src/target-guard.test.ts:generic-api-key:158
+# #319: sessionStorage entry name in a test (rasta.unresolved-dispute.TXN_1), not a secret (PM-verified).
+c0fbaeffb79669ddb501daac6e4015a306527fb3:apps/web/src/app/transactions/dispute-retry.spec.tsx:generic-api-key:41
