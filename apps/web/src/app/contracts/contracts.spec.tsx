@@ -256,6 +256,33 @@ describe('the contract detail', () => {
     ).toBeInTheDocument();
   });
 
+  it('links to the next page of amendments, under the contract, when the service says there is more', () => {
+    render(
+      <ContractDetailScreen
+        result={{ kind: 'OK', data: DETAIL }}
+        amendments={amendmentPage([AMENDMENT], 'a2')}
+        milestones={milestonePage([MILESTONE])}
+      />,
+    );
+
+    expect(screen.getByRole('link', { name: 'صفحهٔ بعدِ الحاقیه‌ها' })).toHaveAttribute(
+      'href',
+      '/contracts/CNT_1?amendmentCursor=a2',
+    );
+  });
+
+  it('shows no amendments pagination link when the service says there is no more', () => {
+    render(
+      <ContractDetailScreen
+        result={{ kind: 'OK', data: DETAIL }}
+        amendments={amendmentPage([AMENDMENT])}
+        milestones={milestonePage([MILESTONE])}
+      />,
+    );
+
+    expect(screen.queryByRole('link', { name: 'صفحهٔ بعدِ الحاقیه‌ها' })).not.toBeInTheDocument();
+  });
+
   it('keeps the contract when only the amendments or only the milestones could not be read', () => {
     render(
       <ContractDetailScreen
@@ -309,6 +336,12 @@ describe('the contract detail', () => {
       'with amendments and milestones',
       { kind: 'OK', data: DETAIL },
       amendmentPage([AMENDMENT]),
+      milestonePage([MILESTONE]),
+    ],
+    [
+      'with an amendments pagination link',
+      { kind: 'OK', data: DETAIL },
+      amendmentPage([AMENDMENT], 'a2'),
       milestonePage([MILESTONE]),
     ],
     [
@@ -445,6 +478,19 @@ describe('a malformed timestamp, from the response to the page', () => {
     expect(container.textContent).not.toContain(UPSTREAM);
   });
 
+  it('forwards a given amendment cursor to the gateway', async () => {
+    mockCallGateway.mockResolvedValue({
+      data: { items: [AMENDMENT], nextCursor: null, hasMore: false },
+      correlationId: 'corr-cursor',
+    });
+
+    await fetchAmendments(session, 'CNT_1', 'a2');
+
+    expect(mockCallGateway).toHaveBeenCalledWith(
+      expect.objectContaining({ path: '/v1/contracts/CNT_1/amendments?limit=20&cursor=a2' }),
+    );
+  });
+
   it('still renders a well-formed record through the same path', async () => {
     mockCallGateway.mockResolvedValue({ data: wire, correlationId: 'corr-ok' });
     const result = await fetchContract(session, 'CNT_1');
@@ -452,4 +498,106 @@ describe('a malformed timestamp, from the response to the page', () => {
     render(<ContractDetailScreen result={result} amendments={null} milestones={null} />);
     expect(screen.getByText('شناسه')).toBeInTheDocument();
   });
+});
+
+/**
+ * Distinct from a bad timestamp (a present but invalid value): a required field the
+ * service contract marks non-optional (`contract/dto.ts`, `amendment/dto.ts`,
+ * `milestone/dto.ts`) that is simply missing from the response. None of these may default
+ * to `null`/`false` and quietly become a fact nobody signed or reviewed — omission must
+ * read as `MALFORMED`, same as an invalid value, never as `OK`.
+ */
+describe('a response missing a required field, not merely an invalid one', () => {
+  beforeEach(() => {
+    Object.assign(process.env, {
+      API_GATEWAY_URL: 'http://gateway.test:3000',
+      OIDC_ISSUER_URL: 'http://keycloak.test/realms/rasta',
+      OIDC_CLIENT_ID: 'rasta-web',
+      WEB_PUBLIC_ORIGIN: 'http://localhost:3200',
+      WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
+    });
+  });
+
+  afterEach(() => {
+    mockCallGateway.mockReset();
+  });
+
+  const session = {
+    subject: 'USR_1',
+    username: 'owner',
+    organizationId: 'ORG_EMPLOYER',
+    accessToken: 'access-token-value',
+    accessTokenExpiresAt: 2_000_000_000,
+    refreshToken: 'refresh-token-value',
+    csrfToken: 'csrf',
+    issuedAt: 1_900_000_000,
+  };
+
+  function omit<T extends object>(value: T, field: keyof T): unknown {
+    const copy: Partial<T> = { ...value };
+    delete copy[field];
+    return copy;
+  }
+
+  it.each<keyof ContractDetail>([
+    'employerSignedAt',
+    'contractorSignedAt',
+    'authorityReviewRequired',
+    'authorityReviewReason',
+    'cancelReasonCode',
+    'cancelNote',
+  ])('reads a contract missing %s as MALFORMED', async (field) => {
+    mockCallGateway.mockResolvedValue({
+      data: omit(DETAIL, field),
+      correlationId: 'corr-omit',
+    });
+
+    const result = await fetchContract(session, 'CNT_1');
+
+    expect(result.kind).toBe('MALFORMED');
+  });
+
+  it.each<keyof Amendment>([
+    'employerSignedAt',
+    'contractorSignedAt',
+    'authorityReviewRequired',
+    'effectiveAt',
+  ])('reads an amendment missing %s as MALFORMED', async (field) => {
+    mockCallGateway.mockResolvedValue({
+      data: { items: [omit(AMENDMENT, field)], nextCursor: null, hasMore: false },
+      correlationId: 'corr-omit',
+    });
+
+    const result = await fetchAmendments(session, 'CNT_1');
+
+    expect(result.kind).toBe('MALFORMED');
+  });
+
+  it.each<keyof Milestone>(['plannedShareBp', 'referenced'])(
+    'reads a milestone missing %s as MALFORMED',
+    async (field) => {
+      mockCallGateway.mockResolvedValue({
+        data: { items: [omit(MILESTONE, field)], nextCursor: null, hasMore: false },
+        correlationId: 'corr-omit',
+      });
+
+      const result = await fetchMilestones(session, 'CNT_1');
+
+      expect(result.kind).toBe('MALFORMED');
+    },
+  );
+
+  it.each(['nextCursor', 'hasMore'] as const)(
+    'reads a contract page missing %s as MALFORMED',
+    async (field) => {
+      mockCallGateway.mockResolvedValue({
+        data: omit({ items: [CONTRACT], nextCursor: null, hasMore: false }, field),
+        correlationId: 'corr-omit',
+      });
+
+      const result = await fetchContracts(session);
+
+      expect(result.kind).toBe('MALFORMED');
+    },
+  );
 });

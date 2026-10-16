@@ -1,6 +1,14 @@
 import type { ReactNode } from 'react';
 
-import { EmptyState, ErrorState, Identifier, NoAccessState, Section, StatusBadge } from '@/ui';
+import {
+  ButtonLink,
+  EmptyState,
+  ErrorState,
+  Identifier,
+  NoAccessState,
+  Section,
+  StatusBadge,
+} from '@/ui';
 import {
   IRR,
   formatJalaliDate,
@@ -94,8 +102,14 @@ function AmendmentRow({ amendment }: { amendment: Amendment }) {
   );
 }
 
-/** The amendments, read separately and able to fail on their own. */
-function AmendmentsSection({ result }: { result: ReadResult<AmendmentPage> }) {
+/** The amendments, read separately and able to fail on their own, paged by `amendmentCursor`. */
+function AmendmentsSection({
+  contractId,
+  result,
+}: {
+  contractId: string;
+  result: ReadResult<AmendmentPage>;
+}) {
   if (result.kind !== 'OK') {
     return (
       <Section headingId="contract-amendments" title="الحاقیه‌ها">
@@ -111,7 +125,7 @@ function AmendmentsSection({ result }: { result: ReadResult<AmendmentPage> }) {
     );
   }
 
-  const { items } = result.data;
+  const { items, nextCursor } = result.data;
 
   return (
     <Section headingId="contract-amendments" title="الحاقیه‌ها">
@@ -127,6 +141,17 @@ function AmendmentsSection({ result }: { result: ReadResult<AmendmentPage> }) {
           ))}
         </ul>
       )}
+
+      {nextCursor ? (
+        <div className="mt-4">
+          <ButtonLink
+            href={`/contracts/${encodeURIComponent(contractId)}?amendmentCursor=${encodeURIComponent(nextCursor)}`}
+            tone="secondary"
+          >
+            صفحهٔ بعدِ الحاقیه‌ها
+          </ButtonLink>
+        </div>
+      ) : null}
     </Section>
   );
 }
@@ -255,7 +280,7 @@ export function ContractDetailScreen({
         ) : null}
       </Section>
 
-      {amendments ? <AmendmentsSection result={amendments} /> : null}
+      {amendments ? <AmendmentsSection contractId={contract.id} result={amendments} /> : null}
       {milestones ? <MilestonesSection result={milestones} /> : null}
     </div>
   );

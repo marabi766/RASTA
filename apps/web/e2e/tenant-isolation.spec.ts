@@ -406,30 +406,40 @@ test.describe('tenant isolation through the live stack', () => {
    * `/tenders` and `/contracts` are **not** covered here — see the file-level
    * note after this block for why, and the PM-STATE this branch's PR carries.
    *
-   * **Not wired into CI yet, deliberately.** The "Portal in a browser" job
-   * (`.github/workflows/ci.yml`, `web-browser`) that sets `WEB_LIVE_STACK_E2E=true`
-   * starts exactly EXP-002's services — identity, fleet, organization, asset,
-   * maintenance, document, marketplace, economic, api-gateway. It does **not**
-   * start construction-service or inventory-service, so a plain
-   * `WEB_LIVE_STACK_E2E` gate here would make this block run there today and
-   * fail on the first write (`POST /v1/projects` / `POST /v1/warehouses`
-   * answered by a gateway with nothing behind that route). Adding two more
-   * stateful services (their own Postgres schema, migrations, Kafka topics and
-   * ACLs) to an already nine-service, 30-minute-timeout job is a CI
-   * infrastructure decision past what an `apps/web`-only read slice should
-   * make unilaterally — so this block carries its own extra gate,
-   * `WEB_LIVE_STACK_E2E_EXP004`, that nothing in this repository sets today.
-   * It runs locally for anyone who starts construction-service and
-   * inventory-service alongside the usual live-stack set and exports both
-   * variables; it is inert in CI until the PM decides the job should grow (or
-   * gets a sibling job of its own) and that variable is added next to the
-   * other one in the workflow.
+   * **Wired into the required "Portal in a browser" job.** It now starts
+   * construction-service and inventory-service too (`.github/workflows/ci.yml`,
+   * `web-browser`) and sets `WEB_LIVE_STACK_E2E_EXP004=true` alongside the
+   * usual `WEB_LIVE_STACK_E2E`, so this block runs for real in CI, not merely
+   * locally. The gate stays a second, separate variable (not folded into
+   * `WEB_LIVE_STACK_E2E`) because someone running the rest of this suite
+   * locally against the smaller EXP-002 set should not have to also start
+   * these two services.
+   *
+   * The guard below turns a would-be skip into a hard failure whenever `CI` is
+   * set: the job that is supposed to provide this coverage must never again go
+   * green while silently skipping it, which is exactly how it went unnoticed
+   * before (PR #305 review round 1, finding 3). Locally, without `CI` set,
+   * the plain `test.skip` still applies — nobody who has not started
+   * construction-service and inventory-service alongside the usual live
+   * stack is forced to.
    */
+  if (process.env.CI && process.env.WEB_LIVE_STACK_E2E_EXP004 !== 'true') {
+    test('WEB_LIVE_STACK_E2E_EXP004 must be set in the required "Portal in a browser" job', () => {
+      throw new Error(
+        'This CI job must start construction-service and inventory-service and set ' +
+          'WEB_LIVE_STACK_E2E_EXP004=true (.github/workflows/ci.yml, web-browser) — ' +
+          'otherwise the block below would be skipped and CI would go green with no ' +
+          'EXP-004 live-isolation evidence for /projects and /inventory (PR #305 review ' +
+          'round 1, finding 3).',
+      );
+    });
+  }
   test.describe('EXP-004 — projects and inventory, created live for this run', () => {
     test.skip(
       process.env.WEB_LIVE_STACK_E2E_EXP004 !== 'true',
-      'needs construction-service and inventory-service alongside the usual live stack — not ' +
-        'started by the "Portal in a browser" CI job today (see the note above)',
+      'needs construction-service and inventory-service alongside the usual live stack — set ' +
+        'WEB_LIVE_STACK_E2E_EXP004=true locally after starting them (the "Portal in a browser" ' +
+        'CI job always does; see the guard above)',
     );
 
     const RUN = randomUUID().slice(0, 8);

@@ -22,15 +22,32 @@ import { ContractDetailScreen } from './ContractDetailScreen';
  */
 export const dynamic = 'force-dynamic';
 
-export default async function ContractPage({ params }: { params: Promise<{ id: string }> }) {
+function one(value: string | string[] | undefined): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+export default async function ContractPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const { id } = await params;
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/contracts/${id}`)}`);
 
+  const amendmentCursor = one((await searchParams).amendmentCursor);
+
   const result = await fetchContract(session, id);
   const [amendments, milestones] =
     result.kind === 'OK'
-      ? await Promise.all([fetchAmendments(session, id), fetchMilestones(session, id)])
+      ? await Promise.all([
+          fetchAmendments(session, id, amendmentCursor),
+          fetchMilestones(session, id),
+        ])
       : [null, null];
 
   return (

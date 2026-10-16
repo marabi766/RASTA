@@ -45,8 +45,8 @@ const minorUnits = z.string().regex(/^-?\d+$/, 'amount must be whole minor units
 function pageSchema<S extends z.ZodTypeAny>(item: S) {
   return z.object({
     items: z.array(item),
-    nextCursor: z.string().nullable().default(null),
-    hasMore: z.boolean().default(false),
+    nextCursor: z.string().nullable(),
+    hasMore: z.boolean(),
   });
 }
 
@@ -70,12 +70,12 @@ export type ContractSummary = z.infer<typeof contractSummarySchema>;
 const contractDetailSchema = contractSummarySchema.extend({
   winningBidId: z.string(),
   amendmentsTotalMinor: minorUnits,
-  employerSignedAt: utcInstant.nullable().default(null),
-  contractorSignedAt: utcInstant.nullable().default(null),
-  authorityReviewRequired: z.boolean().default(false),
-  authorityReviewReason: z.literal('AUTHORITY_CHANGED_DURING_SIGNING').nullable().default(null),
-  cancelReasonCode: z.string().nullable().default(null),
-  cancelNote: z.string().nullable().default(null),
+  employerSignedAt: utcInstant.nullable(),
+  contractorSignedAt: utcInstant.nullable(),
+  authorityReviewRequired: z.boolean(),
+  authorityReviewReason: z.literal('AUTHORITY_CHANGED_DURING_SIGNING').nullable(),
+  cancelReasonCode: z.string().nullable(),
+  cancelNote: z.string().nullable(),
   createdAt: utcInstant,
   updatedAt: utcInstant,
   version: z.number().int(),
@@ -96,11 +96,11 @@ const amendmentSchema = z.object({
   reasonCode: z.string(),
   reasonText: z.string(),
   status: z.string(),
-  employerSignedAt: utcInstant.nullable().default(null),
-  contractorSignedAt: utcInstant.nullable().default(null),
-  authorityReviewRequired: z.boolean().default(false),
+  employerSignedAt: utcInstant.nullable(),
+  contractorSignedAt: utcInstant.nullable(),
+  authorityReviewRequired: z.boolean(),
   proposedAt: utcInstant,
-  effectiveAt: utcInstant.nullable().default(null),
+  effectiveAt: utcInstant.nullable(),
   updatedAt: utcInstant,
   version: z.number().int(),
 });
@@ -123,8 +123,8 @@ const milestoneSchema = z.object({
   organizationId: z.string(),
   title: z.string(),
   plannedDate: renderableDate,
-  plannedShareBp: z.number().int().nullable().default(null),
-  referenced: z.boolean().default(false),
+  plannedShareBp: z.number().int().nullable(),
+  referenced: z.boolean(),
   createdAt: utcInstant,
   updatedAt: utcInstant,
   version: z.number().int(),
