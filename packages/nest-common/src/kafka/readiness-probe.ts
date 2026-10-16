@@ -19,7 +19,10 @@ import type { KafkaConnectionOptions } from './connection';
  * (`kafkaProbeTimeoutMs`): one that has not finished by then answers "not
  * healthy". Its client is closed when it answers, on every path — one that
  * failed half-way has still opened a socket — and the answer does not wait for
- * that close, which `boundedDisconnect` abandons if the broker holds it. And
+ * that close, which `boundedDisconnect` abandons if the broker holds it. A
+ * connect still retrying when the probe answered is not cancelled by that
+ * close, so when it ends — even by succeeding — the client is closed once more
+ * and asked nothing (Codex r2 on #293, R2-F1). And
  * once the shutdown has begun (`close()`, from the publisher's
  * `onModuleDestroy`, the first hook of `app.close()`), no probe starts, and one
  * in flight answers "not healthy" at once rather than at its bound, so the HTTP
@@ -126,21 +129,59 @@ export class KafkaReadinessProbe {
         return;
       }
       const client = admin;
+      let began = false;
+      // How the probe's own work ended. Before the answer, it is the answer.
+      // After it (the bound, or the shutdown, answered first and closed the
+      // client), it is a fence: kafkajs's `disconnect()` does not cancel the
+      // connect's retries, so a connect that was backing off when the probe
+      // answered can still succeed later, after that close, and leave a
+      // connection nothing holds (Codex r2 on #293, R2-F1). The probe still
+      // owns the client: whatever the work's late end, it is closed again then,
+      // and never asked anything more.
+      const ended = (healthy: boolean): void => {
+        if (!settled) {
+          answer(healthy);
+          return;
+        }
+        if (began) this.closeLate(client);
+      };
       // `then(...)` so a synchronous throw is a failed probe, not an exception here.
       Promise.resolve()
         .then(async () => {
           // Answered already (`close()` in the same tick): its close has begun,
           // and a connect after it would open what nothing closes.
           if (settled) return;
+          began = true;
           await client.connect();
           if (settled) return;
           await client.listTopics();
         })
         .then(
-          () => answer(true),
-          () => answer(false),
+          () => ended(true),
+          () => ended(false),
         );
     });
+  }
+
+  /**
+   * Closes a client whose connect or listing ended after its probe had
+   * answered. A fresh close, not the first one's: `boundedDisconnect` joins a
+   * client's earlier close, and that one returned before this connection was
+   * opened. Bounded and quiet the same way.
+   */
+  private closeLate(client: ReturnType<AdminFactory['admin']>): void {
+    this.options.logger.debug(
+      'Kafka readiness probe: its client finished after the probe answered; closed again',
+    );
+    void boundedDisconnect(
+      { disconnect: () => client.disconnect() },
+      {
+        deadlineAt: this.now() + this.options.timeoutMs,
+        label: 'Kafka readiness probe',
+        logger: { warn: (message) => this.options.logger.debug(message) },
+        now: this.now,
+      },
+    );
   }
 
   /**

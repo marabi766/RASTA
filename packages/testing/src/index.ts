@@ -41,7 +41,7 @@ export {
 } from './tenant-scope';
 export type { DmmfModelLike, TenantScopeInput } from './tenant-scope';
 
-export { StubKafkaBroker } from './stub-kafka-broker';
+export { StubKafkaBroker, reserveFreePort } from './stub-kafka-broker';
 export type { StubKafkaBrokerOptions } from './stub-kafka-broker';
 
 export { publisherCloseProblems, runOutboxShutdownProvider } from './outbox-shutdown-wiring';

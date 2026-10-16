@@ -1602,6 +1602,9 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
       جواب می‌دهد و Client را در لحظهٔ جواب، بی‌انتظار و با `boundedDisconnect`، می‌بندد. `onModuleDestroy` Publisher —
       نخستین Hook `app.close()` — حالا فقط Probe را می‌بندد: از آن پس Probeی شروع نمی‌شود و Probe در پرواز همان لحظه
       «سالم نیست» جواب می‌دهد. Kafka در پاسخ آمادگی فقط Degradation است، پس این جواب فقط `degraded: ['kafka']` می‌دهد.
+      `disconnect()` در kafkajs Retry اتصالی را که در Backoff است لغو نمی‌کند، پس connectی که پس از جواب Probe موفق می‌شد
+      اتصالی بی‌صاحب می‌گذاشت (Codex r2 روی #293، R2-F1). Probe مالک Client خود می‌ماند: هر وقت کار آن تمام شود — حتی با
+      موفقیت — Client دوباره بسته می‌شود و چیزی از آن پرسیده نمی‌شود.
     - آزمون: `bounded-disconnect.spec.ts` و `readiness-probe.spec.ts` در nest-common، و ترتیب و مهلت در
       `outbox-shutdown.spec.ts`. `kafka.publisher.shutdown.spec.ts` در fleet (شکل ساده) و inventory (Pending) دیگر
       Coordinator خودش را نمی‌سازد: Providerهای خود AppModule (`KafkaEventPublisher`، `OutboxRelay`، `OutboxShutdown`، همان

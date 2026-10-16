@@ -29,6 +29,24 @@ import { createServer, type Server, type Socket } from 'node:net';
 export interface StubKafkaBrokerOptions {
   /** Hold every ApiVersions request: a producer stays mid-`connect()`. */
   holdConnect?: boolean;
+  /**
+   * Listen on this port rather than a free one: a broker that comes up where a
+   * client has been retrying (see {@link reserveFreePort}).
+   */
+  port?: number;
+}
+
+/** A loopback port free now, and closed again: nothing answers on it until a broker starts there. */
+export async function reserveFreePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+  const address = server.address();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  if (address === null || typeof address === 'string') throw new Error('no TCP address');
+  return address.port;
 }
 
 type HeldApi = 'ApiVersions' | 'Produce';
@@ -57,6 +75,7 @@ export class StubKafkaBroker {
   private readonly heldRequests: Held[] = [];
   private readonly waiters = new Set<() => void>();
   private releasing = false;
+  private accepted = 0;
 
   private constructor(
     private readonly server: Server,
@@ -68,7 +87,7 @@ export class StubKafkaBroker {
     const server = createServer();
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
-      server.listen(0, '127.0.0.1', () => resolve());
+      server.listen(options.port ?? 0, '127.0.0.1', () => resolve());
     });
     const address = server.address();
     if (address === null || typeof address === 'string') throw new Error('no TCP address');
@@ -80,6 +99,16 @@ export class StubKafkaBroker {
   /** `KAFKA_BROKERS` for a client of this broker. */
   get brokers(): string {
     return `${this.host}:${this.port}`;
+  }
+
+  /** How many client connections this broker has accepted, ever. */
+  get connectionsAccepted(): number {
+    return this.accepted;
+  }
+
+  /** How many client connections are open right now. */
+  get openConnections(): number {
+    return this.sockets.size;
   }
 
   /** How many requests of `api` are held, unanswered, right now. */
@@ -131,6 +160,7 @@ export class StubKafkaBroker {
   }
 
   private accept(socket: Socket): void {
+    this.accepted += 1;
     this.sockets.add(socket);
     socket.on('close', () => this.sockets.delete(socket));
     socket.on('error', () => undefined);

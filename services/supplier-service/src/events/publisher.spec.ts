@@ -1,4 +1,5 @@
 import { runWithContext, type RequestContext } from '@rasta/nest-common';
+import { decodeTime } from 'ulid';
 import { EventPublisher, ID_PREFIX, newId } from './publisher';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { SupplierEnv } from '../config/env';
@@ -374,11 +375,39 @@ describe('identifiers are organization-agnostic (AGENTS.md A-05)', () => {
   it('encodes no province, organization type or tenant', () => {
     // An id naming "Yazd" or a dehyari would make a structural assumption the
     // platform explicitly refuses, and would leak a tenant into every log line
-    // that carried it.
-    const ids = Object.values(ID_PREFIX).map((prefix) => newId(prefix));
+    // that carried it. What anything decides is the prefix and the ULID's time;
+    // the ULID's other 16 characters are random, so they are not searched.
+    const before = Date.now();
+    const ids = Object.values(ID_PREFIX).map((prefix) => ({ prefix, id: newId(prefix) }));
+    const after = Date.now();
 
-    for (const id of ids) {
-      expect(id).not.toMatch(/yazd|dehyari|municipal/i);
+    for (const { prefix, id } of ids) {
+      const { head, time } = decidedParts(id);
+      expect(head).toBe(prefix);
+      expect(`${head}_${time}`).not.toMatch(TENANT_WORDS);
+      // The time is the clock's, nothing else.
+      expect(decodeTime(id.slice(-26))).toBeGreaterThanOrEqual(before);
+      expect(decodeTime(id.slice(-26))).toBeLessThanOrEqual(after);
     }
   });
+
+  it('a valid id whose random part happens to spell a tenant word still passes (Codex r2 on #293, R2-F2)', () => {
+    // A real ULID: its randomness reads "...RYAZDZ...". The old check searched
+    // the whole id and failed on it: "yazd" fits in 16 random Crockford
+    // characters (the other two words need letters Crockford has not), about
+    // once in 13 000 runs of six ids.
+    const id = 'SSP_01M51V3560RYAZDZSVKD043BPM';
+    expect(id).toMatch(TENANT_WORDS);
+    const { head, time } = decidedParts(id);
+    expect(`${head}_${time}`).not.toMatch(TENANT_WORDS);
+  });
 });
+
+const TENANT_WORDS = /yazd|dehyari|municipal/i;
+
+/** The parts of an id something decides: the prefix and the ULID's 10-character time. */
+function decidedParts(id: string): { head: string; time: string } {
+  const match = /^([A-Z]+)_([0-9A-HJKMNP-TV-Z]{10})[0-9A-HJKMNP-TV-Z]{16}$/.exec(id);
+  if (!match) throw new Error(`not a prefixed ULID: ${id}`);
+  return { head: match[1]!, time: match[2]! };
+}

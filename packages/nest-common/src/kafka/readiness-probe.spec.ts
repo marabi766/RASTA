@@ -11,22 +11,42 @@ import {
  * close waits for open requests — past SHUTDOWN_TIMEOUT_MS. The probe now
  * answers within its bound, and at once when the shutdown begins.
  *
+ * Codex r2 (R2-F1): a connect still retrying when the probe answered could
+ * succeed after the probe's close and leave a connection open; it is closed
+ * again when it ends.
+ *
  * Fake timers; the admin client is a fake whose every call can be held. The
- * publishers' own specs run the probe through real kafkajs and Nest's HTTP close.
+ * publishers' own specs run the probe through real kafkajs and Nest's HTTP close
+ * (fleet's, a real connect that succeeds after the bound).
  */
 
 type Step = 'connect' | 'listTopics' | 'disconnect';
 
-/** An admin client per probe; each step answers, fails or is held as told. */
-function adminFactory(behaviour: Partial<Record<Step, 'ok' | 'fail' | 'hang'>> = {}) {
+/**
+ * An admin client per probe; each step answers, fails or is held as told. A
+ * `later` step is held until the test ends it with `finish`.
+ */
+function adminFactory(behaviour: Partial<Record<Step, 'ok' | 'fail' | 'hang' | 'later'>> = {}) {
   const calls: Step[] = [];
   let created = 0;
+  const later: Partial<Record<Step, { resolve: () => void; reject: (error: Error) => void }>> = {};
   const step = (name: Step) => (): Promise<never> => {
     calls.push(name);
     const how = behaviour[name] ?? 'ok';
     if (how === 'hang') return new Promise<never>(() => undefined);
+    if (how === 'later') {
+      return new Promise<never>((resolve, reject) => {
+        later[name] = { resolve: () => resolve(undefined as never), reject };
+      });
+    }
     if (how === 'fail') return Promise.reject(new Error(`${name} refused`));
     return Promise.resolve(undefined as never);
+  };
+  const finish = (name: Step, how: 'ok' | 'fail'): void => {
+    const held = later[name];
+    if (!held) throw new Error(`no held ${name}`);
+    if (how === 'ok') held.resolve();
+    else held.reject(new Error(`${name} refused`));
   };
   const kafka: AdminFactory = {
     admin: () => {
@@ -38,7 +58,7 @@ function adminFactory(behaviour: Partial<Record<Step, 'ok' | 'fail' | 'hang'>> =
       };
     },
   };
-  return { kafka, calls, created: () => created };
+  return { kafka, calls, finish, created: () => created };
 }
 
 const quiet = { debug: jest.fn() };
@@ -115,6 +135,74 @@ describe('KafkaReadinessProbe', () => {
     await settle();
     expect(answer).toBe(false);
     expect(calls).toEqual(['connect', 'disconnect']);
+  });
+
+  // Codex r2 on #293, R2-F1: kafkajs's admin `disconnect()` does not cancel a
+  // connect that is backing off between retries, so the connect can succeed
+  // after the probe answered and closed the client. That connection must be
+  // closed when it opens, and the client never asked anything.
+  it.each([
+    ['its bound', 'ok'],
+    ['its bound', 'fail'],
+    ['the shutdown', 'ok'],
+  ] as const)(
+    'R2-F1: answered by %s while connecting, a connect that then ends (%s) is closed again and lists nothing',
+    async (answeredBy, connectEnds) => {
+      const { kafka, calls, finish } = adminFactory({ connect: 'later' });
+      const probe = new KafkaReadinessProbe(kafka, { timeoutMs: 1000, logger: quiet });
+      let answer: boolean | undefined;
+      void probe.check().then((healthy) => (answer = healthy));
+      await settle();
+      if (answeredBy === 'its bound') await jest.advanceTimersByTimeAsync(1000);
+      else probe.close();
+      await settle();
+      expect(answer).toBe(false);
+      expect(calls).toEqual(['connect', 'disconnect']);
+
+      finish('connect', connectEnds);
+      await settle();
+      expect(calls).toEqual(['connect', 'disconnect', 'disconnect']);
+      expect(quiet.debug).toHaveBeenCalledWith(
+        'Kafka readiness probe: its client finished after the probe answered; closed again',
+      );
+      // The late close is bounded too, and leaves no timer once it finished.
+      expect(jest.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('R2-F1: a listing that ends after the bound: the client is closed again', async () => {
+    const { kafka, calls, finish } = adminFactory({ listTopics: 'later' });
+    const probe = new KafkaReadinessProbe(kafka, { timeoutMs: 1000, logger: quiet });
+    const answer = probe.check();
+    await jest.advanceTimersByTimeAsync(1000);
+    await expect(answer).resolves.toBe(false);
+    expect(calls).toEqual(['connect', 'listTopics', 'disconnect']);
+
+    finish('listTopics', 'ok');
+    await settle();
+    expect(calls).toEqual(['connect', 'listTopics', 'disconnect', 'disconnect']);
+  });
+
+  it('R2-F1: a late close the broker holds is abandoned one bound later, quietly', async () => {
+    const { kafka, finish } = adminFactory({ connect: 'later', disconnect: 'hang' });
+    const probe = new KafkaReadinessProbe(kafka, { timeoutMs: 1000, logger: quiet });
+    const answer = probe.check();
+    await jest.advanceTimersByTimeAsync(1000);
+    await expect(answer).resolves.toBe(false);
+    // The first close is held: abandoned at its own bound.
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(jest.getTimerCount()).toBe(0);
+
+    finish('connect', 'ok');
+    await settle();
+    expect(jest.getTimerCount()).toBe(1);
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(jest.getTimerCount()).toBe(0);
+    expect(
+      quiet.debug.mock.calls.filter(([message]) =>
+        /^Kafka readiness probe: disconnect did not finish/.test(message as string),
+      ),
+    ).toHaveLength(2);
   });
 
   it('after the shutdown began, no probe opens a client', async () => {

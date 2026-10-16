@@ -20,7 +20,7 @@ import {
   type OutboxStopOptions,
   type OutboxStore,
 } from '@rasta/nest-common';
-import { StubKafkaBroker, type StubKafkaBrokerOptions } from '@rasta/testing';
+import { reserveFreePort, StubKafkaBroker, type StubKafkaBrokerOptions } from '@rasta/testing';
 import { AppModule } from '../app.module';
 import { HealthController } from '../health/health.controller';
 import { PrismaService } from '../prisma/prisma.service';
@@ -42,6 +42,9 @@ import { PrismaOutboxStore } from './outbox.store';
  *        has returned, by the drain's deadline.
  *   F2 — a readiness probe in flight held its HTTP request, and the HTTP
  *        server's close waits for open requests.
+ * Codex r2 on #293:
+ *   R2-F1 — a probe that answered while its connect was backing off left the
+ *        connection that retry opened later, after the probe's close.
  *
  * Real, and AppModule's: the providers of `KafkaEventPublisher`, `OutboxRelay`
  * and `OutboxShutdown` (the very factory objects of its `@Module` metadata),
@@ -138,7 +141,10 @@ interface Booted {
   port: number;
 }
 
-async function boot(broker: StubKafkaBroker, options: { relayRow: boolean }): Promise<Booted> {
+async function boot(
+  broker: Pick<StubKafkaBroker, 'brokers'>,
+  options: { relayRow: boolean },
+): Promise<Booted> {
   const store = outboxStore(options.relayRow);
   // What AppModule's factories read of the environment.
   const env = {
@@ -404,4 +410,30 @@ describe('fleet-service shutdown through AppModule’s wiring: publisher and rea
     expect(Date.now() - from).toBeGreaterThanOrEqual(450);
     expect(Date.now() - from).toBeLessThan(1000);
   }, 20_000);
+
+  it('R2-F1: a probe whose connect succeeds after its bound — the broker came back mid-retry — leaves no connection open', async () => {
+    // Nothing listens there yet: kafkajs's connect is refused, and backs off
+    // between retries (BrokerPool's retrier, which `disconnect()` does not cancel).
+    const port = await reserveFreePort();
+    booted = await boot({ brokers: `127.0.0.1:${port}` }, { relayRow: false });
+    await expect(booted.publisher.isHealthy()).resolves.toBe(false);
+
+    // The broker comes up while that connect is still retrying.
+    const late = await start({ port });
+    await waitUntil(() => late.connectionsAccepted > 0, 'the late connect');
+    // The probe had answered and closed its client before this connection
+    // opened; it is closed when the connect returns, and stays closed.
+    await waitUntil(() => late.openConnections === 0, 'the late connection closed');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(late.openConnections).toBe(0);
+  }, 20_000);
 });
+
+/** Polls `condition` every 20 ms; fails after `timeoutMs`. */
+async function waitUntil(condition: () => boolean, what: string, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(`${what}: not within ${timeoutMs} ms`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
