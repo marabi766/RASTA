@@ -12,7 +12,8 @@ import { UnprocessableEventError, type EventDelivery } from '@rasta/nest-common'
  * default of "an event on a topic is a success under its own name" is wrong for them:
  * `outcome=REFUSED` searches missed every contract, amendment, milestone, statement and
  * policy-approval refusal. These events are stored as `REFUSED`, under the closed action the
- * refusal names (`SIGN_CONTRACT`, `SIGN_AMENDMENT`, …, `DRAFT_STATEMENT`, `APPROVE_POLICY`) and the
+ * refusal names (`SIGN_CONTRACT`, `SIGN_AMENDMENT`, …, `DRAFT_STATEMENT`, `SUBMIT_STATEMENT`,
+ * `APPROVE_POLICY`) and the
  * closed reason.
  *
  * Only authority and separation-of-duties refusals are published as refusals; contract-service
@@ -53,6 +54,7 @@ export const CONTRACT_REFUSAL_ACTIONS = [
   'PLAN_MILESTONE',
   'CHANGE_MILESTONE',
   'DRAFT_STATEMENT',
+  'SUBMIT_STATEMENT',
 ] as const;
 
 /** Contract-service's `AUTHORITY_REFUSED_REASONS`. */

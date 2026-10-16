@@ -128,6 +128,9 @@ describe('approval policies (contract.signature)', () => {
           authorityOrganizationId: employer,
           authorityRole: 'ORGANIZATION_ADMIN',
           authorityLabel: 'Signer ORGANIZATION_ADMIN',
+          // A signing step has no amount bounds (CON-003 PR 5: a statement chain's may).
+          minAmountMinor: null,
+          maxAmountMinor: null,
         },
       ]);
       // Its version is the next of the line, not a number the client chose.
@@ -194,6 +197,90 @@ describe('approval policies (contract.signature)', () => {
       ['a blank rationale', { rationale: '   ' }],
     ])('refuses %s: 400', async (_label, change) => {
       await create(unionAdmin, { ...body(employer), ...change }).expect(400);
+    });
+
+    describe('the statement chains (CON-003 PR 5, ADR-068 § 5, Q-96 (1))', () => {
+      const chainBody = (workflowKey: string, steps: object[]) => ({
+        ...body(employer),
+        workflowKey,
+        label: `The ${workflowKey} chain`,
+        steps,
+      });
+
+      it.each(['contract.statement.technical', 'contract.statement.financial'])(
+        'a %s policy goes through the same governance: written by the union, steps of any organization in order, bounds on the gross, approved by the platform',
+        async (workflowKey) => {
+          const written = await create(
+            unionAdmin,
+            chainBody(workflowKey, [
+              stepFor(elsewhere),
+              { ...stepFor(employer), minAmountMinor: '0', maxAmountMinor: '1000000000' },
+              { ...stepFor(employer, 'FLEET_MANAGER'), minAmountMinor: '1000000000' },
+            ]),
+          ).expect(201);
+          expect(written.body).toMatchObject({
+            workflowKey,
+            status: 'DRAFT',
+            authorRole: 'UNION_ADMIN',
+          });
+          expect(written.body.steps).toEqual([
+            {
+              stepOrder: 1,
+              authorityOrganizationId: elsewhere,
+              authorityRole: 'ORGANIZATION_ADMIN',
+              authorityLabel: 'Signer ORGANIZATION_ADMIN',
+              minAmountMinor: null,
+              maxAmountMinor: null,
+            },
+            {
+              stepOrder: 2,
+              authorityOrganizationId: employer,
+              authorityRole: 'ORGANIZATION_ADMIN',
+              authorityLabel: 'Signer ORGANIZATION_ADMIN',
+              minAmountMinor: '0',
+              maxAmountMinor: '1000000000',
+            },
+            {
+              stepOrder: 3,
+              authorityOrganizationId: employer,
+              authorityRole: 'FLEET_MANAGER',
+              authorityLabel: 'Signer FLEET_MANAGER',
+              minAmountMinor: '1000000000',
+              maxAmountMinor: null,
+            },
+          ]);
+          const submitted = await command(unionAdmin, written.body.id, 'submit', {
+            expectedVersion: 1,
+          }).expect(200);
+          // Four eyes as for any policy: the union's writer never approves it.
+          const approved = await command(platformAdmin, written.body.id, 'approve', {
+            expectedVersion: submitted.body.version,
+          }).expect(200);
+          expect(approved.body.status).toBe('ACTIVE');
+        },
+      );
+
+      it('only a statement chain’s steps have bounds: a signing step with one is 422 AMOUNT_BOUNDS_NOT_APPLICABLE', async () => {
+        const res = await create(unionAdmin, {
+          ...body(employer),
+          steps: [{ ...stepFor(employer), maxAmountMinor: '10' }],
+        }).expect(422);
+        expect(reasons(res)).toEqual(['policy:AMOUNT_BOUNDS_NOT_APPLICABLE']);
+      });
+
+      it.each([
+        ['an empty range', { minAmountMinor: '10', maxAmountMinor: '10' }],
+        ['an inverted range', { minAmountMinor: '11', maxAmountMinor: '10' }],
+        ['a maximum of 0', { maxAmountMinor: '0' }],
+        ['a negative bound', { minAmountMinor: '-1' }],
+        ['a number, not a string', { minAmountMinor: 10 }],
+        ['a bound past the largest bigint', { maxAmountMinor: '9223372036854775808' }],
+      ])('refuses %s on a chain step: 400', async (_label, bounds) => {
+        await create(
+          unionAdmin,
+          chainBody('contract.statement.technical', [{ ...stepFor(employer), ...bounds }]),
+        ).expect(400);
+      });
     });
 
     it('fails closed when organization-service cannot confirm: 503, and 504 when it is too slow — nothing is written', async () => {

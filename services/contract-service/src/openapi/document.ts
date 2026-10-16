@@ -30,6 +30,7 @@ import {
   draftStatementSchema,
   listStatementsQuerySchema,
   statementViewSchema,
+  submitStatementSchema,
 } from '../statement/dto';
 import { PolicyController } from '../policy/policy.controller';
 import { PolicyService } from '../policy/policy.service';
@@ -118,6 +119,10 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'GET /v1/contracts/{id}/statements': { status: '200', schema: cursorPageOf(statementViewSchema) },
   'GET /v1/contracts/{id}/statements/{statementId}': { status: '200', schema: statementViewSchema },
   'POST /v1/contracts/{id}/statements': { status: '201', schema: statementViewSchema },
+  'POST /v1/contracts/{id}/statements/{statementId}/submit': {
+    status: '200',
+    schema: statementViewSchema,
+  },
 };
 
 /** Every command takes a strict body. */
@@ -134,6 +139,7 @@ const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'POST /v1/contracts/{id}/milestones': planMilestoneSchema,
   'PATCH /v1/contracts/{id}/milestones/{milestoneId}': changeMilestoneSchema,
   'POST /v1/contracts/{id}/statements': draftStatementSchema,
+  'POST /v1/contracts/{id}/statements/{statementId}/submit': submitStatementSchema,
 };
 
 /** The commands that require an `Idempotency-Key` (docs/06 § 6.8). */
@@ -146,6 +152,7 @@ const IDEMPOTENT_COMMANDS: ReadonlySet<string> = new Set([
   'POST /v1/contracts/{id}/milestones',
   'PATCH /v1/contracts/{id}/milestones/{milestoneId}',
   'POST /v1/contracts/{id}/statements',
+  'POST /v1/contracts/{id}/statements/{statementId}/submit',
 ]);
 
 /** The commands that confirm the union's hierarchy with organization-service. */
@@ -154,6 +161,7 @@ const HIERARCHY_COMMANDS: ReadonlySet<string> = new Set([
   'POST /v1/contract-approval-policies/{id}/submit',
   'POST /v1/contract-approval-policies/{id}/approve',
   'POST /v1/contracts/{id}/amendments/{amendmentId}/sign',
+  'POST /v1/contracts/{id}/statements/{statementId}/submit',
 ]);
 
 /**
@@ -169,6 +177,8 @@ const AUDITED_COMMANDS: ReadonlySet<string> = new Set([
   'POST /v1/contracts/{id}/amendments/{amendmentId}/sign',
   'POST /v1/contracts/{id}/milestones',
   'PATCH /v1/contracts/{id}/milestones/{milestoneId}',
+  'POST /v1/contracts/{id}/statements',
+  'POST /v1/contracts/{id}/statements/{statementId}/submit',
 ]);
 
 /** The area whose closed reasons a command's refusals carry in `details[].code` (docs/06 § 6.7). */
@@ -181,6 +191,7 @@ const REFUSAL_AREA_OF: Record<string, RefusalArea> = {
   'POST /v1/contracts/{id}/milestones': 'milestone',
   'PATCH /v1/contracts/{id}/milestones/{milestoneId}': 'milestone',
   'POST /v1/contracts/{id}/statements': 'statement',
+  'POST /v1/contracts/{id}/statements/{statementId}/submit': 'statement',
 };
 
 /** `Retry-After` on a command's in-flight 409: optional, only that 409 carries it. */
@@ -230,13 +241,13 @@ const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
   400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
-  403: 'Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded.',
+  403: 'Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds; recorded as a refusal when it acts for a party’s organization), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). On statements: only the winning contractor drafts and submits (AUTHOR_NOT_CONTRACTOR), with the CONTRACTOR role; the platform administrator acting for a party is refused and recorded.',
   404: 'Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.',
-  409: 'On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).',
-  422: 'Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT).',
+  409: 'On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on submitting a statement, an approval policy of either chain put in force or retired at the same moment (CONFLICT — retry); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).',
+  422: 'Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). On statements: a contract that is not signed (CONTRACT_NOT_SIGNED), a deduction that is not a rule the employer configured and keeps in force (DEDUCTION_NOT_CONFIGURED, Q-96 (6)), a line against a milestone of another contract (MILESTONE_NOT_OF_CONTRACT), deductions past the gross (STATEMENT_NET_NEGATIVE), a gross past the largest bigint (STATEMENT_EXCEEDS_LIMIT); on submission, a statement that is not a draft (STATEMENT_NOT_DRAFT), a submitter without a stable identity (ACTOR_IDENTITY_UNKNOWN, fail closed), no approval policy in force for a chain (TECHNICAL_POLICY_REQUIRED, FINANCIAL_POLICY_REQUIRED) or no step of it that applies to the gross (TECHNICAL_STEP_NOT_APPLICABLE, FINANCIAL_STEP_NOT_APPLICABLE), a step that names the contractor (APPROVAL_STEP_NAMES_CONTRACTOR), a union-written chain policy whose union no longer governs the employer (POLICY_AUTHOR_NOT_GOVERNING).',
   500: 'Unexpected server error.',
-  503: 'On sign, cancel, amendment, milestone and statement commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment, also organization-service could not confirm the hierarchy: the signature is refused, never assumed.',
-  504: 'organization-service did not answer in time (UPSTREAM_TIMEOUT) while the employer’s signature of an amendment was being confirmed: nothing was signed.',
+  503: 'On sign, cancel, amendment, milestone and statement commands: the refusal of a party for want of authority or for separation of duties — the platform administrator acting for a party included — could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request. Only these refusals are recorded; a refusal of the contract’s state (422) never is. On signing an amendment and on submitting a statement, also organization-service could not confirm the hierarchy: the signature or submission is refused, never assumed.',
+  504: 'organization-service did not answer in time (UPSTREAM_TIMEOUT) while the employer’s signature of an amendment, or the union behind a statement’s approval policy, was being confirmed: nothing was signed or submitted.',
 };
 
 /** The same statuses on the approval-policy routes, which answer for other reasons (Q-70 (7)). */
@@ -246,7 +257,7 @@ export const POLICY_ERROR_DESCRIPTIONS: Record<number, string> = {
   403: 'Authenticated, but not permitted: writing a policy is a UNION_ADMIN for its own organization or one beneath it, or a SYSTEM_ADMIN (an ORGANIZATION_ADMIN never writes its own); approving, rejecting and the platform queue are SYSTEM_ADMIN only, and with CONTRACT_POLICY_FOUR_EYES the approver is neither the author nor the submitter (a union-written policy is never approved by the person who wrote or submitted it; such a refusal is recorded); submitting and retiring belong to the organization that wrote the policy. Also: the oversight role, a service-to-service token, a user token without the platform user id where one is required, and a union acting outside its own organization.',
   404: 'Not found — also returned for a policy the caller may not see (neither its author organization, nor a contract reader of the organization it governs, nor a platform administrator).',
   409: 'The `expectedVersion` is not the policy’s current version, or another version of the same policy line was written at the same moment (OPTIMISTIC_LOCK_FAILED / CONFLICT — reload and retry); on a create, an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).',
-  422: 'Well-formed but refused (BUSINESS_RULE_VIOLATION): a transition the lifecycle does not have (DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED; ACTIVE → RETIRED), a step that names another organization’s role (AUTHORITY_NOT_GOVERNED_ORGANIZATION), or an author or submitter whose identity was not recorded (ACTOR_IDENTITY_UNKNOWN, fail closed).',
+  422: 'Well-formed but refused (BUSINESS_RULE_VIOLATION): a transition the lifecycle does not have (DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED; ACTIVE → RETIRED), a signing step that names another organization’s role (AUTHORITY_NOT_GOVERNED_ORGANIZATION), amount bounds on a step of a workflow that is not a statement chain (AMOUNT_BOUNDS_NOT_APPLICABLE), or an author or submitter whose identity was not recorded (ACTOR_IDENTITY_UNKNOWN, fail closed).',
   500: 'Unexpected server error.',
   503: 'organization-service could not confirm the hierarchy (UPSTREAM_UNAVAILABLE): the write is refused, never assumed. On approve, also: an approval refused by four eyes could not be recorded (UPSTREAM_UNAVAILABLE) — the policy is unchanged; retry.',
   504: 'organization-service did not answer in time (UPSTREAM_TIMEOUT): the write is refused, never assumed.',
@@ -268,9 +279,11 @@ const DESCRIPTION =
   'reason code and a text), and the amendment takes effect only when both parties have signed it ' +
   'the way they signed the contract; the employer also plans milestones (a title, a planned day ' +
   'and an optional share in basis points) that both parties read. The contractor drafts ' +
-  'statements of a signed contract: lines, the deductions the employer has configured, and the ' +
-  'gross, deductions and net computed once by the service. Their submission with the separate ' +
-  'technical and financial approvals, and the settlement boundary with economic-service, follow ' +
+  'statements of a signed contract — lines, each optionally against a milestone, the deductions ' +
+  'the employer has configured, and the gross, deductions and net computed once by the service — ' +
+  'and submits them, which snapshots the separate technical and financial approval chains from ' +
+  'the employer’s `contract.statement.technical` and `contract.statement.financial` policies. ' +
+  'Recording the approvals, and the settlement boundary with economic-service, follow ' +
   '(ADR-068 § 9); no money is ever held here.';
 
 /** Builds the finished document for a booted application. */

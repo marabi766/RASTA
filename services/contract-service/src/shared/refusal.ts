@@ -15,7 +15,7 @@ export const REFUSAL_AREAS = {
   policy: 'Approval policy cannot be written',
   amendment: 'Amendment cannot be made',
   milestone: 'Milestone cannot be planned',
-  statement: 'Statement cannot be drafted',
+  statement: 'Statement cannot be drafted or submitted',
 } as const;
 export type RefusalArea = keyof typeof REFUSAL_AREAS;
 
@@ -43,6 +43,8 @@ export const REFUSAL_REASONS = {
   },
   policy: {
     AUTHORITY_NOT_GOVERNED_ORGANIZATION: 422,
+    /** Amount bounds on a step of a workflow that is not a statement chain (CON-003 PR 5). */
+    AMOUNT_BOUNDS_NOT_APPLICABLE: 422,
   },
   /** Proposing and signing an amendment (CON-003 PR 3, Q-100); the signing reasons are the contract's own. */
   amendment: {
@@ -69,9 +71,9 @@ export const REFUSAL_REASONS = {
     MILESTONE_REFERENCED: 422,
     MILESTONE_LIMIT_REACHED: 422,
   },
-  /** Drafting a statement (CON-003 PR 4, ADR-068 § 5, Q-96). */
+  /** Drafting (CON-003 PR 4) and submitting (PR 5) a statement (ADR-068 § 5, Q-96). */
   statement: {
-    /** The contractor drafts; the employer approves (Q-96). */
+    /** The contractor drafts and submits; the employer's approvers decide (Q-96). */
     AUTHOR_NOT_CONTRACTOR: 403,
     CONTRACT_NOT_SIGNED: 422,
     /** A deduction that is not a rule the employer configured and keeps in force (Q-96 (6)). */
@@ -80,6 +82,24 @@ export const REFUSAL_REASONS = {
     STATEMENT_NET_NEGATIVE: 422,
     /** The lines sum past the largest amount a bigint stores. */
     STATEMENT_EXCEEDS_LIMIT: 422,
+    /** A line's milestone is not a planned milestone of this contract (Q-100 (4)). */
+    MILESTONE_NOT_OF_CONTRACT: 422,
+    /** Only a draft is submitted. */
+    STATEMENT_NOT_DRAFT: 422,
+    /** The submitter's stable identity is unknown, so no approval could keep them out (#188). */
+    ACTOR_IDENTITY_UNKNOWN: 422,
+    /** No `contract.statement.technical` policy is in force for the employer: no submission (Q-96 (1)). */
+    TECHNICAL_POLICY_REQUIRED: 422,
+    /** No `contract.statement.financial` policy is in force for the employer. */
+    FINANCIAL_POLICY_REQUIRED: 422,
+    /** The technical policy in force has no step that applies to this statement's gross. */
+    TECHNICAL_STEP_NOT_APPLICABLE: 422,
+    /** The financial policy in force has no step that applies to this statement's gross. */
+    FINANCIAL_STEP_NOT_APPLICABLE: 422,
+    /** A step that applies names the contractor's own organization: it never approves its own claim. */
+    APPROVAL_STEP_NAMES_CONTRACTOR: 422,
+    /** The union that wrote a chain's policy in force no longer governs the employer (Q-70 (7)). */
+    POLICY_AUTHOR_NOT_GOVERNING: 422,
   },
 } as const satisfies Record<RefusalArea, Record<string, 403 | 409 | 422>>;
 

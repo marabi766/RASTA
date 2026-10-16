@@ -43,6 +43,7 @@ export const CONTRACT_EVENTS = {
   CONTRACT_MILESTONE_CHANGED: 'CONTRACT_MILESTONE_CHANGED',
   CONTRACT_AUTHORITY_REFUSED: 'CONTRACT_AUTHORITY_REFUSED',
   STATEMENT_DRAFTED: 'STATEMENT_DRAFTED',
+  STATEMENT_SUBMITTED: 'STATEMENT_SUBMITTED',
 } as const;
 
 export type ContractEventName = keyof typeof CONTRACT_EVENTS;
@@ -459,8 +460,8 @@ export const contractMilestoneChangedPayload = z
  * A party's attempt at an authority-bound action on a contract was refused for want of authority
  * (the audit record of the refusal, written in a transaction of its own so it survives the request
  * failing): signing or cancelling the contract, proposing or signing an amendment, planning or
- * editing a milestone, drafting a statement — refused for want of authority or for separation of
- * duties. Who asked, for which contract, the closed action and reason — no free text. Never
+ * editing a milestone, drafting or submitting a statement — refused for want of authority or for
+ * separation of duties. Who asked, for which contract, the closed action and reason — no free text. Never
  * written for a caller who is not a party: such a caller is told the contract does not exist. A
  * refusal of the contract's state (a contract no longer a draft, a version moved on) is not one of
  * these: it is answered and not audited. audit-service projects the same two closed lists
@@ -475,6 +476,8 @@ export const AUTHORITY_REFUSED_ACTIONS = [
   'CHANGE_MILESTONE',
   /** The contractor drafts a statement of a signed contract (CON-003 PR 4). */
   'DRAFT_STATEMENT',
+  /** The contractor submits a draft statement for approval (CON-003 PR 5). */
+  'SUBMIT_STATEMENT',
 ] as const;
 export const AUTHORITY_REFUSED_REASONS = [
   /** The caller's role is not one the configuration or the policy in force names. */
@@ -499,7 +502,10 @@ export const contractAuthorityRefusedPayload = z
     organizationId: id,
     action: z.enum(AUTHORITY_REFUSED_ACTIONS),
     side: z.enum(['EMPLOYER', 'CONTRACTOR']),
-    /** The amendment or milestone the action named; null when it created one (or a statement). */
+    /**
+     * The amendment, milestone or statement the action named; null when it created one (an
+     * amendment, a milestone or a statement draft).
+     */
     subjectId: id.nullable(),
     reason: z.enum(AUTHORITY_REFUSED_REASONS),
     /** The policy that was in force and stranded; null when none was or the reason is not a policy's. */
@@ -527,6 +533,32 @@ export const statementDraftedPayload = z
   })
   .strict();
 
+/**
+ * The contractor submitted a draft statement for approval (`DRAFT → SUBMITTED`, CON-003 PR 5,
+ * ADR-068 § 5), in the transaction that snapshotted both approval chains. The catalogue's
+ * `STATEMENT_SUBMITTED` without its `grossAmount` (Q-97 (2)): identifiers, versions and instants
+ * only — the policy and version each chain was snapshotted from, and the milestones its lines refer
+ * to (marked referenced by this submission if no earlier one did, Q-100 (4)). The steps themselves
+ * and the amounts are read through the API. The submitter is named by user id; the identity pair
+ * the approvals compare stays in this service's database.
+ */
+export const statementSubmittedPayload = z
+  .object({
+    contractId: id,
+    statementId: id,
+    statementNumber: positive,
+    organizationId: id,
+    contractorOrganizationId: id,
+    technicalPolicyId: id,
+    technicalPolicyVersion: positive,
+    financialPolicyId: id,
+    financialPolicyVersion: positive,
+    milestoneIds: z.array(id).max(100),
+    submittedBy: id,
+    submittedAt: instant,
+  })
+  .strict();
+
 export const CONTRACT_EVENT_SCHEMAS = {
   CONTRACT_DRAFTED: contractDraftedPayload,
   CONTRACT_SIGNATURE_RECORDED: contractSignatureRecordedPayload,
@@ -549,6 +581,7 @@ export const CONTRACT_EVENT_SCHEMAS = {
   CONTRACT_MILESTONE_CHANGED: contractMilestoneChangedPayload,
   CONTRACT_AUTHORITY_REFUSED: contractAuthorityRefusedPayload,
   STATEMENT_DRAFTED: statementDraftedPayload,
+  STATEMENT_SUBMITTED: statementSubmittedPayload,
 } as const satisfies Record<ContractEventName, z.ZodTypeAny>;
 
 export type ContractEventPayload<N extends ContractEventName> = z.infer<

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { cursorPaginationSchema } from '@rasta/contracts';
+import { amountMinorSchema, cursorPaginationSchema } from '@rasta/contracts';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
 import type { CursorPage } from '../contract/dto';
 import { POLICY_STATES, WORKFLOW_KEYS } from './policy.state-machine';
@@ -32,19 +32,42 @@ const authorityRole = z.enum(AUTHORITY_ROLES, {
 
 export const MAX_POLICY_STEPS = 20;
 
+/** A bound in minor units: a non-negative integer as a decimal string, within a bigint. */
+const amountBound = amountMinorSchema.describe(
+  'A statement gross in minor units (rials), a decimal string; never a float.',
+);
+
 export const policyStepInput = z
   .object({
     /**
      * The authority's organization. For `contract.signature` it is the governed organization
      * itself — the employer decides which of its own roles accept a contract for it; anything
-     * else is refused when the policy is written.
+     * else is refused when the policy is written. For a statement chain it may be any
+     * organization — a supervising consultant, say (Q-96 (1)) — but a step that names the
+     * contractor of a statement is refused when that statement is submitted.
      */
     authorityOrganizationId: z.string().trim().min(1).max(64),
     authorityRole,
     /** How the tenant names the authority, e.g. «مدیر عامل». */
     authorityLabel: z.string().trim().min(2).max(200),
+    /**
+     * Statement chains only: the step applies to a statement whose gross is ≥ this (inclusive).
+     * A signing step with a bound is refused (`AMOUNT_BOUNDS_NOT_APPLICABLE`).
+     */
+    minAmountMinor: amountBound.optional(),
+    /** Statement chains only: the step applies to a statement whose gross is < this (exclusive). */
+    maxAmountMinor: amountBound
+      .refine((value) => !/^0+$/.test(value), 'An exclusive maximum of 0 applies to nothing')
+      .optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (step) =>
+      step.minAmountMinor === undefined ||
+      step.maxAmountMinor === undefined ||
+      BigInt(step.minAmountMinor) < BigInt(step.maxAmountMinor),
+    { message: 'minAmountMinor must be less than maxAmountMinor', path: ['maxAmountMinor'] },
+  );
 
 export const createPolicySchema = z
   .object({
@@ -60,7 +83,10 @@ export const createPolicySchema = z
     rationale: z.string().trim().min(8).max(2000),
     /** Demo data: «نمونه — نیازمند تصویب» (ADR-023). */
     isSample: z.boolean().default(false),
-    /** The authorities. For `contract.signature` they are alternatives: any one may sign. */
+    /**
+     * The authorities. For `contract.signature` they are alternatives: any one may sign. For a
+     * statement chain they are its steps, asked in this order (Q-96 (1)).
+     */
     steps: z.array(policyStepInput).min(1).max(MAX_POLICY_STEPS),
   })
   .strict();
@@ -91,6 +117,9 @@ export const policyStepViewSchema = z
     authorityOrganizationId: z.string(),
     authorityRole: z.string(),
     authorityLabel: z.string(),
+    /** A statement chain step's bounds on the gross (min inclusive, max exclusive), or null. */
+    minAmountMinor: z.string().nullable(),
+    maxAmountMinor: z.string().nullable(),
   })
   .strict();
 
