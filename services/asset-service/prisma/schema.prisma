@@ -451,11 +451,16 @@ model InsuranceClaimDocument {
 
   documentId String @map("document_id")
 
+  /// Set once, when document-service reported the file deleted after it was
+  /// attached. The reference stays: it is the claim's record of what was filed.
+  documentRemovedAt DateTime? @map("document_removed_at")
+
   createdAt DateTime @default(now()) @map("created_at")
   createdBy String   @map("created_by")
 
   claim InsuranceClaim @relation(fields: [claimId], references: [id])
 
+  @@index([organizationId, documentId], map: "insurance_claim_document_org_doc_idx")
   @@unique([organizationId, claimId, documentId], map: "insurance_claim_document_org_claim_doc_key")
   @@index([organizationId, claimId, createdAt], map: "insurance_claim_document_org_claim_created_idx")
   @@map("insurance_claim_document")

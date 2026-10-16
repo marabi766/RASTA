@@ -611,14 +611,17 @@ export const attachClaimDocumentSchema = z
 
 export type AttachClaimDocumentDto = z.infer<typeof attachClaimDocumentSchema>;
 
-/** The most documents one claim takes (Q-128, temporary). */
-export const MAX_CLAIM_DOCUMENTS = 20;
-
 export interface ClaimDocumentView {
   id: string;
   documentId: string;
   attachedBy: string;
   attachedAt: string;
+  /**
+   * `DOCUMENT_REMOVED` once document-service has said the file was deleted
+   * after it was attached; the reference itself is kept (Q-128).
+   */
+  state: 'ATTACHED' | 'DOCUMENT_REMOVED';
+  documentRemovedAt: string | null;
 }
 
 export interface InsuranceClaimDetailView extends InsuranceClaimView {

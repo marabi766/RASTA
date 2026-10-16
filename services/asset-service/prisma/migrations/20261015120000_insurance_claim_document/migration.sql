@@ -18,6 +18,9 @@ CREATE TABLE "insurance_claim_document" (
     "asset_id" TEXT NOT NULL,
     "organization_id" TEXT NOT NULL,
     "document_id" TEXT NOT NULL,
+    -- Set once when document-service reports the file deleted after it was
+    -- attached; the row is kept (the claim's record of what was filed).
+    "document_removed_at" TIMESTAMP(3),
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "created_by" TEXT NOT NULL,
 
@@ -34,6 +37,10 @@ CREATE UNIQUE INDEX "insurance_claim_document_org_claim_doc_key"
 -- The list a claim read shows, oldest first.
 CREATE INDEX "insurance_claim_document_org_claim_created_idx"
     ON "insurance_claim_document"("organization_id", "claim_id", "created_at");
+
+-- The deletion event finds the references to one document in one tenant.
+CREATE INDEX "insurance_claim_document_org_doc_idx"
+    ON "insurance_claim_document"("organization_id", "document_id");
 
 ALTER TABLE "insurance_claim_document"
     ADD CONSTRAINT "insurance_claim_document_claim_id_fkey"

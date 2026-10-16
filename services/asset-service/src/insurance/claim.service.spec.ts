@@ -1,6 +1,7 @@
 import { RastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
 import { ClaimService } from './claim.service';
 import type { ClaimAuthority } from './claim-access';
+import type { ClaimAttachmentPolicy } from './claim-attachment-policy';
 import type { AssetRepository } from '../asset/asset.repository';
 import type { AssetService } from '../asset/asset.service';
 import { INSURANCE_EVENTS } from '../asset/events';
@@ -112,6 +113,8 @@ function harness(
     policyCounts?: boolean;
     /** document-service does not vouch for the document (docs/24 Q-128). */
     documentRefused?: boolean;
+    /** The injected attachment policy; the conservative defaults when absent. */
+    attachment?: ClaimAttachmentPolicy;
   } = {},
 ): Harness {
   const enqueued: Harness['enqueued'] = [];
@@ -220,7 +223,12 @@ function harness(
   } as unknown as AssetService;
 
   return {
-    service: new ClaimService(repository, assets, options.authority ?? authority),
+    service: new ClaimService(
+      repository,
+      assets,
+      options.authority ?? authority,
+      options.attachment,
+    ),
     enqueued,
     appended,
     row: () => stored,
@@ -550,6 +558,102 @@ describe('ClaimService', () => {
       expect(again.id).toBe(first.id);
       expect(h.documents).toHaveLength(1);
       expect(h.enqueued).toHaveLength(1);
+    });
+
+    it('answers a retry from the stored reference without asking document-service', async () => {
+      // The first attach committed and its response was lost; document-service is
+      // now down (or the file is deleted): the retry still gets its answer.
+      const h = harness();
+      const first = await run(() =>
+        h.service.attachDocument(ASSET_ID, CLAIM_ID, { documentId: DOC }),
+      );
+      h.assertDocumentIsTheirs.mockRejectedValue(
+        RastaError.upstreamUnavailable('document-service'),
+      );
+      h.assertDocumentIsTheirs.mockClear();
+
+      const again = await run(() =>
+        h.service.attachDocument(ASSET_ID, CLAIM_ID, { documentId: DOC }),
+      );
+
+      expect(again.id).toBe(first.id);
+      expect(h.assertDocumentIsTheirs).not.toHaveBeenCalled();
+    });
+
+    it('still validates a new document remotely, and a refusal writes nothing', async () => {
+      const h = harness();
+      await run(() => h.service.attachDocument(ASSET_ID, CLAIM_ID, { documentId: DOC }));
+      h.assertDocumentIsTheirs.mockRejectedValue(RastaError.notFound('Document'));
+      await expect(
+        run(() => h.service.attachDocument(ASSET_ID, CLAIM_ID, { documentId: 'DOC_OTHER' })),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      expect(h.documents).toHaveLength(1);
+    });
+
+    it('does not answer a stored reference for an asset the caller cannot see', async () => {
+      const h = harness({ asset: null });
+      h.documents.push({ id: 'CLD_1', documentId: DOC, createdBy: 'x', createdAt: new Date() });
+      await expect(
+        run(() => h.service.attachDocument(ASSET_ID, CLAIM_ID, { documentId: DOC })),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    });
+
+    it('takes the limit from the injected policy', async () => {
+      const h = harness({
+        attachment: { maxDocuments: 2, statusesAllowingAttach: ['SUBMITTED'] },
+      });
+      h.documents.push({ documentId: 'DOC_1' }, { documentId: 'DOC_2' });
+      await expect(
+        run(() => h.service.attachDocument(ASSET_ID, CLAIM_ID, { documentId: DOC })),
+      ).rejects.toMatchObject({
+        internalContext: expect.objectContaining({ rule: 'CLAIM_DOCUMENT_LIMIT', limit: 2 }),
+      });
+    });
+
+    it('takes the statuses that allow attaching from the injected policy', async () => {
+      const allowed = harness({
+        claim: claimRow({ status: 'APPROVED' }),
+        attachment: { maxDocuments: 20, statusesAllowingAttach: ['APPROVED'] },
+      });
+      await expect(
+        run(() => allowed.service.attachDocument(ASSET_ID, CLAIM_ID, { documentId: DOC })),
+      ).resolves.toMatchObject({ documentId: DOC });
+
+      // And a status the policy leaves out is refused, even an open one.
+      const refused = harness({
+        attachment: { maxDocuments: 20, statusesAllowingAttach: ['APPROVED'] },
+      });
+      await expect(
+        run(() => refused.service.attachDocument(ASSET_ID, CLAIM_ID, { documentId: DOC })),
+      ).rejects.toMatchObject({
+        internalContext: expect.objectContaining({ rule: 'CLAIM_NOT_OPEN_FOR_DOCUMENTS' }),
+      });
+    });
+
+    it('shows a reference whose file document-service deleted as DOCUMENT_REMOVED', async () => {
+      const h = harness();
+      const removedAt = new Date('2026-10-16T08:00:00.000Z');
+      h.documents.push(
+        {
+          id: 'CLD_1',
+          documentId: 'DOC_A',
+          createdBy: 'u',
+          createdAt: new Date(),
+          documentRemovedAt: null,
+        },
+        {
+          id: 'CLD_2',
+          documentId: 'DOC_B',
+          createdBy: 'u',
+          createdAt: new Date(),
+          documentRemovedAt: removedAt,
+        },
+      );
+      const claim = await run(() => h.service.getClaim(ASSET_ID, CLAIM_ID));
+      expect(claim.documents.map((d) => [d.documentId, d.state, d.documentRemovedAt])).toEqual([
+        ['DOC_A', 'ATTACHED', null],
+        ['DOC_B', 'DOCUMENT_REMOVED', removedAt.toISOString()],
+      ]);
     });
 
     it.each(['APPROVED', 'REJECTED', 'SETTLED'])(

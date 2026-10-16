@@ -4,6 +4,7 @@ import { AssetRepository } from '../src/asset/asset.repository';
 import { AssetService } from '../src/asset/asset.service';
 import { InsuranceService } from '../src/insurance/insurance.service';
 import { ClaimService } from '../src/insurance/claim.service';
+import { DocumentRemovalConsumer } from '../src/consumers/document-removal.consumer';
 import { INSURANCE_EVENTS } from '../src/asset/events';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { FakeDocuments, asActor, id, newPrisma, tenants } from './helpers';
@@ -170,6 +171,98 @@ describe('documents on an insurance claim (Q-128)', () => {
     );
     expect(lines).toHaveLength(1);
     expect(lines[0]?.detail.claimId).toBe(claimId);
+  });
+
+  describe('a retry, and a document deleted after it was attached', () => {
+    const deletion = (documentId: string, organizationId: string, eventId = `EVT_${ulid()}`) => ({
+      eventId,
+      eventName: 'DOCUMENT_DELETED',
+      eventVersion: 1,
+      occurredAt: new Date().toISOString(),
+      producer: 'document-service',
+      producerVersion: '0.1.0',
+      aggregateType: 'Document',
+      aggregateId: documentId,
+      tenantId: organizationId,
+      correlationId: 'CORR_ITEST',
+      payload: {
+        documentId,
+        organizationId,
+        documentClass: 'INSURANCE',
+        reason: 'uploaded by mistake',
+        deletedBy: 'USR_1',
+        deletedAt: new Date().toISOString(),
+      },
+    });
+    const removal = () => new DocumentRemovalConsumer(null, repository, assets, documents);
+    const consume = (organizationId: string, event: ReturnType<typeof deletion>) =>
+      asActor({ organizationId }, () => removal().handle(event));
+
+    it('answers an identical retry from the stored reference while document-service is down', async () => {
+      const { assetId, claimId } = await openClaim(org.a);
+      const documentId = id('DOC');
+      const first = await attach(org.a, assetId, claimId, documentId);
+
+      documents.unavailable();
+      try {
+        const again = await attach(org.a, assetId, claimId, documentId);
+        expect(again.id).toBe(first.id);
+      } finally {
+        documents.unavailable(false);
+      }
+      expect(await rowsOf(claimId)).toHaveLength(1);
+    });
+
+    it('marks the reference DOCUMENT_REMOVED on document-service’s deletion event, keeping history', async () => {
+      const { assetId, claimId } = await openClaim(org.a);
+      const documentId = id('DOC');
+      await attach(org.a, assetId, claimId, documentId);
+
+      // document-service now says the file is gone (the owner check, A-13).
+      documents.missing(documentId);
+      const event = deletion(documentId, org.a);
+      await consume(org.a, event);
+      // Redelivery: processed_event makes it a no-op.
+      await expect(consume(org.a, event)).resolves.toBe('SKIPPED');
+
+      const detail = await asActor(manager(org.a), () => claims.getClaim(assetId, claimId));
+      expect(detail.documents).toEqual([
+        expect.objectContaining({ documentId, state: 'DOCUMENT_REMOVED' }),
+      ]);
+      expect(await rowsOf(claimId)).toHaveLength(1);
+      // The claim's status history is untouched; the dossier gains one line.
+      expect(detail.history.map((h) => h.status)).toEqual(['SUBMITTED']);
+      const lines = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM asset_timeline_entry
+          WHERE asset_id = $1 AND category = 'DOCUMENT'`,
+        assetId,
+      );
+      expect(lines[0]?.n).toBe(2);
+    });
+
+    it('refuses a deletion event for a document document-service still holds', async () => {
+      const { assetId, claimId } = await openClaim(org.a);
+      const documentId = id('DOC');
+      await attach(org.a, assetId, claimId, documentId);
+
+      await expect(consume(org.a, deletion(documentId, org.a))).rejects.toMatchObject({
+        reason: 'SOURCE_UNCONFIRMED',
+      });
+      const detail = await asActor(manager(org.a), () => claims.getClaim(assetId, claimId));
+      expect(detail.documents[0]?.state).toBe('ATTACHED');
+    });
+
+    it('never reaches another organization’s reference, whatever the event names', async () => {
+      const { assetId, claimId } = await openClaim(org.a);
+      const documentId = id('DOC');
+      await attach(org.a, assetId, claimId, documentId);
+      documents.missing(documentId);
+
+      // Delivered under org B: tenant-scoped reads find nothing of org A's.
+      await expect(consume(org.b, deletion(documentId, org.b))).resolves.toBe('SKIPPED');
+      const detail = await asActor(manager(org.a), () => claims.getClaim(assetId, claimId));
+      expect(detail.documents[0]?.state).toBe('ATTACHED');
+    });
   });
 
   describe('no existence oracle', () => {

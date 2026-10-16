@@ -12,7 +12,10 @@ import {
   type InsuranceEventName,
 } from '../asset/events';
 import { INSURANCE_TOPIC } from '../config/env';
-import { MAX_CLAIM_DOCUMENTS } from '../asset/dto';
+import {
+  DEFAULT_CLAIM_ATTACHMENT_POLICY,
+  type ClaimAttachmentPolicy,
+} from './claim-attachment-policy';
 import type {
   AttachClaimDocumentDto,
   ClaimDocumentView,
@@ -62,6 +65,7 @@ export class ClaimService {
     private readonly repository: AssetRepository,
     private readonly assets: AssetService,
     private readonly authority: ClaimAuthority,
+    private readonly attachment: ClaimAttachmentPolicy = DEFAULT_CLAIM_ATTACHMENT_POLICY,
   ) {}
 
   // =========================================================================
@@ -231,10 +235,20 @@ export class ClaimService {
    * answer is no oracle for another tenant's ids; an outage is the upstream
    * error and nothing is attached.
    *
-   * Temporary rules (Q-128): only an open claim (SUBMITTED or UNDER_REVIEW)
-   * takes documents; at most {@link MAX_CLAIM_DOCUMENTS} per claim; a reference
-   * is never removed. Attaching the same document again answers the existing
-   * reference and writes nothing, so a retry needs no Idempotency-Key.
+   * Temporary rules (Q-128), from the injected {@link ClaimAttachmentPolicy}:
+   * only a claim in a status the policy names takes documents (default
+   * SUBMITTED, UNDER_REVIEW); at most `maxDocuments` per claim (default 20); a
+   * reference is never removed. Attaching the same document again answers the
+   * existing reference and writes nothing — and asks document-service nothing —
+   * so a retry needs no Idempotency-Key.
+   *
+   * ## The residual window
+   *
+   * document-service is asked before the commit, and nothing holds its row
+   * across it: a document deleted in between is attached anyway. That is not
+   * prevented; it is made visible and self-healing. document-service's
+   * `DOCUMENT_DELETED` event marks the reference `DOCUMENT_REMOVED`
+   * ({@link markDocumentRemoved}), whichever side of the commit it lands on.
    */
   async attachDocument(
     assetId: string,
@@ -244,7 +258,17 @@ export class ClaimService {
     const asset = await this.assertAssetExists(assetId);
     await this.findClaim(assetId, claimId);
 
-    // Outside the transaction: a network call holds no lock.
+    // A reference this organization already holds is answered as stored, with no
+    // call out: a retry of an attach whose response was lost must not depend on
+    // document-service being up, or on the file still existing (review #304 r1).
+    // Read through the tenant-scoped client, after the asset and claim checks.
+    const held = await this.repository.client.insuranceClaimDocument.findFirst({
+      where: { claimId, documentId: dto.documentId },
+    });
+    if (held) return toDocumentView(held);
+
+    // Only a new attachment is validated remotely. Outside the transaction: a
+    // network call holds no lock.
     await this.assets.assertDocumentIsTheirs(asset.organizationId, assetId, dto.documentId);
 
     const actor = this.actor();
@@ -266,17 +290,17 @@ export class ClaimService {
       });
       if (existing) return toDocumentView(existing);
 
-      if (claim.status !== 'SUBMITTED' && claim.status !== 'UNDER_REVIEW') {
-        throw RastaError.businessRule('Documents can be attached only while the claim is open', {
+      if (!this.attachment.statusesAllowingAttach.includes(claim.status as ClaimStatus)) {
+        throw RastaError.businessRule('Documents cannot be attached to a claim in this status', {
           rule: 'CLAIM_NOT_OPEN_FOR_DOCUMENTS',
           status: claim.status,
         });
       }
       const count = await tx.insuranceClaimDocument.count({ where: { claimId } });
-      if (count >= MAX_CLAIM_DOCUMENTS) {
+      if (count >= this.attachment.maxDocuments) {
         throw RastaError.businessRule('The claim already holds the most documents it takes', {
           rule: 'CLAIM_DOCUMENT_LIMIT',
-          limit: MAX_CLAIM_DOCUMENTS,
+          limit: this.attachment.maxDocuments,
         });
       }
 
@@ -671,12 +695,15 @@ function toDocumentView(row: {
   documentId: string;
   createdBy: string;
   createdAt: Date;
+  documentRemovedAt: Date | null;
 }): ClaimDocumentView {
   return {
     id: row.id,
     documentId: row.documentId,
     attachedBy: row.createdBy,
     attachedAt: row.createdAt.toISOString(),
+    state: row.documentRemovedAt ? 'DOCUMENT_REMOVED' : 'ATTACHED',
+    documentRemovedAt: row.documentRemovedAt?.toISOString() ?? null,
   };
 }
 

@@ -95,6 +95,55 @@ describe('claim authority configuration', () => {
   });
 });
 
+/** The claim attachment policy (docs/24 Q-128), validated at boot. */
+describe('claim attachment policy configuration', () => {
+  const max = assetEnvSchema.shape.INSURANCE_CLAIM_MAX_DOCUMENTS;
+  const statuses = assetEnvSchema.shape.INSURANCE_CLAIM_DOCUMENT_STATUSES;
+
+  it('defaults to twenty documents, while the claim is open', () => {
+    expect(max.parse(undefined)).toBe(20);
+    expect(statuses.parse(undefined)).toEqual(['SUBMITTED', 'UNDER_REVIEW']);
+  });
+
+  it('takes a configured limit and a trimmed status list', () => {
+    expect(max.parse('50')).toBe(50);
+    expect(statuses.parse(' SUBMITTED, UNDER_REVIEW ,APPROVED')).toEqual([
+      'SUBMITTED',
+      'UNDER_REVIEW',
+      'APPROVED',
+    ]);
+  });
+
+  it('refuses a limit that is not an integer from 1 to 200', () => {
+    for (const bad of ['0', '-1', '201', '2.5', 'many']) {
+      expect(() => max.parse(bad)).toThrow();
+    }
+  });
+
+  it('refuses an unknown, repeated, blank or empty status list', () => {
+    for (const bad of ['', 'SUBMITTED,,UNDER_REVIEW', 'OPEN', 'SUBMITTED,SUBMITTED', 'submitted']) {
+      expect(() => statuses.parse(bad)).toThrow();
+    }
+  });
+
+  it('stops the service at start-up on an invalid value', () => {
+    const base: NodeJS.ProcessEnv = {
+      DATABASE_URL: 'postgresql://u:p@localhost:5433/rasta_asset?schema=public',
+      KAFKA_BROKERS: 'localhost:9092',
+      OIDC_ISSUER_URL: 'http://localhost:8080/realms/rasta',
+      OIDC_JWKS_URI: 'http://localhost:8080/realms/rasta/protocol/openid-connect/certs',
+      OIDC_AUDIENCE: 'rasta-api',
+      INTERNAL_TOKEN_SECRET: 'a-throwaway-value-used-only-by-this-spec-32',
+      FLEET_SERVICE_URL: 'http://localhost:3104',
+      MAINTENANCE_SERVICE_URL: 'http://localhost:3105',
+      DOCUMENT_SERVICE_URL: 'http://localhost:3107',
+    };
+    expect(() => loadAssetEnv({ ...base, INSURANCE_CLAIM_MAX_DOCUMENTS: '0' })).toThrow();
+    expect(() => loadAssetEnv({ ...base, INSURANCE_CLAIM_DOCUMENT_STATUSES: 'NOPE' })).toThrow();
+    expect(loadAssetEnv(base).INSURANCE_CLAIM_MAX_DOCUMENTS).toBe(20);
+  });
+});
+
 /** The two Idempotency-Key lifetimes on POST /v1/assets (#169), validated at boot. */
 describe('idempotency configuration', () => {
   const ttl = assetEnvSchema.shape.ASSET_IDEMPOTENCY_TTL_HOURS;
