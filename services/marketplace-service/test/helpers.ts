@@ -4,7 +4,7 @@ import { runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-co
 import { PrismaService } from '../src/prisma/prisma.service';
 import { EventPublisher } from '../src/events/publisher';
 import { IdempotencyStore } from '../src/shared/idempotency';
-import { OrderRepository } from '../src/order/order.repository';
+import { OrderRepository, type SagaStep } from '../src/order/order.repository';
 import { OrderService } from '../src/order/order.service';
 import { CatalogueService } from '../src/offer/catalogue.service';
 import { loadMarketplaceEnv, type MarketplaceEnv } from '../src/config/env';
@@ -179,6 +179,16 @@ export function key(prefix: string): string {
   return `${prefix}-${ulid()}`;
 }
 
+/**
+ * A saga step of its own, as each separately scheduled activity has (D-053).
+ * A Temporal retry is the same step again: keep the value and pass it twice.
+ * `scheduledAt` is when the workflow scheduled it: now, unless the case needs
+ * the gap a real saga leaves between two steps.
+ */
+export function sagaStep(scheduledAt: Date = new Date()): SagaStep {
+  return { key: `order-test/run-test/${ulid()}`, scheduledAt };
+}
+
 /** Removes everything the named organizations wrote. */
 export async function cleanup(
   prisma: PrismaService,
@@ -198,6 +208,10 @@ export async function cleanup(
     );
     await client.$executeRawUnsafe(
       `DELETE FROM order_status_history WHERE organization_id = ANY($1::text[])`,
+      orgs,
+    );
+    await client.$executeRawUnsafe(
+      `DELETE FROM saga_step WHERE organization_id = ANY($1::text[])`,
       orgs,
     );
     await client.$executeRawUnsafe(

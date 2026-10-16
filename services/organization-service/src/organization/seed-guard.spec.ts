@@ -22,10 +22,21 @@ describe('the demo seed never re-parents an existing organization', () => {
   });
 
   it('is what the seed runs before it writes, and its update never touches the parent, path or depth', () => {
-    const seed = readFileSync(join(__dirname, '..', '..', 'prisma', 'seed.ts'), 'utf8');
-    expect(seed).toContain('assertSeedDoesNotReparent(');
-    const update = /update: \{([\s\S]*?)\},\n {4}\}\);/.exec(seed)?.[1] ?? '';
+    const write = readFileSync(join(__dirname, 'seed-organization.ts'), 'utf8');
+    expect(write).toContain('assertSeedDoesNotReparent(');
+    const update = /organization\.update\(\{([\s\S]*?)\}\);/.exec(write)?.[1] ?? '';
     expect(update).toContain('name: org.name');
     expect(update).not.toMatch(/parentId|depth|path/);
+  });
+
+  it('writes organizations only through seedOrganization, never with a statement of its own', () => {
+    // seed-hierarchy-lock.int-spec.ts holds seedOrganization to the hierarchy lock; a write
+    // beside it in the seed would be outside that lock again.
+    const seed = readFileSync(join(__dirname, '..', '..', 'prisma', 'seed.ts'), 'utf8');
+    expect(seed).toContain('await seedOrganization(repository, org, { maxDepth })');
+    // …at the depth limit the service runs with (Codex r1 on #295), not one of its own.
+    expect(seed).toContain('const maxDepth = loadMaxHierarchyDepth();');
+    expect(seed).not.toMatch(/\.organization\.(upsert|create|update|updateMany)\(/);
+    expect(seed).not.toMatch(/UPDATE organization SET/);
   });
 });

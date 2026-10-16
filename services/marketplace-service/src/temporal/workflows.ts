@@ -127,8 +127,9 @@ const {
 /**
  * Reads, and writes to this service's own database: retried until they answer.
  *
- * Each of these is idempotent — a read, or a transition that returns quietly
- * when the order is already where it was sent. Retrying them costs nothing.
+ * Each of these is idempotent — a read, or a step that records its outcome
+ * under its own key and answers a retry from that record, wherever the order
+ * has moved since (D-053). Retrying them costs nothing.
  * Giving up on them is what cost money: a local write that failed after an
  * economic step succeeded used to be treated as though the economic step had
  * failed, and the saga then recorded the opposite of what had happened. A

@@ -13,7 +13,10 @@ import {
   EventConsumer,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
+  OutboxPurgeScheduler,
   OutboxRelay,
+  OutboxShutdown,
+  outboxPurgeSettings,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -21,6 +24,7 @@ import {
   type AuthGuardOptions,
   kafkaConnection,
 } from '@rasta/nest-common';
+import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
   outboxAckFencedTotal,
@@ -211,6 +215,39 @@ import { loadSupplierEnv, SERVICE_NAME, type SupplierEnv } from './config/env';
     },
 
     {
+      // D-052: published rows past OUTBOX_PURGE_RETENTION_HOURS, in bounded batches.
+      provide: OutboxPurgeScheduler,
+      inject: [PrismaOutboxStore, ENV, LOGGER],
+      useFactory: (store: PrismaOutboxStore, env: SupplierEnv, logger: Logger) =>
+        new OutboxPurgeScheduler({
+          store,
+          service: SERVICE_NAME,
+          logger,
+          ...outboxPurgeSettings(env),
+        }),
+    },
+    {
+      // D-052: the relay, the purge and the performance consumer stop together
+      // in the destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. The
+      // consumer too (Codex r1 on #276): stopped later, in
+      // `onApplicationShutdown`, its wait came on top of the relay's.
+      provide: OutboxShutdown,
+      inject: [OutboxRelay, OutboxPurgeScheduler, PerformanceConsumer, ENV],
+      useFactory: (
+        relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
+        performance: PerformanceConsumer,
+        env: SupplierEnv,
+      ) =>
+        new OutboxShutdown({
+          relay,
+          purge,
+          workers: [performance],
+          budgetMs: outboxShutdownBudgetMs(env),
+        }),
+    },
+
+    {
       provide: AUTH_OPTIONS,
       inject: [ENV, InternalTokenService],
       useFactory: (env: SupplierEnv, internalTokens: InternalTokenService): AuthGuardOptions => ({
@@ -236,6 +273,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   constructor(
     private readonly relay: OutboxRelay,
+    private readonly purge: OutboxPurgeScheduler,
+    private readonly outboxShutdown: OutboxShutdown,
     private readonly store: PrismaOutboxStore,
     private readonly prisma: PrismaService,
     private readonly performance: PerformanceConsumer,
@@ -254,6 +293,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.prisma.assertRuntimeRole();
 
     this.relay.start();
+    this.purge.start();
     await this.performance.start();
 
     const sample = async () => {
@@ -277,7 +317,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
-    await this.performance.stop();
-    await this.relay.stop();
+    // The relay, the purge and the performance consumer already stopped in
+    // OutboxShutdown's onModuleDestroy, concurrently and by one deadline; this
+    // joins that stop and returns at once.
+    await this.outboxShutdown.stop();
   }
 }

@@ -1,7 +1,13 @@
 import { OUTBOX_PURGE_TRANSACTION_MARGIN_MS } from '@rasta/config';
 import { toStreamSeq } from '@rasta/contracts';
 
-import { RENEWAL_TRANSACTION_MARGIN_MS, orderForPublish, type OutboxRow } from './outbox';
+import {
+  OutboxReleaseAbandoned,
+  RENEWAL_TRANSACTION_MARGIN_MS,
+  orderForPublish,
+  type OutboxReleaseBound,
+  type OutboxRow,
+} from './outbox';
 
 /**
  * The SQL behind every service's outbox store.
@@ -17,7 +23,8 @@ import { RENEWAL_TRANSACTION_MARGIN_MS, orderForPublish, type OutboxRow } from '
  * a contract, in the same sense as an event schema.
  *
  * Every value is bound as a parameter. Nothing is interpolated into SQL (S-05),
- * with one guarded exception noted on {@link renewSql}.
+ * with one guarded exception: the `statement_timeout` of {@link renewSql} and
+ * {@link boundedReleaseSql}.
  *
  * **The token is the only fence.** Every mutation below matches on
  * `claim_token` exactly, and not one of them conditions on `claim_expires_at`.
@@ -40,9 +47,11 @@ export interface OutboxSqlClient {
 }
 
 /**
- * Runs `fn` inside one transaction that lives at least `timeoutMs`.
+ * Runs `fn` inside one transaction, waiting at most `timeoutMs` for its
+ * connection and letting it live at most `timeoutMs` (Prisma's `maxWait` and
+ * `timeout`).
  *
- * Only {@link renewSql} needs it, and it is a callback rather than a method on
+ * {@link renewSql} and {@link releaseSql} need it, and it is a callback rather than a method on
  * {@link OutboxSqlClient} for a concrete reason: Prisma's `$transaction` is an
  * overload set whose first signature takes an array, so a structural interface
  * requiring it never matches a real `PrismaClient`. Supplying the call from the
@@ -501,23 +510,95 @@ export async function markFailedSql(
  *
  * Leaves `attempts` and `next_attempt_at` alone: nothing failed, so the row
  * should be claimable immediately rather than parked behind a backoff.
+ *
+ * Bounded by the stop it is part of, through {@link boundedReleaseSql}. The
+ * relay stops waiting at that bound in any case (Codex r1 on #291, finding 2);
+ * this makes the release give up then too — whether it is still waiting for a
+ * connection, blocked on a lock, or not yet begun.
  */
 export async function releaseSql(
-  client: OutboxSqlClient,
+  runTransaction: OutboxTxRunner,
   ids: readonly string[],
   token: string,
+  bound: OutboxReleaseBound,
 ): Promise<number> {
   if (ids.length === 0) return 0;
-  return client.$executeRawUnsafe(
-    `UPDATE outbox_message
-        SET claim_token      = NULL,
-            claim_owner      = NULL,
-            claim_expires_at = NULL
-      WHERE id = ANY($1::text[])
-        AND claim_token = $2`,
-    [...ids],
-    token,
+  return boundedReleaseSql(runTransaction, bound, (tx) =>
+    tx.$executeRawUnsafe(
+      `UPDATE outbox_message
+          SET claim_token      = NULL,
+              claim_owner      = NULL,
+              claim_expires_at = NULL
+        WHERE id = ANY($1::text[])
+          AND claim_token = $2`,
+      [...ids],
+      token,
+    ),
   );
+}
+
+/**
+ * Runs a release's `update` within what is left of its stop's bound, and
+ * writes nothing once that is spent (Codex r3 on #291).
+ *
+ * Shared by every release, whichever table it updates. The bound is read
+ *
+ *   before the transaction  the wait for a connection gets what is left, and
+ *                           no more: the store passes it as Prisma's
+ *                           `maxWait`, and as its transaction `timeout` too;
+ *   once it has begun       acquisition may have taken the rest, and the stop
+ *                           may have returned meanwhile — then no statement is
+ *                           issued. Otherwise what is left now becomes the
+ *                           `statement_timeout`: recomputed from the stop's
+ *                           deadline, not carried over from before the wait;
+ *   before the UPDATE       the `SET LOCAL` took a round trip;
+ *   after the UPDATE        one that returned after the bound is rolled back,
+ *                           not committed after the stop has returned.
+ *
+ * Each spent read rejects with {@link OutboxReleaseAbandoned}, so a
+ * transaction already begun ends in a ROLLBACK of nothing. No margin is added
+ * anywhere: Prisma's transaction timeout firing first ends the release no
+ * later than the statement timeout would.
+ *
+ * What remains after the bound, by construction: the BEGIN and ROLLBACK of a
+ * transaction whose connection arrived too late, a statement issued just
+ * before the bound running until its `statement_timeout` (at most the
+ * `SET LOCAL` round trip past it), and the COMMIT of an UPDATE that returned
+ * in time — the one write that can land after the stop has returned, of an
+ * UPDATE that had returned before it. ADR-050 §Shutdown lists them.
+ */
+export async function boundedReleaseSql(
+  runTransaction: OutboxTxRunner,
+  bound: OutboxReleaseBound,
+  update: (tx: OutboxSqlClient) => Promise<number>,
+): Promise<number> {
+  const left = (): number => {
+    const remainingMs = bound.remainingMs();
+    if (!(remainingMs > 0)) throw new OutboxReleaseAbandoned();
+    return localStatementTimeoutMs(remainingMs, 'release');
+  };
+
+  return runTransaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${left()}`);
+    left();
+    const released = await update(tx);
+    left();
+    return released;
+  }, left());
+}
+
+/**
+ * A `SET LOCAL statement_timeout` value. Interpolated because `SET LOCAL`
+ * accepts no bind parameters. Not user input — it is derived from validated
+ * configuration — and coerced to a safe positive integer here so nothing but
+ * digits can reach the statement (S-05).
+ */
+function localStatementTimeoutMs(deadlineMs: number, operation: string): number {
+  const timeoutMs = Math.max(1, Math.floor(deadlineMs));
+  if (!Number.isSafeInteger(timeoutMs)) {
+    throw new Error(`outbox ${operation}: refusing a non-integer statement timeout: ${deadlineMs}`);
+  }
+  return timeoutMs;
 }
 
 /**
@@ -542,14 +623,7 @@ export async function renewSql(
   deadlineMs: number,
 ): Promise<string[]> {
   if (ids.length === 0) return [];
-
-  // Interpolated because `SET LOCAL` accepts no bind parameters. Not user
-  // input — it is derived from validated configuration — and coerced to a safe
-  // positive integer here so nothing but digits can reach the statement (S-05).
-  const timeoutMs = Math.max(1, Math.floor(deadlineMs));
-  if (!Number.isSafeInteger(timeoutMs)) {
-    throw new Error(`outbox renew: refusing a non-integer statement timeout: ${deadlineMs}`);
-  }
+  const timeoutMs = localStatementTimeoutMs(deadlineMs, 'renew');
 
   return runTransaction(async (tx) => {
     await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);

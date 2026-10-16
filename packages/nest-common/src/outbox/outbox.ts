@@ -321,8 +321,16 @@ export interface OutboxStore {
   /** Records a failure and schedules the retry with the database clock. */
   markFailed(id: string, token: string, error: string, backoff: RetryBackoff): Promise<number>;
 
-  /** Gives rows back without counting a failure. Returns rows released. */
-  release(ids: readonly string[], token: string): Promise<number>;
+  /**
+   * Gives rows back without counting a failure. Returns rows released.
+   *
+   * Only a stop releases, and `bound` is that stop's bound, read again at each
+   * step: the store waits for its connection no longer than what is left of
+   * it, then issues nothing once it reads zero, and takes what is left then as
+   * its own `statement_timeout` — so a release the stop no longer waits for
+   * neither starts late nor goes on holding row locks (`releaseSql`).
+   */
+  release(ids: readonly string[], token: string, bound: OutboxReleaseBound): Promise<number>;
 
   /**
    * Extends the lease and returns the ids **still owned**.
@@ -388,6 +396,47 @@ export interface OutboxStopOptions {
   deadlineAt?: number;
 }
 
+/**
+ * The bound a stop gives its release: not a number of milliseconds read once,
+ * but the stop's deadline itself, read again at each step (Codex r3 on #291).
+ *
+ * A budget fixed when the release began would be spent by whatever precedes
+ * its statements — waiting for a pooled connection above all — while the stop
+ * stops waiting at its deadline regardless. Read after that wait instead, it
+ * says whether there is still a stop to release for, and how long the
+ * statement may take.
+ */
+export interface OutboxReleaseBound {
+  /**
+   * Milliseconds left of the stop's bound, on the relay's clock. Zero once its
+   * deadline has passed, the stop has stopped waiting for this release or the
+   * run has ended — and zero from then on.
+   */
+  remainingMs(): number;
+}
+
+/**
+ * A bound `ms` from now, for a release no stop is waiting on: tests, tooling.
+ * Zero once that time has passed, so nothing of such a release starts later.
+ */
+export function releaseWithin(ms: number, now: () => number = Date.now): OutboxReleaseBound {
+  const deadlineAt = now() + ms;
+  return { remainingMs: () => Math.max(0, deadlineAt - now()) };
+}
+
+/**
+ * A release that found its bound spent — before its connection, after it, or
+ * once its UPDATE had returned — and so wrote nothing: no statement after the
+ * bound, and an UPDATE that returned after it rolled back rather than
+ * committed. The rows stay claimed until their lease expires.
+ */
+export class OutboxReleaseAbandoned extends Error {
+  constructor() {
+    super('outbox release: its bound was spent, so it wrote nothing; the lease decides');
+    this.name = 'OutboxReleaseAbandoned';
+  }
+}
+
 /** ADR-050 §Heartbeat timing. Three attempts before expiry, at every lease size. */
 export const RENEWAL_INTERVAL_DIVISOR = 4;
 /** Ceiling on one renewal's `statement_timeout`, in milliseconds. */
@@ -435,13 +484,52 @@ export function outboxRenewalOperationBudget(env: {
  */
 type PublishState = 'NOT_SENT' | 'IN_FLIGHT' | 'PUBLISHED' | 'FAILED';
 
+/**
+ * One run of the relay: from construction, or the first `start()` after a
+ * stop, to the return of its stop. Stops never overlap, so neither do runs: a
+ * `stop()` during a stop joins it, and a `start()` during a stop takes effect
+ * once that stop has returned (Codex r1 on #291, finding 1).
+ *
+ * Between a stop's return and the next `start()` the relay stays in the run
+ * that stop ended: a forced tick claims nothing, and a repeated `stop()` is
+ * that run's stop, already returned. A stop therefore always settles the run
+ * it was called in, and no tick runs in a run whose stop has returned (Codex
+ * r2 on #291).
+ *
+ * A tick and a renewal keep the run they began in, so whatever of them
+ * outlives that stop (a claim, a publish or a renewal still pending at its
+ * deadline) finds, when it resumes, that the stop has already settled the run,
+ * and leaves it as the stop left it (Codex r1 on #280, finding 2).
+ */
+interface RelayRun {
+  /** Set when a stop begins: from then on the run claims, publishes and renews nothing new. */
+  stopping: boolean;
+  /**
+   * Set when that stop returns: from then on nothing of the run writes to the
+   * store or to the relay's state. A stop returns with a tick still running
+   * only once its own deadline has passed, so none of it remains for a release
+   * or an acknowledgement: rows the run still holds return to the queue when
+   * their lease expires, and any that reached the broker are delivered again —
+   * at-least-once, deduplicated by consumers on the event id (ADR-021).
+   */
+  ended: boolean;
+  /** The run's one stop, once called: every later `stop()` in the run joins it. */
+  stop?: Promise<void>;
+}
+
+const newRun = (): RelayRun => ({ stopping: false, ended: false });
+
 export class OutboxRelay {
   private timer?: NodeJS.Timeout;
   private heartbeat?: NodeJS.Timeout;
   private running = false;
   private stopped = true;
-  /** The one stop in progress or done since the last `start()`; later calls join it. */
-  private stopping?: Promise<void>;
+  /** Whether the current run's stop is in progress. */
+  private draining = false;
+  /** A `start()` made while a stop was in progress, applied when it returns. */
+  private startDeferred = false;
+  /** The current run; replaced by the first `start()` after its stop has returned. */
+  private run: RelayRun = newRun();
 
   /** Rows this relay holds and has not yet acknowledged, failed or released. */
   private owned = new Set<string>();
@@ -466,9 +554,19 @@ export class OutboxRelay {
   }
 
   start(): void {
+    if (this.draining) {
+      // Not now: a second stop would then drain the stopping run again, and
+      // its return would end that run while the next one was already claiming
+      // (Codex r1 on #291, finding 1). The stop in progress starts the relay
+      // when it returns — unless another stop() joins it first.
+      this.startDeferred = true;
+      return;
+    }
     if (!this.stopped) return;
     this.stopped = false;
-    this.stopping = undefined;
+    // A run that was never stopped (forced ticks before the first start())
+    // carries on, so the next stop still fences whatever of it is pending.
+    if (this.run.ended) this.run = newRun();
     const interval = this.options.pollIntervalMs ?? 500;
     this.timer = setInterval(() => {
       if (this.stopped) return;
@@ -494,71 +592,129 @@ export class OutboxRelay {
    *                       claimant picks it up — a duplicate only if one was
    *                       genuinely needed.
    *
-   * Shutdown never waits indefinitely: the grace is bounded by configuration,
-   * so a pod cannot sit in `Terminating` behind a Kafka request that cannot be
-   * cancelled. With `deadlineAt` (`OutboxShutdown`, D-052) the grace and the
-   * release both end by that shared deadline as well.
+   * Shutdown never waits indefinitely: every wait of a stop — for the tick,
+   * and for the release — ends by its bound, so a pod cannot sit in
+   * `Terminating` behind a Kafka request that cannot be cancelled or a release
+   * blocked on a lock. The bound is the shutdown grace from configuration;
+   * with `deadlineAt` (`OutboxShutdown`, D-052) the tick's wait ends by the
+   * earlier of the two and the release by that shared deadline. A release
+   * still unfinished at its bound is abandoned: nothing was sent, and the rows
+   * return to the queue when their lease expires (Codex r1 on #291, finding 2).
+   * An abandoned release issues no statement after the stop has returned, and
+   * commits nothing it had not by then (Codex r3 on #291; `releaseSql`).
    *
-   * One stop per `start()`: a second call joins the first and, once that one
-   * has returned, returns at once rather than waiting a second grace.
+   * Once a stop has begun the run starts nothing new: no claim, no publish
+   * (the per-row fallback included), no heartbeat. A claim that returns while
+   * the stop still waits is released by it, unsent; a publish that returns
+   * then is acknowledged or failed as usual. Whatever returns after the stop
+   * has returned writes nothing and is left to its lease ({@link RelayRun}).
+   *
+   * One stop at a time, and one per run: a call while a stop is in progress
+   * joins it — returning when it returns, by that stop's bound — and cancels a
+   * `start()` made meanwhile; a call after it has returned, with no `start()`
+   * since, is that same stop and returns at once rather than waiting a second
+   * grace. Nothing can have run since: until the next `start()` a forced tick
+   * claims nothing.
    */
   stop(options: OutboxStopOptions = {}): Promise<void> {
-    this.stopping ??= this.drain(options.deadlineAt);
-    return this.stopping;
+    this.startDeferred = false;
+    const run = this.run;
+    run.stop ??= this.drain(run, options.deadlineAt);
+    return run.stop;
   }
 
-  private async drain(deadlineAt: number | undefined): Promise<void> {
+  private async drain(run: RelayRun, deadlineAt: number | undefined): Promise<void> {
+    run.stopping = true;
+    this.draining = true;
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
 
-    const deadline = Math.min(this.now() + this.shutdownGraceMs, deadlineAt ?? Infinity);
-    while (this.running && this.now() < deadline) {
-      await new Promise((resolve) => setImmediate(resolve));
-    }
+    const startedAt = this.now();
+    const deadline = Math.min(startedAt + this.shutdownGraceMs, deadlineAt ?? Infinity);
+    const releaseBy = deadlineAt ?? startedAt + this.shutdownGraceMs;
+    try {
+      while (this.running && this.now() < deadline) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
 
-    const token = this.token;
-    if (token) {
-      const notSent = [...this.owned].filter((id) => this.state.get(id) === 'NOT_SENT');
-      if (notSent.length > 0) {
-        const releasing = this.options.store.release(notSent, token).then(
-          (released) => {
-            this.recordFencing(notSent.length - released, 'release');
-            this.options.logger?.debug(
-              { count: released, owner: this.owner },
-              'Outbox shutdown released rows that had not been sent',
-            );
-          },
-          (error: unknown) => {
-            this.options.logger?.error({ err: error }, 'Outbox shutdown release failed');
-          },
-        );
-        if (deadlineAt === undefined) {
-          await releasing;
-        } else if ((await withinDeadline(releasing, deadlineAt - this.now())) === 'abandoned') {
-          // Not released is safe: nothing was sent, and the lease lapses on its own.
+      const token = this.token;
+      if (token) {
+        const notSent = [...this.owned].filter((id) => this.state.get(id) === 'NOT_SENT');
+        if (notSent.length > 0) await this.release(run, notSent, token, releaseBy);
+
+        const abandoned = [...this.owned].filter((id) => this.state.get(id) === 'IN_FLIGHT');
+        if (abandoned.length > 0) {
           this.options.logger?.warn(
-            { count: notSent.length, owner: this.owner, leaseSeconds: this.leaseSeconds },
-            'Outbox shutdown release did not finish by the shutdown deadline; the rows ' +
-              'return to the queue when their lease expires',
+            { count: abandoned.length, owner: this.owner, leaseSeconds: this.leaseSeconds },
+            'Outbox shutdown abandoned rows whose publish result is unknown; ' +
+              'their leases will expire naturally and a duplicate delivery is possible',
           );
         }
       }
-
-      const abandoned = [...this.owned].filter((id) => this.state.get(id) === 'IN_FLIGHT');
-      if (abandoned.length > 0) {
-        this.options.logger?.warn(
-          { count: abandoned.length, owner: this.owner, leaseSeconds: this.leaseSeconds },
-          'Outbox shutdown abandoned rows whose publish result is unknown; ' +
-            'their leases will expire naturally and a duplicate delivery is possible',
-        );
+    } finally {
+      this.stopHeartbeat();
+      this.owned.clear();
+      this.state.clear();
+      this.token = null;
+      run.ended = true;
+      this.draining = false;
+      if (this.startDeferred) {
+        this.startDeferred = false;
+        this.start();
       }
     }
+  }
 
-    this.stopHeartbeat();
-    this.owned.clear();
-    this.state.clear();
-    this.token = null;
+  /**
+   * The stop's release of rows nothing was sent for, waited for until
+   * `releaseBy` and no longer. Not released is safe: the lease lapses on its
+   * own. With no time left the release is not even begun.
+   *
+   * The store reads the bound again once it has a connection and before each
+   * statement (Codex r3 on #291). It reads zero from the moment the stop stops
+   * waiting — set here, before the stop returns, not inferred from a clock —
+   * so a release whose connection arrives after the stop has returned issues
+   * nothing, and one whose UPDATE returns then is rolled back. Its outcome,
+   * whenever it settles, is no longer this relay's to record.
+   */
+  private async release(
+    run: RelayRun,
+    ids: string[],
+    token: string,
+    releaseBy: number,
+  ): Promise<void> {
+    let abandoned = false;
+    const bound: OutboxReleaseBound = {
+      remainingMs: () => (abandoned || run.ended ? 0 : Math.max(0, releaseBy - this.now())),
+    };
+    const boundMs = bound.remainingMs();
+    if (boundMs > 0) {
+      /** Whether the release ran: false when the store found the bound spent first. */
+      const releasing = this.options.store.release(ids, token, bound).then(
+        (released) => {
+          if (abandoned) return true;
+          this.recordFencing(ids.length - released, 'release');
+          this.options.logger?.debug(
+            { count: released, owner: this.owner },
+            'Outbox shutdown released rows that had not been sent',
+          );
+          return true;
+        },
+        (error: unknown) => {
+          if (abandoned || error instanceof OutboxReleaseAbandoned) return false;
+          this.options.logger?.error({ err: error }, 'Outbox shutdown release failed');
+          return true;
+        },
+      );
+      if ((await withinDeadline(releasing, boundMs)) === 'finished' && (await releasing)) return;
+    }
+    abandoned = true;
+    this.options.logger?.warn(
+      { count: ids.length, owner: this.owner, leaseSeconds: this.leaseSeconds },
+      'Outbox shutdown release did not finish by the shutdown deadline; the rows ' +
+        'return to the queue when their lease expires',
+    );
   }
 
   /**
@@ -567,10 +723,14 @@ export class OutboxRelay {
    * Guards only against *concurrent* ticks within this process. Cross-replica
    * safety is the claim token's job, not this flag's. It deliberately does not
    * require the relay to be started, so an operator can force a drain during
-   * incident response and a test can drive it deterministically.
+   * incident response and a test can drive it deterministically — but it
+   * claims nothing once a stop has begun, until the next `start()`: a stopped
+   * relay stays stopped, and a tick it allowed would be one no `stop()` fences
+   * (Codex r2 on #291).
    */
   async tick(): Promise<number> {
-    if (this.running) return 0;
+    const run = this.run;
+    if (this.running || run.stopping) return 0;
     this.running = true;
     this.ownershipUnknown = false;
 
@@ -582,6 +742,17 @@ export class OutboxRelay {
       });
 
       if (claim.rows.length === 0 || !claim.token) return 0;
+
+      if (run.ended) {
+        // The stop returned while this claim was pending, so its deadline has
+        // passed: nothing is published, renewed or released.
+        this.options.logger?.warn(
+          { count: claim.rows.length, owner: this.owner, leaseSeconds: this.leaseSeconds },
+          'Outbox claim returned after the relay had stopped; its rows were not published ' +
+            'and return to the queue when their lease expires',
+        );
+        return 0;
+      }
 
       this.token = claim.token;
       this.owned = new Set(claim.rows.map((row) => row.id));
@@ -601,10 +772,14 @@ export class OutboxRelay {
         'Outbox claim acquired',
       );
 
+      // The stop began while this claim was pending and is waiting for this
+      // tick: it releases these rows, none of which was sent.
+      if (run.stopping) return 0;
+
       this.startHeartbeat();
 
       try {
-        return await this.publishBatch(claim.rows, claim.token);
+        return await this.publishBatch(claim.rows, claim.token, run);
       } finally {
         this.stopHeartbeat();
       }
@@ -616,7 +791,11 @@ export class OutboxRelay {
     }
   }
 
-  private async publishBatch(claimed: readonly OutboxRow[], token: string): Promise<number> {
+  private async publishBatch(
+    claimed: readonly OutboxRow[],
+    token: string,
+    run: RelayRun,
+  ): Promise<number> {
     // Whatever order the store returned, one stream's rows go out in stream_seq
     // order. Done here as well as in the shared claim so a store with its own
     // claim cannot silently lose the property.
@@ -627,13 +806,17 @@ export class OutboxRelay {
     try {
       await this.options.publisher.publish(rows);
     } catch (error) {
+      if (this.endedDuringPublish(run, ids.length)) return 0;
       for (const id of ids) this.state.set(id, 'NOT_SENT');
       // Fall back to per-row publishing so one poisoned message cannot block
       // the queue behind it. A row that keeps failing surfaces via its attempt
       // count and the stuck-relay alert.
-      return await this.publishIndividually(rows, token, error);
+      return await this.publishIndividually(rows, token, error, run);
     }
 
+    // Within the stop's deadline a publish that returned is acknowledged as
+    // usual — the stop waits for it so that it can be — and after it, not.
+    if (this.endedDuringPublish(run, ids.length)) return 0;
     for (const id of ids) this.state.set(id, 'PUBLISHED');
     const acknowledged = await this.acknowledge(ids, token);
     if (acknowledged > 0) {
@@ -650,15 +833,22 @@ export class OutboxRelay {
     batch: readonly OutboxRow[],
     token: string,
     batchError: unknown,
+    run: RelayRun,
   ): Promise<number> {
     this.options.logger?.warn(
       { err: describeError(batchError), count: batch.length },
-      'Batch publish failed; retrying rows individually',
+      run.stopping
+        ? 'Batch publish failed while the relay is stopping; no row is retried'
+        : 'Batch publish failed; retrying rows individually',
     );
 
     const published: string[] = [];
 
     for (const row of batch) {
+      // Once a stop has begun no further row is sent: the rest stay NOT_SENT,
+      // for the stop to release.
+      if (run.stopping) break;
+
       // A row already fenced away is not ours to publish again, and a lease we
       // can no longer renew must not outlive itself down this path either —
       // which is exactly how the old fallback could run for hours past its
@@ -674,19 +864,40 @@ export class OutboxRelay {
       this.state.set(row.id, 'IN_FLIGHT');
       try {
         await this.options.publisher.publish([row]);
+        if (this.endedDuringPublish(run, published.length + 1)) return 0;
         this.state.set(row.id, 'PUBLISHED');
         published.push(row.id);
       } catch (error) {
+        if (this.endedDuringPublish(run, published.length + 1)) return 0;
         this.state.set(row.id, 'FAILED');
         await this.fail(row, token, error);
       }
     }
 
+    if (this.endedDuringPublish(run, published.length)) return 0;
     const acknowledged = await this.acknowledge(published, token);
     if (acknowledged > 0) {
       this.options.onBatchPublished?.(acknowledged);
     }
     return acknowledged;
+  }
+
+  /**
+   * Whether the run's stop returned while this tick awaited a publish of
+   * `count` rows. Their result is then neither acknowledged nor failed: the
+   * stop has already settled the run, so they stay claimed until their lease
+   * expires and are delivered again.
+   */
+  private endedDuringPublish(run: RelayRun, count: number): boolean {
+    if (!run.ended) return false;
+    if (count > 0) {
+      this.options.logger?.warn(
+        { count, owner: this.owner, leaseSeconds: this.leaseSeconds },
+        'Outbox publish returned after the relay had stopped; its rows are not acknowledged, ' +
+          'return to the queue when their lease expires and are delivered again',
+      );
+    }
+    return true;
   }
 
   /** Acknowledges only rows still owned, and reports whatever was fenced. */
@@ -773,8 +984,12 @@ export class OutboxRelay {
    * between. Ownership only becomes *unknown* once the safety margin is gone —
    * `lastSuccessfulRenewAt + lease - renewalDeadline` — which with three
    * attempts per lease tolerates two consecutive losses.
+   *
+   * A renewal still pending when the stop returns changes nothing once it
+   * does, and is not retried.
    */
   async renewOnce(): Promise<void> {
+    const run = this.run;
     const token = this.token;
     if (!token || this.owned.size === 0) {
       this.stopHeartbeat();
@@ -788,9 +1003,11 @@ export class OutboxRelay {
     try {
       renewed = await this.options.store.renew(ids, token, this.leaseSeconds, deadline);
     } catch (first) {
+      if (run.ended) return;
       try {
         renewed = await this.options.store.renew(ids, token, this.leaseSeconds, deadline);
       } catch (second) {
+        if (run.ended) return;
         this.options.logger?.warn(
           {
             err: describeError(second),
@@ -805,6 +1022,7 @@ export class OutboxRelay {
       }
     }
 
+    if (run.ended) return;
     this.lastRenewAt = this.now();
 
     const kept = new Set(renewed);

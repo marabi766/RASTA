@@ -12,7 +12,10 @@ import {
   AUTH_OPTIONS,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
+  OutboxPurgeScheduler,
   OutboxRelay,
+  OutboxShutdown,
+  outboxPurgeSettings,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -20,6 +23,7 @@ import {
   type AuthGuardOptions,
   kafkaConnection,
 } from '@rasta/nest-common';
+import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
   outboxAckFencedTotal,
@@ -193,6 +197,38 @@ import { loadInventoryEnv, SERVICE_NAME, type InventoryEnv } from './config/env'
     },
 
     {
+      // D-052: published rows past OUTBOX_PURGE_RETENTION_HOURS, in bounded batches.
+      provide: OutboxPurgeScheduler,
+      inject: [PrismaOutboxStore, ENV, LOGGER],
+      useFactory: (store: PrismaOutboxStore, env: InventoryEnv, logger: Logger) =>
+        new OutboxPurgeScheduler({
+          store,
+          service: SERVICE_NAME,
+          logger,
+          ...outboxPurgeSettings(env),
+        }),
+    },
+    {
+      // D-052: the relay, the purge and the reservation sweeper stop together in the destroy
+      // phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. The sweeper too: stopped later, it
+      // could keep writing outbox rows while the relay drained.
+      provide: OutboxShutdown,
+      inject: [OutboxRelay, OutboxPurgeScheduler, ReservationSweeper, ENV],
+      useFactory: (
+        relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
+        sweeper: ReservationSweeper,
+        env: InventoryEnv,
+      ) =>
+        new OutboxShutdown({
+          relay,
+          purge,
+          workers: [sweeper],
+          budgetMs: outboxShutdownBudgetMs(env),
+        }),
+    },
+
+    {
       provide: AUTH_OPTIONS,
       inject: [ENV, InternalTokenService],
       useFactory: (env: InventoryEnv, internalTokens: InternalTokenService): AuthGuardOptions => ({
@@ -219,6 +255,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
+    private readonly purge: OutboxPurgeScheduler,
+    private readonly outboxShutdown: OutboxShutdown,
     private readonly sweeper: ReservationSweeper,
     private readonly reservations: ReservationRepository,
     private readonly store: PrismaOutboxStore,
@@ -239,6 +277,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
     this.sweeper.start();
     this.relay.start();
+    this.purge.start();
 
     const sample = async () => {
       try {
@@ -272,8 +311,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onApplicationShutdown(): Promise<void> {
+    // The relay, the purge and the sweeper already stopped in OutboxShutdown's onModuleDestroy,
+    // concurrently and by one deadline; this joins that stop and returns at once.
+    await this.outboxShutdown.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
-    await this.sweeper.stop();
-    await this.relay.stop();
   }
 }
