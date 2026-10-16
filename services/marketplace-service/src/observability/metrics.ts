@@ -44,6 +44,25 @@ export const orderTransitionsTotal = new Counter({
 });
 
 /**
+ * Return-request state transitions, by destination status (RUN-005). Bounded labels: the status
+ * set is closed by the database CHECK, and no request id is ever a label.
+ */
+export const returnTransitionsTotal = new Counter({
+  name: 'rasta_marketplace_return_transitions_total',
+  help: 'Return request state transitions, by destination status',
+  labelNames: ['service', 'to'] as const,
+  registers: [registry],
+});
+
+/** Return commands refused for a business rule, by which rule (a closed set, see ReturnService). */
+export const returnRefusalsTotal = new Counter({
+  name: 'rasta_marketplace_return_refusals_total',
+  help: 'Return commands refused for a business rule, by reason',
+  labelNames: ['service', 'reason'] as const,
+  registers: [registry],
+});
+
+/**
  * Orders refused for a business rule, by which rule.
  *
  * Separate from HTTP 4xx because the interesting question is *which* rule: a

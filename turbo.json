@@ -84,6 +84,7 @@
         "GATEWAY_*",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
+        "MARKETPLACE_RETURN_WINDOW_DAYS",
         "CORS_ORIGINS",
         "PROCUREMENT_*"
       ]
@@ -139,6 +140,7 @@
         "GATEWAY_*",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
+        "MARKETPLACE_RETURN_WINDOW_DAYS",
         "CORS_ORIGINS",
         "PROCUREMENT_*"
       ]
@@ -231,6 +233,10 @@
     // declared or the check fails. The settings withheld before it are listed
     // in scripts/service-env-turbo-withheld.json, a list that may only shrink.
     //
+    // MARKETPLACE_RETURN_WINDOW_DAYS (RUN-005, Q-132): marketplace's return
+    // window, no default — unset, every return request is refused. The first
+    // new setting under that check, declared here and in the test tasks above.
+    //
     // PROCUREMENT_* and CORS_ORIGINS (COM-007 PR 1): procurement-service is new,
     // so none of its settings may join the withheld list — its own settings and
     // the CORS list every service reads are declared here, which takes
@@ -254,6 +260,7 @@
         "GATEWAY_*",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
+        "MARKETPLACE_RETURN_WINDOW_DAYS",
         "CORS_ORIGINS",
         "PROCUREMENT_*"
       ]

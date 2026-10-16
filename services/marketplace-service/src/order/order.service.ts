@@ -1580,6 +1580,7 @@ type OrderRow = {
   createdAt: Date;
   placedBy: string;
   lines: {
+    id: string;
     offerId: string;
     productId: string;
     productName: string;
@@ -1611,6 +1612,7 @@ export function toView(row: OrderRow): OrderView {
     totalAmountMinor: row.totalAmountMinor.toString(),
     currency: row.currency,
     lines: row.lines.map((line) => ({
+      id: line.id,
       offerId: line.offerId,
       productId: line.productId,
       productName: line.productName,

@@ -320,6 +320,11 @@ export const EXEMPTIONS = {
     },
   },
   marketplace: {
+    ix_return_request_supplier: {
+      index: 'return_request (supplier_organization_id, id)',
+      reason:
+        "the supplier's own return requests (GET /v1/returns?role=SUPPLIER; RUN-005): a request belongs to the buyer's organization, but the supplier asking is another tenant, whose organization is supplier_organization_id — the column this index leads with, and the predicate of that read (ReturnRepository.list with role SUPPLIER, runUnscoped)",
+    },
     ix_offer_product_status: {
       index: 'offer (product_id, status)',
       reason:

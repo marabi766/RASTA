@@ -910,6 +910,11 @@ POST   /v1/return-shipments                   [K] ایجاد حمل برگشت
 POST   /v1/returns/{id}/inspections           [K] ثبت بازرسی و تعیین تکلیف
 ```
 
+> **وضعیت پیاده‌سازی (RUN-005 PR ۱، 2026-10-16، marketplace-service):** `POST /v1/orders/{id}/returns`، `GET /v1/returns/{id}`
+> و `POST /v1/returns/{id}/decisions` (`AUTHORIZE`\|`REJECT`، فقط تأمین‌کنندهٔ همان سفارش) ساخته شده‌اند، به‌اضافهٔ دو مسیر که
+> فهرست بالا ندارد: `GET /v1/returns` (درخواست‌های خود سازمان) و `POST /v1/returns/{id}/cancellation` (لغو توسط خریدار). ادعای
+> ضمانت، محمولهٔ برگشت و بازرسی هنوز **NOT_IMPLEMENTED** است. هیچ مسیر Refund وجود ندارد.
+
 همهٔ مسیرهای نوشتنی به Tenant Scope، مجوز سطح Object، Audit و در صورت اثر تکرارپذیر به
 `Idempotency-Key` نیاز دارند. نمایش مسیر برنامه‌ریزی‌شده به‌عنوان API موجود ممنوع است.
 

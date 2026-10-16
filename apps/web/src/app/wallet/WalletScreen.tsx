@@ -1,3 +1,5 @@
+import Link from 'next/link';
+
 import {
   Alert,
   Button,
@@ -213,7 +215,14 @@ function TransactionRows({ page, query }: { page: TransactionPage; query: Transa
         <tbody>
           {page.items.map((transaction) => (
             <tr key={transaction.id} className="border-b border-border">
-              <td className="p-3">{transactionTypeLabel(transaction.transactionType)}</td>
+              <td className="p-3">
+                <Link
+                  href={`/transactions/${encodeURIComponent(transaction.id)}`}
+                  className="underline"
+                >
+                  {transactionTypeLabel(transaction.transactionType)}
+                </Link>
+              </td>
               <td className="p-3">{formatMoney(transaction.netAmountMinor)}</td>
               <td className="p-3">
                 <StatusBadge
