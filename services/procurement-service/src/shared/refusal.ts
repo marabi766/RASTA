@@ -10,6 +10,7 @@ import { RastaError } from '@rasta/nest-common';
  * `path` names the area whose rule refused (it is not a field of the request body).
  */
 export const REFUSAL_AREAS = {
+  submission: 'Demand cannot be submitted',
   withdrawal: 'Demand cannot be withdrawn',
 } as const;
 export type RefusalArea = keyof typeof REFUSAL_AREAS;
@@ -21,6 +22,15 @@ export type RefusalArea = keyof typeof REFUSAL_AREAS;
  * it), so the two cannot disagree.
  */
 export const REFUSAL_REASONS = {
+  /** Submitting a demand (ADR-070 § 2). */
+  submission: {
+    /**
+     * The demand would take the total of the window it joins past MAX_QUANTITY, the most an RFQ
+     * and a purchase order can state. Decided under the window's lock, after the window's end if
+     * it had ended; nothing is written.
+     */
+    AGGREGATION_QUANTITY_LIMIT_EXCEEDED: 422,
+  },
   /** Withdrawing a demand (ADR-070 § 2). */
   withdrawal: {
     /** Only a SUBMITTED demand is withdrawn; WITHDRAWN, REFERRED and LAPSED are final. */

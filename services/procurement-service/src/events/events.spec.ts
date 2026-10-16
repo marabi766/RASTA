@@ -1,7 +1,9 @@
+import { createHash } from 'node:crypto';
 import { AGGREGATE_OF, resolvePartitionKey } from './routing';
 import {
   PROCUREMENT_EVENT_SCHEMAS,
   PROCUREMENT_EVENTS,
+  demandIdsDigest,
   validateProcurementPayload,
   type ProcurementEventName,
 } from './events';
@@ -13,8 +15,11 @@ const window = {
   aggregationId: 'AGG_1',
   organizationId: 'ORG_BUYER',
   productId: PRODUCT,
-  totalQuantity: '12',
+  totalQuantity: 12,
 };
+
+/** SHA-256 of the empty string: the digest of a window that ended with no live demand. */
+const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
 /** One payload as published for every event. */
 const PUBLISHED: Record<ProcurementEventName, Record<string, unknown>> = {
@@ -40,7 +45,8 @@ const PUBLISHED: Record<ProcurementEventName, Record<string, unknown>> = {
   },
   DEMAND_AGGREGATED: {
     ...window,
-    demandIds: ['DMD_1', 'DMD_2'],
+    demandCount: 2,
+    demandIdsSha256: demandIdsDigest(['DMD_1', 'DMD_2']),
     settingVersion: null,
     closedAt: AT,
   },
@@ -51,11 +57,17 @@ const PUBLISHED: Record<ProcurementEventName, Record<string, unknown>> = {
     windows: 1,
     extensionCount: 1,
   },
-  AGGREGATION_REFERRED: { ...window, demandIds: ['DMD_1'], closedAt: AT },
+  AGGREGATION_REFERRED: {
+    ...window,
+    demandCount: 1,
+    demandIdsSha256: demandIdsDigest(['DMD_1']),
+    closedAt: AT,
+  },
   AGGREGATION_LAPSED: {
     ...window,
-    totalQuantity: '0',
-    demandIds: [],
+    totalQuantity: 0,
+    demandCount: 0,
+    demandIdsSha256: EMPTY_SHA256,
     reasonCode: 'NO_LIVE_DEMAND',
     closedAt: AT,
   },
@@ -118,14 +130,14 @@ describe('the procurement events (ADR-070 § 9, PR 1)', () => {
     ).toThrow();
   });
 
-  it('carries a window’s total as a decimal string, exact past 2^53', () => {
+  it('carries a window’s total as a whole number up to MAX_QUANTITY (ADR-070 § 2)', () => {
     expect(() =>
       validateProcurementPayload('DEMAND_AGGREGATED', {
         ...PUBLISHED.DEMAND_AGGREGATED,
-        totalQuantity: '9007199254740993',
+        totalQuantity: 2_147_483_647,
       }),
     ).not.toThrow();
-    for (const totalQuantity of [12, '-1', '01', '1.5']) {
+    for (const totalQuantity of [2_147_483_648, -1, 1.5, '12']) {
       expect(() =>
         validateProcurementPayload('DEMAND_AGGREGATED', {
           ...PUBLISHED.DEMAND_AGGREGATED,
@@ -135,11 +147,33 @@ describe('the procurement events (ADR-070 § 9, PR 1)', () => {
     }
   });
 
+  it('names a window’s demands by count and digest, never by an unbounded list (ADR-070 § 9)', () => {
+    for (const name of [
+      'DEMAND_AGGREGATED',
+      'AGGREGATION_REFERRED',
+      'AGGREGATION_LAPSED',
+    ] as const) {
+      expect(() =>
+        validateProcurementPayload(name, { ...PUBLISHED[name], demandIds: ['DMD_1'] }),
+      ).toThrow();
+      expect(() =>
+        validateProcurementPayload(name, { ...PUBLISHED[name], demandIdsSha256: 'ABC' }),
+      ).toThrow();
+    }
+  });
+
+  it('digests the ids sorted and joined by a newline, whatever order they come in', () => {
+    const expected = createHash('sha256').update('DMD_1\nDMD_2', 'utf8').digest('hex');
+    expect(demandIdsDigest(['DMD_2', 'DMD_1'])).toBe(expected);
+    expect(demandIdsDigest(['DMD_1', 'DMD_2'])).toBe(expected);
+    expect(demandIdsDigest([])).toBe(EMPTY_SHA256);
+  });
+
   it('a READY window names at least one demand; a lapsed one names its closed reason', () => {
     expect(() =>
       validateProcurementPayload('DEMAND_AGGREGATED', {
         ...PUBLISHED.DEMAND_AGGREGATED,
-        demandIds: [],
+        demandCount: 0,
       }),
     ).toThrow();
     expect(() =>

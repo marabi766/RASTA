@@ -64,7 +64,9 @@ export class DemandController {
       'is half-open, [openedAt, closesAt): a demand at or after closesAt never joins it — that ' +
       'same request ends the window (READY when it holds a demand and reaches its threshold; ' +
       'otherwise its snapshot’s policy: EXTEND moves it on and the demand joins it, REFER and ' +
-      'CLOSE end it) and the demand joins the window that follows. productId is opaque and never ' +
+      'CLOSE end it) and the demand joins the window that follows. A demand that would take the ' +
+      'total of the window it joins past 2147483647 is 422 AGGREGATION_QUANTITY_LIMIT_EXCEEDED ' +
+      'and writes nothing. productId is opaque and never ' +
       'checked against marketplace (Q-105, Q-120). DEMAND_SUBMITTED carries identifiers, the ' +
       `quantity and instants only — never the note. ${BUYER_NOTE} ${COMMAND_NOTE}`,
   })

@@ -75,7 +75,7 @@ describe('demand requests', () => {
     expect(aggregation.body).toMatchObject({
       status: 'OPEN',
       productId,
-      totalQuantity: '7',
+      totalQuantity: 7,
       demandCount: 1,
       extensionCount: 0,
       setting: {
@@ -135,7 +135,7 @@ describe('demand requests', () => {
     expect(second.body.aggregationId).toBe(first.body.aggregationId);
     expect(other.body.aggregationId).not.toBe(first.body.aggregationId);
     const aggregation = await client(api, buyer(a)).aggregation(first.body.aggregationId);
-    expect(aggregation.body).toMatchObject({ totalQuantity: '5', demandCount: 2, version: 3 });
+    expect(aggregation.body).toMatchObject({ totalQuantity: 5, demandCount: 2, version: 3 });
     const joined = (await eventsOf(a)).filter(
       (e) => e.payload.aggregationId === first.body.aggregationId,
     );
@@ -165,7 +165,7 @@ describe('demand requests', () => {
     });
     expect(withdrawn.body.withdrawnAt).toEqual(expect.any(String));
     const aggregation = await client(api, buyer(a)).aggregation(kept.body.aggregationId);
-    expect(aggregation.body).toMatchObject({ status: 'OPEN', totalQuantity: '4', demandCount: 1 });
+    expect(aggregation.body).toMatchObject({ status: 'OPEN', totalQuantity: 4, demandCount: 1 });
 
     const last = (await eventsOf(a)).at(-1);
     expect(last).toEqual({
@@ -278,7 +278,7 @@ describe('demand requests', () => {
       'DEMAND_WITHDRAWN',
     ]);
     const aggregation = await client(api, token).aggregation(first.body.aggregationId);
-    expect(aggregation.body).toMatchObject({ totalQuantity: '0', demandCount: 0 });
+    expect(aggregation.body).toMatchObject({ totalQuantity: 0, demandCount: 0 });
   });
 
   it('lists the organization’s own demands and aggregations, newest first, by status and in pages', async () => {

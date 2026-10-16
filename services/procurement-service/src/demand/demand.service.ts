@@ -3,6 +3,7 @@ import { RastaError, currentActor, getContext } from '@rasta/nest-common';
 import type { DemandAggregation } from '../generated/prisma';
 import { ProcurementAccess, assertOwnedBy, type Acting } from '../access/access';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
+import { demandIdsDigest } from '../events/events';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { DatabaseClock } from '../shared/clock';
 import type { ClaimFence } from '../shared/idempotency';
@@ -17,14 +18,15 @@ import {
   windowOutcome,
   type WindowOutcome,
 } from './demand.state-machine';
-import type {
-  AggregationView,
-  CursorPage,
-  DemandView,
-  ListAggregationsQuery,
-  ListDemandsQuery,
-  SubmitDemandDto,
-  WithdrawDemandDto,
+import {
+  MAX_QUANTITY,
+  type AggregationView,
+  type CursorPage,
+  type DemandView,
+  type ListAggregationsQuery,
+  type ListDemandsQuery,
+  type SubmitDemandDto,
+  type WithdrawDemandDto,
 } from './dto';
 import { toAggregationView, toDemandView } from './views';
 
@@ -87,6 +89,18 @@ export class DemandService {
           window = await this.openWindowAt(tx, acting, dto.productId, now);
           opened = true;
         }
+      }
+
+      // The window's total becomes the quantity of an RFQ and a purchase order: it stays within
+      // what they can state (ADR-070 § 2). Refused here, under the lock, so nothing is written —
+      // a window this transaction ended stays as it was too.
+      if (window.totalQuantity + BigInt(dto.quantity) > BigInt(MAX_QUANTITY)) {
+        throw ruleRefusal(
+          'This demand would take the window past the largest quantity an order can state',
+          'submission',
+          ['AGGREGATION_QUANTITY_LIMIT_EXCEEDED'],
+          { aggregationId: window.id },
+        );
       }
 
       const demand = await this.repository.insertDemand(tx, {
@@ -355,8 +369,10 @@ export class DemandService {
       aggregationId: window.id,
       organizationId: window.organizationId,
       productId: window.productId,
-      totalQuantity: window.totalQuantity.toString(),
+      totalQuantity: Number(window.totalQuantity),
     };
+    // The demands it ended with, by count and digest: never a list without a bound (ADR-070 § 9).
+    const demands = { demandCount: live.length, demandIdsSha256: demandIdsDigest(live) };
     const event = {
       aggregateId: window.id,
       organizationId: window.organizationId,
@@ -371,7 +387,7 @@ export class DemandService {
           eventName: 'DEMAND_AGGREGATED',
           payload: {
             ...facts,
-            demandIds: live,
+            ...demands,
             settingVersion: window.settingVersion,
             closedAt: now.toISOString(),
           },
@@ -383,7 +399,7 @@ export class DemandService {
         await this.publisher.enqueue(tx, {
           ...event,
           eventName: 'AGGREGATION_REFERRED',
-          payload: { ...facts, demandIds: live, closedAt: now.toISOString() },
+          payload: { ...facts, ...demands, closedAt: now.toISOString() },
         });
         break;
       case 'lapse':
@@ -396,7 +412,7 @@ export class DemandService {
           eventName: 'AGGREGATION_LAPSED',
           payload: {
             ...facts,
-            demandIds: live,
+            ...demands,
             reasonCode: live.length === 0 ? 'NO_LIVE_DEMAND' : 'SHORTFALL_CLOSED',
             closedAt: now.toISOString(),
           },

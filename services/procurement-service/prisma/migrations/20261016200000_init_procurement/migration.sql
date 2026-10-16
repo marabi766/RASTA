@@ -175,9 +175,12 @@ ALTER TABLE "demand_aggregation" ADD CONSTRAINT "ck_demand_aggregation_snapshot"
          AND ("setting_version" IS NULL OR "setting_version" >= 1));
 
 -- The window's contents: no negative total, and a total exactly when there is a demand (every
--- demand's quantity is positive).
+-- demand's quantity is positive). The total never passes MAX_QUANTITY, the integer an RFQ and a
+-- purchase order state it in (ADR-070 § 2): the column is a bigint only so the sum cannot overflow
+-- before this CHECK sees it; the service refuses such a demand first (422).
 ALTER TABLE "demand_aggregation" ADD CONSTRAINT "ck_demand_aggregation_counts"
-  CHECK ("total_quantity" >= 0 AND "demand_count" >= 0 AND "extension_count" >= 0
+  CHECK ("total_quantity" BETWEEN 0 AND 2147483647
+         AND "demand_count" >= 0 AND "extension_count" >= 0
          AND (("demand_count" = 0) = ("total_quantity" = 0)));
 
 -- A window that ended says when; an open one has not.

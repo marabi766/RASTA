@@ -86,7 +86,7 @@ describe('tenant isolation and authorization', () => {
     expect(theirs.status).toBe(201);
     expect(theirs.body.aggregationId).not.toBe(demand.aggregationId);
     expect((await client(api, buyer(owner)).aggregation(demand.aggregationId)).body).toMatchObject({
-      totalQuantity: '5',
+      totalQuantity: 5,
       demandCount: 1,
     });
   });

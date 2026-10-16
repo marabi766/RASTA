@@ -152,11 +152,11 @@ describe('the real demand DTOs', () => {
     expect(properties.limit).toBeDefined();
   });
 
-  it('publishes the aggregation view as strict, with the total a string', () => {
+  it('publishes the aggregation view as strict, with the total an integer up to MAX_QUANTITY', () => {
     const schema = toJsonSchema(aggregationViewSchema);
-    const properties = schema.properties as Record<string, { type?: string }>;
+    const properties = schema.properties as Record<string, { type?: string; maximum?: number }>;
 
     expect(schema.additionalProperties).toBe(false);
-    expect(properties.totalQuantity?.type).toBe('string');
+    expect(properties.totalQuantity).toMatchObject({ type: 'integer', maximum: 2147483647 });
   });
 });

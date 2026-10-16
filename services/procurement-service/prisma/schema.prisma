@@ -52,7 +52,8 @@ model DemandAggregation {
   /// null = the environment defaults (Q-10); a per-organization setting's version from PR 3.
   settingVersion  Int?    @map("setting_version")
 
-  /// Sum and count of the demands still SUBMITTED; changed only under this row's lock.
+  /// Sum and count of the demands still SUBMITTED; changed only under this row's lock. The sum is
+  /// at most MAX_QUANTITY (2147483647, CHECK ck_demand_aggregation_counts; ADR-070 § 2).
   totalQuantity  BigInt @map("total_quantity")
   demandCount    Int    @map("demand_count")
   extensionCount Int    @map("extension_count")

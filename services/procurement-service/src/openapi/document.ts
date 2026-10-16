@@ -80,6 +80,7 @@ const IDEMPOTENT_COMMANDS: ReadonlySet<string> = new Set(Object.keys(REQUEST_BOD
 
 /** The area whose closed reasons a command's refusals carry in `details[].code` (docs/06 § 6.7). */
 const REFUSAL_AREA_OF: Record<string, RefusalArea> = {
+  'POST /v1/demand-requests': 'submission',
   'POST /v1/demand-requests/{id}/withdraw': 'withdrawal',
 };
 
@@ -116,7 +117,7 @@ function refusalErrorSchema(area: RefusalArea, status: number): z.ZodTypeAny | u
 
 const REFUSAL_DETAILS_NOTE =
   ' When refused for a closed reason, `details` names it: one entry, `path` the area ' +
-  '(withdrawal) and `code` the reason, one of those listed here. Branch on `code` and ' +
+  '(submission or withdrawal) and `code` the reason, one of those listed here. Branch on `code` and ' +
   '`details[].code`, never on `message`.';
 
 const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
@@ -130,7 +131,7 @@ export const ERROR_DESCRIPTIONS: Record<number, string> = {
   403: 'Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.',
   404: 'Not found — also returned for a demand or aggregation of any other organization, so its existence is never disclosed.',
   409: 'On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw, `expectedVersion` that is not the demand’s current version (OPTIMISTIC_LOCK_FAILED — reload and retry).',
-  422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen).',
+  422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen).',
   500: 'Unexpected server error.',
 };
 

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 /**
@@ -34,9 +35,13 @@ export type ProcurementEventName = keyof typeof PROCUREMENT_EVENTS;
 
 const id = z.string().min(1).max(128);
 const productId = z.string().regex(/^PRD_[0-9A-HJKMNP-TV-Z]{26}$/);
+/** MAX_QUANTITY (ADR-070 § 2): a demand's quantity and a window's total alike. */
 const quantity = z.number().int().min(1).max(2_147_483_647);
-/** A window's total: a bigint in the database, a decimal string here (exact past 2^53). */
-const totalQuantity = z.string().regex(/^(0|[1-9][0-9]{0,18})$/);
+const totalQuantity = z.number().int().min(0).max(2_147_483_647);
+/** How many live demands a window held when it ended. */
+const demandCount = z.number().int().min(0).max(2_147_483_647);
+/** `demandIdsDigest` of the same demands: lowercase hex SHA-256. */
+const demandIdsSha256 = z.string().regex(/^[0-9a-f]{64}$/);
 /** ISO 8601 in UTC, the form every event of the platform carries a time in. */
 const instant = z.string().datetime({ offset: false });
 
@@ -81,13 +86,27 @@ export const demandWithdrawnPayload = z
   .strict();
 
 /**
+ * The digest a window-end event names its demands by: SHA-256 (lowercase hex) of their ids, sorted
+ * and joined with `\n`. The ids themselves are not listed — a window's demands have no bound
+ * (extension after extension), and an unbounded list would one day make a message larger than
+ * the broker takes, a poison message on the partition (ADR-070 § 9). Each demand already names its
+ * window on `DEMAND_SUBMITTED`, so a reader rebuilds the set and checks it against this.
+ */
+export function demandIdsDigest(ids: readonly string[]): string {
+  return createHash('sha256')
+    .update([...ids].sort().join('\n'), 'utf8')
+    .digest('hex');
+}
+
+/**
  * The window ended with at least one demand and its total at or past the snapshot's threshold
  * (OPEN → READY). `settingVersion` is null when the window opened on the environment defaults.
  */
 export const demandAggregatedPayload = z
   .object({
     ...windowFacts,
-    demandIds: z.array(id).min(1),
+    demandCount: demandCount.min(1),
+    demandIdsSha256,
     settingVersion: z.number().int().min(1).nullable(),
     closedAt: instant,
   })
@@ -113,7 +132,7 @@ export const aggregationWindowExtendedPayload = z
  * only: marketplace is never called (ADR-070 § 2).
  */
 export const aggregationReferredPayload = z
-  .object({ ...windowFacts, demandIds: z.array(id).min(1), closedAt: instant })
+  .object({ ...windowFacts, demandCount: demandCount.min(1), demandIdsSha256, closedAt: instant })
   .strict();
 
 /**
@@ -123,7 +142,8 @@ export const aggregationReferredPayload = z
 export const aggregationLapsedPayload = z
   .object({
     ...windowFacts,
-    demandIds: z.array(id),
+    demandCount,
+    demandIdsSha256,
     reasonCode: z.enum(['NO_LIVE_DEMAND', 'SHORTFALL_CLOSED']),
     closedAt: instant,
   })

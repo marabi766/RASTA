@@ -20,7 +20,10 @@ export function toDemandView(row: DemandRequest): DemandView {
   };
 }
 
-/** An aggregation row as the API shows it: the total as a decimal string (a bigint). */
+/**
+ * An aggregation row as the API shows it. The total is a bigint column held to MAX_QUANTITY by its
+ * CHECK, so it is an exact JavaScript number.
+ */
 export function toAggregationView(row: DemandAggregation): AggregationView {
   return {
     id: row.id,
@@ -29,7 +32,7 @@ export function toAggregationView(row: DemandAggregation): AggregationView {
     status: row.status as AggregationStateName,
     openedAt: row.openedAt.toISOString(),
     closesAt: row.closesAt.toISOString(),
-    totalQuantity: row.totalQuantity.toString(),
+    totalQuantity: Number(row.totalQuantity),
     demandCount: row.demandCount,
     extensionCount: row.extensionCount,
     setting: {

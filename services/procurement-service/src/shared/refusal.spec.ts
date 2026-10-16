@@ -19,6 +19,17 @@ describe('refusalDetails: the closed reason in details[].code (docs/06 § 6.7)',
     expect(refusalDetails('withdrawal', ['DEMAND_NOT_SUBMITTED', 'DMD_01'])).toHaveLength(1);
   });
 
+  it('names the submission’s area for the quantity limit', () => {
+    expect(refusalDetails('submission', ['AGGREGATION_QUANTITY_LIMIT_EXCEEDED'])).toEqual([
+      {
+        path: 'submission',
+        code: 'AGGREGATION_QUANTITY_LIMIT_EXCEEDED',
+        message: 'Demand cannot be submitted: AGGREGATION_QUANTITY_LIMIT_EXCEEDED',
+      },
+    ]);
+    expect(refusalDetails('submission', ['AGGREGATION_WINDOW_ENDED'])).toBeUndefined();
+  });
+
   it('is absent, not empty, when there is no closed reason', () => {
     expect(refusalDetails('withdrawal', [])).toBeUndefined();
   });

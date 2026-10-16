@@ -1,4 +1,5 @@
 import { eventEnvelopeSchema } from '@rasta/contracts';
+import { demandIdsDigest } from '../src/events/events';
 import { PrismaClient } from '../src/generated/prisma';
 import { buyer, client, startApi, TestClock, type ApiHarness } from './api-helpers';
 import { cleanup, databaseUrl, newOrganizationId, newProductId } from './helpers';
@@ -16,6 +17,7 @@ import { cleanup, databaseUrl, newOrganizationId, newProductId } from './helpers
  * - Withdrawing is refused once the window has ended, by the clock even while the status is OPEN.
  */
 const HOUR = 3_600_000;
+const MAX_QUANTITY = 2_147_483_647;
 const T0 = new Date('2031-03-01T08:00:00.000Z');
 
 describe('the window of an aggregation', () => {
@@ -91,14 +93,14 @@ describe('the window of an aggregation', () => {
     const ended = await as.aggregation(window);
     expect(ended.body).toMatchObject({
       status: 'READY',
-      totalQuantity: '5',
+      totalQuantity: 5,
       demandCount: 2,
       closedAt: new Date(T0.getTime() + 24 * HOUR).toISOString(),
     });
     const next = await as.aggregation(late.body.aggregationId);
     expect(next.body).toMatchObject({
       status: 'OPEN',
-      totalQuantity: '5',
+      totalQuantity: 5,
       demandCount: 1,
       openedAt: new Date(T0.getTime() + 24 * HOUR).toISOString(),
       closesAt: new Date(T0.getTime() + 48 * HOUR).toISOString(),
@@ -114,8 +116,9 @@ describe('the window of an aggregation', () => {
     expect(await streamOf(harness, a, late.body.aggregationId)).toEqual(['DEMAND_SUBMITTED']);
     expect(await lastEvent(harness, a, 'DEMAND_AGGREGATED')).toMatchObject({
       aggregationId: window,
-      demandIds: [first.body.id, last.body.id].sort(),
-      totalQuantity: '5',
+      demandCount: 2,
+      demandIdsSha256: demandIdsDigest([first.body.id, last.body.id]),
+      totalQuantity: 5,
       settingVersion: null,
     });
     expect(await lastEvent(harness, a, 'DEMAND_SUBMITTED')).toMatchObject({
@@ -140,7 +143,7 @@ describe('the window of an aggregation', () => {
     const window = await as.aggregation(first.body.aggregationId);
     expect(window.body).toMatchObject({
       status: 'OPEN',
-      totalQuantity: '2',
+      totalQuantity: 2,
       demandCount: 2,
       extensionCount: 2,
       closesAt: new Date(T0.getTime() + 30 * HOUR).toISOString(),
@@ -150,7 +153,7 @@ describe('the window of an aggregation', () => {
       closesAt: new Date(T0.getTime() + 30 * HOUR).toISOString(),
       windows: 2,
       extensionCount: 2,
-      totalQuantity: '1',
+      totalQuantity: 1,
     });
   });
 
@@ -168,12 +171,13 @@ describe('the window of an aggregation', () => {
     expect(late.body.aggregationId).not.toBe(first.body.aggregationId);
     expect((await as.aggregation(first.body.aggregationId)).body).toMatchObject({
       status: 'REFERRED',
-      totalQuantity: '4',
+      totalQuantity: 4,
     });
     expect((await as.demand(first.body.id)).body).toMatchObject({ status: 'REFERRED', version: 2 });
     expect(await lastEvent(harness, a, 'AGGREGATION_REFERRED')).toMatchObject({
-      demandIds: [first.body.id],
-      totalQuantity: '4',
+      demandCount: 1,
+      demandIdsSha256: demandIdsDigest([first.body.id]),
+      totalQuantity: 4,
     });
   });
 
@@ -191,7 +195,8 @@ describe('the window of an aggregation', () => {
     expect((await as.aggregation(first.body.aggregationId)).body.status).toBe('LAPSED');
     expect((await as.demand(first.body.id)).body.status).toBe('LAPSED');
     expect(await lastEvent(harness, a, 'AGGREGATION_LAPSED')).toMatchObject({
-      demandIds: [first.body.id],
+      demandCount: 1,
+      demandIdsSha256: demandIdsDigest([first.body.id]),
       reasonCode: 'SHORTFALL_CLOSED',
     });
   });
@@ -217,12 +222,86 @@ describe('the window of an aggregation', () => {
     expect(late.body.aggregationId).not.toBe(only.body.aggregationId);
     expect((await as.aggregation(only.body.aggregationId)).body).toMatchObject({
       status: 'LAPSED',
-      totalQuantity: '0',
+      totalQuantity: 0,
     });
     expect((await as.demand(only.body.id)).body.status).toBe('WITHDRAWN');
     expect(await lastEvent(harness, a, 'AGGREGATION_LAPSED')).toMatchObject({
-      demandIds: [],
+      demandCount: 0,
+      demandIdsSha256: demandIdsDigest([]),
       reasonCode: 'NO_LIVE_DEMAND',
+    });
+  });
+
+  it('holds a window’s total to MAX_QUANTITY: exactly it joins, one unit more is 422 AGGREGATION_QUANTITY_LIMIT_EXCEEDED and writes nothing', async () => {
+    const { harness, clock } = await api({ hours: 10 });
+    const a = org();
+    const as = client(harness, buyer(a));
+    const productId = newProductId();
+
+    clock.set(T0);
+    const first = await as.submit({ productId, quantity: MAX_QUANTITY - 1 });
+    const last = await as.submit({ productId, quantity: 1 });
+    expect(last.status).toBe(201);
+    const full = await as.aggregation(first.body.aggregationId);
+    expect(full.body).toMatchObject({ totalQuantity: MAX_QUANTITY, demandCount: 2 });
+
+    const refused = await as.submit({ productId, quantity: 1 });
+    expect(refused.status).toBe(422);
+    expect(refused.body.code).toBe('BUSINESS_RULE_VIOLATION');
+    expect(refused.body.details).toEqual([
+      expect.objectContaining({ path: 'submission', code: 'AGGREGATION_QUANTITY_LIMIT_EXCEEDED' }),
+    ]);
+    expect((await as.aggregation(first.body.aggregationId)).body).toEqual(full.body);
+    const raw = new PrismaClient({ datasources: { db: { url: databaseUrl() } } });
+    try {
+      const [row] = await raw.$queryRaw<{ n: bigint }[]>`
+        SELECT count(*) AS n FROM demand_request WHERE organization_id = ${a}`;
+      expect(row!.n).toBe(2n);
+    } finally {
+      await raw.$disconnect();
+    }
+    expect(await streamOf(harness, a, first.body.aggregationId)).toEqual([
+      'DEMAND_SUBMITTED',
+      'DEMAND_SUBMITTED',
+    ]);
+  });
+
+  it('a demand past the limit after the window ended leaves that window as it was; READY then opens a new window it fits in', async () => {
+    const extend = await api({ hours: 10, min: MAX_QUANTITY, policy: 'EXTEND' });
+    const a = org();
+    const asA = client(extend.harness, buyer(a));
+    const productA = newProductId();
+    extend.clock.set(T0);
+    const short = await asA.submit({ productId: productA, quantity: MAX_QUANTITY - 1 });
+    const before = await asA.aggregation(short.body.aggregationId);
+
+    // EXTEND would keep the same window: the demand would take it past the limit, so the whole
+    // transaction — the extension included — is refused.
+    extend.clock.set(new Date(T0.getTime() + 10 * HOUR));
+    const refused = await asA.submit({ productId: productA, quantity: 2 });
+    expect(refused.status).toBe(422);
+    expect(refused.body.details).toEqual([
+      expect.objectContaining({ code: 'AGGREGATION_QUANTITY_LIMIT_EXCEEDED' }),
+    ]);
+    expect((await asA.aggregation(short.body.aggregationId)).body).toEqual(before.body);
+    expect(await streamOf(extend.harness, a, short.body.aggregationId)).toEqual([
+      'DEMAND_SUBMITTED',
+    ]);
+
+    // READY ends the full window and the late demand opens the next one, which it fits in.
+    const ready = await api({ hours: 10, min: 0 });
+    const b = org();
+    const asB = client(ready.harness, buyer(b));
+    const productB = newProductId();
+    ready.clock.set(T0);
+    const full = await asB.submit({ productId: productB, quantity: MAX_QUANTITY });
+    ready.clock.set(new Date(T0.getTime() + 10 * HOUR));
+    const next = await asB.submit({ productId: productB, quantity: 1 });
+    expect(next.status).toBe(201);
+    expect(next.body.aggregationId).not.toBe(full.body.aggregationId);
+    expect((await asB.aggregation(full.body.aggregationId)).body).toMatchObject({
+      status: 'READY',
+      totalQuantity: MAX_QUANTITY,
     });
   });
 
@@ -293,7 +372,7 @@ describe('the window of an aggregation', () => {
       expect(late.body.aggregationId).not.toBe(first.body.aggregationId);
       expect((await as.aggregation(first.body.aggregationId)).body).toMatchObject({
         status: 'READY',
-        totalQuantity: '2',
+        totalQuantity: 2,
       });
     } finally {
       release();
@@ -326,7 +405,7 @@ describe('the window of an aggregation', () => {
     const [window] = [...windows];
     expect((await as.aggregation(window!)).body).toMatchObject({
       status: 'OPEN',
-      totalQuantity: String((20 * 21) / 2),
+      totalQuantity: (20 * 21) / 2,
       demandCount: 20,
     });
     const open = await as.aggregations('?status=OPEN');

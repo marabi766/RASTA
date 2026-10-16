@@ -482,16 +482,18 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 >
 > **COM-007 PR 1 (2026-10-16).** `procurement-service` شش رویداد زیر را تولید می‌کند (`services/procurement-service/src/events/events.ts`،
 > `.strict()`، اعتبارسنجی پیش از Outbox)؛ کلید پارتیشن همه `aggregationId` است. چهار رویداد پایان پنجره در برنامه جزء PR 2‌اند، ولی نیازی که پس از
-> `closesAt` برسد همان گذار را در PR 1 می‌سازد، پس هر گذار رویداد و در نتیجه ردیف audit دارد. هیچ‌کدام یادداشت نیاز، دلیل انصراف یا مبلغ ندارد.
+> `closesAt` برسد همان گذار را در PR 1 می‌سازد (ADR-070 § ۲)، پس هر گذار رویداد و در نتیجه ردیف audit دارد. هیچ‌کدام یادداشت نیاز، دلیل انصراف یا
+> مبلغ ندارد. `totalQuantity` عدد است (حداکثر `MAX_QUANTITY`)؛ به‌جای فهرست بی‌کران شناسه‌ها `demandCount` و `demandIdsSha256` (SHA-256 هگز شناسه‌های
+> نیازهای زنده، مرتب و با `\n` جدا) می‌آید و پیوند هر نیاز با `DEMAND_SUBMITTED.aggregationId` است (ADR-070 § ۹).
 > مصرف‌کنندهٔ امروز فقط audit-service است.
 >
 > | رویداد                        | Payload                                                                                                                               |
 > | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 > | `DEMAND_SUBMITTED`            | `demandId`, `aggregationId`, `organizationId`, `productId`, `quantity`, `aggregationOpened`, `closesAt`, `submittedBy`, `submittedAt` |
 > | `DEMAND_WITHDRAWN`            | `demandId`, `aggregationId`, `organizationId`, `productId`, `quantity`, `withdrawnBy`, `withdrawnAt`                                  |
-> | `DEMAND_AGGREGATED`           | `aggregationId`, `organizationId`, `productId`, `totalQuantity` (رشته), `demandIds[]`, `settingVersion`, `closedAt`                   |
-> | `AGGREGATION_WINDOW_EXTENDED` | همان، با `previousClosesAt`, `closesAt`, `windows`, `extensionCount` (بی `demandIds`)                                                 |
-> | `AGGREGATION_REFERRED`        | `aggregationId`, `organizationId`, `productId`, `totalQuantity`, `demandIds[]`, `closedAt`                                            |
+> | `DEMAND_AGGREGATED`           | `aggregationId`, `organizationId`, `productId`, `totalQuantity`, `demandCount`, `demandIdsSha256`, `settingVersion`, `closedAt`       |
+> | `AGGREGATION_WINDOW_EXTENDED` | `aggregationId`, `organizationId`, `productId`, `totalQuantity`, `previousClosesAt`, `closesAt`, `windows`, `extensionCount`          |
+> | `AGGREGATION_REFERRED`        | `aggregationId`, `organizationId`, `productId`, `totalQuantity`, `demandCount`, `demandIdsSha256`, `closedAt`                         |
 > | `AGGREGATION_LAPSED`          | همان، با `reasonCode` (`NO_LIVE_DEMAND` \| `SHORTFALL_CLOSED`)                                                                        |
 
 ## Supplier — `rasta.supplier.v1`

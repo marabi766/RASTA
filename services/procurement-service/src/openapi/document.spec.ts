@@ -106,10 +106,15 @@ describe('the committed OpenAPI document', () => {
     expect(submit['409']).toBeDefined();
   });
 
-  it('types the withdrawal’s 422 with its closed reasons', () => {
-    const responses = new Map(operations().map((o) => [o.key, o.operation.responses])).get(
+  it.each([
+    ['POST /v1/demand-requests', 'submission', ['AGGREGATION_QUANTITY_LIMIT_EXCEEDED']],
+    [
       'POST /v1/demand-requests/{id}/withdraw',
-    )!;
+      'withdrawal',
+      ['DEMAND_NOT_SUBMITTED', 'AGGREGATION_WINDOW_ENDED'],
+    ],
+  ])('types the 422 of %s with its closed reasons', (key, area, codes) => {
+    const responses = new Map(operations().map((o) => [o.key, o.operation.responses])).get(key)!;
     const schema = (
       responses['422'] as {
         content: Record<
@@ -126,14 +131,11 @@ describe('the committed OpenAPI document', () => {
         >;
       }
     ).content['application/json']!.schema;
-    expect(schema.properties.details.items.properties.path.const).toBe('withdrawal');
-    expect(schema.properties.details.items.properties.code.enum).toEqual([
-      'DEMAND_NOT_SUBMITTED',
-      'AGGREGATION_WINDOW_ENDED',
-    ]);
+    expect(schema.properties.details.items.properties.path.const).toBe(area);
+    expect(schema.properties.details.items.properties.code.enum).toEqual(codes);
   });
 
-  it('carries the setting snapshot and the total as a string on an aggregation, and no amount field anywhere', () => {
+  it('carries the setting snapshot and the total as a bounded integer on an aggregation, and no amount field anywhere', () => {
     const text = readFileSync(committedPath, 'utf8');
     // No property, parameter or schema named for money: the words may appear in prose only.
     expect(text).not.toMatch(/"\w*(amount|price|Amount|Price)\w*"\s*:/);
@@ -159,7 +161,11 @@ describe('the committed OpenAPI document', () => {
     const aggregation =
       document.paths['/v1/aggregations/{id}']!.get!.responses['200']!.content['application/json']!
         .schema.properties;
-    expect(aggregation.totalQuantity?.type).toBe('string');
+    expect(aggregation.totalQuantity).toMatchObject({
+      type: 'integer',
+      minimum: 0,
+      maximum: 2147483647,
+    });
     expect(aggregation.setting?.required).toEqual([
       'windowHours',
       'minQuantity',

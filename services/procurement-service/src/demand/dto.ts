@@ -15,7 +15,12 @@ import { AGGREGATION_STATES, DEMAND_STATES } from './demand.state-machine';
 /** Marketplace's opaque product identifier; never checked there (Q-105, Q-120). */
 export const PRODUCT_ID_PATTERN = /^PRD_[0-9A-HJKMNP-TV-Z]{26}$/;
 
-/** The largest quantity one demand states: a PostgreSQL integer. */
+/**
+ * The largest quantity anything holds — one demand, and the total of a window (ADR-070 § 2): a
+ * PostgreSQL integer, the `int32` of the published schemas. The RFQ and the purchase order a window
+ * becomes carry that total as their quantity, so it stays representable all the way. A
+ * representation limit, not a business rule.
+ */
 export const MAX_QUANTITY = 2_147_483_647;
 
 export const MAX_NOTE_LENGTH = 500;
@@ -122,10 +127,14 @@ export const aggregationViewSchema = z
     openedAt: utcInstant('When its first demand opened the window'),
     closesAt: utcInstant('When the window ends, exclusive: a demand at or after it never joins'),
     totalQuantity: z
-      .string()
+      .number()
+      .int()
+      .min(0)
+      .max(MAX_QUANTITY)
       .describe(
-        'The sum of the quantities of the demands it holds (withdrawn ones excluded), a decimal ' +
-          'string; frozen once the window ended.',
+        'The sum of the quantities of the demands it holds (withdrawn ones excluded); frozen once ' +
+          'the window ended. Never above MAX_QUANTITY: a demand that would take it past is 422 ' +
+          'AGGREGATION_QUANTITY_LIMIT_EXCEEDED (ADR-070 § 2).',
       ),
     demandCount: z.number().int(),
     extensionCount: z.number().int(),
