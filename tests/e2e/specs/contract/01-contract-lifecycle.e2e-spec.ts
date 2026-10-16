@@ -163,6 +163,25 @@ const AMENDMENT_TWO = '250000000';
 const STATEMENT_ONE_LINES = ['1100000000', '400000000'] as const;
 const STATEMENT_ONE_GROSS = '1500000000';
 const STATEMENT_TWO_GROSS = '3300000000';
+/** How a statement line is worded: `<this>, section <n>`. */
+const STATEMENT_LINE_WORDING = 'Resurfacing works';
+
+/**
+ * What no refusal may repeat: every amount of contract A — its price, the amendments, the cap
+ * they make, each statement line, each gross and the total the second statement would make — and
+ * the lines' wording.
+ */
+const SCENARIO_VALUES: readonly string[] = [
+  PRICE.A.c1,
+  AMENDMENT_ONE,
+  AMENDMENT_TWO,
+  (BigInt(PRICE.A.c1) + BigInt(AMENDMENT_ONE)).toString(),
+  ...STATEMENT_ONE_LINES,
+  STATEMENT_ONE_GROSS,
+  STATEMENT_TWO_GROSS,
+  (BigInt(STATEMENT_ONE_GROSS) + BigInt(STATEMENT_TWO_GROSS)).toString(),
+  STATEMENT_LINE_WORDING,
+];
 
 function bidContent(price: string, note: string) {
   return {
@@ -352,6 +371,54 @@ function refusalOf(response: ApiResponse<unknown>): {
   };
 }
 
+/** An error body's request metadata: it differs by construction and is left out of a comparison. */
+const REQUEST_METADATA: readonly string[] = ['correlationId', 'traceId', 'timestamp', 'path'];
+
+/** A refusal's closed reason, as contract-service words it (`refusalDetails`, docs/06 § 6.7). */
+function decisionReason(code: string): { path: string; code: string; message: string }[] {
+  return [{ path: 'decision', code, message: `Statement cannot be decided: ${code}` }];
+}
+
+/**
+ * A refusal that says what it is meant to and nothing more (S-09): the request's metadata aside,
+ * its body is exactly the platform code, the fixed message and the closed reasons expected — no
+ * other key — and no value of the scenario, an amount or a line's wording, appears anywhere in it,
+ * metadata included. `expectRefusal` alone would pass a 403 whose message quoted the statement.
+ */
+function expectRefusalExactly(
+  response: ApiResponse<unknown>,
+  expected: {
+    status: number;
+    code: string;
+    message: string;
+    details?: { path: string; code: string; message: string }[];
+  },
+  what: string,
+): void {
+  const text = JSON.stringify(response.body);
+  expect(response.status, `${what}: ${text}`).toBe(expected.status);
+  const said = Object.fromEntries(
+    Object.entries((response.body ?? {}) as Record<string, unknown>).filter(
+      ([key]) => !REQUEST_METADATA.includes(key),
+    ),
+  );
+  expect(said, `${what}: ${text}`).toEqual({
+    code: expected.code,
+    message: expected.message,
+    ...(expected.details ? { details: expected.details } : {}),
+  });
+  for (const value of SCENARIO_VALUES) {
+    expect(text, `${what}: the body repeats ${value}`).not.toContain(value);
+  }
+}
+
+/** The role guard's refusal of the oversight role (`RastaError.insufficientRole`): no details. */
+const OVERSIGHT_REFUSED = {
+  status: 403,
+  code: 'INSUFFICIENT_ROLE',
+  message: 'You do not have permission to perform this action',
+} as const;
+
 async function tender(owner: Actor, id: string): Promise<TenderBody> {
   const response = await owner.get(`/v1/tenders/${id}`);
   expect(response.status, JSON.stringify(response.body)).toBe(200);
@@ -382,7 +449,7 @@ async function amendment(actor: Actor, contractId: string, id: string): Promise<
 /** A statement's draft body: one line per amount, numbered by the service in this order. */
 function statementLines(amounts: readonly string[], milestoneId?: string) {
   return amounts.map((amountMinor, index) => ({
-    description: `Resurfacing works, section ${index + 1}`,
+    description: `${STATEMENT_LINE_WORDING}, section ${index + 1}`,
     amountMinor,
     ...(index === 0 && milestoneId ? { milestoneId } : {}),
   }));
@@ -2009,7 +2076,14 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
         },
       },
     });
-    expect((submitted.body as StatementBody).submittedAt).not.toBeNull();
+    // An instant in UTC, in the ISO 8601 form the contract publishes (`toISOString`): a missing,
+    // empty or unparseable value fails, and so does one with an offset or another precision.
+    const submittedAt: unknown = (submitted.body as StatementBody).submittedAt;
+    expect(typeof submittedAt, `submittedAt: ${String(submittedAt)}`).toBe('string');
+    const at = String(submittedAt);
+    expect(at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(Number.isNaN(Date.parse(at)), `submittedAt: ${at}`).toBe(false);
+    expect(new Date(at).toISOString(), 'submittedAt is a real instant').toBe(at);
     evidence.push({
       label: 'statement one submitted',
       correlationId: submitting,
@@ -2052,41 +2126,68 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     // ADR-068 § 7: the oversight role reads and does nothing; the platform administrator reads a
     // contract's statements only for an organization it selected, and it can select only its own —
     // which is no party — so it is told what a stranger is told, and never drafts, submits or
-    // decides.
+    // decides. Each refusal is asserted whole — code, message, no details — and repeats nothing of
+    // the statement.
     const missing = `/v1/contracts/CTR_${RUN}_MISSING/statements`;
     for (const [path, missingPath] of [
       [base, missing],
       [`${base}/${statementId.one}`, `${missing}/${statementId.one}`],
     ] as const) {
-      expectRefusal(
+      expectRefusalExactly(
         await auditor.get(path),
-        { status: 403, code: 'INSUFFICIENT_ROLE' },
+        OVERSIGHT_REFUSED,
         `the oversight role reading ${path}`,
       );
-      const asOperator = await systemAdmin.get(path);
-      expectRefusal(asOperator, NOT_FOUND, `the platform administrator reading ${path}`);
-      expect(refusalOf(asOperator), 'the platform administrator: against a missing one').toEqual(
-        refusalOf(await systemAdmin.get(missingPath)),
+      // What it is told for a contract that is not there, word for word.
+      const absent = refusalOf(await systemAdmin.get(missingPath));
+      expect(absent, 'the platform administrator reading a missing contract').toMatchObject(
+        NOT_FOUND,
       );
-      expectRefusal(
+      expect(typeof absent.message).toBe('string');
+      expect(absent.details).toBeUndefined();
+      expectRefusalExactly(
+        await systemAdmin.get(path),
+        { ...NOT_FOUND, message: absent.message ?? '' },
+        `the platform administrator reading ${path}`,
+      );
+      expectRefusalExactly(
         await systemAdmin.get(path, { organizationId: org.owner }),
-        { status: 403, code: 'TENANT_MISMATCH' },
+        {
+          status: 403,
+          code: 'TENANT_MISMATCH',
+          message: 'You are not a member of the requested organization',
+        },
         `the platform administrator selecting the employer to read ${path}`,
       );
     }
-    for (const [what, path, command] of [
-      ['draft a statement', base, { lines: statementLines(['1000']) }],
-      ['submit it', `${base}/${statementId.one}/submit`, {}],
-      ['decide it', `${base}/${statementId.one}/decisions`, stepOf('TECHNICAL', 1)],
+    for (const [what, path, command, operatorRefused] of [
+      [
+        'draft a statement',
+        base,
+        { lines: statementLines(['1000']) },
+        'The platform administrator does not draft or submit a statement for a party',
+      ],
+      [
+        'submit it',
+        `${base}/${statementId.one}/submit`,
+        {},
+        'The platform administrator does not draft or submit a statement for a party',
+      ],
+      [
+        'decide it',
+        `${base}/${statementId.one}/decisions`,
+        stepOf('TECHNICAL', 1),
+        'The platform administrator does not approve or reject a statement for anyone',
+      ],
     ] as const) {
-      expectRefusal(
+      expectRefusalExactly(
         await send(auditor, 'POST', path, command),
-        { status: 403, code: 'INSUFFICIENT_ROLE' },
+        OVERSIGHT_REFUSED,
         `the oversight role trying to ${what}`,
       );
-      expectRefusal(
+      expectRefusalExactly(
         await send(systemAdmin, 'POST', path, command),
-        { status: 403, code: 'FORBIDDEN' },
+        { status: 403, code: 'FORBIDDEN', message: operatorRefused },
         `the platform administrator trying to ${what}`,
       );
     }
@@ -2275,9 +2376,15 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     // Separation of duties across both chains (Q-96 (3)): p1 holds the financial step's role too,
     // and is refused it — recorded — and nothing changes.
     const twice = correlation('same-person-twice');
-    expectRefusal(
+    expectRefusalExactly(
       await send(p1, 'POST', path, stepOf('FINANCIAL', 1), twice),
-      { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'ALREADY_DECIDED_STATEMENT' },
+      {
+        status: 422,
+        code: 'BUSINESS_RULE_VIOLATION',
+        message:
+          'Separation of duties: one person decides a statement at most once, across both chains',
+        details: decisionReason('ALREADY_DECIDED_STATEMENT'),
+      },
       'the same person deciding a second step',
     );
     evidence.push({
@@ -2429,9 +2536,15 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       BigInt(PRICE.A.c1) + BigInt(AMENDMENT_ONE),
     );
     const contractBefore = await contract(author, contractId.A);
-    expectRefusal(
+    expectRefusalExactly(
       await send(p2, 'POST', path, stepOf('FINANCIAL', 1)),
-      { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'APPROVED_TOTAL_EXCEEDS_CAP' },
+      {
+        status: 422,
+        code: 'BUSINESS_RULE_VIOLATION',
+        message:
+          'Approving this statement would take the approved total past the contract’s price and its effective amendments',
+        details: decisionReason('APPROVED_TOTAL_EXCEEDS_CAP'),
+      },
       'approving past the cap',
     );
     for (const party of [author, c1]) {
