@@ -28,6 +28,7 @@ import type { DraftEntry } from '../ledger/journal';
 import type { IdempotentAnswer } from '../shared/idempotency';
 import {
   recordFinancialCommand,
+  reconfirmFinancialAuthority,
   settlementBooks,
   type FinancialAuthority,
   type SettlementBooks,
@@ -155,7 +156,10 @@ export class SettlementService {
     // (docs/23 D-054, docs/24 Q-136). Decided here, under the row lock — the
     // hierarchy question included — against the payer the journal will name;
     // anyone else is refused before anything is written.
-    const { authority, books } = await settlementBooks(transaction.organizationId, this.hierarchy);
+    const { authority: lockedRowAuthority, books } = await settlementBooks(
+      transaction.organizationId,
+      this.hierarchy,
+    );
 
     // Hoisted to a local so the narrowing survives the awaits below. A
     // top-up has no counterparty and never reaches settlement; anything else
@@ -219,6 +223,12 @@ export class SettlementService {
     if (netAmountMinor < 0n) {
       throw RastaError.businessRule('Commission exceeds the transaction amount', { transactionId });
     }
+
+    // Every lock this settlement takes is held, and nothing below waits on
+    // another: ask the hierarchy again, so a union administrator's authority
+    // is the one confirmed after the wallet wait above, immediately before the
+    // journal posts (docs/23 D-054; Codex on #314 round 3, F2).
+    const authority = await reconfirmFinancialAuthority(lockedRowAuthority, this.hierarchy);
 
     const settledAt = new Date();
     const journal = await this.postSettlementJournal(tx, {

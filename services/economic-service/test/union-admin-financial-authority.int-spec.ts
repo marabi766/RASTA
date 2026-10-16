@@ -467,6 +467,8 @@ describe('a union administrator acts financially only within its union (docs/24 
       await new Promise((resolve) => setTimeout(resolve, 300));
       expect(competitorDone).toBe(false);
 
+      // A refund asks once more after its wallet lock (D-054): answered at once.
+      mode = 'contract';
       release();
       const [unionResponse, competitorResponse] = await Promise.all([unionCall, competitorCall]);
       expect(unionResponse.status).toBe(200);
@@ -474,6 +476,135 @@ describe('a union administrator acts financially only within its union (docs/24 
       expect(competitorResponse.body.code).toBe('INVALID_STATE_TRANSITION');
     },
   );
+
+  /**
+   * organization-service's answer is a snapshot and takes no lock there, and a
+   * settlement or refund asks it under the transaction's row lock and then
+   * waits for a wallet lock — as long as its transaction allows — during which
+   * organization-service can move B out of U (Codex on #314 round 3, F2). The
+   * question is asked again once the wallet lock is held, immediately before
+   * the financial write (the PM's ruling, docs/23 D-054): the command commits
+   * on the answer given after the wait, or on none.
+   *
+   * A competing transaction holds B's wallet; the union's command is seen
+   * waiting on it in `pg_stat_activity`; the hierarchy changes; the wallet is
+   * released.
+   */
+  describe.each([
+    { name: 'settle', from: 'authorised' as const },
+    { name: 'refund', from: 'held' as const },
+  ])('$name: asked again once the wallet lock is held (docs/23 D-054)', ({ name, from }) => {
+    const command = COMMANDS.find((candidate) => candidate.name === name)!;
+
+    /** Sessions waiting on a wallet's row lock — `WalletRepository.lock`'s read. */
+    const walletLockWaiters = async () => {
+      const [row] = await read(
+        'lock waits',
+        () =>
+          harness.prisma.client.$queryRaw<{ n: number }[]>`
+            SELECT count(*)::int AS n FROM pg_stat_activity
+             WHERE wait_event_type = 'Lock' AND query LIKE '%AS "ledgerAccountId"%'`,
+      );
+      return row?.n ?? 0;
+    };
+
+    /** B's wallet, locked by another transaction until `release()`. */
+    async function holdPayerWallet() {
+      const payerWallet = await wallet(asPayer());
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let locked: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => (locked = resolve));
+      const done = read('a competing transaction holding the payer wallet', () =>
+        harness.prisma.client.$transaction(
+          async (tx) => {
+            await tx.$queryRaw`SELECT id FROM wallet WHERE id = ${payerWallet.id} FOR UPDATE`;
+            locked();
+            await gate;
+          },
+          { timeout: 30_000 },
+        ),
+      );
+      await held;
+      return { release, done };
+    }
+
+    /** Issues the union's command against a held wallet; `meanwhile` runs once it waits there. */
+    async function acrossTheWalletWait(meanwhile: () => void) {
+      const transactionId = await transaction(from);
+      const key = id(`ufa-wallet-wait-${name}`);
+      const before = await written(transactionId, key);
+      const holder = await holdPayerWallet();
+      asked.length = 0;
+
+      const call = records(() => issue(command, transactionId, asUnionAdmin(), key));
+      for (let waited = 0; (await walletLockWaiters()) === 0; waited += 20) {
+        if (waited > 10_000) throw new Error('the command never waited on the wallet lock');
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      // Asked under the row lock, before the wallet wait — all of it about B, for U.
+      const askedBeforeTheWait = asked.length;
+      expect(askedBeforeTheWait).toBeGreaterThanOrEqual(1);
+
+      meanwhile();
+      holder.release();
+      await holder.done;
+      const { result: response, lines } = await call;
+      return { transactionId, key, before, askedBeforeTheWait, response, lines };
+    }
+
+    it('B moved out of U during the wait: 403, nothing written', async () => {
+      const { transactionId, key, before, askedBeforeTheWait, response, lines } =
+        await acrossTheWalletWait(() => {
+          parent.delete(payer);
+          payerVersion = 6;
+        });
+
+      expect(response.status).toBe(403);
+      expect(response.body.code).toBe('FORBIDDEN');
+      // Exactly one more question, after the wait.
+      expect(asked).toHaveLength(askedBeforeTheWait + 1);
+      expect(await written(transactionId, key)).toEqual(before);
+      expect(lines).toEqual([
+        `Financial command ${command.command} refused: actor=${userIdOf(asUnionAdmin())} ` +
+          `actingOrganization=${union} booksOrganization=${payer} ` +
+          'reason=OUTSIDE_UNION_SUBTREE_BEFORE_WRITE',
+      ]);
+    });
+
+    it('organization-service down during the wait: 503, nothing written', async () => {
+      const { transactionId, key, before, response } = await acrossTheWalletWait(() => {
+        mode = 'down';
+      });
+
+      expect(response.status).toBe(503);
+      expect(response.body.code).toBe('UPSTREAM_UNAVAILABLE');
+      expect(await written(transactionId, key)).toEqual(before);
+    });
+
+    it('B still within U: committed, and the record names the version answered after the wait', async () => {
+      const { transactionId, askedBeforeTheWait, response, lines } = await acrossTheWalletWait(
+        () => {
+          payerVersion = 6;
+        },
+      );
+
+      expect(response.status).toBe(command.status);
+      expect(asked).toHaveLength(askedBeforeTheWait + 1);
+      for (const question of asked) {
+        expect(question).toEqual({
+          scope: union,
+          caller: 'economic-service',
+          path: `/v1/organizations/${payer}`,
+        });
+      }
+      expect(lines).toEqual([
+        `Financial command ${command.command} on ${transactionId}: actor=${userIdOf(asUnionAdmin())} ` +
+          `actingOrganization=${union} booksOrganization=${payer} ` +
+          'authority=UNION_SUBTREE hierarchyVersion=6',
+      ]);
+    });
+  });
 
   it('the settler, demoted from SYSTEM_ADMIN to UNION_ADMIN of S, is refused the replay — and answered again once restored', async () => {
     const transactionId = await transaction('authorised');

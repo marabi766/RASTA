@@ -201,9 +201,11 @@ const financialLog = new Logger('FinancialAuthority');
  * for the union — the organization the request acts for — never by anything
  * the client sends. "Could not confirm" is 503/504 and nothing is written
  * (fail closed). The caller asks this under the transaction's row lock, in the
- * transaction that commits the command; the answer's hierarchy version is in
- * the command's record, so a concurrent `ORGANIZATION_MOVED` can be ordered
- * against it (docs/23 D-054).
+ * transaction that commits the command; a command that then takes wallet
+ * locks — settlement, refund — asks again once it holds them, immediately
+ * before its write ({@link reconfirmFinancialAuthority}). The last answer's
+ * hierarchy version is in the command's record, so a concurrent
+ * `ORGANIZATION_MOVED` can be ordered against it (docs/23 D-054).
  *
  * The books stay the transaction's own: this decides only whether the caller
  * may act for them.
@@ -235,6 +237,44 @@ export async function canActFinanciallyFor(
     `Financial command ${command} refused: actor=${actorOf()} ` +
       `actingOrganization=${actingOrganizationId} booksOrganization=${booksOrganizationId} ` +
       'reason=OUTSIDE_UNION_SUBTREE',
+  );
+  throw outsideUnionRefused();
+}
+
+/**
+ * {@link canActFinanciallyFor}'s hierarchy answer asked once more, once every
+ * row and wallet lock the command takes is held and immediately before its
+ * financial write (docs/23 D-054, Codex on #314 round 3, F2).
+ *
+ * The first answer is organization-service's at that instant and takes no lock
+ * there, and a settlement or refund can then wait on a contended wallet lock —
+ * for as long as its transaction allows — while organization-service moves the
+ * books organization out of the union. Asked again here, the authority the
+ * command commits on is the one confirmed after that wait; what remains is the
+ * time from this answer to the commit, with no lock wait in it (D-054 records
+ * it, and Q-136 the cross-service fence that would close it).
+ *
+ * Only `UNION_SUBTREE` is asked: every other basis is decided by the token and
+ * the transaction row alone, both already read under the lock. Not within any
+ * more is the same 403 the first question answers; could not confirm is
+ * 503/504 — fail closed, nothing written. The returned authority carries the
+ * hierarchy version of this answer, the one the command's record names.
+ */
+export async function reconfirmFinancialAuthority(
+  authority: FinancialAuthority,
+  hierarchy: HierarchyQuestion,
+): Promise<FinancialAuthority> {
+  if (authority.basis !== 'UNION_SUBTREE') return authority;
+  const within = await hierarchy.withinVersion(
+    authority.actingOrganizationId,
+    authority.booksOrganizationId,
+  );
+  if (within) return Object.freeze({ ...authority, hierarchyVersion: within.hierarchyVersion });
+  financialLog.warn(
+    `Financial command ${authority.command} refused: actor=${authority.actor} ` +
+      `actingOrganization=${authority.actingOrganizationId} ` +
+      `booksOrganization=${authority.booksOrganizationId} ` +
+      'reason=OUTSIDE_UNION_SUBTREE_BEFORE_WRITE',
   );
   throw outsideUnionRefused();
 }

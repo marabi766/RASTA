@@ -9,8 +9,14 @@ import {
   assertOrderVisible,
   viewerParties,
   assertSupplier,
+  recordDisputeDecision,
+  type DisputeAuthority,
   type OrderParties,
 } from '../access/access';
+import {
+  OrganizationHierarchy,
+  type HierarchyQuestion,
+} from '../organization/organization-hierarchy';
 import { ENV } from '../tokens';
 import { ECONOMIC_SERVICE, SERVICE_NAME, type MarketplaceEnv } from '../config/env';
 import {
@@ -62,10 +68,15 @@ const COMMAND_AUTHORISATION = {
   fulfill: (order: OrderParties) => assertSupplier(order, 'record fulfilment for this order'),
   confirmReceipt: (order: OrderParties) => assertBuyer(order, 'confirm receipt'),
   raiseDispute: (order: OrderParties) => assertBuyer(order, 'raise a dispute'),
-  resolveDispute: () => assertDisputeResolver(),
+  // The one check that asks organization-service (docs/24 Q-136).
+  resolveDispute: (order: OrderParties, hierarchy: HierarchyQuestion) =>
+    assertDisputeResolver(order, hierarchy),
   cancel: (order: OrderParties) => assertBuyer(order, 'cancel this order'),
   review: (order: OrderParties) => assertBuyer(order, 'review this order'),
-} satisfies Record<string, (order: OrderParties) => void>;
+} satisfies Record<
+  string,
+  (order: OrderParties, hierarchy: HierarchyQuestion) => unknown | Promise<unknown>
+>;
 
 export type OrderCommand = keyof typeof COMMAND_AUTHORISATION;
 
@@ -109,6 +120,7 @@ export class OrderService {
     private readonly repository: OrderRepository,
     private readonly events: EventPublisher,
     @Inject(ENV) private readonly env: MarketplaceEnv,
+    @Inject(OrganizationHierarchy) private readonly hierarchy: HierarchyQuestion,
   ) {}
 
   // =========================================================================
@@ -299,7 +311,7 @@ export class OrderService {
     if (!row) throw RastaError.notFound('Order', orderId);
 
     assertOrderVisible(row);
-    COMMAND_AUTHORISATION[command](row);
+    await COMMAND_AUTHORISATION[command](row, this.hierarchy);
   }
 
   async list(query: ListOrdersQuery): Promise<{ items: OrderView[]; nextCursor: string | null }> {
@@ -519,7 +531,9 @@ export class OrderService {
    * The outcome re-enters the normal path rather than jumping to an end state:
    * `SETTLE` returns the order to `RECEIPT_CONFIRMED` so the saga settles it,
    * and `REFUND` moves it to `CANCELLING` so the saga compensates. Neither
-   * moves money here.
+   * moves money here — but each decides that money moves, on the buyer's
+   * books, so a union administrator decides only for a buyer within its
+   * union's subtree ({@link assertDisputeResolver}, docs/24 Q-136).
    */
   async resolveDispute(
     orderId: string,
@@ -529,13 +543,19 @@ export class OrderService {
     const context = getContext();
     const target: OrderStatus = dto.outcome === 'SETTLE' ? 'RECEIPT_CONFIRMED' : 'CANCELLING';
     const resolvedAt = new Date();
+    let authority: DisputeAuthority | undefined;
 
-    return this.transition(orderId, target, {
+    const view = await this.transition(orderId, target, {
       record,
       // The mirror of the restriction on `confirmReceipt`: an operator resolves
       // a dispute, and there is nothing to resolve on an order that has none.
       from: ['DISPUTED'],
-      authorise: COMMAND_AUTHORISATION.resolveDispute,
+      // Under the order's row lock: nothing else the decision writes is
+      // locked after this, so organization-service's answer is the last thing
+      // read before the decision is written.
+      authorise: async (order) => {
+        authority = await COMMAND_AUTHORISATION.resolveDispute(order, this.hierarchy);
+      },
       apply: async (tx, order) => {
         // Read before the update names the dispute the event below is about —
         // the same pattern `raiseDispute` uses, and for the same reason: after
@@ -598,6 +618,8 @@ export class OrderService {
       },
       reason: dto.resolution,
     });
+    if (authority) recordDisputeDecision(orderId, dto.outcome, authority);
+    return view;
   }
 
   /** The buyer cancels. Compensation is the saga's job, not this method's. */
@@ -1238,7 +1260,8 @@ export class OrderService {
     handlers: {
       /** Stores the idempotent response, as the transaction's last statement. */
       record: RecordResponse<OrderView> | undefined;
-      authorise: (order: LockedOrderRow) => void;
+      /** Awaited under the row lock, before the transition is checked or applied. */
+      authorise: (order: LockedOrderRow) => unknown;
       apply: (tx: ExtendedPrismaClient, order: LockedOrderRow) => Promise<void>;
       reason?: string;
       /**
@@ -1269,7 +1292,7 @@ export class OrderService {
       // and gets the 403 below when they try the other side's command — they
       // can already see the order, so 404 would be a lie to them.
       assertOrderVisible(order);
-      handlers.authorise(order);
+      await handlers.authorise(order);
 
       if (handlers.from && !handlers.from.includes(order.status)) {
         orderRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'WRONG_SOURCE_STATE' });

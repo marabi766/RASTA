@@ -11,6 +11,7 @@ import {
   hasPlatformScope,
   isIssuedSettlementBooks,
   recordFinancialCommand,
+  reconfirmFinancialAuthority,
   settlementBooks,
   type FinancialCommand,
 } from './access';
@@ -380,6 +381,66 @@ describe('canActFinanciallyFor (docs/24 Q-136)', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe('reconfirmFinancialAuthority (docs/23 D-054)', () => {
+  /** A union administrator of ORG-U, admitted for ORG-B at version 7. */
+  const admitted = () =>
+    run(asUser(['UNION_ADMIN'], 'ORG-U', 'USR-UNION'), () =>
+      canActFinanciallyFor('SETTLE', 'ORG-B', hierarchy()),
+    );
+
+  it('asks again, for the same union and books, and carries the version answered now', async () => {
+    const authority = await admitted();
+    const asked: [string, string][] = [];
+    const now: HierarchyQuestion = {
+      withinVersion: async (scope, organizationId) => {
+        asked.push([scope, organizationId]);
+        return { hierarchyVersion: 8 };
+      },
+    };
+    // No request context: everything it needs is in the authority.
+    const again = await reconfirmFinancialAuthority(authority, now);
+    expect(asked).toEqual([['ORG-U', 'ORG-B']]);
+    expect(again).toEqual({ ...authority, hierarchyVersion: 8 });
+    expect(Object.isFrozen(again)).toBe(true);
+  });
+
+  it('refuses with the same 403 once the books are no longer within, and logs it', async () => {
+    const authority = await admitted();
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(
+        reconfirmFinancialAuthority(authority, { withinVersion: async () => null }),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN', message: OUTSIDE });
+      expect(warn).toHaveBeenCalledWith(
+        'Financial command SETTLE refused: actor=USR-UNION actingOrganization=ORG-U ' +
+          'booksOrganization=ORG-B reason=OUTSIDE_UNION_SUBTREE_BEFORE_WRITE',
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('fails closed when organization-service cannot answer', async () => {
+    const authority = await admitted();
+    await expect(reconfirmFinancialAuthority(authority, unreachable)).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+    });
+  });
+
+  it.each([
+    ['OWN_ORGANIZATION', asUser(['ORGANIZATION_ADMIN'], 'ORG-B')],
+    ['SYSTEM_ADMIN', asUser(['SYSTEM_ADMIN'], 'ORG-S')],
+    ['OWN_ORGANIZATION (a service as the payer)', asService('marketplace-service', 'ORG-B')],
+  ])('asks nothing for %s: the token and the row decided it', async (_, context) => {
+    const authority = await run(context, () =>
+      canActFinanciallyFor('REFUND', 'ORG-B', hierarchy()),
+    );
+    const tree = hierarchy();
+    await expect(reconfirmFinancialAuthority(authority, tree)).resolves.toBe(authority);
+    expect(tree.asked).toEqual([]);
   });
 });
 

@@ -36,6 +36,12 @@ export const CONTRACT_SERVICE = 'contract-service';
  * organization within its union's subtree (docs/24 Q-136), with the same question and answer.
  */
 export const ECONOMIC_SERVICE = 'economic-service';
+/**
+ * The fourth: marketplace-service confirms that a union administrator decides a dispute — settle
+ * or refund — only for an order whose buyer is within its union’s subtree (docs/24 Q-136), with
+ * the same question and answer.
+ */
+export const MARKETPLACE_SERVICE = 'marketplace-service';
 
 const subtreeQuerySchema = z
   .object({ maxDepth: z.coerce.number().int().min(1).max(10).optional() })
@@ -69,8 +75,8 @@ export class OrganizationController {
   }
 
   /**
-   * One organization, for a person; for construction-service, contract-service
-   * and economic-service, only a yes.
+   * One organization, for a person; for construction-service, contract-service,
+   * economic-service and marketplace-service, only a yes.
    *
    * Each asks one question here (Q-70 (7), decided 2026-09-26): is this
    * organization the one its service token is signed for, or beneath it? It
@@ -79,11 +85,12 @@ export class OrganizationController {
    * contacts. A person's request is unchanged.
    */
   @Get(':id')
-  @AllowService(CONSTRUCTION_SERVICE, CONTRACT_SERVICE, ECONOMIC_SERVICE)
+  @AllowService(CONSTRUCTION_SERVICE, CONTRACT_SERVICE, ECONOMIC_SERVICE, MARKETPLACE_SERVICE)
   @ApiOperation({
     summary: 'Get one organization with locations and contacts',
     description:
-      'Service callers (construction-service, contract-service and economic-service only) receive ' +
+      'Service callers (construction-service, contract-service, economic-service and marketplace-service only) ' +
+      'receive ' +
       '`{ id, hierarchyVersion }` when the organization is ' +
       'the one their token is signed for or beneath it, and 404 otherwise.',
   })

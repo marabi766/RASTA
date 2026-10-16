@@ -11,6 +11,7 @@ import {
   assertMayRefund,
   assertTransactionVisible,
   canActFinanciallyFor,
+  reconfirmFinancialAuthority,
   recordFinancialCommand,
   type FinancialAuthority,
   type FinancialCommand,
@@ -520,7 +521,7 @@ export class TransactionService {
       const { detail, authority } = await this.prisma.transaction(async (tx) => {
         const transaction = await this.repository.lockForUpdate(tx, transactionId);
         if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-        const authority = await this.authorizeAct(transaction, 'REFUND');
+        const lockedRowAuthority = await this.authorizeAct(transaction, 'REFUND');
 
         const target = nextStatus(transactionId, transaction.status, 'REFUND');
 
@@ -535,6 +536,13 @@ export class TransactionService {
         if (!locked) throw RastaError.internal('Wallet vanished while locking it');
 
         const hold = await this.walletRepository.findActiveHold(tx, wallet.id, transactionId);
+
+        // The wallet lock was the last lock this refund takes: ask the
+        // hierarchy again, so a union administrator's authority is the one
+        // confirmed after that wait, immediately before the refund journal
+        // (docs/23 D-054; Codex on #314 round 3, F2).
+        const authority = await reconfirmFinancialAuthority(lockedRowAuthority, this.hierarchy);
+
         if (hold) {
           // The refund journal is the payer's — it moves the payer's escrow back
           // into the payer's wallet — but the caller may be another party: the
@@ -630,7 +638,9 @@ export class TransactionService {
       if (!transaction) throw RastaError.notFound('Transaction', transactionId);
       // Judged here, under the row lock and in the transaction that commits the
       // move, so the authority and the state it moves are read together; the
-      // hierarchy question, when there is one, is asked here too (Q-136).
+      // hierarchy question, when there is one, is asked here too (Q-136). No
+      // lock is taken after the row's, so this answer is already the last
+      // thing read before the write — nothing to ask again (docs/23 D-054).
       const authority = await this.authorizeAct(transaction, event);
 
       const target = nextStatus(transactionId, transaction.status, event);
