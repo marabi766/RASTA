@@ -11,6 +11,7 @@ import {
   type LockedTransaction,
 } from '../transaction/transaction.repository';
 import { CommissionService } from '../commission/commission.service';
+import type { CommissionOutcome } from '../commission/rule-engine';
 import { assertSufficient, balancesFrom } from '../wallet/balances';
 import { nextStatus } from '../transaction/state-machine';
 import { ECONOMIC_EVENTS } from '../events/events';
@@ -176,6 +177,7 @@ export class SettlementService {
     const decision = await this.commissions.decide(tx, {
       organizationId: payeeOrganizationId,
       transactionType: transaction.transactionType,
+      businessLine: transaction.businessLine,
       occurredAt: transaction.occurredAt,
       grossAmountMinor: transaction.grossAmountMinor,
       currency: transaction.currency,
@@ -219,6 +221,7 @@ export class SettlementService {
     await this.commissions.record(tx, {
       transactionId: transaction.id,
       organizationId: payeeOrganizationId,
+      businessLine: transaction.businessLine,
       decision,
       grossAmountMinor: transaction.grossAmountMinor,
       currency: transaction.currency,
@@ -292,6 +295,8 @@ export class SettlementService {
       netAmountMinor,
       currency: transaction.currency,
       commissionMatched: decision.matched,
+      commissionOutcome: decision.outcome,
+      businessLine: transaction.businessLine,
       payeeOrganizationId,
       settledAt,
     };
@@ -474,6 +479,9 @@ export interface SettlementResult {
   netAmountMinor: bigint;
   currency: string;
   commissionMatched: boolean;
+  /** `RULE_APPLIED`, or `NO_ACTIVE_RULE` (ADR-045 § 2). */
+  commissionOutcome: CommissionOutcome;
+  businessLine: string | null;
   payeeOrganizationId: string;
   settledAt: Date;
 }

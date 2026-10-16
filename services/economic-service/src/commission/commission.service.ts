@@ -4,14 +4,19 @@ import { ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
-import { computeCommission, type CommissionDecision, type CommissionRuleView } from './rule-engine';
+import {
+  computeCommission,
+  type CommissionDecision,
+  type CommissionRuleView,
+  type CommissionSubject,
+} from './rule-engine';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { formatMinor, parseMinor } from '../shared/money';
 import { nextValidTo } from '../shared/rule-validity';
 import { after, resolveCursor } from '../shared/cursor';
 import { commissionApplicationsTotal } from '../observability/metrics';
 import { SERVICE_NAME } from '../config/env';
-import type { Prisma, TransactionType } from '../generated/prisma';
+import type { BusinessLine, Prisma, TransactionType } from '../generated/prisma';
 import type { CreateCommissionRuleDto, UpdateCommissionRuleDto } from './dto';
 
 /**
@@ -21,9 +26,17 @@ import type { CreateCommissionRuleDto, UpdateCommissionRuleDto } from './dto';
  *
  * **No rate is hard-coded, anywhere.** Not a default, not a fallback, not a
  * "reasonable" figure for a demo. Every number comes from a `commission_rule`
- * row, and with no matching row the commission is zero — a result, not an
- * error and not a guess. docs/24 Q-08 is open, and the answer to it will be an
- * INSERT rather than a deployment.
+ * row, and with no matching row the commission is zero and recorded as
+ * `NO_ACTIVE_RULE` — a result, not an error and not a guess (ADR-045 § 2).
+ * docs/24 Q-08 is open, and the answer to it will be an INSERT rather than a
+ * deployment.
+ *
+ * ## Business lines (ADR-045, docs/23 D-057)
+ *
+ * A rule is written for a business line, optionally narrowed to one
+ * transaction type; the source service states the line and never the rate
+ * (ADR-045 § 4). Type-only rules from before business lines keep pricing the
+ * transactions that carry no line, and nothing else.
  *
  * ## Why rules are not automatically tenant-scoped
  *
@@ -53,19 +66,30 @@ export class CommissionService {
    * and `tenant-isolation.int-spec.ts` proves organization B cannot read
    * organization A's.
    */
-  private candidateRules(
-    tx: ExtendedPrismaClient,
-    organizationId: string,
-    transactionType: TransactionType,
-  ) {
+  private candidateRules(tx: ExtendedPrismaClient, subject: CommissionSubject) {
+    // What a rule must be written for (`coversSubject`, which the engine
+    // applies again): the transaction's line — whole, or narrowed to its type
+    // — or, for a transaction without one, its type alone (docs/23 D-057).
+    const covers: Prisma.CommissionRuleWhereInput =
+      subject.businessLine === null
+        ? { businessLine: null, transactionType: subject.transactionType as TransactionType }
+        : {
+            businessLine: subject.businessLine,
+            OR: [
+              { transactionType: null },
+              { transactionType: subject.transactionType as TransactionType },
+            ],
+          };
     return runUnscoped(
       'commission rules are platform-wide or organization-specific; scoping is explicit below',
       () =>
         tx.commissionRule.findMany({
           where: {
-            transactionType,
-            status: 'ACTIVE',
-            OR: [{ organizationId: null }, { organizationId }],
+            AND: [
+              covers,
+              { status: 'ACTIVE' },
+              { OR: [{ organizationId: null }, { organizationId: subject.organizationId }] },
+            ],
           },
         }),
     );
@@ -84,23 +108,20 @@ export class CommissionService {
     input: {
       organizationId: string;
       transactionType: TransactionType;
+      businessLine: BusinessLine | null;
       occurredAt: Date;
       grossAmountMinor: bigint;
       currency: string;
     },
   ): Promise<CommissionDecision> {
-    const rules = await this.candidateRules(tx, input.organizationId, input.transactionType);
+    const rules = await this.candidateRules(tx, input);
 
-    const decision = computeCommission(rules as CommissionRuleView[], {
-      organizationId: input.organizationId,
-      occurredAt: input.occurredAt,
-      grossAmountMinor: input.grossAmountMinor,
-      currency: input.currency,
-    });
+    const decision = computeCommission(rules as CommissionRuleView[], input);
 
     commissionApplicationsTotal.inc({
       service: SERVICE_NAME,
       type: input.transactionType,
+      business_line: input.businessLine ?? 'NONE',
       matched: String(decision.matched),
     });
 
@@ -124,6 +145,7 @@ export class CommissionService {
     input: {
       transactionId: string;
       organizationId: string;
+      businessLine: BusinessLine | null;
       decision: CommissionDecision;
       grossAmountMinor: bigint;
       currency: string;
@@ -140,6 +162,8 @@ export class CommissionService {
           organizationId: input.organizationId,
           transactionId: input.transactionId,
           ruleId: input.decision.ruleId,
+          businessLine: input.businessLine,
+          outcome: input.decision.outcome,
           rateBasisPoints: input.decision.rateBasisPoints,
           grossAmountMinor: input.grossAmountMinor,
           amountMinor: input.decision.amountMinor,
@@ -159,6 +183,8 @@ export class CommissionService {
         transactionId: input.transactionId,
         organizationId: input.organizationId,
         ruleId: input.decision.ruleId,
+        businessLine: input.businessLine,
+        outcome: input.decision.outcome,
         rateBasisPoints: input.decision.rateBasisPoints,
         grossAmountMinor: formatMinor(input.grossAmountMinor),
         amountMinor: formatMinor(input.decision.amountMinor),
@@ -194,7 +220,8 @@ export class CommissionService {
     const data: Prisma.CommissionRuleUncheckedCreateInput = {
       id,
       organizationId: dto.organizationId ?? null,
-      transactionType: dto.transactionType,
+      businessLine: dto.businessLine,
+      transactionType: dto.transactionType ?? null,
       rateBasisPoints: dto.rateBasisPoints,
       minAmountMinor: dto.minAmountMinor ? parseMinor(dto.minAmountMinor, 'minAmountMinor') : null,
       maxAmountMinor: dto.maxAmountMinor ? parseMinor(dto.maxAmountMinor, 'maxAmountMinor') : null,
@@ -305,17 +332,23 @@ export class CommissionService {
    * organization's negotiated rate, which is why this is not a plain
    * `findMany`.
    */
-  listRules(transactionType?: TransactionType) {
+  listRules(filter: { businessLine?: BusinessLine; transactionType?: TransactionType } = {}) {
     const organizationId = getOrganizationId();
     return runUnscoped(
       'a tenant sees platform-wide rules and its own; the OR below is the scope',
       () =>
         this.prisma.client.commissionRule.findMany({
           where: {
-            ...(transactionType ? { transactionType } : {}),
+            ...(filter.businessLine ? { businessLine: filter.businessLine } : {}),
+            ...(filter.transactionType ? { transactionType: filter.transactionType } : {}),
             OR: [{ organizationId: null }, { organizationId }],
           },
-          orderBy: [{ transactionType: 'asc' }, { validFrom: 'desc' }],
+          orderBy: [
+            { businessLine: { sort: 'asc', nulls: 'last' } },
+            { transactionType: { sort: 'asc', nulls: 'first' } },
+            { validFrom: 'desc' },
+            { id: 'asc' },
+          ],
         }),
     );
   }
@@ -353,6 +386,7 @@ type CommissionRuleRow = Prisma.CommissionRuleGetPayload<Record<string, never>>;
 function commissionRuleTerms(rule: CommissionRuleRow) {
   return {
     organizationId: rule.organizationId,
+    businessLine: rule.businessLine,
     transactionType: rule.transactionType,
     rateBasisPoints: rule.rateBasisPoints,
     minAmountMinor: rule.minAmountMinor === null ? null : formatMinor(rule.minAmountMinor),

@@ -52,9 +52,10 @@ export class CommissionController {
   @ApiOperation({
     summary: 'Commission charged to this organization',
     description:
-      'One row per settled transaction, including those charged nothing. A zero with a null ' +
-      '`ruleId` means no active rule matched — evidence that the step ran, which its absence ' +
-      'could not provide.',
+      'One row per settled transaction, including those charged nothing. `outcome` ' +
+      '`NO_ACTIVE_RULE` (and a null `ruleId`) means no active rule matched — evidence that the ' +
+      'step ran, which its absence could not provide, and never the same thing as a rule ' +
+      'configured at zero (ADR-045 § 2).',
   })
   async list(@Query(zodPipe(listCommissionsQuerySchema)) query: ListCommissionsQuery) {
     assertNotAuditor();
@@ -76,7 +77,7 @@ export class CommissionController {
   })
   async listRules(@Query(zodPipe(listCommissionRulesQuerySchema)) query: ListCommissionRulesQuery) {
     assertNotAuditor();
-    const rows = await this.commissions.listRules(query.transactionType);
+    const rows = await this.commissions.listRules(query);
     return { items: rows.map((row) => toCommissionRuleView(row as CommissionRuleRow)) };
   }
 
@@ -87,7 +88,9 @@ export class CommissionController {
     summary: 'Define a commission rate',
     description:
       'The rate is an integer in basis points — 250 is exactly 2.5%, which a decimal ' +
-      'percentage cannot promise (ADR-022). Rules are versioned in time: a transaction is ' +
+      'percentage cannot promise (ADR-022). A rule prices one `businessLine` (ADR-045), ' +
+      'optionally narrowed to one `transactionType`; the narrowed rule wins over the line-wide ' +
+      'one. Rules are versioned in time: a transaction is ' +
       'always charged the rate in force when it *occurred*, so an old obligation settled today ' +
       'is not repriced. An organization-specific rule takes precedence over a platform-wide ' +
       'one. Label demonstration data "نمونه — نیازمند تصویب" so a sample rate can never be ' +

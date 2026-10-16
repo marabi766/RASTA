@@ -104,6 +104,26 @@ describe('enrichOpenApiDocument', () => {
     for (const parameter of operation.parameters) expect(parameter.in).toBe('query');
   });
 
+  it('publishes the business line a commission rule requires (ADR-045)', () => {
+    const document = emptyDocument();
+    document.paths = {
+      '/v1/commissions/rules': { post: { responses: {} }, get: { responses: {} } },
+    } as never;
+
+    const enriched = enrichOpenApiDocument(document);
+    const rules = enriched.paths['/v1/commissions/rules'] as Record<string, never>;
+    const body = JSON.stringify((rules.post as unknown as { requestBody: unknown }).requestBody);
+    // Required, closed to the seven lines of the contract — never free text.
+    expect(body).toMatch(/"required":\[[^\]]*"businessLine"/);
+    expect(body).toContain('MARKETPLACE_SERVICE');
+
+    const names = (path: string, operation: Record<string, never>) =>
+      (operation.get as unknown as { parameters: { name: string }[] }).parameters.map(
+        (parameter) => `${path}?${parameter.name}`,
+      );
+    expect(names('rules', rules)).toContain('rules?businessLine');
+  });
+
   it('gives a POST that takes no body a 200 rather than a 201', () => {
     // `POST /v1/transactions/{id}/authorise-settlement` creates nothing; a
     // document promising 201 would have clients waiting for a Location header

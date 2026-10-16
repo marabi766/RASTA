@@ -159,7 +159,7 @@ describe('a system actor', () => {
     const commission = await asSystem(() =>
       wiring.commissions.createRule({
         organizationId: org.a,
-        transactionType: 'LOGISTICS',
+        businessLine: 'LOGISTICS',
         rateBasisPoints: 120,
         // `status` omitted: the service supplies the default rather than
         // leaving a rule in an undefined state.

@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
-import type { Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
+import type { BusinessLine, Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
 import { after, resolveCursor } from '../shared/cursor';
 
 /** How a transaction list may be narrowed. */
@@ -102,6 +102,7 @@ export class TransactionRepository {
                  organization_id                 AS "organizationId",
                  counterparty_organization_id    AS "counterpartyOrganizationId",
                  transaction_type                AS "transactionType",
+                 business_line                   AS "businessLine",
                  status,
                  gross_amount_minor              AS "grossAmountMinor",
                  commission_amount_minor         AS "commissionAmountMinor",
@@ -264,6 +265,7 @@ export interface LockedTransaction {
   organizationId: string;
   counterpartyOrganizationId: string | null;
   transactionType: TransactionType;
+  businessLine: BusinessLine | null;
   status: TransactionStatus;
   grossAmountMinor: bigint;
   commissionAmountMinor: bigint;
@@ -280,6 +282,7 @@ export interface TransactionRow {
   organizationId: string;
   counterpartyOrganizationId: string | null;
   transactionType: string;
+  businessLine: string | null;
   status: string;
   grossAmountMinor: bigint;
   commissionAmountMinor: bigint;

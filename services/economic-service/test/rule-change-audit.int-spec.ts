@@ -63,7 +63,7 @@ describe('rule change audit records', () => {
     const created = await request(http)
       .post('/v1/commissions/rules')
       .set('authorization', asSystem())
-      .send({ organizationId: org, transactionType: 'LOGISTICS', rateBasisPoints: 120 })
+      .send({ organizationId: org, businessLine: 'LOGISTICS', rateBasisPoints: 120 })
       .expect(201);
     const ruleId = created.body.id as string;
 
@@ -73,7 +73,14 @@ describe('rule change audit records', () => {
       change: 'CREATED',
       changedBy: actorId,
       before: null,
-      after: { organizationId: org, rateBasisPoints: 120, validTo: null, status: 'ACTIVE' },
+      after: {
+        organizationId: org,
+        businessLine: 'LOGISTICS',
+        transactionType: null,
+        rateBasisPoints: 120,
+        validTo: null,
+        status: 'ACTIVE',
+      },
     });
 
     await request(http)
@@ -104,7 +111,12 @@ describe('rule change audit records', () => {
     const created = await request(http)
       .post('/v1/commissions/rules')
       .set('authorization', asSystem())
-      .send({ transactionType: 'PROCUREMENT_ORDER', rateBasisPoints: 0, status: 'INACTIVE' })
+      .send({
+        businessLine: 'PROCUREMENT',
+        transactionType: 'PROCUREMENT_ORDER',
+        rateBasisPoints: 0,
+        status: 'INACTIVE',
+      })
       .expect(201);
 
     const [row] = await runUnscoped('the suite reads the outbox it asserts on', () =>

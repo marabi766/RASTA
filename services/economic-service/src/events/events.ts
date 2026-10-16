@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { BUSINESS_LINES } from '@rasta/contracts';
+import { COMMISSION_OUTCOMES } from '../commission/rule-engine';
 
 /**
  * Events published by economic-service, on `rasta.economic.v1`.
@@ -431,18 +433,31 @@ export const paymentReconciliationOperatorActionPayload = z.object({
  * `ruleId` is nullable and that case is real rather than defensive: with no
  * active rule the commission is zero, and a zero commission with no rule is
  * exactly what ADR-023 requires the platform to record instead of guessing.
+ *
+ * `businessLine` and `outcome` (ADR-045): revenue per line, and
+ * `NO_ACTIVE_RULE` named rather than left to be read off a null `ruleId`.
+ * `businessLine` is null where the transaction's source sent none (docs/24
+ * Q-130).
  */
-export const commissionAppliedPayload = z.object({
-  commissionId: z.string(),
-  transactionId: z.string(),
-  organizationId: z.string(),
-  ruleId: z.string().nullable(),
-  rateBasisPoints: z.number().int().min(0).max(10_000),
-  grossAmountMinor: amountMinor,
-  amountMinor,
-  currency,
-  appliedAt: z.string(),
-});
+export const commissionAppliedPayload = z
+  .object({
+    commissionId: z.string(),
+    transactionId: z.string(),
+    organizationId: z.string(),
+    ruleId: z.string().nullable(),
+    businessLine: z.enum(BUSINESS_LINES).nullable(),
+    outcome: z.enum(COMMISSION_OUTCOMES),
+    rateBasisPoints: z.number().int().min(0).max(10_000),
+    grossAmountMinor: amountMinor,
+    amountMinor,
+    currency,
+    appliedAt: z.string(),
+  })
+  .refine(
+    // As `ck_commission_outcome` holds the row: the two never tell two stories.
+    (applied) => (applied.outcome === 'NO_ACTIVE_RULE') === (applied.ruleId === null),
+    'outcome is NO_ACTIVE_RULE exactly when ruleId is null',
+  );
 
 // ---------------------------------------------------------------------------
 // Reward
@@ -622,7 +637,10 @@ const CHANGE_KINDS = ['CREATED', 'UPDATED'] as const;
 /** A commission rule's terms at one moment — the thing an auditor compares. */
 const commissionRuleTerms = z.object({
   organizationId: z.string().nullable(),
-  transactionType: z.string(),
+  /** Null only on a type-only rule from before business lines (docs/23 D-057). */
+  businessLine: z.enum(BUSINESS_LINES).nullable(),
+  /** Null for a rule that covers its whole line. */
+  transactionType: z.string().nullable(),
   rateBasisPoints: z.number().int().min(0).max(10_000),
   minAmountMinor: amountMinor.nullable(),
   maxAmountMinor: amountMinor.nullable(),

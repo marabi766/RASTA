@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { amountMinorSchema, organizationIdSchema } from '@rasta/contracts';
+import { amountMinorSchema, businessLineSchema, organizationIdSchema } from '@rasta/contracts';
 import { TRANSACTION_TYPES } from '../transaction/dto';
 import { cursorQueryParameter } from '../shared/cursor';
 
@@ -27,7 +27,18 @@ export const createCommissionRuleSchema = z
      * code (docs/10 § 10.7).
      */
     organizationId: organizationIdSchema.optional(),
-    transactionType: z.enum(TRANSACTION_TYPES),
+    /**
+     * The business line the rule prices (ADR-045 § 2). Required: a rule
+     * names the economic reason it charges for. The type-only rules from
+     * before business lines stay readable and closable, but none is written
+     * any more (docs/23 D-057).
+     */
+    businessLine: businessLineSchema,
+    /**
+     * Narrows the rule to one transaction type within the line. Omitted, the
+     * rule covers the whole line; a narrowed rule beats a line-wide one.
+     */
+    transactionType: z.enum(TRANSACTION_TYPES).optional(),
     /** 0–10 000. 250 is 2.5%; 10 000 would be the whole transaction. */
     rateBasisPoints: z.number().int().min(0).max(10_000),
     /** Floor and ceiling on the commission itself, not on the transaction. */
@@ -80,6 +91,7 @@ export type UpdateCommissionRuleDto = z.infer<typeof updateCommissionRuleSchema>
 
 export const listCommissionRulesQuerySchema = z
   .object({
+    businessLine: businessLineSchema.optional(),
     transactionType: z.enum(TRANSACTION_TYPES).optional(),
   })
   .strict();
@@ -98,7 +110,10 @@ export type ListCommissionsQuery = z.infer<typeof listCommissionsQuerySchema>;
 export interface CommissionRuleView {
   id: string;
   organizationId: string | null;
-  transactionType: string;
+  /** Null only on a type-only rule from before business lines. */
+  businessLine: string | null;
+  /** Null for a rule that covers its whole line. */
+  transactionType: string | null;
   rateBasisPoints: number;
   minAmountMinor: string | null;
   maxAmountMinor: string | null;
@@ -114,6 +129,13 @@ export interface CommissionView {
   organizationId: string;
   /** Null when no rule matched: zero commission because unconfigured. */
   ruleId: string | null;
+  /** The transaction's business line; null where its source sent none. */
+  businessLine: string | null;
+  /**
+   * `RULE_APPLIED`, or `NO_ACTIVE_RULE` — commissionable and unpriced, which
+   * a zero amount alone cannot say (ADR-045 § 2).
+   */
+  outcome: string;
   rateBasisPoints: number;
   grossAmountMinor: string;
   amountMinor: string;

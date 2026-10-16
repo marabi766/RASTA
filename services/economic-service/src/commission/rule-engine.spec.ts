@@ -1,4 +1,11 @@
-import { computeCommission, selectRule, type CommissionRuleView } from './rule-engine';
+import { BUSINESS_LINES } from '@rasta/contracts';
+import {
+  computeCommission,
+  coversSubject,
+  selectRule,
+  type CommissionRuleView,
+  type CommissionSubject,
+} from './rule-engine';
 
 /**
  * The commission engine.
@@ -14,6 +21,8 @@ function rule(overrides: Partial<CommissionRuleView> = {}): CommissionRuleView {
   return {
     id: 'CMR_1',
     organizationId: null,
+    businessLine: 'LOGISTICS',
+    transactionType: null,
     rateBasisPoints: 250,
     minAmountMinor: null,
     maxAmountMinor: null,
@@ -24,42 +33,52 @@ function rule(overrides: Partial<CommissionRuleView> = {}): CommissionRuleView {
   };
 }
 
+/** A LOGISTICS transaction on the LOGISTICS line, unless overridden. */
+function subject(
+  organizationId: string,
+  overrides: Partial<CommissionSubject> = {},
+): CommissionSubject {
+  return { organizationId, businessLine: 'LOGISTICS', transactionType: 'LOGISTICS', ...overrides };
+}
+
 const AT = new Date('2026-06-01T00:00:00.000Z');
 
 describe('selectRule', () => {
   it('returns null when nothing is configured', () => {
     // The MVP's real state. docs/24 Q-08 is open and no commercial rate is
     // seeded, so this is the path every settlement takes today.
-    expect(selectRule([], 'ORG-A', AT)).toBeNull();
+    expect(selectRule([], subject('ORG-A'), AT)).toBeNull();
   });
 
   it('ignores an INACTIVE rule', () => {
-    expect(selectRule([rule({ status: 'INACTIVE' })], 'ORG-A', AT)).toBeNull();
+    expect(selectRule([rule({ status: 'INACTIVE' })], subject('ORG-A'), AT)).toBeNull();
   });
 
   it('ignores a rule that had not started when the transaction occurred', () => {
     expect(
-      selectRule([rule({ validFrom: new Date('2026-07-01T00:00:00.000Z') })], 'ORG-A', AT),
+      selectRule([rule({ validFrom: new Date('2026-07-01T00:00:00.000Z') })], subject('ORG-A'), AT),
     ).toBeNull();
   });
 
   it('ignores a rule that had already ended', () => {
     expect(
-      selectRule([rule({ validTo: new Date('2026-05-01T00:00:00.000Z') })], 'ORG-A', AT),
+      selectRule([rule({ validTo: new Date('2026-05-01T00:00:00.000Z') })], subject('ORG-A'), AT),
     ).toBeNull();
   });
 
   it('treats validTo as exclusive, so a replacement can start where the last ended', () => {
     // Half-open intervals: no one-instant overlap and no one-instant gap.
     const boundary = new Date('2026-06-01T00:00:00.000Z');
-    expect(selectRule([rule({ validTo: boundary })], 'ORG-A', boundary)).toBeNull();
-    expect(selectRule([rule({ validFrom: boundary })], 'ORG-A', boundary)?.id).toBe('CMR_1');
+    expect(selectRule([rule({ validTo: boundary })], subject('ORG-A'), boundary)).toBeNull();
+    expect(selectRule([rule({ validFrom: boundary })], subject('ORG-A'), boundary)?.id).toBe(
+      'CMR_1',
+    );
   });
 
   it('never returns another organization private rule', () => {
     // A negotiated rate is commercially sensitive. Organization B must not be
     // charged — or even matched against — organization A's arrangement.
-    expect(selectRule([rule({ organizationId: 'ORG-A' })], 'ORG-B', AT)).toBeNull();
+    expect(selectRule([rule({ organizationId: 'ORG-A' })], subject('ORG-B'), AT)).toBeNull();
   });
 
   it('prefers an organization-specific rule over a platform-wide one', () => {
@@ -67,7 +86,7 @@ describe('selectRule', () => {
     // (docs/10 § 10.7).
     const chosen = selectRule(
       [rule({ id: 'GLOBAL', organizationId: null }), rule({ id: 'OWN', organizationId: 'ORG-A' })],
-      'ORG-A',
+      subject('ORG-A'),
       AT,
     );
     expect(chosen?.id).toBe('OWN');
@@ -82,7 +101,7 @@ describe('selectRule', () => {
         rule({ id: 'OLD', validFrom: new Date('2026-01-01T00:00:00.000Z') }),
         rule({ id: 'NEW', validFrom: new Date('2026-05-01T00:00:00.000Z') }),
       ],
-      'ORG-A',
+      subject('ORG-A'),
       AT,
     );
     expect(chosen?.id).toBe('NEW');
@@ -102,7 +121,7 @@ describe('selectRule', () => {
         }),
         rule({ id: 'NOW', rateBasisPoints: 500, validFrom: new Date('2026-04-01T00:00:00.000Z') }),
       ],
-      'ORG-A',
+      subject('ORG-A'),
       occurredAt,
     );
 
@@ -113,7 +132,7 @@ describe('selectRule', () => {
 
 describe('computeCommission', () => {
   const input = {
-    organizationId: 'ORG-A',
+    ...subject('ORG-A'),
     occurredAt: AT,
     grossAmountMinor: 10_000_000n,
     currency: 'IRR',
@@ -129,6 +148,7 @@ describe('computeCommission', () => {
       rateBasisPoints: 0,
       amountMinor: 0n,
       matched: false,
+      outcome: 'NO_ACTIVE_RULE',
     });
   });
 
@@ -136,6 +156,7 @@ describe('computeCommission', () => {
     const decision = computeCommission([rule({ rateBasisPoints: 0 })], input);
     expect(decision.amountMinor).toBe(0n);
     expect(decision.matched).toBe(true);
+    expect(decision.outcome).toBe('RULE_APPLIED');
     expect(decision.ruleId).toBe('CMR_1');
   });
 
@@ -249,7 +270,7 @@ describe('when nothing matches', () => {
     // rate of zero — and the one the settlement response reports as
     // `commissionRuleMatched: false` (docs/24 Q-08).
     const decision = computeCommission([], {
-      organizationId: 'ORG-A',
+      ...subject('ORG-A'),
       occurredAt: new Date('2026-08-29T10:00:00.000Z'),
       grossAmountMinor: 1_000_000n,
       currency: 'IRR',
@@ -258,5 +279,116 @@ describe('when nothing matches', () => {
     expect(decision.matched).toBe(false);
     expect(decision.amountMinor).toBe(0n);
     expect(decision.ruleId).toBeNull();
+  });
+});
+
+describe('business lines (ADR-045 § 2, docs/23 D-057)', () => {
+  const at = { occurredAt: AT, grossAmountMinor: 10_000_000n, currency: 'IRR' };
+
+  it.each(BUSINESS_LINES)('prices a %s transaction by a rule for its own line only', (line) => {
+    // One rule per line, each at its own rate: a transaction of every line is
+    // charged at exactly its line's rate and never at a neighbour's.
+    const rules = BUSINESS_LINES.map((each, index) =>
+      rule({ id: `CMR_${each}`, businessLine: each, rateBasisPoints: 100 + index }),
+    );
+    const decision = computeCommission(rules, {
+      ...at,
+      ...subject('ORG-A', { businessLine: line, transactionType: 'MARKETPLACE_ORDER' }),
+    });
+    expect(decision).toMatchObject({ ruleId: `CMR_${line}`, outcome: 'RULE_APPLIED' });
+  });
+
+  it('records NO_ACTIVE_RULE for a line that has no rule, however many other lines do', () => {
+    const decision = computeCommission([rule({ businessLine: 'PARTS' })], {
+      ...at,
+      ...subject('ORG-A', { businessLine: 'INSURANCE' }),
+    });
+    expect(decision).toEqual({
+      ruleId: null,
+      rateBasisPoints: 0,
+      amountMinor: 0n,
+      matched: false,
+      outcome: 'NO_ACTIVE_RULE',
+    });
+  });
+
+  it('applies a line rule narrowed to a type only to that type', () => {
+    const narrowed = rule({ businessLine: 'PARTS', transactionType: 'PROCUREMENT_ORDER' });
+    const parts = (transactionType: string) =>
+      subject('ORG-A', { businessLine: 'PARTS', transactionType });
+    expect(coversSubject(narrowed, parts('PROCUREMENT_ORDER'))).toBe(true);
+    expect(coversSubject(narrowed, parts('MARKETPLACE_ORDER'))).toBe(false);
+  });
+
+  it('prefers a rule narrowed to the type over one for the whole line', () => {
+    const chosen = selectRule(
+      [
+        rule({
+          id: 'LINE',
+          businessLine: 'PARTS',
+          validFrom: new Date('2026-05-01T00:00:00.000Z'),
+        }),
+        rule({ id: 'TYPE', businessLine: 'PARTS', transactionType: 'MARKETPLACE_ORDER' }),
+      ],
+      subject('ORG-A', { businessLine: 'PARTS', transactionType: 'MARKETPLACE_ORDER' }),
+      AT,
+    );
+    // The narrower rule wins even though the line rule started later.
+    expect(chosen?.id).toBe('TYPE');
+  });
+
+  it('still prefers an organization rule for the whole line over a platform rule for the type', () => {
+    const chosen = selectRule(
+      [
+        rule({ id: 'PLATFORM_TYPE', businessLine: 'PARTS', transactionType: 'MARKETPLACE_ORDER' }),
+        rule({ id: 'OWN_LINE', businessLine: 'PARTS', organizationId: 'ORG-A' }),
+      ],
+      subject('ORG-A', { businessLine: 'PARTS', transactionType: 'MARKETPLACE_ORDER' }),
+      AT,
+    );
+    expect(chosen?.id).toBe('OWN_LINE');
+  });
+
+  it('never reads a line off the type: a line rule does not price a transaction without one', () => {
+    // A MARKETPLACE_ORDER may sell parts or broker a service; ADR-045 rejects
+    // the inference, so a transaction whose source sent no line is not priced
+    // by any line rule, its type notwithstanding (docs/24 Q-130).
+    const decision = computeCommission(
+      [rule({ businessLine: 'PARTS', transactionType: 'MARKETPLACE_ORDER' })],
+      { ...at, ...subject('ORG-A', { businessLine: null, transactionType: 'MARKETPLACE_ORDER' }) },
+    );
+    expect(decision.outcome).toBe('NO_ACTIVE_RULE');
+  });
+
+  it('keeps a type-only rule from before business lines for transactions without a line', () => {
+    const legacy = rule({ id: 'LEGACY', businessLine: null, transactionType: 'MARKETPLACE_ORDER' });
+    const order = (businessLine: CommissionSubject['businessLine']) => ({
+      ...at,
+      ...subject('ORG-A', { businessLine, transactionType: 'MARKETPLACE_ORDER' }),
+    });
+    expect(computeCommission([legacy], order(null)).ruleId).toBe('LEGACY');
+    // …and gives it no new meaning: it does not price a transaction that has a line.
+    expect(computeCommission([legacy], order('PARTS')).outcome).toBe('NO_ACTIVE_RULE');
+  });
+
+  it('applies the line rule in force when the transaction occurred, not the newest', () => {
+    const chosen = selectRule(
+      [
+        rule({
+          id: 'THEN',
+          businessLine: 'INSURANCE',
+          validFrom: new Date('2026-01-01T00:00:00.000Z'),
+          validTo: new Date('2026-04-01T00:00:00.000Z'),
+        }),
+        rule({
+          id: 'NOW',
+          businessLine: 'INSURANCE',
+          validFrom: new Date('2026-04-01T00:00:00.000Z'),
+        }),
+      ],
+      subject('ORG-A', { businessLine: 'INSURANCE' }),
+      new Date('2026-03-01T00:00:00.000Z'),
+    );
+    expect(chosen?.id).toBe('THEN');
   });
 });

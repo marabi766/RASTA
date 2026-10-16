@@ -229,12 +229,20 @@ describe('COMMISSION_APPLIED', () => {
     commissionId: 'CMS_1',
     transactionId: 'TXN_1',
     organizationId: 'ORG-B',
+    businessLine: 'PARTS',
     rateBasisPoints: 200,
     grossAmountMinor: '10000000',
     amountMinor: '200000',
     currency: 'IRR',
     appliedAt: new Date().toISOString(),
   };
+  const applied = { ...base, ruleId: 'CMR_1', outcome: 'RULE_APPLIED' };
+
+  it('accepts a charge under a rule, with its business line', () => {
+    expect(() =>
+      validateEconomicPayload(ECONOMIC_EVENTS.COMMISSION_APPLIED, applied),
+    ).not.toThrow();
+  });
 
   it('permits a null ruleId — no rule matched, so nothing was charged', () => {
     // The ADR-023 case, and a real one rather than defensive: with no active
@@ -243,16 +251,50 @@ describe('COMMISSION_APPLIED', () => {
       validateEconomicPayload(ECONOMIC_EVENTS.COMMISSION_APPLIED, {
         ...base,
         ruleId: null,
+        outcome: 'NO_ACTIVE_RULE',
+        rateBasisPoints: 0,
         amountMinor: '0',
       }),
     ).not.toThrow();
   });
 
+  it('permits a null businessLine — the source sent none (docs/24 Q-130)', () => {
+    expect(() =>
+      validateEconomicPayload(ECONOMIC_EVENTS.COMMISSION_APPLIED, {
+        ...applied,
+        businessLine: null,
+      }),
+    ).not.toThrow();
+  });
+
+  it('refuses an outcome that contradicts the rule (ADR-045 § 2)', () => {
+    // A zero under a rule and a zero under none must never be confusable.
+    for (const contradiction of [
+      { ruleId: null, outcome: 'RULE_APPLIED' },
+      { ruleId: 'CMR_1', outcome: 'NO_ACTIVE_RULE' },
+    ]) {
+      expect(() =>
+        validateEconomicPayload(ECONOMIC_EVENTS.COMMISSION_APPLIED, {
+          ...base,
+          ...contradiction,
+        }),
+      ).toThrow();
+    }
+  });
+
+  it('refuses a business line outside the contract', () => {
+    expect(() =>
+      validateEconomicPayload(ECONOMIC_EVENTS.COMMISSION_APPLIED, {
+        ...applied,
+        businessLine: 'FUEL',
+      }),
+    ).toThrow();
+  });
+
   it('refuses a rate outside 0–10 000 basis points', () => {
     expect(() =>
       validateEconomicPayload(ECONOMIC_EVENTS.COMMISSION_APPLIED, {
-        ...base,
-        ruleId: null,
+        ...applied,
         rateBasisPoints: 10_001,
       }),
     ).toThrow();
@@ -261,8 +303,7 @@ describe('COMMISSION_APPLIED', () => {
   it('refuses a fractional rate', () => {
     expect(() =>
       validateEconomicPayload(ECONOMIC_EVENTS.COMMISSION_APPLIED, {
-        ...base,
-        ruleId: null,
+        ...applied,
         rateBasisPoints: 2.5,
       }),
     ).toThrow();
@@ -442,7 +483,8 @@ describe('consumed events', () => {
 describe('a rule change record', () => {
   const terms = {
     organizationId: null,
-    transactionType: 'LOGISTICS',
+    businessLine: 'LOGISTICS' as string | null,
+    transactionType: null as string | null,
     rateBasisPoints: 100,
     minAmountMinor: null,
     maxAmountMinor: null,
@@ -485,6 +527,23 @@ describe('a rule change record', () => {
       validateEconomicPayload('COMMISSION_RULE_CHANGED', {
         ...record('CREATED', null),
         after: { ...terms, rateBasisPoints: 2.5 },
+      }),
+    ).toThrow();
+  });
+
+  it('carries the business line, and keeps a type-only rule from before them readable', () => {
+    // docs/23 D-057: rules written before ADR-045 name a type and no line.
+    const legacy = { ...terms, businessLine: null, transactionType: 'LOGISTICS' };
+    expect(() =>
+      validateEconomicPayload('COMMISSION_RULE_CHANGED', {
+        ...record('UPDATED', legacy),
+        after: { ...legacy, status: 'INACTIVE' },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateEconomicPayload('COMMISSION_RULE_CHANGED', {
+        ...record('CREATED', null),
+        after: { ...terms, businessLine: 'FUEL' },
       }),
     ).toThrow();
   });

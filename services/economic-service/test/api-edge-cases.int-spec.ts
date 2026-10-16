@@ -66,6 +66,7 @@ describe('economic edge cases', () => {
         .set('authorization', asSystem())
         .send({
           organizationId: payee,
+          businessLine: 'PROCUREMENT',
           transactionType: 'PROCUREMENT_ORDER',
           rateBasisPoints: 1000,
           // The floor and the ceiling are on the **commission**, not on the
@@ -95,7 +96,7 @@ describe('economic edge cases', () => {
         .set('authorization', asSystem())
         .send({
           organizationId: payee,
-          transactionType: 'LOGISTICS',
+          businessLine: 'LOGISTICS',
           rateBasisPoints: 100,
           validFrom: new Date(Date.now() + 86_400_000).toISOString(),
           validTo: new Date().toISOString(),
@@ -115,6 +116,7 @@ describe('economic edge cases', () => {
         .set('idempotency-key', id('edge-capped'))
         .send({
           transactionType: 'PROCUREMENT_ORDER',
+          businessLine: 'PROCUREMENT',
           counterpartyOrganizationId: payee,
           grossAmountMinor: '1000000',
           currency: 'IRR',
@@ -148,6 +150,7 @@ describe('economic edge cases', () => {
         .set('idempotency-key', id('edge-floored'))
         .send({
           transactionType: 'PROCUREMENT_ORDER',
+          businessLine: 'PROCUREMENT',
           counterpartyOrganizationId: payee,
           grossAmountMinor: '20000',
           currency: 'IRR',
@@ -175,7 +178,7 @@ describe('economic edge cases', () => {
       const created = await request(http)
         .post('/v1/commissions/rules')
         .set('authorization', asSystem())
-        .send({ organizationId: org, transactionType: 'LOGISTICS', rateBasisPoints: 100 })
+        .send({ organizationId: org, businessLine: 'LOGISTICS', rateBasisPoints: 100 })
         .expect(201);
       const inAnHour = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
@@ -227,7 +230,7 @@ describe('economic edge cases', () => {
         .set('authorization', asSystem())
         .send({
           organizationId: org,
-          transactionType: 'LOGISTICS',
+          businessLine: 'LOGISTICS',
           rateBasisPoints: 90,
           validFrom: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
           validTo: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
@@ -448,6 +451,7 @@ describe('economic edge cases', () => {
         .set('authorization', asSystem())
         .send({
           organizationId: org,
+          businessLine: 'PARTS',
           transactionType: 'MARKETPLACE_ORDER',
           rateBasisPoints: 100,
           minAmountMinor: PAST_BIGINT,

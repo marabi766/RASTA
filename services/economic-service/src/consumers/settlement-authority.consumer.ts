@@ -196,6 +196,9 @@ export class SettlementAuthorityConsumer implements OnModuleInit, OnApplicationS
           organizationId: fact.organizationId,
           counterpartyOrganizationId: payeeOrganizationId,
           transactionType: 'MAINTENANCE_SERVICE',
+          // What the fact is, not what its type suggests: this consumer
+          // records only approved maintenance work (ADR-045 § 4, docs/24 Q-130).
+          businessLine: 'MAINTENANCE',
           grossAmountMinor: BigInt(fact.totalCostMinor),
           currency: fact.currency,
           // Equal to the event's instant; `confirmApproval` refuses a fact without one.

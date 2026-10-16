@@ -15,7 +15,7 @@ import { ECONOMIC_EVENTS } from '../events/events';
 import { financialTransactionDuration, transactionsCreatedTotal } from '../observability/metrics';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { ENV } from '../tokens';
-import type { Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
+import type { BusinessLine, Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
 import type { CreateTransactionDto, DisputeTransactionDto, ResolveDisputeDto } from './dto';
 
 /**
@@ -96,6 +96,7 @@ export class TransactionService {
             organizationId,
             counterpartyOrganizationId: dto.counterpartyOrganizationId ?? null,
             transactionType: dto.transactionType,
+            businessLine: dto.businessLine ?? null,
             status: 'CREATED',
             grossAmountMinor,
             currency: dto.currency ?? 'IRR',
@@ -226,6 +227,8 @@ export class TransactionService {
       organizationId: string;
       counterpartyOrganizationId: string;
       transactionType: TransactionType;
+      /** Stated by the consumer that knows what the fact is (ADR-045 § 4). */
+      businessLine: BusinessLine;
       grossAmountMinor: bigint;
       currency: string;
       occurredAt: Date;
@@ -251,6 +254,7 @@ export class TransactionService {
         organizationId: input.organizationId,
         counterpartyOrganizationId: input.counterpartyOrganizationId,
         transactionType: input.transactionType,
+        businessLine: input.businessLine,
         // Straight to PENDING_SETTLEMENT: the authorising fact is the event
         // itself. The state machine permits this edge from CREATED, and the
         // row is written in its post-transition state rather than moved twice.

@@ -261,6 +261,7 @@ describe('ledger and governance API', () => {
   it('lets only a system administrator configure a commission rate', async () => {
     const body = {
       organizationId: org,
+      businessLine: 'PARTS',
       transactionType: 'MARKETPLACE_ORDER',
       rateBasisPoints: 250,
       label: 'نمونه — نیازمند تصویب',
@@ -313,7 +314,7 @@ describe('ledger and governance API', () => {
       .set('authorization', asSystem())
       .send({
         organizationId: org,
-        transactionType: 'LOGISTICS',
+        businessLine: 'LOGISTICS',
         rateBasisPoints: 10_001,
       })
       .expect(400);
@@ -332,7 +333,7 @@ describe('ledger and governance API', () => {
         // nothing, and the settlement would report `commissionRuleMatched:
         // false` — which is exactly how a misconfigured rate hides.
         organizationId: payee,
-        transactionType: 'CONSTRUCTION_STATEMENT',
+        businessLine: 'CONSTRUCTION',
         rateBasisPoints: 500,
         label: 'نمونه — نیازمند تصویب',
       })
@@ -344,6 +345,7 @@ describe('ledger and governance API', () => {
       .set('idempotency-key', id('api-commissioned'))
       .send({
         transactionType: 'CONSTRUCTION_STATEMENT',
+        businessLine: 'CONSTRUCTION',
         counterpartyOrganizationId: payee,
         grossAmountMinor: '1000000',
         currency: 'IRR',
@@ -381,6 +383,10 @@ describe('ledger and governance API', () => {
     expect(charged).toBeDefined();
     expect(charged.rateBasisPoints).toBe(500);
     expect(charged.ruleId).not.toBeNull();
+    expect(charged.businessLine).toBe('CONSTRUCTION');
+    expect(charged.outcome).toBe('RULE_APPLIED');
+    expect(settled.body.commissionOutcome).toBe('RULE_APPLIED');
+    expect(settled.body.businessLine).toBe('CONSTRUCTION');
   });
 
   // -------------------------------------------------------------------------
