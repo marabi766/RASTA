@@ -299,3 +299,38 @@ describe('the absolute lifetime, enforced on the server', () => {
     expect(await renewSession('not-a-sealed-value', { env: ENV })).toEqual({ kind: 'ENDED' });
   });
 });
+
+describe('a token that runs out while its refresh is out (PR 319 review 3, finding 2)', () => {
+  it('is judged by the clock once the refresh settles, not by the one before it started', async () => {
+    // One second left when the refresh starts; the provider takes two and
+    // answers with a transient failure.
+    const startedAt = at(T0 + 899);
+    let clock = startedAt;
+    const refresh = async (): Promise<TokenResponse> => {
+      clock += 2_000;
+      throw new OidcError('TOKEN_REQUEST_FAILED', 'the identity provider answered 503');
+    };
+
+    const renewal = await renewSession(sealed(), {
+      env: ENV,
+      refresh,
+      now: startedAt,
+      clock: () => clock,
+    });
+
+    expect(renewal).toEqual({ kind: 'REFUSED', usable: false });
+  });
+
+  it('still usable when the token outlives the refresh', async () => {
+    const startedAt = at(T0 + 880);
+    let clock = startedAt;
+    const refresh = async (): Promise<TokenResponse> => {
+      clock += 2_000;
+      throw new OidcError('TOKEN_REQUEST_FAILED', 'the identity provider answered 503');
+    };
+
+    expect(
+      await renewSession(sealed(), { env: ENV, refresh, now: startedAt, clock: () => clock }),
+    ).toEqual({ kind: 'REFUSED', usable: true });
+  });
+});
