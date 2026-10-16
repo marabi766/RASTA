@@ -16,19 +16,32 @@ const expectedVersion = z.number().int().min(1).max(2_147_483_647);
 const statedReason = z.string().trim().min(8).max(500);
 
 /**
- * An authority role: any platform role except the oversight role and the platform operator. The
- * database refuses the same two (`ck_step_authority_not_oversight`).
+ * An authority role: any platform role except the oversight role and the platform operator, for
+ * every workflow. The oversight role has aggregate access only; the platform creates no legal
+ * authority of its own (CLAUDE.md principle 9), so it neither accepts a contract for a party nor
+ * approves a tenant's statement — Q-96 (1) as clarified for CON-003 PR 5. The database refuses
+ * the same two (`ck_step_authority_not_oversight`).
  */
-const AUTHORITY_ROLES = PLATFORM_ROLES.filter(
-  (role) => role !== 'AUDITOR' && role !== 'SYSTEM_ADMIN',
-) as [string, ...string[]];
-// An enum rather than a refinement, so the published schema lists exactly the roles that can be named.
-const authorityRole = z.enum(AUTHORITY_ROLES, {
-  errorMap: () => ({
-    message:
-      'Not a role that can accept a contract for a party (never the oversight role or the platform operator)',
-  }),
-});
+const NEVER_AUTHORITY: readonly string[] = ['AUDITOR', 'SYSTEM_ADMIN'];
+const AUTHORITY_ROLES = PLATFORM_ROLES.filter((role) => !NEVER_AUTHORITY.includes(role)) as [
+  string,
+  ...string[],
+];
+// An enum, so the published schema lists exactly the roles that can be named. The two excluded
+// roles are refused first, with the reason: the validation pipe rebuilds an enum's own message
+// from its options (S-09), and keeps a custom message only when it does not repeat the input.
+const authorityRole = z.preprocess((role, context) => {
+  if (typeof role === 'string' && NEVER_AUTHORITY.includes(role)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      fatal: true,
+      message:
+        'The oversight role and the platform operator are never an approval authority: the ' +
+        'platform creates no legal authority, so it approves no tenant contract or statement',
+    });
+  }
+  return role;
+}, z.enum(AUTHORITY_ROLES));
 
 export const MAX_POLICY_STEPS = 20;
 
@@ -84,12 +97,29 @@ export const createPolicySchema = z
     /** Demo data: «نمونه — نیازمند تصویب» (ADR-023). */
     isSample: z.boolean().default(false),
     /**
-     * The authorities. For `contract.signature` they are alternatives: any one may sign. For a
-     * statement chain they are its steps, asked in this order (Q-96 (1)).
+     * The authorities. For `contract.signature` they are alternatives: any one may sign, so each
+     * (organization, role) is named once. For a statement chain they are its steps, asked in this
+     * order (Q-96 (1)); two of them may name the same (organization, role), for two people.
      */
     steps: z.array(policyStepInput).min(1).max(MAX_POLICY_STEPS),
   })
-  .strict();
+  .strict()
+  .superRefine((policy, context) => {
+    if (policy.workflowKey !== 'contract.signature') return;
+    // The database refuses the same row (`ck_step_signing_authority_once`).
+    const named = new Set<string>();
+    policy.steps.forEach((step, index) => {
+      const authority = JSON.stringify([step.authorityOrganizationId, step.authorityRole]);
+      if (named.has(authority)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['steps', index],
+          message: 'A signing policy names each authority once: its steps are alternatives',
+        });
+      }
+      named.add(authority);
+    });
+  });
 export type CreatePolicyDto = z.infer<typeof createPolicySchema>;
 
 export const policyTransitionSchema = z.object({ expectedVersion }).strict();

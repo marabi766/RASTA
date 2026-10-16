@@ -4,7 +4,7 @@
 -- Drops the approval chains' snapshot, the chains' step counts, a line's milestone and a policy
 -- step's amount bounds; narrows `approval_policy` back to `contract.signature`; and restores the
 -- previous `statement_guard` (no transition open), `statement_part_guard`, `milestone_guard` and
--- `approval_policy_step_guard`. Roll the code back first: it submits statements and writes all of
+-- `approval_policy_step_guard`, and the one-step-per-authority index of every policy. Roll the code back first: it submits statements and writes all of
 -- these.
 --
 -- **Refuses, and changes nothing, once any of this has been used.** A submitted statement is the
@@ -218,6 +218,10 @@ $$ LANGUAGE plpgsql;
 ALTER TABLE "approval_policy_step" DROP CONSTRAINT IF EXISTS "ck_step_amount_bounds";
 ALTER TABLE "approval_policy_step" DROP COLUMN IF EXISTS "min_amount_minor";
 ALTER TABLE "approval_policy_step" DROP COLUMN IF EXISTS "max_amount_minor";
+
+-- One authority, one step, for every policy again. Only signing policies are left (the preflight
+-- refused otherwise), and the guard kept each of them to one step per authority.
+CREATE UNIQUE INDEX "ux_approval_policy_step_authority" ON "approval_policy_step"("organization_id", "policy_id", "authority_organization_id", "authority_role");
 
 -- ---- approval_policy: the signing workflow only ----------------------------------------
 

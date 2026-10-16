@@ -260,6 +260,48 @@ describe('approval policies (contract.signature)', () => {
         },
       );
 
+      it('two steps of a chain may name the same organization and role — two people, asked in turn; a signing policy names each authority once (400, not a retry)', async () => {
+        const written = await create(
+          unionAdmin,
+          chainBody('contract.statement.technical', [stepFor(employer), stepFor(employer)]),
+        ).expect(201);
+        expect(
+          written.body.steps.map((step: { stepOrder: number; authorityRole: string }) => [
+            step.stepOrder,
+            step.authorityRole,
+          ]),
+        ).toEqual([
+          [1, 'ORGANIZATION_ADMIN'],
+          [2, 'ORGANIZATION_ADMIN'],
+        ]);
+        const submitted = await command(unionAdmin, written.body.id, 'submit', {
+          expectedVersion: 1,
+        }).expect(200);
+        const approved = await command(platformAdmin, written.body.id, 'approve', {
+          expectedVersion: submitted.body.version,
+        }).expect(200);
+        expect(approved.body.status).toBe('ACTIVE');
+
+        const signing = await create(unionAdmin, {
+          ...body(employer),
+          steps: [stepFor(employer), stepFor(employer, 'FLEET_MANAGER'), stepFor(employer)],
+        }).expect(400);
+        expect(JSON.stringify(signing.body)).toContain('names each authority once');
+        // Nothing was written: the line's next version is still 1.
+        expect((await create(unionAdmin, body(employer)).expect(201)).body.policyVersion).toBe(1);
+      });
+
+      it.each(['AUDITOR', 'SYSTEM_ADMIN'])(
+        'a chain step never names %s: 400, saying the platform approves no tenant statement (Q-96 (1) as clarified)',
+        async (role) => {
+          const res = await create(
+            unionAdmin,
+            chainBody('contract.statement.financial', [stepFor(employer, role)]),
+          ).expect(400);
+          expect(JSON.stringify(res.body)).toContain('approves no tenant contract or statement');
+        },
+      );
+
       it('only a statement chain’s steps have bounds: a signing step with one is 422 AMOUNT_BOUNDS_NOT_APPLICABLE', async () => {
         const res = await create(unionAdmin, {
           ...body(employer),

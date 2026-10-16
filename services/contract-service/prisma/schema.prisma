@@ -675,7 +675,9 @@ model PolicyReconciliationTask {
 /// One authority a policy names. For `contract.signature` each step is a role of the governed
 /// organization that may accept a contract for it (alternatives, not a sequence). For a statement
 /// chain the steps are a sequence, of any organization but the contractor's (Q-96 (1)), each
-/// applying to a statement whose gross is within its optional bounds.
+/// applying to a statement whose gross is within its optional bounds. Never `AUDITOR` or
+/// `SYSTEM_ADMIN` (`ck_step_authority_not_oversight`): the platform is no approval authority on a
+/// tenant's contract or statement (Q-96 (1) as clarified, CLAUDE.md principle 9).
 model ApprovalPolicyStep {
   id String @id
 
@@ -698,8 +700,10 @@ model ApprovalPolicyStep {
   minAmountMinor BigInt? @map("min_amount_minor")
   maxAmountMinor BigInt? @map("max_amount_minor")
 
+  /// A signing policy names each (organization, role) once (`ck_step_signing_authority_once`, in
+  /// `approval_policy_step_guard`: no index can name the parent's workflow). A statement chain may
+  /// name one twice — two steps for two different people, kept apart when they decide.
   @@unique([organizationId, policyId, stepOrder], map: "ux_approval_policy_step_order")
-  @@unique([organizationId, policyId, authorityOrganizationId, authorityRole], map: "ux_approval_policy_step_authority")
   @@map("approval_policy_step")
 }
 

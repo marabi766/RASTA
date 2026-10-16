@@ -10,6 +10,8 @@
 --   * `approval_policy_step` gains optional amount bounds (`min_amount_minor` inclusive,
 --     `max_amount_minor` exclusive), for the statement chains only: a step applies to a statement
 --     whose gross falls within them (the construction-service rule, Q-70 (3); the basis is Q-134).
+--     One step per (organization, role) now holds for signing policies only: two steps of a
+--     statement chain may name the same authority, for two different people.
 --   * `statement_line.milestone_id` — a line may refer to a planned milestone of its own contract.
 --   * `statement_approval_step` — the snapshot of both chains, taken when the statement is submitted:
 --     every step of the policy in force for each chain that applies to the statement's gross, with
@@ -48,15 +50,25 @@ ALTER TABLE "approval_policy_step" ADD CONSTRAINT "ck_step_amount_bounds"
          AND ("min_amount_minor" IS NULL OR "max_amount_minor" IS NULL
               OR "min_amount_minor" < "max_amount_minor"));
 
+-- One authority, one step — for signing only. A signing policy's steps are alternatives, so naming
+-- an (organization, role) twice says nothing; a statement chain's steps are asked in order, and two
+-- of them may name the same (organization, role) for two different people (the separation of those
+-- people is enforced when they decide). Kept for signing by `approval_policy_step_guard` below; step
+-- order stays unique for every workflow (`ux_approval_policy_step_order`).
+DROP INDEX "ux_approval_policy_step_authority";
+
 -- A step is part of the policy it belongs to: written with it, while it is a draft, and never
--- changed or removed. Amount bounds belong to the statement chains: a signing step has none.
+-- changed or removed. Amount bounds belong to the statement chains: a signing step has none. A
+-- signing policy names each authority once: the policy row is locked first, so two transactions
+-- adding steps to one policy are checked one after the other.
 CREATE OR REPLACE FUNCTION "approval_policy_step_guard"() RETURNS trigger AS $$
 DECLARE
   parent RECORD;
 BEGIN
   IF TG_OP = 'INSERT' THEN
     SELECT "status", "workflow_key" INTO parent FROM "approval_policy"
-     WHERE "organization_id" = NEW."organization_id" AND "id" = NEW."policy_id";
+     WHERE "organization_id" = NEW."organization_id" AND "id" = NEW."policy_id"
+       FOR UPDATE;
     IF NOT FOUND OR parent."status" <> 'DRAFT' THEN
       RAISE EXCEPTION 'ck_step_policy_draft: steps are written with a draft policy only'
         USING ERRCODE = 'check_violation';
@@ -64,6 +76,21 @@ BEGIN
     IF (NEW."min_amount_minor" IS NOT NULL OR NEW."max_amount_minor" IS NOT NULL)
        AND parent."workflow_key" NOT IN ('contract.statement.technical', 'contract.statement.financial') THEN
       RAISE EXCEPTION 'ck_step_bounds_statement_only: only a statement chain''s step has amount bounds'
+        USING ERRCODE = 'check_violation';
+    END IF;
+    -- `ck_step_authority_not_oversight` refuses the same row; this says why, for a statement chain.
+    IF parent."workflow_key" IN ('contract.statement.technical', 'contract.statement.financial')
+       AND NEW."authority_role" IN ('AUDITOR', 'SYSTEM_ADMIN') THEN
+      RAISE EXCEPTION 'ck_step_authority_not_oversight: a statement chain step is never the oversight role (Q-96 (1)) nor the platform operator: the platform creates no legal authority, so it approves no tenant''s statement (CLAUDE.md principle 9)'
+        USING ERRCODE = 'check_violation';
+    END IF;
+    IF parent."workflow_key" = 'contract.signature' AND EXISTS (
+      SELECT 1 FROM "approval_policy_step"
+       WHERE "organization_id" = NEW."organization_id" AND "policy_id" = NEW."policy_id"
+         AND "authority_organization_id" = NEW."authority_organization_id"
+         AND "authority_role" = NEW."authority_role"
+    ) THEN
+      RAISE EXCEPTION 'ck_step_signing_authority_once: a signing policy names each authority once'
         USING ERRCODE = 'check_violation';
     END IF;
     RETURN NEW;
@@ -319,6 +346,9 @@ ALTER TABLE "statement_approval_step" ADD CONSTRAINT "ck_statement_approval_step
          AND btrim("authority_organization_id") <> '' AND btrim("authority_role") <> ''
          AND btrim("authority_label") <> '');
 
+-- Never the oversight role (Q-96 (1)), and never the platform operator: the platform creates no
+-- legal authority of its own (CLAUDE.md principle 9), so it is no approver of a tenant's statement
+-- (Q-96 (1), as clarified for CON-003 PR 5) — as `ck_step_authority_not_oversight` says for policies.
 ALTER TABLE "statement_approval_step" ADD CONSTRAINT "ck_statement_approval_step_terms"
   CHECK ("chain" IN ('TECHNICAL', 'FINANCIAL') AND "step_order" >= 1 AND "policy_version" >= 1
          AND "authority_role" NOT IN ('AUDITOR', 'SYSTEM_ADMIN'));
