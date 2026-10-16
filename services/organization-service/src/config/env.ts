@@ -3,6 +3,7 @@ import {
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
+  EnvValidationError,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
@@ -86,6 +87,24 @@ export function loadOrganizationEnv(source: NodeJS.ProcessEnv = process.env): Or
     },
     { operationBudgets: organizationOperationBudgets },
   );
+}
+
+/**
+ * `MAX_HIERARCHY_DEPTH` alone, by the service's own schema and default. The demo seed has no use
+ * for the rest of the service's configuration, but holds the rows it writes to the depth the
+ * running service enforces (Codex r1 on #295).
+ */
+export function loadMaxHierarchyDepth(source: NodeJS.ProcessEnv = process.env): number {
+  const result = organizationEnvSchema.pick({ MAX_HIERARCHY_DEPTH: true }).safeParse(source);
+  if (!result.success) {
+    throw new EnvValidationError(
+      result.error.issues.map((issue) => ({
+        path: issue.path.join('.') || '(root)',
+        message: issue.message,
+      })),
+    );
+  }
+  return result.data.MAX_HIERARCHY_DEPTH;
 }
 
 export function corsOrigins(env: OrganizationEnv): string[] {

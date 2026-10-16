@@ -6,6 +6,7 @@ import {
   auditTrailPayloadSchemaV1,
   parseEnvelope,
 } from '@rasta/contracts';
+import { releaseWithin } from '@rasta/nest-common';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { aggregationWindowOf } from '../src/security-events/refusal-aggregation';
 import { REFUSAL_SITES, type RefusalSite } from '../src/security-events/refusal-sites';
@@ -1362,6 +1363,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
           await harness.store.release(
             others.map((candidate) => candidate.id),
             claim.token,
+            releaseWithin(5_000),
           );
         }
         return { token: claim.token, mine };

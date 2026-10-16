@@ -1,5 +1,11 @@
 import { Logger } from '@nestjs/common';
-import { RastaError, createSystemContext, runWithContext } from '@rasta/nest-common';
+import {
+  RastaError,
+  createSystemContext,
+  runWithContext,
+  withinDeadline,
+  type OutboxStopOptions,
+} from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { SERVICE_NAME } from '../config/env';
 import { OrganizationDirectory } from '../organization/organization-directory';
@@ -75,6 +81,8 @@ export class PolicyReconciliationSweeper {
   private readonly logger = new Logger(PolicyReconciliationSweeper.name);
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<unknown>;
+  private stopping?: Promise<void>;
+  private stopped = false;
 
   constructor(
     private readonly reconciliations: PolicyReconciliationRepository,
@@ -84,7 +92,7 @@ export class PolicyReconciliationSweeper {
   ) {}
 
   start(): void {
-    if (this.timer) return;
+    if (this.timer || this.stopped) return;
     this.timer = setInterval(() => {
       // Never overlap with itself: a slow sweep is followed by the next tick, not by a second
       // sweep beside it.
@@ -102,10 +110,40 @@ export class PolicyReconciliationSweeper {
     this.timer.unref?.();
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Stops the timer at once, lets a sweep in flight start no further task, and waits for the one
+   * being worked — at most until `deadlineAt`, the shutdown's shared deadline (`OutboxShutdown`
+   * calls this in Nest's destroy phase, beside the relay and the purge; D-052). Stopped in
+   * `onApplicationShutdown`, after the relay, a sweep kept writing outbox rows while the relay
+   * drained, and its wait came on top of the relay's.
+   *
+   * Past the deadline the sweep is abandoned with a warning: a suspension, its event and the task's
+   * completion commit together, so an exit rolls back the one in flight, and the lease lets the next
+   * sweep, anywhere, take it and the rest of the batch again. Without a deadline it waits. One stop
+   * per process.
+   */
+  stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopping ??= this.halt(options.deadlineAt);
+    return this.stopping;
+  }
+
+  private async halt(deadlineAt: number | undefined): Promise<void> {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    await this.inFlight;
+
+    const current = this.inFlight;
+    if (!current) return;
+    if (deadlineAt === undefined) {
+      await current;
+      return;
+    }
+    if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+      this.logger.warn(
+        'Reconciliation sweep still running at the shutdown deadline; abandoned. The task in ' +
+          'flight rolls back and its lease lets the next sweep take it again',
+      );
+    }
   }
 
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
@@ -138,6 +176,8 @@ export class PolicyReconciliationSweeper {
     };
 
     for (const task of tasks) {
+      // Stopping: the rest stay claimed until their lease runs out, then any sweep takes them.
+      if (this.stopped) break;
       const context = createSystemContext({
         correlationId: task.correlationId,
         organizationId: task.organizationId,

@@ -6,6 +6,7 @@ import {
   key,
   newPrisma,
   publishOffer,
+  sagaStep,
   tenants,
   wire,
   type Wiring,
@@ -151,7 +152,7 @@ describe('tenant isolation (real database)', () => {
       // The supplier can see this order, so 404 would be a lie. It is a real
       // authorization refusal on a record they are entitled to know about.
       const order = await anOrder();
-      await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+      await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
       await asSupplier(() => wiring.orders.confirm(order.id));
       await asSupplier(() => wiring.orders.fulfill(order.id, {}));
 
@@ -166,7 +167,7 @@ describe('tenant isolation (real database)', () => {
 
     it('refuses the buyer the supplier’s commands', async () => {
       const order = await anOrder();
-      await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+      await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
 
       await expect(
         asActor({ organizationId: org.buyer, roles: ['SUPPLIER', 'PROCUREMENT_USER'] }, () =>
@@ -177,7 +178,7 @@ describe('tenant isolation (real database)', () => {
 
     it('refuses a buyer to resolve their own dispute', async () => {
       const order = await anOrder();
-      await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+      await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
       await asBuyer(() =>
         wiring.orders.raiseDispute(order.id, { reason: 'the goods never arrived at all' }),
       );

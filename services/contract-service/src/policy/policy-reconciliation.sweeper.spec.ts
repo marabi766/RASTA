@@ -257,4 +257,75 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
       expect(reconciliations.claimDue).toHaveBeenCalledTimes(3);
     });
   });
+
+  /**
+   * D-052: the sweep stops with the relay and the purge, in the destroy phase, by their shared
+   * deadline — no new task once stopping, and no wait past the deadline for the one in flight.
+   */
+  describe('stop', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    /** A sweep the timer started over three tasks, held in the first one's question. */
+    async function heldInTheFirstTask() {
+      const built = build([
+        task(),
+        task({ id: 'PRT_2', policyId: 'APL_2', organizationId: 'ORG_F' }),
+        task({ id: 'PRT_3', policyId: 'APL_3', organizationId: 'ORG_G' }),
+      ]);
+      let answer: () => void = () => undefined;
+      built.directory.withinAnswer.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            answer = () => resolve(null);
+          }),
+      );
+      built.sweeper.start();
+      await jest.advanceTimersByTimeAsync(options.intervalMs);
+      expect(built.directory.withinAnswer).toHaveBeenCalledTimes(1);
+      return { ...built, answer: () => answer() };
+    }
+
+    it('starts no further task once stopping, and waits for the one in flight', async () => {
+      const { sweeper, suspension, directory, answer } = await heldInTheFirstTask();
+
+      let stopped = false;
+      const stopping = sweeper.stop({ deadlineAt: Date.now() + 5000 }).then(() => {
+        stopped = true;
+      });
+      await jest.advanceTimersByTimeAsync(100);
+      expect(stopped).toBe(false);
+
+      answer();
+      await stopping;
+      expect(suspension.suspend).toHaveBeenCalledTimes(1);
+      expect(directory.withinAnswer).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns by the deadline when the task in flight never finishes', async () => {
+      const { sweeper } = await heldInTheFirstTask();
+
+      let stopped = false;
+      const stopping = sweeper.stop({ deadlineAt: Date.now() + 300 }).then(() => {
+        stopped = true;
+      });
+      await jest.advanceTimersByTimeAsync(299);
+      expect(stopped).toBe(false);
+      await jest.advanceTimersByTimeAsync(1);
+      await stopping;
+      expect(stopped).toBe(true);
+    });
+
+    it('clears its timer, returns at once when idle, and is one stop', async () => {
+      const { sweeper, reconciliations } = build([]);
+      sweeper.start();
+
+      const first = sweeper.stop({ deadlineAt: Date.now() + 1000 });
+      expect(sweeper.stop()).toBe(first);
+      await first;
+      sweeper.start(); // not once stopped
+      await jest.advanceTimersByTimeAsync(options.intervalMs * 3);
+      expect(reconciliations.claimDue).not.toHaveBeenCalled();
+    });
+  });
 });
