@@ -90,6 +90,10 @@ const probeRow = (): OutboxRow => {
 const never = <T>(): Promise<T> => new Promise<T>(() => undefined);
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** A strictly increasing counter: the order of events, which a clock in ms cannot give. */
+let events = 0;
+const nextEvent = (): number => (events += 1);
+
 type EachMessage = (payload: {
   topic: string;
   partition: number;
@@ -138,9 +142,9 @@ const dueSoon = (): Buffer =>
   );
 
 interface Probe {
-  /** Epoch ms of every relay claim. */
+  /** Every relay claim, by its place in the order of events (`nextEvent`), taken as it is issued. */
   claims: number[];
-  /** Epoch ms of every worker tick, per worker. */
+  /** Every worker tick, per worker, the same way. */
   ticks: { resolution: number[]; mail: number[] };
   publishes: number;
   /** Purge batches begun; each one never ends. */
@@ -202,7 +206,7 @@ async function boot(behaviour: Behaviour): Promise<{
   let claimedOnce = false;
   const store: Partial<Record<keyof PrismaOutboxStore, unknown>> = {
     claimPending: async (): Promise<OutboxClaim> => {
-      probe.claims.push(Date.now());
+      probe.claims.push(nextEvent());
       if (!behaviour.endlessRows && claimedOnce) return { token: null, rows: [], reclaimed: 0 };
       claimedOnce = true;
       return { token: `tok-${probe.claims.length}`, rows: [probeRow()], reclaimed: 0 };
@@ -274,11 +278,11 @@ async function boot(behaviour: Behaviour): Promise<{
 
   // Before `init()` starts the timers: the real workers, with their batch replaced.
   jest.spyOn(moduleRef.get(ResolutionWorker), 'tick').mockImplementation(async () => {
-    probe.ticks.resolution.push(Date.now());
+    probe.ticks.resolution.push(nextEvent());
     return 0;
   });
   jest.spyOn(moduleRef.get(MailWorker), 'tick').mockImplementation(() => {
-    probe.ticks.mail.push(Date.now());
+    probe.ticks.mail.push(nextEvent());
     return behaviour.mailHangs ? never<number>() : Promise.resolve(0);
   });
 
@@ -309,12 +313,15 @@ async function closeLikeMain(app: INestApplication, env: NotificationEnv) {
     logger: { warn: () => undefined, error: (message) => errors.push(message) },
   });
   const startedAt = Date.now();
+  // Taken in the same synchronous run as the call, so everything issued before
+  // the close began has a smaller number and everything after — during the
+  // close as much as after it — a larger one.
+  const closeSeq = nextEvent();
   await shutdown.shutdown('SIGTERM');
-  const endedAt = Date.now();
-  return { exits, errors, startedAt, endedAt, tookMs: endedAt - startedAt };
+  return { exits, errors, closeSeq, tookMs: Date.now() - startedAt };
 }
 
-const after = (stamps: readonly number[], at: number) => stamps.filter((t) => t > at);
+const after = (seqs: readonly number[], seq: number) => seqs.filter((s) => s > seq);
 
 describe('notification-service shutdown: relay, purge, workers and consumer by one deadline', () => {
   let app: INestApplication | undefined;
@@ -342,6 +349,12 @@ describe('notification-service shutdown: relay, purge, workers and consumer by o
     expect(closed.tookMs).toBeGreaterThanOrEqual(GRACE_SECONDS * 1000 - 100);
     expect(closed.tookMs).toBeLessThan(GRACE_SECONDS * 1000 + 1500);
     expect(booted.probe.publishes).toBe(1);
+    // Six seconds of drain, dozens of polls: nothing claimed and no worker
+    // batch begun from the start of the close — a worker left off the
+    // coordinator keeps its timer until its own `onApplicationShutdown`.
+    expect(after(booted.probe.claims, closed.closeSeq)).toEqual([]);
+    expect(after(booted.probe.ticks.resolution, closed.closeSeq)).toEqual([]);
+    expect(after(booted.probe.ticks.mail, closed.closeSeq)).toEqual([]);
   }, 30_000);
 
   it('claims nothing once the close has begun, though the publisher closed under it', async () => {
@@ -355,9 +368,10 @@ describe('notification-service shutdown: relay, purge, workers and consumer by o
 
     expect(closed.exits).toEqual([0]);
     expect(closed.errors).toEqual([]);
-    expect(after(booted.probe.claims, closed.endedAt)).toEqual([]);
-    expect(after(booted.probe.ticks.resolution, closed.endedAt)).toEqual([]);
-    expect(after(booted.probe.ticks.mail, closed.endedAt)).toEqual([]);
+    // Nothing from the start of the close on: not while it drained, not after.
+    expect(after(booted.probe.claims, closed.closeSeq)).toEqual([]);
+    expect(after(booted.probe.ticks.resolution, closed.closeSeq)).toEqual([]);
+    expect(after(booted.probe.ticks.mail, closed.closeSeq)).toEqual([]);
   }, 30_000);
 
   it('ends a slow relay, a purge batch and a mail batch that never end by the shared budget, under the timeout', async () => {

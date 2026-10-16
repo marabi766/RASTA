@@ -222,14 +222,17 @@ describe('document-service shutdown: the scan worker by the outbox deadline (D-0
     const app: INestApplication = moduleRef.createNestApplication();
     // Every claim the booted worker makes, with its place in the order of
     // events (`tick`), stamped when the claim is issued. Not wall-clock ms: a
-    // claim and the start of the close can share a millisecond.
-    const claims: { seq: number; ids: string[] }[] = [];
+    // claim and the start of the close can share a millisecond. Recorded before
+    // the claim is awaited, so one that fails is still seen: the worker logs a
+    // failed claim and carries on, and nothing else here would notice it.
+    const claims: { seq: number; ids: string[] | null }[] = [];
     const scans = app.get(ScanRepository);
     const claim = scans.claim.bind(scans);
     jest.spyOn(scans, 'claim').mockImplementation(async (input) => {
-      const seq = tick();
+      const issued: { seq: number; ids: string[] | null } = { seq: tick(), ids: null };
+      claims.push(issued);
       const batch = await claim(input);
-      claims.push({ seq, ids: batch.map((d) => d.id) });
+      issued.ids = batch.map((d) => d.id);
       return batch;
     });
     await app.init();
