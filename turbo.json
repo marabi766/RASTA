@@ -81,7 +81,10 @@
         "INVENTORY_LOCK_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
-        "GATEWAY_*"
+        "GATEWAY_*",
+        "INSURANCE_CLAIM_MAX_DOCUMENTS",
+        "INSURANCE_CLAIM_DOCUMENT_STATUSES",
+        "MARKETPLACE_RETURN_WINDOW_DAYS"
       ]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
@@ -132,7 +135,10 @@
         "INVENTORY_LOCK_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
-        "GATEWAY_*"
+        "GATEWAY_*",
+        "INSURANCE_CLAIM_MAX_DOCUMENTS",
+        "INSURANCE_CLAIM_DOCUMENT_STATUSES",
+        "MARKETPLACE_RETURN_WINDOW_DAYS"
       ]
     },
     // identity-service's two 500-write aggregation proofs, run alone after the
@@ -212,6 +218,20 @@
     // the trap again — `CONSTRUCTION_TRANSACTION_TIMEOUT_MS=60000 pnpm dev` ran
     // on the .env value. scripts/construction-turbo-env.test.mjs holds every
     // task that starts the service to every CONSTRUCTION_* key of its schema.
+    //
+    // INSURANCE_CLAIM_MAX_DOCUMENTS and INSURANCE_CLAIM_DOCUMENT_STATUSES
+    // (Codex r2 on #304): asset-service's claim-document policy (Q-128), the
+    // trap once more — `INSURANCE_CLAIM_MAX_DOCUMENTS=1 pnpm dev` accepted a
+    // second document on the .env limit of 20, and `=0` never met the boot
+    // refusal. Declared here and in the test tasks above. From this one on,
+    // scripts/service-env-turbo.test.mjs holds every task that starts a
+    // service to every key of that service's own schema: a new setting is
+    // declared or the check fails. The settings withheld before it are listed
+    // in scripts/service-env-turbo-withheld.json, a list that may only shrink.
+    //
+    // MARKETPLACE_RETURN_WINDOW_DAYS (RUN-005, Q-132): marketplace's return
+    // window, no default — unset, every return request is refused. The first
+    // new setting under that check, declared here and in the test tasks above.
     "dev": {
       "cache": false,
       "persistent": true,
@@ -228,7 +248,10 @@
         "INVENTORY_LOCK_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
-        "GATEWAY_*"
+        "GATEWAY_*",
+        "INSURANCE_CLAIM_MAX_DOCUMENTS",
+        "INSURANCE_CLAIM_DOCUMENT_STATUSES",
+        "MARKETPLACE_RETURN_WINDOW_DAYS"
       ]
     },
     "clean": { "cache": false }

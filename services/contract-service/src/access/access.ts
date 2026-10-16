@@ -153,6 +153,37 @@ export class ContractAccess {
   }
 
   /**
+   * The caller of a statement command (CON-003 PR 4): the same person-for-an-organization as
+   * {@link assertCanCommand}, and never the platform administrator — the contractor drafts its own
+   * statements (Q-96). Like the other commands, the platform administrator's refusal is recorded
+   * when it acts for a party to the contract (`AuthorityRefusals.commandingCaller`).
+   */
+  assertCanCommandStatements(): Acting {
+    assertNotAuditor();
+    assertNotServiceCaller();
+    const context = getContext();
+    if (context.roles.includes(SUPER_ROLE)) {
+      throw platformAdministratorRefused(
+        'The platform administrator does not draft a statement for a party',
+        context.organizationId,
+      );
+    }
+    if (!context.organizationId) {
+      throw RastaError.forbidden('A statement is drafted for an organization');
+    }
+    return { organizationId: context.organizationId };
+  }
+
+  /** Whether the caller holds the contractor's role (`CONTRACTOR`, not configurable, Q-95 (1)). */
+  isContractor(): boolean {
+    return getContext().roles.includes(CONTRACTOR_ROLE);
+  }
+
+  contractorRole(): string {
+    return CONTRACTOR_ROLE;
+  }
+
+  /**
    * The contractor's signing role: the `CONTRACTOR` role of its own organization, which is not
    * configurable (Q-95 (1)). The employer's side has no role here: who signs for it is the
    * `contract.signature` policy of the employer's organization (`employerSigningRole`), read

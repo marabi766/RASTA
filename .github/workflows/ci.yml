@@ -144,6 +144,14 @@ jobs:
         # dry run). Codex r1 and r4 on #268.
         run: pnpm run test:database-turbo-env
 
+      - name: Every service's own settings reach it through turbo
+        # Every task that starts a service passes every key of that service's
+        # own schema, save the ones withheld before this check
+        # (scripts/service-env-turbo-withheld.json, which only shrinks); and
+        # the root commands resolve asset-service's claim-document settings
+        # (turbo dry run). Codex r2 on #304.
+        run: pnpm run test:service-env-turbo
+
       - name: Optional database-side statement timeout for the runtime roles
         # Behind PgBouncer the services' own statement_timeout option is
         # dropped, so the bootstrap, the split and the rotation can set one
@@ -521,6 +529,8 @@ jobs:
           pnpm --filter @rasta/document-service run db:migrate
           pnpm --filter @rasta/marketplace-service run db:migrate
           pnpm --filter @rasta/economic-service run db:migrate
+          pnpm --filter @rasta/construction-service run db:migrate
+          pnpm --filter @rasta/inventory-service run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
@@ -538,6 +548,13 @@ jobs:
           DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_ECONOMIC_MIGRATOR: postgresql://rasta_economic_migrator:rasta_economic_migrator_dev_password@localhost:5432/rasta_economic?schema=public
+          # EXP-004: /projects and /inventory read construction-service and
+          # inventory-service through the gateway; their live isolation
+          # scenarios (`e2e/tenant-isolation.spec.ts`) need both running.
+          DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
+          DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
+          DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
 
       - name: Seed the live users and both tenants' machines, drivers and schedules
         # operator.one is the same platform user in identity, Keycloak and
@@ -583,6 +600,8 @@ jobs:
           --filter=@rasta/document-service...
           --filter=@rasta/marketplace-service...
           --filter=@rasta/economic-service...
+          --filter=@rasta/construction-service...
+          --filter=@rasta/inventory-service...
 
       - name: Start MinIO and create the document bucket
         # EXP-002 slice 7: the portal attaches a file by having its server ask
@@ -632,7 +651,7 @@ jobs:
           docker logs rasta-web-e2e-keycloak
           exit 1
 
-      - name: Start identity, fleet, organization, asset, maintenance and api-gateway
+      - name: Start identity, fleet, organization, asset, maintenance, construction, inventory and api-gateway
         env:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           NODE_ENV: test
@@ -776,6 +795,29 @@ jobs:
             ECONOMIC_BALANCE_AUDIT_ENABLED=false \
             node dist/main.js > /tmp/rasta-web-e2e-logs/economic.log 2>&1 & )
 
+          # EXP-004 — construction-service: the `/projects` live-isolation
+          # scenarios (`e2e/tenant-isolation.spec.ts`) create a real project
+          # per tenant through `POST /v1/projects` and read it back through
+          # the portal. No tender is created here, so no
+          # CONSTRUCTION_TENDER_KEKS is needed (optional; unset, publishing a
+          # tender would be refused, which nothing in this job does).
+          ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service construction-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/construction-service && \
+            PORT=3110 SERVICE_NAME=construction-service \
+            DATABASE_URL=postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/construction.log 2>&1 & )
+
+          # EXP-004 — inventory-service: the `/inventory` live-isolation
+          # scenarios create a real warehouse per tenant through
+          # `POST /v1/warehouses` and read it back through the portal.
+          ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service inventory-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/inventory-service && \
+            PORT=3109 SERVICE_NAME=inventory-service \
+            DATABASE_URL=postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/inventory.log 2>&1 & )
+
           # The per-person allowance (GATEWAY_RATE_LIMIT_MAX, 300 a minute per
           # user and route prefix by default) is sized for one human. Here three
           # seeded people stand in for every scenario of both Playwright
@@ -810,12 +852,17 @@ jobs:
               http://localhost:3106/health/ready || true)"
             economic="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3112/health/ready || true)"
+            construction="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3110/health/ready || true)"
+            inventory="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3109/health/ready || true)"
             gateway="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3000/v1/usage-records || true)"
             if [ "$identity" = "200" ] && [ "$fleet" = "200" ] \
                && [ "$organization" = "200" ] && [ "$asset" = "200" ] \
                && [ "$maintenance" = "200" ] && [ "$document" = "200" ] \
                && [ "$marketplace" = "200" ] && [ "$economic" = "200" ] \
+               && [ "$construction" = "200" ] && [ "$inventory" = "200" ] \
                && [ "$gateway" = "401" ]; then
               echo "portal live stack ready after ${attempt} attempt(s)"
               exit 0
@@ -823,7 +870,7 @@ jobs:
             sleep 3
           done
 
-          echo "portal live stack failed (identity=${identity}, fleet=${fleet}, organization=${organization}, asset=${asset}, maintenance=${maintenance}, document=${document}, marketplace=${marketplace}, economic=${economic}, gateway=${gateway})"
+          echo "portal live stack failed (identity=${identity}, fleet=${fleet}, organization=${organization}, asset=${asset}, maintenance=${maintenance}, document=${document}, marketplace=${marketplace}, economic=${economic}, construction=${construction}, inventory=${inventory}, gateway=${gateway})"
           cat /tmp/rasta-web-e2e-logs/identity.log
           cat /tmp/rasta-web-e2e-logs/fleet.log
           cat /tmp/rasta-web-e2e-logs/organization.log
@@ -832,6 +879,8 @@ jobs:
           cat /tmp/rasta-web-e2e-logs/document.log
           cat /tmp/rasta-web-e2e-logs/marketplace.log
           cat /tmp/rasta-web-e2e-logs/economic.log
+          cat /tmp/rasta-web-e2e-logs/construction.log
+          cat /tmp/rasta-web-e2e-logs/inventory.log
           cat /tmp/rasta-web-e2e-logs/gateway.log
           exit 1
 
@@ -874,6 +923,10 @@ jobs:
         run: pnpm --filter @rasta/web exec playwright test
         env:
           WEB_LIVE_STACK_E2E: 'true'
+          # EXP-004: construction-service and inventory-service are up in this
+          # job (above), so `/projects` and `/inventory` live-isolation
+          # scenarios run for real instead of skipping.
+          WEB_LIVE_STACK_E2E_EXP004: 'true'
           WEB_E2E_FLEET_URL: http://localhost:3104
           WEB_E2E_MAINTENANCE_URL: http://localhost:3105
           API_GATEWAY_URL: http://localhost:3000
@@ -903,6 +956,10 @@ jobs:
           tail -n 200 /tmp/rasta-web-e2e-logs/marketplace.log || true
           echo '--- economic-service ---'
           tail -n 200 /tmp/rasta-web-e2e-logs/economic.log || true
+          echo '--- construction-service ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/construction.log || true
+          echo '--- inventory-service ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/inventory.log || true
           echo '--- api-gateway ---'
           tail -n 200 /tmp/rasta-web-e2e-logs/gateway.log || true
           echo '--- keycloak ---'

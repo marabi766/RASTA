@@ -34,7 +34,7 @@ const cancelled = {
 };
 
 describe('the contract events', () => {
-  it('are the lifecycle’s four, the approval policy’s seven, the authority review’s two and amendments’ and milestones’ seven, each with a schema and an aggregate', () => {
+  it('are the lifecycle’s four, the approval policy’s seven, the authority review’s two, amendments’ and milestones’ seven and the statement’s one, each with a schema and an aggregate', () => {
     const names = [
       'CONTRACT_DRAFTED',
       'CONTRACT_SIGNATURE_RECORDED',
@@ -56,6 +56,7 @@ describe('the contract events', () => {
       'CONTRACT_MILESTONE_PLANNED',
       'CONTRACT_MILESTONE_CHANGED',
       'CONTRACT_AUTHORITY_REFUSED',
+      'STATEMENT_DRAFTED',
     ];
     expect(Object.keys(CONTRACT_EVENTS)).toEqual(names);
     expect(Object.keys(CONTRACT_EVENT_SCHEMAS)).toEqual(names);
@@ -503,6 +504,7 @@ describe('the amendment and milestone events (CON-003 PR 3)', () => {
       'SIGN_AMENDMENT',
       'PLAN_MILESTONE',
       'CHANGE_MILESTONE',
+      'DRAFT_STATEMENT',
     ]) {
       expect(
         validateContractPayload('CONTRACT_AUTHORITY_REFUSED', { ...refused, action }),
@@ -511,6 +513,7 @@ describe('the amendment and milestone events (CON-003 PR 3)', () => {
     for (const reason of [
       'ROLE_NOT_PERMITTED',
       'NOT_EMPLOYER',
+      'NOT_CONTRACTOR',
       'SIGNATURE_POLICY_REQUIRED',
       'POLICY_AUTHOR_NOT_GOVERNING',
       'MEMBER_OF_BOTH_PARTIES',
@@ -617,6 +620,51 @@ describe('CONTRACT_DRAFTED', () => {
       validateContractPayload('CONTRACT_DRAFTED', {
         ...drafted,
         draftedAt: '2026-10-05T13:30:00+03:30',
+      }),
+    ).toThrow();
+  });
+});
+
+describe('the statement event (CON-003 PR 4)', () => {
+  const statementDrafted = {
+    contractId: 'CTR_1',
+    statementId: 'STM_1',
+    statementNumber: 1,
+    organizationId: 'ORG_OWNER',
+    contractorOrganizationId: 'ORG_WINNER',
+    draftedBy: 'USR_1',
+    draftedAt: '2026-10-15T10:00:00.000Z',
+  };
+
+  it('accepts the payload as published, keyed by the contract the statement belongs to', () => {
+    expect(validateContractPayload('STATEMENT_DRAFTED', statementDrafted)).toEqual(
+      statementDrafted,
+    );
+    expect(resolvePartitionKey('STATEMENT_DRAFTED', statementDrafted).key).toBe('CTR_1');
+  });
+
+  it.each([
+    'grossAmount',
+    'grossMinor',
+    'netMinor',
+    'deductionsMinor',
+    'deductions',
+    'lines',
+    'description',
+  ])('refuses %s: identifiers and instants only, no amount (Q-97 (2)) and no text', (field) => {
+    expect(() =>
+      validateContractPayload('STATEMENT_DRAFTED', { ...statementDrafted, [field]: '1' }),
+    ).toThrow(/does not match its published contract/);
+  });
+
+  it('refuses a statement number below 1 and an instant with an offset', () => {
+    expect(() =>
+      validateContractPayload('STATEMENT_DRAFTED', { ...statementDrafted, statementNumber: 0 }),
+    ).toThrow();
+    expect(() =>
+      validateContractPayload('STATEMENT_DRAFTED', {
+        ...statementDrafted,
+        draftedAt: '2026-10-15T14:30:00+03:30',
       }),
     ).toThrow();
   });

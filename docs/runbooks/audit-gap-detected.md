@@ -316,7 +316,8 @@ SELECT id, organization_id, source_topic, source_service, correction_of, occurre
 `correction_of` هم فقط در همین مسیر پر می‌شود.
 
 **مسیر A:** همان پرسش را روی `outbox_message` سرویس مبدأ (`sourceService` مورد انتظار) با [outbox-stuck](outbox-stuck.md) بپرس.
-fleet، asset، document، maintenance، organization، notification، supplier، inventory و identity ردیف منتشرشده را پس از `OUTBOX_PURGE_RETENTION_HOURS` (پیش‌فرض ۱۶۸
+fleet، asset، document، maintenance، organization، notification، supplier، inventory، identity، construction،
+contract، economic و marketplace ردیف منتشرشده را پس از `OUTBOX_PURGE_RETENTION_HOURS` (پیش‌فرض ۱۶۸
 ساعت) پاک می‌کنند (D-052). نبودِ ردیف در این سرویس‌ها هم با **همان قاعدهٔ شاهد** سنجیده می‌شود، نه با سن. در سرویس‌های دیگر
 هنوز Purge اجرا نمی‌شود.
 

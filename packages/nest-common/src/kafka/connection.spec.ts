@@ -194,6 +194,7 @@ describe('kafkaClientConfig', () => {
     expect(kafkaClientConfig({ brokers: ['b:9092'], clientId: 'c' })).toEqual({
       brokers: ['b:9092'],
       clientId: 'c',
+      logCreator: expect.any(Function),
     });
   });
 

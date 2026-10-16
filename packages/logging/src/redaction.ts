@@ -152,10 +152,10 @@ function isTokenChar(code: number): boolean {
  * Replaces the password in every `scheme://user:password@` with
  * {@link REDACTED}. One forward pass: each `://` is looked at once and the
  * runs after it end at the next `/`, `@` or whitespace, so no character is
- * read twice. In a `cut` text a password that runs to the end may have lost
- * its `@` to the cut, so it is taken whole.
+ * read twice. A cut text never ends inside a password: the word a cut runs
+ * through is dropped first (see `head`).
  */
-function scrubConnectionStrings(text: string, cut: boolean): string {
+function scrubConnectionStrings(text: string): string {
   let out = '';
   let copied = 0;
   let from = 0;
@@ -182,7 +182,7 @@ function scrubConnectionStrings(text: string, cut: boolean): string {
       at++;
     }
     if (at === passwordStart) continue;
-    if (text.charCodeAt(at) !== AT && !(cut && at === text.length)) continue;
+    if (text.charCodeAt(at) !== AT) continue;
 
     out += `${text.slice(copied, passwordStart)}${REDACTED}`;
     copied = at;
@@ -243,18 +243,32 @@ function scrubAuthSchemes(text: string): string {
  * echoing the connection string it failed to open.
  *
  * Linear in the message, with no regular expression that could backtrack. A
- * message longer than {@link SCRUB_MESSAGE_MAX} is cut to it first — never
- * between the halves of a surrogate pair — the rules fail closed at the cut,
- * and it ends in {@link TRUNCATED_MESSAGE}.
+ * message longer than `max` (default {@link SCRUB_MESSAGE_MAX}) is cut to it first, and
+ * the word the cut runs through is dropped (fail closed: a fragment is never
+ * scrubbed as if it were whole); it ends in {@link TRUNCATED_MESSAGE}.
+ *
+ * `max` bounds the *result* too, not only the input: replacing a token with
+ * {@link REDACTED} can make a text longer (`Bearer a ` doubles), so what the
+ * rules produce is cut to `max` again. The result is at most
+ * `max + TRUNCATED_MESSAGE.length` UTF-16 code units — lengths here and in
+ * `@rasta/logging` are code units, never encoded bytes.
  */
-export function scrubMessage(message: string): string {
-  if (message.length <= SCRUB_MESSAGE_MAX) {
-    return scrubAuthSchemes(scrubConnectionStrings(message, false));
-  }
-  const last = message.charCodeAt(SCRUB_MESSAGE_MAX - 1);
-  const kept = message.slice(
-    0,
-    last >= 0xd800 && last <= 0xdbff ? SCRUB_MESSAGE_MAX - 1 : SCRUB_MESSAGE_MAX,
-  );
-  return `${scrubAuthSchemes(scrubConnectionStrings(kept, true))}${TRUNCATED_MESSAGE}`;
+export function scrubMessage(message: string, max: number = SCRUB_MESSAGE_MAX): string {
+  const cut = message.length > max;
+  const scrubbed = scrubAuthSchemes(scrubConnectionStrings(cut ? head(message, max) : message));
+  return cut || scrubbed.length > max ? `${head(scrubbed, max)}${TRUNCATED_MESSAGE}` : scrubbed;
+}
+
+/**
+ * The first `max` code units of `text`, without the word the cut runs through
+ * (everything after the last whitespace before it goes). That word is dropped,
+ * not scrubbed: a fragment can have lost what marks its secret — a connection
+ * string's `@` — and no rule could tell (Codex on #290, r5 R5-1). A cut never
+ * keeps half of a surrogate pair, and a text with no whitespace keeps nothing.
+ */
+function head(text: string, max: number): string {
+  if (text.length <= max) return text;
+  let end = max;
+  while (end > 0 && !isWhitespace(text.charCodeAt(end - 1))) end--;
+  return text.slice(0, end);
 }
