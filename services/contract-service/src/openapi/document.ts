@@ -28,9 +28,15 @@ import { StatementController } from '../statement/statement.controller';
 import { StatementDecisionService } from '../statement/statement-decision.service';
 import { StatementService } from '../statement/statement.service';
 import {
+  InternalStatementController,
+  STATEMENT_SETTLEMENT_READ_ENDPOINT,
+} from '../statement/internal-statement.controller';
+import { StatementSettlementService } from '../statement/settlement-fact';
+import {
   decideStatementSchema,
   draftStatementSchema,
   listStatementsQuerySchema,
+  statementSettlementViewSchema,
   statementViewSchema,
   submitStatementSchema,
 } from '../statement/dto';
@@ -129,6 +135,7 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
     status: '200',
     schema: statementViewSchema,
   },
+  [STATEMENT_SETTLEMENT_READ_ENDPOINT]: { status: '200', schema: statementSettlementViewSchema },
 };
 
 /** Every command takes a strict body. */
@@ -273,6 +280,24 @@ export const POLICY_ERROR_DESCRIPTIONS: Record<number, string> = {
   504: 'organization-service did not answer in time (UPSTREAM_TIMEOUT): the write is refused, never assumed.',
 };
 
+/**
+ * The same statuses on the internal routes (`/v1/internal/…`, ADR-061 § 4), which answer one named
+ * service and no user at all.
+ */
+export const INTERNAL_ERROR_DESCRIPTIONS: Record<number, string> = {
+  401: ERROR_DESCRIPTIONS[401] as string,
+  403: 'Authenticated, but not the service this route answers: any user token (whatever its roles), another service’s internal token, or an internal token signed for no organization.',
+  404: 'Not found — also returned for a statement of any organization but the one the internal token is signed for (the employer’s), so its existence is never disclosed.',
+  500: 'Unexpected server error.',
+};
+
+/**
+ * The internal routes' credential: a service's internal token in `X-Internal-Token` and nothing
+ * else. `AuthGuard` judges a request that also carries `Authorization` on that bearer token, as
+ * a user — so the internal routes cannot be described by the bearer scheme.
+ */
+export const INTERNAL_TOKEN_SCHEME = 'internalToken';
+
 const DESCRIPTION =
   'The contract boundary (CON-003, ADR-068). The draft contract that a tender award creates: ' +
   'the system makes it when construction-service publishes TENDER_AWARDED, after reading the ' +
@@ -296,8 +321,9 @@ const DESCRIPTION =
   'Each step is then decided by the organization and role it names — technical first, then ' +
   'financial; a person decides a statement at most once and never the one who submitted it — and ' +
   'the last financial approval makes the statement APPROVED, within the contract’s price and its ' +
-  'amendments. The settlement boundary with economic-service follows (ADR-068 § 9); no money is ' +
-  'ever held or moved here.';
+  'amendments. economic-service reads a statement on an internal route, with its own service ' +
+  'token signed for the employer, to build the obligation it settles (ADR-068 § 6) — the amount ' +
+  'is on no event; no money is ever held or moved here.';
 
 /** Builds the finished document for a booted application. */
 export function buildContractOpenApiDocument(app: INestApplication): OpenAPIObject {
@@ -308,6 +334,16 @@ export function buildContractOpenApiDocument(app: INestApplication): OpenAPIObje
       .setDescription(DESCRIPTION)
       .setVersion(CONTRACT_VERSION)
       .addBearerAuth()
+      .addApiKey(
+        {
+          type: 'apiKey',
+          in: 'header',
+          name: 'X-Internal-Token',
+          description:
+            'A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user.',
+        },
+        INTERNAL_TOKEN_SCHEME,
+      )
       .build(),
   );
   return enrichOpenApiDocument(document);
@@ -323,6 +359,7 @@ export function buildContractOpenApiDocument(app: INestApplication): OpenAPIObje
     AmendmentController,
     MilestoneController,
     StatementController,
+    InternalStatementController,
     PolicyController,
   ],
   providers: [
@@ -331,6 +368,7 @@ export function buildContractOpenApiDocument(app: INestApplication): OpenAPIObje
     { provide: MilestoneService, useValue: {} },
     { provide: StatementService, useValue: {} },
     { provide: StatementDecisionService, useValue: {} },
+    { provide: StatementSettlementService, useValue: {} },
     { provide: PolicyService, useValue: {} },
     { provide: IdempotencyStore, useValue: {} },
   ],
@@ -356,8 +394,11 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       const key = `${method.toUpperCase()} ${path}`;
 
       // `addBearerAuth()` declares the scheme; it does not apply it. Without this the
-      // contract would describe endpoints anybody can call.
-      operation.security ??= [{ bearer: [] }];
+      // contract would describe endpoints anybody can call. The internal routes answer a
+      // service's internal token only, which is not a bearer token.
+      operation.security ??= path.startsWith('/v1/internal/')
+        ? [{ [INTERNAL_TOKEN_SCHEME]: [] }]
+        : [{ bearer: [] }];
 
       const query = QUERY_SCHEMAS[key];
       const body = REQUEST_BODIES[key];
@@ -400,9 +441,11 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         };
       }
 
-      const descriptions = path.startsWith('/v1/contract-approval-policies')
-        ? POLICY_ERROR_DESCRIPTIONS
-        : ERROR_DESCRIPTIONS;
+      const descriptions = path.startsWith('/v1/internal/')
+        ? INTERNAL_ERROR_DESCRIPTIONS
+        : path.startsWith('/v1/contract-approval-policies')
+          ? POLICY_ERROR_DESCRIPTIONS
+          : ERROR_DESCRIPTIONS;
       for (const [status, description] of Object.entries(descriptions)) {
         // A route with no `{id}` names no existing row, so it cannot answer 404.
         if (status === '404' && !path.includes('{id}')) continue;

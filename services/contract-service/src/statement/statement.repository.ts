@@ -1,6 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
-import type { Contract, DeductionRule, StatementStatus } from '../generated/prisma';
+import type {
+  Contract,
+  DeductionRule,
+  Statement,
+  StatementDecision,
+  StatementStatus,
+} from '../generated/prisma';
 import type { StatementChain } from '../policy/policy.state-machine';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { StatementAmounts } from './amounts';
@@ -52,6 +58,12 @@ export interface DecisionInput {
   readonly correlationId: string;
   readonly at: Date;
 }
+
+/** A statement as the settlement read needs it: its contractor and its financial approvals. */
+export type StatementForSettlement = Statement & {
+  contract: { contractorOrganizationId: string };
+  decisions: StatementDecision[];
+};
 
 const WITH_PARTS = {
   lines: true,
@@ -174,6 +186,25 @@ export class StatementRepository {
         return contract ? { contract, statement } : null;
       },
     );
+  }
+
+  // -- the settlement read (economic-service's, CON-003 PR 6a) ---------------------------------
+
+  /**
+   * The statement `id` of the organization the request acts for — the employer, since that is a
+   * statement's tenant — with its contractor and its financial approvals, for the settlement read
+   * (ADR-068 § 6 (2)). Through the tenant guard and **not** `runUnscoped`: the guard adds
+   * `organization_id = <the token's signed organization>`, so a statement of any other
+   * organization, the contractor's included, is `null`.
+   */
+  findForSettlement(id: string): Promise<StatementForSettlement | null> {
+    return this.prisma.client.statement.findFirst({
+      where: { id },
+      include: {
+        contract: { select: { contractorOrganizationId: true } },
+        decisions: { where: { chain: 'FINANCIAL', outcome: 'APPROVED' } },
+      },
+    });
   }
 
   // -- the commands (under the contract's lock) -----------------------------------------------
