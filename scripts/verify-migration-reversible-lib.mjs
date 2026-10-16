@@ -2026,6 +2026,8 @@ export const EXPECTED = {
       'return_shipment',
       'return_shipment_line',
       'return_tracking_event',
+      // 20261016130000_return_inspection_resolution: what becomes of received goods.
+      'return_disposition',
     ],
     types: ['StockMovementType', 'StockReservationStatus'],
     triggers: [
@@ -2054,6 +2056,8 @@ export const EXPECTED = {
       'tg_return_shipment_line_no_truncate',
       'tg_return_tracking_event_guard',
       'tg_return_tracking_event_no_truncate',
+      'tg_return_disposition_guard',
+      'tg_return_disposition_no_truncate',
     ],
     functions: [
       'warehouse_guard',
@@ -2071,6 +2075,7 @@ export const EXPECTED = {
       'return_shipment_history_check',
       'return_shipment_line_guard',
       'return_tracking_event_guard',
+      'return_disposition_guard',
     ],
     indexes: [
       'ux_warehouse_org_id',
@@ -2095,6 +2100,7 @@ export const EXPECTED = {
       'ux_return_shipment_line_order_line',
       'ux_return_tracking_event_command',
       'ux_return_tracking_event_sequence',
+      'ux_return_disposition_line',
     ],
     constraints: [
       'fk_stock_item_warehouse',
@@ -2137,6 +2143,10 @@ export const EXPECTED = {
       'ck_return_shipment_carrier',
       'ck_return_shipment_line_quantities',
       'ck_return_tracking_event_type',
+      'fk_return_disposition_shipment',
+      'ck_return_shipment_inspection',
+      'ck_return_disposition_value',
+      'ck_return_disposition_quantity_positive',
       'ck_idempotency_state',
       'ck_idempotency_completed_has_response',
       'ck_outbox_claim_triple',

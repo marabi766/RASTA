@@ -24,6 +24,17 @@ describe('the provisional defaults (Q-102, Q-103)', () => {
     expect(env.INVENTORY_CONSIGNEE_READER_ROLES).toEqual(['ORGANIZATION_ADMIN']);
   });
 
+  it('allows no return disposition until the deployment names one (Q-133)', () => {
+    expect(env.INVENTORY_RETURN_DISPOSITIONS_ALLOWED).toEqual([]);
+    expect(
+      load({ INVENTORY_RETURN_DISPOSITIONS_ALLOWED: ' SCRAP , RESTOCK ' })
+        .INVENTORY_RETURN_DISPOSITIONS_ALLOWED,
+    ).toEqual(['SCRAP', 'RESTOCK']);
+    expect(() => load({ INVENTORY_RETURN_DISPOSITIONS_ALLOWED: 'REFUND' })).toThrow(
+      /Unknown disposition/,
+    );
+  });
+
   it('configures no shipment state, cancellation or stock link the documents leave open (Q-114, Q-115)', () => {
     expect(
       Object.keys(env).filter((name) => /SHIPMENT|FAILED|CANCEL|CHECKPOINT/.test(name)),

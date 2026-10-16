@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
+import { RETURN_DISPOSITIONS } from '@rasta/contracts';
 import {
   authEnvSchema,
   baseEnvSchema,
@@ -93,6 +94,12 @@ function roleList(name: string) {
  *                                       Default 20: a reservation of the most lines (50) then
  *                                       expires at most 1000 in one transaction, well inside
  *                                       its budget (about 15 ms each, measured locally).
+ *   INVENTORY_RETURN_DISPOSITIONS_ALLOWED
+ *                                       Q-133. Which of ADR-048's six dispositions (RESTOCK,
+ *                                       REPAIR, REPLACE, RETURN_TO_SUPPLIER, SCRAP, RECYCLE) a
+ *                                       return shipment may be resolved with. **Unset: none** —
+ *                                       a return can then be received and inspected but not
+ *                                       resolved.
  *   INVENTORY_LOCK_TIMEOUT_MS          How long a command waits for a stock item another command
  *                                       holds before it answers 409 CONFLICT with Retry-After —
  *                                       never an unbounded wait (ADR-056 § 3).
@@ -144,6 +151,25 @@ export const inventoryEnvSchema = baseEnvSchema
       .default(30),
     INVENTORY_RESERVATION_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
     INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+
+    /**
+     * Q-133 (RUN-005, ADR-048 § 1): which dispositions a return shipment may be resolved with —
+     * a comma-separated subset of the six ADR-048 names. **Empty by default, and then no return
+     * shipment can be resolved**: whether a returned unit may be restocked, repaired, replaced,
+     * sent back to the supplier, scrapped or recycled "is configuration and follows the contract",
+     * and no such policy is decided. A deployment opts in with the outcomes its operations allow.
+     */
+    INVENTORY_RETURN_DISPOSITIONS_ALLOWED: commaList()
+      .pipe(
+        z.array(
+          z.enum(RETURN_DISPOSITIONS, {
+            errorMap: () => ({
+              message: `Unknown disposition in INVENTORY_RETURN_DISPOSITIONS_ALLOWED (${RETURN_DISPOSITIONS.join(', ')})`,
+            }),
+          }),
+        ),
+      )
+      .default(''),
 
     INVENTORY_LOCK_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
 

@@ -1,8 +1,11 @@
 import {
   INVENTORY_RETURN_EVENTS,
   INVENTORY_RETURN_EVENT_SCHEMAS,
+  RETURN_DISPOSITIONS,
   returnShipmentDispatchedPayloadSchema,
+  returnShipmentInspectedPayloadSchema,
   returnShipmentReceivedPayloadSchema,
+  returnShipmentResolvedPayloadSchema,
 } from './inventory-returns';
 
 const ULID = '01JBQ0000000000000000000AB';
@@ -98,6 +101,83 @@ describe('inventory return-shipment event contracts', () => {
       returnShipmentDispatchedPayloadSchema.safeParse({
         ...dispatched,
         returnShipmentId: `SHP_${ULID}`,
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('inspection and resolution events', () => {
+  const inspected = {
+    ...facts,
+    returnShipmentVersion: 3,
+    reportDocumentId: `DOC_${ULID}`,
+    inspectedBy: 'USR-1',
+    inspectedAt: '2026-10-16T10:00:00.000Z',
+  };
+  const resolved = {
+    ...facts,
+    returnShipmentVersion: 4,
+    dispositions: [
+      { orderLineId: 'OLN_1', disposition: 'RESTOCK', quantity: 1 },
+      { orderLineId: 'OLN_1', disposition: 'SCRAP', quantity: 1 },
+    ],
+    resolvedBy: 'USR-1',
+    resolvedAt: '2026-10-16T11:00:00.000Z',
+  };
+
+  it('accepts what inventory-service publishes', () => {
+    expect(returnShipmentInspectedPayloadSchema.parse(inspected)).toEqual(inspected);
+    expect(
+      returnShipmentInspectedPayloadSchema.safeParse({ ...inspected, reportDocumentId: null })
+        .success,
+    ).toBe(true);
+    expect(returnShipmentResolvedPayloadSchema.parse(resolved)).toEqual(resolved);
+  });
+
+  it('knows exactly the six outcomes of ADR-048 § 1', () => {
+    expect([...RETURN_DISPOSITIONS]).toEqual([
+      'RESTOCK',
+      'REPAIR',
+      'REPLACE',
+      'RETURN_TO_SUPPLIER',
+      'SCRAP',
+      'RECYCLE',
+    ]);
+    for (const disposition of ['REFUND', 'restock', '']) {
+      const dispositions = [{ orderLineId: 'OLN_1', disposition, quantity: 1 }];
+      expect(
+        returnShipmentResolvedPayloadSchema.safeParse({ ...resolved, dispositions }).success,
+      ).toBe(false);
+    }
+  });
+
+  it('refuses a free-text note, a refund field, or a line sent one way twice', () => {
+    expect(
+      returnShipmentInspectedPayloadSchema.safeParse({ ...inspected, note: 'cracked' }).success,
+    ).toBe(false);
+    expect(
+      returnShipmentResolvedPayloadSchema.safeParse({ ...resolved, refundAmountMinor: '1' })
+        .success,
+    ).toBe(false);
+    const twice = [resolved.dispositions[0], resolved.dispositions[0]];
+    expect(
+      returnShipmentResolvedPayloadSchema.safeParse({ ...resolved, dispositions: twice }).success,
+    ).toBe(false);
+  });
+
+  it('refuses a version that is not the status’s place in the history, and a non-document report id', () => {
+    expect(
+      returnShipmentInspectedPayloadSchema.safeParse({ ...inspected, returnShipmentVersion: 2 })
+        .success,
+    ).toBe(false);
+    expect(
+      returnShipmentResolvedPayloadSchema.safeParse({ ...resolved, returnShipmentVersion: 3 })
+        .success,
+    ).toBe(false);
+    expect(
+      returnShipmentInspectedPayloadSchema.safeParse({
+        ...inspected,
+        reportDocumentId: `ORD_${ULID}`,
       }).success,
     ).toBe(false);
   });

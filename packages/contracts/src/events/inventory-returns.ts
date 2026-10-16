@@ -12,7 +12,7 @@ import { ID_PREFIXES, organizationIdSchema } from '../common/identifiers';
  * ## Who owns what (ADR-048 § 2)
  *
  * inventory-service owns the **physical** half of a return: the goods on the road, their receipt,
- * and (later) inspection and disposition. These events are facts about goods and say nothing about
+ * their inspection and what becomes of them. These events are facts about goods and say nothing about
  * whether the return was *allowed* — that is marketplace's, which owns the return request and
  * verifies every one of these against it before acting (an event for a return it does not know, or
  * has not authorized, is refused there). No event here moves money or asks for it to move.
@@ -20,7 +20,7 @@ import { ID_PREFIXES, organizationIdSchema } from '../common/identifiers';
  * ## One stream per return shipment, in order
  *
  * Keyed by `returnShipmentId`. `returnShipmentVersion` is the shipment's position in its own
- * history (1 = IN_TRANSIT, 2 = RECEIVED, …). Like the forward shipment stream (D-027), delivery
+ * history (1 = IN_TRANSIT, 2 = RECEIVED, 3 = INSPECTED, 4 = RESOLVED). Like the forward shipment stream (D-027), delivery
  * order is not guaranteed: a consumer orders and de-duplicates by the envelope's `streamSeq`
  * (`streamKey` = `returnShipmentId`, equal to `returnShipmentVersion`) — a sequence at or below the
  * last one applied is a duplicate or stale and has no effect.
@@ -34,7 +34,24 @@ import { ID_PREFIXES, organizationIdSchema } from '../common/identifiers';
 export const INVENTORY_RETURN_EVENTS = {
   RETURN_SHIPMENT_DISPATCHED: 'RETURN_SHIPMENT_DISPATCHED',
   RETURN_SHIPMENT_RECEIVED: 'RETURN_SHIPMENT_RECEIVED',
+  RETURN_SHIPMENT_INSPECTED: 'RETURN_SHIPMENT_INSPECTED',
+  RETURN_SHIPMENT_RESOLVED: 'RETURN_SHIPMENT_RESOLVED',
 } as const;
+
+/**
+ * What can become of a received unit (ADR-048 § 1). Which of them an organization may choose is
+ * configuration and the service's to enforce (Q-133); this is only the closed set a consumer can
+ * meet on the wire.
+ */
+export const RETURN_DISPOSITIONS = [
+  'RESTOCK',
+  'REPAIR',
+  'REPLACE',
+  'RETURN_TO_SUPPLIER',
+  'SCRAP',
+  'RECYCLE',
+] as const;
+export type ReturnDisposition = (typeof RETURN_DISPOSITIONS)[number];
 
 export type InventoryReturnEventName = keyof typeof INVENTORY_RETURN_EVENTS;
 
@@ -117,12 +134,63 @@ export const returnShipmentReceivedPayloadSchema = z
   })
   .strict();
 
+/**
+ * The received goods were examined: RECEIVED → INSPECTED. They are still not stock. The inspector's
+ * note stays in inventory-service; the report is a file in document-service, named by id.
+ */
+export const returnShipmentInspectedPayloadSchema = z
+  .object({
+    ...returnShipmentFacts,
+    returnShipmentVersion: z.literal(3),
+    reportDocumentId: prefixed(ID_PREFIXES.document).nullable(),
+    inspectedBy: id,
+    inspectedAt: instant,
+  })
+  .strict();
+
+/** What becomes of one line's received units: a closed outcome and how many went that way. */
+export const returnDispositionLineSchema = z
+  .object({
+    orderLineId,
+    disposition: z.enum(RETURN_DISPOSITIONS),
+    quantity: z.number().int().min(1),
+  })
+  .strict();
+
+/**
+ * Every received unit was given an outcome: INSPECTED → RESOLVED. The record is a fact about
+ * goods. It moves no stock and asks for no money: whether a restocked unit becomes sellable, and
+ * whether the buyer is refunded, are other owners' decisions (ADR-048 § 2, § 4).
+ */
+export const returnShipmentResolvedPayloadSchema = z
+  .object({
+    ...returnShipmentFacts,
+    returnShipmentVersion: z.literal(4),
+    dispositions: z
+      .array(returnDispositionLineSchema)
+      .min(1)
+      .max(300)
+      .refine(
+        (rows) =>
+          new Set(rows.map((row) => `${row.orderLineId}|${row.disposition}`)).size === rows.length,
+        { message: 'a line has one row per disposition' },
+      ),
+    resolvedBy: id,
+    resolvedAt: instant,
+  })
+  .strict();
+
 export const INVENTORY_RETURN_EVENT_SCHEMAS = {
   RETURN_SHIPMENT_DISPATCHED: returnShipmentDispatchedPayloadSchema,
   RETURN_SHIPMENT_RECEIVED: returnShipmentReceivedPayloadSchema,
+  RETURN_SHIPMENT_INSPECTED: returnShipmentInspectedPayloadSchema,
+  RETURN_SHIPMENT_RESOLVED: returnShipmentResolvedPayloadSchema,
 } as const satisfies Record<InventoryReturnEventName, z.ZodTypeAny>;
 
 export type ReturnShipmentLine = z.infer<typeof returnShipmentLineSchema>;
 export type ReceivedReturnShipmentLine = z.infer<typeof receivedReturnShipmentLineSchema>;
 export type ReturnShipmentDispatchedPayload = z.infer<typeof returnShipmentDispatchedPayloadSchema>;
 export type ReturnShipmentReceivedPayload = z.infer<typeof returnShipmentReceivedPayloadSchema>;
+export type ReturnShipmentInspectedPayload = z.infer<typeof returnShipmentInspectedPayloadSchema>;
+export type ReturnShipmentResolvedPayload = z.infer<typeof returnShipmentResolvedPayloadSchema>;
+export type ReturnDispositionLine = z.infer<typeof returnDispositionLineSchema>;

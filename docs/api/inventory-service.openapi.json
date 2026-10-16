@@ -4061,7 +4061,7 @@
             "required": false,
             "schema": {
               "type": "string",
-              "enum": ["IN_TRANSIT", "RECEIVED"]
+              "enum": ["IN_TRANSIT", "RECEIVED", "INSPECTED", "RESOLVED"]
             }
           },
           {
@@ -4110,7 +4110,7 @@
                           },
                           "status": {
                             "type": "string",
-                            "enum": ["IN_TRANSIT", "RECEIVED"]
+                            "enum": ["IN_TRANSIT", "RECEIVED", "INSPECTED", "RESOLVED"]
                           },
                           "lines": {
                             "type": "array",
@@ -4157,12 +4157,56 @@
                             "type": "string",
                             "nullable": true
                           },
+                          "inspectedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "inspectionNote": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "inspectionReportDocumentId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "resolvedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "dispositions": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "orderLineId": {
+                                  "type": "string"
+                                },
+                                "disposition": {
+                                  "type": "string",
+                                  "enum": [
+                                    "RESTOCK",
+                                    "REPAIR",
+                                    "REPLACE",
+                                    "RETURN_TO_SUPPLIER",
+                                    "SCRAP",
+                                    "RECYCLE"
+                                  ]
+                                },
+                                "quantity": {
+                                  "type": "integer"
+                                }
+                              },
+                              "required": ["orderLineId", "disposition", "quantity"],
+                              "additionalProperties": false
+                            },
+                            "description": "Empty until RESOLVED; then every received unit, by line and disposition."
+                          },
                           "updatedAt": {
                             "type": "string"
                           },
                           "version": {
                             "type": "integer",
-                            "description": "1 while IN_TRANSIT, 2 once RECEIVED."
+                            "description": "1 while IN_TRANSIT, 2 once RECEIVED, 3 once INSPECTED, 4 once RESOLVED."
                           }
                         },
                         "required": [
@@ -4178,6 +4222,11 @@
                           "carrierReference",
                           "createdAt",
                           "receivedAt",
+                          "inspectedAt",
+                          "inspectionNote",
+                          "inspectionReportDocumentId",
+                          "resolvedAt",
+                          "dispositions",
                           "updatedAt",
                           "version"
                         ],
@@ -4293,7 +4342,7 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": ["IN_TRANSIT", "RECEIVED"]
+                      "enum": ["IN_TRANSIT", "RECEIVED", "INSPECTED", "RESOLVED"]
                     },
                     "lines": {
                       "type": "array",
@@ -4340,12 +4389,56 @@
                       "type": "string",
                       "nullable": true
                     },
+                    "inspectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "inspectionNote": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "inspectionReportDocumentId": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "resolvedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "dispositions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "orderLineId": {
+                            "type": "string"
+                          },
+                          "disposition": {
+                            "type": "string",
+                            "enum": [
+                              "RESTOCK",
+                              "REPAIR",
+                              "REPLACE",
+                              "RETURN_TO_SUPPLIER",
+                              "SCRAP",
+                              "RECYCLE"
+                            ]
+                          },
+                          "quantity": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": ["orderLineId", "disposition", "quantity"],
+                        "additionalProperties": false
+                      },
+                      "description": "Empty until RESOLVED; then every received unit, by line and disposition."
+                    },
                     "updatedAt": {
                       "type": "string"
                     },
                     "version": {
                       "type": "integer",
-                      "description": "1 while IN_TRANSIT, 2 once RECEIVED."
+                      "description": "1 while IN_TRANSIT, 2 once RECEIVED, 3 once INSPECTED, 4 once RESOLVED."
                     }
                   },
                   "required": [
@@ -4361,6 +4454,11 @@
                     "carrierReference",
                     "createdAt",
                     "receivedAt",
+                    "inspectedAt",
+                    "inspectionNote",
+                    "inspectionReportDocumentId",
+                    "resolvedAt",
+                    "dispositions",
                     "updatedAt",
                     "version"
                   ],
@@ -4410,7 +4508,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -4446,7 +4544,12 @@
                           },
                           "code": {
                             "type": "string",
-                            "enum": ["RETURN_ALREADY_DISPATCHED", "RETURN_SHIPMENT_NOT_IN_TRANSIT"]
+                            "enum": [
+                              "RETURN_ALREADY_DISPATCHED",
+                              "RETURN_SHIPMENT_NOT_IN_TRANSIT",
+                              "RETURN_SHIPMENT_NOT_RECEIVED",
+                              "RETURN_SHIPMENT_NOT_INSPECTED"
+                            ]
                           },
                           "message": {
                             "type": "string"
@@ -4609,7 +4712,7 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": ["IN_TRANSIT", "RECEIVED"]
+                      "enum": ["IN_TRANSIT", "RECEIVED", "INSPECTED", "RESOLVED"]
                     },
                     "lines": {
                       "type": "array",
@@ -4656,12 +4759,56 @@
                       "type": "string",
                       "nullable": true
                     },
+                    "inspectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "inspectionNote": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "inspectionReportDocumentId": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "resolvedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "dispositions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "orderLineId": {
+                            "type": "string"
+                          },
+                          "disposition": {
+                            "type": "string",
+                            "enum": [
+                              "RESTOCK",
+                              "REPAIR",
+                              "REPLACE",
+                              "RETURN_TO_SUPPLIER",
+                              "SCRAP",
+                              "RECYCLE"
+                            ]
+                          },
+                          "quantity": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": ["orderLineId", "disposition", "quantity"],
+                        "additionalProperties": false
+                      },
+                      "description": "Empty until RESOLVED; then every received unit, by line and disposition."
+                    },
                     "updatedAt": {
                       "type": "string"
                     },
                     "version": {
                       "type": "integer",
-                      "description": "1 while IN_TRANSIT, 2 once RECEIVED."
+                      "description": "1 while IN_TRANSIT, 2 once RECEIVED, 3 once INSPECTED, 4 once RESOLVED."
                     }
                   },
                   "required": [
@@ -4677,6 +4824,11 @@
                     "carrierReference",
                     "createdAt",
                     "receivedAt",
+                    "inspectedAt",
+                    "inspectionNote",
+                    "inspectionReportDocumentId",
+                    "resolvedAt",
+                    "dispositions",
                     "updatedAt",
                     "version"
                   ],
@@ -4762,7 +4914,7 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": ["IN_TRANSIT", "RECEIVED"]
+                      "enum": ["IN_TRANSIT", "RECEIVED", "INSPECTED", "RESOLVED"]
                     },
                     "destinationWarehouseId": {
                       "type": "string"
@@ -4780,7 +4932,7 @@
                           },
                           "type": {
                             "type": "string",
-                            "enum": ["IN_TRANSIT", "RECEIVED"],
+                            "enum": ["IN_TRANSIT", "RECEIVED", "INSPECTED", "RESOLVED"],
                             "description": "The status the return shipment reached."
                           },
                           "occurredAt": {
@@ -4793,7 +4945,7 @@
                         "required": ["id", "type", "occurredAt", "recordedAt"],
                         "additionalProperties": false
                       },
-                      "description": "What happened, in lifecycle order: IN_TRANSIT, then RECEIVED."
+                      "description": "What happened, in lifecycle order: IN_TRANSIT, RECEIVED, INSPECTED, RESOLVED — as far as it got."
                     }
                   },
                   "required": [
@@ -4913,7 +5065,7 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": ["IN_TRANSIT", "RECEIVED"]
+                      "enum": ["IN_TRANSIT", "RECEIVED", "INSPECTED", "RESOLVED"]
                     },
                     "lines": {
                       "type": "array",
@@ -4960,12 +5112,56 @@
                       "type": "string",
                       "nullable": true
                     },
+                    "inspectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "inspectionNote": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "inspectionReportDocumentId": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "resolvedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "dispositions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "orderLineId": {
+                            "type": "string"
+                          },
+                          "disposition": {
+                            "type": "string",
+                            "enum": [
+                              "RESTOCK",
+                              "REPAIR",
+                              "REPLACE",
+                              "RETURN_TO_SUPPLIER",
+                              "SCRAP",
+                              "RECYCLE"
+                            ]
+                          },
+                          "quantity": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": ["orderLineId", "disposition", "quantity"],
+                        "additionalProperties": false
+                      },
+                      "description": "Empty until RESOLVED; then every received unit, by line and disposition."
+                    },
                     "updatedAt": {
                       "type": "string"
                     },
                     "version": {
                       "type": "integer",
-                      "description": "1 while IN_TRANSIT, 2 once RECEIVED."
+                      "description": "1 while IN_TRANSIT, 2 once RECEIVED, 3 once INSPECTED, 4 once RESOLVED."
                     }
                   },
                   "required": [
@@ -4981,6 +5177,11 @@
                     "carrierReference",
                     "createdAt",
                     "receivedAt",
+                    "inspectedAt",
+                    "inspectionNote",
+                    "inspectionReportDocumentId",
+                    "resolvedAt",
+                    "dispositions",
                     "updatedAt",
                     "version"
                   ],
@@ -5030,7 +5231,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -5066,7 +5267,12 @@
                           },
                           "code": {
                             "type": "string",
-                            "enum": ["RETURN_ALREADY_DISPATCHED", "RETURN_SHIPMENT_NOT_IN_TRANSIT"]
+                            "enum": [
+                              "RETURN_ALREADY_DISPATCHED",
+                              "RETURN_SHIPMENT_NOT_IN_TRANSIT",
+                              "RETURN_SHIPMENT_NOT_RECEIVED",
+                              "RETURN_SHIPMENT_NOT_INSPECTED"
+                            ]
                           },
                           "message": {
                             "type": "string"
@@ -5084,7 +5290,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED)",
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED, DISPOSITION_NOT_ALLOWED, DISPOSITIONS_DO_NOT_BALANCE)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5109,7 +5315,12 @@
                           },
                           "code": {
                             "type": "string",
-                            "enum": ["RECEIPT_LINES_MISMATCH", "RECEIVED_EXCEEDS_EXPECTED"]
+                            "enum": [
+                              "RECEIPT_LINES_MISMATCH",
+                              "RECEIVED_EXCEEDS_EXPECTED",
+                              "DISPOSITION_NOT_ALLOWED",
+                              "DISPOSITIONS_DO_NOT_BALANCE"
+                            ]
                           },
                           "message": {
                             "type": "string"
@@ -5182,6 +5393,736 @@
                   }
                 },
                 "required": ["lines"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/return-shipments/{id}/inspection": {
+      "post": {
+        "description": "The received goods were examined. An optional `note` (kept here, shown to the readers, never on an event) and an optional `reportDocumentId` — the report is a file in document-service, referenced by id. Records the INSPECTED tracking event and RETURN_SHIPMENT_INSPECTED. The goods are still not stock (ADR-048 § 4). A return shipment not yet received, or inspected already, is 409 `RETURN_SHIPMENT_NOT_RECEIVED` (INVALID_STATE_TRANSITION). `expectedVersion` is optional. Only an operator of the destination warehouse’s owner records a return shipment (Q-133: the order’s supplier); its sender reads it and is refused 403 FORBIDDEN here, any other organization gets 404. This service records physical facts only: whether the return was allowed is marketplace’s, which verifies every RETURN_SHIPMENT_* event against its own request. Nothing here moves stock or money. One transaction: the row is locked, moved by compare-and-set, and its tracking event, its RETURN_SHIPMENT_* event and the stored response commit together. A shipment another command holds longer than INVENTORY_LOCK_TIMEOUT_MS is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "ReturnShipmentController_inspect_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for INVENTORY_IDEMPOTENCY_TTL_HOURS (24 by default) — and, for a stock command, applied at most once per stock item for good.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The owner of the destination warehouse."
+                    },
+                    "destinationWarehouseId": {
+                      "type": "string"
+                    },
+                    "buyerOrganizationId": {
+                      "type": "string",
+                      "description": "The organization the goods come from."
+                    },
+                    "returnRequestId": {
+                      "type": "string"
+                    },
+                    "orderId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["IN_TRANSIT", "RECEIVED", "INSPECTED", "RESOLVED"]
+                    },
+                    "lines": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "orderLineId": {
+                            "type": "string"
+                          },
+                          "productId": {
+                            "type": "string"
+                          },
+                          "expectedQuantity": {
+                            "type": "integer"
+                          },
+                          "receivedQuantity": {
+                            "type": "integer",
+                            "nullable": true,
+                            "description": "Null until the shipment is RECEIVED."
+                          }
+                        },
+                        "required": [
+                          "orderLineId",
+                          "productId",
+                          "expectedQuantity",
+                          "receivedQuantity"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "carrierName": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "carrierReference": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "description": "When the goods were recorded as on their way."
+                    },
+                    "receivedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "inspectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "inspectionNote": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "inspectionReportDocumentId": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "resolvedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "dispositions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "orderLineId": {
+                            "type": "string"
+                          },
+                          "disposition": {
+                            "type": "string",
+                            "enum": [
+                              "RESTOCK",
+                              "REPAIR",
+                              "REPLACE",
+                              "RETURN_TO_SUPPLIER",
+                              "SCRAP",
+                              "RECYCLE"
+                            ]
+                          },
+                          "quantity": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": ["orderLineId", "disposition", "quantity"],
+                        "additionalProperties": false
+                      },
+                      "description": "Empty until RESOLVED; then every received unit, by line and disposition."
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer",
+                      "description": "1 while IN_TRANSIT, 2 once RECEIVED, 3 once INSPECTED, 4 once RESOLVED."
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "destinationWarehouseId",
+                    "buyerOrganizationId",
+                    "returnRequestId",
+                    "orderId",
+                    "status",
+                    "lines",
+                    "carrierName",
+                    "carrierReference",
+                    "createdAt",
+                    "receivedAt",
+                    "inspectedAt",
+                    "inspectionNote",
+                    "inspectionReportDocumentId",
+                    "resolvedAt",
+                    "dispositions",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item or shipment another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "returnShipment"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "RETURN_ALREADY_DISPATCHED",
+                              "RETURN_SHIPMENT_NOT_IN_TRANSIT",
+                              "RETURN_SHIPMENT_NOT_RECEIVED",
+                              "RETURN_SHIPMENT_NOT_INSPECTED"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Record the inspection of a return shipment (RECEIVED → INSPECTED)",
+        "tags": ["return-shipments"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The `version` the caller read. When given, the command applies only to that version (409 OPTIMISTIC_LOCK_FAILED otherwise)."
+                  },
+                  "note": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "minLength": 1,
+                    "maxLength": 1000,
+                    "description": "Optional: what the inspector found, in words. Trimmed, 1 to 1000 characters. Shown to the return shipment’s readers; kept here and never on an event."
+                  },
+                  "reportDocumentId": {
+                    "type": "string",
+                    "pattern": "^DOC_[0-9A-HJKMNP-TV-Z]{26}$",
+                    "description": "Optional: the inspection report, a file in document-service (`DOC_<ULID>`), referenced by id and never resolved here. Files and images are stored only there (ADR-048)."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/return-shipments/{id}/resolution": {
+      "post": {
+        "description": "Per line, its received units by disposition (RESTOCK, REPAIR, REPLACE, RETURN_TO_SUPPLIER, SCRAP, RECYCLE) — only those named in INVENTORY_RETURN_DISPOSITIONS_ALLOWED, which is empty by default (Q-133): 422 `DISPOSITION_NOT_ALLOWED`. For every line the quantities add up to exactly what was received: 422 `DISPOSITIONS_DO_NOT_BALANCE`. Records the RESOLVED tracking event and RETURN_SHIPMENT_RESOLVED. **This records an outcome and nothing else**: no stock is received into a balance (RESTOCK included) and no refund is requested — a refund is economic-service’s and has no operation for a settled order yet (Q-76). A return shipment not yet inspected, or resolved already, is 409 `RETURN_SHIPMENT_NOT_INSPECTED` (INVALID_STATE_TRANSITION). `expectedVersion` is optional. Only an operator of the destination warehouse’s owner records a return shipment (Q-133: the order’s supplier); its sender reads it and is refused 403 FORBIDDEN here, any other organization gets 404. This service records physical facts only: whether the return was allowed is marketplace’s, which verifies every RETURN_SHIPMENT_* event against its own request. Nothing here moves stock or money. One transaction: the row is locked, moved by compare-and-set, and its tracking event, its RETURN_SHIPMENT_* event and the stored response commit together. A shipment another command holds longer than INVENTORY_LOCK_TIMEOUT_MS is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "ReturnShipmentController_resolve_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for INVENTORY_IDEMPOTENCY_TTL_HOURS (24 by default) — and, for a stock command, applied at most once per stock item for good.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The owner of the destination warehouse."
+                    },
+                    "destinationWarehouseId": {
+                      "type": "string"
+                    },
+                    "buyerOrganizationId": {
+                      "type": "string",
+                      "description": "The organization the goods come from."
+                    },
+                    "returnRequestId": {
+                      "type": "string"
+                    },
+                    "orderId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["IN_TRANSIT", "RECEIVED", "INSPECTED", "RESOLVED"]
+                    },
+                    "lines": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "orderLineId": {
+                            "type": "string"
+                          },
+                          "productId": {
+                            "type": "string"
+                          },
+                          "expectedQuantity": {
+                            "type": "integer"
+                          },
+                          "receivedQuantity": {
+                            "type": "integer",
+                            "nullable": true,
+                            "description": "Null until the shipment is RECEIVED."
+                          }
+                        },
+                        "required": [
+                          "orderLineId",
+                          "productId",
+                          "expectedQuantity",
+                          "receivedQuantity"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "carrierName": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "carrierReference": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "description": "When the goods were recorded as on their way."
+                    },
+                    "receivedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "inspectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "inspectionNote": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "inspectionReportDocumentId": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "resolvedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "dispositions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "orderLineId": {
+                            "type": "string"
+                          },
+                          "disposition": {
+                            "type": "string",
+                            "enum": [
+                              "RESTOCK",
+                              "REPAIR",
+                              "REPLACE",
+                              "RETURN_TO_SUPPLIER",
+                              "SCRAP",
+                              "RECYCLE"
+                            ]
+                          },
+                          "quantity": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": ["orderLineId", "disposition", "quantity"],
+                        "additionalProperties": false
+                      },
+                      "description": "Empty until RESOLVED; then every received unit, by line and disposition."
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer",
+                      "description": "1 while IN_TRANSIT, 2 once RECEIVED, 3 once INSPECTED, 4 once RESOLVED."
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "destinationWarehouseId",
+                    "buyerOrganizationId",
+                    "returnRequestId",
+                    "orderId",
+                    "status",
+                    "lines",
+                    "carrierName",
+                    "carrierReference",
+                    "createdAt",
+                    "receivedAt",
+                    "inspectedAt",
+                    "inspectionNote",
+                    "inspectionReportDocumentId",
+                    "resolvedAt",
+                    "dispositions",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item or shipment another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "returnShipment"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "RETURN_ALREADY_DISPATCHED",
+                              "RETURN_SHIPMENT_NOT_IN_TRANSIT",
+                              "RETURN_SHIPMENT_NOT_RECEIVED",
+                              "RETURN_SHIPMENT_NOT_INSPECTED"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED, DISPOSITION_NOT_ALLOWED, DISPOSITIONS_DO_NOT_BALANCE)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "returnShipment"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "RECEIPT_LINES_MISMATCH",
+                              "RECEIVED_EXCEEDS_EXPECTED",
+                              "DISPOSITION_NOT_ALLOWED",
+                              "DISPOSITIONS_DO_NOT_BALANCE"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Resolve a return shipment: give every received unit an outcome (INSPECTED → RESOLVED)",
+        "tags": ["return-shipments"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The `version` the caller read. When given, the command applies only to that version (409 OPTIMISTIC_LOCK_FAILED otherwise)."
+                  },
+                  "dispositions": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "orderLineId": {
+                          "type": "string",
+                          "pattern": "^OLN_[0-9A-HJKMNP-TV-Z]{26}$",
+                          "description": "A line of that order. Opaque; never resolved here."
+                        },
+                        "disposition": {
+                          "type": "string",
+                          "enum": [
+                            "RESTOCK",
+                            "REPAIR",
+                            "REPLACE",
+                            "RETURN_TO_SUPPLIER",
+                            "SCRAP",
+                            "RECYCLE"
+                          ]
+                        },
+                        "quantity": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 2147483647,
+                          "description": "How many units of this line go this way."
+                        }
+                      },
+                      "required": ["orderLineId", "disposition", "quantity"],
+                      "additionalProperties": false
+                    },
+                    "minItems": 1,
+                    "maxItems": 300,
+                    "description": "Per line, its units by disposition; for every line the quantities add up to exactly what was received (a line that received none needs no row). This records an outcome for the goods. It moves no stock and asks for no money."
+                  }
+                },
+                "required": ["dispositions"],
                 "additionalProperties": false
               }
             }
