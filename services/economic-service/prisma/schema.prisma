@@ -416,7 +416,7 @@ model Transaction {
   transactionType TransactionType   @map("transaction_type")
   /// Why the platform may earn from it (ADR-045 § 1) — sent by the service
   /// that owns the fact, never inferred from the type. NULL on rows recorded
-  /// before migration `20261015120000_commission_business_lines`, and on
+  /// before migration `20261016120000_commission_business_lines`, and on
   /// rows whose source does not send one yet (docs/24 Q-130): those are
   /// priced only by the type-only rules that predate business lines.
   businessLine    BusinessLine?     @map("business_line")
@@ -1251,6 +1251,14 @@ model IdempotencyKey {
   /// body is `409 IDEMPOTENCY_KEY_REUSED`, never a silent replay of the wrong
   /// response.
   requestHash String @map("request_hash")
+
+  /// SHA-256 of the actor who reserved the key. The same key from another
+  /// actor is `409 IDEMPOTENCY_KEY_REUSED`, never a replay. Null on records
+  /// written before it existed (docs/23 D-054).
+  actorHash  String? @map("actor_hash")
+  /// Random, per reservation: only the request holding it may complete,
+  /// refuse or release the claim (docs/23 D-054).
+  claimToken String? @map("claim_token")
 
   responseStatus Int?             @map("response_status")
   responseBody   Json?            @map("response_body")

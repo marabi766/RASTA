@@ -662,7 +662,7 @@ export const ASSET_DATA_ROLLBACK = {
   ],
 };
 
-const COMMISSION_BUSINESS_LINES = '20261015120000_commission_business_lines';
+const COMMISSION_BUSINESS_LINES = '20261016120000_commission_business_lines';
 
 /** A transaction as the schema before business lines holds it (or after, with a line). */
 const TRANSACTION_MIGCHECK = (id, line = null) => `
@@ -896,10 +896,10 @@ export const ECONOMIC_DATA_ROLLBACK = {
     {
       label: 'down: the rollback succeeds while no task is open (the resolutions first)',
       runDownScript: [
-        // An index on the resolution table, which 20261001100000's down script
-        // drops with the table. Left applied, it is never re-created by the
-        // re-apply below, and the chain reversal then finds it missing — which
-        // only shows once a later migration's down is checked against it.
+        // An index on the resolution table, which 20261001100000's down drops:
+        // rolled back with it, or its ledger row stays and the re-apply below
+        // never recreates the index — masked while it was the newest
+        // migration, exposed by the next one's exact-inverse check (#287 r2).
         '20261004120000_payment_resolution_intent_index',
         // Its foreign key needs the intent's (organization_id, id) index,
         // which 20260930200000's down script drops.

@@ -69,7 +69,8 @@ export class PaymentReconciliationController {
       key,
       targeted(id, boundTo(actor, dto)),
       200,
-      () => this.operator.requeue(id, dto.reason),
+      (answer) => this.operator.requeue(id, dto.reason, answer),
+      { mayReplay: () => this.operator.assertMayReplay(id) },
     );
   }
 
@@ -100,7 +101,8 @@ export class PaymentReconciliationController {
       key,
       targeted(id, boundTo(actor, dto)),
       200,
-      () => this.operator.propose(id, dto),
+      (answer) => this.operator.propose(id, dto, answer),
+      { mayReplay: () => this.operator.assertMayReplay(id) },
     );
   }
 
@@ -130,7 +132,8 @@ export class PaymentReconciliationController {
       key,
       targeted(`${id}/${resolutionId}`, boundTo(actor, dto)),
       200,
-      () => this.operator.approve(id, resolutionId, dto.reason),
+      (answer) => this.operator.approve(id, resolutionId, dto.reason, answer),
+      { mayReplay: () => this.operator.assertMayReplay(id, resolutionId) },
     );
   }
 
@@ -156,7 +159,8 @@ export class PaymentReconciliationController {
       key,
       targeted(`${id}/${resolutionId}`, boundTo(actor, dto)),
       200,
-      () => this.operator.reject(id, resolutionId, dto.reason),
+      (answer) => this.operator.reject(id, resolutionId, dto.reason, answer),
+      { mayReplay: () => this.operator.assertMayReplay(id, resolutionId) },
     );
   }
 }
@@ -165,6 +169,14 @@ export class PaymentReconciliationController {
  * The request a key is bound to: the body and who sent it. The same key from
  * another person is then a different request — `409 IDEMPOTENCY_KEY_REUSED`,
  * with no body — never a replay of someone else's answer.
+ *
+ * The store now binds every record to its actor itself (`requestActor`, review
+ * of #287); this stays in the hash so that the records already stored still
+ * match their own retries. It still names the platform user id, which the
+ * store's actor no longer does. A token without `rasta_uid` never gets this
+ * far (`authorize()` refuses it first), but a retry whose `rasta_uid` changed
+ * between two tokens that both carry one is still `409 IDEMPOTENCY_KEY_REUSED`
+ * (docs/23 D-054, residual risk).
  */
 function boundTo(actor: OperatorActor, body: unknown): unknown {
   return { by: { userId: actor.userId, issuer: actor.issuer, subject: actor.subject }, body };

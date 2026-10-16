@@ -2,7 +2,7 @@ import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { InMemoryEventPublisher } from '../src/outbox/kafka.publisher';
-import { IdempotencyStore } from '../src/shared/idempotency';
+import { IdempotencyStore, type IdempotentAnswer } from '../src/shared/idempotency';
 import { LedgerBalanceAudit } from '../src/wallet/balance-audit';
 import {
   asActor,
@@ -165,11 +165,27 @@ describe('economic internals', () => {
 
     const endpoint = 'POST /v1/internals-test';
 
+    /**
+     * One person sends every request here: a key is bound to its actor
+     * (review of #287), and the helper's default user id is new on every call.
+     */
+    const asRequester = <T>(options: { organizationId: string }, fn: () => Promise<T>) =>
+      asActor({ userId: 'USR-ITEST-INTERNALS', ...options }, fn);
+
+    /** These stored answers are nobody's object: any caller may have them. */
+    const openly = { mayReplay: async () => undefined };
+
+    /** A work with no effect, answering in a transaction of its own. */
+    const answering =
+      <T>(response: T) =>
+      (answer: IdempotentAnswer<T>) =>
+        prisma.transaction((tx) => answer.respond(tx, response));
+
     it('replays the recorded response, with the status it was recorded under', async () => {
       const key = `internals-${ulid()}`;
 
-      const first = await asActor({ organizationId: org.a }, () =>
-        store.run(endpoint, key, { amountMinor: '10' }, 201, async () => ({ value: 'first' })),
+      const first = await asRequester({ organizationId: org.a }, () =>
+        store.run(endpoint, key, { amountMinor: '10' }, 201, answering({ value: 'first' }), openly),
       );
       expect(first).toEqual({ value: 'first' });
 
@@ -177,11 +193,18 @@ describe('economic internals', () => {
       // run again — a retried financial write that recomputes is the failure
       // idempotency exists to prevent.
       let ran = false;
-      const replayed = await asActor({ organizationId: org.a }, () =>
-        store.run(endpoint, key, { amountMinor: '10' }, 201, async () => {
-          ran = true;
-          return { value: 'second' };
-        }),
+      const replayed = await asRequester({ organizationId: org.a }, () =>
+        store.run(
+          endpoint,
+          key,
+          { amountMinor: '10' },
+          201,
+          (answer) => {
+            ran = true;
+            return answering({ value: 'second' })(answer);
+          },
+          openly,
+        ),
       );
       expect(replayed).toEqual({ value: 'first' });
       expect(ran).toBe(false);
@@ -189,21 +212,21 @@ describe('economic internals', () => {
 
     it('refuses the same key with a different body', async () => {
       const key = `internals-${ulid()}`;
-      await asActor({ organizationId: org.a }, () =>
-        store.run(endpoint, key, { amountMinor: '10' }, 201, async () => ({ ok: true })),
+      await asRequester({ organizationId: org.a }, () =>
+        store.run(endpoint, key, { amountMinor: '10' }, 201, answering({ ok: true }), openly),
       );
 
       await expect(
-        asActor({ organizationId: org.a }, () =>
-          store.run(endpoint, key, { amountMinor: '20' }, 201, async () => ({ ok: true })),
+        asRequester({ organizationId: org.a }, () =>
+          store.run(endpoint, key, { amountMinor: '20' }, 201, answering({ ok: true }), openly),
         ),
       ).rejects.toThrow(expect.objectContaining({ code: 'IDEMPOTENCY_KEY_REUSED' }));
     });
 
     it('lets a key past its window be claimed again', async () => {
       const key = `internals-${ulid()}`;
-      await asActor({ organizationId: org.a }, () =>
-        store.run(endpoint, key, { amountMinor: '10' }, 201, async () => ({ attempt: 1 })),
+      await asRequester({ organizationId: org.a }, () =>
+        store.run(endpoint, key, { amountMinor: '10' }, 201, answering({ attempt: 1 }), openly),
       );
 
       // Backdated rather than waited for. The window is hours long by
@@ -224,22 +247,22 @@ describe('economic internals', () => {
 
       // A retry window that never closes is not a retry window — it is a
       // permanent cache of financial responses (docs/06 § 6.8).
-      const second = await asActor({ organizationId: org.a }, () =>
-        store.run(endpoint, key, { amountMinor: '10' }, 201, async () => ({ attempt: 2 })),
+      const second = await asRequester({ organizationId: org.a }, () =>
+        store.run(endpoint, key, { amountMinor: '10' }, 201, answering({ attempt: 2 }), openly),
       );
       expect(second).toEqual({ attempt: 2 });
     });
 
     it('scopes a key to one organization', async () => {
       const key = `internals-${ulid()}`;
-      await asActor({ organizationId: org.a }, () =>
-        store.run(endpoint, key, { amountMinor: '10' }, 201, async () => ({ tenant: 'a' })),
+      await asRequester({ organizationId: org.a }, () =>
+        store.run(endpoint, key, { amountMinor: '10' }, 201, answering({ tenant: 'a' }), openly),
       );
 
       // The same key string in another tenant is a different key. Sharing them
       // would let one organization's retry return another's response.
-      const other = await asActor({ organizationId: org.b }, () =>
-        store.run(endpoint, key, { amountMinor: '10' }, 201, async () => ({ tenant: 'b' })),
+      const other = await asRequester({ organizationId: org.b }, () =>
+        store.run(endpoint, key, { amountMinor: '10' }, 201, answering({ tenant: 'b' }), openly),
       );
       expect(other).toEqual({ tenant: 'b' });
     });
@@ -248,11 +271,11 @@ describe('economic internals', () => {
       const stale = `internals-${ulid()}`;
       const live = `internals-${ulid()}`;
 
-      await asActor({ organizationId: org.a }, () =>
-        store.run(endpoint, stale, { n: 1 }, 201, async () => ({ ok: true })),
+      await asRequester({ organizationId: org.a }, () =>
+        store.run(endpoint, stale, { n: 1 }, 201, answering({ ok: true }), openly),
       );
-      await asActor({ organizationId: org.a }, () =>
-        store.run(endpoint, live, { n: 2 }, 201, async () => ({ ok: true })),
+      await asRequester({ organizationId: org.a }, () =>
+        store.run(endpoint, live, { n: 2 }, 201, answering({ ok: true }), openly),
       );
       await runUnscoped('the suite expires one of the two keys', () =>
         prisma.client.$executeRawUnsafe(
