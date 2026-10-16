@@ -74,13 +74,20 @@ export const policyStepInput = z
       .optional(),
   })
   .strict()
-  .refine(
-    (step) =>
-      step.minAmountMinor === undefined ||
-      step.maxAmountMinor === undefined ||
-      BigInt(step.minAmountMinor) < BigInt(step.maxAmountMinor),
-    { message: 'minAmountMinor must be less than maxAmountMinor', path: ['maxAmountMinor'] },
-  );
+  .superRefine((step, context) => {
+    // Zod runs this even when a bound failed its own pattern, with the raw text: `BigInt('12.5')`
+    // would throw — a 500 whose message, the client's text, reaches the log. Two bounds are
+    // compared only once both are amounts; a malformed one is already reported as such.
+    const { minAmountMinor: min, maxAmountMinor: max } = step;
+    if (min === undefined || max === undefined) return;
+    if (!amountBound.safeParse(min).success || !amountBound.safeParse(max).success) return;
+    if (BigInt(min) < BigInt(max)) return;
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['maxAmountMinor'],
+      message: 'minAmountMinor must be less than maxAmountMinor',
+    });
+  });
 
 export const createPolicySchema = z
   .object({
