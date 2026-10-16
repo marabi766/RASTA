@@ -63,6 +63,9 @@ import { AmendmentService } from './amendment/amendment.service';
 import { MilestoneController } from './milestone/milestone.controller';
 import { MilestoneRepository } from './milestone/milestone.repository';
 import { MilestoneService } from './milestone/milestone.service';
+import { StatementController } from './statement/statement.controller';
+import { StatementRepository } from './statement/statement.repository';
+import { StatementService } from './statement/statement.service';
 import { AuthorityRefusals } from './signing/authority-refusals';
 import { SigningAuthority } from './signing/signing-authority';
 import { PolicyAccess } from './policy/policy.access';
@@ -85,15 +88,16 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
  * and a read API for the two parties. No Temporal (nothing here has a deadline; silence is never
  * consent, ADR-043). Since PR 2 a second consumer (`ORGANIZATION_MOVED`, a trigger that queues a
  * re-check — Q-83) and the sweeper that works that queue suspend a signing policy whose union has
- * lost the employer; nothing a user calls writes through either. Statements, their separate
- * technical and financial approvals and the settlement boundary with economic-service are later
- * changes (ADR-068 § 9) and bring their own wiring.
+ * lost the employer; nothing a user calls writes through either. Since PR 4 the contractor drafts
+ * statements; their submission with the separate technical and financial approvals, and the
+ * settlement boundary with economic-service, are later changes (ADR-068 § 9) with their own wiring.
  */
 @Module({
   controllers: [
     ContractController,
     AmendmentController,
     MilestoneController,
+    StatementController,
     PolicyController,
     HealthController,
     MetricsController,
@@ -142,6 +146,8 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
     AmendmentService,
     MilestoneRepository,
     MilestoneService,
+    StatementRepository,
+    StatementService,
     PolicyAccess,
     PolicyRepository,
     PolicyService,

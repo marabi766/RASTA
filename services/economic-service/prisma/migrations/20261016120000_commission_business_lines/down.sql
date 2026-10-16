@@ -52,6 +52,9 @@ DROP TABLE IF EXISTS "commission_pricing_cutover";
 
 DROP TRIGGER IF EXISTS "trg_commission_rule_effective_dated" ON "commission_rule";
 DROP FUNCTION IF EXISTS commission_rule_effective_dated();
+DROP FUNCTION IF EXISTS commission_pricing_scope_lock(TEXT, "BusinessLine", "TransactionType");
+DROP FUNCTION IF EXISTS commission_rule_scope_change(TEXT, "BusinessLine", "TransactionType");
+DROP FUNCTION IF EXISTS commission_rule_scope_key(TEXT, "BusinessLine", "TransactionType");
 ALTER TABLE "commission_rule" DROP CONSTRAINT IF EXISTS "ex_commission_rule_line_type_no_overlap";
 ALTER TABLE "commission_rule" DROP CONSTRAINT IF EXISTS "ex_commission_rule_line_no_overlap";
 ALTER TABLE "commission_rule" DROP CONSTRAINT IF EXISTS "ex_commission_rule_type_only_no_overlap";

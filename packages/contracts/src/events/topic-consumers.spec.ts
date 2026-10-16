@@ -27,6 +27,7 @@ describe('TOPIC_CONSUMERS', () => {
           'rasta.maintenance.v1',
           'rasta.marketplace.v1',
           'rasta.construction.v1',
+          'rasta.document.v1',
         ],
         deadLetterTopic: 'rasta.asset.v1.dlq',
       },

@@ -24,6 +24,12 @@ import { FakeSourceFacts } from './source-facts.fake';
  *    pricing recorded with its source fact, whatever is written afterwards.
  *  - **F3** A maintenance approval given before the rollout and consumed after
  *    it is priced as it was before business lines.
+ *  - **R1** (round 2) A change that waited for its row or its scope is decided
+ *    by the clock once it holds them, not when its transaction began — in the
+ *    service and in the trigger.
+ *  - **R2** (round 2) An approval priced while a rule of its scope is being
+ *    closed or created ends up with what the committed rules give at its own
+ *    instant: the pricing waits for the change, under the scope's lock.
  */
 describe('commission pricing integrity (docs/23 D-057)', () => {
   let harness: ApiHarness;
@@ -33,6 +39,11 @@ describe('commission pricing integrity (docs/23 D-057)', () => {
   const payer = apiTenant('CPI-PAYER');
   const payee = apiTenant('CPI-PAYEE');
   const workshop = apiTenant('CPI-WORKSHOP');
+  /** Scopes of their own for the lock-wait tests, so no earlier rule overlaps. */
+  const clock = apiTenant('CPI-CLOCK');
+  const closing = apiTenant('CPI-CLOSING');
+  const opening = apiTenant('CPI-OPENING');
+  const platformed = apiTenant('CPI-PLATFORMED');
   /** Platform-wide rules this suite wrote; the per-organization cleanup cannot reach them. */
   const platformRules: string[] = [];
 
@@ -101,6 +112,131 @@ describe('commission pricing integrity (docs/23 D-057)', () => {
       harness.prisma.client.commissionRule.count({ where: { ...where, status: 'ACTIVE' } }),
     );
 
+  // A maintenance approval, consumed as `SettlementAuthorityConsumer` does in
+  // production: the source fact is confirmed by the (fake) source service.
+  const sources = new FakeSourceFacts();
+  const noBroker = (): EventConsumer =>
+    ({ start: async () => undefined, stop: async () => undefined }) as unknown as EventConsumer;
+
+  const maintenanceConsumer = () =>
+    new SettlementAuthorityConsumer(
+      noBroker,
+      harness.prisma,
+      wire(harness.prisma).transactions,
+      sources,
+    );
+
+  function approvalEnvelope(approvedAt: Date, workshopOrganizationId = workshop) {
+    const payload = {
+      requestId: `MNT_${ulid()}`,
+      assetId: `AST_${ulid()}`,
+      organizationId: payer,
+      approvedBy: 'USR-CPI-ITEST',
+      approvedAt: approvedAt.toISOString(),
+      workshopOrganizationId,
+      totalCostMinor: String(GROSS),
+      currency: 'IRR',
+    };
+    sources.approved(payload);
+    return {
+      payload,
+      envelope: {
+        eventId: ulid(),
+        eventName: CONSUMED_EVENTS.MAINTENANCE_APPROVED,
+        eventVersion: 1,
+        occurredAt: new Date().toISOString(),
+        producer: 'maintenance-service',
+        producerVersion: '0.1.0',
+        aggregateType: 'MaintenanceRequest',
+        aggregateId: payload.requestId,
+        tenantId: payer,
+        correlationId: `cpi-itest-${ulid()}`,
+        payload,
+      } as EventEnvelope,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Holding a lock from a second session, and watching others wait for it
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Runs `sql` in an owner transaction left open until `release()`, so the
+   * locks it took stay held. Resolves once they are.
+   */
+  async function hold(sql: string, ...params: unknown[]) {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let taken!: () => void;
+    const held = new Promise<void>((resolve) => (taken = resolve));
+    const done = owner.$transaction(
+      async (blocker) => {
+        await blocker.$executeRawUnsafe(sql, ...params);
+        taken();
+        await released;
+      },
+      { timeout: 60_000 },
+    );
+    await Promise.race([held, done]);
+    return {
+      release: async () => {
+        release();
+        await done;
+      },
+    };
+  }
+
+  /**
+   * Sessions waiting for a lock of one kind (pg_locks: visible to any role). A
+   * row's lock is waited for on the holder's transaction id, which names no
+   * database.
+   */
+  async function waiting(kind: 'row' | 'advisory' | 'outbox'): Promise<number> {
+    const here = `database = (SELECT oid FROM pg_database WHERE datname = current_database())`;
+    const where = {
+      row: `(locktype = 'transactionid' OR (locktype = 'tuple' AND ${here}))`,
+      advisory: `locktype = 'advisory' AND ${here}`,
+      outbox: `locktype = 'relation' AND relation = 'outbox_message'::regclass AND ${here}`,
+    }[kind];
+    const [row] = await owner.$queryRawUnsafe<{ n: bigint }[]>(
+      `SELECT count(*) AS n FROM pg_locks WHERE NOT granted AND ${where}`,
+    );
+    return Number(row?.n ?? 0n);
+  }
+
+  async function until(what: string, condition: () => Promise<boolean>) {
+    const deadline = Date.now() + 20_000;
+    while (!(await condition())) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting until ${what}`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+
+  /** The database's clock — what effective dating is decided by. */
+  async function databaseClock(): Promise<Date> {
+    const [row] = await owner.$queryRawUnsafe<{ at: Date }[]>(
+      `SELECT date_trunc('milliseconds', clock_timestamp()) AS at`,
+    );
+    return row!.at;
+  }
+
+  /** Waits until the database clock has passed `instant`. */
+  const pastInstant = (instant: Date) =>
+    until(`the database clock passes ${instant.toISOString()}`, async () => {
+      return (await databaseClock()).getTime() > instant.getTime() + 20;
+    });
+
+  /** Settles a promise into a flag, so a wait can stop when it is already done. */
+  function tracked<T>(promise: Promise<T>) {
+    const state = { settled: false };
+    const result = promise.finally(() => {
+      state.settled = true;
+    });
+    // Asserted on later; an early rejection must not be reported as unhandled.
+    result.catch(() => undefined);
+    return { result, state };
+  }
+
   beforeAll(async () => {
     harness = await startApi();
     http = harness.app.getHttpServer() as Server;
@@ -117,11 +253,13 @@ describe('commission pricing integrity (docs/23 D-057)', () => {
         .send({ amountMinor: String(GROSS * 20n) })
         .expect(201);
     }
-    await request(http).get('/v1/wallets/me').set('authorization', as(payee));
+    for (const organizationId of [payee, clock, closing, opening, platformed]) {
+      await request(http).get('/v1/wallets/me').set('authorization', as(organizationId));
+    }
   });
 
   afterAll(async () => {
-    await cleanup(harness.prisma, [payer, payee, workshop]);
+    await cleanup(harness.prisma, [payer, payee, workshop, clock, closing, opening, platformed]);
     if (platformRules.length > 0) {
       await runUnscoped('the suite removes the platform-wide rules it wrote', () =>
         harness.prisma.client.commissionRule.deleteMany({ where: { id: { in: platformRules } } }),
@@ -422,47 +560,8 @@ describe('commission pricing integrity (docs/23 D-057)', () => {
   // ===========================================================================
 
   describe('F3: an approval from before the rollout is priced as before', () => {
-    const sources = new FakeSourceFacts();
-    const noBroker = (): EventConsumer =>
-      ({ start: async () => undefined, stop: async () => undefined }) as unknown as EventConsumer;
-
-    function approvalEnvelope(approvedAt: Date) {
-      const payload = {
-        requestId: `MNT_${ulid()}`,
-        assetId: `AST_${ulid()}`,
-        organizationId: payer,
-        approvedBy: 'USR-CPI-ITEST',
-        approvedAt: approvedAt.toISOString(),
-        workshopOrganizationId: workshop,
-        totalCostMinor: String(GROSS),
-        currency: 'IRR',
-      };
-      sources.approved(payload);
-      return {
-        payload,
-        envelope: {
-          eventId: ulid(),
-          eventName: CONSUMED_EVENTS.MAINTENANCE_APPROVED,
-          eventVersion: 1,
-          occurredAt: new Date().toISOString(),
-          producer: 'maintenance-service',
-          producerVersion: '0.1.0',
-          aggregateType: 'MaintenanceRequest',
-          aggregateId: payload.requestId,
-          tenantId: payer,
-          correlationId: `cpi-itest-${ulid()}`,
-          payload,
-        } as EventEnvelope,
-      };
-    }
-
     it('prices an approval given before the cutover and consumed after it by the type-only rule', async () => {
-      const consumer = new SettlementAuthorityConsumer(
-        noBroker,
-        harness.prisma,
-        wire(harness.prisma).transactions,
-        sources,
-      );
+      const consumer = maintenanceConsumer();
       const [cutover] = await owner.$queryRawUnsafe<{ at: Date }[]>(
         `SELECT line_pricing_from AS at FROM commission_pricing_cutover`,
       );
@@ -536,6 +635,267 @@ describe('commission pricing integrity (docs/23 D-057)', () => {
       await expect(
         owner.$executeRawUnsafe(`DELETE FROM commission_pricing_cutover WHERE id = 1`),
       ).rejects.toThrow(/fixed by its migration/);
+    });
+  });
+
+  // ===========================================================================
+  // R1 — decided by the clock after the wait (Codex round 2 on #307)
+  // ===========================================================================
+
+  describe('R1: a change that waited for its lock is decided at the instant it got it', () => {
+    /** A rule of the clock tenant's, through the API. */
+    async function clockRule(body: Record<string, unknown>) {
+      const created = await createRule({ organizationId: clock, ...body }).expect(201);
+      return created.body as { id: string; validFrom: string; validTo: string | null };
+    }
+
+    const lockRow = (ruleId: string) =>
+      hold(`SELECT id FROM commission_rule WHERE id = $1 FOR UPDATE`, ruleId);
+
+    it('ends — never withdraws — a rule whose start passed while the deactivation waited for its row', async () => {
+      const rule = await clockRule({
+        businessLine: 'PARTS',
+        rateBasisPoints: 100,
+        validFrom: new Date((await databaseClock()).getTime() + 1_500).toISOString(),
+      });
+      const blocker = await lockRow(rule.id);
+
+      // Sent while the rule is still ahead: then it would be a withdrawal.
+      const deactivation = tracked(patchRule(rule.id, { status: 'INACTIVE' }).then((r) => r));
+      await until('the deactivation waits for the row', async () => (await waiting('row')) >= 1);
+      await pastInstant(new Date(rule.validFrom));
+      await blocker.release();
+
+      const answer = await deactivation.result;
+      // By the time it held the row the rule was in force: it is ended, and
+      // what occurred from its start to now stays under it.
+      expect(answer.status).toBe(200);
+      expect(answer.body.status).toBe('ACTIVE');
+      expect(new Date(answer.body.validTo).getTime()).toBeGreaterThan(
+        new Date(rule.validFrom).getTime(),
+      );
+    });
+
+    it('refuses to reopen a rule whose end passed while the change waited for its row', async () => {
+      const rule = await clockRule({
+        businessLine: 'INSURANCE',
+        rateBasisPoints: 100,
+        validTo: new Date((await databaseClock()).getTime() + 1_500).toISOString(),
+      });
+      const blocker = await lockRow(rule.id);
+
+      const reopening = tracked(patchRule(rule.id, { validTo: null }).then((r) => r));
+      await until('the reopening waits for the row', async () => (await waiting('row')) >= 1);
+      await pastInstant(new Date(rule.validTo!));
+      await blocker.release();
+
+      const answer = await reopening.result;
+      expect(answer.status).toBe(422);
+      expect(answer.body.message).toMatch(/already ended/);
+      expect(
+        (
+          await runUnscoped('the suite reads the rule it raced', () =>
+            harness.prisma.client.commissionRule.findUniqueOrThrow({ where: { id: rule.id } }),
+          )
+        ).validTo?.toISOString(),
+      ).toBe(rule.validTo);
+    });
+
+    it('is held by the database for a writer around the API whose UPDATE waited past the start', async () => {
+      const rule = await clockRule({
+        businessLine: 'LOGISTICS',
+        rateBasisPoints: 100,
+        validFrom: new Date((await databaseClock()).getTime() + 1_500).toISOString(),
+      });
+      const blocker = await lockRow(rule.id);
+
+      // One statement: its transaction — and `now()` — begin before the wait.
+      const flip = tracked(
+        owner.$executeRawUnsafe(
+          `UPDATE commission_rule SET status = 'INACTIVE' WHERE id = $1`,
+          rule.id,
+        ),
+      );
+      await until('the UPDATE waits for the row', async () => (await waiting('row')) >= 1);
+      await pastInstant(new Date(rule.validFrom));
+      await blocker.release();
+
+      await expect(flip.result).rejects.toThrow(/keeps its status/);
+    });
+
+    it('refuses a create whose start passed while it waited for its scope', async () => {
+      const validFrom = new Date((await databaseClock()).getTime() + 1_000);
+      // Another change to the same scope, holding it.
+      const blocker = await hold(
+        `SELECT commission_rule_scope_change($1, 'CONSTRUCTION'::"BusinessLine", NULL)::TEXT`,
+        clock,
+      );
+
+      const creating = tracked(
+        createRule({
+          organizationId: clock,
+          businessLine: 'CONSTRUCTION',
+          rateBasisPoints: 100,
+          validFrom: validFrom.toISOString(),
+        }).then((r) => r),
+      );
+      await until('the create waits for the scope', async () => (await waiting('advisory')) >= 1);
+      await pastInstant(validFrom);
+      await blocker.release();
+
+      const answer = await creating.result;
+      expect(answer.status).toBe(422);
+      expect(answer.body.message).toMatch(/never in the past/);
+    });
+  });
+
+  // ===========================================================================
+  // R2 — pricing and rule changes take turns (Codex round 2 on #307)
+  // ===========================================================================
+
+  describe('R2: an obligation is priced by the rules committed for its instant, whatever ran beside it', () => {
+    /**
+     * What the committed rules give for the obligation's own instant, read
+     * after everything has finished — the answer its recorded pricing must be.
+     */
+    async function committedPricing(row: {
+      counterpartyOrganizationId: string | null;
+      transactionType: string;
+      businessLine: string | null;
+      occurredAt: Date;
+    }) {
+      const { commissions } = wire(harness.prisma);
+      return harness.prisma.transaction((tx) =>
+        commissions.pricingOf(tx, {
+          organizationId: row.counterpartyOrganizationId!,
+          transactionType: row.transactionType as never,
+          businessLine: row.businessLine as never,
+          occurredAt: row.occurredAt,
+          grossAmountMinor: GROSS,
+          currency: 'IRR',
+        }),
+      );
+    }
+
+    const obligationFor = (requestId: string) =>
+      runUnscoped('the suite reads the obligation', () =>
+        harness.prisma.client.transaction.findFirstOrThrow({
+          where: { sourceReference: requestId },
+        }),
+      );
+
+    /**
+     * Holds `change` (an API call) just short of its commit: an owner session
+     * keeps the outbox from taking its change record, so the change has written
+     * its rule, holds its locks, and waits. Then consumes an approval that
+     * occurs *after* the change's instant, waits until that is either waiting
+     * too or done, and lets everything finish.
+     */
+    async function approvalBesideChange(
+      workshopOrganizationId: string,
+      change: () => Promise<request.Response>,
+    ) {
+      const blocker = await hold(`LOCK TABLE outbox_message IN SHARE MODE`);
+      const changing = tracked(change());
+      await until('the change waits on the outbox', async () => (await waiting('outbox')) >= 1);
+
+      const approval = approvalEnvelope(await databaseClock(), workshopOrganizationId);
+      const consuming = tracked(maintenanceConsumer().handle(approval.envelope));
+      await until(
+        'the pricing waits, or is done',
+        async () =>
+          consuming.state.settled ||
+          (await waiting('advisory')) >= 1 ||
+          (await waiting('outbox')) >= 2,
+      );
+      await blocker.release();
+
+      const changed = await changing.result;
+      await consuming.result;
+      return { changed, recorded: await obligationFor(approval.payload.requestId) };
+    }
+
+    it('does not bind an approval to a rule a concurrent change ended before it occurred', async () => {
+      const rule = await createRule({
+        organizationId: closing,
+        businessLine: 'MAINTENANCE',
+        rateBasisPoints: 500,
+      }).expect(201);
+
+      const { changed, recorded } = await approvalBesideChange(closing, () =>
+        patchRule(rule.body.id, { status: 'INACTIVE' }).then((r) => r),
+      );
+      expect(changed.status).toBe(200);
+      expect(new Date(changed.body.validTo).getTime()).toBeLessThanOrEqual(
+        recorded.occurredAt.getTime(),
+      );
+
+      // The rule ended before the approval occurred: nothing applies to it.
+      expect(recorded).toMatchObject({ pricingOutcome: 'NO_ACTIVE_RULE', pricingRuleId: null });
+      expect(await committedPricing(recorded)).toEqual({
+        pricingOutcome: recorded.pricingOutcome,
+        pricingRuleId: recorded.pricingRuleId,
+      });
+
+      await settle('race-close', payer, recorded.id);
+      expect(await commissionOf(recorded.id)).toMatchObject({
+        outcome: 'NO_ACTIVE_RULE',
+        amountMinor: 0n,
+      });
+    });
+
+    it('does the same for a platform rule, which every tenant’s pricing reads', async () => {
+      // Narrowed to the type, so it sits beside — not over — any platform line rule.
+      const rule = await createRule({
+        businessLine: 'MAINTENANCE',
+        transactionType: 'MAINTENANCE_SERVICE',
+        rateBasisPoints: 250,
+      }).expect(201);
+      platformRules.push(rule.body.id);
+
+      const { changed, recorded } = await approvalBesideChange(platformed, () =>
+        patchRule(rule.body.id, { status: 'INACTIVE' }).then((r) => r),
+      );
+      expect(changed.status).toBe(200);
+      expect(new Date(changed.body.validTo).getTime()).toBeLessThanOrEqual(
+        recorded.occurredAt.getTime(),
+      );
+      expect(recorded).toMatchObject({ pricingOutcome: 'NO_ACTIVE_RULE', pricingRuleId: null });
+      expect(await committedPricing(recorded)).toEqual({
+        pricingOutcome: recorded.pricingOutcome,
+        pricingRuleId: recorded.pricingRuleId,
+      });
+    });
+
+    it('does not pin NO_ACTIVE_RULE on an approval a concurrently created rule covers', async () => {
+      const { changed, recorded } = await approvalBesideChange(opening, () =>
+        createRule({
+          organizationId: opening,
+          businessLine: 'MAINTENANCE',
+          rateBasisPoints: 400,
+        }).then((r) => r),
+      );
+      expect(changed.status).toBe(201);
+      expect(new Date(changed.body.validFrom).getTime()).toBeLessThanOrEqual(
+        recorded.occurredAt.getTime(),
+      );
+
+      // The rule was in force when the approval occurred: it applies.
+      expect(recorded).toMatchObject({
+        pricingOutcome: 'RULE_APPLIED',
+        pricingRuleId: changed.body.id,
+      });
+      expect(await committedPricing(recorded)).toEqual({
+        pricingOutcome: recorded.pricingOutcome,
+        pricingRuleId: recorded.pricingRuleId,
+      });
+
+      await settle('race-open', payer, recorded.id);
+      expect(await commissionOf(recorded.id)).toMatchObject({
+        ruleId: changed.body.id,
+        rateBasisPoints: 400,
+        amountMinor: 40_000n,
+      });
     });
   });
 });
