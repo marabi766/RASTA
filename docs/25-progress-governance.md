@@ -91,7 +91,7 @@ PROPOSED → READY → IN_PROGRESS → ACCEPTED
                    BLOCKED
 ```
 
-بازگرداندن `ACCEPTED` به وضعیت دیگر فقط برای اصلاح یک پذیرش اشتباه مجاز است و باید با `STATUS_CORRECTED` در Change Log ثبت شود. Feature دارای Story فقط وقتی `ACCEPTED` می‌شود که تمام Storyهای فعال آن `ACCEPTED` باشند؛ پذیرش هر Story می‌تواند مستقل و همراه Evidence خودش انجام شود.
+بازگرداندن `ACCEPTED` به وضعیت دیگر فقط برای اصلاح یک پذیرش اشتباه مجاز است و باید با `STATUS_CORRECTED` در Change Log ثبت شود؛ این ورودی به انتهای Change Log افزوده می‌شود، `approvalRef` و `recordIds` (شامل همان آیتم) دارد و تاریخ آن از تاریخ پذیرش زودتر نیست. ورودی `ITEM_ACCEPTED` قبلی به‌عنوان تاریخچه باقی می‌ماند و حذف یا بازنویسی نمی‌شود. Feature دارای Story فقط وقتی `ACCEPTED` می‌شود که تمام Storyهای فعال آن `ACCEPTED` باشند؛ پذیرش هر Story می‌تواند مستقل و همراه Evidence خودش انجام شود.
 
 ## ۲۵٫۵ Definition of Ready و Definition of Accepted
 
@@ -113,7 +113,7 @@ PROPOSED → READY → IN_PROGRESS → ACCEPTED
 - برای دامنه حساس، تست‌های مالی/امنیتی/E2E لازم سبزند؛
 - نتیجه توسط مالک محصول یا نماینده صریحاً مجاز او پذیرفته شده است.
 
-پذیرش در Change Log با `ITEM_ACCEPTED` ثبت می‌شود: `approvalRef` می‌گوید چه کسی، کی و کجا پذیرفت و `recordIds` آیتم‌های پذیرفته‌شده را نام می‌برد. Validator و Schema ورودی بدون `approvalRef` یا `recordIds` را رد می‌کنند و Validator ورودی‌ای را که آیتمی غیر `ACCEPTED` را نام ببرد نیز رد می‌کند. پذیرش‌های پیش از ۲۰۲۶-۱۰-۱۵ این ورودی را ندارند.
+پذیرش در Change Log با `ITEM_ACCEPTED` ثبت می‌شود: `approvalRef` می‌گوید چه کسی، کی و کجا پذیرفت و `recordIds` آیتم‌های پذیرفته‌شده را نام می‌برد. Validator و Schema ورودی بدون `approvalRef` یا `recordIds` را رد می‌کنند و Validator ورودی‌ای را که آیتمی غیر `ACCEPTED` را نام ببرد نیز رد می‌کند، مگر آنکه پس از آن ورودی، یک `STATUS_CORRECTED` تأییدشده برای همان آیتم (طبق § ۲۵٫۴) ثبت شده باشد؛ تناقض بدون چنین اصلاحی خطاست. پذیرش‌های پیش از ۲۰۲۶-۱۰-۱۵ این ورودی را ندارند.
 
 Evidence معتبر شامل Commit، PR، CI، Test، Live Runtime یا سند ثبت‌کننده Evidence است. صرف نوشتن عبارت «Done» یا `READY_FOR_NEXT_PHASE` Evidence نیست.
 

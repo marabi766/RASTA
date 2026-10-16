@@ -49,7 +49,9 @@ test('a logged acceptance names who decided and only records that are ACCEPTED',
   );
 
   // The log may not claim an acceptance the status contradicts, in either order
-  // of mistake: a record withdrawn from ACCEPTED, or one never accepted at all.
+  // of mistake: a record withdrawn from ACCEPTED without a correction, or one
+  // never accepted at all. (The withdrawn record's own STATUS_CORRECTED entry
+  // in the baseline precedes its acceptance, so it explains nothing.)
   const withdrawn = copy();
   const id = logged[0].recordIds[0];
   withdrawn.items.find((item) => item.id === id).status = 'IN_PROGRESS';
@@ -70,6 +72,64 @@ test('a logged acceptance names who decided and only records that are ACCEPTED',
   assert.ok(
     validateBacklogSchema(missingIds, schema).some((error) =>
       error.includes("must have required property 'recordIds'"),
+    ),
+  );
+});
+
+test('a mistaken acceptance is corrected by appending an approved STATUS_CORRECTED entry', () => {
+  // docs/25 § 25.4: the acceptance stays in the log as history; a later
+  // approved correction of the same record explains its current status.
+  const acceptance = baseline.changeLog.find((entry) => entry.type === 'ITEM_ACCEPTED');
+  const id = acceptance.recordIds[0];
+  function withdrawnWith(...entries) {
+    const backlog = copy();
+    backlog.items.find((item) => item.id === id).status = 'IN_PROGRESS';
+    backlog.changeLog.push(...entries);
+    return backlog;
+  }
+  const correction = {
+    date: acceptance.date,
+    type: 'STATUS_CORRECTED',
+    reason: `${id} was accepted by mistake and is back in progress.`,
+    recordedBy: 'Project manager',
+    approvalRef: 'Product owner correction, test fixture',
+    recordIds: [id],
+  };
+
+  const corrected = withdrawnWith(correction);
+  assert.deepEqual(validateBacklog(corrected), []);
+  assert.deepEqual(validateBacklogSchema(corrected, schema), []);
+  assert.deepEqual(
+    corrected.changeLog.find((entry) => entry.type === 'ITEM_ACCEPTED'),
+    acceptance,
+  );
+
+  // Anything short of that is still an unexplained contradiction.
+  const otherId = baseline.items.find((item) => item.status === 'IN_PROGRESS').id;
+  const reaccepted = withdrawnWith(correction, { ...acceptance, recordIds: [id] });
+  const unexplained = {
+    unapproved: withdrawnWith({ ...correction, approvalRef: null }),
+    'blank approval': withdrawnWith({ ...correction, approvalRef: ' ' }),
+    'another record': withdrawnWith({ ...correction, recordIds: [otherId] }),
+    'dated before the acceptance': withdrawnWith({ ...correction, date: '2026-10-14' }),
+    'a different change type': withdrawnWith({ ...correction, type: 'POINTS_CHANGED' }),
+    're-accepted after the correction': reaccepted,
+  };
+  for (const [name, backlog] of Object.entries(unexplained)) {
+    assert.ok(
+      validateBacklog(backlog).some((error) =>
+        error.includes('requires recordIds that exist and are ACCEPTED'),
+      ),
+      name,
+    );
+  }
+
+  // A correction never vouches for a record that does not exist.
+  const missing = withdrawnWith({ ...correction, recordIds: [id, 'NOPE-001'] });
+  missing.changeLog.find((entry) => entry.type === 'ITEM_ACCEPTED').recordIds.push('NOPE-001');
+  assert.ok(
+    validateBacklog(missing).some((error) =>
+      error.includes('requires recordIds that exist and are ACCEPTED'),
     ),
   );
 });
