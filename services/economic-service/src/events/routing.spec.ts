@@ -292,6 +292,19 @@ const PAYLOADS = {
       label: null,
     },
   },
+  PARTICIPATION_RULE_CHANGED: {
+    ruleId: 'PRL_1',
+    change: 'CREATED' as const,
+    changedBy: 'USR-1',
+    changedAt: '2026-10-16T00:00:00.000Z',
+    before: null,
+    after: {
+      version: 1,
+      windowDays: 90,
+      contributions: [{ triggerEvent: 'USAGE_RECORDED', weight: 1, maxPerWindow: null }],
+      label: null,
+    },
+  },
   TRANSACTION_STATUS_CHANGED: {
     transactionId: TXN,
     organizationId: ORG,
@@ -329,6 +342,7 @@ const EXPECTED: { [N in EconomicEventName]: { scope: PartitionScope; key: string
   JOURNAL_POSTED: { scope: 'TRANSACTION', key: TXN },
   COMMISSION_RULE_CHANGED: { scope: 'RULE', key: 'CMR_1' },
   REWARD_RULE_CHANGED: { scope: 'RULE', key: 'RWR_1' },
+  PARTICIPATION_RULE_CHANGED: { scope: 'RULE', key: 'PRL_1' },
   TRANSACTION_STATUS_CHANGED: { scope: 'TRANSACTION', key: TXN },
 };
 
@@ -344,13 +358,13 @@ describe('every published economic event has a partition decision', () => {
     expect(resolve(name)).toEqual(EXPECTED[name]);
   });
 
-  it('covers exactly the twenty-one events the catalogue publishes', () => {
+  it('covers exactly the twenty-two events the catalogue publishes', () => {
     // Guards the table above against drift in both directions: an event added
     // to the catalogue without a row here, and a row left behind for an event
     // that no longer exists.
     expect(Object.keys(EXPECTED).sort()).toEqual([...NAMES].sort());
     expect(Object.keys(PARTITION_KEY_POLICY).sort()).toEqual([...NAMES].sort());
-    expect(NAMES).toHaveLength(21);
+    expect(NAMES).toHaveLength(22);
   });
 });
 
@@ -493,6 +507,7 @@ describe('aggregate identity is untouched by this change', () => {
       JOURNAL_POSTED: 'Journal',
       COMMISSION_RULE_CHANGED: 'CommissionRule',
       REWARD_RULE_CHANGED: 'RewardRule',
+      PARTICIPATION_RULE_CHANGED: 'ParticipationRule',
       TRANSACTION_STATUS_CHANGED: 'Transaction',
     });
   });

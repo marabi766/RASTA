@@ -32,8 +32,10 @@ import {
   updateCommissionRuleSchema,
 } from '../commission/dto';
 import {
+  createParticipationRuleSchema,
   createRewardRuleSchema,
   listRewardRulesQuerySchema,
+  myParticipationQuerySchema,
   myRewardsQuerySchema,
   updateRewardRuleSchema,
 } from '../reward/dto';
@@ -68,6 +70,7 @@ const REQUEST_BODIES: Record<string, JsonSchema> = {
   'PATCH /v1/commissions/rules/{id}': toJsonSchema(updateCommissionRuleSchema),
   'POST /v1/rewards/rules': toJsonSchema(createRewardRuleSchema),
   'PATCH /v1/rewards/rules/{id}': toJsonSchema(updateRewardRuleSchema),
+  'POST /v1/rewards/participation-rules': toJsonSchema(createParticipationRuleSchema),
   'POST /v1/payment-intents/{id}/refund': toJsonSchema(refundPaymentSchema),
   'POST /v1/payment-intents/{id}/reconciliation/requeue': toJsonSchema(operatorDecisionSchema),
   'POST /v1/payment-intents/{id}/reconciliation/resolutions': toJsonSchema(proposeResolutionSchema),
@@ -89,6 +92,7 @@ const QUERY_SCHEMAS: Record<string, JsonSchema> = {
   'GET /v1/commissions/rules': toJsonSchema(listCommissionRulesQuerySchema),
   'GET /v1/rewards/me': toJsonSchema(myRewardsQuerySchema),
   'GET /v1/rewards/rules': toJsonSchema(listRewardRulesQuerySchema),
+  'GET /v1/rewards/me/participation': toJsonSchema(myParticipationQuerySchema),
   'GET /v1/payment-intents': toJsonSchema(listPaymentsQuerySchema),
 };
 
@@ -169,6 +173,11 @@ const ERRORS: Record<string, readonly number[]> = {
   'GET /v1/rewards/rules': COMMON,
   'POST /v1/rewards/rules': WRITE,
   'PATCH /v1/rewards/rules/{id}': WRITE,
+  // A query that fails its schema — a `userId` included — is a 400.
+  'GET /v1/rewards/me/participation': [...COMMON, 400],
+  'GET /v1/rewards/participation-rules': COMMON,
+  // No 404 or 409: nothing is named, and numbering waits on a lock.
+  'POST /v1/rewards/participation-rules': [...COMMON, 400],
   'GET /v1/payment-intents': LIST,
   'GET /v1/payment-intents/{id}': READ_ONE,
   'POST /v1/payment-intents/{id}/refund': WRITE,
