@@ -24,6 +24,7 @@ import { InsuranceService } from '../insurance/insurance.service';
 import { ClaimService } from '../insurance/claim.service';
 import {
   activateAssetSchema,
+  attachClaimDocumentSchema,
   attachDocumentSchema,
   changeStatusSchema,
   createAssetSchema,
@@ -41,6 +42,7 @@ import {
   transferAssetSchema,
   updateAssetSchema,
   type ActivateAssetDto,
+  type AttachClaimDocumentDto,
   type AttachDocumentDto,
   type ChangeStatusDto,
   type AssetView,
@@ -412,6 +414,24 @@ export class AssetController {
   @ApiOperation({ summary: 'File a claim against one of this asset’s policies' })
   submitClaim(@Param('id') id: string, @Body(zodPipe(submitClaimSchema)) dto: SubmitClaimDto) {
     return this.claims.submitClaim(id, dto);
+  }
+
+  @Post(':id/insurance-claims/:claimId/documents')
+  @Roles('ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN')
+  @ApiOperation({
+    summary: 'Attach a document held by document-service to an open claim (Q-128)',
+    description:
+      'The document id is checked against document-service for the organization that owns the ' +
+      'machine: a document of another organization, a missing one and one registered for another ' +
+      'machine all answer the same 404. Attaching the same document again answers the existing ' +
+      'reference. 422 when the claim is no longer open or already holds 20 documents.',
+  })
+  attachClaimDocument(
+    @Param('id') id: string,
+    @Param('claimId') claimId: string,
+    @Body(zodPipe(attachClaimDocumentSchema)) dto: AttachClaimDocumentDto,
+  ) {
+    return this.claims.attachDocument(id, claimId, dto);
   }
 
   @Post(':id/insurance-claims/:claimId/review')

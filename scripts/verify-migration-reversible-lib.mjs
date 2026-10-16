@@ -2178,6 +2178,7 @@ export const EXPECTED = {
       'asset_transfer',
       'idempotency_key',
       'insurance_claim',
+      'insurance_claim_document',
       'insurance_policy',
       'organization_ref',
       'outbox_message',
@@ -2190,6 +2191,7 @@ export const EXPECTED = {
     constraints: [
       'ck_claim_approved_amount_non_negative',
       'ck_claim_claimed_amount_non_negative',
+      'ck_claim_document_ids_not_blank',
       'ck_claim_decided_iff_decision_recorded',
       'ck_claim_rejected_has_no_approved_amount',
       'ck_claim_settled_iff_settlement_recorded',
