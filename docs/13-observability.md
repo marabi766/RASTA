@@ -82,6 +82,19 @@ Middleware (Gateway) → RequestContext ایجاد می‌شود
 Redaction خودکار در `@rasta/logging`: فهرست کلیدهای حساس (`password`, `token`, `secret`,
 `authorization`, `nationalId`, `cardNumber`, …) پیش از سریال‌سازی جایگزین `[REDACTED]` می‌شوند.
 
+پاک‌سازی آخرِ مسیر (`scrubbing-destination.ts`): هر رشتهٔ سطر نهایی از Credential پاک و کوتاه می‌شود، و
+خودِ جریان `createLogger` را می‌پوشاند — از جمله جریان دومی که Instrumentation پینوی OTel برای ارسال Log به
+OTLP/Collector اضافه می‌کند؛ پس مقصد پیکربندی‌شده و Exporter هر دو همان سطرِ پاک‌شده را می‌گیرند. کران‌ها
+بر حسب **UTF-16 code unit** هستند (نه بایت): ۱۶Ki برای هر رشته (به‌علاوهٔ نشانهٔ برش) و ۶۴Ki برای سطر، که **پس از**
+پاک‌سازی (و جایگزینی `[REDACTED]`) دوباره سنجیده می‌شود؛ سطر بلندتر با نشانهٔ ثابت جایگزین می‌شود. در هر
+برش (پیمایش ۶۴Ki پشته، سقف هر رشته) سطر یا واژه‌ای که برش از میانش می‌گذرد دور ریخته و با `…[TRUNCATED]`
+جایگزین می‌شود، نه پاک‌سازی: تکه‌ای که `@` رشتهٔ اتصالش را از دست داده دیگر Credential شناخته نمی‌شد. خطای
+ناهمزمان مقصد و اعضای Multistreamی که Instrumentation OTel می‌سازد مهار می‌شود (Listener ‏`error` که هرگز
+نمی‌اندازد). `destination` فقط جریان ساده است (Writable یا `pino.destination`): Multistream و Transportِ پینو
+(`pino.transport`)، در هر عمق، در `createLogger` خطا می‌دهند — عضوی که دارندهٔ Multistream بعداً بیفزاید
+Listener ندارد، و مسیردهیِ چندهدفهٔ Transport سطح عددی می‌خواهد و سطر بی‌صدا حذف می‌شد. Fan-out را خودِ Logger
+می‌سازد؛ در مخزن هیچ فراخواننده‌ای `destination` نمی‌دهد. باقی‌مانده: T-07 در docs/23.
+
 **MVP → PRODUCTION.** MVP: خروجی به stdout، تجمیع با `docker compose logs`.
 Production: OTel Collector → Loki یا سامانه معادل، با نگهداشت ۳۰ روز (۱۳ ماه برای
 Logهای مالی).
@@ -139,7 +152,8 @@ Logهای مالی).
 
 `OutboxPurgeScheduler` (`@rasta/nest-common`) ردیف‌های منتشرشده را پس از `OUTBOX_PURGE_RETENTION_HOURS` پاک می‌کند. فاز ۱
 (#247) این سرویس‌ها را دارد: fleet، asset، document، maintenance، organization؛ فاز ۲a (#276): notification، supplier،
-inventory؛ و identity (#280، فقط `outbox_message`، نه `security_event_outbox`). سرویس‌های دیگر هنوز Purge ندارند.
+inventory؛ و identity (#280، فقط `outbox_message`، نه `security_event_outbox`). فاز ۲ب (#277):
+construction، contract، economic، marketplace. سرویس‌های دیگر هنوز Purge ندارند.
 
 | متریک                                               | نوع     | برچسب            | دقیقاً چه چیزی را می‌شمارد                                                 |
 | --------------------------------------------------- | ------- | ---------------- | -------------------------------------------------------------------------- |

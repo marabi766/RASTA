@@ -1,4 +1,5 @@
 import { DEFAULT_SHUTDOWN_TIMEOUT_MS } from '@rasta/config';
+import { scrubMessage } from '@rasta/logging';
 
 /**
  * One graceful-shutdown path for a Nest service.
@@ -90,10 +91,17 @@ export interface GracefulShutdown {
 export const DEFAULT_AFTER_CLOSE_TIMEOUT_MS = 3_000;
 export const DEFAULT_SHUTDOWN_SIGNALS: readonly NodeJS.Signals[] = ['SIGTERM', 'SIGINT'];
 
+// A close failure is often a driver error that echoes its connection string, so
+// the error is printed as scrubbed, capped text, never as the raw object.
 const consoleLogger: ShutdownLogger = {
   warn: (message) => console.warn(message),
   error: (message, error) =>
-    error === undefined ? console.error(message) : console.error(message, error),
+    error === undefined
+      ? console.error(message)
+      : console.error(
+          message,
+          scrubMessage(error instanceof Error ? (error.stack ?? error.message) : String(error)),
+        ),
 };
 
 /** A source can be installed on once: a second install would be a second path. */

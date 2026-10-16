@@ -110,6 +110,16 @@ export {
 } from './filters/exception.filter';
 
 export {
+  NestLoggerAdapter,
+  bootstrapLogger,
+  installNestLogger,
+  logFatal,
+  scrubLogValue,
+} from './logging/nest-logger';
+export { kafkaLogCreator } from './kafka/log-creator';
+export type { LoggerHost } from './logging/nest-logger';
+
+export {
   ZodValidationPipe,
   zodPipe,
   toErrorDetails,

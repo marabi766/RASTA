@@ -107,7 +107,8 @@ SELECT pi.id                 AS payment_intent_id,
 - هر ردیف با یکی از چهار علامت بالا، یا با `CAPTURED_REFUND_UNKNOWN`، **باید** یک تسک باز (`task_id`) داشته باشد: تسک در همان
   تراکنشی نوشته می‌شود که Hold یا علامت را می‌نویسد (ADR-064 § ۸، گام B1). `CAPTURED_NOT_CREDITED` تسک ندارد و نباید داشته
   باشد (تلاش دوبارهٔ Top-up حلش می‌کند). علامتی بی تسک باز یک ناسازگاری است — دست نزن و گزارش کن.
-- رویدادهای مربوط: `PAYMENT_REFUND_UNRECONCILED` با همان `paymentIntentId` (در Outbox یا `audit-service`) دلیل (`reason`) را
+- رویدادهای مربوط: `PAYMENT_REFUND_UNRECONCILED` با همان `paymentIntentId` (در Outbox یا `audit-service`؛ ردیف Outbox فقط
+  تا `OUTBOX_PURGE_RETENTION_HOURS` پس از انتشار می‌ماند، پیش‌فرض ۱۶۸ ساعت، D-052) دلیل (`reason`) را
   می‌گوید: `PROVIDER_OUTCOME_UNKNOWN`، `PROVIDER_DECLINED_RELEASE_PENDING`، `REVERSAL_FAILED` یا `INSUFFICIENT_BALANCE`.
   `REFUND_REQUESTED` عمداً رویداد ندارد — یعنی ثبت خود نتیجه هم شکست خورد.
 
