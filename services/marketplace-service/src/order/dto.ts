@@ -181,6 +181,8 @@ export type ListOrdersQuery = z.infer<typeof listOrdersQuerySchema>;
 // ---------------------------------------------------------------------------
 
 export interface OrderLineView {
+  /** The order line a return request names (RUN-005); stable for the life of the order. */
+  id: string;
   offerId: string;
   productId: string;
   productName: string;

@@ -4,3 +4,5 @@
 487919cecfe0ebaaaa058592632d5bec69011756:tests/e2e/src/target-guard.test.ts:generic-api-key:158
 # #319: sessionStorage entry name in a test (rasta.unresolved-dispute.TXN_1), not a secret (PM-verified).
 c0fbaeffb79669ddb501daac6e4015a306527fb3:apps/web/src/app/transactions/dispute-retry.spec.tsx:generic-api-key:41
+# #319 squash on main: the same test sessionStorage key name, not a secret (PM-verified).
+be0f5fa7e000d30e7fad8df39b530d743355ab01:apps/web/src/app/transactions/dispute-retry.spec.tsx:generic-api-key:51

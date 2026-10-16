@@ -132,14 +132,29 @@ describe('the roles the portal mirrors', () => {
   });
 });
 
+/**
+ * Optional fields economic-service accepts that the portal does not send yet. Listed exactly, so a
+ * new field still fails here: `disputeId` (#318, docs/23 D-053) names the dispute a resolution
+ * decides; omitting it keeps the pre-#318 behaviour.
+ */
+const OPTIONAL_UNSENT: Readonly<Record<DisputeCommand, Readonly<Record<string, string>>>> = {
+  DISPUTE: {},
+  RESOLVE_DISPUTE: { disputeId: 'disputeId:z.string().trim().min(1).max(64).optional()' },
+};
+
 describe('the bodies', () => {
   it.each(DISPUTE_COMMAND_TABLE)(
-    '$command: strict, with only the one field the portal sends, and its limits',
+    '$command: strict, with the one field the portal sends, its limits, and only listed optional extras',
     ({ command }) => {
       const field = DISPUTE_COMMAND_FIELDS[command];
       const schema = squash(topLevelConst(dto, SCHEMAS[command]).getText()) ?? '';
       expect(schema).toContain('.strict()');
-      expect([...schemaProperties(dto, SCHEMAS[command]).keys()]).toEqual([field]);
+      const extras = OPTIONAL_UNSENT[command];
+      expect([...schemaProperties(dto, SCHEMAS[command]).keys()]).toEqual([
+        field,
+        ...Object.keys(extras),
+      ]);
+      for (const declaration of Object.values(extras)) expect(schema).toContain(declaration);
       const { min, max } = DISPUTE_FIELD_LIMITS[field];
       expect(schema).toContain(`${field}:z.string().trim().min(${min}).max(${max})`);
     },
