@@ -141,7 +141,7 @@ export class SettlementService {
     const target = nextStatus(transactionId, transaction.status, 'SETTLE');
 
     // Whose books the journal goes on, when that is not the organization the
-    // request acts for: a platform administrator acting for another one
+    // request acts for: a system administrator acting for another one
     // (docs/23 D-054). Decided here, under the row lock, against the payer the
     // journal will name; anyone else is refused before anything is written.
     const books = settlementBooks(transaction.organizationId);
@@ -262,7 +262,7 @@ export class SettlementService {
           settledAt,
           settledBy,
           // Who acted is `settledBy`; this is whom for. The payer itself, or
-          // the organization a platform administrator acted for (D-054).
+          // the organization a system administrator acted for (D-054).
           actingOrganizationId: getOrganizationId(),
         },
       }),

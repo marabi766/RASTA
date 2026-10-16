@@ -150,7 +150,7 @@ export class LedgerService {
    * any future code path that forgets to call this method.
    *
    * `books` is the settlement's leave to post on the payer's books for a
-   * platform administrator acting for another organization (`access.ts`
+   * system administrator acting for another organization (`access.ts`
    * `settlementBooks`); without it the header is written for the request's own
    * organization or not at all.
    */

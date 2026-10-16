@@ -57,6 +57,17 @@ export const PLATFORM_ROLES = ['SYSTEM_ADMIN', 'UNION_ADMIN'] as const;
 export const RULE_ADMIN_ROLES = ['SYSTEM_ADMIN'] as const;
 
 /**
+ * The role that may settle a transaction whose payer is another organization.
+ *
+ * Narrower than `PLATFORM_ROLES`: whether a `UNION_ADMIN` may release another
+ * organization's escrow is a business rule nobody has decided (docs/24
+ * Q-136), so until it is, only `SYSTEM_ADMIN` crosses — the operator
+ * resolving a stuck settlement (docs/23 D-054). Settling one's own
+ * organization's transaction is not affected.
+ */
+export const SETTLEMENT_CROSSING_ROLES = ['SYSTEM_ADMIN'] as const;
+
+/**
  * The one role that must never reach this service.
  *
  * Refused here as well as at the gateway and in every controller's `@Roles`,
@@ -132,7 +143,8 @@ export function canCommitOrganization(organizationId: string): void {
   }
 
   // Platform administrators may act for another organization — an operator
-  // resolving a stuck settlement. Everyone else is confined to their own, and
+  // resolving a stuck settlement (settling itself is narrower still:
+  // `canSettleFor`). Everyone else is confined to their own, and
   // the mismatch is a 403 rather than a 404 because the caller already knows
   // which organization they asked to act for.
   // `getOrganizationId()` rather than `context.organizationId`: a service
@@ -141,6 +153,34 @@ export function canCommitOrganization(organizationId: string): void {
   if (getOrganizationId() !== organizationId && !hasPlatformScope()) {
     throw RastaError.tenantMismatch(organizationId, [context.organizationId ?? '(none)']);
   }
+}
+
+function maySettleAcrossOrganizations(): boolean {
+  const context = getContext();
+  if (context.authType === 'SERVICE') return false;
+  return SETTLEMENT_CROSSING_ROLES.some((role) => context.roles.includes(role));
+}
+
+/**
+ * Whether the caller may settle a transaction this organization pays.
+ *
+ * {@link canCommitOrganization}, and then one rule more: acting for any
+ * organization but the payer is `SYSTEM_ADMIN`'s alone (docs/24 Q-136). A
+ * `UNION_ADMIN` who may read the transaction — platform scope, docs/09 § 9.3 —
+ * is refused here with 403 `FORBIDDEN`, which the exception filter records as
+ * an access denial like every other. The same check guards a fresh settlement
+ * and the replay of a stored one, so a role taken away is taken away from both.
+ */
+export function canSettleFor(payerOrganizationId: string): void {
+  canCommitOrganization(payerOrganizationId);
+  if (getOrganizationId() === payerOrganizationId) return;
+  if (!maySettleAcrossOrganizations()) throw settlementCrossingRefused();
+}
+
+function settlementCrossingRefused(): RastaError {
+  return RastaError.forbidden(
+    "Settling another organization's transaction is reserved to the system administrator",
+  );
 }
 
 /**
@@ -154,7 +194,7 @@ export function canCommitOrganization(organizationId: string): void {
 export interface SettlementBooks {
   /** The payer, whose books the settlement journal is posted on. */
   readonly organizationId: string;
-  /** The organization the platform administrator is acting for. */
+  /** The organization the system administrator is acting for. */
   readonly actingOrganizationId: string;
 }
 
@@ -164,27 +204,27 @@ const issuedSettlementBooks = new WeakSet<SettlementBooks>();
  * Whose books a settlement journal is posted on, when that is not the
  * organization the request acts for.
  *
- * A settlement's journal belongs to the payer. A platform administrator acting
- * for another organization may settle it — `canCommitOrganization` admits
- * them, the operator resolving a stuck settlement (docs/09 § 9.3) — but the
- * journal header is tenant-scoped, and without this the guard refused the
- * write and the settlement failed as a 500. This is the narrow, explicit
- * leave to make that one write: everything else in the request (its
- * idempotency key, its attribution) stays with the acting organization.
+ * A settlement's journal belongs to the payer. A system administrator acting
+ * for another organization may settle it — {@link canSettleFor} admits them,
+ * the operator resolving a stuck settlement — but the journal header is
+ * tenant-scoped, and without this the guard refused the write and the
+ * settlement failed as a 500. This is the narrow, explicit leave to make that
+ * one write: everything else in the request (its idempotency key, its
+ * attribution) stays with the acting organization.
  *
  * `undefined` when the caller acts for the payer: there is nothing to cross.
- * Anyone else without platform scope — a service whose token names another
- * organization included — is refused exactly as `canCommitOrganization`
- * refuses them, so this check holds even where that one was not made first.
+ * Anyone else — a `UNION_ADMIN` (docs/24 Q-136), a service whose token names
+ * another organization — is refused exactly as {@link canSettleFor} refuses
+ * them, so this check holds even where that one was not made first.
  */
 export function settlementBooks(payerOrganizationId: string): SettlementBooks | undefined {
-  canCommitOrganization(payerOrganizationId);
+  canSettleFor(payerOrganizationId);
   const actingOrganizationId = getOrganizationId();
   if (actingOrganizationId === payerOrganizationId) return undefined;
-  if (!hasPlatformScope()) {
-    // Unreachable past `canCommitOrganization`; stated so the crossing never
-    // rests on another function's branch staying as it is.
-    throw RastaError.tenantMismatch(payerOrganizationId, [actingOrganizationId]);
+  if (!maySettleAcrossOrganizations()) {
+    // Unreachable past `canSettleFor`; stated so the crossing never rests on
+    // another function's branch staying as it is.
+    throw settlementCrossingRefused();
   }
   const books = Object.freeze({ organizationId: payerOrganizationId, actingOrganizationId });
   issuedSettlementBooks.add(books);

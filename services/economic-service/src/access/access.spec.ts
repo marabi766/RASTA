@@ -6,6 +6,7 @@ import {
   assertTransactionVisible,
   assertWalletVisible,
   canCommitOrganization,
+  canSettleFor,
   hasPlatformScope,
   isIssuedSettlementBooks,
   settlementBooks,
@@ -225,6 +226,43 @@ describe('canCommitOrganization', () => {
   });
 });
 
+describe('canSettleFor (docs/24 Q-136)', () => {
+  // ORG-B pays; the request acts for whichever organization the context names.
+
+  it.each(['SYSTEM_ADMIN', 'UNION_ADMIN', 'ORGANIZATION_ADMIN'])(
+    'leaves %s settling for its own organization exactly as before',
+    (role) => {
+      expect(() => run(asUser([role], 'ORG-B'), () => canSettleFor('ORG-B'))).not.toThrow();
+    },
+  );
+
+  it('admits a system administrator acting for another organization', () => {
+    expect(() => run(asUser(['SYSTEM_ADMIN'], 'ORG-A'), () => canSettleFor('ORG-B'))).not.toThrow();
+  });
+
+  it('refuses a union administrator acting for another organization with 403 FORBIDDEN', () => {
+    expect(() => run(asUser(['UNION_ADMIN'], 'ORG-A'), () => canSettleFor('ORG-B'))).toThrow(
+      expect.objectContaining({
+        code: 'FORBIDDEN',
+        message:
+          "Settling another organization's transaction is reserved to the system administrator",
+      }),
+    );
+  });
+
+  it('refuses everyone else as canCommitOrganization does', () => {
+    expect(() => run(asUser(['ORGANIZATION_ADMIN'], 'ORG-A'), () => canSettleFor('ORG-B'))).toThrow(
+      expect.objectContaining({ code: 'TENANT_MISMATCH' }),
+    );
+    expect(() =>
+      run(asService('marketplace-service', 'ORG-A'), () => canSettleFor('ORG-B')),
+    ).toThrow(expect.objectContaining({ code: 'TENANT_MISMATCH' }));
+    expect(() =>
+      run(asService('marketplace-service', 'ORG-B'), () => canSettleFor('ORG-B')),
+    ).not.toThrow();
+  });
+});
+
 describe('settlementBooks (docs/23 D-054)', () => {
   // ORG-B pays; the request acts for whichever organization the context names.
 
@@ -238,15 +276,21 @@ describe('settlementBooks (docs/23 D-054)', () => {
     );
   });
 
-  it.each(['SYSTEM_ADMIN', 'UNION_ADMIN'])(
-    'issues %s acting for another organization the payer’s books, naming both',
-    (role) => {
-      const books = run(asUser([role], 'ORG-A'), () => settlementBooks('ORG-B'));
+  it.each([{ roles: ['SYSTEM_ADMIN'] }, { roles: ['SYSTEM_ADMIN', 'UNION_ADMIN'] }])(
+    'issues $roles acting for another organization the payer’s books, naming both',
+    ({ roles }) => {
+      const books = run(asUser(roles, 'ORG-A'), () => settlementBooks('ORG-B'));
       expect(books).toEqual({ organizationId: 'ORG-B', actingOrganizationId: 'ORG-A' });
       expect(isIssuedSettlementBooks(books!)).toBe(true);
       expect(Object.isFrozen(books)).toBe(true);
     },
   );
+
+  it('refuses a union administrator acting for another organization (docs/24 Q-136)', () => {
+    expect(() => run(asUser(['UNION_ADMIN'], 'ORG-A'), () => settlementBooks('ORG-B'))).toThrow(
+      expect.objectContaining({ code: 'FORBIDDEN' }),
+    );
+  });
 
   it('refuses an organization administrator of another organization', () => {
     expect(() =>

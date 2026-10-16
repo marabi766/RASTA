@@ -26,7 +26,7 @@ import { RewardService } from '../reward/reward.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { IdempotencyStore } from '../shared/idempotency';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
-import { assertNotAuditor, canCommitOrganization } from '../access/access';
+import { assertNotAuditor, canSettleFor } from '../access/access';
 import { settleTransactionSchema, type SettleTransactionDto } from '../transaction/dto';
 import { listSettlementsQuerySchema, type ListSettlementsQuery } from './dto';
 import { SERVICE_NAME } from '../config/env';
@@ -120,10 +120,14 @@ export class SettlementController {
     );
   }
 
-  /** Whether the caller may settle this transaction: a party, entitled to commit its payer. */
+  /**
+   * Whether the caller may settle this transaction: a party, entitled to commit
+   * its payer — or, for another organization's, a system administrator only
+   * (`canSettleFor`, docs/24 Q-136). Asked of a replay too.
+   */
   private async authorizeSettlement(transactionId: string): Promise<void> {
     const transaction = await this.transactions.get(transactionId);
-    canCommitOrganization(transaction.organizationId);
+    canSettleFor(transaction.organizationId);
   }
 
   /**

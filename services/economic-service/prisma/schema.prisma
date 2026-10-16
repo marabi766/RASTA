@@ -1168,7 +1168,7 @@ model Settlement {
   settledBy String   @map("settled_by")
 
   /// The organization the settler acted for: the payer itself, or — for a
-  /// platform administrator settling another organization's transaction — the
+  /// system administrator settling another organization's transaction — the
   /// one they were acting in (docs/23 D-054). `settledBy` is who; the journal
   /// and `organizationId` are whose books. NULL only on rows settled before
   /// 20261016120000_settlement_acting_organization.

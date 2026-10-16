@@ -1,20 +1,20 @@
 import request from 'supertest';
 import type { Server } from 'node:http';
-import { runUnscoped } from '@rasta/nest-common';
-import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
+import { EXCEPTION_FILTER_LOGGER, runUnscoped } from '@rasta/nest-common';
+import { admin, apiTenant, bearer, internalToken, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, id } from './helpers';
 import { ECONOMIC_EVENTS } from '../src/events/events';
 
 /**
- * A platform administrator acting for organization A settles B's transaction
+ * A system administrator acting for organization A settles B's transaction
  * to C (docs/23 D-054; review of #287 r4, F3).
  *
- * Object authorization admits them — `canCommitOrganization` gives platform
- * scope the operator's crossing (docs/09 § 9.3) — but the settlement journal
- * is B's, and the journal header is tenant-scoped: the guard refused the write
- * as an implicit cross-tenant create, the settlement rolled back, and the
- * filter answered a bare 500. Now that one write crosses, on an explicit leave
- * (`access.ts` `settlementBooks`), and nothing else moves:
+ * Object authorization admits them — `canSettleFor` gives `SYSTEM_ADMIN` the
+ * operator's crossing — but the settlement journal is B's, and the journal
+ * header is tenant-scoped: the guard refused the write as an implicit
+ * cross-tenant create, the settlement rolled back, and the filter answered a
+ * bare 500. Now that one write crosses, on an explicit leave (`access.ts`
+ * `settlementBooks`), and nothing else moves:
  *
  *   - the money is on B's and C's books — the settlement row, the journal and
  *     its legs, `SETTLEMENT_COMPLETED`'s tenant;
@@ -23,10 +23,13 @@ import { ECONOMIC_EVENTS } from '../src/events/events';
  *   - the record says who acted (`settledBy`, the journal's `postedBy`, the
  *     event's actor) and for whom (`actingOrganizationId` = A).
  *
- * Everyone else is still refused before anything is written. On `main`'s
- * `src` the two trigger cases fail with 500.
+ * Everyone else is still refused before anything is written — a `UNION_ADMIN`
+ * acting for A included, fresh or replayed: whether a union administrator may
+ * settle another organization's transaction is undecided (docs/24 Q-136), and
+ * until it is, it is a 403 recorded as an access denial. On `main`'s `src` the
+ * trigger case fails with 500.
  */
-describe('a platform administrator settles another organization’s transaction (HTTP)', () => {
+describe('a system administrator settles another organization’s transaction (HTTP)', () => {
   let harness: ApiHarness;
   let http: Server;
 
@@ -130,7 +133,7 @@ describe('a platform administrator settles another organization’s transaction 
       }),
     );
 
-  it.each(['SYSTEM_ADMIN', 'UNION_ADMIN'] as const)(
+  it.each(['SYSTEM_ADMIN'] as const)(
     '%s acting for A settles B→C: on B’s and C’s books, keyed and attributed to A',
     async (role) => {
       const transactionId = await transaction('authorised');
@@ -212,6 +215,87 @@ describe('a platform administrator settles another organization’s transaction 
     await post('/v1/settlements', asPayer(), id('xsettle-own'), { transactionId }).expect(201);
     const [settlement] = await settlementsOf(transactionId);
     expect(settlement).toMatchObject({ organizationId: payer, actingOrganizationId: payer });
+  });
+
+  describe('a union administrator settles across organizations only once docs/24 Q-136 says so', () => {
+    const REFUSAL =
+      "Settling another organization's transaction is reserved to the system administrator";
+
+    it('UNION_ADMIN acting for A: 403 FORBIDDEN, recorded as an access denial, nothing written', async () => {
+      const transactionId = await transaction('authorised');
+      const key = id('xsettle-union');
+      const token = asPlatform('UNION_ADMIN');
+
+      // The filter's denial record — the one every 403 of this service leaves.
+      const denials = jest.spyOn(
+        harness.app.get<{ warn: (...args: unknown[]) => void }>(EXCEPTION_FILTER_LOGGER),
+        'warn',
+      );
+      try {
+        const response = await post('/v1/settlements', token, key, { transactionId });
+        expect(response.status).toBe(403);
+        expect(response.body).toMatchObject({ code: 'FORBIDDEN', message: REFUSAL });
+        expect(denials).toHaveBeenCalledTimes(1);
+        expect(denials).toHaveBeenCalledWith(
+          expect.objectContaining({ errorCode: 'FORBIDDEN', status: 403, path: '/v1/settlements' }),
+          'Access denied: FORBIDDEN',
+        );
+      } finally {
+        denials.mockRestore();
+      }
+
+      expect(await statusOf(transactionId)).toBe('PENDING_SETTLEMENT');
+      expect(await settlementsOf(transactionId)).toEqual([]);
+      expect(await settlementJournalsOf(transactionId)).toEqual([]);
+      // Released, not stored: a refusal before the effect is no answer to replay.
+      expect(await idempotencyRecords(key)).toEqual([]);
+
+      // A 403, not a 404, discloses nothing: platform scope still reads the
+      // transaction (docs/09 § 9.3).
+      await request(http)
+        .get(`/v1/transactions/${transactionId}`)
+        .set('authorization', token)
+        .expect(200);
+    });
+
+    it('UNION_ADMIN acting for the payer settles its own transaction as before', async () => {
+      const transactionId = await transaction('authorised');
+      const own = `Bearer ${admin(payer, ['UNION_ADMIN'], 'platform')}`;
+      await post('/v1/settlements', own, id('xsettle-union-own'), { transactionId }).expect(201);
+      const [settlement] = await settlementsOf(transactionId);
+      expect(settlement).toMatchObject({ organizationId: payer, actingOrganizationId: payer });
+    });
+
+    /** One person in A — the key binds issuer and subject, not roles. */
+    const samePerson = (roles: string[]) =>
+      `Bearer ${bearer({
+        sub: `sub-xsettle-person-${acting}`,
+        rastaUserId: 'USR-APITEST-XSETTLE-PERSON',
+        organizationId: acting,
+        organizationIds: [acting],
+        roles,
+      })}`;
+
+    it('the replay is judged as a fresh request: the settler, now only UNION_ADMIN, gets the 403 and nothing of the settlement', async () => {
+      const transactionId = await transaction('authorised');
+      const key = id('xsettle-replay');
+      const settle = (roles: string[]) =>
+        post('/v1/settlements', samePerson(roles), key, { transactionId });
+
+      const first = await settle(['SYSTEM_ADMIN']).expect(201);
+
+      const demoted = await settle(['UNION_ADMIN']);
+      expect(demoted.status).toBe(403);
+      expect(demoted.body).toMatchObject({ code: 'FORBIDDEN', message: REFUSAL });
+      const disclosed = JSON.stringify(demoted.body);
+      expect(disclosed).not.toContain(first.body.settlementId as string);
+      expect(disclosed).not.toContain(first.body.journalId as string);
+
+      // The record is untouched, and answers its actor again once restored.
+      const restored = await settle(['SYSTEM_ADMIN']).expect(201);
+      expect(restored.body).toEqual(first.body);
+      expect(await settlementsOf(transactionId)).toHaveLength(1);
+    });
   });
 
   /**
