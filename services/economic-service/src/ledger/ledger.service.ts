@@ -10,7 +10,12 @@ import { formatMinor } from '../shared/money';
 import { ledgerEntriesTotal, journalsPostedTotal } from '../observability/metrics';
 import { ENV, LOGGER } from '../tokens';
 import { ECONOMIC_TOPIC, SERVICE_NAME, type EconomicEnv } from '../config/env';
-import { ECONOMIC_EVENTS, validateEconomicPayload, type EconomicEventName } from '../events/events';
+import {
+  ECONOMIC_EVENTS,
+  ECONOMIC_EVENT_VERSIONS,
+  validateEconomicPayload,
+  type EconomicEventName,
+} from '../events/events';
 import { AGGREGATE_OF, resolvePartitionKey } from '../events/routing';
 import { allocateStreamSeqSql, buildOutboxRow } from '@rasta/nest-common';
 import type { Logger as StructuredLogger } from '@rasta/logging';
@@ -442,6 +447,8 @@ export class LedgerService {
         aggregateType: AGGREGATE_OF[input.eventName],
         aggregateId: input.aggregateId,
         eventName: input.eventName,
+        // The version the payload was just validated against (docs/07 § 7.8).
+        eventVersion: ECONOMIC_EVENT_VERSIONS[input.eventName],
         topic: ECONOMIC_TOPIC,
         payload,
         organizationId: input.organizationId,

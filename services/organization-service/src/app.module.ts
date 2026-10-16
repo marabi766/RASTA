@@ -139,9 +139,20 @@ export const LOGGER = Symbol('ORGANIZATION_LOGGER');
       // D-052: the relay and the purge drain together in the destroy phase,
       // by one deadline inside SHUTDOWN_TIMEOUT_MS.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OutboxPurgeScheduler, ENV],
-      useFactory: (relay: OutboxRelay, purge: OutboxPurgeScheduler, env: OrganizationEnv) =>
-        new OutboxShutdown({ relay, purge, budgetMs: outboxShutdownBudgetMs(env) }),
+      inject: [OutboxRelay, OutboxPurgeScheduler, KafkaEventPublisher, ENV],
+      useFactory: (
+        relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
+        publisher: KafkaEventPublisher,
+        env: OrganizationEnv,
+      ) =>
+        new OutboxShutdown({
+          relay,
+          purge,
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
+          budgetMs: outboxShutdownBudgetMs(env),
+        }),
     },
 
     {

@@ -144,7 +144,7 @@ describeWithKafka('fleet event flow over Kafka', () => {
 
   afterAll(async () => {
     await consumer?.disconnect();
-    await publisher?.onModuleDestroy();
+    await publisher?.stop();
     await cleanup(prisma, [org.a, org.b]);
     await prisma?.onModuleDestroy();
   }, 60_000);
