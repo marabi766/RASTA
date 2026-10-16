@@ -28,3 +28,11 @@ export const FLASH_PARAM = 'flash';
  * the server rendered rather than against anything the browser claims.
  */
 export const BASELINE_FIELD = 'baseline';
+
+/**
+ * The hidden field of a dispute command's form that carries its replay
+ * deadline (`server/dispute-replay.ts`): signed when the page was drawn, so
+ * the action knows from the server's own clock — not the browser's storage —
+ * until when the same request may still be sent again.
+ */
+export const REPLAY_FIELD = 'replay';

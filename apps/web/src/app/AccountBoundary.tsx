@@ -7,14 +7,25 @@ import {
   purgeAllUnresolvedOrders,
   purgeForeignUnresolvedOrders,
 } from '@/lib/unresolved-order';
+import {
+  markDisputesOpen,
+  purgeAllUnresolvedDisputes,
+  purgeForeignUnresolvedDisputes,
+} from '@/lib/unresolved-dispute';
 
 /**
- * The browser's side of an account boundary: what an unresolved order left in
- * `sessionStorage` (`lib/unresolved-order.ts`) must not outlive.
+ * The browser's side of an account boundary: what an unresolved order or
+ * dispute command left in `sessionStorage` (`lib/unresolved-order.ts`,
+ * `lib/unresolved-dispute.ts`) must not outlive. Both follow the same rules.
  *
  * - **Logout.** Any form posting to `/auth/logout` — every portal page has its
  *   own — empties every remembered order before the navigation leaves. A capture
- *   listener on the document, so no page has to remember to wire it.
+ *   listener on the document, so no page has to remember to wire it. A
+ *   remembered dispute command is reduced instead, to a marker with no text,
+ *   no login tag and no stamp that still says its outcome is unknown: a dispute
+ *   command repeated under a fresh key can act on a newer dispute, so the same
+ *   person signing in again must not be offered a fresh form over it (PR 319
+ *   review 2, finding 1). The next point removes it for anyone else.
  * - **A page for another person.** A page drawn for `owner` removes the entries
  *   of anyone else (and any it cannot read) on its first load, so a tab handed
  *   from one person to the next never shows the first one's offer, quantity or
@@ -35,13 +46,18 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
   useEffect(() => {
     if (owner === null) return;
     markAccountOpen();
+    markDisputesOpen();
     purgeForeignUnresolvedOrders(owner);
+    purgeForeignUnresolvedDisputes(owner);
   }, [owner]);
 
   useEffect(() => {
     const onSubmit = (event: Event) => {
       const form = event.target;
-      if (form instanceof HTMLFormElement && isLogout(form)) purgeAllUnresolvedOrders();
+      if (form instanceof HTMLFormElement && isLogout(form)) {
+        purgeAllUnresolvedOrders();
+        purgeAllUnresolvedDisputes();
+      }
     };
     document.addEventListener('submit', onSubmit, true);
     return () => document.removeEventListener('submit', onSubmit, true);
