@@ -193,6 +193,61 @@ describe('return request API', () => {
       expect(response.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
     });
 
+    describe.each([
+      [
+        'expired',
+        (idempotencyKey: string) =>
+          // Both timestamps move: `ck_idempotency_expiry` wants the expiry after the creation.
+          harness.prisma.client.idempotencyKey.updateMany({
+            where: { key: idempotencyKey },
+            data: {
+              createdAt: new Date(Date.now() - 7_200_000),
+              expiresAt: new Date(Date.now() - 60_000),
+            },
+          }),
+      ],
+      [
+        'purged',
+        (idempotencyKey: string) =>
+          harness.prisma.client.idempotencyKey.deleteMany({ where: { key: idempotencyKey } }),
+      ],
+    ])('a retry after the key’s record is %s (Codex r1 on #310, finding 1)', (_, forget) => {
+      it('is a stable 409 CONFLICT, never a 500, and files nothing twice', async () => {
+        // Two units sold, one asked: the window is open and a unit is still free, so only the
+        // command index can refuse the retry — the case that used to escape as a 500.
+        const { orderId, lineId } = await completedOrder(2);
+        const idempotencyKey = apiKey('ret-expired');
+        const first = await ask(orderId, lineId, 1, buyer(buyerOrg), idempotencyKey).expect(201);
+        await runUnscoped('the suite ages or purges the key past its retention', () =>
+          forget(idempotencyKey),
+        );
+
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const retry = await ask(orderId, lineId, 1, buyer(buyerOrg), idempotencyKey).expect(409);
+          expect(retry.body).toMatchObject({
+            code: 'CONFLICT',
+            message: 'A return has already been requested on this order with this Idempotency-Key',
+          });
+          // Waiting will not change it, so nothing tells the client to wait.
+          expect(retry.headers['retry-after']).toBeUndefined();
+        }
+
+        const listed = await request(http)
+          .get('/v1/returns')
+          .query({ orderId })
+          .set(as(buyer(buyerOrg)))
+          .expect(200);
+        expect(listed.body.items.map((item: { id: string }) => item.id)).toEqual([first.body.id]);
+        expect(await eventsOf(buyerOrg, first.body.id)).toHaveLength(1);
+        // The fresh claim was released, not left in flight.
+        expect(
+          await runUnscoped('the suite counts what the key left', () =>
+            harness.prisma.client.idempotencyKey.count({ where: { key: idempotencyKey } }),
+          ),
+        ).toBe(0);
+      });
+    });
+
     it('never lets requests take more than the order sold, in total', async () => {
       const { orderId, lineId } = await completedOrder(3);
       await ask(orderId, lineId, 2).expect(201);

@@ -18,6 +18,7 @@ import {
   searchProductsQuerySchema,
   updateOfferSchema,
 } from '../offer/dto';
+import { createReturnSchema, decideReturnSchema, listReturnsQuerySchema } from '../returns/dto';
 
 /**
  * Completes the OpenAPI document Nest builds from the decorators.
@@ -47,6 +48,9 @@ const REQUEST_BODIES: Record<string, JsonSchema> = {
   'POST /v1/products': toJsonSchema(createProductSchema),
   'POST /v1/offers': toJsonSchema(createOfferSchema),
   'PATCH /v1/offers/{id}': toJsonSchema(updateOfferSchema),
+  // RUN-005: the order path parameter is `orderId` there, as the controller names it.
+  'POST /v1/orders/{orderId}/returns': toJsonSchema(createReturnSchema),
+  'POST /v1/returns/{id}/decisions': toJsonSchema(decideReturnSchema),
 };
 
 /** Query schemas, so filtering and pagination are described, not implied. */
@@ -54,6 +58,7 @@ const QUERY_SCHEMAS: Record<string, JsonSchema> = {
   'GET /v1/orders': toJsonSchema(listOrdersQuerySchema),
   'GET /v1/products': toJsonSchema(searchProductsQuerySchema),
   'GET /v1/products/{id}/offers': toJsonSchema(searchProductsQuerySchema),
+  'GET /v1/returns': toJsonSchema(listReturnsQuerySchema),
 };
 
 /**
@@ -67,8 +72,11 @@ const QUERY_SCHEMAS: Record<string, JsonSchema> = {
  * among the operations that must be idempotent, and without a key a double
  * submit published two offers (or created two products).
  *
+ * And every unsafe return-request route (RUN-005): a retried POST must not file
+ * two requests or decide one twice.
+ *
  * It is also what the gateway enforces: `requiresIdempotencyKey` applies to the
- * whole `orders`, `products` and `offers` prefixes (unsafe methods only),
+ * whole `orders`, `products`, `offers` and `returns` prefixes (unsafe methods only),
  * because teaching the routing layer which verb commits money would give it
  * domain knowledge ADR-009 keeps out of it. A service that accepted a key on
  * some of these and refused it on others would make the gateway's rule wrong
@@ -86,6 +94,9 @@ const IDEMPOTENT_ROUTES = new Set([
   'POST /v1/orders/{id}/disputes/resolve',
   'POST /v1/orders/{id}/cancel',
   'POST /v1/orders/{id}/reviews',
+  'POST /v1/orders/{orderId}/returns',
+  'POST /v1/returns/{id}/decisions',
+  'POST /v1/returns/{id}/cancellation',
 ]);
 
 /**
@@ -116,6 +127,12 @@ const ERRORS: Record<string, readonly number[]> = {
   'GET /v1/offers': COMMON,
   'POST /v1/offers': WRITE,
   'PATCH /v1/offers/{id}': WRITE,
+  // A malformed filter is refused with 400 before anything is read.
+  'GET /v1/returns': [...COMMON, 400],
+  'GET /v1/returns/{id}': READ_ONE,
+  'POST /v1/orders/{orderId}/returns': WRITE,
+  'POST /v1/returns/{id}/decisions': WRITE,
+  'POST /v1/returns/{id}/cancellation': WRITE,
 };
 
 const STATUS_TEXT: Record<number, string> = {
@@ -210,9 +227,17 @@ export function enrichOpenApiDocument(
         ];
       }
 
-      // A success body, unless the route genuinely returns none.
-      const success = method.toUpperCase() === 'POST' && !body ? '200' : successStatus(method);
+      // The success status the route declares (`@HttpCode`, which Nest has already published as
+      // the operation's one 2xx), so the document never adds a second one beside it — a decision
+      // that answers 200 is not also a 201. Only an operation Nest gave none is guessed at.
       operation.responses ??= {};
+      const declared = Object.keys(operation.responses).filter((status) => /^2\d\d$/.test(status));
+      const success =
+        declared.length === 1 && declared[0]
+          ? declared[0]
+          : method.toUpperCase() === 'POST' && !body
+            ? '200'
+            : successStatus(method);
       operation.responses[success] = {
         description: 'Success',
         content: { 'application/json': { schema: {} } },
