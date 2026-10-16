@@ -9,21 +9,23 @@
 --     writes no row and opens no route that writes one: who configures them is docs/24 Q-125.
 --   * `statement` — a statement of work on a SIGNED contract, made by the contractor: a number per
 --     contract taken under the contract's row lock, and the gross, the deductions and the net in
---     minor units, net = gross − Σ deductions, computed once. DRAFT → SUBMITTED in this change; the
---     whole lifecycle of ADR-068 § 5 is declared now (adding a value to a PostgreSQL enum cannot be
---     reversed), and the approvals that reach the rest are the next change's.
+--     minor units, net = gross − Σ deductions, computed once. It stays a DRAFT in this change: no
+--     transition is open. Submission opens with the next change, together with the approval
+--     policies of both chains and their snapshot at submission (ADR-068 § 5). The whole lifecycle
+--     is declared now, because adding a value to a PostgreSQL enum cannot be reversed.
 --   * `statement_line` — what the statement claims: a bounded description and a positive amount.
 --   * `statement_deduction` — a configured deduction applied to a statement: the rule it came from,
 --     and a snapshot of its name, rate and base with the amount, so what a statement says never
 --     changes with the configuration.
 --
 -- What the statement says is written with it, in one transaction, and never changes: lines and
--- deductions are inserted only while it is a DRAFT and never updated or deleted, and its totals are
--- checked against them at commit. The ADR-068 § 5 cap invariant (`contract.approved_total_minor`,
+-- deductions are inserted only while it is a DRAFT and never updated or deleted, and at commit its
+-- totals and its counts of lines and deductions are checked against them. A part added in a later
+-- transaction, even a deduction of 0, no longer matches the counts. The ADR-068 § 5 cap invariant (`contract.approved_total_minor`,
 -- `ck_contract_approved_cap`) is already in the database since 20261007100000; nothing here moves
 -- it — only an APPROVED statement will. Every instant is TIMESTAMPTZ(3) (D-048).
 --
---   statement transitions: DRAFT>SUBMITTED
+--   statement transitions: (none)
 -- =============================================================================
 
 -- CreateEnum
@@ -113,6 +115,8 @@ CREATE TABLE "statement" (
     "gross_minor" BIGINT NOT NULL,
     "deductions_minor" BIGINT NOT NULL,
     "net_minor" BIGINT NOT NULL,
+    "line_count" INTEGER NOT NULL,
+    "deduction_count" INTEGER NOT NULL,
     "created_at" TIMESTAMPTZ(3) NOT NULL,
     "created_by" TEXT NOT NULL,
     "created_correlation_id" TEXT NOT NULL,
@@ -150,8 +154,14 @@ ALTER TABLE "statement" ADD CONSTRAINT "ck_statement_amounts"
          AND "deductions_minor" <= "gross_minor"
          AND "net_minor" = "gross_minor" - "deductions_minor");
 
+-- How many lines and deductions the statement was written with: part of what it says, so a part
+-- added later, even a deduction of 0 that leaves every total as it was, no longer matches.
+ALTER TABLE "statement" ADD CONSTRAINT "ck_statement_part_counts"
+  CHECK ("line_count" >= 1 AND "deduction_count" >= 0);
+
 -- Submitted exactly when it carries who submitted it and when — with the submitter's stable
--- identity, issuer and subject both (#188), for the separation of duties of the approvals.
+-- identity, issuer and subject both (#188), for the separation of duties of the approvals. No
+-- transition reaches SUBMITTED yet (`statement_guard`); the columns are the next change's.
 ALTER TABLE "statement" ADD CONSTRAINT "ck_statement_submission"
   CHECK ((("status" = 'DRAFT') = ("submitted_at" IS NULL))
          AND ("submitted_at" IS NULL) = ("submitted_by" IS NULL)
@@ -163,9 +173,10 @@ ALTER TABLE "statement" ADD CONSTRAINT "ck_statement_submission"
          AND ("submitted_at" IS NULL OR "submitted_at" >= "created_at")
          AND "updated_at" >= "created_at");
 
--- A statement belongs to a SIGNED contract and is born a DRAFT; what it says never changes; the one
--- transition so far is DRAFT > SUBMITTED, on a contract still SIGNED (`statement.state-machine.ts`
--- declares the same table). The approvals replace this function with their own transitions.
+-- A statement belongs to a SIGNED contract and is born a DRAFT; what it says never changes; and no
+-- transition is open yet (`statement.state-machine.ts` declares the same empty table). The next
+-- change replaces this function: it opens DRAFT > SUBMITTED together with the snapshot of both
+-- approval chains at submission (ADR-068 § 5), so a statement is never SUBMITTED without one.
 CREATE FUNCTION "statement_guard"() RETURNS trigger AS $$
 DECLARE
   parent_status "ContractStatus";
@@ -191,6 +202,8 @@ BEGIN
        OR NEW."gross_minor" IS DISTINCT FROM OLD."gross_minor"
        OR NEW."deductions_minor" IS DISTINCT FROM OLD."deductions_minor"
        OR NEW."net_minor" IS DISTINCT FROM OLD."net_minor"
+       OR NEW."line_count" IS DISTINCT FROM OLD."line_count"
+       OR NEW."deduction_count" IS DISTINCT FROM OLD."deduction_count"
        OR NEW."created_at" IS DISTINCT FROM OLD."created_at"
        OR NEW."created_by" IS DISTINCT FROM OLD."created_by"
        OR NEW."created_correlation_id" IS DISTINCT FROM OLD."created_correlation_id"
@@ -198,17 +211,8 @@ BEGIN
       RAISE EXCEPTION 'ck_statement_terms_immutable: what a statement says never changes'
         USING ERRCODE = 'check_violation';
     END IF;
-    IF NOT (OLD."status" = 'DRAFT' AND NEW."status" = 'SUBMITTED') THEN
-      RAISE EXCEPTION 'ck_statement_transition: a statement cannot move from % to %', OLD."status", NEW."status"
-        USING ERRCODE = 'check_violation';
-    END IF;
-    SELECT "status" INTO parent_status FROM "contract"
-     WHERE "organization_id" = NEW."organization_id" AND "id" = NEW."contract_id";
-    IF parent_status IS DISTINCT FROM 'SIGNED' THEN
-      RAISE EXCEPTION 'ck_statement_contract_signed: a statement belongs to a signed contract'
-        USING ERRCODE = 'check_violation';
-    END IF;
-    RETURN NEW;
+    RAISE EXCEPTION 'ck_statement_transition: no statement transition is open yet (% to % refused)', OLD."status", NEW."status"
+      USING ERRCODE = 'check_violation';
   END IF;
   RAISE EXCEPTION 'ck_statement_not_erasable: a statement is never deleted or truncated (% refused)', TG_OP
     USING ERRCODE = 'check_violation';
@@ -299,7 +303,9 @@ ALTER TABLE "statement_deduction" ADD CONSTRAINT "ck_statement_deduction_amount"
 -- A line or a deduction is written only to a DRAFT of the same contract, and never changed or
 -- removed. A deduction is the rule in force as it is written — its name, rate and base — and the
 -- amount that rate gives on the statement's gross, half up (the platform's one basis-point
--- rounding, `applyBasisPoints` in @rasta/contracts).
+-- rounding, `applyBasisPoints` in @rasta/contracts). The quotient is an exact integer division
+-- (`div`): `/` on numeric rounds to a scale of its own choosing first, which for a gross of
+-- 20000000000000000 at 10000 bp rounds …0.5 up before any floor could apply.
 CREATE FUNCTION "statement_part_guard"() RETURNS trigger AS $$
 DECLARE
   parent RECORD;
@@ -321,7 +327,7 @@ BEGIN
           USING ERRCODE = 'check_violation';
       END IF;
       IF NEW."amount_minor"::numeric
-         <> floor((parent."gross_minor"::numeric * NEW."rate_bp" + 5000) / 10000) THEN
+         <> div(parent."gross_minor"::numeric * NEW."rate_bp" + 5000, 10000) THEN
         RAISE EXCEPTION 'ck_statement_deduction_amount: a deduction is its rate of the gross, rounded half up'
           USING ERRCODE = 'check_violation';
       END IF;
@@ -350,14 +356,16 @@ CREATE TRIGGER "tg_statement_deduction_no_truncate"
   FOR EACH STATEMENT EXECUTE FUNCTION "statement_part_guard"();
 
 -- The totals and the parts agree, at commit (ADR-068 § 5, "computed once"): the gross is the sum of
--- the lines, there is at least one line, and the deductions total is the sum of the deductions. A
--- statement without its lines, or a line added to it later, fails the transaction that wrote it.
+-- the lines, the deductions total the sum of the deductions, and there are exactly as many lines
+-- (at least one) and deductions as the statement was written with. A statement without its lines,
+-- or any part added to it later — a deduction of 0 included — fails the transaction that wrote it.
 CREATE FUNCTION "statement_totals_consistent"() RETURNS trigger AS $$
 DECLARE
   target text;
   recorded RECORD;
   lines integer;
   lines_sum numeric;
+  deductions integer;
   deductions_sum numeric;
 BEGIN
   -- Two assignments, not one CASE: a field the row does not have must never be named.
@@ -366,15 +374,18 @@ BEGIN
   ELSE
     target := NEW."statement_id";
   END IF;
-  SELECT "gross_minor", "deductions_minor" INTO recorded FROM "statement"
+  SELECT "gross_minor", "deductions_minor", "line_count", "deduction_count" INTO recorded
+    FROM "statement"
    WHERE "organization_id" = NEW."organization_id" AND "id" = target;
   SELECT count(*), coalesce(sum("amount_minor"), 0) INTO lines, lines_sum FROM "statement_line"
    WHERE "organization_id" = NEW."organization_id" AND "statement_id" = target;
-  SELECT coalesce(sum("amount_minor"), 0) INTO deductions_sum FROM "statement_deduction"
+  SELECT count(*), coalesce(sum("amount_minor"), 0) INTO deductions, deductions_sum
+    FROM "statement_deduction"
    WHERE "organization_id" = NEW."organization_id" AND "statement_id" = target;
-  IF lines = 0 OR recorded."gross_minor"::numeric <> lines_sum
+  IF lines = 0 OR lines <> recorded."line_count" OR deductions <> recorded."deduction_count"
+     OR recorded."gross_minor"::numeric <> lines_sum
      OR recorded."deductions_minor"::numeric <> deductions_sum THEN
-    RAISE EXCEPTION 'ck_statement_totals_consistent: a statement''s gross is the sum of its lines and its deductions the sum of its deductions'
+    RAISE EXCEPTION 'ck_statement_totals_consistent: a statement''s gross is the sum of its lines, its deductions the sum of its deductions, and it has the lines and deductions it was written with'
       USING ERRCODE = 'check_violation';
   END IF;
   RETURN NULL;

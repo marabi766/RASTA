@@ -4,10 +4,11 @@ import { cleanup, newOrganizationId, wire, type Wiring } from './helpers';
 /**
  * What PostgreSQL keeps of statements, whatever the code forgets (CON-003 PR 4, ADR-068 § 5, Q-96):
  * a statement belongs to a SIGNED contract and is born a DRAFT; its gross is the sum of its lines,
- * its deductions the sum of its deductions and `net = gross − deductions ≥ 0` — checked at commit;
- * a deduction is a configured rule in force, at its rate of the gross rounded half up; nothing a
- * statement says ever changes; DRAFT → SUBMITTED is the one move, and it names the submitter's
- * stable identity. Raw SQL as the runtime role, so no guard of the application is in the way.
+ * its deductions the sum of its deductions and `net = gross − deductions ≥ 0`, and it has exactly
+ * the lines and deductions it was written with — checked at commit; a deduction is a configured
+ * rule in force, at its rate of the gross rounded half up in exact integers; nothing a statement
+ * says ever changes; and no move is open yet (submission comes with the approval chains). Raw SQL
+ * as the runtime role, so no guard of the application is in the way.
  */
 describe('the database keeps the statements and their deductions', () => {
   let w: Wiring;
@@ -51,25 +52,37 @@ describe('the database keeps the statements and their deductions', () => {
                 VALUES ('${id}', '${org}', '${name}', ${rateBp}, 'GROSS', now(), 'USR_CONFIG')`);
     return id;
   };
+  /**
+   * A statement row. `totals.lineCount` and `totals.deductionCount` are the parts it says it is
+   * written with: one line and, by default, as many deductions as a non-zero total implies (one).
+   */
   const statementSql = (
     c: { id: string; org: string },
     id: string,
-    totals: { gross: number | string; deductions?: number | string; net?: number | string },
+    totals: {
+      gross: number | string;
+      deductions?: number | string;
+      net?: number | string;
+      lineCount?: number;
+      deductionCount?: number;
+    },
     number = 1,
   ) => {
     const deductions = totals.deductions ?? 0;
     const net = totals.net ?? BigInt(totals.gross) - BigInt(deductions);
+    const lineCount = totals.lineCount ?? 1;
+    const deductionCount = totals.deductionCount ?? (BigInt(deductions) > 0n ? 1 : 0);
     return `INSERT INTO statement
         (id, organization_id, contract_id, statement_number, gross_minor, deductions_minor, net_minor,
-         created_at, created_by, created_correlation_id, updated_at)
+         line_count, deduction_count, created_at, created_by, created_correlation_id, updated_at)
         VALUES ('${id}', '${c.org}', '${c.id}', ${number}, ${totals.gross}, ${deductions}, ${net},
-                now(), 'USR_1', 'COR_1', now())`;
+                ${lineCount}, ${deductionCount}, now(), 'USR_1', 'COR_1', now())`;
   };
   const lineSql = (
     c: { id: string; org: string },
     statementId: string,
     n: number,
-    amount: number,
+    amount: number | string,
   ) =>
     `INSERT INTO statement_line (id, organization_id, contract_id, statement_id, line_number, description, amount_minor)
      VALUES ('STL_${ulid()}', '${c.org}', '${c.id}', '${statementId}', ${n}, 'work ${n}', ${amount})`;
@@ -78,7 +91,7 @@ describe('the database keeps the statements and their deductions', () => {
     statementId: string,
     ruleId: string,
     rateBp: number,
-    amount: number,
+    amount: number | string,
     name: string,
   ) =>
     `INSERT INTO statement_deduction (id, organization_id, contract_id, statement_id, deduction_rule_id, name, rate_bp, base, amount_minor)
@@ -87,7 +100,7 @@ describe('the database keeps the statements and their deductions', () => {
   const drafted = async (c: { id: string; org: string }, gross = 10, number = 1) => {
     const id = `STM_${ulid()}`;
     await atomically(
-      statementSql(c, id, { gross }, number),
+      statementSql(c, id, { gross, lineCount: 2 }, number),
       lineSql(c, id, 1, gross - 1),
       lineSql(c, id, 2, 1),
     );
@@ -126,9 +139,103 @@ describe('the database keeps the statements and their deductions', () => {
       /ck_statement_totals_consistent/,
     );
     await refuses(atomically(statementSql(c, id, { gross: 9 })), /ck_statement_totals_consistent/);
+    // No line at all: the count says so too.
+    await refuses(
+      atomically(statementSql(c, id, { gross: 9, lineCount: 0 })),
+      /ck_statement_part_counts/,
+    );
     // A line added after the fact breaks the sum: refused at its own commit.
     const made = await drafted(c);
     await refuses(exec(lineSql(c, made, 3, 1)), /ck_statement_totals_consistent/);
+  });
+
+  it('a statement has exactly the parts it was written with: a later deduction of 0, which moves no total, is refused (review #301 r1)', async () => {
+    const c = await contract();
+    // 1 × 0.01% = 0.0001 → 0: a deduction of this rule on this gross is worth nothing.
+    const tiny = await rule(c.org, 1, 'Tiny');
+    const id = `STM_${ulid()}`;
+    await atomically(statementSql(c, id, { gross: 1 }), lineSql(c, id, 1, 1));
+    // Every other guard passes — a DRAFT, a rule in force as configured, 0 its half-up amount, the
+    // deductions total still 0 — and the count written with the statement does not.
+    await refuses(exec(deductionSql(c, id, tiny, 1, 0, 'Tiny')), /ck_statement_totals_consistent/);
+    const parts = await w.prisma.client.$queryRawUnsafe<{ n: bigint }[]>(
+      `SELECT count(*) AS n FROM statement_deduction WHERE statement_id = '${id}'`,
+    );
+    expect(Number(parts[0]!.n)).toBe(0);
+
+    // In the transaction that writes the statement a deduction of 0 is part of it — when the
+    // statement says so, and only then.
+    const withZero = `STM_${ulid()}`;
+    await atomically(
+      statementSql(c, withZero, { gross: 1, deductionCount: 1 }, 2),
+      lineSql(c, withZero, 1, 1),
+      deductionSql(c, withZero, tiny, 1, 0, 'Tiny'),
+    );
+    const unannounced = `STM_${ulid()}`;
+    await refuses(
+      atomically(
+        statementSql(c, unannounced, { gross: 1 }, 3),
+        lineSql(c, unannounced, 1, 1),
+        deductionSql(c, unannounced, tiny, 1, 0, 'Tiny'),
+      ),
+      /ck_statement_totals_consistent/,
+    );
+    // The counts are what the statement says: never changed.
+    await refuses(
+      exec(`UPDATE statement SET deduction_count = 2 WHERE id = '${withZero}'`),
+      /ck_statement_terms_immutable/,
+    );
+    await refuses(
+      exec(`UPDATE statement SET line_count = 2 WHERE id = '${id}'`),
+      /ck_statement_terms_immutable/,
+    );
+  });
+
+  it('a deduction is computed with exact integer arithmetic: a gross of 20000000000000000 at 10000 bp is all of it, not one more (review #301 r1)', async () => {
+    const c = await contract();
+    const largest = 9_223_372_036_854_775_807n;
+    // The same half-up rule as `applyBasisPoints`, in bigint.
+    const halfUp = (gross: bigint, rateBp: number) => (gross * BigInt(rateBp) + 5000n) / 10000n;
+    let number = 0;
+    for (const [gross, rateBp] of [
+      [20_000_000_000_000_000n, 10_000],
+      [20_000_000_000_000_000n, 5_000],
+      [20_000_000_000_000_001n, 5_000],
+      [19_999_999_999_999_999n, 3],
+      [largest, 10_000],
+      [largest, 5_000],
+      [largest, 1],
+    ] as const) {
+      const name = `Rule ${ulid()}`;
+      const r = await rule(c.org, rateBp, name);
+      const amount = halfUp(gross, rateBp);
+      // A neighbour of the exact amount is refused (one more, or one less where one more would
+      // pass the largest bigint) …
+      const neighbour = amount < largest ? amount + 1n : amount - 1n;
+      number += 1;
+      const off = `STM_${ulid()}`;
+      await refuses(
+        atomically(
+          statementSql(c, off, { gross: `${gross}`, deductions: `${neighbour}` }, number),
+          lineSql(c, off, 1, `${gross}`),
+          deductionSql(c, off, r, rateBp, `${neighbour}`, name),
+        ),
+        /ck_statement_deduction_amount|ck_statement_amounts/,
+      );
+      // … and the exact amount, which the service computes, is accepted.
+      number += 1;
+      const exact = `STM_${ulid()}`;
+      await atomically(
+        statementSql(c, exact, { gross: `${gross}`, deductions: `${amount}` }, number),
+        lineSql(c, exact, 1, `${gross}`),
+        deductionSql(c, exact, r, rateBp, `${amount}`, name),
+      );
+    }
+    const zeroNet = await w.prisma.client.$queryRawUnsafe<{ net: bigint }[]>(
+      `SELECT s.net_minor AS net FROM statement s JOIN statement_deduction d ON d.statement_id = s.id
+        WHERE s.organization_id = '${c.org}' AND s.gross_minor = 20000000000000000 AND d.rate_bp = 10000`,
+    );
+    expect(zeroNet.map((row) => row.net)).toEqual([0n]);
   });
 
   it('net = gross − deductions, never negative; a positive gross and positive lines', async () => {
@@ -234,32 +341,33 @@ describe('the database keeps the statements and their deductions', () => {
     await refuses(exec(`DELETE FROM statement WHERE id = '${id}'`), /ck_statement_not_erasable/);
   });
 
-  it('DRAFT → SUBMITTED is the one move, and it names the submitter with issuer and subject', async () => {
+  it('no move is open yet: a DRAFT stays a DRAFT, even submitted with a full stable identity (review #302 r1)', async () => {
     const c = await contract();
     const id = await drafted(c);
     const submit = (identity: string) =>
       exec(`UPDATE statement SET status = 'SUBMITTED', submitted_at = now(), updated_at = now(),
                    version = version + 1, ${identity} WHERE id = '${id}'`);
-    await refuses(submit(`submitted_by = 'USR_1'`), /ck_statement_submission/);
+    // Submission opens with the approval chains and their snapshot (the next change): until then
+    // the database refuses it to any writer, whoever it names.
     await refuses(
-      submit(`submitted_by = 'USR_1', submitted_by_issuer = 'iss'`),
-      /ck_statement_submission/,
-    );
-    await refuses(
-      exec(`UPDATE statement SET status = 'APPROVED' WHERE id = '${id}'`),
+      submit(`submitted_by = 'USR_1', submitted_by_issuer = 'iss', submitted_by_subject = 'sub'`),
       /ck_statement_transition/,
     );
-    await submit(
-      `submitted_by = 'USR_1', submitted_by_issuer = 'iss', submitted_by_subject = 'sub'`,
-    );
+    await refuses(submit(`submitted_by = 'USR_1'`), /ck_statement_transition/);
     for (const to of ['DRAFT', 'TECHNICALLY_APPROVED', 'APPROVED', 'REJECTED']) {
       await refuses(
         exec(`UPDATE statement SET status = '${to}' WHERE id = '${id}'`),
-        /ck_statement_transition|ck_statement_submission/,
+        /ck_statement_transition/,
       );
     }
-    // A SUBMITTED statement takes no new part either.
-    await refuses(exec(lineSql(c, id, 3, 1)), /ck_statement_part_draft/);
+    await refuses(
+      exec(`UPDATE statement SET updated_at = now(), version = version + 1 WHERE id = '${id}'`),
+      /ck_statement_transition/,
+    );
+    const [row] = await w.prisma.client.$queryRawUnsafe<{ status: string; version: number }[]>(
+      `SELECT status::text AS status, version FROM statement WHERE id = '${id}'`,
+    );
+    expect(row).toEqual({ status: 'DRAFT', version: 1 });
   });
 
   it('a deduction rule is whole basis points of the gross, one in force per name, never changed or removed — only retired, once', async () => {
