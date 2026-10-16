@@ -613,6 +613,9 @@ describe('OutboxRelay: every sequence of start, stop, tick and claim (Codex r2 o
     await pending?.tick;
   }
 
+  // 1365 sequences run one after another; on a loaded CI runner the whole walk can
+  // take longer than Jest's 5 s default (main run 38824955004), so it gets its own
+  // bound. A sequence that hangs still fails: 60 s is far beyond the normal walk.
   it(`holds for all ${(4 ** (MAX_LENGTH + 1) - 1) / 3} sequences of up to ${MAX_LENGTH} steps`, async () => {
     for (let length = 0; length <= MAX_LENGTH; length += 1) {
       for (const ops of sequences(length)) {
@@ -623,7 +626,7 @@ describe('OutboxRelay: every sequence of start, stop, tick and claim (Codex r2 o
         }
       }
     }
-  });
+  }, 60_000);
 });
 
 describe('OutboxRelay: a release that does not finish (Codex r1 on #291, finding 2)', () => {
