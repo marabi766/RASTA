@@ -1,4 +1,4 @@
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { z } from 'zod';
 import type { EventEnvelope } from '@rasta/contracts';
 import {
@@ -6,6 +6,7 @@ import {
   type EventConsumer,
   type EventHandler,
   type HandlerOutcome,
+  type OutboxStopOptions,
 } from '@rasta/nest-common';
 import { IDENTITY_EVENTS } from '../identity/events';
 import { KeycloakProjector } from './keycloak.projector';
@@ -40,7 +41,7 @@ const namesUser = z.object({ userId: z.string().min(1) });
 export type EventConsumerFactory = (handler: EventHandler) => EventConsumer;
 
 @Injectable()
-export class KeycloakProjectionConsumer implements OnModuleInit, OnModuleDestroy {
+export class KeycloakProjectionConsumer implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(KeycloakProjectionConsumer.name);
   private consumer?: EventConsumer;
 
@@ -59,8 +60,22 @@ export class KeycloakProjectionConsumer implements OnModuleInit, OnModuleDestroy
     await this.consumer.start();
   }
 
-  async onModuleDestroy(): Promise<void> {
-    await this.consumer?.stop();
+  /**
+   * An `OutboxShutdown` worker: stopped in Nest's destroy phase, beside both
+   * relays, the purge and the expiry scanner, by the shutdown's one deadline
+   * (D-052); an event still in flight is abandoned uncommitted and delivered
+   * again, which the projection absorbs by construction (above). Before, its
+   * own `onModuleDestroy` stopped the consumer with no bound, so a Keycloak
+   * write or a dead letter that hung held the close into the forced exit.
+   * Keycloak sync off, there is nothing to stop.
+   */
+  stop(options?: OutboxStopOptions): Promise<void> {
+    return this.consumer?.stop(options) ?? Promise.resolve();
+  }
+
+  /** Joins the stop `OutboxShutdown` began; returns at once. */
+  onApplicationShutdown(): Promise<void> {
+    return this.stop();
   }
 
   /**

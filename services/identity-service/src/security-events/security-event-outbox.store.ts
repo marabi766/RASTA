@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import type { ErrorCode } from '@rasta/contracts';
-import type {
-  ClaimRequest,
-  OutboxClaim,
-  OutboxRow,
-  OutboxStore,
-  RetryBackoff,
+import {
+  boundedReleaseSql,
+  type ClaimRequest,
+  type OutboxClaim,
+  type OutboxReleaseBound,
+  type OutboxRow,
+  type OutboxStore,
+  type RetryBackoff,
 } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 import { toSecurityEventOutboxRow, type SecurityEventRecord } from './audit-trail-envelope';
@@ -387,18 +389,29 @@ export class SecurityEventOutboxStore implements OutboxStore {
     );
   }
 
-  /** Gives rows back without counting a failure. */
-  async release(ids: readonly string[], token: string): Promise<number> {
+  /**
+   * Gives rows back without counting a failure. Bounded by the relay's stop,
+   * read again once the connection is held and before each statement, exactly
+   * as the shared release is (`boundedReleaseSql`, Codex r1 and r3 on #291);
+   * only the UPDATE is this table's.
+   */
+  async release(ids: readonly string[], token: string, bound: OutboxReleaseBound): Promise<number> {
     if (ids.length === 0) return 0;
-    return this.prisma.client.$executeRawUnsafe(
-      `UPDATE security_event_outbox
-          SET claim_token      = NULL,
-              claim_owner      = NULL,
-              claim_expires_at = NULL
-        WHERE id = ANY($1::text[])
-          AND claim_token = $2`,
-      [...ids],
-      token,
+    return boundedReleaseSql(
+      (fn, timeoutMs) =>
+        this.prisma.client.$transaction(fn, { timeout: timeoutMs, maxWait: timeoutMs }),
+      bound,
+      (tx) =>
+        tx.$executeRawUnsafe(
+          `UPDATE security_event_outbox
+              SET claim_token      = NULL,
+                  claim_owner      = NULL,
+                  claim_expires_at = NULL
+            WHERE id = ANY($1::text[])
+              AND claim_token = $2`,
+          [...ids],
+          token,
+        ),
     );
   }
 

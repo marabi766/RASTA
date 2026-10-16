@@ -42,13 +42,13 @@ export function migratorUrl(): string {
   return withUtcSession(url);
 }
 
+/** The brokers KAFKA_BROKERS names, or null when it names none (unset, empty or only commas). */
 export function brokers(): string[] | null {
-  const raw = process.env.KAFKA_BROKERS;
-  if (!raw) return null;
-  return raw
+  const list = (process.env.KAFKA_BROKERS ?? '')
     .split(',')
     .map((broker) => broker.trim())
     .filter(Boolean);
+  return list.length > 0 ? list : null;
 }
 
 export function newPrisma(): PrismaService {

@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError } from '@rasta/nest-common';
-import { ERROR_CODES, type ErrorCode } from '@rasta/contracts';
+import { ERROR_CODES, type ApiError, type ErrorCode } from '@rasta/contracts';
 import { ENV } from '../tokens';
 import { ECONOMIC_SERVICE, SERVICE_NAME, type MarketplaceEnv } from '../config/env';
 import { economicCallDuration, economicCallsTotal } from '../observability/metrics';
@@ -46,6 +46,18 @@ export interface TransactionView {
   netAmountMinor: string;
   currency: string;
   sourceReference: string | null;
+}
+
+/**
+ * What `GET /v1/transactions/{id}` answers with: the transaction as its payer
+ * sees it now, with the settlement that closed it, if one did. Only the
+ * fields the saga reads.
+ */
+export interface TransactionDetailView extends TransactionView {
+  disputedAt: string | null;
+  /** The objection while DISPUTED; the resolution once resolved. */
+  disputeReason: string | null;
+  settlement: { id: string; journalId: string; settledAt: string } | null;
 }
 
 /**
@@ -170,6 +182,38 @@ export class EconomicClient {
           item.sourceReference === input.orderId && item.transactionType === OBLIGATION_TYPE,
       ) ?? null
     );
+  }
+
+  /**
+   * The order's obligation as economic-service has it now, or null if
+   * `transactionId` is not this order's obligation.
+   *
+   * The saga's answer to "did my command already happen?" when a retry is
+   * refused for the transaction's state (D-053). economic-service replays a
+   * command's stored answer only for `ECONOMIC_IDEMPOTENCY_TTL_HOURS`; a retry
+   * after that is judged against the state the first attempt produced and
+   * refused. Read as the payer, with the same service token as the command;
+   * checked against the order and the obligation type, so a transaction that
+   * is somebody else's — or another order's — can never prove anything.
+   */
+  async readObligation(input: {
+    orderId: string;
+    transactionId: string;
+    buyerOrganizationId: string;
+    correlationId: string;
+  }): Promise<TransactionDetailView | null> {
+    const transaction = await this.call<TransactionDetailView>('readObligation', {
+      method: 'GET',
+      path: `/v1/transactions/${input.transactionId}`,
+      organizationId: input.buyerOrganizationId,
+      correlationId: input.correlationId,
+    });
+    const ours =
+      transaction.id === input.transactionId &&
+      transaction.organizationId === input.buyerOrganizationId &&
+      transaction.sourceReference === input.orderId &&
+      transaction.transactionType === OBLIGATION_TYPE;
+    return ours ? transaction : null;
   }
 
   /** Marks the obligation ready to settle. Only reachable after receipt. */
@@ -361,13 +405,20 @@ export class EconomicClient {
     // generic one, so "insufficient balance" reaches the buyer as that and not
     // as an internal error. The message is theirs; the status follows from the
     // code, which is how every other refusal on the platform behaves.
-    const body = parsed as { error?: { code?: string; message?: string } } | undefined;
-    const reported = body?.error?.code;
+    //
+    // The body is the platform's `ApiError`, `code` and `message` at its top
+    // level, as the shared exception filter writes it. This used to read
+    // `error.code`, a shape no service sends: every refusal became
+    // UPSTREAM_UNAVAILABLE, and a retry refused for the transaction's state
+    // never reached the obligation read that answers it (D-053, review of
+    // #287).
+    const body = parsed as Partial<Pick<ApiError, 'code' | 'message'>> | undefined;
+    const reported = body?.code;
     const code: ErrorCode =
       reported && reported in ERROR_CODES
         ? (reported as ErrorCode)
         : ERROR_CODES.UPSTREAM_UNAVAILABLE;
-    const message = body?.error?.message ?? 'The financial service refused this operation';
+    const message = body?.message ?? 'The financial service refused this operation';
 
     throw new RastaError(code, message, {
       internalContext: { operation, status: response.status },
