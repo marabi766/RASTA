@@ -6,6 +6,7 @@ import { NextRequest } from 'next/server';
 import { middleware } from './middleware';
 import { renewSession } from '@/server/session-refresh';
 import { SESSION_COOKIE, sealSession } from '@/server/session';
+import { REFRESH_UNAVAILABLE, SESSION_STATE_HEADER } from '@/server/session-state';
 
 // Only the session wiring below reaches these: a request without a session
 // cookie returns before the environment or the renewal is consulted, so the
@@ -20,6 +21,11 @@ jest.mock('@/server/env', () => ({
 }));
 
 const renew = renewSession as jest.MockedFunction<typeof renewSession>;
+
+/** A request header as middleware hands it to the route (`NextResponse.next({ request })`). */
+function forwardedHeader(response: Response, name: string): string | null {
+  return response.headers.get(`x-middleware-request-${name}`);
+}
 
 /**
  * The security headers this portal sends on every response (docs/09 §
@@ -191,6 +197,50 @@ describe('the session cookie, renewed before the route runs', () => {
     const response = await middleware(withSession('raced-cookie'));
 
     expect(response.headers.get('x-middleware-request-cookie') ?? '').not.toContain('raced-cookie');
+  });
+
+  it.each([false, true])(
+    'marks every refused refresh as unavailable, not ended — usable: %s (PR 319 r2 f3, r3 f2)',
+    async (usable) => {
+      // usable: true too — the token can run out between that judgement and the
+      // route's own check, and the route must then say "unavailable", not "ended".
+      renew.mockResolvedValue({ kind: 'REFUSED', usable });
+
+      const response = await middleware(withSession('raced-cookie'));
+
+      expect(forwardedHeader(response, SESSION_STATE_HEADER)).toBe(REFRESH_UNAVAILABLE);
+    },
+  );
+
+  it.each([
+    { kind: 'ENDED' as const },
+    { kind: 'VALID' as const },
+    { kind: 'RENEWED' as const, sealed: 'rotated-cookie', maxAgeSeconds: 60 },
+  ])('marks nothing for $kind', async (renewal) => {
+    renew.mockResolvedValue(renewal);
+
+    const response = await middleware(withSession('a-cookie'));
+
+    expect(forwardedHeader(response, SESSION_STATE_HEADER)).toBeNull();
+  });
+
+  it('never forwards a session state the browser sent itself', async () => {
+    renew.mockResolvedValue({ kind: 'ENDED' });
+    const forged = new NextRequest('http://localhost:3200/auth/session', {
+      headers: {
+        cookie: `${SESSION_COOKIE}=expired-cookie`,
+        [SESSION_STATE_HEADER]: REFRESH_UNAVAILABLE,
+      },
+    });
+
+    const response = await middleware(forged);
+
+    expect(forwardedHeader(response, SESSION_STATE_HEADER)).toBeNull();
+    // Overridden, not merely left out: Next drops a request header missing
+    // from the override list.
+    expect(response.headers.get('x-middleware-override-headers') ?? '').not.toContain(
+      SESSION_STATE_HEADER,
+    );
   });
 
   it('lets the render keep a refused session whose access token is still good', async () => {

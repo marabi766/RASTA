@@ -151,6 +151,9 @@ export const ROUTES: readonly RouteRule[] = [
   // handler for it — which answers 404, exactly what "not built yet" means.
   { prefix: 'cart', service: 'marketplace' },
   { prefix: 'orders', service: 'marketplace', requiresIdempotencyKey: true },
+  // RUN-005 (ADR-048): a return request is asked, authorized, rejected or cancelled once; a
+  // retried POST must not file two, so the key is required here and again by the service.
+  { prefix: 'returns', service: 'marketplace', requiresIdempotencyKey: true },
   { prefix: 'demand-requests', service: 'procurement' },
   { prefix: 'aggregations', service: 'procurement' },
   { prefix: 'rfqs', service: 'procurement' },
