@@ -26,7 +26,7 @@ import {
  * deductions the employer has configured; the service computes the gross, each deduction and the
  * net once, in bigint; both parties read; anyone else is told `404`. A draft has its event, with
  * identifiers only; a party refused is recorded (`CONTRACT_AUTHORITY_REFUSED`, `DRAFT_STATEMENT`).
- * No route submits a statement yet: submission comes with the approval chains (review #302 r1).
+ * Submission, with the approval chains' snapshot, is `statement-submit.int-spec.ts` (CON-003 PR 5).
  */
 describe('statements of a signed contract', () => {
   let api: ApiHarness;
@@ -124,6 +124,7 @@ describe('statements of a signed contract', () => {
         ],
         deductions: [],
         submittedAt: null,
+        approvalChains: null,
         version: 1,
       });
       expect(res.body.id).toMatch(/^STM_/);
@@ -494,21 +495,6 @@ describe('statements of a signed contract', () => {
       expect([...instants].sort((a, b) => a - b)).toEqual(instants);
       expect(await statementEvents(c.employer)).toHaveLength(n);
     });
-  });
-
-  it('no route submits a statement yet: submission comes with the approval chains and their snapshot (review #302 r1)', async () => {
-    const c = await signed();
-    const made = (await draft(c.id, c.contractorToken).expect(201)).body as { id: string };
-    await http(api)
-      .post(`/v1/contracts/${c.id}/statements/${made.id}/submit`)
-      .set('authorization', `Bearer ${c.contractorToken}`)
-      .set('idempotency-key', idemKey('stm-submit'))
-      .send({})
-      .expect(404);
-    expect((await statementRows(c.id))[0]).toMatchObject({ status: 'DRAFT', submittedAt: null });
-    expect((await statementEvents(c.employer)).map((e) => e.eventName)).toEqual([
-      'STATEMENT_DRAFTED',
-    ]);
   });
 
   describe('reading', () => {

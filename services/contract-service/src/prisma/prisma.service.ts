@@ -33,6 +33,7 @@ export const TENANT_SCOPED_MODELS = [
   'Statement',
   'StatementLine',
   'StatementDeduction',
+  'StatementApprovalStep',
 ] as const;
 
 /**
