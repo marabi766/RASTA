@@ -240,12 +240,21 @@ describe('deciding a statement (CON-003 PR 6)', () => {
       expect(text).not.toContain(secret);
     }
 
-    // APPROVED is final: no decision, and the database keeps it so.
-    const after = await decide(
+    // APPROVED is final: no decision, and the database keeps it so. A step it decided is told so
+    // (409); any other, that the statement is decided (422).
+    const decided = await decide(
       c,
       s.id,
       person(c.employer, ['FLEET_MANAGER']),
       step('TECHNICAL', 2),
+    );
+    expect(decided.status).toBe(409);
+    expect(reasons(decided.body)).toEqual(['decision:STEP_DECIDED']);
+    const after = await decide(
+      c,
+      s.id,
+      person(c.employer, ['FLEET_MANAGER']),
+      step('FINANCIAL', 2),
     );
     expect(after.status).toBe(422);
     expect(reasons(after.body)).toEqual(['decision:STATEMENT_DECIDED']);
@@ -287,18 +296,26 @@ describe('deciding a statement (CON-003 PR 6)', () => {
           stepOrder: 1,
         });
 
+        // A step decided already is told so (409), the rejecting one included; any other, that the
+        // statement is decided (422).
+        const decidedSteps = [...before, rejection];
         for (const next of [
           step('TECHNICAL', 1),
           step('FINANCIAL', 1),
           step('FINANCIAL', 1, 'REJECT'),
         ]) {
+          const decided = decidedSteps.some(
+            (d) => d.chain === next.chain && d.stepOrder === next.stepOrder,
+          );
           const late = await decide(
             c,
             s.id,
             person(c.employer, ['FLEET_MANAGER', 'ORGANIZATION_ADMIN']),
             next,
-          ).expect(422);
-          expect(reasons(late.body)).toEqual(['decision:STATEMENT_DECIDED']);
+          ).expect(decided ? 409 : 422);
+          expect(reasons(late.body)).toEqual([
+            decided ? 'decision:STEP_DECIDED' : 'decision:STATEMENT_DECIDED',
+          ]);
         }
         expect((await contractRow(w, c.id)).approvedTotalMinor).toBe(0n);
         expect((await statementRow(s.id))!.decisions).toHaveLength(before.length + 1);
@@ -779,6 +796,56 @@ describe('deciding a statement (CON-003 PR 6)', () => {
         step('FINANCIAL', 1, 'REJECT'),
       ).expect(200);
     });
+
+    it('at the largest bigint: a sum past 2^63 - 1 is 422 APPROVED_TOTAL_EXCEEDS_CAP with nothing written, never a 500; the cap of 2^63 - 1 is reached exactly, and one more is refused', async () => {
+      const MAX = 9223372036854775807n; // 2^63 - 1
+      const c = await signed({ amountMinor: MAX.toString() });
+      await activateStatementPolicies(w, c.employer, {
+        technical: [at(c.employer, 'FLEET_MANAGER')],
+        financial: [at(c.employer)],
+      });
+      const approve = async (gross: bigint) => {
+        const s = await submitted(c, gross.toString());
+        await decide(c, s.id, person(c.employer, ['FLEET_MANAGER']), step('TECHNICAL', 1)).expect(
+          200,
+        );
+        const res = await decide(
+          c,
+          s.id,
+          person(c.employer, ['ORGANIZATION_ADMIN']),
+          step('FINANCIAL', 1),
+        );
+        return { s, res };
+      };
+      const refusedPastCap = async (gross: bigint, total: bigint) => {
+        const { s, res } = await approve(gross);
+        expect(res.status).toBe(422);
+        expect(res.body.code).toBe('BUSINESS_RULE_VIOLATION');
+        expect(reasons(res.body)).toEqual(['decision:APPROVED_TOTAL_EXCEEDS_CAP']);
+        expect(await statementRow(s.id)).toMatchObject({
+          status: 'TECHNICALLY_APPROVED',
+          version: 3,
+        });
+        expect((await decisionsOf(s.id)).map((d) => d.chain)).toEqual(['TECHNICAL']);
+        expect((await contractRow(w, c.id)).approvedTotalMinor).toBe(total);
+      };
+
+      const six = 6000000000000000000n;
+      expect((await approve(six)).res.status).toBe(200);
+      expect((await contractRow(w, c.id)).approvedTotalMinor).toBe(six);
+      // 6e18 + 4e18 is past 2^63 - 1: the database's bigint sum would be an arithmetic error.
+      await refusedPastCap(4000000000000000000n, six);
+      // One past the cap, where the sum is 2^63 exactly.
+      await refusedPastCap(MAX - six + 1n, six);
+      // The cap reached exactly.
+      expect((await approve(MAX - six)).res.status).toBe(200);
+      expect((await contractRow(w, c.id)).approvedTotalMinor).toBe(MAX);
+      // One more at a total of 2^63 - 1.
+      await refusedPastCap(1n, MAX);
+      expect(
+        (await statementEvents(c.employer)).filter((e) => e.eventName === 'STATEMENT_APPROVED'),
+      ).toHaveLength(2);
+    });
   });
 
   describe('idempotency and concurrency', () => {
@@ -851,6 +918,60 @@ describe('deciding a statement (CON-003 PR 6)', () => {
       expect((await decisionsOf(s.id)).map((d) => d.stepOrder)).toEqual([1]);
       expect(await statementRow(s.id)).toMatchObject({ status: 'SUBMITTED', version: 3 });
     });
+
+    it.each([
+      ['APPROVE', 'APPROVED'],
+      ['REJECT', 'REJECTED'],
+    ] as const)(
+      'two deciders of the final financial step at once, both %s: one ends the statement, the other is 409 STEP_DECIDED — not 422 STATEMENT_DECIDED',
+      async (decision, status) => {
+        const c = await signed();
+        await activateStatementPolicies(w, c.employer, {
+          technical: [at(c.employer, 'FLEET_MANAGER')],
+          financial: [at(c.employer)],
+        });
+        const s = await submitted(c);
+        await decide(c, s.id, person(c.employer, ['FLEET_MANAGER']), step('TECHNICAL', 1)).expect(
+          200,
+        );
+        const { release, holder } = await holdContract(c);
+        const running = Promise.all(
+          [1, 2].map(() =>
+            decide(
+              c,
+              s.id,
+              person(c.employer, ['ORGANIZATION_ADMIN']),
+              step('FINANCIAL', 1, decision),
+            ).then((r) => r),
+          ),
+        );
+        try {
+          await untilSessionsWaitOnALock(w.prisma, 2);
+        } finally {
+          release();
+          await Promise.allSettled([holder, running]);
+        }
+        const results = await running;
+        expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+        expect(results.find((r) => r.status === 200)!.body.status).toBe(status);
+        const loser = results.find((r) => r.status === 409)!;
+        expect(loser.body.code).toBe('CONFLICT');
+        expect(reasons(loser.body)).toEqual(['decision:STEP_DECIDED']);
+        expect((await decisionsOf(s.id)).map((d) => d.chain)).toEqual(['TECHNICAL', 'FINANCIAL']);
+        expect(await statementRow(s.id)).toMatchObject({ status, version: 4 });
+        expect((await contractRow(w, c.id)).approvedTotalMinor).toBe(
+          decision === 'APPROVE' ? 1500000001n : 0n,
+        );
+        // And asked again later, the same answer.
+        const later = await decide(
+          c,
+          s.id,
+          person(c.employer, ['ORGANIZATION_ADMIN']),
+          step('FINANCIAL', 1, decision),
+        ).expect(409);
+        expect(reasons(later.body)).toEqual(['decision:STEP_DECIDED']);
+      },
+    );
 
     it('two final approvals at once whose sum passes the cap: one is APPROVED, the other 422 with nothing written', async () => {
       const c = await signed({ amountMinor: '1000' });

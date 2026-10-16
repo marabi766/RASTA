@@ -14,7 +14,8 @@ import {
  *
  * - **Technical, then financial.** The technical chain is open while the statement is SUBMITTED,
  *   the financial chain once it is TECHNICALLY_APPROVED; each chain's steps are decided in their
- *   order, each at most once. A DRAFT is not yet decided on, an APPROVED or REJECTED one never again.
+ *   order, each at most once. A DRAFT is not yet decided on, an APPROVED or REJECTED one never again
+ *   — a step already decided is answered as decided first, whatever the statement's state.
  * - **What a decision does.** A rejection rejects the statement — final for that number (Q-96 (7)).
  *   An approval of a chain's last undecided step completes the chain: TECHNICALLY_APPROVED, then
  *   APPROVED. Any other approval is recorded and moves nothing but the version.
@@ -96,13 +97,15 @@ export function judgeStep(
   outcome: DecisionOutcome,
 ): StepJudgement {
   if (status === 'DRAFT') return { ok: false, reason: 'STATEMENT_NOT_SUBMITTED' };
-  const open = openChain(status);
-  if (!open) return { ok: false, reason: 'STATEMENT_DECIDED' };
   const step = steps.find(
     (candidate) => candidate.chain === named.chain && candidate.stepOrder === named.stepOrder,
   );
+  // The named step first: a step already decided is told so even when its decision ended the
+  // statement — the second of two final approvers racing gets the same 409 as on any other step.
+  if (step && decidedOne(decisions, step)) return { ok: false, reason: 'STEP_DECIDED' };
+  const open = openChain(status);
+  if (!open) return { ok: false, reason: 'STATEMENT_DECIDED' };
   if (!step) return { ok: false, reason: 'STEP_NOT_IN_CHAIN' };
-  if (decidedOne(decisions, step)) return { ok: false, reason: 'STEP_DECIDED' };
   if (step.chain !== open) return { ok: false, reason: 'CHAIN_NOT_OPEN' };
   const remaining = undecided(steps, decisions, open);
   if (remaining[0]?.stepOrder !== step.stepOrder) return { ok: false, reason: 'STEP_NOT_NEXT' };
@@ -137,6 +140,26 @@ export function statusOfDecisions(
   if (approved('FINANCIAL') === counts.FINANCIAL) return 'APPROVED';
   if (approved('TECHNICAL') === counts.TECHNICAL) return 'TECHNICALLY_APPROVED';
   return 'SUBMITTED';
+}
+
+/**
+ * Whether approving a statement of `gross` keeps the contract's approved total within the price and
+ * the effective amendments (ADR-068 § 5, Q-96 (5)) — the rule `ck_contract_approved_cap` holds,
+ * judged in arbitrary-precision bigint on the contract read under its row lock. The database's
+ * `approved_total_minor + gross` is a bigint sum that would fail as an arithmetic error past
+ * 2^63 - 1, before the CHECK could refuse it; here no sum overflows.
+ */
+export function withinApprovedCap(
+  contract: {
+    readonly amountMinor: bigint;
+    readonly amendmentsTotalMinor: bigint;
+    readonly approvedTotalMinor: bigint;
+  },
+  gross: bigint,
+): boolean {
+  return (
+    contract.approvedTotalMinor + gross <= contract.amountMinor + contract.amendmentsTotalMinor
+  );
 }
 
 /** Which separation-of-duties rule a decider breaks, if any; `UNKNOWN` when it cannot be shown. */

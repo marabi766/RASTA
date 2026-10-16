@@ -3,6 +3,7 @@ import {
   openChain,
   separationOf,
   statusOfDecisions,
+  withinApprovedCap,
   type RecordedDecision,
   type SnapshotStep,
 } from './decisions';
@@ -86,6 +87,50 @@ describe('judgeStep', () => {
     ['a draft', 'DRAFT', [], 'TECHNICAL', 1, 'STATEMENT_NOT_SUBMITTED'],
     ['an approved statement', 'APPROVED', [], 'FINANCIAL', 1, 'STATEMENT_DECIDED'],
     ['a rejected statement', 'REJECTED', [], 'TECHNICAL', 1, 'STATEMENT_DECIDED'],
+    [
+      'a step the rejection did not decide, on a rejected statement',
+      'REJECTED',
+      [{ chain: 'TECHNICAL', stepOrder: 1, outcome: 'REJECTED' }],
+      'FINANCIAL',
+      1,
+      'STATEMENT_DECIDED',
+    ],
+    [
+      'a step its chains do not have, on an approved statement',
+      'APPROVED',
+      [approved('TECHNICAL', 1), approved('TECHNICAL', 3), approved('FINANCIAL', 1)],
+      'FINANCIAL',
+      2,
+      'STATEMENT_DECIDED',
+    ],
+    [
+      'the final financial step once its approval made the statement APPROVED',
+      'APPROVED',
+      [approved('TECHNICAL', 1), approved('TECHNICAL', 3), approved('FINANCIAL', 1)],
+      'FINANCIAL',
+      1,
+      'STEP_DECIDED',
+    ],
+    [
+      'the step whose rejection made the statement REJECTED',
+      'REJECTED',
+      [
+        approved('TECHNICAL', 1),
+        approved('TECHNICAL', 3),
+        { chain: 'FINANCIAL', stepOrder: 1, outcome: 'REJECTED' },
+      ],
+      'FINANCIAL',
+      1,
+      'STEP_DECIDED',
+    ],
+    [
+      'an approved earlier step, on a statement rejected later',
+      'REJECTED',
+      [approved('TECHNICAL', 1), { chain: 'TECHNICAL', stepOrder: 3, outcome: 'REJECTED' }],
+      'TECHNICAL',
+      1,
+      'STEP_DECIDED',
+    ],
     ['a step the snapshot does not have', 'SUBMITTED', [], 'TECHNICAL', 2, 'STEP_NOT_IN_CHAIN'],
     ['a decided step', 'SUBMITTED', [approved('TECHNICAL', 1)], 'TECHNICAL', 1, 'STEP_DECIDED'],
     [
@@ -112,6 +157,59 @@ describe('judgeStep', () => {
         reason,
       });
     }
+  });
+});
+
+describe('withinApprovedCap: the cap judged in bigint, at the largest bigint too (ADR-068 § 5)', () => {
+  const MAX = 9223372036854775807n; // 2^63 - 1
+  const contract = (
+    amountMinor: bigint,
+    approvedTotalMinor: bigint,
+    amendmentsTotalMinor = 0n,
+  ) => ({
+    amountMinor,
+    amendmentsTotalMinor,
+    approvedTotalMinor,
+  });
+  it.each([
+    ['up to the price exactly', contract(1000n, 600n), 400n, true],
+    ['one past the price', contract(1000n, 600n), 401n, false],
+    ['up to the price plus the amendments', contract(1000n, 600n, 500n), 900n, true],
+    ['one past the price plus the amendments', contract(1000n, 600n, 500n), 901n, false],
+    [
+      'a sum past 2^63 - 1 under a cap of 2^63 - 1',
+      contract(MAX, 6000000000000000000n),
+      4000000000000000000n,
+      false,
+    ],
+    [
+      'the cap of 2^63 - 1 reached exactly',
+      contract(MAX, 6000000000000000000n),
+      MAX - 6000000000000000000n,
+      true,
+    ],
+    [
+      'one past a cap of 2^63 - 1',
+      contract(MAX, 6000000000000000000n),
+      MAX - 5999999999999999999n,
+      false,
+    ],
+    ['one more at a total of 2^63 - 1', contract(MAX, MAX), 1n, false],
+    ['the largest gross on an empty total under a cap of 2^63 - 1', contract(MAX, 0n), MAX, true],
+    [
+      'a cap of 2^63 - 1 split between price and amendments',
+      contract(MAX - 5n, MAX - 1n, 5n),
+      1n,
+      true,
+    ],
+    [
+      'one past a cap split between price and amendments',
+      contract(MAX - 5n, MAX - 1n, 5n),
+      2n,
+      false,
+    ],
+  ] as const)('%s', (_what, given, gross, within) => {
+    expect(withinApprovedCap(given, gross)).toBe(within);
   });
 });
 

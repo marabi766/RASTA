@@ -211,8 +211,9 @@ export class StatementController {
       '— and adds its gross to the contract’s approved total, which never passes the price plus ' +
       'the effective amendments (422 `APPROVED_TOTAL_EXCEEDS_CAP`, nothing written; Q-96 (5)). A ' +
       'rejection at any step makes it REJECTED, final for its number (Q-96 (7)). A step decided ' +
-      'already — by someone else, or at the same moment — is 409 `STEP_DECIDED`; a draft 422 ' +
-      '`STATEMENT_NOT_SUBMITTED`; an approved or rejected statement 422 `STATEMENT_DECIDED`; a step ' +
+      'already — by someone else, or at the same moment, the decision that ended the statement ' +
+      'included — is 409 `STEP_DECIDED`; a draft 422 `STATEMENT_NOT_SUBMITTED`; any other step of ' +
+      'an approved or rejected statement 422 `STATEMENT_DECIDED`; a step ' +
       'its chains do not have 422 `STEP_NOT_IN_CHAIN`; a contract that is not signed 422 ' +
       '`CONTRACT_NOT_SIGNED`. No timer and no default: a step waits for its authority (ADR-043). ' +
       'STATEMENT_DECISION_RECORDED, and STATEMENT_TECHNICALLY_APPROVED, STATEMENT_APPROVED or ' +

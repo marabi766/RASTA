@@ -14,7 +14,13 @@ import type { ClaimFence } from '../shared/idempotency';
 import { forbiddenRefusal, refusal, ruleRefusal, type ReasonOf } from '../shared/refusal';
 import { storedActor } from '../shared/stable-actor';
 import { AuthorityRefusals, type AuthorityRefusal } from '../signing/authority-refusals';
-import { judgeStep, separationOf, type DecisionOutcome, type StepRefusal } from './decisions';
+import {
+  judgeStep,
+  separationOf,
+  withinApprovedCap,
+  type DecisionOutcome,
+  type StepRefusal,
+} from './decisions';
 import type { DecideStatementDto, StatementView } from './dto';
 import { StatementRepository } from './statement.repository';
 import type { StatementStateName } from './statement.state-machine';
@@ -79,7 +85,8 @@ const STEP_REFUSALS: Readonly<Record<StepRefusal, { message: string; conflict?: 
  *   (`statement_decision_guard`, `ux_statement_decision_person`).
  * - **The financial chain's last approval** makes the statement APPROVED and immutable, and adds its
  *   gross to the contract's `approved_total_minor` under the contract's row lock: past the price and
- *   the effective amendments the database's `ck_contract_approved_cap` refuses it, and the decision
+ *   the effective amendments — judged in bigint first, the largest bigint included
+ *   (`withinApprovedCap`), and held by the database's `ck_contract_approved_cap` — the decision
  *   is `422 APPROVED_TOTAL_EXCEEDS_CAP` with nothing written (Q-96 (5)). A rejection, at any step,
  *   is final for that number (Q-96 (7)). No timer and no default: a step waits (ADR-043).
  * - **Every decision has its event in the same transaction** (`STATEMENT_DECISION_RECORDED`, and
@@ -380,9 +387,11 @@ export class StatementDecisionService {
   }
 
   /**
-   * Adds the approved gross to the contract's total. Past the cap the database refuses the row
-   * (`ck_contract_approved_cap`); that refusal is this command's `422`, and the transaction rolls
-   * back with it, so nothing of the decision is written.
+   * Adds the approved gross to the contract's total. Past the cap — judged first on the contract
+   * read under its row lock (`withinApprovedCap`), so a sum past the largest bigint is the same
+   * refusal and never the database's arithmetic error — this command is `422`, and the transaction
+   * rolls back with it, so nothing of the decision is written. The database holds the same
+   * (`ck_contract_approved_cap`), and its refusal is answered alike.
    */
   private async addToApprovedTotal(
     tx: ExtendedPrismaClient,
@@ -391,6 +400,16 @@ export class StatementDecisionService {
     at: Date,
     context: Record<string, unknown>,
   ): Promise<void> {
+    const pastCap = () =>
+      this.refused(
+        ruleRefusal(
+          'Approving this statement would take the approved total past the contract’s price and its effective amendments',
+          'decision',
+          ['APPROVED_TOTAL_EXCEEDS_CAP'],
+          context,
+        ),
+      );
+    if (!withinApprovedCap(contract, gross)) throw pastCap();
     let added: boolean;
     try {
       added = await this.repository.addToApprovedTotal(tx, {
@@ -402,14 +421,7 @@ export class StatementDecisionService {
       });
     } catch (error) {
       if (!isApprovedCapViolation(error)) throw error;
-      throw this.refused(
-        ruleRefusal(
-          'Approving this statement would take the approved total past the contract’s price and its effective amendments',
-          'decision',
-          ['APPROVED_TOTAL_EXCEEDS_CAP'],
-          context,
-        ),
-      );
+      throw pastCap();
     }
     if (!added) throw RastaError.optimisticLockFailed('Contract', contract.id);
   }
