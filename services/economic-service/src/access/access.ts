@@ -1,4 +1,6 @@
+import { Logger } from '@nestjs/common';
 import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
+import type { HierarchyQuestion } from '../organization/organization-hierarchy';
 
 /**
  * Object-level authorization for the financial domain.
@@ -55,17 +57,6 @@ export const PLATFORM_ROLES = ['SYSTEM_ADMIN', 'UNION_ADMIN'] as const;
  * (ADR-023).
  */
 export const RULE_ADMIN_ROLES = ['SYSTEM_ADMIN'] as const;
-
-/**
- * The role that may settle a transaction whose payer is another organization.
- *
- * Narrower than `PLATFORM_ROLES`: whether a `UNION_ADMIN` may release another
- * organization's escrow is a business rule nobody has decided (docs/24
- * Q-136), so until it is, only `SYSTEM_ADMIN` crosses — the operator
- * resolving a stuck settlement (docs/23 D-054). Settling one's own
- * organization's transaction is not affected.
- */
-export const SETTLEMENT_CROSSING_ROLES = ['SYSTEM_ADMIN'] as const;
 
 /**
  * The one role that must never reach this service.
@@ -143,8 +134,8 @@ export function canCommitOrganization(organizationId: string): void {
   }
 
   // Platform administrators may act for another organization — an operator
-  // resolving a stuck settlement (settling itself is narrower still:
-  // `canSettleFor`). Everyone else is confined to their own, and
+  // resolving a stuck settlement (the six transaction commands are narrower
+  // still: `canActFinanciallyFor`). Everyone else is confined to their own, and
   // the mismatch is a 403 rather than a 404 because the caller already knows
   // which organization they asked to act for.
   // `getOrganizationId()` rather than `context.organizationId`: a service
@@ -155,31 +146,142 @@ export function canCommitOrganization(organizationId: string): void {
   }
 }
 
-function maySettleAcrossOrganizations(): boolean {
+/**
+ * The six commands that move or stop a transaction's money (docs/24 Q-136):
+ * settlement, its authorisation, opening and resolving a dispute,
+ * cancellation and refund. Named in every record of who did one for whom.
+ */
+export type FinancialCommand =
+  'SETTLE' | 'AUTHORISE_SETTLEMENT' | 'DISPUTE' | 'RESOLVE_DISPUTE' | 'CANCEL' | 'REFUND';
+
+/**
+ * On what authority the caller acts on a transaction's books:
+ *
+ * - `OWN_ORGANIZATION` — the request acts for the organization whose books
+ *   carry the transaction (its payer), or is the order saga as that party;
+ * - `PAYEE` — the payee's financial administrator returning escrow (Q-62);
+ * - `SYSTEM_ADMIN` — the platform operator, for any organization;
+ * - `UNION_SUBTREE` — a union administrator, for an organization
+ *   organization-service confirmed within its union (Q-136), at
+ *   `hierarchyVersion`.
+ */
+export type FinancialAuthorityBasis =
+  'OWN_ORGANIZATION' | 'PAYEE' | 'SYSTEM_ADMIN' | 'UNION_SUBTREE';
+
+export interface FinancialAuthority {
+  readonly command: FinancialCommand;
+  readonly basis: FinancialAuthorityBasis;
+  /** Who acts: the platform user id, or the calling service. */
+  readonly actor: string;
+  /** The organization the request acts for — its idempotency key and attribution. */
+  readonly actingOrganizationId: string;
+  /** The organization whose books carry the transaction: its own tenant, the payer. */
+  readonly booksOrganizationId: string;
+  /** For `UNION_SUBTREE`: organization-service's hierarchy version of the books organization. */
+  readonly hierarchyVersion: number | null;
+}
+
+/** The records of who did a financial command for whom (`recordFinancialCommand`). */
+const financialLog = new Logger('FinancialAuthority');
+
+/**
+ * The one rule for acting financially for an organization (docs/24 Q-136,
+ * decided by the product owner 2026-10-16), for each of the six
+ * {@link FinancialCommand}s, fresh and replayed alike:
+ *
+ * | caller                                   | for its own organization | for another one                         |
+ * | ---------------------------------------- | ------------------------ | --------------------------------------- |
+ * | financial administrator (any of the three) | as before              | `canCommitOrganization` refuses         |
+ * | `SYSTEM_ADMIN`                           | as before                | yes — unchanged                         |
+ * | `UNION_ADMIN`                            | as before                | only within its union's subtree; else 403 |
+ * | a service                                | as the party its token names | `canCommitOrganization` refuses     |
+ *
+ * "Within the union's subtree" is decided by organization-service, the owner
+ * of the hierarchy (A-13), asked over authenticated REST with a token signed
+ * for the union — the organization the request acts for — never by anything
+ * the client sends. "Could not confirm" is 503/504 and nothing is written
+ * (fail closed). The caller asks this under the transaction's row lock, in the
+ * transaction that commits the command; the answer's hierarchy version is in
+ * the command's record, so a concurrent `ORGANIZATION_MOVED` can be ordered
+ * against it (docs/23 D-054).
+ *
+ * The books stay the transaction's own: this decides only whether the caller
+ * may act for them.
+ */
+export async function canActFinanciallyFor(
+  command: FinancialCommand,
+  booksOrganizationId: string,
+  hierarchy: HierarchyQuestion,
+): Promise<FinancialAuthority> {
+  canCommitOrganization(booksOrganizationId);
   const context = getContext();
-  if (context.authType === 'SERVICE') return false;
-  return SETTLEMENT_CROSSING_ROLES.some((role) => context.roles.includes(role));
+  const actingOrganizationId = getOrganizationId();
+  const authority = (basis: FinancialAuthorityBasis, hierarchyVersion: number | null = null) =>
+    financialAuthority(command, basis, booksOrganizationId, hierarchyVersion);
+
+  if (actingOrganizationId === booksOrganizationId) return authority('OWN_ORGANIZATION');
+
+  // Past `canCommitOrganization`, only platform scope acts for another
+  // organization: a person, never a service.
+  const isPerson = context.authType !== 'SERVICE';
+  if (isPerson && context.roles.includes('SYSTEM_ADMIN')) return authority('SYSTEM_ADMIN');
+  if (isPerson && context.roles.includes('UNION_ADMIN')) {
+    // The union is the organization the request acts for, signed into the
+    // question's token; the answer is organization-service's (A-13).
+    const within = await hierarchy.withinVersion(actingOrganizationId, booksOrganizationId);
+    if (within) return authority('UNION_SUBTREE', within.hierarchyVersion);
+  }
+  financialLog.warn(
+    `Financial command ${command} refused: actor=${actorOf()} ` +
+      `actingOrganization=${actingOrganizationId} booksOrganization=${booksOrganizationId} ` +
+      'reason=OUTSIDE_UNION_SUBTREE',
+  );
+  throw outsideUnionRefused();
+}
+
+function outsideUnionRefused(): RastaError {
+  return RastaError.forbidden(
+    "Acting financially for another organization is limited to the organizations within your union's subtree",
+  );
+}
+
+function financialAuthority(
+  command: FinancialCommand,
+  basis: FinancialAuthorityBasis,
+  booksOrganizationId: string,
+  hierarchyVersion: number | null = null,
+): FinancialAuthority {
+  return Object.freeze({
+    command,
+    basis,
+    actor: actorOf(),
+    actingOrganizationId: getOrganizationId(),
+    booksOrganizationId,
+    hierarchyVersion,
+  });
+}
+
+function actorOf(): string {
+  const context = getContext();
+  return context.userId ?? context.callerService ?? '(unknown)';
 }
 
 /**
- * Whether the caller may settle a transaction this organization pays.
- *
- * {@link canCommitOrganization}, and then one rule more: acting for any
- * organization but the payer is `SYSTEM_ADMIN`'s alone (docs/24 Q-136). A
- * `UNION_ADMIN` who may read the transaction — platform scope, docs/09 § 9.3 —
- * is refused here with 403 `FORBIDDEN`, which the exception filter records as
- * an access denial like every other. The same check guards a fresh settlement
- * and the replay of a stored one, so a role taken away is taken away from both.
+ * The record of a financial command that committed: who acted, for which
+ * organization, on whose books, and on what authority (docs/24 Q-136). One
+ * line per command, after its transaction commits — the settlement row also
+ * keeps `acting_organization_id`; the other five commands have no column for
+ * it, so this line is where the acting organization is kept (S-06: logged,
+ * not yet a durable audit record).
  */
-export function canSettleFor(payerOrganizationId: string): void {
-  canCommitOrganization(payerOrganizationId);
-  if (getOrganizationId() === payerOrganizationId) return;
-  if (!maySettleAcrossOrganizations()) throw settlementCrossingRefused();
-}
-
-function settlementCrossingRefused(): RastaError {
-  return RastaError.forbidden(
-    "Settling another organization's transaction is reserved to the system administrator",
+export function recordFinancialCommand(transactionId: string, authority: FinancialAuthority): void {
+  financialLog.log(
+    `Financial command ${authority.command} on ${transactionId}: actor=${authority.actor} ` +
+      `actingOrganization=${authority.actingOrganizationId} ` +
+      `booksOrganization=${authority.booksOrganizationId} authority=${authority.basis}` +
+      (authority.hierarchyVersion === null
+        ? ''
+        : ` hierarchyVersion=${authority.hierarchyVersion}`),
   );
 }
 
@@ -194,7 +296,7 @@ function settlementCrossingRefused(): RastaError {
 export interface SettlementBooks {
   /** The payer, whose books the settlement journal is posted on. */
   readonly organizationId: string;
-  /** The organization the system administrator is acting for. */
+  /** The organization the platform administrator is acting for. */
   readonly actingOrganizationId: string;
 }
 
@@ -202,33 +304,38 @@ const issuedSettlementBooks = new WeakSet<SettlementBooks>();
 
 /**
  * Whose books a settlement journal is posted on, when that is not the
- * organization the request acts for.
+ * organization the request acts for — and the authority it is posted on.
  *
- * A settlement's journal belongs to the payer. A system administrator acting
- * for another organization may settle it — {@link canSettleFor} admits them,
- * the operator resolving a stuck settlement — but the journal header is
- * tenant-scoped, and without this the guard refused the write and the
- * settlement failed as a 500. This is the narrow, explicit leave to make that
- * one write: everything else in the request (its idempotency key, its
- * attribution) stays with the acting organization.
+ * A settlement's journal belongs to the payer. A platform administrator acting
+ * for another organization may settle it — {@link canActFinanciallyFor} admits
+ * a system administrator, and a union administrator for an organization of its
+ * union's subtree — but the journal header is tenant-scoped, and without this
+ * the guard refused the write and the settlement failed as a 500. This is the
+ * narrow, explicit leave to make that one write: everything else in the
+ * request (its idempotency key, its attribution) stays with the acting
+ * organization.
  *
- * `undefined` when the caller acts for the payer: there is nothing to cross.
- * Anyone else — a `UNION_ADMIN` (docs/24 Q-136), a service whose token names
- * another organization — is refused exactly as {@link canSettleFor} refuses
- * them, so this check holds even where that one was not made first.
+ * `books` is `undefined` when the caller acts for the payer: there is nothing
+ * to cross. Anyone else is refused exactly as {@link canActFinanciallyFor}
+ * refuses them — it is that function, asked here under the row lock.
  */
-export function settlementBooks(payerOrganizationId: string): SettlementBooks | undefined {
-  canSettleFor(payerOrganizationId);
-  const actingOrganizationId = getOrganizationId();
-  if (actingOrganizationId === payerOrganizationId) return undefined;
-  if (!maySettleAcrossOrganizations()) {
-    // Unreachable past `canSettleFor`; stated so the crossing never rests on
+export async function settlementBooks(
+  payerOrganizationId: string,
+  hierarchy: HierarchyQuestion,
+): Promise<{ authority: FinancialAuthority; books: SettlementBooks | undefined }> {
+  const authority = await canActFinanciallyFor('SETTLE', payerOrganizationId, hierarchy);
+  if (authority.basis === 'OWN_ORGANIZATION') return { authority, books: undefined };
+  if (authority.basis !== 'SYSTEM_ADMIN' && authority.basis !== 'UNION_SUBTREE') {
+    // Unreachable for a settlement; stated so the crossing never rests on
     // another function's branch staying as it is.
-    throw settlementCrossingRefused();
+    throw outsideUnionRefused();
   }
-  const books = Object.freeze({ organizationId: payerOrganizationId, actingOrganizationId });
+  const books = Object.freeze({
+    organizationId: payerOrganizationId,
+    actingOrganizationId: authority.actingOrganizationId,
+  });
   issuedSettlementBooks.add(books);
-  return books;
+  return { authority, books };
 }
 
 /** Whether `books` was issued by {@link settlementBooks} — not merely shaped like it. */
@@ -291,21 +398,28 @@ export interface RefundPolicy {
 }
 
 /**
- * Refuses a refund the caller has no authority to make (docs/24 Q-62).
+ * Refuses a refund the caller has no authority to make (docs/24 Q-62, Q-136),
+ * and answers the authority it is made on.
  *
  * A refund returns escrow to the **payer**, so the payer is the one party
  * whose say-so cannot be enough: a payer that could refund its own escrow
  * could confirm receipt, or open a dispute, and then take the money back —
  * stepping around `resolve-dispute`, which is a platform decision, and leaving
- * the payee unpaid (docs/10 § 10.5). The interim rule:
+ * the payee unpaid (docs/10 § 10.5). The rule:
  *
  * | caller                                         | may refund                  |
  * | ---------------------------------------------- | --------------------------- |
  * | not a party, no platform scope                 | 404 (never learns it exists) |
  * | the payer, in any role, from any state         | never — 403                  |
- * | platform scope (not acting as the payer)       | from any refundable state    |
  * | a service `@AllowService` admits on the route  | as the party its token names |
  * | the payee's financial administrator            | yes, unless `DISPUTED`       |
+ * | `SYSTEM_ADMIN` acting for another organization | from any refundable state    |
+ * | `UNION_ADMIN` acting for another organization  | the same, only if the payer is within its union's subtree (Q-136); else 403 |
+ *
+ * The last two are {@link canActFinanciallyFor} for the payer's books — the
+ * one rule every financial command shares. The payee's own rule is judged
+ * first and asks nothing of the hierarchy, so a union administrator of the
+ * payee keeps what the payee's own administrator has.
  *
  * **The service row is the order saga.** marketplace-service's token is signed
  * for the *buyer* — the payer — and its refund is the compensation for an order
@@ -316,30 +430,40 @@ export interface RefundPolicy {
  * The state machine still decides whether a refund is possible at all; this
  * only decides who may ask.
  */
-export function assertMayRefund(transaction: RefundableTransaction, policy: RefundPolicy): void {
+export async function assertMayRefund(
+  transaction: RefundableTransaction,
+  policy: RefundPolicy,
+  hierarchy: HierarchyQuestion,
+): Promise<FinancialAuthority> {
   // First, so that a non-party learns nothing — not even that it would have
   // been refused for a different reason.
   assertTransactionVisible(transaction);
 
   const context = getContext();
-  if (context.authType === 'SERVICE') return;
+  const acting = getOrganizationId();
+  const payer = transaction.organizationId;
+  const isPayee = acting === transaction.counterpartyOrganizationId;
 
-  if (getOrganizationId() === transaction.organizationId) {
+  if (context.authType === 'SERVICE') {
+    return financialAuthority('REFUND', isPayee ? 'PAYEE' : 'OWN_ORGANIZATION', payer);
+  }
+
+  if (acting === payer) {
     throw RastaError.forbidden('The payer cannot refund its own transaction');
   }
 
-  if (hasPlatformScope()) return;
+  const isAdmin = FINANCIAL_ADMIN_ROLES.some((role) => context.roles.includes(role));
+  if (isPayee && isAdmin && policy.payeeMayRefund && transaction.status !== 'DISPUTED') {
+    return financialAuthority('REFUND', 'PAYEE', payer);
+  }
+
+  if (hasPlatformScope()) return canActFinanciallyFor('REFUND', payer, hierarchy);
 
   if (transaction.status === 'DISPUTED') {
     throw RastaError.forbidden(
       'A disputed transaction is refunded only by a platform decision on the dispute',
     );
   }
-
-  const isPayee = getOrganizationId() === transaction.counterpartyOrganizationId;
-  const isAdmin = FINANCIAL_ADMIN_ROLES.some((role) => context.roles.includes(role));
-  if (isPayee && isAdmin && policy.payeeMayRefund) return;
-
   throw RastaError.forbidden('You do not have permission to refund this transaction');
 }
 

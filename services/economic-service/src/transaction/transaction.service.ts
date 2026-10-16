@@ -10,9 +10,13 @@ import { nextStatus } from './state-machine';
 import {
   assertMayRefund,
   assertTransactionVisible,
-  canCommitOrganization,
+  canActFinanciallyFor,
+  recordFinancialCommand,
+  type FinancialAuthority,
+  type FinancialCommand,
   type RefundableTransaction,
 } from '../access/access';
+import { OrganizationHierarchy } from '../organization/organization-hierarchy';
 import { formatMinor, parseMinor } from '../shared/money';
 import { isUniqueViolation } from '../ledger/ledger.repository';
 import { LedgerService } from '../ledger/ledger.service';
@@ -46,6 +50,7 @@ export class TransactionService {
     private readonly walletRepository: WalletRepository,
     @Inject(ENV) private readonly env: EconomicEnv,
     private readonly ledger: LedgerService,
+    private readonly hierarchy: OrganizationHierarchy,
   ) {}
 
   // ==========================================================================
@@ -461,10 +466,10 @@ export class TransactionService {
     });
 
     try {
-      return await this.prisma.transaction(async (tx) => {
+      const { detail, authority } = await this.prisma.transaction(async (tx) => {
         const transaction = await this.repository.lockForUpdate(tx, transactionId);
         if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-        this.authorizeAct(transaction, 'REFUND');
+        const authority = await this.authorizeAct(transaction, 'REFUND');
 
         const target = nextStatus(transactionId, transaction.status, 'REFUND');
 
@@ -518,8 +523,10 @@ export class TransactionService {
           at: refundedAt,
         });
 
-        return this.answered(tx, transactionId, answer);
+        return { detail: await this.answered(tx, transactionId, answer), authority };
       });
+      recordFinancialCommand(transactionId, authority);
+      return detail;
     } finally {
       stop();
     }
@@ -562,10 +569,13 @@ export class TransactionService {
     extra: Prisma.TransactionUncheckedUpdateManyInput,
     answer?: IdempotentAnswer<TransactionDetail>,
   ): Promise<TransactionDetail> {
-    return this.prisma.transaction(async (tx) => {
+    const { detail, authority } = await this.prisma.transaction(async (tx) => {
       const transaction = await this.repository.lockForUpdate(tx, transactionId);
       if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-      this.authorizeAct(transaction, 'COMMIT');
+      // Judged here, under the row lock and in the transaction that commits the
+      // move, so the authority and the state it moves are read together; the
+      // hierarchy question, when there is one, is asked here too (Q-136).
+      const authority = await this.authorizeAct(transaction, event);
 
       const target = nextStatus(transactionId, transaction.status, event);
       const moved = await this.repository.transition(
@@ -585,28 +595,32 @@ export class TransactionService {
         at,
       });
 
-      return this.answered(tx, transactionId, answer);
+      return { detail: await this.answered(tx, transactionId, answer), authority };
     });
+    recordFinancialCommand(transactionId, authority);
+    return detail;
   }
 
   /**
-   * Who may act on this transaction, as a command asks it: `COMMIT` for a
-   * lifecycle move, `REFUND` for a refund (docs/24 Q-62), `READ` for what only
-   * shows it. A non-party learns nothing — `NOT_FOUND` first, always.
+   * Who may make one of the five transaction commands on this transaction, and
+   * on what authority: a refund by its own rule (docs/24 Q-62), the other four
+   * by {@link canActFinanciallyFor} — and both, for acting from another
+   * organization, by that one rule of docs/24 Q-136. A non-party learns
+   * nothing — `NOT_FOUND` first, always.
    */
-  private authorizeAct(transaction: RefundableTransaction, act: TransactionAct): void {
-    switch (act) {
-      case 'READ':
-        assertTransactionVisible(transaction);
-        return;
-      case 'COMMIT':
-        assertTransactionVisible(transaction);
-        canCommitOrganization(transaction.organizationId);
-        return;
-      case 'REFUND':
-        assertMayRefund(transaction, { payeeMayRefund: this.env.ECONOMIC_REFUND_BY_PAYEE_ENABLED });
-        return;
+  private authorizeAct(
+    transaction: RefundableTransaction,
+    command: TransactionCommand,
+  ): Promise<FinancialAuthority> {
+    if (command === 'REFUND') {
+      return assertMayRefund(
+        transaction,
+        { payeeMayRefund: this.env.ECONOMIC_REFUND_BY_PAYEE_ENABLED },
+        this.hierarchy,
+      );
     }
+    assertTransactionVisible(transaction);
+    return canActFinanciallyFor(command, transaction.organizationId, this.hierarchy);
   }
 
   /**
@@ -619,7 +633,8 @@ export class TransactionService {
   async assertMayReplay(transactionId: string, act: TransactionAct): Promise<void> {
     const transaction = await this.repository.findByIdForParty(transactionId);
     if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-    this.authorizeAct(transaction, act);
+    if (act === 'READ') assertTransactionVisible(transaction);
+    else await this.authorizeAct(transaction, act);
   }
 
   /**
@@ -717,7 +732,10 @@ export class TransactionService {
 }
 
 /** What a caller asks to do to a transaction — see `TransactionService.authorizeAct`. */
-export type TransactionAct = 'READ' | 'COMMIT' | 'REFUND';
+export type TransactionAct = 'READ' | TransactionCommand;
+
+/** The five financial commands made on `/v1/transactions/:id` (settlement is its own resource). */
+export type TransactionCommand = Exclude<FinancialCommand, 'SETTLE'>;
 
 type StatusChangeAction =
   | 'CREATE'

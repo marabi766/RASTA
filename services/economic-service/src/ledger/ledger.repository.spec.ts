@@ -1,6 +1,7 @@
 import { currentUnscopedReason, runWithContext, type RequestContext } from '@rasta/nest-common';
 import { LedgerRepository } from './ledger.repository';
 import { settlementBooks, type SettlementBooks } from '../access/access';
+import type { HierarchyQuestion } from '../organization/organization-hierarchy';
 import type { ExtendedPrismaClient, PrismaService } from '../prisma/prisma.service';
 
 /**
@@ -54,14 +55,23 @@ describe('LedgerRepository.createJournal', () => {
     correlationId: 'corr-1',
   });
 
+  /** ORG-B is within the union ORG-A (docs/24 Q-136); a system administrator asks nothing. */
+  const unionOfB: HierarchyQuestion = {
+    withinVersion: async (scope, organizationId) =>
+      scope === 'ORG-A' && organizationId === 'ORG-B' ? { hierarchyVersion: 3 } : null,
+  };
+
+  /** The leave `settlementBooks` issues to the context's caller for ORG-B's books. */
+  const issue = async (payer = 'ORG-B') => (await settlementBooks(payer, unionOfB)).books;
+
   const create = (
     context: RequestContext,
     data: ReturnType<typeof journal>,
-    books: () => SettlementBooks | undefined,
+    books: () => Promise<SettlementBooks | undefined> | SettlementBooks | undefined,
   ) => {
     const { tx, writes } = fakeTx();
     const result = runWithContext(context, () =>
-      Promise.resolve().then(() => repository.createJournal(tx, data, books())),
+      Promise.resolve().then(async () => repository.createJournal(tx, data, await books())),
     );
     return { result, writes };
   };
@@ -77,8 +87,16 @@ describe('LedgerRepository.createJournal', () => {
   });
 
   it('with the leave issued for this request, writes the payer’s settlement journal across the guard', async () => {
-    const { result, writes } = create(acting('ORG-A'), journal('ORG-B'), () =>
-      settlementBooks('ORG-B'),
+    const { result, writes } = create(acting('ORG-A'), journal('ORG-B'), () => issue());
+    await result;
+    expect(writes).toEqual([
+      { organizationId: 'ORG-B', unscoped: expect.stringContaining("posts the payer's journal") },
+    ]);
+  });
+
+  it('writes a union administrator’s settlement for an organization of its union the same way', async () => {
+    const { result, writes } = create(acting('ORG-A', ['UNION_ADMIN']), journal('ORG-B'), () =>
+      issue(),
     );
     await result;
     expect(writes).toEqual([
@@ -97,22 +115,20 @@ describe('LedgerRepository.createJournal', () => {
 
   it('refuses any journal type but SETTLEMENT', async () => {
     const { result, writes } = create(acting('ORG-A'), journal('ORG-B', 'FUNDS_HELD'), () =>
-      settlementBooks('ORG-B'),
+      issue(),
     );
     await expect(result).rejects.toThrow(/only as an issued settlement/);
     expect(writes).toEqual([]);
   });
 
   it('refuses books other than the payer the leave names', async () => {
-    const { result, writes } = create(acting('ORG-A'), journal('ORG-D'), () =>
-      settlementBooks('ORG-B'),
-    );
+    const { result, writes } = create(acting('ORG-A'), journal('ORG-D'), () => issue());
     await expect(result).rejects.toThrow(/only as an issued settlement/);
     expect(writes).toEqual([]);
   });
 
   it('refuses a leave carried into a request acting for another organization', async () => {
-    const issued = runWithContext(acting('ORG-A'), () => settlementBooks('ORG-B'));
+    const issued = await runWithContext(acting('ORG-A'), () => issue());
     const { result, writes } = create(acting('ORG-C'), journal('ORG-B'), () => issued);
     await expect(result).rejects.toThrow(/only as an issued settlement/);
     expect(writes).toEqual([]);

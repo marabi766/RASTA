@@ -169,8 +169,9 @@ export class LedgerRepository {
     if (!books) return tx.journal.create({ data });
 
     // The one exception: a settlement journal on the payer's books, posted by
-    // a system administrator acting for another organization (`access.ts`
-    // `settlementBooks`). Only this row crosses, only for this journal type,
+    // a platform administrator acting for another organization — a system
+    // administrator, or a union administrator for an organization of its
+    // union's subtree (`access.ts` `settlementBooks`, docs/24 Q-136). Only this row crosses, only for this journal type,
     // only onto the organization the leave names, and only within the request
     // it was issued for; anything else is refused here rather than written.
     if (
@@ -182,7 +183,7 @@ export class LedgerRepository {
       throw new Error('A journal may cross the tenant boundary only as an issued settlement');
     }
     return runUnscoped(
-      "a system administrator's settlement posts the payer's journal while acting for another organization",
+      "a platform administrator's settlement posts the payer's journal while acting for another organization",
       () => tx.journal.create({ data }),
     );
   }

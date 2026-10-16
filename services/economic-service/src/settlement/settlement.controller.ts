@@ -26,7 +26,8 @@ import { RewardService } from '../reward/reward.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { IdempotencyStore } from '../shared/idempotency';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
-import { assertNotAuditor, canSettleFor } from '../access/access';
+import { assertNotAuditor, canActFinanciallyFor } from '../access/access';
+import { OrganizationHierarchy } from '../organization/organization-hierarchy';
 import { settleTransactionSchema, type SettleTransactionDto } from '../transaction/dto';
 import { listSettlementsQuerySchema, type ListSettlementsQuery } from './dto';
 import { SERVICE_NAME } from '../config/env';
@@ -64,6 +65,7 @@ export class SettlementController {
     private readonly rewards: RewardService,
     private readonly prisma: PrismaService,
     private readonly idempotency: IdempotencyStore,
+    private readonly hierarchy: OrganizationHierarchy,
   ) {}
 
   @Post()
@@ -99,7 +101,9 @@ export class SettlementController {
       async (answer) => {
         // Authorization before the lock: the caller must be entitled to commit
         // the paying organization. Read outside the settlement transaction so an
-        // unauthorised request never takes a row lock at all.
+        // unauthorised request never takes a row lock at all. Asked again under
+        // the lock (`settlementBooks`), and that answer is the one the
+        // settlement commits on.
         await this.authorizeSettlement(dto.transactionId);
 
         // The response is stored with the settlement, in its transaction: a
@@ -122,12 +126,13 @@ export class SettlementController {
 
   /**
    * Whether the caller may settle this transaction: a party, entitled to commit
-   * its payer — or, for another organization's, a system administrator only
-   * (`canSettleFor`, docs/24 Q-136). Asked of a replay too.
+   * its payer — or, for another organization's, a system administrator, or a
+   * union administrator for an organization within its union's subtree
+   * (`canActFinanciallyFor`, docs/24 Q-136). Asked of a replay too, the same way.
    */
   private async authorizeSettlement(transactionId: string): Promise<void> {
     const transaction = await this.transactions.get(transactionId);
-    canSettleFor(transaction.organizationId);
+    await canActFinanciallyFor('SETTLE', transaction.organizationId, this.hierarchy);
   }
 
   /**
