@@ -35,6 +35,16 @@ describe('the provisional defaults (Q-102, Q-103)', () => {
     );
   });
 
+  it('resolves no return of which nothing arrived until the deployment says so (Q-133 (4))', () => {
+    expect(env.INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED).toBe(false);
+    expect(
+      load({ INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED: 'true' })
+        .INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED,
+    ).toBe(true);
+    // Only the two words: a typo is a failed start, never a silent false.
+    expect(() => load({ INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED: 'yes' })).toThrow();
+  });
+
   it('configures no shipment state, cancellation or stock link the documents leave open (Q-114, Q-115)', () => {
     expect(
       Object.keys(env).filter((name) => /SHIPMENT|FAILED|CANCEL|CHECKPOINT/.test(name)),

@@ -379,12 +379,13 @@ export class ReturnShipmentService {
         throw RastaError.optimisticLockFailed('ReturnShipment', id);
       }
 
-      // Policy first: no disposition is allowed unless the deployment named it (Q-133).
+      // Policy first: no disposition is allowed unless the deployment named it (Q-133) — and with
+      // none named, nothing is resolved at all, an empty set of dispositions included.
       const allowed = new Set<string>(this.env.INVENTORY_RETURN_DISPOSITIONS_ALLOWED);
       const refused = [...new Set(dto.dispositions.map((row) => row.disposition))].filter(
         (disposition) => !allowed.has(disposition),
       );
-      if (refused.length > 0) {
+      if (allowed.size === 0 || refused.length > 0) {
         throw refusal(
           'returnShipment',
           'DISPOSITION_NOT_ALLOWED',
@@ -397,6 +398,20 @@ export class ReturnShipmentService {
 
       // Arithmetic second: per line, exactly what was received goes somewhere.
       const lines = (await this.shipments.linesOf([locked], tx)).get(locked.id) ?? [];
+
+      // Nothing arrived: what that resolves to is not decided (Q-133 (4)), so it is resolved —
+      // with no disposition — only where the deployment says so, and otherwise refused by name.
+      const nothingReceived = lines.every((line) => (line.receivedQuantity ?? 0) === 0);
+      if (nothingReceived && !this.env.INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED) {
+        throw refusal(
+          'returnShipment',
+          'NOTHING_RECEIVED_TO_RESOLVE',
+          'Nothing of this return arrived, and this deployment does not resolve such a return ' +
+            '(INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED, Q-133)',
+          { returnShipmentId: id },
+        );
+      }
+
       const known = new Set(lines.map((line) => line.orderLineId));
       const sent = new Map<string, number>();
       for (const row of dto.dispositions) {

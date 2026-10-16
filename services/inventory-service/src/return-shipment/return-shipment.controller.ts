@@ -202,8 +202,11 @@ export class ReturnShipmentController {
       'Per line, its received units by disposition (RESTOCK, REPAIR, REPLACE, ' +
       'RETURN_TO_SUPPLIER, SCRAP, RECYCLE) — only those named in ' +
       'INVENTORY_RETURN_DISPOSITIONS_ALLOWED, which is empty by default (Q-133): 422 ' +
-      '`DISPOSITION_NOT_ALLOWED`. For every line the quantities add up to exactly what was ' +
-      'received: 422 `DISPOSITIONS_DO_NOT_BALANCE`. Records the RESOLVED tracking event and ' +
+      '`DISPOSITION_NOT_ALLOWED`, and while it is empty nothing is resolved. For every line the ' +
+      'quantities add up to exactly what was received: 422 `DISPOSITIONS_DO_NOT_BALANCE`. A ' +
+      'shipment of which nothing arrived resolves with `dispositions: []`, and only where ' +
+      'INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED is true; it is false by default (Q-133): 422 ' +
+      '`NOTHING_RECEIVED_TO_RESOLVE`. Records the RESOLVED tracking event and ' +
       'RETURN_SHIPMENT_RESOLVED. **This records an outcome and nothing else**: no stock is ' +
       'received into a balance (RESTOCK included) and no refund is requested — a refund is ' +
       'economic-service’s and has no operation for a settled order yet (Q-76). A return shipment ' +

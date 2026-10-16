@@ -166,9 +166,10 @@ export const returnShipmentResolvedPayloadSchema = z
   .object({
     ...returnShipmentFacts,
     returnShipmentVersion: z.literal(4),
+    // Empty exactly when nothing arrived (every line received 0) and the deployment resolves such a
+    // return (Q-133 (4)); inventory's own database refuses an empty set for anything else.
     dispositions: z
       .array(returnDispositionLineSchema)
-      .min(1)
       .max(300)
       .refine(
         (rows) =>

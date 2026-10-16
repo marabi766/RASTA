@@ -65,6 +65,8 @@ export const REFUSAL_REASONS = {
     DISPOSITION_NOT_ALLOWED: 422,
     /** Per line, the dispositions' quantities do not add up to what was received. */
     DISPOSITIONS_DO_NOT_BALANCE: 422,
+    /** Nothing arrived, and this deployment does not resolve such a return (Q-133 (4)). */
+    NOTHING_RECEIVED_TO_RESOLVE: 422,
   },
 } as const satisfies Record<RefusalArea, Record<string, 409 | 422>>;
 

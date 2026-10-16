@@ -182,7 +182,9 @@ export const resolveReturnShipmentSchema = z
           })
           .strict(),
       )
-      .min(1)
+      // Empty is a shape, not a permission: it balances only a shipment of which nothing arrived,
+      // and resolves one only where the deployment allows it (Q-133 (4); the service decides).
+      .min(0)
       .max(MAX_RETURN_SHIPMENT_LINES * RETURN_DISPOSITIONS.length)
       .superRefine((rows, context) => {
         const seen = new Set<string>();
@@ -200,8 +202,10 @@ export const resolveReturnShipmentSchema = z
       })
       .describe(
         'Per line, its units by disposition; for every line the quantities add up to exactly ' +
-          'what was received (a line that received none needs no row). This records an outcome ' +
-          'for the goods. It moves no stock and asks for no money.',
+          'what was received (a line that received none needs no row). Empty only when nothing ' +
+          'arrived at all, and then only where INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED allows ' +
+          'it (Q-133). This records an outcome for the goods. It moves no stock and asks for no ' +
+          'money.',
       ),
   })
   .strict();

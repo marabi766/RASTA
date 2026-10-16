@@ -5290,7 +5290,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED, DISPOSITION_NOT_ALLOWED, DISPOSITIONS_DO_NOT_BALANCE)",
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED, DISPOSITION_NOT_ALLOWED, DISPOSITIONS_DO_NOT_BALANCE, NOTHING_RECEIVED_TO_RESOLVE)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5319,7 +5319,8 @@
                               "RECEIPT_LINES_MISMATCH",
                               "RECEIVED_EXCEEDS_EXPECTED",
                               "DISPOSITION_NOT_ALLOWED",
-                              "DISPOSITIONS_DO_NOT_BALANCE"
+                              "DISPOSITIONS_DO_NOT_BALANCE",
+                              "NOTHING_RECEIVED_TO_RESOLVE"
                             ]
                           },
                           "message": {
@@ -5731,7 +5732,7 @@
     },
     "/v1/return-shipments/{id}/resolution": {
       "post": {
-        "description": "Per line, its received units by disposition (RESTOCK, REPAIR, REPLACE, RETURN_TO_SUPPLIER, SCRAP, RECYCLE) — only those named in INVENTORY_RETURN_DISPOSITIONS_ALLOWED, which is empty by default (Q-133): 422 `DISPOSITION_NOT_ALLOWED`. For every line the quantities add up to exactly what was received: 422 `DISPOSITIONS_DO_NOT_BALANCE`. Records the RESOLVED tracking event and RETURN_SHIPMENT_RESOLVED. **This records an outcome and nothing else**: no stock is received into a balance (RESTOCK included) and no refund is requested — a refund is economic-service’s and has no operation for a settled order yet (Q-76). A return shipment not yet inspected, or resolved already, is 409 `RETURN_SHIPMENT_NOT_INSPECTED` (INVALID_STATE_TRANSITION). `expectedVersion` is optional. Only an operator of the destination warehouse’s owner records a return shipment (Q-133: the order’s supplier); its sender reads it and is refused 403 FORBIDDEN here, any other organization gets 404. This service records physical facts only: whether the return was allowed is marketplace’s, which verifies every RETURN_SHIPMENT_* event against its own request. Nothing here moves stock or money. One transaction: the row is locked, moved by compare-and-set, and its tracking event, its RETURN_SHIPMENT_* event and the stored response commit together. A shipment another command holds longer than INVENTORY_LOCK_TIMEOUT_MS is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "description": "Per line, its received units by disposition (RESTOCK, REPAIR, REPLACE, RETURN_TO_SUPPLIER, SCRAP, RECYCLE) — only those named in INVENTORY_RETURN_DISPOSITIONS_ALLOWED, which is empty by default (Q-133): 422 `DISPOSITION_NOT_ALLOWED`, and while it is empty nothing is resolved. For every line the quantities add up to exactly what was received: 422 `DISPOSITIONS_DO_NOT_BALANCE`. A shipment of which nothing arrived resolves with `dispositions: []`, and only where INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED is true; it is false by default (Q-133): 422 `NOTHING_RECEIVED_TO_RESOLVE`. Records the RESOLVED tracking event and RETURN_SHIPMENT_RESOLVED. **This records an outcome and nothing else**: no stock is received into a balance (RESTOCK included) and no refund is requested — a refund is economic-service’s and has no operation for a settled order yet (Q-76). A return shipment not yet inspected, or resolved already, is 409 `RETURN_SHIPMENT_NOT_INSPECTED` (INVALID_STATE_TRANSITION). `expectedVersion` is optional. Only an operator of the destination warehouse’s owner records a return shipment (Q-133: the order’s supplier); its sender reads it and is refused 403 FORBIDDEN here, any other organization gets 404. This service records physical facts only: whether the return was allowed is marketplace’s, which verifies every RETURN_SHIPMENT_* event against its own request. Nothing here moves stock or money. One transaction: the row is locked, moved by compare-and-set, and its tracking event, its RETURN_SHIPMENT_* event and the stored response commit together. A shipment another command holds longer than INVENTORY_LOCK_TIMEOUT_MS is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
         "operationId": "ReturnShipmentController_resolve_v1",
         "parameters": [
           {
@@ -6009,7 +6010,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED, DISPOSITION_NOT_ALLOWED, DISPOSITIONS_DO_NOT_BALANCE)",
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED, DISPOSITION_NOT_ALLOWED, DISPOSITIONS_DO_NOT_BALANCE, NOTHING_RECEIVED_TO_RESOLVE)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6038,7 +6039,8 @@
                               "RECEIPT_LINES_MISMATCH",
                               "RECEIVED_EXCEEDS_EXPECTED",
                               "DISPOSITION_NOT_ALLOWED",
-                              "DISPOSITIONS_DO_NOT_BALANCE"
+                              "DISPOSITIONS_DO_NOT_BALANCE",
+                              "NOTHING_RECEIVED_TO_RESOLVE"
                             ]
                           },
                           "message": {
@@ -6117,9 +6119,9 @@
                       "required": ["orderLineId", "disposition", "quantity"],
                       "additionalProperties": false
                     },
-                    "minItems": 1,
+                    "minItems": 0,
                     "maxItems": 300,
-                    "description": "Per line, its units by disposition; for every line the quantities add up to exactly what was received (a line that received none needs no row). This records an outcome for the goods. It moves no stock and asks for no money."
+                    "description": "Per line, its units by disposition; for every line the quantities add up to exactly what was received (a line that received none needs no row). Empty only when nothing arrived at all, and then only where INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED allows it (Q-133). This records an outcome for the goods. It moves no stock and asks for no money."
                   }
                 },
                 "required": ["dispositions"],

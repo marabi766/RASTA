@@ -151,6 +151,17 @@ describe('inspection and resolution events', () => {
     }
   });
 
+  it('carries an empty set of dispositions for a return of which nothing arrived (Q-133 (4))', () => {
+    // The producer sends it only then; the shape must not make that return unresolvable.
+    expect(
+      returnShipmentResolvedPayloadSchema.safeParse({ ...resolved, dispositions: [] }).success,
+    ).toBe(true);
+    expect(
+      returnShipmentResolvedPayloadSchema.safeParse({ ...resolved, dispositions: undefined })
+        .success,
+    ).toBe(false);
+  });
+
   it('refuses a free-text note, a refund field, or a line sent one way twice', () => {
     expect(
       returnShipmentInspectedPayloadSchema.safeParse({ ...inspected, note: 'cracked' }).success,
