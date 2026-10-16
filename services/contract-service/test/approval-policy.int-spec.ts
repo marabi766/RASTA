@@ -1,5 +1,6 @@
+import { inspect } from 'node:util';
 import request from 'supertest';
-import { runUnscoped } from '@rasta/nest-common';
+import { EXCEPTION_FILTER_LOGGER, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { EventPublisher } from '../src/events/publisher';
 import {
@@ -323,6 +324,44 @@ describe('approval policies (contract.signature)', () => {
           chainBody('contract.statement.technical', [{ ...stepFor(employer), ...bounds }]),
         ).expect(400);
       });
+
+      it.each([
+        [
+          'a decimal minimum',
+          { minAmountMinor: '12.5', maxAmountMinor: '100' },
+          '12.5',
+          'minAmountMinor',
+        ],
+        [
+          'free text for the maximum',
+          { minAmountMinor: '0', maxAmountMinor: 'private free text' },
+          'private free text',
+          'maxAmountMinor',
+        ],
+      ])(
+        'refuses %s beside a well-formed bound: 400 naming the field, and the text reaches neither the answer nor the log (S-09)',
+        async (_label, bounds, sent, field) => {
+          const logger = api.app.get<Record<string, unknown>>(EXCEPTION_FILTER_LOGGER);
+          const spies = ['fatal', 'error', 'warn', 'info', 'debug', 'trace'].map((level) =>
+            jest.spyOn(logger as Record<string, () => void>, level),
+          );
+          try {
+            const res = await create(
+              unionAdmin,
+              chainBody('contract.statement.technical', [{ ...stepFor(employer), ...bounds }]),
+            ).expect(400);
+            expect(res.body.code).toBe('VALIDATION_FAILED');
+            expect(reasons(res)).toEqual([`steps[0].${field}:invalid_string`]);
+            expect(JSON.stringify(res.body)).not.toContain(sent);
+            const logged = spies.flatMap((spy) => spy.mock.calls);
+            // The refusal is logged (debug), so the absence below is not of the whole entry.
+            expect(logged.length).toBeGreaterThan(0);
+            expect(inspect(logged, { depth: null })).not.toContain(sent);
+          } finally {
+            spies.forEach((spy) => spy.mockRestore());
+          }
+        },
+      );
     });
 
     it('fails closed when organization-service cannot confirm: 503, and 504 when it is too slow — nothing is written', async () => {
