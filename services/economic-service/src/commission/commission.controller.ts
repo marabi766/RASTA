@@ -52,9 +52,10 @@ export class CommissionController {
   @ApiOperation({
     summary: 'Commission charged to this organization',
     description:
-      'One row per settled transaction, including those charged nothing. A zero with a null ' +
-      '`ruleId` means no active rule matched — evidence that the step ran, which its absence ' +
-      'could not provide.',
+      'One row per settled transaction, including those charged nothing. `outcome` ' +
+      '`NO_ACTIVE_RULE` (and a null `ruleId`) means no active rule matched — evidence that the ' +
+      'step ran, which its absence could not provide, and never the same thing as a rule ' +
+      'configured at zero (ADR-045 § 2).',
   })
   async list(@Query(zodPipe(listCommissionsQuerySchema)) query: ListCommissionsQuery) {
     assertNotAuditor();
@@ -76,7 +77,7 @@ export class CommissionController {
   })
   async listRules(@Query(zodPipe(listCommissionRulesQuerySchema)) query: ListCommissionRulesQuery) {
     assertNotAuditor();
-    const rows = await this.commissions.listRules(query.transactionType);
+    const rows = await this.commissions.listRules(query);
     return { items: rows.map((row) => toCommissionRuleView(row as CommissionRuleRow)) };
   }
 
@@ -87,9 +88,14 @@ export class CommissionController {
     summary: 'Define a commission rate',
     description:
       'The rate is an integer in basis points — 250 is exactly 2.5%, which a decimal ' +
-      'percentage cannot promise (ADR-022). Rules are versioned in time: a transaction is ' +
-      'always charged the rate in force when it *occurred*, so an old obligation settled today ' +
-      'is not repriced. An organization-specific rule takes precedence over a platform-wide ' +
+      'percentage cannot promise (ADR-022). A rule prices one `businessLine` (ADR-045), ' +
+      'optionally narrowed to one `transactionType`; the narrowed rule wins over the line-wide ' +
+      'one. Rules are versioned in time: a transaction is ' +
+      'always charged the rate in force when it *occurred*, recorded with it when its source ' +
+      'fact is recorded, so an old obligation settled today is not repriced. `validFrom` ' +
+      'defaults to now and may not be earlier (422): a rule is never backdated. An active rule ' +
+      'may not overlap another of the same organization (or the platform), line and type (409). ' +
+      'An organization-specific rule takes precedence over a platform-wide ' +
       'one. Label demonstration data "نمونه — نیازمند تصویب" so a sample rate can never be ' +
       'mistaken for an approved one.',
   })
@@ -102,16 +108,20 @@ export class CommissionController {
   @Patch('rules/:id')
   @Roles('SYSTEM_ADMIN')
   @ApiOperation({
-    summary: 'Close, deactivate or relabel a rule',
+    summary: 'End, withdraw, reinstate or relabel a rule',
     description:
       'Close a rule with `validTo` rather than deleting it: a commission already charged ' +
       'references the rule that produced it, and deleting it would make a historical charge ' +
       'unexplainable. **The rate cannot be changed** — sending `rateBasisPoints` is a 400: a ' +
-      'rule is selected by when a transaction occurred and priced when it settles, so an ' +
-      'edited rate re-priced unsettled work. A new rate is a new rule: close this one and ' +
+      'new rate is a new rule: close this one and ' +
       'create the next from the same instant. `validTo` only moves forward: a close in the ' +
-      'past, or re-dating a rule that has ended, is a 422. Every change publishes ' +
-      '`COMMISSION_RULE_CHANGED` with the actor and the terms before and after.',
+      'past, or re-dating a rule that has ended, is a 422. **Status is effective-dated:** ' +
+      '`status: INACTIVE` on a rule in force ends it now (`validTo` becomes the present and the ' +
+      'status stays, so what it priced it still prices); before its start it withdraws the ' +
+      'rule, and `status: ACTIVE` reinstates a withdrawn rule only while its start is ahead. An ' +
+      'extension or reinstatement that would overlap an active rule of the same scope is a 409. ' +
+      'Every change publishes `COMMISSION_RULE_CHANGED` (v2) with the actor and the terms ' +
+      'before and after.',
   })
   async updateRule(
     @Param('id') id: string,

@@ -414,7 +414,23 @@ model Transaction {
   counterpartyOrganizationId String? @map("counterparty_organization_id")
 
   transactionType TransactionType   @map("transaction_type")
+  /// Why the platform may earn from it (ADR-045 § 1) — sent by the service
+  /// that owns the fact, never inferred from the type. NULL on rows recorded
+  /// before migration `20261016120000_commission_business_lines`, and on
+  /// rows whose source does not send one yet (docs/24 Q-130): those are
+  /// priced only by the type-only rules that predate business lines.
+  businessLine    BusinessLine?     @map("business_line")
   status          TransactionStatus @default(CREATED)
+
+  /// The commission pricing decided when the source fact was recorded, at
+  /// `occurredAt` (docs/23 D-057): the rule, or `NO_ACTIVE_RULE`. Settlement
+  /// charges exactly this, whatever happens to the rules afterwards, and
+  /// `trg_transaction_pricing_fixed` keeps it from changing. NULL on rows
+  /// recorded before migration `20261016120000_commission_business_lines` and
+  /// on rows without a payee, which settlement prices at `occurredAt` as before.
+  pricingOutcome CommissionOutcome? @map("pricing_outcome")
+  pricingRuleId  String?            @map("pricing_rule_id")
+  pricingRule    CommissionRule?    @relation("TransactionPricingRule", fields: [pricingRuleId], references: [id], onDelete: Restrict)
 
   /// What is owed. Fixed at creation and never recomputed — for a maintenance
   /// obligation this is exactly the figure the owner approved (ADR-028).
@@ -482,6 +498,7 @@ model Transaction {
   /// business fact per payer: two approvals of one repair cannot both settle.
   @@index([organizationId, sourceType, sourceReference])
   @@index([counterpartyOrganizationId, status])
+  @@index([pricingRuleId])
   @@map("transaction")
 }
 
@@ -497,6 +514,20 @@ enum TransactionType {
   PROCUREMENT_ORDER
   /// Money entering a wallet. Never commissioned.
   WALLET_TOP_UP
+}
+
+/// The economic reason for a commissionable transaction (ADR-045 § 1).
+///
+/// Mirrors `BUSINESS_LINES` in `@rasta/contracts`, and `business-line.spec.ts`
+/// holds the two equal. Adding a line is a contract change and a migration.
+enum BusinessLine {
+  PARTS
+  INSURANCE
+  MAINTENANCE
+  LOGISTICS
+  PROCUREMENT
+  CONSTRUCTION
+  MARKETPLACE_SERVICE
 }
 
 enum TransactionStatus {
@@ -819,14 +850,26 @@ enum PaymentIntentStatus {
 /// A commission rate, versioned in time (docs/10 § 10.7, ADR-023).
 ///
 /// **CONSTRAINT from the product document:** "تعیین درصد دقیق کارمزد … ساختگی
-/// و پیشینی نیست". No rate is hard-coded anywhere in this service and no
-/// commercial default is seeded. Q-08 is open; the answer will be an INSERT,
-/// not a deployment.
+/// و پیشینی نیست". No rate is hard-coded in this service's code and no
+/// commercial default is seeded. The one rate in the repository is the guarded
+/// demonstration seed's 200 bps (`prisma/seed.ts`, behind its flag, labelled
+/// "نمونه — نیازمند تصویب") — sample data, never a production default. Q-08 is
+/// open; the answer will be an INSERT, not a deployment.
 ///
-/// Matching, in order: an organization-specific rule beats a global one; among
-/// equals, the one valid at the transaction's `occurredAt` with the latest
-/// `validFrom` wins. **No active rule means no commission** — not an error and
-/// not a guess (docs/10 § 10.7).
+/// Matching, in order: an organization-specific rule beats a global one; then
+/// a rule narrowed to the transaction type beats one for the whole business
+/// line; the rule valid at the transaction's `occurredAt` applies. Two active
+/// rules of one scope never overlap in time (`ex_commission_rule_*_no_overlap`),
+/// so there is no tie to break. **No active rule means `NO_ACTIVE_RULE`** — a
+/// recorded outcome, not an error and not a guess (ADR-045 § 2, docs/24 Q-29).
+///
+/// Effective-dated (docs/23 D-057): created from now on, never backdated; terms
+/// fixed; status fixed once the rule has come into force; ended by `validTo`,
+/// at or after the present (`trg_commission_rule_effective_dated`).
+///
+/// Since ADR-045 a rule is written for a business line, optionally narrowed to
+/// one transaction type. Rules from before it (`businessLine` NULL) keep their
+/// meaning and price only transactions that carry no line (docs/23 D-057).
 model CommissionRule {
   /// `CMR_<ULID>`.
   id String @id
@@ -837,7 +880,12 @@ model CommissionRule {
   /// `commission.repository.ts`.
   organizationId String? @map("organization_id")
 
-  transactionType TransactionType @map("transaction_type")
+  /// Required for every rule written since ADR-045; NULL only on the
+  /// type-only rules that predate it. `ck_commission_rule_scope` keeps a rule
+  /// from naming neither.
+  businessLine    BusinessLine?    @map("business_line")
+  /// The whole line when NULL; one transaction type within it otherwise.
+  transactionType TransactionType? @map("transaction_type")
 
   /// Integer basis points. 250 = 2.5% (ADR-022). Never a float, so "2.5%" is
   /// exactly 250 and cannot become 0.024999999999999998.
@@ -863,16 +911,44 @@ model CommissionRule {
   updatedAt DateTime @updatedAt @map("updated_at")
   updatedBy String   @map("updated_by")
 
-  commissions Commission[]
+  commissions        Commission[]
+  pricedTransactions Transaction[] @relation("TransactionPricingRule")
 
   @@index([transactionType, status, validFrom])
   @@index([organizationId, transactionType, status])
+  @@index([businessLine, status, validFrom])
   @@map("commission_rule")
 }
 
 enum RuleStatus {
   ACTIVE
   INACTIVE
+}
+
+/// The instant line rules began to price (docs/23 D-057), written once by
+/// migration `20261016120000_commission_business_lines` with the database
+/// clock. A source fact that occurred before it is priced by the type-only
+/// rules exactly as before, even when it is recorded afterwards with a line.
+/// One row; `trg_commission_pricing_cutover_fixed` refuses any change.
+model CommissionPricingCutover {
+  id              Int      @id @default(1) @db.SmallInt
+  linePricingFrom DateTime @map("line_pricing_from")
+  migrationName   String   @map("migration_name")
+
+  @@map("commission_pricing_cutover")
+}
+
+/// What the commission step decided for one transaction (ADR-045 § 2).
+///
+/// Kept apart from the amount because a zero says nothing on its own: a rule
+/// configured at zero and no rule at all look identical as `0`, and mean
+/// opposite things to whoever has to explain the month's revenue.
+enum CommissionOutcome {
+  /// An active rule matched; `amountMinor` is what it produced, zero included.
+  RULE_APPLIED
+  /// Commissionable, and no active rule matched. Charged nothing, and
+  /// reportable as such — production behaviour is docs/24 Q-29.
+  NO_ACTIVE_RULE
 }
 
 /// Commission actually charged on one transaction.
@@ -883,6 +959,9 @@ enum RuleStatus {
 ///
 /// The rate is copied onto the row rather than only referenced, so the charge
 /// remains explicable after the rule is superseded.
+///
+/// **Append-only** (`trg_commission_append_only`): a posted commission is
+/// corrected by a reversal entry, never edited (ADR-045 § 3).
 model Commission {
   /// `CMS_<ULID>`.
   id String @id
@@ -893,6 +972,12 @@ model Commission {
 
   transactionId String  @unique @map("transaction_id")
   ruleId        String? @map("rule_id")
+
+  /// The transaction's line, copied so revenue is reported per line without a
+  /// join (ADR-045 Consequences). NULL where the transaction carries none.
+  businessLine BusinessLine?     @map("business_line")
+  /// `NO_ACTIVE_RULE` exactly when `ruleId` is NULL (`ck_commission_outcome`).
+  outcome      CommissionOutcome
 
   rateBasisPoints  Int    @map("rate_basis_points")
   grossAmountMinor BigInt @map("gross_amount_minor")
@@ -905,9 +990,11 @@ model Commission {
   appliedAt DateTime @map("applied_at")
 
   transaction Transaction     @relation(fields: [transactionId], references: [id])
-  rule        CommissionRule? @relation(fields: [ruleId], references: [id])
+  /// RESTRICT: a rule that priced a charge is never deleted (rules are closed).
+  rule        CommissionRule? @relation(fields: [ruleId], references: [id], onDelete: Restrict)
 
   @@index([organizationId, appliedAt(sort: Desc)])
+  @@index([organizationId, businessLine, outcome])
   @@map("commission")
 }
 

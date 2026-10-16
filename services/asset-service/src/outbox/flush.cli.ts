@@ -97,7 +97,7 @@ async function main(): Promise<number> {
     return report.drained ? 0 : 1;
   } finally {
     await relay.stop();
-    await publisher.onModuleDestroy();
+    await publisher.stop();
     await prisma.onModuleDestroy();
   }
 }

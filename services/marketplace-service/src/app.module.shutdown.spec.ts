@@ -6,6 +6,7 @@ import {
   type OutboxStopOptions,
 } from '@rasta/nest-common';
 import { AppModule } from './app.module';
+import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { ENV } from './tokens';
 import { OrderSagaWorker } from './temporal/worker';
 
@@ -51,7 +52,9 @@ describe('AppModule shutdown wiring (D-052)', () => {
 
     const { inject, stops } = await stopThroughFactory();
 
-    const expected = [OutboxRelay, OutboxPurgeScheduler, OrderSagaWorker];
+    // The publisher is closed last, after the drain, by the same deadline (D-052
+    // phase 4b): app.module.publisher-close.spec.ts.
+    const expected = [OutboxRelay, OutboxPurgeScheduler, OrderSagaWorker, KafkaEventPublisher];
     expect(new Set(inject)).toEqual(new Set([...expected, ENV]));
     expect(inject).toHaveLength(expected.length + 1);
     for (const token of expected) expect(stops.get(token)).toHaveLength(1);
@@ -62,7 +65,9 @@ describe('AppModule shutdown wiring (D-052)', () => {
     const { inject, stops } = await stopThroughFactory();
     const deadlines = new Map([...stops].map(([token, calls]) => [token, calls[0]?.deadlineAt]));
 
-    expect(inject).toEqual(expect.arrayContaining([OutboxRelay, OrderSagaWorker]));
+    expect(inject).toEqual(
+      expect.arrayContaining([OutboxRelay, OrderSagaWorker, KafkaEventPublisher]),
+    );
     expect(deadlines.size).toBe(inject.length - 1);
     expect(new Set(deadlines.values()).size).toBe(1);
     expect(deadlines.get(OrderSagaWorker)).toBeGreaterThan(Date.now());
