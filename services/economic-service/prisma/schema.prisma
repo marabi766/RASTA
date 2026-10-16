@@ -1197,6 +1197,14 @@ model IdempotencyKey {
   /// response.
   requestHash String @map("request_hash")
 
+  /// SHA-256 of the actor who reserved the key. The same key from another
+  /// actor is `409 IDEMPOTENCY_KEY_REUSED`, never a replay. Null on records
+  /// written before it existed (docs/23 D-054).
+  actorHash  String? @map("actor_hash")
+  /// Random, per reservation: only the request holding it may complete,
+  /// refuse or release the claim (docs/23 D-054).
+  claimToken String? @map("claim_token")
+
   responseStatus Int?             @map("response_status")
   responseBody   Json?            @map("response_body")
   state          IdempotencyState
