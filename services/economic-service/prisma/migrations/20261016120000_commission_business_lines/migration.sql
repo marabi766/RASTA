@@ -34,7 +34,12 @@
 --     two concurrent writers cannot both succeed.
 --   - A rule's terms never change, its status never changes once it has come
 --     into force, and its end only moves at or after the present
---     (`trg_commission_rule_effective_dated`). Ending a rule is a `valid_to`.
+--     (`trg_commission_rule_effective_dated`). Ending a rule is a `valid_to`,
+--     decided by the clock once the change holds its lock, not when its
+--     transaction began (Codex round 2 on #307, R1).
+--   - A change to one scope's rules and a pricing that reads them never
+--     overlap: both take the scope's advisory lock, and the pricing reads and
+--     records its choice while holding it (`commission_*_scope_*`, R2).
 --   - An obligation records the rule it was priced with when its source fact is
 --     recorded (`transaction.pricing_*`), so settlement charges what was decided
 --     then, whatever happens to the rules afterwards.
@@ -147,14 +152,79 @@ ALTER TABLE "commission_rule"
     tsrange("valid_from", "valid_to", '[)') WITH &&
   ) WHERE ("status" = 'ACTIVE' AND "business_line" IS NOT NULL AND "transaction_type" IS NOT NULL);
 
+-- One scope's rules, and every pricing that reads them, take turns (Codex
+-- round 2 on #307, R2). A scope is whose (a tenant, or the platform) and which
+-- line — or, for a rule from before business lines, which type — and it has a
+-- lock whether or not any rule exists in it yet: a transaction-level advisory
+-- lock on a hash of its name. A change to the scope's rules holds it
+-- exclusively; a pricing holds the platform's and then the tenant's shared,
+-- reads the rules once both are held, and records its choice before it lets
+-- go. So no obligation is bound to a rule set that a concurrent change is
+-- about to replace: the pricing waits for the change, or the change for it.
+CREATE OR REPLACE FUNCTION commission_rule_scope_key(
+  organization_id TEXT, business_line "BusinessLine", transaction_type "TransactionType"
+) RETURNS BIGINT AS $$
+  SELECT hashtextextended(
+    'commission_rule_scope:' || COALESCE(organization_id, '') || ':' ||
+      CASE WHEN business_line IS NOT NULL THEN 'LINE:' || business_line::TEXT
+           ELSE 'TYPE:' || transaction_type::TEXT END,
+    0);
+$$ LANGUAGE sql STABLE;
+
+-- A change to one scope's rules, decided at one instant: the database clock
+-- read once the lock is held — `clock_timestamp()`, not the transaction's start,
+-- which can lie before a wait for the lock or the row (Codex round 2 on #307,
+-- R1). Every later call in the same transaction returns that same instant, so
+-- the service and `trg_commission_rule_effective_dated` decide at one time.
+CREATE OR REPLACE FUNCTION commission_rule_scope_change(
+  organization_id TEXT, business_line "BusinessLine", transaction_type "TransactionType"
+) RETURNS TIMESTAMP(3) AS $$
+DECLARE
+  scope_key BIGINT := commission_rule_scope_key(organization_id, business_line, transaction_type);
+  setting TEXT := 'rasta.commission_rule_scope_' || to_hex(scope_key);
+  decided TEXT := NULLIF(current_setting(setting, true), '');
+BEGIN
+  IF decided IS NULL THEN
+    PERFORM pg_advisory_xact_lock(scope_key);
+    decided := to_char(date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC'),
+                       'YYYY-MM-DD"T"HH24:MI:SS.MS');
+    PERFORM set_config(setting, decided, true);
+  END IF;
+  RETURN decided::TIMESTAMP(3);
+END; $$ LANGUAGE plpgsql VOLATILE;
+
+-- A pricing: the platform's scope, then the tenant's — always in that order.
+CREATE OR REPLACE FUNCTION commission_pricing_scope_lock(
+  organization_id TEXT, business_line "BusinessLine", transaction_type "TransactionType"
+) RETURNS VOID AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock_shared(commission_rule_scope_key(NULL, business_line, transaction_type));
+  PERFORM pg_advisory_xact_lock_shared(commission_rule_scope_key(organization_id, business_line, transaction_type));
+END; $$ LANGUAGE plpgsql VOLATILE;
+
+-- The runtime role calls these — directly, and through the trigger below,
+-- which runs as the writer. PUBLIC has no EXECUTE on what the migrator creates
+-- (service-privilege-split.bash); all three are SECURITY INVOKER.
+GRANT EXECUTE ON FUNCTION commission_rule_scope_key(TEXT, "BusinessLine", "TransactionType") TO rasta_economic;
+GRANT EXECUTE ON FUNCTION commission_rule_scope_change(TEXT, "BusinessLine", "TransactionType") TO rasta_economic;
+GRANT EXECUTE ON FUNCTION commission_pricing_scope_lock(TEXT, "BusinessLine", "TransactionType") TO rasta_economic;
+
 -- Effective-dated, enforced where every writer passes (Codex round 1 on #307,
 -- F2). The service refuses the same things first, with a 422 that says why;
--- this is what holds when something writes around it. `valid_*` are UTC
--- timestamps without zone, so the clock is read the same way, to the
--- millisecond the columns keep.
+-- this is what holds when something writes around it. It takes the scope's
+-- lock itself, so a writer around the service is ordered with pricing too, and
+-- decides at the instant that lock was taken (R1). `valid_*` are UTC
+-- timestamps without zone, to the millisecond, as that instant is.
 CREATE OR REPLACE FUNCTION commission_rule_effective_dated() RETURNS TRIGGER AS $$
-DECLARE at TIMESTAMP(3) := date_trunc('milliseconds', now() AT TIME ZONE 'UTC');
+DECLARE at TIMESTAMP(3);
 BEGIN
+  IF TG_OP = 'INSERT' THEN
+    -- A row naming no scope has no lock; `ck_commission_rule_scope` refuses it.
+    IF NEW."business_line" IS NOT NULL OR NEW."transaction_type" IS NOT NULL THEN
+      PERFORM commission_rule_scope_change(NEW."organization_id", NEW."business_line", NEW."transaction_type");
+    END IF;
+    RETURN NEW;
+  END IF;
   IF (NEW."organization_id", NEW."business_line", NEW."transaction_type", NEW."rate_basis_points",
       NEW."min_amount_minor", NEW."max_amount_minor", NEW."valid_from")
      IS DISTINCT FROM
@@ -163,6 +233,7 @@ BEGIN
     RAISE EXCEPTION 'commission_rule terms never change: a new rate, scope or start is a new rule'
       USING ERRCODE = 'restrict_violation';
   END IF;
+  at := commission_rule_scope_change(OLD."organization_id", OLD."business_line", OLD."transaction_type");
   IF NEW."status" IS DISTINCT FROM OLD."status" AND OLD."valid_from" <= at THEN
     RAISE EXCEPTION 'a commission rule in force keeps its status: end it with valid_to'
       USING ERRCODE = 'restrict_violation';
@@ -181,7 +252,7 @@ BEGIN
 END; $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER "trg_commission_rule_effective_dated"
-  BEFORE UPDATE ON "commission_rule"
+  BEFORE INSERT OR UPDATE ON "commission_rule"
   FOR EACH ROW EXECUTE FUNCTION commission_rule_effective_dated();
 
 -- -----------------------------------------------------------------------------

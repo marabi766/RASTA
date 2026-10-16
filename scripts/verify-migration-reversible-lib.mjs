@@ -1577,6 +1577,10 @@ export const EXPECTED = {
     functions: [
       'reject_commission_mutation',
       'commission_rule_effective_dated',
+      // One scope's rule changes and the pricings that read them take turns (D-057).
+      'commission_rule_scope_key',
+      'commission_rule_scope_change',
+      'commission_pricing_scope_lock',
       'reject_commission_pricing_cutover_mutation',
       'reject_transaction_repricing',
     ],

@@ -123,6 +123,16 @@ export class CommissionService {
    * Called when the source fact is recorded, which is when the obligation's
    * pricing is fixed ({@link pricingOf}); and at settlement only for an
    * obligation recorded before that existed.
+   *
+   * **Under the scope locks** (Codex round 2 on #307, R2). The rules are read
+   * only once this transaction holds the platform's and the tenant's lock for
+   * the subject's scope, shared, and the locks last until it commits — with
+   * the pricing it records. A change to those rules holds the same lock
+   * exclusively ({@link lockScopeForChange}), so it either committed before
+   * this read, and is seen, or waits until the pricing is recorded. The lock
+   * exists whether or not a rule does, so a rule being created is waited for
+   * too. `tx` must be a transaction: outside one the lock would end with the
+   * statement.
    */
   async decide(
     tx: ExtendedPrismaClient,
@@ -136,6 +146,9 @@ export class CommissionService {
     },
   ): Promise<CommissionDecision> {
     const subject = pricingSubjectAt(input, input.occurredAt, await this.linePricingFrom(tx));
+    await tx.$executeRaw`SELECT commission_pricing_scope_lock(
+      ${subject.organizationId}, ${subject.businessLine}::"BusinessLine",
+      ${subject.transactionType}::"TransactionType")`;
     const rules = await this.candidateRules(tx, subject);
     return computeCommission(rules as CommissionRuleView[], { ...input, ...subject });
   }
@@ -298,7 +311,10 @@ export class CommissionService {
    *
    * **From now on, never backdated** (docs/23 D-057). `validFrom` defaults to
    * the database's clock and may not precede it: a rule inserted into the past
-   * would reprice whatever occurred there. And it may not overlap an active
+   * would reprice whatever occurred there. "Now" is read once the scope's lock
+   * is held, so a create that waited for it cannot start in the time it waited
+   * (Codex round 2 on #307, R1), and no pricing of the scope runs until it
+   * commits (R2). And it may not overlap an active
    * rule of the same scope — the database refuses that
    * (`ex_commission_rule_*_no_overlap`), and two concurrent creates cannot
    * both pass; the loser is a 409.
@@ -309,7 +325,11 @@ export class CommissionService {
 
     return this.prisma
       .transaction(async (tx) => {
-        const now = await databaseNow(tx);
+        const now = await lockScopeForChange(tx, {
+          organizationId: dto.organizationId ?? null,
+          businessLine: dto.businessLine,
+          transactionType: dto.transactionType ?? null,
+        });
         const validFrom = dto.validFrom ? new Date(dto.validFrom) : now;
         const validTo = dto.validTo ? new Date(dto.validTo) : null;
 
@@ -371,32 +391,40 @@ export class CommissionService {
    * - `ACTIVE` reinstates a withdrawn rule only while its start is still ahead;
    *   after that it would apply retroactively to the time it was withdrawn.
    *
-   * Every change is checked against the database clock, and an extension or a
-   * reinstatement that would overlap an active rule of the same scope is
-   * refused by the database (409). `trg_commission_rule_effective_dated` holds
-   * the same rules for any writer that goes around this method.
+   * Every change is checked against the database clock as it reads once the
+   * row and the scope are locked — after any wait for either (Codex round 2
+   * on #307, R1) — and an extension or a reinstatement that would overlap an
+   * active rule of the same scope is refused by the database (409).
+   * `trg_commission_rule_effective_dated` holds the same rules, at the same
+   * instant, for any writer that goes around this method.
    *
    * Under the row lock, so the `before` in the change record is the state this
-   * change was actually applied to.
+   * change was actually applied to; and under the scope lock, so no pricing
+   * reads the scope between this change and its commit (R2).
    */
   async updateRule(id: string, dto: UpdateCommissionRuleDto) {
     const actor = getContext().userId ?? SERVICE_NAME;
 
     return this.prisma
       .transaction(async (tx) => {
-        const locked = await runUnscoped(
+        // The row, then its scope — the order an UPDATE written around this
+        // method takes them in, through the trigger. NO KEY: an obligation
+        // being priced with this rule keys its row, and must not wait on it.
+        const [locked] = await runUnscoped(
           'commission rules may be platform-wide',
           () =>
-            tx.$queryRaw<
-              { id: string }[]
-            >`SELECT id FROM commission_rule WHERE id = ${id} FOR UPDATE`,
+            tx.$queryRaw<ScopeOfRule[]>`
+            SELECT organization_id AS "organizationId", business_line::TEXT AS "businessLine",
+                   transaction_type::TEXT AS "transactionType"
+              FROM commission_rule WHERE id = ${id} FOR NO KEY UPDATE`,
         );
-        if (locked.length === 0) throw RastaError.notFound('CommissionRule', id);
+        if (!locked) throw RastaError.notFound('CommissionRule', id);
+        // After every wait: the instant this change is decided at (R1).
+        const now = await lockScopeForChange(tx, locked);
 
         const existing = await runUnscoped('commission rules may be platform-wide', () =>
           tx.commissionRule.findUniqueOrThrow({ where: { id } }),
         );
-        const now = await databaseNow(tx);
         const change = effectiveDatedChange(existing, dto, now);
 
         const updated = await runUnscoped('commission rules may be platform-wide', () =>
@@ -501,19 +529,34 @@ export class CommissionService {
 
 type CommissionRuleRow = Prisma.CommissionRuleGetPayload<Record<string, never>>;
 
+/** What a rule's scope lock is named by: whose, which line — or, before lines, which type. */
+interface ScopeOfRule {
+  organizationId: string | null;
+  businessLine: string | null;
+  transactionType: string | null;
+}
+
 /**
- * The database's present, to the millisecond the rule columns keep.
+ * Takes one scope's lock for a change to its rules, and returns the instant
+ * the change is decided at (`commission_rule_scope_change`).
  *
- * Effective-dating is decided against one clock — the one
- * `trg_commission_rule_effective_dated` reads — so an application host whose
- * clock runs behind cannot place a rule's start or end in the past.
+ * Exclusive, so no pricing reads the scope's rules until this transaction has
+ * committed or rolled back (Codex round 2 on #307, R2). The instant is the
+ * database clock read once the lock is held — `clock_timestamp()`, never
+ * `now()`, which is when the transaction began and can lie before the wait
+ * (R1) — to the millisecond the rule columns keep. The same instant is what
+ * `trg_commission_rule_effective_dated` decides by in this transaction, so the
+ * service and the database never disagree about whether a rule has started
+ * or ended; and an application host whose clock runs behind cannot place a
+ * rule's start or end in the past.
  */
-async function databaseNow(tx: ExtendedPrismaClient): Promise<Date> {
-  const [row] = await tx.$queryRaw<
-    { now: Date }[]
-  >`SELECT date_trunc('milliseconds', now()) AS now`;
-  if (!row) throw RastaError.internal('The database did not report its clock');
-  return row.now;
+async function lockScopeForChange(tx: ExtendedPrismaClient, scope: ScopeOfRule): Promise<Date> {
+  const [row] = await tx.$queryRaw<{ at: Date }[]>`
+    SELECT commission_rule_scope_change(
+      ${scope.organizationId}, ${scope.businessLine}::"BusinessLine",
+      ${scope.transactionType}::"TransactionType") AT TIME ZONE 'UTC' AS at`;
+  if (!row) throw RastaError.internal('The database did not report the change instant');
+  return row.at;
 }
 
 /**
