@@ -7,6 +7,7 @@ import type { CurrentUserResult } from './identity';
 import {
   canReadInventory,
   canReadProjects,
+  canReadSuppliers,
   canReadTenders,
   loadPortalNav,
   tenderDoorsFor,
@@ -150,7 +151,45 @@ describe('canReadInventory', () => {
   });
 });
 
+describe('canReadSuppliers', () => {
+  it('shows the link to every role in supplier-service’s DIRECTORY_ROLES', () => {
+    for (const role of [
+      'SYSTEM_ADMIN',
+      'UNION_ADMIN',
+      'ORGANIZATION_ADMIN',
+      'SUPPLIER',
+      'WORKSHOP',
+      'CONTRACTOR',
+      'PROCUREMENT_USER',
+      'FLEET_MANAGER',
+    ]) {
+      expect(canReadSuppliers([role])).toBe(true);
+    }
+  });
+
+  it('hides it from roles the service does not list, and from nobody holding any role', () => {
+    for (const role of ['DRIVER', 'AUDITOR']) {
+      expect(canReadSuppliers([role])).toBe(false);
+    }
+    expect(canReadSuppliers([])).toBe(false);
+  });
+});
+
 describe('portalNavFor', () => {
+  it('puts Suppliers right after Inventory (and Projects, Tenders), and only when allowed', () => {
+    const shown = hrefs(portalNavFor({ canReadProjects: true, canReadSuppliers: true }));
+    const hidden = hrefs(portalNavFor({ canReadProjects: true, canReadSuppliers: false }));
+    const withInventory = hrefs(
+      portalNavFor({ canReadProjects: true, canReadInventory: true, canReadSuppliers: true }),
+    );
+
+    expect(shown.indexOf('/suppliers')).toBe(shown.indexOf('/projects') + 1);
+    expect(shown.indexOf('/wallet')).toBe(shown.indexOf('/suppliers') + 1);
+    expect(withInventory.indexOf('/suppliers')).toBe(withInventory.indexOf('/inventory') + 1);
+    expect(hidden).not.toContain('/suppliers');
+    expect(hrefs(portalNavFor({ canReadProjects: false }))).not.toContain('/suppliers');
+  });
+
   it('puts Inventory right after Projects (and Tenders), and only when allowed', () => {
     const shown = hrefs(portalNavFor({ canReadProjects: true, canReadInventory: true }));
     const hidden = hrefs(portalNavFor({ canReadProjects: true, canReadInventory: false }));
@@ -272,6 +311,16 @@ describe('loadPortalNav', () => {
     for (const link of ['/tenders', '/projects']) {
       expect(items.includes(link)).toBe(links.includes(link));
     }
+  });
+
+  it('offers the Suppliers link to every role the service lists, not to the oversight role', async () => {
+    expect(hrefs(await loadPortalNav(SESSION, user(['ORGANIZATION_ADMIN'])))).toContain(
+      '/suppliers',
+    );
+    expect(hrefs(await loadPortalNav(SESSION, user(['PROCUREMENT_USER'])))).toContain('/suppliers');
+    expect(hrefs(await loadPortalNav(SESSION, user(['CONTRACTOR'])))).toContain('/suppliers');
+    expect(hrefs(await loadPortalNav(SESSION, user(['AUDITOR'])))).not.toContain('/suppliers');
+    expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/suppliers');
   });
 
   it('keeps the settlements link for the roles that read settlements, next to Projects', async () => {
@@ -409,6 +458,7 @@ describe('loadPortalNav', () => {
       expect(items).not.toContain('/tenders');
       expect(items).not.toContain('/settlements');
       expect(items).not.toContain('/inventory');
+      expect(items).not.toContain('/suppliers');
       expect(items).toContain('/assets');
       expect(items).toContain('/organizations');
     },
