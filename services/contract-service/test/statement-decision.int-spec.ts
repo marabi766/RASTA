@@ -377,6 +377,27 @@ describe('deciding a statement (CON-003 PR 6)', () => {
       ).expect(200);
     });
 
+    it('two steps of a chain naming the same organization and role are two people: whoever decides the first never decides the second (#312 r2)', async () => {
+      const c = await signed();
+      await activateStatementPolicies(w, c.employer, {
+        technical: [at(c.employer), at(c.employer)],
+        financial: [at(c.employer)],
+      });
+      const s = await submitted(c);
+      const first = person(c.employer, ['ORGANIZATION_ADMIN'], { sub: `sub-${ulid()}` });
+      await decide(c, s.id, first, step('TECHNICAL', 1)).expect(200);
+      const again = await decide(c, s.id, first, step('TECHNICAL', 2)).expect(422);
+      expect(reasons(again.body)).toEqual(['decision:ALREADY_DECIDED_STATEMENT']);
+      expect((await statementRow(s.id))!.status).toBe('SUBMITTED');
+      const second = person(c.employer, ['ORGANIZATION_ADMIN'], { sub: `sub-${ulid()}` });
+      const res = await decide(c, s.id, second, step('TECHNICAL', 2)).expect(200);
+      expect(res.body.status).toBe('TECHNICALLY_APPROVED');
+      expect((await decisionsOf(s.id)).map((d) => [d.chain, d.stepOrder])).toEqual([
+        ['TECHNICAL', 1],
+        ['TECHNICAL', 2],
+      ]);
+    });
+
     it('the submitter never decides, whichever organization they act for; a decider who cannot be told apart from them is 422 ACTOR_IDENTITY_UNKNOWN; each is recorded', async () => {
       const c = await signed();
       await activateStatementPolicies(w, c.employer, {
