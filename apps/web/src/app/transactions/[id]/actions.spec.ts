@@ -228,22 +228,15 @@ describe('what the answer becomes', () => {
         retryAfterSeconds: 1,
       });
       const submission = mintSubmissionId(SESSION);
-      expect(
-        await submitDisputeCommand(
-          TXN,
-          IDLE_DISPUTE_FORM,
-          formData({ command: 'DISPUTE', reason: `  ${REASON}  ` }, { submission }),
-        ),
-      ).toEqual({
+      const form = formData({ command: 'DISPUTE', reason: `  ${REASON}  ` }, { submission });
+      const sentStamp = form.get(REPLAY_FIELD);
+      expect(await submitDisputeCommand(TXN, IDLE_DISPUTE_FORM, form)).toEqual({
         kind: 'UNCONFIRMED',
         command: 'DISPUTE',
         correlationId: 'corr-1',
         submissionId: submission,
         values: { ...EMPTY_DISPUTE_FORM, reason: REASON },
-        replay: {
-          token: mintReplayStamp(SESSION, TXN, submission).token,
-          until: expect.any(Number),
-        },
+        replay: { token: sentStamp, until: expect.any(Number) },
       });
     },
   );
@@ -392,6 +385,37 @@ describe('the replay deadline, decided here (PR 319 review 2, finding 2)', () =>
       viewOnly: true,
       replayExpired: true,
     });
+  });
+
+  it('a stamp issued under a longer retention is refused once the retention is shortened (review 3, finding 1)', async () => {
+    // Drawn two hours ago while both retentions were 24 h, so its own signed
+    // expiry is still far off; the portal now runs with the 1 h default.
+    const issuedUnderLongRetention = mintReplayStamp(
+      SESSION,
+      TXN,
+      submission,
+      Date.now() - 2 * 60 * 60 * 1000,
+      { WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS: 24, WEB_DISPUTE_REPLAY_MARGIN_SECONDS: 600 },
+    );
+    expect(issuedUnderLongRetention.until).toBeGreaterThan(Date.now());
+    const previous: UnconfirmedDispute = {
+      kind: 'UNCONFIRMED',
+      command: 'RESOLVE_DISPUTE',
+      correlationId: 'corr-original',
+      submissionId: submission,
+      values: { ...EMPTY_DISPUTE_FORM, resolution: REASON },
+      replay: issuedUnderLongRetention,
+    };
+    const state = await submitDisputeCommand(
+      TXN,
+      previous,
+      formData(
+        { command: 'RESOLVE_DISPUTE', resolution: REASON },
+        { submission, replay: issuedUnderLongRetention.token },
+      ),
+    );
+    expect(issueDisputeCommand).not.toHaveBeenCalled();
+    expect(state).toEqual({ ...previous, replay: null, viewOnly: true, replayExpired: true });
   });
 
   it('a retry just inside the deadline is sent, under the same key', async () => {

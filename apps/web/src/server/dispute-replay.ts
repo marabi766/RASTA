@@ -35,6 +35,15 @@ import { mintSubmissionId } from './submission';
  * first and each retry, is checked against the same deadline, in the action,
  * just before the call.
  *
+ * ## When the retention is shortened later
+ *
+ * The stamp also signs **when it was issued**, and is accepted only while both
+ * hold: its own signed expiry, and issuance plus the window **as configured
+ * now** (PR 319 review 3, finding 1). Otherwise a stamp issued under 24 hours
+ * would outlive a change to 1 hour by up to 23, and a re-send could reach
+ * economic-service after its shorter-lived record had gone. A longer window
+ * never extends a stamp: its signed expiry still binds.
+ *
  * It is `signed-payload.ts`' construction: bound to this login, readable by
  * whoever holds it (nothing secret in it), not a credential for anything.
  */
@@ -44,6 +53,8 @@ const PURPOSE = 'dispute-replay';
 const replaySchema = z.object({
   transactionId: z.string().min(1).max(200),
   submissionId: z.string().min(1).max(200),
+  /** When the page signed it, milliseconds since the epoch, server clock. */
+  issuedAt: z.number().int().nonnegative(),
   /** The signed expiry again, in milliseconds, for the browser to draw the right controls. */
   until: z.number().int(),
 });
@@ -64,13 +75,20 @@ export function mintReplayStamp(
   transactionId: string,
   submissionId: string,
   now: number = Date.now(),
+  env: ReplayEnv = webServerEnv(),
 ): ReplayStamp {
-  const window = replayWindowSeconds();
+  const window = replayWindowSeconds(env);
   // The same instant `signPayload` signs as its expiry. Advisory in the
   // browser; the action decides from the signed expiry itself.
   const until = (Math.floor(now / 1000) + window) * 1000;
   return {
-    token: signPayload(session, PURPOSE, { transactionId, submissionId, until }, window, now),
+    token: signPayload(
+      session,
+      PURPOSE,
+      { transactionId, submissionId, issuedAt: now, until },
+      window,
+      now,
+    ),
     until,
   };
 }
@@ -87,8 +105,10 @@ export function mintDisputeSubmission(
 
 /**
  * The stamp, only if this server issued it to this login, for this
- * transaction and this submission id, and its deadline has not passed;
- * otherwise null — one answer for every way it can be wrong.
+ * transaction and this submission id, its signed expiry has not passed, **and**
+ * it is still inside the window as configured now, counted from when it was
+ * issued; otherwise null — one answer for every way it can be wrong. The
+ * returned `until` is the earlier of the two deadlines.
  */
 export function verifyReplayStamp(
   session: WebSession,
@@ -96,6 +116,7 @@ export function verifyReplayStamp(
   transactionId: string,
   submissionId: string,
   now: number = Date.now(),
+  env: ReplayEnv = webServerEnv(),
 ): ReplayStamp | null {
   const payload = verifyPayload(session, PURPOSE, token, replaySchema, now);
   if (
@@ -106,5 +127,7 @@ export function verifyReplayStamp(
   ) {
     return null;
   }
-  return { token, until: payload.until };
+  const current = payload.issuedAt + replayWindowSeconds(env) * 1000;
+  if (now > current) return null;
+  return { token, until: Math.min(payload.until, current) };
 }

@@ -199,18 +199,22 @@ describe('the session cookie, renewed before the route runs', () => {
     expect(response.headers.get('x-middleware-request-cookie') ?? '').not.toContain('raced-cookie');
   });
 
-  it('marks a session hidden after a refused refresh as unavailable, not ended (PR 319 r2, finding 3)', async () => {
-    renew.mockResolvedValue({ kind: 'REFUSED', usable: false });
+  it.each([false, true])(
+    'marks every refused refresh as unavailable, not ended — usable: %s (PR 319 r2 f3, r3 f2)',
+    async (usable) => {
+      // usable: true too — the token can run out between that judgement and the
+      // route's own check, and the route must then say "unavailable", not "ended".
+      renew.mockResolvedValue({ kind: 'REFUSED', usable });
 
-    const response = await middleware(withSession('raced-cookie'));
+      const response = await middleware(withSession('raced-cookie'));
 
-    expect(forwardedHeader(response, SESSION_STATE_HEADER)).toBe(REFRESH_UNAVAILABLE);
-  });
+      expect(forwardedHeader(response, SESSION_STATE_HEADER)).toBe(REFRESH_UNAVAILABLE);
+    },
+  );
 
   it.each([
     { kind: 'ENDED' as const },
     { kind: 'VALID' as const },
-    { kind: 'REFUSED' as const, usable: true },
     { kind: 'RENEWED' as const, sealed: 'rotated-cookie', maxAgeSeconds: 60 },
   ])('marks nothing for $kind', async (renewal) => {
     renew.mockResolvedValue(renewal);

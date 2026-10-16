@@ -68,11 +68,13 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   requestHeaders.set('x-nonce', nonce);
   requestHeaders.set('Content-Security-Policy', csp);
   // Only this file says why a session is missing (`session-state.ts`): never
-  // the browser, and only for a hidden session that may come back.
+  // the browser. Every refused refresh is marked, whatever `usable` said: the
+  // token can run out between that judgement and the route's own check, and
+  // the route then finds no session — one that may still come back, not one
+  // that ended (PR 319 review 3, finding 2). Read only when a route finds no
+  // session, so a marked request that still has one is unaffected.
   requestHeaders.delete(SESSION_STATE_HEADER);
-  if (renewal.kind === 'REFUSED' && !renewal.usable) {
-    requestHeaders.set(SESSION_STATE_HEADER, REFRESH_UNAVAILABLE);
-  }
+  if (renewal.kind === 'REFUSED') requestHeaders.set(SESSION_STATE_HEADER, REFRESH_UNAVAILABLE);
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });
   applyRenewal(response, renewal);

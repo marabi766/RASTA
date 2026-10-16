@@ -8,14 +8,19 @@
  *   - **ended** — the cookie does not open, is past its lifetime, or the
  *     provider refused its refresh token for good. Signing in again is the
  *     only way on.
- *   - **refresh unavailable** — the access token has run out and its refresh
- *     was refused or went unanswered for a reason that may pass (no answer, a
- *     5xx, a race with another replica). The login itself may well still be
- *     good; the next request may find it renewed.
+ *   - **refresh unavailable** — the access token has run out, or runs out
+ *     before the route looks, and its refresh was refused or went unanswered
+ *     for a reason that may pass (no answer, a 5xx, a race with another
+ *     replica). The login itself may well still be good; the next request may
+ *     find it renewed.
  *
  * Both reach a route as "no session". Middleware says which by a request
  * header it sets itself — and removes from whatever the browser sent, so a
- * request cannot claim it — and only the second is ever marked. A route or
+ * request cannot claim it — and only the second is ever marked: every request
+ * whose refresh was refused, whether or not its token still looked usable
+ * then, since a refresh takes time and the route checks expiry again with its
+ * own clock (PR 319 review 3, finding 2). The mark is read only when a route
+ * finds no session. A route or
  * action that reads it can then say "unavailable, try again" instead of "your
  * session has ended" where the latter would not be true.
  */
