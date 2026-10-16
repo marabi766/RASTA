@@ -129,6 +129,7 @@ describe('each down.sql, run whole with psql --file', () => {
   const ALL = readdirSync(MIGRATIONS)
     .filter((name) => /^\d{14}_/.test(name))
     .sort();
+  const DECISIONS = '20261016180000_statement_decisions';
   const SUBMISSION = '20261016120000_statement_submission';
   const STATEMENTS = '20261015120000_statements';
   const REFUSAL_DEDUPE = '20261013100000_refusal_audit_dedupe';
@@ -233,6 +234,7 @@ describe('each down.sql, run whole with psql --file', () => {
     AMENDMENTS,
     STATEMENTS,
     SUBMISSION,
+    DECISIONS,
   ])(
     '%s is one transaction: it opens with BEGIN and closes with COMMIT, the lock and the check inside',
     (migration) => {
@@ -710,77 +712,77 @@ describe('each down.sql, run whole with psql --file', () => {
     });
   });
 
+  /** Each function's source, hashed: a down must restore the previous guards to the letter. */
+  const functions = (schema: string): string =>
+    mustRun(schema, [
+      '-c',
+      `SELECT jsonb_agg(p.proname || ':' || md5(p.prosrc) ORDER BY p.proname)::text
+         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = current_schema()`,
+    ]);
+  const signedContract = `INSERT INTO "contract"
+       ("id", "organization_id", "tender_id", "project_id", "winning_bid_id",
+        "contractor_organization_id", "amount_minor", "matrix_digest", "awarded_by", "awarded_at",
+        "status", "status_changed_at", "status_changed_by", "source_event_id", "created_at",
+        "created_by", "created_correlation_id", "updated_at")
+     VALUES ('CTR_rb', 'ORG_E', 'TND_1', 'PRJ_1', 'BID_1', 'ORG_C', 1000, repeat('a', 64), 'USR_1',
+             now(), 'SIGNED', now(), 'system', 'EVT_1', now(), 'system', 'COR_1', now())`;
+  const milestone = `INSERT INTO "milestone"
+       ("id", "organization_id", "contract_id", "title", "planned_date", "created_at",
+        "created_by", "created_correlation_id", "updated_at", "updated_by")
+     VALUES ('MLS_rb', 'ORG_E', 'CTR_rb', 't', '2026-12-01', now(), 'USR_1', 'COR_1', now(),
+             'USR_1')`;
+  /** A DRAFT statement of 10 with its one line — against the milestone when `milestoneId` is given. */
+  const draftStatement = (id = 'STM_rb', number = 1, milestoneId: string | null = null) => `BEGIN;
+     INSERT INTO "statement"
+       ("id", "organization_id", "contract_id", "statement_number", "gross_minor",
+        "deductions_minor", "net_minor", "line_count", "deduction_count", "created_at",
+        "created_by", "created_correlation_id", "updated_at")
+     VALUES ('${id}', 'ORG_E', 'CTR_rb', ${number}, 10, 0, 10, 1, 0, now(), 'USR_1', 'COR_1', now());
+     INSERT INTO "statement_line"
+       ("id", "organization_id", "contract_id", "statement_id", "line_number", "description",
+        "amount_minor"${milestoneId === null ? '' : ', "milestone_id"'})
+     VALUES ('STL_${id}', 'ORG_E', 'CTR_rb', '${id}', 1, 'work', 10${milestoneId === null ? '' : `, '${milestoneId}'`});
+     COMMIT;`;
+  /** A statement chain policy in force with one step of the employer — or a DRAFT one, bounded. */
+  const chainPolicy = (
+    id: string,
+    workflowKey: string,
+    options: { active?: boolean; bounds?: string } = {},
+  ) => `INSERT INTO "approval_policy"
+       ("id", "organization_id", "author_organization_id", "author_role", "workflow_key",
+        "policy_version", "label", "rationale", "created_at", "created_by", "created_correlation_id")
+     VALUES ('${id}', 'ORG_E', 'ORG_U', 'UNION_ADMIN', '${workflowKey}', 1, 'l', 'r', now(), 'USR_1', 'COR_1');
+     INSERT INTO "approval_policy_step"
+       ("id", "organization_id", "policy_id", "step_order", "authority_organization_id",
+        "authority_role", "authority_label"${options.bounds ? ', "min_amount_minor"' : ''})
+     VALUES ('APS_${id}', 'ORG_E', '${id}', 1, 'ORG_E', 'ORGANIZATION_ADMIN', 'Engineer'${options.bounds ? `, ${options.bounds}` : ''});
+     ${
+       options.active === false
+         ? ''
+         : `UPDATE "approval_policy" SET "status" = 'PENDING_PLATFORM_APPROVAL', "submitted_at" = now(),
+              "submitted_by" = 'USR_1', "version" = 2 WHERE "id" = '${id}';
+            UPDATE "approval_policy" SET "status" = 'ACTIVE', "activated_at" = now(),
+              "activated_by" = 'USR_2', "version" = 3 WHERE "id" = '${id}';`
+     }`;
+  /** Submits STM_rb with both chains (APL_T, APL_F) whole, in one transaction. */
+  const submission = (milestoneId: string | null = null) => `BEGIN;
+     UPDATE "statement" SET "status" = 'SUBMITTED', "submitted_at" = now(), "updated_at" = now(),
+            "submitted_by" = 'USR_1', "submitted_by_issuer" = 'iss', "submitted_by_subject" = 'sub',
+            "technical_step_count" = 1, "financial_step_count" = 1, "version" = 2
+      WHERE "id" = 'STM_rb';
+     INSERT INTO "statement_approval_step"
+       ("id", "organization_id", "contract_id", "statement_id", "chain", "step_order", "policy_id",
+        "policy_version", "authority_organization_id", "authority_role", "authority_label", "created_at")
+     VALUES ('SAS_t', 'ORG_E', 'CTR_rb', 'STM_rb', 'TECHNICAL', 1, 'APL_T', 1, 'ORG_E', 'ORGANIZATION_ADMIN', 'Engineer', now()),
+            ('SAS_f', 'ORG_E', 'CTR_rb', 'STM_rb', 'FINANCIAL', 1, 'APL_F', 1, 'ORG_E', 'ORGANIZATION_ADMIN', 'Engineer', now());
+     ${
+       milestoneId === null
+         ? ''
+         : `UPDATE "milestone" SET "first_referenced_at" = now(), "version" = "version" + 1 WHERE "id" = '${milestoneId}';`
+     }
+     COMMIT;`;
   describe('statement_submission (CON-003 PR 5)', () => {
-    /** Each function's source, hashed: a down must restore the previous guards to the letter. */
-    const functions = (schema: string): string =>
-      mustRun(schema, [
-        '-c',
-        `SELECT jsonb_agg(p.proname || ':' || md5(p.prosrc) ORDER BY p.proname)::text
-           FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-          WHERE n.nspname = current_schema()`,
-      ]);
-    const signedContract = `INSERT INTO "contract"
-         ("id", "organization_id", "tender_id", "project_id", "winning_bid_id",
-          "contractor_organization_id", "amount_minor", "matrix_digest", "awarded_by", "awarded_at",
-          "status", "status_changed_at", "status_changed_by", "source_event_id", "created_at",
-          "created_by", "created_correlation_id", "updated_at")
-       VALUES ('CTR_rb', 'ORG_E', 'TND_1', 'PRJ_1', 'BID_1', 'ORG_C', 1000, repeat('a', 64), 'USR_1',
-               now(), 'SIGNED', now(), 'system', 'EVT_1', now(), 'system', 'COR_1', now())`;
-    const milestone = `INSERT INTO "milestone"
-         ("id", "organization_id", "contract_id", "title", "planned_date", "created_at",
-          "created_by", "created_correlation_id", "updated_at", "updated_by")
-       VALUES ('MLS_rb', 'ORG_E', 'CTR_rb', 't', '2026-12-01', now(), 'USR_1', 'COR_1', now(),
-               'USR_1')`;
-    /** A DRAFT statement of 10 with its one line — against the milestone when `milestoneId` is given. */
-    const draftStatement = (id = 'STM_rb', number = 1, milestoneId: string | null = null) => `BEGIN;
-       INSERT INTO "statement"
-         ("id", "organization_id", "contract_id", "statement_number", "gross_minor",
-          "deductions_minor", "net_minor", "line_count", "deduction_count", "created_at",
-          "created_by", "created_correlation_id", "updated_at")
-       VALUES ('${id}', 'ORG_E', 'CTR_rb', ${number}, 10, 0, 10, 1, 0, now(), 'USR_1', 'COR_1', now());
-       INSERT INTO "statement_line"
-         ("id", "organization_id", "contract_id", "statement_id", "line_number", "description",
-          "amount_minor"${milestoneId === null ? '' : ', "milestone_id"'})
-       VALUES ('STL_${id}', 'ORG_E', 'CTR_rb', '${id}', 1, 'work', 10${milestoneId === null ? '' : `, '${milestoneId}'`});
-       COMMIT;`;
-    /** A statement chain policy in force with one step of the employer — or a DRAFT one, bounded. */
-    const chainPolicy = (
-      id: string,
-      workflowKey: string,
-      options: { active?: boolean; bounds?: string } = {},
-    ) => `INSERT INTO "approval_policy"
-         ("id", "organization_id", "author_organization_id", "author_role", "workflow_key",
-          "policy_version", "label", "rationale", "created_at", "created_by", "created_correlation_id")
-       VALUES ('${id}', 'ORG_E', 'ORG_U', 'UNION_ADMIN', '${workflowKey}', 1, 'l', 'r', now(), 'USR_1', 'COR_1');
-       INSERT INTO "approval_policy_step"
-         ("id", "organization_id", "policy_id", "step_order", "authority_organization_id",
-          "authority_role", "authority_label"${options.bounds ? ', "min_amount_minor"' : ''})
-       VALUES ('APS_${id}', 'ORG_E', '${id}', 1, 'ORG_E', 'ORGANIZATION_ADMIN', 'Engineer'${options.bounds ? `, ${options.bounds}` : ''});
-       ${
-         options.active === false
-           ? ''
-           : `UPDATE "approval_policy" SET "status" = 'PENDING_PLATFORM_APPROVAL', "submitted_at" = now(),
-                "submitted_by" = 'USR_1', "version" = 2 WHERE "id" = '${id}';
-              UPDATE "approval_policy" SET "status" = 'ACTIVE', "activated_at" = now(),
-                "activated_by" = 'USR_2', "version" = 3 WHERE "id" = '${id}';`
-       }`;
-    /** Submits STM_rb with both chains (APL_T, APL_F) whole, in one transaction. */
-    const submission = (milestoneId: string | null = null) => `BEGIN;
-       UPDATE "statement" SET "status" = 'SUBMITTED', "submitted_at" = now(), "updated_at" = now(),
-              "submitted_by" = 'USR_1', "submitted_by_issuer" = 'iss', "submitted_by_subject" = 'sub',
-              "technical_step_count" = 1, "financial_step_count" = 1, "version" = 2
-        WHERE "id" = 'STM_rb';
-       INSERT INTO "statement_approval_step"
-         ("id", "organization_id", "contract_id", "statement_id", "chain", "step_order", "policy_id",
-          "policy_version", "authority_organization_id", "authority_role", "authority_label", "created_at")
-       VALUES ('SAS_t', 'ORG_E', 'CTR_rb', 'STM_rb', 'TECHNICAL', 1, 'APL_T', 1, 'ORG_E', 'ORGANIZATION_ADMIN', 'Engineer', now()),
-              ('SAS_f', 'ORG_E', 'CTR_rb', 'STM_rb', 'FINANCIAL', 1, 'APL_F', 1, 'ORG_E', 'ORGANIZATION_ADMIN', 'Engineer', now());
-       ${
-         milestoneId === null
-           ? ''
-           : `UPDATE "milestone" SET "first_referenced_at" = now(), "version" = "version" + 1 WHERE "id" = '${milestoneId}';`
-       }
-       COMMIT;`;
     const refusal = (counts: [number, number, number, number, number]) =>
       new RegExp(
         `down refused: ${counts[0]} submitted statement\\(s\\), ${counts[1]} approval chain step\\(s\\), ` +
@@ -914,6 +916,125 @@ describe('each down.sql, run whole with psql --file', () => {
           `SELECT status::text || ':' || (SELECT count(*) FROM "statement_approval_step") FROM "statement" WHERE "id" = 'STM_rb'`,
         ]),
       ).toBe('SUBMITTED:2');
+    });
+  });
+  describe('statement_decisions (CON-003 PR 6)', () => {
+    /** One decision of STM_rb by a person other than its submitter, with the statement's move. */
+    const decision = (id: string, chain: string, by: string, status: string, version: number) =>
+      `INSERT INTO "statement_decision"
+         ("id", "organization_id", "contract_id", "statement_id", "chain", "step_order", "outcome",
+          "decider_organization_id", "decider_role", "decided_by", "decided_by_issuer",
+          "decided_by_subject", "decided_at", "correlation_id")
+       VALUES ('${id}', 'ORG_E', 'CTR_rb', 'STM_rb', '${chain}', 1, 'APPROVED', 'ORG_E',
+               'ORGANIZATION_ADMIN', '${by}', 'iss', 'sub-${by}', now(), 'COR_1');
+       UPDATE "statement" SET "status" = '${status}', "version" = ${version}, "updated_at" = now()
+        WHERE "id" = 'STM_rb';`;
+    /** The technical step approved: TECHNICALLY_APPROVED. */
+    const technicalApproval = `BEGIN; ${decision('SDC_t', 'TECHNICAL', 'USR_2', 'TECHNICALLY_APPROVED', 3)} COMMIT;`;
+    /** The financial step approved: APPROVED, and the contract's approved total moved with it. */
+    const financialApproval = `BEGIN; ${decision('SDC_f', 'FINANCIAL', 'USR_3', 'APPROVED', 4)}
+       UPDATE "contract" SET "approved_total_minor" = 10 WHERE "id" = 'CTR_rb';
+       COMMIT;`;
+    const submitted = [
+      signedContract,
+      chainPolicy('APL_T', 'contract.statement.technical'),
+      chainPolicy('APL_F', 'contract.statement.financial'),
+      draftStatement('STM_rb', 1),
+      submission(),
+    ];
+    const refusal = (counts: [number, number, number]) =>
+      new RegExp(
+        `down refused: ${counts[0]} statement decision\\(s\\), ${counts[1]} decided statement\\(s\\) ` +
+          `and ${counts[2]} contract\\(s\\) with an approved total exist; nothing was changed`,
+      );
+
+    it.each([
+      ['a technically approved statement', [...submitted, technicalApproval], refusal([1, 1, 0])],
+      [
+        'an approved statement and the total it moved',
+        [...submitted, technicalApproval, financialApproval],
+        refusal([2, 1, 1]),
+      ],
+    ] as const)(
+      'over %s it refuses and changes nothing — with ON_ERROR_STOP and without it; over none it succeeds, to the exact previous shape and guards',
+      (_what, statements, message) => {
+        const schema = scratch(DECISIONS);
+        for (const sql of statements) mustRun(schema, ['-c', sql]);
+        const before = shape(schema);
+        const guards = functions(schema);
+        for (const stop of [true, false]) {
+          const refused = psql(schema, ['--file', down(DECISIONS)], stop);
+          expect(refused.out).toMatch(message);
+          expect(shape(schema)).toBe(before);
+          expect(functions(schema)).toBe(guards);
+        }
+
+        const unused = scratch(DECISIONS);
+        const result = psql(unused, ['--file', down(DECISIONS)]);
+        expect(result.out).toBe('');
+        expect(result.ok).toBe(true);
+        const previous = scratch(SUBMISSION);
+        expect(shape(unused)).toBe(shape(previous));
+        expect(functions(unused)).toBe(functions(previous));
+      },
+    );
+
+    it('up → down → up over a schema already holding contracts, milestones and SUBMITTED statements with their chains: each way the shape and guards are exact, those rows untouched, and the old submission is decided after the second up', () => {
+      const held = (schema: string) =>
+        mustRun(schema, [
+          '-c',
+          `SELECT jsonb_build_object(
+             'contracts', (SELECT jsonb_agg(to_jsonb(c) ORDER BY c."id") FROM "contract" c),
+             'milestones', (SELECT jsonb_agg(to_jsonb(m) ORDER BY m."id") FROM "milestone" m),
+             'policies', (SELECT jsonb_agg(to_jsonb(p) ORDER BY p."id") FROM "approval_policy" p),
+             'statements', (SELECT jsonb_agg(to_jsonb(s) ORDER BY s."id") FROM "statement" s),
+             'lines', (SELECT jsonb_agg(to_jsonb(l) ORDER BY l."id") FROM "statement_line" l),
+             'chains', (SELECT jsonb_agg(to_jsonb(a) ORDER BY a."id") FROM "statement_approval_step" a)
+           )::text`,
+        ]);
+      const up = (schema: string) => {
+        mustRun(schema, ['--file', join(MIGRATIONS, DECISIONS, 'migration.sql')]);
+        mustRun(schema, ['-c', `INSERT INTO "_prisma_migrations" VALUES ('${DECISIONS}')`]);
+      };
+
+      const schema = scratch(SUBMISSION);
+      mustRun(schema, ['-c', `${signedContract}; ${milestone}; ${policyRow}`]);
+      for (const sql of submitted.slice(1)) mustRun(schema, ['-c', sql]);
+      mustRun(schema, ['-c', draftStatement('STM_rb_2', 2)]);
+      const before = shape(schema);
+      const guards = functions(schema);
+      const rows = held(schema);
+      expect(rows).toContain('"SUBMITTED"');
+
+      up(schema);
+      const afterUp = shape(schema);
+      const afterUpGuards = functions(schema);
+      const reference = scratch(DECISIONS);
+      expect(afterUp).toBe(shape(reference));
+      expect(afterUpGuards).toBe(functions(reference));
+      expect(held(schema)).toBe(rows);
+
+      const result = psql(schema, ['--file', down(DECISIONS)]);
+      expect(result.out).toBe('');
+      expect(result.ok).toBe(true);
+      expect(shape(schema)).toBe(before);
+      expect(functions(schema)).toBe(guards);
+      expect(held(schema)).toBe(rows);
+
+      up(schema);
+      expect(shape(schema)).toBe(afterUp);
+      expect(functions(schema)).toBe(afterUpGuards);
+      expect(held(schema)).toBe(rows);
+      // A statement submitted before this migration existed is decided, to APPROVED, after it.
+      mustRun(schema, ['-c', technicalApproval]);
+      mustRun(schema, ['-c', financialApproval]);
+      expect(
+        mustRun(schema, [
+          '-c',
+          `SELECT s.status::text || ':' || c.approved_total_minor FROM "statement" s
+             JOIN "contract" c ON c."id" = s."contract_id" WHERE s."id" = 'STM_rb'`,
+        ]),
+      ).toBe('APPROVED:10');
     });
   });
 });
