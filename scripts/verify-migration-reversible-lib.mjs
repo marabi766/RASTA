@@ -1348,9 +1348,33 @@ export const EXPECTED = {
       'order_status_history',
       // 20261015120000_saga_step (D-053): replay records of saga activities.
       'saga_step',
+      // 20261016100000_return_request (RUN-005, ADR-048): the return request, its lines, its history.
+      'return_request',
+      'return_line',
+      'return_status_history',
     ],
-    triggers: [],
+    triggers: [
+      'tg_return_request_guard',
+      'tg_return_request_no_truncate',
+      'tg_return_request_history_check',
+      'tg_return_line_guard',
+      'tg_return_line_no_truncate',
+      'tg_return_status_history_guard',
+      'tg_return_status_history_no_truncate',
+    ],
+    functions: [
+      'return_request_guard',
+      'return_request_history_check',
+      'return_line_guard',
+      'return_status_history_guard',
+    ],
     constraints: [
+      'ck_return_request_status',
+      'ck_return_request_status_coherent',
+      'ck_return_request_version_matches_status',
+      'ck_return_request_parties',
+      'ck_return_line_quantity_positive',
+      'ck_return_history_status',
       'ck_saga_step_key_not_blank',
       'ck_order_settled_after_receipt',
       'ck_order_completed_has_settlement',
@@ -1367,7 +1391,14 @@ export const EXPECTED = {
     // Added by 20260929120100_order_idempotency_key_unique (review of #141):
     // one Idempotency-Key places at most one order per organization, even
     // after its idempotency record is gone.
-    indexes: ['uq_order_org_idempotency_key'],
+    indexes: [
+      'uq_order_org_idempotency_key',
+      'ux_return_request_org_id',
+      'ux_return_request_command',
+      'ux_return_history_command',
+      'ux_return_history_version',
+      'ux_return_line_order_line',
+    ],
     types: ['ResponsibilityAttribution'],
     dataRollback: MARKETPLACE_DATA_ROLLBACK,
   },
