@@ -3,7 +3,7 @@
   "info": {
     "title": "procurement-service (PLANNED, COM-007)",
     "version": "0.0.0-planned",
-    "description": "DESIGN CONTRACT, not current behaviour: procurement-service does not exist. Nothing here is implemented until the PR named in x-step (docs/adr/ADR-070-implementation-plan.md) lands; each slice then moves into a generated docs/api/procurement-service.openapi.json checked byte for byte. Money is a rial bigint as a string and is on no event. Times are UTC ISO 8601 with Z. Every route needs a bearer token and an Idempotency-Key on writes; roles come from configuration (docs/24 Q-119..Q-124), never from the route. A third organization gets 404 everywhere; AUDITOR reaches no route. Quotation content is never returned before openedAt (ADR-066). Design: ADR-070."
+    "description": "DESIGN CONTRACT, not current behaviour: procurement-service does not exist. Nothing here is implemented until the PR named in x-step (docs/adr/ADR-070-implementation-plan.md) lands; each slice then moves into a generated docs/api/procurement-service.openapi.json checked byte for byte. Money is a rial bigint as a string and is on no event. Times are UTC ISO 8601 with Z. Every route needs a bearer token and an Idempotency-Key on writes, except /v1/internal/, which takes an internal token in X-Internal-Token only (internalToken scheme; the gateway routes that prefix nowhere); roles come from configuration (docs/24 Q-119..Q-124), never from the route. A third organization gets 404 everywhere; AUDITOR reaches no route. Quotation content is never returned before openedAt (ADR-066). Design: ADR-070."
   },
   "servers": [],
   "security": [
@@ -1129,7 +1129,13 @@
       "get": {
         "operationId": "getPurchaseOrderForService",
         "x-step": "PR 12",
-        "summary": "Service only (@AllowService economic-service, inventory-service) with a token signed for the buyer organization (ADR-035). The record a future financial or stock consumer asks before any effect (A-13). No consumer exists yet (Q-123, Q-124).",
+        "summary": "State a purchase order as its owner records it, for a future financial consumer (internal)",
+        "description": "The A-13 owner read (ADR-061 § 4), on the pattern contract-service's GET /v1/internal/statements/{id} set (ADR-068 PR 6a notes). Reserved for economic-service's service token, sent in X-Internal-Token with no Authorization header and signed for the buyer, the order's own organization (ADR-035); every other service and every user token is 403 (a service-side caller check, since AuthGuard admits any authenticated user), and so is a token signed for no organization (SERVICE_TENANT_CONTEXT_INVALID). An order of any other organization (the supplier's included) answers this service's own 404, exactly as one that does not exist. Returns the stored row, whatever its status; the reader builds any effect from this answer, never from PURCHASE_ORDER_ISSUED or GOODS_RECEIVED (which carry no amount), and decides itself which statuses it accepts (Q-124). Nothing is written, audited or published. No consumer exists yet (Q-123, Q-124); inventory-service joins the caller list only in the slice that builds its consumer (ADR-056 § 7).",
+        "security": [
+          {
+            "internalToken": []
+          }
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/Id"
@@ -1137,20 +1143,23 @@
         ],
         "responses": {
           "200": {
-            "description": "The order",
+            "description": "The order as stored",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PurchaseOrder"
+                  "$ref": "#/components/schemas/PurchaseOrderSourceFact"
                 }
               }
             }
           },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience."
+          },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "description": "Authenticated, but not the service this route answers: any user token (whatever its roles), another service's internal token, or an internal token signed for no organization."
           },
           "404": {
-            "$ref": "#/components/responses/NotFound"
+            "description": "Not found, also returned for an order of any organization but the one the internal token is signed for (the buyer's), so its existence is never disclosed."
           }
         }
       }
@@ -1319,6 +1328,12 @@
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "JWT"
+      },
+      "internalToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Internal-Token",
+        "description": "A service's internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user. Given to /v1/internal/ routes only."
       }
     },
     "parameters": {
@@ -1416,7 +1431,7 @@
         "description": "BUSINESS_RULE_VIOLATION or INVALID_STATE_TRANSITION, with a closed reason code (e.g. APPROVAL_POLICY_REQUIRED, JUSTIFICATION_REQUIRED, WINNER_NOT_ELIGIBLE)"
       },
       "Unavailable": {
-        "description": "UPSTREAM_UNAVAILABLE or UPSTREAM_TIMEOUT: supplier-service, identity-service or audit-service could not answer; nothing was written (fail closed)"
+        "description": "UPSTREAM_UNAVAILABLE or UPSTREAM_TIMEOUT: supplier-service, identity-service, audit-service or organization-service could not answer; nothing was written (fail closed)"
       }
     },
     "schemas": {
@@ -2330,6 +2345,74 @@
           },
           "version": {
             "type": "integer"
+          }
+        }
+      },
+      "PurchaseOrderSourceFact": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Only from the stored row (ADR-070 § 8). Payer and beneficiary are named outright so the reader never infers them; the currency is stated, never assumed (ADR-022).",
+        "required": [
+          "purchaseOrderId",
+          "rfqId",
+          "status",
+          "quantity",
+          "receivedQuantity",
+          "amountMinor",
+          "currency",
+          "payerOrganizationId",
+          "beneficiaryOrganizationId",
+          "issuedAt",
+          "cancelledAt"
+        ],
+        "properties": {
+          "purchaseOrderId": {
+            "type": "string"
+          },
+          "rfqId": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PurchaseOrderStatus"
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "receivedQuantity": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Sum of recorded receipts; receipts change no stock or money (Q-123)"
+          },
+          "amountMinor": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$",
+            "description": "Rial bigint as a decimal string, exact to 2^63 - 1; computed once at issue; on no event"
+          },
+          "currency": {
+            "type": "string",
+            "enum": ["IRR"],
+            "description": "Stated, not stored: no column holds a currency (Q-86, Q-120)"
+          },
+          "payerOrganizationId": {
+            "type": "string",
+            "description": "The buyer, the order's own organization"
+          },
+          "beneficiaryOrganizationId": {
+            "type": "string",
+            "description": "The selected supplier"
+          },
+          "issuedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC, ISO 8601 with Z"
+          },
+          "cancelledAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Null unless CANCELLED"
           }
         }
       },

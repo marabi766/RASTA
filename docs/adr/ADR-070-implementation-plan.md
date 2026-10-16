@@ -1,10 +1,13 @@
 # ADR-070 — برنامهٔ اجرا (COM-007)
 
-> برش PR به PR برای [ADR-070](ADR-070-procurement-service-boundary-and-lifecycle.md). **هیچ‌کدام ساخته نشده است** (2026-10-15)؛ این سند وضعیت
+> برش PR به PR برای [ADR-070](ADR-070-procurement-service-boundary-and-lifecycle.md). **هیچ‌کدام ساخته نشده است** (2026-10-15؛ بازبینی 2026-10-16
+> با `main` @ `7da6e20`: PR 5، PR 11 و PR 12)؛ این سند وضعیت
 > نیست، نقشه است. هر PR جداگانه با CI سبز ادغام می‌شود؛ هر PRی که مسیر کاربری می‌سازد آزمون جداسازی مستأجر و آزمون رد نقش دارد.
 
 **اندازه:** `S` ≈ تا ۳۰۰ خط تغییر با آزمون؛ `M` ≈ ۳۰۰ تا ۹۰۰؛ `L` ≈ ۹۰۰ تا ۲۰۰۰ (مرجع: برش‌های CON-002 و CON-003 روی `main`). امتیاز
-برآوردی کنار هر برش است؛ جمع آن (۷۰، با همین PR) از ۲۱ امتیاز COM-007 بسیار بیشتر است — **بازبرآورد با مدیر پروژه** (همان یادداشت ADR-065 و ADR-068).
+برآوردی کنار هر برش است؛ جمع آن (۷۰، با همین PR) از ۲۱ امتیاز COM-007 بسیار بیشتر است — **بازبرآورد پرسش باز مدیر پروژه و صاحب محصول است**
+(همان یادداشت ADR-065 و ADR-068)؛ این سند آن را نمی‌بندد و `backlog.json` را تغییر نمی‌دهد. بازبینی 2026-10-16 کاری به برش‌ها افزود (پذیرش
+procurement در organization-service در PR 11) ولی امتیازی را عوض نکرد.
 
 ## نقشه
 
@@ -65,10 +68,13 @@
 
 ### PR 5 — پورت‌های خواندنی (`S`)
 
-- supplier-service: موقعیت یک سازمان برای یک قابلیت (`GOODS_SUPPLY`) با `@AllowService('procurement-service')`؛ رفتار `CONTRACTING` برای construction
-  بی‌تغییر (آزمون موجود).
-- identity-service: گسترش `@AllowService` مسیر عضویت/تاریخچه به `procurement-service`.
-- آزمون در هر دو سرویس: سرویس دیگر و شخص ⇒ `403`؛ توکن مستأجردار/بی‌مستأجر طبق همان قاعدهٔ امروز.
+- supplier-service: `GET /v1/suppliers/standing-snapshot/:organizationId` امروز فقط `construction-service` و فقط `contractingApprovedAt` دارد. برش
+  `procurement-service` را به `@AllowService` و بررسی فراخوانندهٔ سرویس (`assertCallerIsConstructionService` امروز) می‌افزاید و لحظهٔ تأیید
+  `GOODS_SUPPLY` را میدان **افزایشی** پاسخ می‌کند (شکل `.strict()` construction با آن بازبینی می‌شود)؛ قرارداد توکن بی‌تغییر: **بی مستأجر**، توکن
+  مستأجردار `403`. رفتار و آزمون موجود construction بی‌تغییر.
+- identity-service: `GET /v1/users/:id/organizations` (امروز فقط `construction-service`، توکن **بی مستأجر**) ـ گسترش `@AllowService` به
+  `procurement-service`، همان قرارداد توکن.
+- آزمون در هر دو سرویس: سرویس دیگر و شخص ⇒ `403`؛ توکن مستأجردار ⇒ `403`؛ procurement و construction ⇒ `200`.
 
 ### PR 6 — صدور RFQ (`L`)
 
@@ -106,18 +112,28 @@
 
 ### PR 11 — سیاست موافقت سفارش (`L`)
 
-- کپی ماژول سیاست contract-service با کلید `procurement.purchase_order`: نویسنده طبق Q-70 (۷)، `DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED`،
-  چهارچشمی `SYSTEM_ADMIN`، Snapshot، پرسش سلسله‌مراتب از organization-service، Consumer `ORGANIZATION_MOVED` (فقط محرک) و جاروکنندهٔ آشتی (D-041).
-- آزمون: همان مجموعهٔ contract-service (سیاست اتحادیه برای سازمان بیرون از زیردرخت، تعلیق پس از جابه‌جایی، چهارچشمی).
+- کپی ماژول سیاست contract-service **همان‌گونه که روی `main` است** با کلید `procurement.purchase_order`: نویسنده طبق Q-70 (۷)،
+  `DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED`، چهارچشمی `SYSTEM_ADMIN`، Snapshot، پرسش سلسله‌مراتب از organization-service، Consumer
+  `ORGANIZATION_MOVED` (فقط محرک) و جاروکنندهٔ آشتی (D-041)؛ مرجع گام هر (سازمان، نقش) جز `AUDITOR` و `SYSTEM_ADMIN` (`400`)، دو گام با یک
+  (سازمان، نقش) مجاز، کران مبلغ گام فقط پس از اعتبارسنجی هر دو کران مقایسه می‌شود (ADR-068 § ۵ و بازبینی #312).
+- organization-service: `procurement-service` به `@AllowService` ـ `GET /v1/organizations/{id}` (امروز construction و contract) و آزمون Provider
+  همان پاسخ `{ id }`/`404` برای procurement (الگوی `construction-hierarchy-contract.int-spec.ts`).
+- آزمون: همان مجموعهٔ contract-service (سیاست اتحادیه برای سازمان بیرون از زیردرخت، تعلیق پس از جابه‌جایی، چهارچشمی، `SYSTEM_ADMIN` و
+  `AUDITOR` به‌عنوان مرجع گام ⇒ `400`).
 
 ### PR 12 — صدور سفارش خرید (`L`)
 
 - `purchase_order`، `purchase_order_line`، `purchase_order_approval_request`، `purchase_order_standing_check`؛ `POST /v1/rfqs/{id}/purchase-order`
   (`422 APPROVAL_POLICY_REQUIRED` بی سیاست؛ `202` با سیاست؛ اجرا در یک تراکنش پس از تصویب؛ `409 APPROVAL_STALE`)، مسیرهای تصمیم موافقت، بازسنجی
   شایستگی برنده، مبلغ از محتوای مهرشده (`bigint`، کران سرریز)، `GET /v1/purchase-orders[/{id}]` برای خریدار و تأمین‌کننده،
-  `GET /v1/internal/purchase-orders/{id}` (`@AllowService('economic-service','inventory-service')`، توکن برای سازمان خریدار).
+  `GET /v1/internal/purchase-orders/{id}` به الگوی `GET /v1/internal/statements/{id}` contract-service (#320؛ ADR-070 § ۸): فقط
+  `@AllowService('economic-service')` و بررسی فراخواننده در سرویس (هر توکن کاربر `403`)، مستأجر = سازمان امضاشده در توکن (خریدار)، پاسخ فقط از ردیف
+  با هر وضعیت (`PurchaseOrderSourceFact`)، OpenAPI تولیدشده با طرح `internalToken` فقط روی `/v1/internal/` (`enrichOpenApiDocument` و `document.spec`
+  به‌ازای عملیات، همان #320). `inventory-service` اینجا افزوده نمی‌شود (Q-123).
 - رویدادها: `PURCHASE_ORDER_APPROVAL_ACTION`، `PURCHASE_ORDER_ISSUED` (بی مبلغ)، `QUOTATION_NOT_SELECTED`، `PURCHASE_ORDER_STANDING_CONFLICT_DETECTED`.
-- آزمون: دو صدور هم‌زمان ⇒ یکی؛ برندهٔ معلق ⇒ `422`؛ supplier ناپیدا ⇒ `503`؛ درخواست‌دهنده تصویب‌کنندهٔ خودش نیست؛ هیچ رویدادی میدان مبلغ ندارد.
+- آزمون: دو صدور هم‌زمان ⇒ یکی؛ برندهٔ معلق ⇒ `422`؛ supplier ناپیدا ⇒ `503`؛ درخواست‌دهنده تصویب‌کنندهٔ خودش نیست؛ هیچ رویدادی میدان مبلغ ندارد؛
+  خواندن داخلی: خریدار `200`، تأمین‌کننده/بیگانه/ناموجود همان `404`، کاربر و سرویس دیگر `403`، توکن بی سازمان `403`، بی توکن `401`، توکن سرویس در
+  `Authorization` ⇒ `401` (الگوی `statement-settlement-read.int-spec.ts`).
 
 ### PR 13 — رسید، کنترل کیفیت، لغو (`M`)
 
