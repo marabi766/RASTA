@@ -678,15 +678,23 @@ INSERT INTO "commission" ("id", "organization_id", "transaction_id", "rule_id", 
 VALUES ('${id}', 'ORG-MIGCHECK-PAYEE', '${transactionId}', ${ruleId ? `'${ruleId}'` : 'NULL'}, ${rate},
   1000, ${amount}, 'IRR', now()${extra ? `, ${extra}` : ''});`;
 
+/**
+ * The append-only trigger in the schema under test — never another schema's.
+ * In a scratch schema the service's own `public` holds the same objects, so an
+ * unscoped catalogue lookup would count both.
+ */
+const COMMISSION_TRIGGER_HERE = `SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+   WHERE t.tgname = 'trg_commission_append_only' AND c.relnamespace = current_schema()::regnamespace`;
+
 /** Removes every commission probe row; the owner lifts the append-only trigger for them only. */
 const COMMISSION_MIGCHECK_CLEANUP = `
 DO $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_commission_append_only') THEN
+  IF EXISTS (${COMMISSION_TRIGGER_HERE}) THEN
     EXECUTE 'ALTER TABLE "commission" DISABLE TRIGGER "trg_commission_append_only"';
   END IF;
   DELETE FROM "commission" WHERE organization_id = 'ORG-MIGCHECK-PAYEE';
-  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_commission_append_only') THEN
+  IF EXISTS (${COMMISSION_TRIGGER_HERE}) THEN
     EXECUTE 'ALTER TABLE "commission" ENABLE TRIGGER "trg_commission_append_only"';
   END IF;
 END $$;
@@ -823,7 +831,7 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
       BEGIN
         SELECT count(*) INTO found FROM "commission" WHERE id = 'CMS_MIGCHECK_LINE' AND business_line = 'PARTS';
         IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback touched the rows'; END IF;
-        SELECT count(*) INTO found FROM pg_trigger WHERE tgname = 'trg_commission_append_only';
+        SELECT count(*) INTO found FROM (${COMMISSION_TRIGGER_HERE}) here;
         IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback dropped the trigger'; END IF;
         SELECT count(*) INTO found FROM "_prisma_migrations"
          WHERE migration_name = '${COMMISSION_BUSINESS_LINES}' AND rolled_back_at IS NULL;
@@ -856,7 +864,9 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
                       AND column_name IN ('outcome', 'business_line')) THEN
           RAISE EXCEPTION 'the refused migration left a column behind';
         END IF;
-        IF EXISTS (SELECT 1 FROM pg_type WHERE typname IN ('BusinessLine', 'CommissionOutcome')) THEN
+        IF EXISTS (SELECT 1 FROM pg_type
+                    WHERE typname IN ('BusinessLine', 'CommissionOutcome')
+                      AND typnamespace = current_schema()::regnamespace) THEN
           RAISE EXCEPTION 'the refused migration left a type behind';
         END IF;
       END $$;`,
