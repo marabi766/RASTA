@@ -662,9 +662,292 @@ export const ASSET_DATA_ROLLBACK = {
   ],
 };
 
+const COMMISSION_BUSINESS_LINES = '20261016120000_commission_business_lines';
+
+/** A transaction as the schema before business lines holds it (or after, with a line). */
+const TRANSACTION_MIGCHECK = (id, line = null) => `
+INSERT INTO "transaction" ("id", "organization_id", "counterparty_organization_id", "transaction_type",
+  ${line ? '"business_line", ' : ''}"gross_amount_minor", "occurred_at", "correlation_id", "updated_at", "created_by")
+VALUES ('${id}', 'ORG-MIGCHECK', 'ORG-MIGCHECK-PAYEE', 'LOGISTICS', ${line ? `'${line}', ` : ''}1000,
+  now(), 'COR-MIGCHECK', now(), 'USR-MIGCHECK');`;
+
+/** A commission row; `extra` is the post-migration columns, when they exist. */
+const COMMISSION_MIGCHECK = (id, transactionId, ruleId, rate, amount, extra = null) => `
+INSERT INTO "commission" ("id", "organization_id", "transaction_id", "rule_id", "rate_basis_points",
+  "gross_amount_minor", "amount_minor", "currency", "applied_at"${extra ? ', "business_line", "outcome"' : ''})
+VALUES ('${id}', 'ORG-MIGCHECK-PAYEE', '${transactionId}', ${ruleId ? `'${ruleId}'` : 'NULL'}, ${rate},
+  1000, ${amount}, 'IRR', now()${extra ? `, ${extra}` : ''});`;
+
+/**
+ * The append-only trigger in the schema under test — never another schema's.
+ * In a scratch schema the service's own `public` holds the same objects, so an
+ * unscoped catalogue lookup would count both.
+ */
+const COMMISSION_TRIGGER_HERE = `SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+   WHERE t.tgname = 'trg_commission_append_only' AND c.relnamespace = current_schema()::regnamespace`;
+
+/** Removes every commission probe row; the owner lifts the append-only trigger for them only. */
+const COMMISSION_MIGCHECK_CLEANUP = `
+DO $$
+BEGIN
+  IF EXISTS (${COMMISSION_TRIGGER_HERE}) THEN
+    EXECUTE 'ALTER TABLE "commission" DISABLE TRIGGER "trg_commission_append_only"';
+  END IF;
+  DELETE FROM "commission" WHERE organization_id = 'ORG-MIGCHECK-PAYEE';
+  IF EXISTS (${COMMISSION_TRIGGER_HERE}) THEN
+    EXECUTE 'ALTER TABLE "commission" ENABLE TRIGGER "trg_commission_append_only"';
+  END IF;
+END $$;
+DELETE FROM "commission_rule" WHERE id LIKE 'CMR_MIGCHECK_%';
+DELETE FROM "transaction" WHERE organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_%';`;
+
+/**
+ * Commission by business line (ADR-045, docs/23 D-057), rolled back and
+ * re-applied over rows rather than an empty schema.
+ *
+ * Rows from before business lines survive the round trip exactly: their
+ * outcome is derived from `rule_id`, the only fact that already said it, and
+ * dropped again without loss. Rows that carry a line cannot be expressed by
+ * the earlier schema — a line-wide rule has no type to fall back to — so the
+ * rollback refuses them before it changes anything. The forward migration
+ * refuses, in words, a charge with no rule it cannot classify honestly.
+ */
+const COMMISSION_BUSINESS_LINES_STEPS = [
+  {
+    label: 'commission: down to the schema before business lines (empty)',
+    runDownScript: [COMMISSION_BUSINESS_LINES],
+  },
+  {
+    label: 'commission: a priced and an unpriced charge, as the old engine wrote them',
+    sql: [
+      `INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
+         "valid_from", "status", "created_by", "updated_at", "updated_by")
+       VALUES ('CMR_MIGCHECK_OLD', 'ORG-MIGCHECK-PAYEE', 'LOGISTICS', 250, now(), 'ACTIVE',
+         'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_PRICED'),
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_UNPRICED'),
+      COMMISSION_MIGCHECK(
+        'CMS_MIGCHECK_PRICED',
+        'TXN_MIGCHECK_PRICED',
+        'CMR_MIGCHECK_OLD',
+        250,
+        25,
+      ),
+      COMMISSION_MIGCHECK('CMS_MIGCHECK_UNPRICED', 'TXN_MIGCHECK_UNPRICED', null, 0, 0),
+    ].join('\n'),
+  },
+  { label: 'commission: up again over them', reapply: true },
+  {
+    label: 'commission: outcomes derived from the rule, no line invented anywhere',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "commission"
+         WHERE (id, outcome::text) IN (('CMS_MIGCHECK_PRICED', 'RULE_APPLIED'),
+                                       ('CMS_MIGCHECK_UNPRICED', 'NO_ACTIVE_RULE'))
+           AND business_line IS NULL;
+        IF found <> 2 THEN RAISE EXCEPTION 'the outcome backfill is wrong (found %)', found; END IF;
+        SELECT count(*) INTO found FROM "transaction"
+         WHERE id LIKE 'TXN_MIGCHECK_%' AND business_line IS NOT NULL;
+        IF found <> 0 THEN RAISE EXCEPTION 'a line was inferred for % transaction(s)', found; END IF;
+        SELECT count(*) INTO found FROM "commission_rule"
+         WHERE id = 'CMR_MIGCHECK_OLD' AND business_line IS NULL AND transaction_type = 'LOGISTICS';
+        IF found <> 1 THEN RAISE EXCEPTION 'the type-only rule changed meaning'; END IF;
+      END $$;`,
+  },
+  {
+    label: 'commission: the pricing cutover is recorded once, by this migration',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "commission_pricing_cutover"
+         WHERE id = 1 AND migration_name = '${COMMISSION_BUSINESS_LINES}';
+        IF found <> 1 THEN RAISE EXCEPTION 'the pricing cutover is not recorded (found %)', found; END IF;
+      END $$;`,
+  },
+  {
+    label: 'commission: a rule that has been in force keeps its status (D-057)',
+    sql: `INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
+            "valid_from", "valid_to", "status", "created_by", "updated_at", "updated_by")
+          VALUES ('CMR_MIGCHECK_PAST', 'ORG-MIGCHECK-OTHER', 'LOGISTICS', 100,
+            '2020-01-01', '2020-02-01', 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK');
+          UPDATE "commission_rule" SET "status" = 'INACTIVE' WHERE id = 'CMR_MIGCHECK_PAST';`,
+    mustFail: 'keeps its status',
+  },
+  {
+    label: 'commission: two active rules of one scope never overlap (D-057)',
+    sql: `INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
+            "valid_from", "valid_to", "status", "created_by", "updated_at", "updated_by")
+          VALUES ('CMR_MIGCHECK_EARLIER', 'ORG-MIGCHECK-OVERLAP', 'LOGISTICS', 100,
+            '2020-01-01', '2020-02-01', 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK'),
+                 ('CMR_MIGCHECK_OVERLAP', 'ORG-MIGCHECK-OVERLAP', 'LOGISTICS', 500,
+            '2020-01-15', NULL, 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
+    mustFail: 'ex_commission_rule_type_only_no_overlap',
+  },
+  {
+    label: 'commission: a posted charge is append-only',
+    sql: `UPDATE "commission" SET amount_minor = 0 WHERE id = 'CMS_MIGCHECK_PRICED';`,
+    mustFail: 'append-only',
+  },
+  {
+    label: 'commission: an outcome that contradicts its rule is refused',
+    sql: COMMISSION_MIGCHECK(
+      'CMS_MIGCHECK_LIE',
+      'TXN_MIGCHECK_UNPRICED',
+      null,
+      0,
+      0,
+      `NULL, 'RULE_APPLIED'`,
+    ),
+    mustFail: 'ck_commission_outcome',
+  },
+  {
+    label: 'commission: a rule naming neither a line nor a type is refused',
+    sql: `INSERT INTO "commission_rule" ("id", "rate_basis_points", "valid_from", "created_by", "updated_at", "updated_by")
+          VALUES ('CMR_MIGCHECK_NONE', 1, now(), 'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
+    mustFail: 'ck_commission_rule_scope',
+  },
+  {
+    label: 'commission: down succeeds over rows without a line, and keeps them',
+    runDownScript: [COMMISSION_BUSINESS_LINES],
+  },
+  {
+    label: 'commission: every row as it was, the rule still named, the type NOT NULL again',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "commission"
+         WHERE (id, rule_id, amount_minor) IN (('CMS_MIGCHECK_PRICED', 'CMR_MIGCHECK_OLD', 25))
+            OR (id = 'CMS_MIGCHECK_UNPRICED' AND rule_id IS NULL AND amount_minor = 0);
+        IF found <> 2 THEN RAISE EXCEPTION 'the rollback lost a charge (found %)', found; END IF;
+        SELECT count(*) INTO found FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'commission_rule'
+           AND column_name = 'transaction_type' AND is_nullable = 'NO';
+        IF found <> 1 THEN RAISE EXCEPTION 'commission_rule.transaction_type is nullable after down'; END IF;
+      END $$;`,
+  },
+  { label: 'commission: up again', reapply: true },
+  {
+    label: 'commission: a line-wide rule, and a transaction and its charge under a line',
+    sql: [
+      `INSERT INTO "commission_rule" ("id", "organization_id", "business_line", "rate_basis_points",
+         "valid_from", "status", "created_by", "updated_at", "updated_by")
+       VALUES ('CMR_MIGCHECK_LINE', 'ORG-MIGCHECK-PAYEE', 'PARTS', 100, now(), 'ACTIVE',
+         'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_LINE', 'PARTS'),
+      COMMISSION_MIGCHECK(
+        'CMS_MIGCHECK_LINE',
+        'TXN_MIGCHECK_LINE',
+        'CMR_MIGCHECK_LINE',
+        100,
+        10,
+        `'PARTS', 'RULE_APPLIED'`,
+      ),
+    ].join('\n'),
+  },
+  {
+    label: 'commission: the rollback refuses while any row carries a line',
+    runDownScript: [COMMISSION_BUSINESS_LINES],
+    mustFail: 'carry a business line; refusing to roll back beneath them',
+  },
+  {
+    label: 'commission: …and changed nothing — columns, trigger and ledger row all there',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "commission" WHERE id = 'CMS_MIGCHECK_LINE' AND business_line = 'PARTS';
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback touched the rows'; END IF;
+        SELECT count(*) INTO found FROM (${COMMISSION_TRIGGER_HERE}) here;
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback dropped the trigger'; END IF;
+        SELECT count(*) INTO found FROM "_prisma_migrations"
+         WHERE migration_name = '${COMMISSION_BUSINESS_LINES}' AND rolled_back_at IS NULL;
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback left the ledger'; END IF;
+      END $$;`,
+  },
+  {
+    label: 'commission: clear the line rows, and down again',
+    sql: COMMISSION_MIGCHECK_CLEANUP,
+  },
+  { label: 'commission: down (no line anywhere)', runDownScript: [COMMISSION_BUSINESS_LINES] },
+  {
+    label: 'commission: two active type-only rules for one organization and type, overlapping',
+    sql: `INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
+            "valid_from", "status", "created_by", "updated_at", "updated_by")
+          VALUES ('CMR_MIGCHECK_DUP_A', 'ORG-MIGCHECK-DUP', 'LOGISTICS', 100, '2020-01-01', 'ACTIVE',
+                  'USR-MIGCHECK', now(), 'USR-MIGCHECK'),
+                 ('CMR_MIGCHECK_DUP_B', 'ORG-MIGCHECK-DUP', 'LOGISTICS', 500, '2020-06-01', 'ACTIVE',
+                  'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
+  },
+  {
+    label: 'commission: the forward migration refuses them, naming the query that finds them',
+    deployMustFail:
+      'pair(s) of active rules for one organization and type in force at the same time',
+  },
+  {
+    label: 'commission: an operator closes one (in the probe: removes both)',
+    sql: `DELETE FROM "commission_rule" WHERE id LIKE 'CMR_MIGCHECK_DUP_%';`,
+  },
+  {
+    label: 'commission: resolve the migration refused for overlap',
+    resolveRolledBack: COMMISSION_BUSINESS_LINES,
+  },
+  {
+    label: 'commission: a charge with no rule behind it, which nothing can classify',
+    sql: [
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_ORPHAN'),
+      COMMISSION_MIGCHECK('CMS_MIGCHECK_ORPHAN', 'TXN_MIGCHECK_ORPHAN', null, 100, 10),
+    ].join('\n'),
+  },
+  {
+    label: 'commission: the forward migration refuses it in words',
+    deployMustFail: 'carry a charge but no rule; refusing to classify them',
+  },
+  {
+    label: 'commission: …having changed nothing',
+    sql: `
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema() AND table_name = 'commission'
+                      AND column_name IN ('outcome', 'business_line')) THEN
+          RAISE EXCEPTION 'the refused migration left a column behind';
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_type
+                    WHERE typname IN ('BusinessLine', 'CommissionOutcome')
+                      AND typnamespace = current_schema()::regnamespace) THEN
+          RAISE EXCEPTION 'the refused migration left a type behind';
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_tables
+                    WHERE schemaname = current_schema() AND tablename = 'commission_pricing_cutover') THEN
+          RAISE EXCEPTION 'the refused migration left the pricing cutover behind';
+        END IF;
+      END $$;`,
+  },
+  {
+    label: 'commission: an operator settles the row (in the probe: removes it)',
+    sql: `DELETE FROM "commission" WHERE id = 'CMS_MIGCHECK_ORPHAN';`,
+  },
+  {
+    label: 'commission: resolve the refused migration',
+    resolveRolledBack: COMMISSION_BUSINESS_LINES,
+  },
+  { label: 'commission: up again: it applies', reapply: true },
+  {
+    label: 'commission: clean up the probe rows and the rolled-back ledger row',
+    sql: `${COMMISSION_MIGCHECK_CLEANUP}
+          DELETE FROM "_prisma_migrations"
+           WHERE migration_name = '${COMMISSION_BUSINESS_LINES}' AND rolled_back_at IS NOT NULL;`,
+  },
+];
+
 export const ECONOMIC_DATA_ROLLBACK = {
   migration: '20260930200000_payment_reconciliation_task',
-  label: 'intents B0 left marked, and the open tasks they get',
+  label:
+    'intents B0 left marked, and the open tasks they get; then charges and rules before and under business lines',
   steps: [
     {
       label: 'down: the rollback succeeds while no task is open (the resolutions first)',
@@ -816,6 +1099,7 @@ export const ECONOMIC_DATA_ROLLBACK = {
             DELETE FROM "payment_reconciliation_task" WHERE organization_id = 'ORG-MIGCHECK';
             DELETE FROM "payment_intent" WHERE organization_id = 'ORG-MIGCHECK';`,
     },
+    ...COMMISSION_BUSINESS_LINES_STEPS,
   ],
 };
 
@@ -1254,6 +1538,12 @@ export const EXPECTED = {
     // D-045: the runtime role owns nothing and cannot create the scratch schema
     // or database; the migrator owns rasta_economic.
     connectAs: 'migrator',
+    // `CREATE EXTENSION IF NOT EXISTS btree_gist` for the commission rules'
+    // no-overlap exclusions (docs/23 D-057); its down script leaves it, as
+    // organization-service's does, because the bootstrap installs it too.
+    keptExtensions: {
+      '20261016120000_commission_business_lines': ['btree_gist'],
+    },
     tables: [
       'wallet',
       'ledger_account',
@@ -1265,6 +1555,8 @@ export const EXPECTED = {
       'payment_reconciliation_resolution',
       'payment_reconciliation_requeue',
       'payment_refund_decline',
+      // The instant line rules began to price (docs/23 D-057).
+      'commission_pricing_cutover',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -1273,10 +1565,40 @@ export const EXPECTED = {
       // The operator path's history (ADR-064 § 6): never deleted, decided once.
       'trg_payment_resolution_append_only',
       'trg_payment_requeue_append_only',
+      // A posted commission is corrected by a reversal entry, never edited (ADR-045 § 3).
+      'trg_commission_append_only',
+      // What was in force at an instant stays what it was (docs/23 D-057).
+      'trg_commission_rule_effective_dated',
+      'trg_commission_pricing_cutover_fixed',
+      'trg_transaction_pricing_fixed',
+    ],
+    // ADR-045: the business line a commission is charged under, and what the step decided.
+    types: ['BusinessLine', 'CommissionOutcome'],
+    functions: [
+      'reject_commission_mutation',
+      'commission_rule_effective_dated',
+      // One scope's rule changes and the pricings that read them take turns (D-057).
+      'commission_rule_scope_key',
+      'commission_rule_scope_change',
+      'commission_pricing_scope_lock',
+      'reject_commission_pricing_cutover_mutation',
+      'reject_transaction_repricing',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
       'ck_wallet_balances',
+      // A rule names a line or a type; an outcome never contradicts its rule (ADR-045 § 2).
+      'ck_commission_rule_scope',
+      'ck_commission_outcome',
+      // Two active rules of one scope never overlap in time (docs/23 D-057).
+      'ex_commission_rule_type_only_no_overlap',
+      'ex_commission_rule_line_no_overlap',
+      'ex_commission_rule_line_type_no_overlap',
+      'ck_commission_rule_organization_not_blank',
+      // An obligation's recorded pricing names a rule exactly when one applied.
+      'ck_transaction_pricing',
+      'transaction_pricing_rule_id_fkey',
+      'ck_commission_pricing_cutover_single',
       'ck_payment_reconciliation_done_complete',
       'ck_payment_reconciliation_lease_pair',
       // Separation of duties on an operator resolution (ADR-064 § 6).

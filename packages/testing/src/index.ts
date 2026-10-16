@@ -40,3 +40,9 @@ export {
   MIN_REASON_LENGTH,
 } from './tenant-scope';
 export type { DmmfModelLike, TenantScopeInput } from './tenant-scope';
+
+export { StubKafkaBroker, reserveFreePort } from './stub-kafka-broker';
+export type { StubKafkaBrokerOptions } from './stub-kafka-broker';
+
+export { publisherCloseProblems, runOutboxShutdownProvider } from './outbox-shutdown-wiring';
+export type { ParticipantStop, ShutdownFactoryProvider } from './outbox-shutdown-wiring';

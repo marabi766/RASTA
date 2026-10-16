@@ -146,6 +146,23 @@ export {
   KafkaConnectionConfigError,
 } from './kafka/connection';
 export type { KafkaConnectionOptions, KafkaConnectionEnv } from './kafka/connection';
+export { boundedDisconnect, kafkaShutdownDeadline } from './kafka/bounded-disconnect';
+export type {
+  BoundedDisconnectOptions,
+  Disconnectable,
+  DisconnectLogger,
+  DisconnectOutcome,
+} from './kafka/bounded-disconnect';
+export {
+  KafkaReadinessProbe,
+  kafkaProbeTimeoutMs,
+  KAFKA_PROBE_MAX_TIMEOUT_MS,
+} from './kafka/readiness-probe';
+export type {
+  AdminFactory,
+  KafkaReadinessProbeOptions,
+  ProbeLogger,
+} from './kafka/readiness-probe';
 
 // Event consumption ----------------------------------------------------------
 export {

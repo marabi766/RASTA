@@ -213,17 +213,20 @@ import { loadInventoryEnv, SERVICE_NAME, type InventoryEnv } from './config/env'
       // phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. The sweeper too: stopped later, it
       // could keep writing outbox rows while the relay drained.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OutboxPurgeScheduler, ReservationSweeper, ENV],
+      inject: [OutboxRelay, OutboxPurgeScheduler, ReservationSweeper, KafkaEventPublisher, ENV],
       useFactory: (
         relay: OutboxRelay,
         purge: OutboxPurgeScheduler,
         sweeper: ReservationSweeper,
+        publisher: KafkaEventPublisher,
         env: InventoryEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
           workers: [sweeper],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

@@ -29,6 +29,7 @@ describe('source fact uniqueness — concurrency, duplicate and tenant isolation
     organizationId: org.a,
     counterpartyOrganizationId: org.b,
     transactionType: 'MAINTENANCE_SERVICE' as const,
+    businessLine: 'MAINTENANCE' as const,
     grossAmountMinor: 480_000n,
     currency: 'IRR',
     occurredAt: new Date(),

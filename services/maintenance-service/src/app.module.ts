@@ -318,6 +318,7 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
         DueScanner,
         UsageConsumer,
         AssetSyncConsumer,
+        KafkaEventPublisher,
         ENV,
       ],
       useFactory: (
@@ -326,12 +327,15 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
         dueScanner: DueScanner,
         usage: UsageConsumer,
         assetSync: AssetSyncConsumer,
+        publisher: KafkaEventPublisher,
         env: MaintenanceEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
           workers: [dueScanner, usage, assetSync],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

@@ -1,5 +1,5 @@
 {
-  "$comment": "Settings of a service’s own schema that turbo withheld before scripts/service-env-turbo.test.mjs (Codex r2 on #304). Only shrinks: declare one in turbo.json and delete it here. Never add to it.",
+  "$comment": "Settings of a service’s own schema that turbo withheld before scripts/service-env-turbo.test.mjs (Codex r2 on #304). Only shrinks: declare one in turbo.json and delete it here. Never add to it — the test refuses any entry the base branch's copy does not list.",
   "asset-service": {
     "ASSET_DOCUMENT_LOOKUP_TIMEOUT_MS": ["dev", "test", "test:integration"],
     "ASSET_IDEMPOTENCY_CLAIM_LEASE_SECONDS": ["dev", "test", "test:integration"],

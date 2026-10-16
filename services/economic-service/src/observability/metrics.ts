@@ -178,8 +178,10 @@ export const paymentIntentsTotal = new Counter({
  */
 export const commissionApplicationsTotal = new Counter({
   name: 'rasta_economic_commission_applications_total',
-  help: 'Commission calculations, by whether an active rule matched',
-  labelNames: ['service', 'type', 'matched'] as const,
+  help: 'Commission calculations, by business line and whether an active rule matched',
+  // `business_line` is one of seven values or `NONE` (ADR-045), so the series
+  // count stays bounded: `matched="false"` per line is NO_ACTIVE_RULE.
+  labelNames: ['service', 'type', 'business_line', 'matched'] as const,
   registers: [registry],
 });
 
