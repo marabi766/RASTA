@@ -7,6 +7,7 @@ import { LedgerService } from '../ledger/ledger.service';
 import {
   computeCommission,
   type CommissionDecision,
+  type CommissionOutcome,
   type CommissionRuleView,
   type CommissionSubject,
 } from './rule-engine';
@@ -365,15 +366,24 @@ export class CommissionService {
    * the cursor, which is resolved in the same scope as the page
    * (shared/cursor.ts).
    */
-  async listCommissions(limit: number, cursor?: string) {
+  async listCommissions(
+    limit: number,
+    cursor?: string,
+    filter: { businessLine?: BusinessLine; outcome?: CommissionOutcome } = {},
+  ) {
     const scope = { organizationId: getOrganizationId() };
     const boundary = await resolveCursor(cursor, (id) =>
       this.prisma.client.commission
         .findFirst({ where: { ...scope, id }, select: { id: true, appliedAt: true } })
         .then((row) => (row ? { at: row.appliedAt, id: row.id } : null)),
     );
+    const where = {
+      ...scope,
+      ...(filter.businessLine ? { businessLine: filter.businessLine } : {}),
+      ...(filter.outcome ? { outcome: filter.outcome } : {}),
+    };
     return this.prisma.client.commission.findMany({
-      where: boundary ? { ...scope, ...after('appliedAt', boundary) } : scope,
+      where: boundary ? { ...where, ...after('appliedAt', boundary) } : where,
       orderBy: [{ appliedAt: 'desc' }, { id: 'desc' }],
       take: limit,
     });

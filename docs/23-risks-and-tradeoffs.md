@@ -1702,7 +1702,7 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   - هر قاعدهٔ تازه باید خط داشته باشد (`POST /v1/commissions/rules` بی `businessLine` ‏۴۰۰ است). قاعدهٔ قدیمی خواندنی،
     بستنی و غیرفعال‌شدنی می‌ماند. Migration هیچ خطی را برای ردیف موجود حدس نمی‌زند و `outcome` ردیف‌های موجود را فقط از
     `rule_id` می‌سازد؛ ردیفی با مبلغ ولی بی قاعده را رد می‌کند و در Migration طبقه‌بندی نمی‌کند.
-  - `NO_ACTIVE_RULE` ثبت و گزارش‌پذیر است (ستون `outcome` در `GET /v1/commissions`، پاسخ تسویه
+  - `NO_ACTIVE_RULE` ثبت و گزارش‌پذیر است (`GET /v1/commissions?outcome=…&businessLine=…`، پاسخ تسویه
     `commissionOutcome`، رویداد `COMMISSION_APPLIED`، برچسب `business_line` روی
     `rasta_economic_commission_applications_total`). رفتار Production در نبود قاعده همچنان Q-29 است؛ امروز تسویه با کارمزد
     صفر ادامه می‌یابد، همان رفتار پیش از این تغییر.
@@ -1715,8 +1715,9 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   نشده) آن‌ها را قیمت می‌کند، پس `NO_ACTIVE_RULE` ثبت می‌شوند — دیده‌شدنی، نه پنهان. بازگرداندن Migration فقط تا وقتی
   ممکن است که هیچ ردیفی خط ندارد (down.sql پیش از هر تغییر رد می‌کند)؛ پس از نخستین خط، اصلاح رو به جلوست. اصلاح کارمزد
   Postشده همچنان فقط با Reversal Entry است و آن عملیات برای تسویه هنوز Q-76 است.
-- **آزمون:** `rule-engine.spec.ts` (هر هفت خط، محدود به نوع، قدیمی، عدم استنتاج)؛ `tenant-isolation`، `rule-change-audit`
-  و `runtime-privileges` (Trigger تازه در فهرست نگهبان‌ها)؛
+- **آزمون:** `rule-engine.spec.ts` (هر هفت خط، محدود به نوع، قدیمی، عدم استنتاج)؛
+  `test/commission-business-lines.int-spec.ts` (هر خط با نرخ خودش: توازن Journal، بازپخش با همان کلید بی کارمزد دوم، ردیف
+  Append-only و رد Reversal با نام Q-76؛ `NO_ACTIVE_RULE`؛ قاعدهٔ قدیمی؛ جداسازی مستأجر و BOLA روی فیلترها)؛
   `verify-migration-reversible-lib.mjs` (رفت‌وبرگشت روی ردیف: پیش از خط حفظ، با خط رد، ردیف بی قاعده رد در Migration رو به جلو).
 - **اولویت:** متوسط
 - **ثبت‌شده:** 2026-10-16 (COM-011)

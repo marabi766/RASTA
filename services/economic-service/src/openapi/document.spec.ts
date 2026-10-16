@@ -104,10 +104,11 @@ describe('enrichOpenApiDocument', () => {
     for (const parameter of operation.parameters) expect(parameter.in).toBe('query');
   });
 
-  it('publishes the business line a commission rule requires (ADR-045)', () => {
+  it('publishes the business line a commission rule requires, and the commission filters (ADR-045)', () => {
     const document = emptyDocument();
     document.paths = {
       '/v1/commissions/rules': { post: { responses: {} }, get: { responses: {} } },
+      '/v1/commissions': { get: { responses: {} } },
     } as never;
 
     const enriched = enrichOpenApiDocument(document);
@@ -122,6 +123,10 @@ describe('enrichOpenApiDocument', () => {
         (parameter) => `${path}?${parameter.name}`,
       );
     expect(names('rules', rules)).toContain('rules?businessLine');
+    const charges = enriched.paths['/v1/commissions'] as Record<string, never>;
+    expect(names('commissions', charges)).toEqual(
+      expect.arrayContaining(['commissions?businessLine', 'commissions?outcome']),
+    );
   });
 
   it('gives a POST that takes no body a 200 rather than a 201', () => {
