@@ -669,6 +669,11 @@ export const ECONOMIC_DATA_ROLLBACK = {
     {
       label: 'down: the rollback succeeds while no task is open (the resolutions first)',
       runDownScript: [
+        // An index on the resolution table, which 20261001100000's down drops:
+        // rolled back with it, or its ledger row stays and the re-apply below
+        // never recreates the index — masked while it was the newest
+        // migration, exposed by the next one's exact-inverse check (#287 r2).
+        '20261004120000_payment_resolution_intent_index',
         // Its foreign key needs the intent's (organization_id, id) index,
         // which 20260930200000's down script drops.
         '20261003100000_payment_refund_decline',
@@ -2173,6 +2178,7 @@ export const EXPECTED = {
       'asset_transfer',
       'idempotency_key',
       'insurance_claim',
+      'insurance_claim_document',
       'insurance_policy',
       'organization_ref',
       'outbox_message',
@@ -2185,6 +2191,7 @@ export const EXPECTED = {
     constraints: [
       'ck_claim_approved_amount_non_negative',
       'ck_claim_claimed_amount_non_negative',
+      'ck_claim_document_ids_not_blank',
       'ck_claim_decided_iff_decision_recorded',
       'ck_claim_rejected_has_no_approved_amount',
       'ck_claim_settled_iff_settlement_recorded',

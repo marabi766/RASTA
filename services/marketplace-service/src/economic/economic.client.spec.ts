@@ -1,4 +1,4 @@
-import { isRastaError } from '@rasta/nest-common';
+import { AllExceptionsFilter, RastaError, isRastaError } from '@rasta/nest-common';
 import { EconomicClient, idempotencyKeyFor } from './economic.client';
 import type { MarketplaceEnv } from '../config/env';
 
@@ -175,7 +175,7 @@ describe('a refusal keeps economic-service’s own error code', () => {
     // never succeed.
     const { impl } = stubFetch({
       status: 422,
-      body: { error: { code: 'INSUFFICIENT_BALANCE', message: 'Not enough available balance' } },
+      body: { code: 'INSUFFICIENT_BALANCE', message: 'Not enough available balance' },
     });
     globalThis.fetch = impl as typeof fetch;
 
@@ -193,12 +193,46 @@ describe('a refusal keeps economic-service’s own error code', () => {
     ).rejects.toThrow(expect.objectContaining({ code: 'INSUFFICIENT_BALANCE' }));
   });
 
+  it('reads the body the platform’s exception filter writes, not a shape of its own', async () => {
+    // The bodies above are written by hand, and once had a shape no service
+    // sends (`{ error: { code } }`): every refusal came back
+    // UPSTREAM_UNAVAILABLE, and a retry refused for the transaction's state
+    // never reached the obligation read that answers it (D-053, review of
+    // #287). This one comes from the filter economic-service runs.
+    let sent: unknown;
+    const response = {
+      status: () => response,
+      json: (body: unknown) => {
+        sent = body;
+      },
+      setHeader: () => undefined,
+    };
+    const quiet = { debug: () => undefined, warn: () => undefined, error: () => undefined };
+    new AllExceptionsFilter(quiet as never).catch(
+      RastaError.invalidStateTransition('Transaction', 'PENDING_SETTLEMENT', 'PENDING_SETTLEMENT'),
+      { switchToHttp: () => ({ getResponse: () => response }) } as never,
+    );
+    const { impl } = stubFetch({ status: 409, body: sent });
+    globalThis.fetch = impl as typeof fetch;
+
+    const client = new EconomicClient(ENV, recordingTokens().service as never);
+
+    await expect(
+      client.authoriseSettlement({
+        orderId: 'ORD_1',
+        transactionId: 'TXN_1',
+        buyerOrganizationId: 'ORG-BUYER',
+        correlationId: 'corr-1',
+      }),
+    ).rejects.toThrow(expect.objectContaining({ code: 'INVALID_STATE_TRANSITION', status: 409 }));
+  });
+
   it('falls back to an upstream code when the body names one this platform does not have', async () => {
     // A code the platform does not define must not be trusted into a status
     // lookup that would be undefined.
     const { impl } = stubFetch({
       status: 500,
-      body: { error: { code: 'SOMETHING_ELSE', message: 'unknown' } },
+      body: { code: 'SOMETHING_ELSE', message: 'unknown' },
     });
     globalThis.fetch = impl as typeof fetch;
 

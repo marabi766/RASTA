@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError } from '@rasta/nest-common';
-import { ERROR_CODES, type ErrorCode } from '@rasta/contracts';
+import { ERROR_CODES, type ApiError, type ErrorCode } from '@rasta/contracts';
 import { ENV } from '../tokens';
 import { ECONOMIC_SERVICE, SERVICE_NAME, type MarketplaceEnv } from '../config/env';
 import { economicCallDuration, economicCallsTotal } from '../observability/metrics';
@@ -405,13 +405,20 @@ export class EconomicClient {
     // generic one, so "insufficient balance" reaches the buyer as that and not
     // as an internal error. The message is theirs; the status follows from the
     // code, which is how every other refusal on the platform behaves.
-    const body = parsed as { error?: { code?: string; message?: string } } | undefined;
-    const reported = body?.error?.code;
+    //
+    // The body is the platform's `ApiError`, `code` and `message` at its top
+    // level, as the shared exception filter writes it. This used to read
+    // `error.code`, a shape no service sends: every refusal became
+    // UPSTREAM_UNAVAILABLE, and a retry refused for the transaction's state
+    // never reached the obligation read that answers it (D-053, review of
+    // #287).
+    const body = parsed as Partial<Pick<ApiError, 'code' | 'message'>> | undefined;
+    const reported = body?.code;
     const code: ErrorCode =
       reported && reported in ERROR_CODES
         ? (reported as ErrorCode)
         : ERROR_CODES.UPSTREAM_UNAVAILABLE;
-    const message = body?.error?.message ?? 'The financial service refused this operation';
+    const message = body?.message ?? 'The financial service refused this operation';
 
     throw new RastaError(code, message, {
       internalContext: { operation, status: response.status },

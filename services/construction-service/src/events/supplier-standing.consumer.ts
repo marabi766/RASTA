@@ -4,6 +4,7 @@ import {
   UnprocessableEventError,
   kafkaConnection,
   type HandlerOutcome,
+  type OutboxStopOptions,
 } from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
 import { z } from 'zod';
@@ -119,8 +120,15 @@ export class SupplierStandingConsumer {
     await this.consumer.start();
   }
 
-  async stop(): Promise<void> {
-    await this.consumer?.stop();
+  /**
+   * An `OutboxShutdown` worker: stopped in Nest's destroy phase, beside the
+   * relay, the purge and the sweeps, by the shutdown's one deadline; an event
+   * still in flight is abandoned uncommitted and delivered again, and every
+   * write here is idempotent. Before, `AppModule` stopped it with no bound in
+   * `onApplicationShutdown`, after the relay had drained (Codex r1 on #277).
+   */
+  stop(options?: OutboxStopOptions): Promise<void> {
+    return this.consumer?.stop(options) ?? Promise.resolve();
   }
 
   /** One event. Public so a test can drive it without a broker. */

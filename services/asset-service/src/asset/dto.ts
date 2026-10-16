@@ -599,9 +599,36 @@ export interface ClaimHistoryEntryView {
   notes: string | null;
 }
 
+/**
+ * Attaches a document document-service already holds to a claim (docs/24 Q-128).
+ * The file never passes through here; the id is checked against document-service.
+ */
+export const attachClaimDocumentSchema = z
+  .object({
+    documentId: documentReference.min(1),
+  })
+  .strict();
+
+export type AttachClaimDocumentDto = z.infer<typeof attachClaimDocumentSchema>;
+
+export interface ClaimDocumentView {
+  id: string;
+  documentId: string;
+  attachedBy: string;
+  attachedAt: string;
+  /**
+   * `DOCUMENT_REMOVED` once document-service has said the file was deleted
+   * after it was attached; the reference itself is kept (Q-128).
+   */
+  state: 'ATTACHED' | 'DOCUMENT_REMOVED';
+  documentRemovedAt: string | null;
+}
+
 export interface InsuranceClaimDetailView extends InsuranceClaimView {
   /** Oldest first: the story of the claim in the order it happened. */
   history: ClaimHistoryEntryView[];
+  /** References to the documents of the caller's organization, oldest first (Q-128). */
+  documents: ClaimDocumentView[];
 }
 
 export { assetId as assetIdSchema };

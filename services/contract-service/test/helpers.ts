@@ -509,6 +509,21 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
   const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
   try {
     await owner.$transaction(async (tx) => {
+      // The statements (CON-003 PR 4) hang off the contract and the deduction rules: their parts,
+      // then the statements, then the rules — none ever deleted by the service.
+      for (const [table, trigger] of [
+        ['statement_deduction', 'tg_statement_deduction_guard'],
+        ['statement_line', 'tg_statement_line_guard'],
+        ['statement', 'tg_statement_guard'],
+        ['deduction_rule', 'tg_deduction_rule_guard'],
+      ] as const) {
+        await tx.$executeRawUnsafe(`ALTER TABLE "${table}" DISABLE TRIGGER "${trigger}"`);
+        await tx.$executeRawUnsafe(
+          `DELETE FROM "${table}" WHERE "organization_id" = ANY($1::text[])`,
+          organizationIds,
+        );
+        await tx.$executeRawUnsafe(`ALTER TABLE "${table}" ENABLE TRIGGER "${trigger}"`);
+      }
       // The amendments (CON-003 PR 3) hang off the contract and the policies: reviews, then
       // signatures, then amendments, then milestones — each never deleted by the service, so each
       // goes with its own guard lifted for this transaction only.
