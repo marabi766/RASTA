@@ -24,6 +24,7 @@ import {
 } from '../observability/metrics';
 import { SERVICE_NAME } from '../config/env';
 import type { DraftEntry } from '../ledger/journal';
+import type { IdempotentAnswer } from '../shared/idempotency';
 
 /**
  * Settlement — the one operation this whole service is arranged around
@@ -88,9 +89,15 @@ export class SettlementService {
    * Settles one transaction.
    *
    * `settledBy` is the acting user; the caller has already established that
-   * they may commit this organization (`access.ts`).
+   * they may commit this organization (`access.ts`). `answer`, for an
+   * idempotent request, is stored as its key's answer in the settlement's own
+   * transaction, so the money movement and the completed key commit together.
    */
-  async settle(transactionId: string, settledBy: string): Promise<SettlementResult> {
+  async settle(
+    transactionId: string,
+    settledBy: string,
+    answer?: IdempotentAnswer<SettlementResult>,
+  ): Promise<SettlementResult> {
     const stop = financialTransactionDuration.startTimer({
       service: SERVICE_NAME,
       operation: 'settle',
@@ -98,7 +105,11 @@ export class SettlementService {
 
     try {
       const result = await withFinancialSpan('economic.settle', () =>
-        this.prisma.transaction((tx) => this.settleWithin(tx, transactionId, settledBy)),
+        this.prisma.transaction(async (tx) => {
+          const settled = await this.settleWithin(tx, transactionId, settledBy);
+          await answer?.respond(tx, settled);
+          return settled;
+        }),
       );
       settlementsCompletedTotal.inc({ service: SERVICE_NAME, type: result.transactionType });
       return result;

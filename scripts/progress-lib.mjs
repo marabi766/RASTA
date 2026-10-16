@@ -17,6 +17,7 @@ const VALID_CHANGE_TYPES = new Set([
   'STATUS_CORRECTED',
   'BASELINE_APPROVED',
   'ITEM_DECOMPOSED',
+  'ITEM_ACCEPTED',
 ]);
 
 function isNonEmptyString(value) {
@@ -322,7 +323,23 @@ export function validateBacklog(backlog) {
     }
   }
 
-  for (const entry of changeLog) {
+  // An approved STATUS_CORRECTED entry is how a mistaken acceptance is undone
+  // (docs/25 § 25.4); the acceptance it corrects stays in the log as history.
+  function isCorrectedAfter(position, entry, id) {
+    return changeLog
+      .slice(position + 1)
+      .some(
+        (later) =>
+          later.type === 'STATUS_CORRECTED' &&
+          isNonEmptyString(later.approvalRef) &&
+          Array.isArray(later.recordIds) &&
+          later.recordIds.includes(id) &&
+          isNonEmptyString(later.date) &&
+          later.date >= entry.date,
+      );
+  }
+
+  for (const [position, entry] of changeLog.entries()) {
     const label = `change log entry '${entry.type}' on '${entry.date}'`;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(entry.date ?? '')) {
       errors.push(`${label} requires a YYYY-MM-DD date`);
@@ -341,6 +358,28 @@ export function validateBacklog(backlog) {
         entry.recordIds.some((id) => !recordsById.has(id))
       ) {
         errors.push(`${label} requires existing parent and story recordIds`);
+      }
+    }
+    if (entry.type === 'ITEM_ACCEPTED') {
+      // Acceptance is the product owner's decision (docs/25 § 25.5), so the
+      // entry names who decided, and it may only name records that are in fact
+      // ACCEPTED: a logged acceptance the status contradicts is a false record,
+      // unless a later approved correction of that record explains the change.
+      if (!isNonEmptyString(entry.approvalRef)) {
+        errors.push(`${label} requires an approvalRef`);
+      }
+      if (
+        !Array.isArray(entry.recordIds) ||
+        entry.recordIds.length === 0 ||
+        entry.recordIds.some(
+          (id) =>
+            !recordsById.has(id) ||
+            (recordsById.get(id).status !== 'ACCEPTED' && !isCorrectedAfter(position, entry, id)),
+        )
+      ) {
+        errors.push(
+          `${label} requires recordIds that exist and are ACCEPTED, or were later corrected by an approved STATUS_CORRECTED entry`,
+        );
       }
     }
   }

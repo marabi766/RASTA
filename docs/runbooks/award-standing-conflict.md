@@ -17,7 +17,7 @@ supplier-service هنگام پاسخ، پس از Commit)** را می‌سنجد:
 
 **بررسی ماندگار است:** ردیفی در `tender_award_standing_check` است که در همان تراکنشِ انتخاب نوشته می‌شود (پایگاه داده انتخاب بی آن را Commit نمی‌کند) و جاروکنندهٔ `AwardStandingCheckSweeper` با Lease و Fence آن را انجام می‌دهد؛ پاسخ `award` منتظر آن نیست و خرابی/ری‌استارت آن را گم نمی‌کند. نتیجه (`outcome` = `CLEAR` یا `CONFLICT`) و رویداد در یک تراکنش نوشته می‌شود، پس رویداد نه دوبار می‌آید و نه گم می‌شود (فقط اگر سرویس درست پس از Commit و پیش از افزایش شمارنده بمیرد، صفحهٔ هشدار گم می‌شود، نه رویداد).
 
-**انتخاب پس گرفته نشد:** مناقصه `AWARDED` است. تصمیم با انسان است. `TENDER_AWARD_STANDING_CONFLICT_DETECTED` (Outbox و `rasta.construction.v1`) فقط شناسه دارد.
+**انتخاب پس گرفته نشد:** مناقصه `AWARDED` است. تصمیم با انسان است. `TENDER_AWARD_STANDING_CONFLICT_DETECTED` (Outbox و `rasta.construction.v1`) فقط شناسه دارد. ردیف Outbox فقط تا `OUTBOX_PURGE_RETENTION_HOURS` پس از انتشار می‌ماند (پیش‌فرض ۱۶۸ ساعت، برابر نگه‌داری Topic؛ D-052).
 
 ## ۲. بررسی
 

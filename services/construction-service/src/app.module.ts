@@ -13,8 +13,10 @@ import {
   AUTH_OPTIONS,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
+  OutboxPurgeScheduler,
   OutboxRelay,
   OutboxShutdown,
+  outboxPurgeSettings,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -398,19 +400,54 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     },
 
     {
-      // D-052: the relay and the standing bootstrap stop together in the destroy
-      // phase, by one deadline inside SHUTDOWN_TIMEOUT_MS.
+      // D-052: published rows past OUTBOX_PURGE_RETENTION_HOURS, in bounded batches.
+      provide: OutboxPurgeScheduler,
+      inject: [PrismaOutboxStore, ENV, LOGGER],
+      useFactory: (store: PrismaOutboxStore, env: ConstructionEnv, logger: Logger) =>
+        new OutboxPurgeScheduler({
+          store,
+          service: SERVICE_NAME,
+          logger,
+          ...outboxPurgeSettings(env),
+        }),
+    },
+    {
+      // D-052: the relay, the purge, the three sweeps, the two consumers and the
+      // standing bootstrap stop together in the destroy phase, by one deadline
+      // inside SHUTDOWN_TIMEOUT_MS. The sweeps too (as #247 r3): stopped later,
+      // they kept writing outbox rows while the relay drained. The consumers too
+      // (Codex r1 on #277): stopped later, in onApplicationShutdown and with no
+      // bound, their wait came on top of the relay's. The bootstrap too (#279,
+      // phase 3): it pages the snapshot in transactions of its own.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, StandingBootstrap, KafkaEventPublisher, ENV],
+      inject: [
+        OutboxRelay,
+        OutboxPurgeScheduler,
+        PolicyReconciliationSweeper,
+        TenderCloseSweeper,
+        AwardStandingCheckSweeper,
+        OrganizationMovedConsumer,
+        SupplierStandingConsumer,
+        StandingBootstrap,
+        KafkaEventPublisher,
+        ENV,
+      ],
       useFactory: (
         relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
+        reconciliation: PolicyReconciliationSweeper,
+        tenderClose: TenderCloseSweeper,
+        awardCheck: AwardStandingCheckSweeper,
+        moves: OrganizationMovedConsumer,
+        standing: SupplierStandingConsumer,
         bootstrap: StandingBootstrap,
         publisher: KafkaEventPublisher,
         env: ConstructionEnv,
       ) =>
         new OutboxShutdown({
           relay,
-          workers: [bootstrap],
+          purge,
+          workers: [reconciliation, tenderClose, awardCheck, moves, standing, bootstrap],
           // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
@@ -447,6 +484,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
+    private readonly purge: OutboxPurgeScheduler,
     private readonly outboxShutdown: OutboxShutdown,
     private readonly moves: OrganizationMovedConsumer,
     private readonly standing: SupplierStandingConsumer,
@@ -487,6 +525,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     this.tenderCloser.start();
     this.awardChecker.start();
     this.relay.start();
+    this.purge.start();
 
     const sample = async () => {
       try {
@@ -538,13 +577,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
-    await this.moves.stop();
-    await this.standing.stop();
-    await this.sweeper.stop();
-    await this.tenderCloser.stop();
-    await this.awardChecker.stop();
-    // The relay and the bootstrap already stopped in OutboxShutdown's
-    // onModuleDestroy, concurrently and by one deadline; this joins that stop.
+    // The relay, the purge, the three sweeps, the two consumers and the
+    // bootstrap already stopped in OutboxShutdown's onModuleDestroy,
+    // concurrently and by one deadline; this joins that stop and returns at once.
     await this.outboxShutdown.stop();
   }
 }
