@@ -464,6 +464,20 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 > `QUOTATION_REVISED|WITHDRAWN|ACCESSED|NOT_SELECTED`، `RFQ_CLOSED|CANCELLED`، `QUOTATIONS_OPENED`، `PURCHASE_ORDER_APPROVAL_ACTION`،
 > `PURCHASE_ORDER_CANCELLED`، `PURCHASE_ORDER_STANDING_CONFLICT_DETECTED` (نام‌ها با مدیر پروژه). مصرف economic و inventory موکول است و هر
 > مصرف‌کنندهٔ با اثر مالی پیش از اثر از procurement می‌پرسد (A-13)؛ مصرف `QUALITY_CHECK_RECORDED` برای امتیاز کیفیت تصمیم supplier-service است (ADR-052).
+>
+> **COM-007 PR 1 (2026-10-16).** `procurement-service` شش رویداد زیر را تولید می‌کند (`services/procurement-service/src/events/events.ts`،
+> `.strict()`، اعتبارسنجی پیش از Outbox)؛ کلید پارتیشن همه `aggregationId` است. چهار رویداد پایان پنجره در برنامه جزء PR 2‌اند، ولی نیازی که پس از
+> `closesAt` برسد همان گذار را در PR 1 می‌سازد، پس هر گذار رویداد و در نتیجه ردیف audit دارد. هیچ‌کدام یادداشت نیاز، دلیل انصراف یا مبلغ ندارد.
+> مصرف‌کنندهٔ امروز فقط audit-service است.
+>
+> | رویداد                        | Payload                                                                                                                               |
+> | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+> | `DEMAND_SUBMITTED`            | `demandId`, `aggregationId`, `organizationId`, `productId`, `quantity`, `aggregationOpened`, `closesAt`, `submittedBy`, `submittedAt` |
+> | `DEMAND_WITHDRAWN`            | `demandId`, `aggregationId`, `organizationId`, `productId`, `quantity`, `withdrawnBy`, `withdrawnAt`                                  |
+> | `DEMAND_AGGREGATED`           | `aggregationId`, `organizationId`, `productId`, `totalQuantity` (رشته), `demandIds[]`, `settingVersion`, `closedAt`                   |
+> | `AGGREGATION_WINDOW_EXTENDED` | همان، با `previousClosesAt`, `closesAt`, `windows`, `extensionCount` (بی `demandIds`)                                                 |
+> | `AGGREGATION_REFERRED`        | `aggregationId`, `organizationId`, `productId`, `totalQuantity`, `demandIds[]`, `closedAt`                                            |
+> | `AGGREGATION_LAPSED`          | همان، با `reasonCode` (`NO_LIVE_DEMAND` \| `SHORTFALL_CLOSED`)                                                                        |
 
 ## Supplier — `rasta.supplier.v1`
 

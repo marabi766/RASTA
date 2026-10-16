@@ -5,7 +5,6 @@
     "ASSET_IDEMPOTENCY_CLAIM_LEASE_SECONDS": ["dev", "test", "test:integration"],
     "ASSET_IDEMPOTENCY_TTL_HOURS": ["dev", "test", "test:integration"],
     "ASSET_TRANSFER_FENCE_TTL_SECONDS": ["dev", "test", "test:integration"],
-    "CORS_ORIGINS": ["dev", "test", "test:integration"],
     "DOCUMENT_SERVICE_URL": ["dev"],
     "EXPIRY_WARNING_DAYS": ["dev", "test", "test:integration"],
     "FLEET_SERVICE_URL": ["dev", "test", "test:integration"],
@@ -19,12 +18,10 @@
     "AUDIT_MAX_QUERY_WINDOW_DAYS": ["dev", "test", "test:integration"],
     "AUDIT_MAX_VERIFICATION_RECORDS": ["dev", "test", "test:integration"],
     "AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS": ["dev", "test", "test:integration"],
-    "AUDIT_TENDER_GAP_ALERT_SECONDS": ["dev", "test", "test:integration"],
-    "CORS_ORIGINS": ["dev", "test", "test:integration"]
+    "AUDIT_TENDER_GAP_ALERT_SECONDS": ["dev", "test", "test:integration"]
   },
   "construction-service": {
     "AUDIT_SERVICE_URL": ["dev", "test", "test:integration"],
-    "CORS_ORIGINS": ["dev", "test", "test:integration"],
     "IDENTITY_SERVICE_URL": ["dev", "test", "test:integration"],
     "ORGANIZATION_SERVICE_URL": ["dev", "test", "test:integration"],
     "SUPPLIER_SERVICE_URL": ["dev", "test", "test:integration"]
@@ -50,11 +47,9 @@
     "CONTRACT_RECONCILE_BATCH_SIZE": ["dev", "test", "test:integration"],
     "CONTRACT_RECONCILE_INTERVAL_MS": ["dev", "test", "test:integration"],
     "CONTRACT_RECONCILE_LEASE_SECONDS": ["dev", "test", "test:integration"],
-    "CORS_ORIGINS": ["dev", "test", "test:integration"],
     "ORGANIZATION_SERVICE_URL": ["dev", "test", "test:integration"]
   },
   "document-service": {
-    "CORS_ORIGINS": ["dev", "test", "test:integration"],
     "DOCUMENT_CLAMAV_HOST": ["dev"],
     "DOCUMENT_CLAMAV_PORT": ["dev"],
     "DOCUMENT_CLAMAV_SOCKET_PATH": ["dev"],
@@ -82,7 +77,6 @@
     "S3_SECRET_KEY": ["dev"]
   },
   "economic-service": {
-    "CORS_ORIGINS": ["dev", "test", "test:integration"],
     "ECONOMIC_BALANCE_AUDIT_BATCH_SIZE": ["dev", "test", "test:integration"],
     "ECONOMIC_BALANCE_AUDIT_ENABLED": ["dev", "test", "test:integration"],
     "ECONOMIC_BALANCE_AUDIT_INTERVAL_SECONDS": ["dev", "test", "test:integration"],
@@ -110,7 +104,6 @@
   },
   "fleet-service": {
     "ASSET_SERVICE_URL": ["dev", "test", "test:integration"],
-    "CORS_ORIGINS": ["dev", "test", "test:integration"],
     "FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS": ["dev", "test", "test:integration"],
     "FLEET_DISPATCH_BLOCKING_COVERAGES": ["dev", "test", "test:integration"],
     "FLEET_DISPATCH_REQUIRED_COVERAGES": ["dev", "test", "test:integration"],
@@ -127,7 +120,7 @@
   "identity-service": {
     "AUDIT_REQUEST_TIMEOUT_MS": ["dev", "test", "test:integration", "test:aggregation-stress"],
     "AUDIT_SERVICE_URL": ["dev", "test", "test:integration", "test:aggregation-stress"],
-    "CORS_ORIGINS": ["dev", "test", "test:integration", "test:aggregation-stress"],
+    "CORS_ORIGINS": ["test:aggregation-stress"],
     "KEYCLOAK_BACKEND_CLIENT_ID": ["dev", "test", "test:integration", "test:aggregation-stress"],
     "KEYCLOAK_BACKEND_CLIENT_SECRET": [
       "dev",
@@ -190,7 +183,6 @@
     ]
   },
   "inventory-service": {
-    "CORS_ORIGINS": ["dev", "test", "test:integration"],
     "INVENTORY_CONSIGNEE_READER_ROLES": ["dev", "test", "test:integration"],
     "INVENTORY_IDEMPOTENCY_CLAIM_LEASE_SECONDS": ["dev", "test", "test:integration"],
     "INVENTORY_IDEMPOTENCY_TTL_HOURS": ["dev", "test", "test:integration"],
@@ -203,7 +195,6 @@
   },
   "maintenance-service": {
     "ASSET_SERVICE_URL": ["dev", "test", "test:integration"],
-    "CORS_ORIGINS": ["dev", "test", "test:integration"],
     "MAINTENANCE_DEFAULT_LEAD_DAYS": ["dev", "test", "test:integration"],
     "MAINTENANCE_DUE_SCAN_BATCH_SIZE": ["dev", "test", "test:integration"],
     "MAINTENANCE_DUE_SCAN_ENABLED": ["dev", "test", "test:integration"],
@@ -212,7 +203,6 @@
     "MAINTENANCE_IDEMPOTENCY_TTL_HOURS": ["dev", "test", "test:integration"]
   },
   "marketplace-service": {
-    "CORS_ORIGINS": ["dev", "test", "test:integration"],
     "ECONOMIC_REQUEST_TIMEOUT_MS": ["dev", "test", "test:integration"],
     "ECONOMIC_SERVICE_URL": ["dev", "test", "test:integration"],
     "MARKETPLACE_FULFILLMENT_WINDOW_DAYS": ["dev", "test", "test:integration"],
@@ -227,7 +217,6 @@
     "TEMPORAL_NAMESPACE": ["dev", "test", "test:integration"]
   },
   "notification-service": {
-    "CORS_ORIGINS": ["dev", "test", "test:integration"],
     "IDENTITY_SERVICE_URL": ["dev", "test", "test:integration"],
     "KAFKA_CONSUMER_GROUP": ["dev", "test", "test:integration"],
     "NOTIFICATION_DEDUPE_RETENTION_DAYS": ["dev", "test", "test:integration"],
@@ -254,12 +243,10 @@
     "NOTIFICATION_SMTP_USER": ["dev", "test", "test:integration"]
   },
   "organization-service": {
-    "CORS_ORIGINS": ["dev", "test", "test:integration"],
     "GOVERNANCE_POLICY_SETTER_ROLES": ["dev", "test", "test:integration"],
     "MAX_HIERARCHY_DEPTH": ["dev", "test", "test:integration"]
   },
   "supplier-service": {
-    "CORS_ORIGINS": ["dev", "test", "test:integration"],
     "SUPPLIER_PERFORMANCE_CONSUMER_ENABLED": ["dev", "test", "test:integration"]
   }
 }

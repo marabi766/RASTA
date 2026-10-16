@@ -83,7 +83,9 @@
         "CONSTRUCTION_*",
         "GATEWAY_*",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
-        "INSURANCE_CLAIM_DOCUMENT_STATUSES"
+        "INSURANCE_CLAIM_DOCUMENT_STATUSES",
+        "CORS_ORIGINS",
+        "PROCUREMENT_*"
       ]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
@@ -136,7 +138,9 @@
         "CONSTRUCTION_*",
         "GATEWAY_*",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
-        "INSURANCE_CLAIM_DOCUMENT_STATUSES"
+        "INSURANCE_CLAIM_DOCUMENT_STATUSES",
+        "CORS_ORIGINS",
+        "PROCUREMENT_*"
       ]
     },
     // identity-service's two 500-write aggregation proofs, run alone after the
@@ -226,6 +230,11 @@
     // service to every key of that service's own schema: a new setting is
     // declared or the check fails. The settings withheld before it are listed
     // in scripts/service-env-turbo-withheld.json, a list that may only shrink.
+    //
+    // PROCUREMENT_* and CORS_ORIGINS (COM-007 PR 1): procurement-service is new,
+    // so none of its settings may join the withheld list — its own settings and
+    // the CORS list every service reads are declared here, which takes
+    // CORS_ORIGINS off every other service's withheld entry too.
     "dev": {
       "cache": false,
       "persistent": true,
@@ -244,7 +253,9 @@
         "CONSTRUCTION_*",
         "GATEWAY_*",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
-        "INSURANCE_CLAIM_DOCUMENT_STATUSES"
+        "INSURANCE_CLAIM_DOCUMENT_STATUSES",
+        "CORS_ORIGINS",
+        "PROCUREMENT_*"
       ]
     },
     "clean": { "cache": false }

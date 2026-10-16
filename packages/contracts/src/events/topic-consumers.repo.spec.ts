@@ -554,12 +554,12 @@ export class Quiet extends EventConsumer {}
       // An extra topic added to the derived list …
       const text = read(AUDIT_MODULE).replace(
         'topics: [...DOMAIN_TOPICS]',
-        "topics: [...DOMAIN_TOPICS, 'rasta.procurement.v1']",
+        "topics: [...DOMAIN_TOPICS, 'rasta.analytics.v1']",
       );
-      expect(text).toContain("'rasta.procurement.v1'");
+      expect(text).toContain("'rasta.analytics.v1'");
       const result = mutate('audit-service', { [AUDIT_MODULE]: text });
       expect(problemsOf(result.consumers).join('\n')).toMatch(
-        /does not declare a subscription to rasta\.procurement\.v1/,
+        /does not declare a subscription to rasta\.analytics\.v1/,
       );
       // … and a declaration narrower than what the derived list can hold.
       const narrowed: typeof consumerDeclarationProblem = (service, consumer) =>

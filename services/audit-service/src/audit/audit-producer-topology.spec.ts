@@ -22,7 +22,7 @@ import { DOMAIN_TOPICS } from './audit.mapper';
  * wrong makes the silence alert watch the wrong service.
  */
 describe('audit producer topology', () => {
-  it('maps each of the fourteen path-A topics to exactly its owning service', () => {
+  it('maps each of the fifteen path-A topics to exactly its owning service', () => {
     expect(AUDIT_DOMAIN_TOPIC_OWNERS.map(({ topic, owner }) => [topic, owner])).toEqual([
       ['rasta.identity.v1', 'identity-service'],
       ['rasta.organization.v1', 'organization-service'],
@@ -43,12 +43,14 @@ describe('audit producer topology', () => {
       ['rasta.contract.v1', 'contract-service'],
       // Added with COM-006 (ADR-056): inventory-service's warehouses, stock movements and reservations.
       ['rasta.inventory.v1', 'inventory-service'],
+      // Added with COM-007 (ADR-070): procurement-service's demands and aggregation windows.
+      ['rasta.procurement.v1', 'procurement-service'],
     ]);
   });
 
   it('is the source the subscription list is derived from, not a copy of it', () => {
     expect([...DOMAIN_TOPICS]).toEqual(AUDIT_DOMAIN_TOPIC_OWNERS.map((entry) => entry.topic));
-    expect(new Set(DOMAIN_TOPICS).size).toBe(14);
+    expect(new Set(DOMAIN_TOPICS).size).toBe(15);
     expect(DOMAIN_TOPICS).not.toContain(AUDIT_TRAIL_TOPIC);
   });
 
@@ -78,7 +80,7 @@ describe('audit producer topology', () => {
     }
   });
 
-  it('deduplicates the known producers into thirteen services and the replay tool', () => {
+  it('deduplicates the known producers into fourteen services and the replay tool', () => {
     expect([...AUDIT_SOURCE_SERVICES]).toEqual([
       'identity-service',
       'organization-service',
@@ -93,15 +95,16 @@ describe('audit producer topology', () => {
       'construction-service',
       'contract-service',
       'inventory-service',
+      'procurement-service',
       'ops-replay',
     ]);
-    expect(new Set(AUDIT_SOURCE_SERVICES).size).toBe(14);
+    expect(new Set(AUDIT_SOURCE_SERVICES).size).toBe(15);
   });
 
-  it('pins the complete metric label set: thirteen services, the replay tool and one fallback', () => {
+  it('pins the complete metric label set: fourteen services, the replay tool and one fallback', () => {
     expect(AUDIT_UNKNOWN_SOURCE_SERVICE).toBe('unknown');
     expect([...AUDIT_SOURCE_SERVICE_LABELS]).toEqual([...AUDIT_SOURCE_SERVICES, 'unknown']);
-    expect(AUDIT_SOURCE_SERVICE_LABELS).toHaveLength(15);
+    expect(AUDIT_SOURCE_SERVICE_LABELS).toHaveLength(16);
     expect(isAuditSourceService(AUDIT_UNKNOWN_SOURCE_SERVICE)).toBe(false);
   });
 
@@ -138,7 +141,7 @@ describe('audit producer topology', () => {
       ['rasta.asset.v1', 'x'.repeat(128)],
       ['rasta.asset.v1', `asset-service${'x'.repeat(4096)}`],
       // A topic outside the topology, even with a known name.
-      ['rasta.procurement.v1', 'asset-service'],
+      ['rasta.analytics.v1', 'asset-service'],
       [AUDIT_TRAIL_TOPIC, 'identity-service'],
     ])('uses the fallback for topic %s and producer %s', (topic, producer) => {
       expect(domainSourceServiceLabel(topic, producer)).toBe('unknown');
@@ -172,8 +175,9 @@ describe('audit producer topology', () => {
     expect(sourceTopicsOf('construction-service')).toEqual(['rasta.construction.v1']);
     expect(sourceTopicsOf('contract-service')).toEqual(['rasta.contract.v1']);
     expect(sourceTopicsOf('inventory-service')).toEqual(['rasta.inventory.v1']);
+    expect(sourceTopicsOf('procurement-service')).toEqual(['rasta.procurement.v1']);
     expect(sourceTopicsOf('ops-replay')).toEqual([OPS_REPLAY_TOPIC]);
-    expect(AUDIT_SOURCE_SERVICES.flatMap((service) => sourceTopicsOf(service))).toHaveLength(16);
+    expect(AUDIT_SOURCE_SERVICES.flatMap((service) => sourceTopicsOf(service))).toHaveLength(17);
     expect(Object.isFrozen(sourceTopicsOf('asset-service'))).toBe(true);
   });
 });

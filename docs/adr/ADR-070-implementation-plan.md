@@ -46,6 +46,18 @@ procurement در organization-service در PR 11) ولی امتیازی را ع�
 - تنظیمات فقط از محیط (پیش‌فرض‌های Q-10)؛ `DEMAND_SUBMITTED`، `DEMAND_WITHDRAWN`.
 - آزمون: ماتریس گذار، مرز `closes_at`، دو نیاز هم‌زمان ⇒ یک تجمیع، جداسازی مستأجر، نقش‌ها (`AUDITOR` در پیکربندی ⇒ راه‌اندازی رد).
 
+> **وضعیت: ساخته شد (2026-10-16، COM-007 PR 1).** همان فهرست بالا، با این تفاوت‌ها که هر کدام اینجا و در PR نام برده شده‌اند:
+>
+> 1. **چهار رویداد پایان پنجره از همین برش** (`DEMAND_AGGREGATED`، `AGGREGATION_WINDOW_EXTENDED`، `AGGREGATION_REFERRED`، `AGGREGATION_LAPSED`):
+>    مسیر همزمانِ «نیازی که پس از `closes_at` برسد» همان گذارهای PR 2 را می‌سازد و هر گذار باید رویداد و ردیف audit داشته باشد. PR 2 همان‌ها
+>    را از جاروکننده منتشر می‌کند؛ `AGGREGATION_CANCELLED` با لغو در PR 2 می‌ماند. نام‌های تازه همچنان با مدیر پروژه.
+> 2. **شکل API در برابر OpenAPI طرح‌شده:** `totalQuantity` رشتهٔ دهدهی است نه `integer` (ستون `bigint`، دقیق پس از 2^53، همان قاعدهٔ مبلغ)؛ نیاز
+>    `note`، `withdrawnAt` و `withdrawReason` را هم برمی‌گرداند (یادداشت «فقط API» است) و تجمیع `closedAt` را؛ صفحه‌ها `{ items, nextCursor }`.
+> 3. تصمیم‌های موقت تازه در Q-119 (یادداشت PR 1: `SYSTEM_ADMIN` بیرون از سمت خریدار، پنجرهٔ تهی تا پایانش باز، تمدید چندطولی) و Q-120
+>    (انصراف با هر نقش نیاز همان سازمان).
+> 4. پایگاه داده نگهبان چرخه‌ها و مرز پنجره را خودش دارد (Trigger)، و جمع و شمار هر تجمیع با نیازهایش در Commit سنجیده می‌شود (Constraint
+>    Trigger معوق). رویه راه‌اندازی پایگاه داده: `docs/runbooks/database-bootstrap.md` بخش procurement.
+
 ### PR 2 — پایان پنجره (`M`)
 
 - `AggregationWindowSweeper` (اجاره، حصار، `SKIP LOCKED`، دستهٔ کران‌دار، الگوی `TenderCloseSweeper`)؛ گذارهای `READY`، `EXTEND`، `REFERRED`، `LAPSED`؛
