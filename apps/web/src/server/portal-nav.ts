@@ -158,6 +158,40 @@ export function canReadInventory(
 }
 
 /**
+ * Whether supplier-service would let these roles read `/v1/suppliers`, so the
+ * Suppliers link is worth drawing.
+ *
+ * Unlike Projects and Inventory, this is not a setting: supplier-service's
+ * `DIRECTORY_ROLES` (`services/supplier-service/src/access/access.ts`) is a
+ * fixed export, not read from its own environment, so there is nothing here
+ * to make configurable either — mirroring a hard-coded list with another
+ * hard-coded list. This **mirrors that list exactly** and must change
+ * together with it: `SYSTEM_ADMIN`, `UNION_ADMIN` (`PLATFORM_ROLES`),
+ * `ORGANIZATION_ADMIN`, `SUPPLIER`, `WORKSHOP`, `CONTRACTOR`
+ * (`SUPPLIER_SIDE_ROLES`), plus `PROCUREMENT_USER` and `FLEET_MANAGER`.
+ *
+ * `AUDITOR` is refused first, whatever else the person holds: the service
+ * calls `assertNotAuditor()` before it looks at `DIRECTORY_ROLES`, so
+ * `AUDITOR` + `SUPPLIER` or `AUDITOR` + `SYSTEM_ADMIN` is a 403 there and no
+ * link here.
+ */
+const SUPPLIER_DIRECTORY_ROLES: readonly string[] = [
+  'SYSTEM_ADMIN',
+  'UNION_ADMIN',
+  'ORGANIZATION_ADMIN',
+  'SUPPLIER',
+  'WORKSHOP',
+  'CONTRACTOR',
+  'PROCUREMENT_USER',
+  'FLEET_MANAGER',
+];
+
+export function canReadSuppliers(roles: readonly string[]): boolean {
+  if (roles.includes('AUDITOR')) return false;
+  return roles.some((role) => SUPPLIER_DIRECTORY_ROLES.includes(role));
+}
+
+/**
  * The navigation for a person, from the roles identity-service reports for the
  * organization they are acting in plus the global realm roles in their token
  * (`SYSTEM_ADMIN`), which is the set the backend services act on.
@@ -181,5 +215,6 @@ export async function loadPortalNav(
     canReadContracts: canReadContracts(roles, webServerEnv()),
     canReadSettlements: canReadSettlements(result.kind === 'USER' ? roles : null),
     canReadInventory: canReadInventory(roles, webServerEnv()),
+    canReadSuppliers: canReadSuppliers(roles),
   });
 }

@@ -9,6 +9,7 @@ import {
 import { AppModule } from './app.module';
 import { RewardTriggerConsumer } from './consumers/reward-trigger.consumer';
 import { SettlementAuthorityConsumer } from './consumers/settlement-authority.consumer';
+import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { PaymentReconciliationSweeper } from './payment/payment-reconciliation.sweeper';
 import { ENV } from './tokens';
 import { LedgerBalanceAudit } from './wallet/balance-audit';
@@ -89,6 +90,9 @@ describe('AppModule shutdown wiring (D-052)', () => {
       SettlementAuthorityConsumer,
       RewardTriggerConsumer,
       LedgerBalanceAudit,
+      // Closed last, after the drain, by the same deadline (D-052 phase 4b):
+      // app.module.publisher-close.spec.ts.
+      KafkaEventPublisher,
     ];
     expect(new Set(inject)).toEqual(new Set([...expected, ENV]));
     expect(inject).toHaveLength(expected.length + 1);
@@ -100,7 +104,9 @@ describe('AppModule shutdown wiring (D-052)', () => {
     const { inject, stops } = await stopThroughFactory();
     const deadlines = new Map([...stops].map(([token, calls]) => [token, calls[0]?.deadlineAt]));
 
-    expect(inject).toEqual(expect.arrayContaining([OutboxRelay, LedgerBalanceAudit]));
+    expect(inject).toEqual(
+      expect.arrayContaining([OutboxRelay, LedgerBalanceAudit, KafkaEventPublisher]),
+    );
     expect(deadlines.size).toBe(inject.length - 1);
     expect(new Set(deadlines.values()).size).toBe(1);
     expect(deadlines.get(LedgerBalanceAudit)).toBeGreaterThan(Date.now());

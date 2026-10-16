@@ -60,8 +60,15 @@ export class PolicyController {
     description:
       'For `contract.signature`, each step names a role of the governed organization itself that ' +
       'may accept a contract for it (alternatives: any one of them may sign); another ' +
-      'organization’s role is 422 `AUTHORITY_NOT_GOVERNED_ORGANIZATION`. The authority is never ' +
-      'the oversight role or the platform operator. A DRAFT governs nothing until a platform ' +
+      'organization’s role is 422 `AUTHORITY_NOT_GOVERNED_ORGANIZATION`, and naming one role ' +
+      'twice is 400. For `contract.statement.technical` and `contract.statement.financial` (the ' +
+      'two approval chains of the employer’s statements, ADR-068 § 5) the steps are asked in order ' +
+      'and may name any organization, and two steps may name the same organization and role (for ' +
+      'two different people); a step may carry `minAmountMinor` (inclusive) and `maxAmountMinor` ' +
+      '(exclusive) and then applies only to a statement whose gross lies within them — a signing ' +
+      'step with a bound is 422 `AMOUNT_BOUNDS_NOT_APPLICABLE`. The authority is never ' +
+      'the oversight role or the platform operator: the platform creates no legal authority, so ' +
+      'it approves no tenant’s contract or statement. A DRAFT governs nothing until a platform ' +
       `administrator approves it. Requires an Idempotency-Key. ${WRITERS_NOTE}`,
   })
   async create(
@@ -160,8 +167,10 @@ export class PolicyController {
     summary: 'Take an ACTIVE policy out of force with no replacement',
     description:
       'By its author organization or a platform administrator. From then on the employer’s side ' +
-      'of its contracts cannot be signed (422 SIGNATURE_POLICY_REQUIRED): no policy never means ' +
-      '"anyone may sign".',
+      'of its contracts cannot be signed (422 SIGNATURE_POLICY_REQUIRED) — or, for a statement ' +
+      'chain, no statement is submitted (422 TECHNICAL_POLICY_REQUIRED / ' +
+      'FINANCIAL_POLICY_REQUIRED): no policy never means "anyone may sign" or "approved". A ' +
+      'statement already submitted keeps the chains it was submitted with.',
   })
   async retire(
     @Param('id') id: string,

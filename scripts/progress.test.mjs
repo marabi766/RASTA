@@ -25,11 +25,11 @@ test('the repository baseline is valid and preserves the approved horizons', () 
   // is accepted, so they are updated in the same commit as the acceptance —
   // that coupling is the point: a status change nobody meant to make fails here.
   assert.equal(progress.mvp.committed, 563);
-  assert.equal(progress.mvp.earned, 309);
-  assert.equal(progress.mvp.percent, 54.9);
+  assert.equal(progress.mvp.earned, 322);
+  assert.equal(progress.mvp.percent, 57.2);
   assert.equal(progress.fullProduct.committed, 786);
-  assert.equal(progress.fullProduct.earned, 309);
-  assert.equal(progress.fullProduct.percent, 39.3);
+  assert.equal(progress.fullProduct.earned, 322);
+  assert.equal(progress.fullProduct.percent, 41);
 });
 
 test('a logged acceptance names who decided and only records that are ACCEPTED', () => {

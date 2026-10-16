@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
 import type { DeductionRule } from '../generated/prisma';
+import type { StatementChain } from '../policy/policy.state-machine';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { StatementAmounts } from './amounts';
 import type { StatementWithParts } from './views';
@@ -10,7 +11,12 @@ export interface StatementInput {
   readonly organizationId: string;
   readonly contractId: string;
   readonly statementNumber: number;
-  readonly lines: readonly { id: string; description: string; amountMinor: bigint }[];
+  readonly lines: readonly {
+    id: string;
+    description: string;
+    amountMinor: bigint;
+    milestoneId: string | null;
+  }[];
   readonly amounts: StatementAmounts;
   /** One id per applied deduction, in the order of `amounts.deductions`. */
   readonly deductionIds: readonly string[];
@@ -19,7 +25,19 @@ export interface StatementInput {
   readonly at: Date;
 }
 
-const WITH_PARTS = { lines: true, deductions: true } as const;
+/** One snapshotted chain step, as the submission writes it. */
+export interface ApprovalStepInput {
+  readonly id: string;
+  readonly chain: StatementChain;
+  readonly stepOrder: number;
+  readonly policyId: string;
+  readonly policyVersion: number;
+  readonly authorityOrganizationId: string;
+  readonly authorityRole: string;
+  readonly authorityLabel: string;
+}
+
+const WITH_PARTS = { lines: true, deductions: true, approvalSteps: true } as const;
 
 /**
  * Every statement this service runs against `statement`, `statement_line`, `statement_deduction`
@@ -95,6 +113,25 @@ export class StatementRepository {
     return (last._max.statementNumber ?? 0) + 1;
   }
 
+  /** The ids among `ids` that are milestones of this contract (Q-100 (4)); any other is not here. */
+  async milestonesOf(
+    tx: ExtendedPrismaClient,
+    organizationId: string,
+    contractId: string,
+    ids: readonly string[],
+  ): Promise<string[]> {
+    if (ids.length === 0) return [];
+    const rows = await runUnscoped(
+      'a statement line refers to a milestone of its own contract, named by that contract’s organization and id',
+      () =>
+        tx.milestone.findMany({
+          where: { organizationId, contractId, id: { in: [...ids] } },
+          select: { id: true },
+        }),
+    );
+    return rows.map((row) => row.id);
+  }
+
   /** The employer's deduction rules in force among `ids` (Q-96 (6)); any other id is not here. */
   rulesInForce(
     tx: ExtendedPrismaClient,
@@ -149,6 +186,7 @@ export class StatementRepository {
             lineNumber: index + 1,
             description: line.description,
             amountMinor: line.amountMinor,
+            milestoneId: line.milestoneId,
           })),
         });
         if (input.amounts.deductions.length > 0) {
@@ -172,5 +210,106 @@ export class StatementRepository {
         });
       },
     );
+  }
+
+  /** Takes the statement's row lock and reads it as it now stands (after the contract's lock). */
+  async lock(
+    tx: ExtendedPrismaClient,
+    organizationId: string,
+    contractId: string,
+    id: string,
+  ): Promise<StatementWithParts | null> {
+    await tx.$queryRaw`SELECT 1 FROM statement WHERE organization_id = ${organizationId} AND contract_id = ${contractId} AND id = ${id} FOR UPDATE`;
+    return this.findOne(organizationId, contractId, id, tx);
+  }
+
+  /**
+   * DRAFT → SUBMITTED: a compare-and-set on `organization_id`, `id`, the status it was read in and
+   * its `version`, which it increments, recording who submitted it with their stable identity and
+   * how many steps each chain is snapshotted with. `false` when the row is no longer that. The
+   * snapshot itself is written next, in the same transaction (`insertApprovalSteps`); the database
+   * checks the two agree at commit (`statement_submission_consistent`).
+   */
+  async submit(
+    tx: ExtendedPrismaClient,
+    input: {
+      organizationId: string;
+      id: string;
+      version: number;
+      person: { userId: string; issuer: string; subject: string };
+      technicalStepCount: number;
+      financialStepCount: number;
+      at: Date;
+    },
+  ): Promise<boolean> {
+    const { count } = await runUnscoped(
+      'the contractor submits the statement it holds the lock of, matched on its organization, id, status and version',
+      () =>
+        tx.statement.updateMany({
+          where: {
+            organizationId: input.organizationId,
+            id: input.id,
+            status: 'DRAFT',
+            version: input.version,
+          },
+          data: {
+            status: 'SUBMITTED',
+            submittedAt: input.at,
+            submittedBy: input.person.userId,
+            submittedByIssuer: input.person.issuer,
+            submittedBySubject: input.person.subject,
+            technicalStepCount: input.technicalStepCount,
+            financialStepCount: input.financialStepCount,
+            updatedAt: input.at,
+            version: { increment: 1 },
+          },
+        }),
+    );
+    return count === 1;
+  }
+
+  /** Both chains' snapshot, written after the transition, in its transaction. */
+  async insertApprovalSteps(
+    tx: ExtendedPrismaClient,
+    statement: { organizationId: string; contractId: string; id: string },
+    steps: readonly ApprovalStepInput[],
+    at: Date,
+  ): Promise<void> {
+    await runUnscoped(
+      'a submitted statement’s approval chains are written for the contract’s own organization, named explicitly',
+      () =>
+        tx.statementApprovalStep.createMany({
+          data: steps.map((step) => ({
+            ...step,
+            organizationId: statement.organizationId,
+            contractId: statement.contractId,
+            statementId: statement.id,
+            createdAt: at,
+          })),
+        }),
+    );
+  }
+
+  /**
+   * Marks the milestones the submitted statement's lines refer to as referenced, the first time
+   * only (Q-100 (4)): from then on the employer cannot change them. Returns how many it marked.
+   */
+  async markMilestonesReferenced(
+    tx: ExtendedPrismaClient,
+    organizationId: string,
+    contractId: string,
+    ids: readonly string[],
+    at: Date,
+  ): Promise<number> {
+    if (ids.length === 0) return 0;
+    const { count } = await runUnscoped(
+      'a submitted statement marks the milestones of its own contract it refers to, named by that contract’s organization and id',
+      () =>
+        tx.milestone.updateMany({
+          where: { organizationId, contractId, id: { in: [...ids] }, firstReferencedAt: null },
+          data: { firstReferencedAt: at, version: { increment: 1 } },
+        }),
+    );
+    return count;
   }
 }

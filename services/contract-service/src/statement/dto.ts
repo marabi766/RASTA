@@ -30,6 +30,17 @@ const line = z
       .describe(
         'The amount claimed in minor units (rials), a positive decimal string; never a float.',
       ),
+    milestoneId: z
+      .string()
+      .min(1)
+      .max(128)
+      .optional()
+      .describe(
+        'A planned milestone of this contract the line is against, if any. One that is not a ' +
+          'milestone of this contract is 422 MILESTONE_NOT_OF_CONTRACT. Submitting the statement ' +
+          'marks the milestone referenced, after which the employer can no longer change it ' +
+          '(Q-100 (4)).',
+      ),
   })
   .strict();
 
@@ -71,6 +82,23 @@ export const draftStatementSchema = z
   .strict();
 export type DraftStatementDto = z.infer<typeof draftStatementSchema>;
 
+/** `POST /v1/contracts/{id}/statements/{statementId}/submit`: the contractor submits a draft. */
+export const submitStatementSchema = z
+  .object({
+    expectedVersion: z
+      .number()
+      .int()
+      .min(1)
+      .max(2_147_483_647)
+      .optional()
+      .describe(
+        'The statement’s `version` the caller read. When given, the submission applies only to ' +
+          'that version (409 OPTIMISTIC_LOCK_FAILED otherwise).',
+      ),
+  })
+  .strict();
+export type SubmitStatementDto = z.infer<typeof submitStatementSchema>;
+
 /** `GET /v1/contracts/{id}/statements`: oldest first, a cursor being the last statement number. */
 export const listStatementsQuerySchema = z
   .object({
@@ -88,6 +116,24 @@ export type ListStatementsQuery = z.infer<typeof listStatementsQuerySchema>;
 
 const money = (what: string) =>
   z.string().describe(`${what} in minor units (rials), a decimal string.`);
+
+/** One chain as it was snapshotted at submission: the policy in force and its applicable steps. */
+const approvalChainView = z
+  .object({
+    policyId: z.string(),
+    policyVersion: z.number().int(),
+    steps: z.array(
+      z
+        .object({
+          stepOrder: z.number().int().describe('The policy step’s order; asked in this order.'),
+          authorityOrganizationId: z.string(),
+          authorityRole: z.string(),
+          authorityLabel: z.string(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
 
 /**
  * A statement as either party sees it: what was claimed, what was withheld and why, the net, and
@@ -112,6 +158,7 @@ export const statementViewSchema = z
           lineNumber: z.number().int(),
           description: z.string(),
           amountMinor: money('The amount claimed'),
+          milestoneId: z.string().nullable().describe('The milestone it is against, or null.'),
         })
         .strict(),
     ),
@@ -127,12 +174,15 @@ export const statementViewSchema = z
         .strict(),
     ),
     createdAt: z.string(),
-    submittedAt: z
-      .string()
+    submittedAt: z.string().nullable().describe('When it was submitted (ISO 8601, UTC), or null.'),
+    approvalChains: z
+      .object({ technical: approvalChainView, financial: approvalChainView })
+      .strict()
       .nullable()
       .describe(
-        'When it was submitted (ISO 8601, UTC), or null. Always null for now: submission opens ' +
-          'with the approval chains (ADR-068 § 5).',
+        'The two approval chains as the policies in force said them when the statement was ' +
+          'submitted — technical first, then financial (Q-96 (2)) — or null while it is a draft. ' +
+          'A policy changed later never changes them (ADR-068 § 5).',
       ),
     updatedAt: z.string(),
     version: z.number().int(),
