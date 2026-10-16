@@ -90,6 +90,9 @@ export const ID_PREFIX = {
   review: 'REV',
   history: 'OSH',
   priceHistory: 'OPH',
+  returnRequest: 'RET',
+  returnLine: 'RTL',
+  returnHistory: 'RSH',
 } as const;
 
 export function newId(prefix: (typeof ID_PREFIX)[keyof typeof ID_PREFIX]): string {

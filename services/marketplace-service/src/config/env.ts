@@ -76,6 +76,15 @@ export const marketplaceEnvSchema = baseEnvSchema
      */
     MARKETPLACE_RECEIPT_WINDOW_DAYS: z.coerce.number().int().min(1).max(365).default(3),
 
+    /**
+     * Days after an order COMPLETED within which its buyer may ask to return goods (RUN-005,
+     * ADR-048, Q-132). **Unset by default, and then returns are refused**: the window is a
+     * business fact the product document does not give (Q-33), so no number is invented and a
+     * deployment opts in with the one its operations decided. Counted from the order's
+     * `completedAt`; a request is judged against it when it is made, not when it is decided.
+     */
+    MARKETPLACE_RETURN_WINDOW_DAYS: z.coerce.number().int().min(1).max(730).optional(),
+
     /** How often a reminder is recorded once a window has elapsed. */
     MARKETPLACE_REMINDER_INTERVAL_DAYS: z.coerce.number().int().min(1).max(90).default(3),
 

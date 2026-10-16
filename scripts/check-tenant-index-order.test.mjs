@@ -266,6 +266,7 @@ const OPTED_IN = {
     'ix_offer_status_price',
     'ix_order_history_order',
     'ix_order_supplier_status',
+    'ix_return_request_supplier',
     'uq_offer_price_version',
     'uq_order_line_offer',
   ],
