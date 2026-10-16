@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { amountMinorSchema, plainText } from '@rasta/contracts';
+import { amountMinorSchema, currencySchema, plainText } from '@rasta/contracts';
 import { STATEMENT_STATES } from './statement.state-machine';
 
 /**
@@ -239,3 +239,34 @@ export const statementViewSchema = z
   })
   .strict();
 export type StatementView = z.infer<typeof statementViewSchema>;
+
+/**
+ * A statement as economic-service reads it to build its obligation (ADR-068 § 6 (2), CON-003 PR 6a):
+ * the stored row only — status, net, currency and who pays whom — whatever its status.
+ */
+export const statementSettlementViewSchema = z
+  .object({
+    statementId: z.string(),
+    contractId: z.string(),
+    status: z
+      .enum(STATEMENT_STATES)
+      .describe(
+        'As stored. Only an APPROVED statement may be settled; the reader refuses the rest.',
+      ),
+    netMinor: money('The gross less the deductions, never negative,'),
+    currency: currencySchema.describe(
+      'Rials: nothing on the contract chain stores another currency (Q-73 (2)); said explicitly so no reader assumes one (ADR-022).',
+    ),
+    payerOrganizationId: z
+      .string()
+      .describe('The employer: the statement’s organization, the one the token acts for.'),
+    beneficiaryOrganizationId: z.string().describe('The contract’s winning contractor.'),
+    approvedAt: z
+      .string()
+      .nullable()
+      .describe(
+        'When the financial chain’s last step approved it (ISO 8601, UTC); null unless APPROVED.',
+      ),
+  })
+  .strict();
+export type StatementSettlementView = z.infer<typeof statementSettlementViewSchema>;
