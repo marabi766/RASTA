@@ -28,17 +28,32 @@ import { enableSignIn, freshToken, membershipClaims } from '../../src/keycloak-a
  *   stranger to the other's contracts — and **C3**, a contractor that bid on nothing. Contract
  *   C exists only for the organization move: its employer signature is made immediately before
  *   the move, so the D-050 review flag does not depend on how long the run took.
- *   `tenantB` (`ORG-DEH-0002`) is the other seeded tenant.
+ *   `tenantB` (`ORG-DEH-0002`) is the other seeded tenant. A **consultant**, an organization
+ *   that is neither party, is named by the first step of the statements' technical chain
+ *   (Q-96 (1)).
  * - **People** (`system.admin`, identity-service — real memberships): in the owner, all
  *   `ORGANIZATION_ADMIN`: `author`, `p1`, `p2`, `evaluator`, `awarder` (the tender flow),
  *   `plain` (no signing authority), `signer` (also `FLEET_MANAGER`, the role the signing policy
  *   names) and `dual` (also a `CONTRACTOR` member of C1). One `CONTRACTOR` in each of C1, C2, C3,
- *   and a second in C1 (`c1b`).
+ *   and a second in C1 (`c1b`). `tech`, the consultant's `ORGANIZATION_ADMIN`.
  * - **Policies**: `project.execution`, `tender.publication`, `tender.award` for the owner in
  *   construction-service (`union.admin` writes, `system.admin` approves), then — later in the
  *   run, once a signature has been refused for want of one — `contract.signature` in
- *   contract-service, naming the owner's own `FLEET_MANAGER` role. Samples; no legal authority
- *   is claimed (ADR-023, Q-02).
+ *   contract-service, naming the owner's own `FLEET_MANAGER` role, and — once a submission has
+ *   been refused for want of them — `contract.statement.technical` (the consultant, then the
+ *   owner) and `contract.statement.financial` (the owner). Samples; no legal authority is
+ *   claimed (ADR-023, Q-02).
+ *
+ * ## Statements (CON-003 PR 4 to 6)
+ *
+ * On contract A, after its amendment and milestone: C1 drafts and submits two statements; both
+ * approval chains are decided by different people, the same person twice is refused, a replayed
+ * decision answers its first response, and the second statement's financial approval would take
+ * the approved total past the price and the effective amendment, so it is refused. They run
+ * before the organization move: a union-written chain policy is confirmed with
+ * organization-service at submission (Q-70 (7)). No deduction is applied: no route writes a
+ * deduction rule yet (Q-125), so a statement can only name one to be refused, and its net is its
+ * gross.
  *
  * ## Through the front door
  *
@@ -98,6 +113,7 @@ const SURNAMES: Record<string, string> = {
   c1b: 'پیمانکار یکم دوم',
   c2: 'پیمانکار دوم',
   c3: 'پیمانکار سوم',
+  tech: 'مشاور ناظر',
 };
 
 const CRITERIA = [
@@ -138,6 +154,34 @@ const SCORES: Record<TenderKey, Record<Contractor, [number, number]>> = {
 
 const AMENDMENT_ONE = '500000000';
 const AMENDMENT_TWO = '250000000';
+
+/**
+ * The statements of contract A, minor units. The first is approved; the second would take the
+ * approved total (gross, Q-96 (5)) past the price plus the effective amendment — 4 200 000 000 +
+ * 500 000 000 — so its final approval is refused.
+ */
+const STATEMENT_ONE_LINES = ['1100000000', '400000000'] as const;
+const STATEMENT_ONE_GROSS = '1500000000';
+const STATEMENT_TWO_GROSS = '3300000000';
+/** How a statement line is worded: `<this>, section <n>`. */
+const STATEMENT_LINE_WORDING = 'Resurfacing works';
+
+/**
+ * What no refusal may repeat: every amount of contract A — its price, the amendments, the cap
+ * they make, each statement line, each gross and the total the second statement would make — and
+ * the lines' wording.
+ */
+const SCENARIO_VALUES: readonly string[] = [
+  PRICE.A.c1,
+  AMENDMENT_ONE,
+  AMENDMENT_TWO,
+  (BigInt(PRICE.A.c1) + BigInt(AMENDMENT_ONE)).toString(),
+  ...STATEMENT_ONE_LINES,
+  STATEMENT_ONE_GROSS,
+  STATEMENT_TWO_GROSS,
+  (BigInt(STATEMENT_ONE_GROSS) + BigInt(STATEMENT_TWO_GROSS)).toString(),
+  STATEMENT_LINE_WORDING,
+];
 
 function bidContent(price: string, note: string) {
   return {
@@ -208,6 +252,34 @@ interface PolicyBody {
   workflowKey: string;
 }
 
+interface ChainBody {
+  policyId: string;
+  policyVersion: number;
+  steps: {
+    stepOrder: number;
+    authorityOrganizationId: string;
+    authorityRole: string;
+    decision: { outcome: string; decidedAt: string } | null;
+  }[];
+}
+
+interface StatementBody {
+  id: string;
+  contractId: string;
+  organizationId: string;
+  contractorOrganizationId: string;
+  statementNumber: number;
+  status: string;
+  grossMinor: string;
+  deductionsMinor: string;
+  netMinor: string;
+  lines: { lineNumber: number; amountMinor: string; milestoneId: string | null }[];
+  deductions: unknown[];
+  submittedAt: string | null;
+  approvalChains: { technical: ChainBody; financial: ChainBody } | null;
+  version: number;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers — thin: each adds headers or polls, and none decides an outcome.
 // ---------------------------------------------------------------------------
@@ -236,12 +308,19 @@ function send(
   });
 }
 
+/** The closed reasons of a refusal: every `details[].code` of the error body (docs/06 § 6.7). */
+function reasonsOf(body: unknown): string[] {
+  const details = (body as { details?: unknown } | null)?.details;
+  if (!Array.isArray(details)) return [];
+  return details.flatMap((detail) => {
+    const code = (detail as { code?: unknown } | null)?.code;
+    return typeof code === 'string' ? [code] : [];
+  });
+}
+
 /** The closed reason of a refusal: the first `details[].code` of the error body (docs/06 § 6.7). */
 function reasonOf(body: unknown): string | undefined {
-  const details = (body as { details?: unknown } | null)?.details;
-  if (!Array.isArray(details)) return undefined;
-  const code = (details[0] as { code?: unknown } | undefined)?.code;
-  return typeof code === 'string' ? code : undefined;
+  return reasonsOf(body)[0];
 }
 
 /** A refusal, asserted whole: the status, the platform's `code` and — where named — the closed reason. */
@@ -292,6 +371,54 @@ function refusalOf(response: ApiResponse<unknown>): {
   };
 }
 
+/** An error body's request metadata: it differs by construction and is left out of a comparison. */
+const REQUEST_METADATA: readonly string[] = ['correlationId', 'traceId', 'timestamp', 'path'];
+
+/** A refusal's closed reason, as contract-service words it (`refusalDetails`, docs/06 § 6.7). */
+function decisionReason(code: string): { path: string; code: string; message: string }[] {
+  return [{ path: 'decision', code, message: `Statement cannot be decided: ${code}` }];
+}
+
+/**
+ * A refusal that says what it is meant to and nothing more (S-09): the request's metadata aside,
+ * its body is exactly the platform code, the fixed message and the closed reasons expected — no
+ * other key — and no value of the scenario, an amount or a line's wording, appears anywhere in it,
+ * metadata included. `expectRefusal` alone would pass a 403 whose message quoted the statement.
+ */
+function expectRefusalExactly(
+  response: ApiResponse<unknown>,
+  expected: {
+    status: number;
+    code: string;
+    message: string;
+    details?: { path: string; code: string; message: string }[];
+  },
+  what: string,
+): void {
+  const text = JSON.stringify(response.body);
+  expect(response.status, `${what}: ${text}`).toBe(expected.status);
+  const said = Object.fromEntries(
+    Object.entries((response.body ?? {}) as Record<string, unknown>).filter(
+      ([key]) => !REQUEST_METADATA.includes(key),
+    ),
+  );
+  expect(said, `${what}: ${text}`).toEqual({
+    code: expected.code,
+    message: expected.message,
+    ...(expected.details ? { details: expected.details } : {}),
+  });
+  for (const value of SCENARIO_VALUES) {
+    expect(text, `${what}: the body repeats ${value}`).not.toContain(value);
+  }
+}
+
+/** The role guard's refusal of the oversight role (`RastaError.insufficientRole`): no details. */
+const OVERSIGHT_REFUSED = {
+  status: 403,
+  code: 'INSUFFICIENT_ROLE',
+  message: 'You do not have permission to perform this action',
+} as const;
+
 async function tender(owner: Actor, id: string): Promise<TenderBody> {
   const response = await owner.get(`/v1/tenders/${id}`);
   expect(response.status, JSON.stringify(response.body)).toBe(200);
@@ -319,14 +446,28 @@ async function amendment(actor: Actor, contractId: string, id: string): Promise<
   return response.body as AmendmentBody;
 }
 
+/** A statement's draft body: one line per amount, numbered by the service in this order. */
+function statementLines(amounts: readonly string[], milestoneId?: string) {
+  return amounts.map((amountMinor, index) => ({
+    description: `${STATEMENT_LINE_WORDING}, section ${index + 1}`,
+    amountMinor,
+    ...(index === 0 && milestoneId ? { milestoneId } : {}),
+  }));
+}
+
 /**
- * Everything another organization could ask about a contract, its amendments and its
- * milestones. Each must be 404 — a 403 would confirm the record exists — and none may change
- * anything (each write body is valid, so the answer is the tenant check, not validation).
+ * Everything another organization could ask about a contract, its amendments, its milestones
+ * and its statements. Each must be 404 — a 403 would confirm the record exists — and none may
+ * change anything (each write body is valid, so the answer is the tenant check, not validation).
  */
 async function assertInvisibleToStranger(
   stranger: Actor,
-  ids: { contractId: string; amendmentIds?: string[]; milestoneIds?: string[] },
+  ids: {
+    contractId: string;
+    amendmentIds?: string[];
+    milestoneIds?: string[];
+    statementIds?: string[];
+  },
   who: string,
 ): Promise<void> {
   const probesOf = (target: typeof ids): [string, () => Promise<ApiResponse<unknown>>][] => {
@@ -351,6 +492,11 @@ async function assertInvisibleToStranger(
         () =>
           send(stranger, 'POST', `${c}/milestones`, { title: 'Probe', plannedDate: '2027-06-01' }),
       ],
+      ['list its statements', () => stranger.get(`${c}/statements`)],
+      [
+        'draft a statement',
+        () => send(stranger, 'POST', `${c}/statements`, { lines: statementLines(['1000']) }),
+      ],
     ];
     (target.amendmentIds ?? []).forEach((id, index) => {
       probes.push(
@@ -370,6 +516,24 @@ async function assertInvisibleToStranger(
         ],
       );
     });
+    (target.statementIds ?? []).forEach((id, index) => {
+      probes.push(
+        [`read statement ${index + 1}`, () => stranger.get(`${c}/statements/${id}`)],
+        [
+          `submit statement ${index + 1}`,
+          () => send(stranger, 'POST', `${c}/statements/${id}/submit`, {}),
+        ],
+        [
+          `decide statement ${index + 1}`,
+          () =>
+            send(stranger, 'POST', `${c}/statements/${id}/decisions`, {
+              chain: 'TECHNICAL',
+              stepOrder: 1,
+              decision: 'APPROVE',
+            }),
+        ],
+      );
+    });
     return probes;
   };
   // The same requests against records that do not exist: the answers must be identical in
@@ -378,6 +542,7 @@ async function assertInvisibleToStranger(
     contractId: `CTR_${RUN}_MISSING`,
     amendmentIds: (ids.amendmentIds ?? []).map((_, index) => `AMD_${RUN}_MISSING_${index}`),
     milestoneIds: (ids.milestoneIds ?? []).map((_, index) => `MLS_${RUN}_MISSING_${index}`),
+    statementIds: (ids.statementIds ?? []).map((_, index) => `STM_${RUN}_MISSING_${index}`),
   };
   const real = probesOf(ids);
   const absent = probesOf(missing);
@@ -401,7 +566,7 @@ async function assertInvisibleToStranger(
 test.describe.serial('a contract, end to end (CON-003)', () => {
   let tap: EconomicEventTap;
 
-  const org = { owner: '', c1: '', c2: '', c3: '' };
+  const org = { owner: '', c1: '', c2: '', c3: '', consultant: '' };
   const supplier = { c1: '', c2: '' };
   let people: Record<
     | 'author'
@@ -415,7 +580,8 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     | 'c1'
     | 'c1b'
     | 'c2'
-    | 'c3',
+    | 'c3'
+    | 'tech',
     Actor
   >;
 
@@ -430,6 +596,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
   let policyId = '';
   const amendmentId = { one: '', two: '' };
   let milestoneId = '';
+  const statementId = { one: '', two: '' };
 
   let windowSetAt = 0;
   const inWindow = <T>(step: string, call: () => Promise<T>): Promise<T> => {
@@ -461,7 +628,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
 
   // ---- the cast and the awarded tenders -------------------------------------
 
-  test('the cast: an owner under the union, three contractors, and the people who act', async ({
+  test('the cast: an owner under the union, three contractors, a consultant, and the people who act', async ({
     systemAdmin,
   }) => {
     // One token wait per person, one after another.
@@ -478,6 +645,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     org.c1 = await organization(`E2E contractor one ${RUN}`, 'COMPANY');
     org.c2 = await organization(`E2E contractor two ${RUN}`, 'COMPANY');
     org.c3 = await organization(`E2E contractor three ${RUN}`, 'COMPANY');
+    org.consultant = await organization(`E2E supervising consultant ${RUN}`, 'COMPANY');
 
     const provision = async (
       label: string,
@@ -513,6 +681,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       c1b: await provision('c1b', org.c1, ['CONTRACTOR']),
       c2: await provision('c2', org.c2, ['CONTRACTOR']),
       c3: await provision('c3', org.c3, ['CONTRACTOR']),
+      tech: await provision('tech', org.consultant, [OWNER_ROLE]),
     };
 
     // `dual` is an administrator of the employer and also a contractor member of C1: the
@@ -536,6 +705,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       c1b: org.c1,
       c2: org.c2,
       c3: org.c3,
+      tech: org.consultant,
     } as const;
     const signedIn = {} as typeof people;
     for (const [key, account] of Object.entries(accounts) as [
@@ -1095,48 +1265,63 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
   });
 
   /**
-   * Through the gateway: the signing policy is written and submitted by `union.admin` and
-   * approved by a different person, the platform administrator (CONTRACT_POLICY_FOUR_EYES).
+   * A contract-service approval policy for the owner, through the gateway: written and submitted
+   * by `union.admin` and approved by a different person, the platform administrator
+   * (CONTRACT_POLICY_FOUR_EYES). Returns its id.
    */
-  test('the union writes the contract.signature policy and the platform approves it', async ({
-    platformAdmin,
-    systemAdmin,
-  }) => {
-    const created = await platformAdmin.post('/v1/contract-approval-policies', {
+  async function activateContractPolicy(
+    union: Actor,
+    platform: Actor,
+    workflowKey: string,
+    label: string,
+    steps: { authorityOrganizationId: string; authorityRole: string; authorityLabel: string }[],
+  ): Promise<string> {
+    const created = await union.post('/v1/contract-approval-policies', {
       idempotencyKey: idempotencyKey(`contract-policy-${RUN}`),
       body: {
         organizationId: org.owner,
-        workflowKey: 'contract.signature',
-        label: 'E2E sample — contract signature',
+        workflowKey,
+        label,
         rationale: 'Written by the E2E suite; a sample, not an adopted procedure',
         isSample: true,
-        steps: [
-          {
-            authorityOrganizationId: org.owner,
-            authorityRole: SIGNING_ROLE,
-            authorityLabel: 'Signatory of the owner (sample)',
-          },
-        ],
+        steps,
       },
     });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    policyId = (created.body as PolicyBody).id;
+    const id = (created.body as PolicyBody).id;
 
-    const submitted = await platformAdmin.post(
-      `/v1/contract-approval-policies/${policyId}/submit`,
-      {
-        idempotencyKey: idempotencyKey(`contract-policy-${RUN}`),
-        body: { expectedVersion: (created.body as PolicyBody).version },
-      },
-    );
+    const submitted = await union.post(`/v1/contract-approval-policies/${id}/submit`, {
+      idempotencyKey: idempotencyKey(`contract-policy-${RUN}`),
+      body: { expectedVersion: (created.body as PolicyBody).version },
+    });
     expect(submitted.status, JSON.stringify(submitted.body)).toBe(200);
 
-    const approved = await systemAdmin.post(`/v1/contract-approval-policies/${policyId}/approve`, {
+    const approved = await platform.post(`/v1/contract-approval-policies/${id}/approve`, {
       idempotencyKey: idempotencyKey(`contract-policy-${RUN}`),
       body: { expectedVersion: (submitted.body as PolicyBody).version },
     });
     expect(approved.status, JSON.stringify(approved.body)).toBe(200);
-    expect(approved.body).toMatchObject({ status: 'ACTIVE', workflowKey: 'contract.signature' });
+    expect(approved.body).toMatchObject({ status: 'ACTIVE', workflowKey });
+    return id;
+  }
+
+  test('the union writes the contract.signature policy and the platform approves it', async ({
+    platformAdmin,
+    systemAdmin,
+  }) => {
+    policyId = await activateContractPolicy(
+      platformAdmin,
+      systemAdmin,
+      'contract.signature',
+      'E2E sample — contract signature',
+      [
+        {
+          authorityOrganizationId: org.owner,
+          authorityRole: SIGNING_ROLE,
+          authorityLabel: 'Signatory of the owner (sample)',
+        },
+      ],
+    );
   });
 
   test('the employer signs under the policy: refusals once each, then SIGNED exactly once, and a replay answers the first response', async ({
@@ -1665,6 +1850,716 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     }
   });
 
+  // ---- statements (CON-003 PR 4 to 6) ---------------------------------------
+
+  const statementPolicy = { technical: '', financial: '' };
+
+  async function statement(actor: Actor, id: string): Promise<StatementBody> {
+    const response = await actor.get(`/v1/contracts/${contractId.A}/statements/${id}`);
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    return response.body as StatementBody;
+  }
+
+  /** A decision on a named step: the step is named, never inferred (Q-135 (1)). */
+  function stepOf(chain: 'TECHNICAL' | 'FINANCIAL', stepOrder: number, decision = 'APPROVE') {
+    return { chain, stepOrder, decision };
+  }
+
+  test('a statement: only the contractor drafts it, on a signed contract and with no unconfigured deduction; with no chain policy it is not submitted', async () => {
+    const { author, p1, c1, c2 } = people;
+    const base = `/v1/contracts/${contractId.A}/statements`;
+    const body = { lines: statementLines(STATEMENT_ONE_LINES, milestoneId) };
+
+    // The employer does not draft its contractor's claim: refused, and recorded.
+    const byEmployer = correlation('employer-drafts');
+    expectRefusal(
+      await send(author, 'POST', base, body, byEmployer),
+      { status: 403, code: 'FORBIDDEN', reason: 'AUTHOR_NOT_CONTRACTOR' },
+      'the employer drafting a statement',
+    );
+    evidence.push({
+      label: 'employer draft refused',
+      correlationId: byEmployer,
+      events: ['CONTRACT_AUTHORITY_REFUSED'],
+      refusal: {
+        event: 'CONTRACT_AUTHORITY_REFUSED',
+        contractId: contractId.A,
+        payload: {
+          contractId: contractId.A,
+          action: 'DRAFT_STATEMENT',
+          side: 'EMPLOYER',
+          subjectId: null,
+          reason: 'NOT_CONTRACTOR',
+        },
+      },
+    });
+    expectRefusal(
+      await c1.post(base, { body }),
+      { status: 400, code: 'VALIDATION_FAILED' },
+      'drafting without a key',
+    );
+    // A deduction is only a rule the employer configured (Q-96 (6)). No route configures one yet
+    // (Q-125), so any rule a statement names is refused, and nothing is drafted.
+    expectRefusal(
+      await send(c1, 'POST', base, {
+        ...body,
+        deductions: [{ deductionRuleId: `DDR_${RUN}_NONE` }],
+      }),
+      { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'DEDUCTION_NOT_CONFIGURED' },
+      'a deduction no rule configures',
+    );
+    // Only on a signed contract: B was cancelled as a draft.
+    expectRefusal(
+      await send(c2, 'POST', `/v1/contracts/${contractId.B}/statements`, {
+        lines: statementLines(STATEMENT_ONE_LINES),
+      }),
+      { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'CONTRACT_NOT_SIGNED' },
+      'a statement of a cancelled contract',
+    );
+
+    const drafting = correlation('statement-one-drafted');
+    const key = idempotencyKey(`contract-statement-${RUN}`);
+    const drafted = await c1.call('POST', base, {
+      idempotencyKey: key,
+      correlationId: drafting,
+      body,
+    });
+    expect(drafted.status, JSON.stringify(drafted.body)).toBe(201);
+    expect(drafted.body).toMatchObject({
+      contractId: contractId.A,
+      organizationId: org.owner,
+      contractorOrganizationId: org.c1,
+      statementNumber: 1,
+      status: 'DRAFT',
+      grossMinor: STATEMENT_ONE_GROSS,
+      deductionsMinor: '0',
+      netMinor: STATEMENT_ONE_GROSS,
+      lines: [
+        { lineNumber: 1, amountMinor: STATEMENT_ONE_LINES[0], milestoneId },
+        { lineNumber: 2, amountMinor: STATEMENT_ONE_LINES[1], milestoneId: null },
+      ],
+      deductions: [],
+      submittedAt: null,
+      approvalChains: null,
+    });
+    statementId.one = (drafted.body as StatementBody).id;
+    evidence.push({
+      label: 'statement one drafted',
+      correlationId: drafting,
+      events: ['STATEMENT_DRAFTED'],
+    });
+
+    // A replay answers the first response and drafts nothing.
+    const replay = await c1.call('POST', base, { idempotencyKey: key, body });
+    expect(replay.status).toBe(201);
+    expect(replay.body).toEqual(drafted.body);
+    // Both parties read it, and list it once.
+    for (const party of [author, c1]) {
+      expect(await statement(party, statementId.one)).toEqual(drafted.body);
+      const listed = await party.get(`${base}?limit=50`);
+      expect(listed.status, JSON.stringify(listed.body)).toBe(200);
+      expect((listed.body as { items: StatementBody[] }).items.map((item) => item.id)).toEqual([
+        statementId.one,
+      ]);
+    }
+
+    // A draft is not decided; and with no chain policy in force it is not submitted — the
+    // platform never approves by default.
+    expectRefusal(
+      await send(p1, 'POST', `${base}/${statementId.one}/decisions`, stepOf('TECHNICAL', 1)),
+      { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'STATEMENT_NOT_SUBMITTED' },
+      'deciding a draft',
+    );
+    const unsubmitted = await send(c1, 'POST', `${base}/${statementId.one}/submit`, {});
+    expectRefusal(
+      unsubmitted,
+      { status: 422, code: 'BUSINESS_RULE_VIOLATION' },
+      'submitting with no chain policy in force',
+    );
+    expect(reasonsOf(unsubmitted.body)).toEqual([
+      'TECHNICAL_POLICY_REQUIRED',
+      'FINANCIAL_POLICY_REQUIRED',
+    ]);
+    expect(await statement(author, statementId.one)).toEqual(drafted.body);
+  });
+
+  test('the union writes both statement chains, and the platform approves them', async ({
+    platformAdmin,
+    systemAdmin,
+  }) => {
+    // Technical: the supervising consultant, then the owner. Financial: the owner. Every step is
+    // an organization administrator, so who decides is told apart by person, not by role.
+    statementPolicy.technical = await activateContractPolicy(
+      platformAdmin,
+      systemAdmin,
+      'contract.statement.technical',
+      'E2E sample — statement technical chain',
+      [
+        {
+          authorityOrganizationId: org.consultant,
+          authorityRole: OWNER_ROLE,
+          authorityLabel: 'Supervising consultant (sample)',
+        },
+        {
+          authorityOrganizationId: org.owner,
+          authorityRole: OWNER_ROLE,
+          authorityLabel: 'Technical review of the owner (sample)',
+        },
+      ],
+    );
+    statementPolicy.financial = await activateContractPolicy(
+      platformAdmin,
+      systemAdmin,
+      'contract.statement.financial',
+      'E2E sample — statement financial chain',
+      [
+        {
+          authorityOrganizationId: org.owner,
+          authorityRole: OWNER_ROLE,
+          authorityLabel: 'Financial approval of the owner (sample)',
+        },
+      ],
+    );
+  });
+
+  test('the contractor submits it with both chains snapshotted; strangers, the oversight role and the platform administrator see nothing, the consultant only this statement', async ({
+    tenantB,
+    auditor,
+    systemAdmin,
+  }) => {
+    const { author, c1, c2, c3, tech } = people;
+    const base = `/v1/contracts/${contractId.A}/statements`;
+    const draft = await statement(c1, statementId.one);
+
+    const submitting = correlation('statement-one-submitted');
+    const submitted = await send(
+      c1,
+      'POST',
+      `${base}/${statementId.one}/submit`,
+      { expectedVersion: draft.version },
+      submitting,
+    );
+    expect(submitted.status, JSON.stringify(submitted.body)).toBe(200);
+    expect(submitted.body).toMatchObject({
+      id: statementId.one,
+      status: 'SUBMITTED',
+      grossMinor: STATEMENT_ONE_GROSS,
+      netMinor: STATEMENT_ONE_GROSS,
+      approvalChains: {
+        technical: {
+          policyId: statementPolicy.technical,
+          steps: [
+            {
+              stepOrder: 1,
+              authorityOrganizationId: org.consultant,
+              authorityRole: OWNER_ROLE,
+              decision: null,
+            },
+            {
+              stepOrder: 2,
+              authorityOrganizationId: org.owner,
+              authorityRole: OWNER_ROLE,
+              decision: null,
+            },
+          ],
+        },
+        financial: {
+          policyId: statementPolicy.financial,
+          steps: [
+            {
+              stepOrder: 1,
+              authorityOrganizationId: org.owner,
+              authorityRole: OWNER_ROLE,
+              decision: null,
+            },
+          ],
+        },
+      },
+    });
+    // An instant in UTC, in the ISO 8601 form the contract publishes (`toISOString`): a missing,
+    // empty or unparseable value fails, and so does one with an offset or another precision.
+    const submittedAt: unknown = (submitted.body as StatementBody).submittedAt;
+    expect(typeof submittedAt, `submittedAt: ${String(submittedAt)}`).toBe('string');
+    const at = String(submittedAt);
+    expect(at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(Number.isNaN(Date.parse(at)), `submittedAt: ${at}`).toBe(false);
+    expect(new Date(at).toISOString(), 'submittedAt is a real instant').toBe(at);
+    evidence.push({
+      label: 'statement one submitted',
+      correlationId: submitting,
+      events: ['STATEMENT_SUBMITTED'],
+    });
+    expectRefusal(
+      await send(c1, 'POST', `${base}/${statementId.one}/submit`, {}),
+      { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'STATEMENT_NOT_DRAFT' },
+      'submitting it again',
+    );
+
+    // The milestone its first line is against is now referenced, and no longer changed (Q-100 (4)).
+    const milestonePath = `/v1/contracts/${contractId.A}/milestones/${milestoneId}`;
+    const referenced = await author.get(milestonePath);
+    expect(referenced.status, JSON.stringify(referenced.body)).toBe(200);
+    expect(referenced.body).toMatchObject({ id: milestoneId, referenced: true });
+    expectRefusal(
+      await send(author, 'PATCH', milestonePath, { title: 'Changed after the statement' }),
+      { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'MILESTONE_REFERENCED' },
+      'changing a referenced milestone',
+    );
+
+    // Both parties read the submitted statement alike.
+    for (const party of [author, c1]) {
+      expect(await statement(party, statementId.one)).toEqual(submitted.body);
+    }
+    // Every other organization: what it gets for a contract or a statement that does not exist.
+    for (const [who, stranger] of [
+      ['an uninvolved contractor', c3],
+      ['another tenant', tenantB],
+      ['the other bidder', c2],
+    ] as const) {
+      await assertInvisibleToStranger(
+        stranger,
+        { contractId: contractId.A, statementIds: [statementId.one] },
+        who,
+      );
+    }
+
+    // ADR-068 § 7: the oversight role reads and does nothing; the platform administrator reads a
+    // contract's statements only for an organization it selected, and it can select only its own —
+    // which is no party — so it is told what a stranger is told, and never drafts, submits or
+    // decides. Each refusal is asserted whole — code, message, no details — and repeats nothing of
+    // the statement.
+    const missing = `/v1/contracts/CTR_${RUN}_MISSING/statements`;
+    for (const [path, missingPath] of [
+      [base, missing],
+      [`${base}/${statementId.one}`, `${missing}/${statementId.one}`],
+    ] as const) {
+      expectRefusalExactly(
+        await auditor.get(path),
+        OVERSIGHT_REFUSED,
+        `the oversight role reading ${path}`,
+      );
+      // What it is told for a contract that is not there, word for word.
+      const absent = refusalOf(await systemAdmin.get(missingPath));
+      expect(absent, 'the platform administrator reading a missing contract').toMatchObject(
+        NOT_FOUND,
+      );
+      expect(typeof absent.message).toBe('string');
+      expect(absent.details).toBeUndefined();
+      expectRefusalExactly(
+        await systemAdmin.get(path),
+        { ...NOT_FOUND, message: absent.message ?? '' },
+        `the platform administrator reading ${path}`,
+      );
+      expectRefusalExactly(
+        await systemAdmin.get(path, { organizationId: org.owner }),
+        {
+          status: 403,
+          code: 'TENANT_MISMATCH',
+          message: 'You are not a member of the requested organization',
+        },
+        `the platform administrator selecting the employer to read ${path}`,
+      );
+    }
+    for (const [what, path, command, operatorRefused] of [
+      [
+        'draft a statement',
+        base,
+        { lines: statementLines(['1000']) },
+        'The platform administrator does not draft or submit a statement for a party',
+      ],
+      [
+        'submit it',
+        `${base}/${statementId.one}/submit`,
+        {},
+        'The platform administrator does not draft or submit a statement for a party',
+      ],
+      [
+        'decide it',
+        `${base}/${statementId.one}/decisions`,
+        stepOf('TECHNICAL', 1),
+        'The platform administrator does not approve or reject a statement for anyone',
+      ],
+    ] as const) {
+      expectRefusalExactly(
+        await send(auditor, 'POST', path, command),
+        OVERSIGHT_REFUSED,
+        `the oversight role trying to ${what}`,
+      );
+      expectRefusalExactly(
+        await send(systemAdmin, 'POST', path, command),
+        { status: 403, code: 'FORBIDDEN', message: operatorRefused },
+        `the platform administrator trying to ${what}`,
+      );
+    }
+
+    // The consultant its technical chain names reads this statement — nothing else of the
+    // contract (Q-135 (2)).
+    expect(await statement(tech, statementId.one)).toEqual(submitted.body);
+    const contractPath = `/v1/contracts/${contractId.A}`;
+    for (const [what, path, missingPath] of [
+      ['the contract', contractPath, `/v1/contracts/CTR_${RUN}_MISSING`],
+      ['its statements', base, missing],
+      [
+        'its amendments',
+        `${contractPath}/amendments`,
+        `/v1/contracts/CTR_${RUN}_MISSING/amendments`,
+      ],
+      [
+        'its milestones',
+        `${contractPath}/milestones`,
+        `/v1/contracts/CTR_${RUN}_MISSING/milestones`,
+      ],
+    ] as const) {
+      const response = await tech.get(path);
+      expectRefusal(response, NOT_FOUND, `the consultant reading ${what}`);
+      expect(refusalOf(response), `the consultant reading ${what}: against a missing one`).toEqual(
+        refusalOf(await tech.get(missingPath)),
+      );
+    }
+    const contracts = await tech.get('/v1/contracts?limit=100');
+    expect(contracts.status, JSON.stringify(contracts.body)).toBe(200);
+    expect((contracts.body as { items: { id: string }[] }).items).toEqual([]);
+    for (const [what, path, command] of [
+      ['draft a statement', base, { lines: statementLines(['1000']) }],
+      ['submit it', `${base}/${statementId.one}/submit`, {}],
+    ] as const) {
+      await expectMissingLike(
+        await send(tech, 'POST', path, command),
+        send(tech, 'POST', path.replace(contractId.A, `CTR_${RUN}_MISSING`), command),
+        `the consultant trying to ${what}`,
+      );
+    }
+  });
+
+  test('the technical chain, then the financial chain, each step by its authority and a different person: the same person twice is refused, and a replayed decision answers its first response', async () => {
+    const { author, p1, p2, dual, tech, c1 } = people;
+    const path = `/v1/contracts/${contractId.A}/statements/${statementId.one}/decisions`;
+
+    expectRefusal(
+      await tech.post(path, { body: stepOf('TECHNICAL', 1) }),
+      { status: 400, code: 'VALIDATION_FAILED' },
+      'deciding without a key',
+    );
+    // In order (Q-96 (2)): the financial chain is not open, the technical chain's second step
+    // waits for its first, and a step the chains do not have is no step.
+    expectRefusal(
+      await send(p2, 'POST', path, stepOf('FINANCIAL', 1)),
+      { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'CHAIN_NOT_OPEN' },
+      'the financial chain before the technical one',
+    );
+    expectRefusal(
+      await send(p1, 'POST', path, stepOf('TECHNICAL', 2)),
+      { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'STEP_NOT_NEXT' },
+      'the second technical step before the first',
+    );
+    expectRefusal(
+      await send(p1, 'POST', path, stepOf('TECHNICAL', 3)),
+      { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'STEP_NOT_IN_CHAIN' },
+      'a step the chain does not have',
+    );
+
+    // The employer is not the authority of the consultant's step: refused, and recorded.
+    const notAuthority = correlation('employer-decides-consultant-step');
+    expectRefusal(
+      await send(p1, 'POST', path, stepOf('TECHNICAL', 1), notAuthority),
+      { status: 403, code: 'FORBIDDEN', reason: 'NOT_STEP_AUTHORITY' },
+      'the employer deciding the consultant’s step',
+    );
+    evidence.push({
+      label: 'employer deciding the consultant’s step refused',
+      correlationId: notAuthority,
+      events: ['CONTRACT_AUTHORITY_REFUSED'],
+      refusal: {
+        event: 'CONTRACT_AUTHORITY_REFUSED',
+        contractId: contractId.A,
+        payload: {
+          contractId: contractId.A,
+          action: 'APPROVE_STATEMENT',
+          side: 'EMPLOYER',
+          subjectId: statementId.one,
+          reason: 'NOT_STEP_AUTHORITY',
+        },
+      },
+    });
+    // A member of the contractor's organization never decides its claim, whichever step.
+    const memberOfContractor = correlation('member-of-contractor-decides');
+    expectRefusal(
+      await send(dual, 'POST', path, stepOf('TECHNICAL', 1), memberOfContractor),
+      { status: 403, code: 'FORBIDDEN', reason: 'MEMBER_OF_CONTRACTOR' },
+      'a member of the contractor deciding',
+    );
+    evidence.push({
+      label: 'member of the contractor deciding refused',
+      correlationId: memberOfContractor,
+      events: ['CONTRACT_AUTHORITY_REFUSED'],
+      refusal: {
+        event: 'CONTRACT_AUTHORITY_REFUSED',
+        contractId: contractId.A,
+        payload: {
+          contractId: contractId.A,
+          action: 'APPROVE_STATEMENT',
+          side: 'EMPLOYER',
+          subjectId: statementId.one,
+          reason: 'MEMBER_OF_CONTRACTOR',
+        },
+      },
+    });
+
+    // Technical step 1, by the consultant: recorded, the statement still SUBMITTED.
+    const technicalOne = correlation('statement-one-technical-1');
+    const first = await send(tech, 'POST', path, stepOf('TECHNICAL', 1), technicalOne);
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    expect(first.body).toMatchObject({
+      status: 'SUBMITTED',
+      approvalChains: {
+        technical: {
+          steps: [
+            { stepOrder: 1, decision: { outcome: 'APPROVED' } },
+            { stepOrder: 2, decision: null },
+          ],
+        },
+        financial: { steps: [{ stepOrder: 1, decision: null }] },
+      },
+    });
+    evidence.push({
+      label: 'statement one technical step 1',
+      correlationId: technicalOne,
+      events: ['STATEMENT_DECISION_RECORDED'],
+    });
+    // The consultant is not the authority of the owner's step: refused, and recorded as an
+    // approver that is no party.
+    const approverOther = correlation('consultant-decides-owner-step');
+    expectRefusal(
+      await send(tech, 'POST', path, stepOf('TECHNICAL', 2), approverOther),
+      { status: 403, code: 'FORBIDDEN', reason: 'NOT_STEP_AUTHORITY' },
+      'the consultant deciding the owner’s step',
+    );
+    evidence.push({
+      label: 'consultant deciding the owner’s step refused',
+      correlationId: approverOther,
+      events: ['CONTRACT_AUTHORITY_REFUSED'],
+      refusal: {
+        event: 'CONTRACT_AUTHORITY_REFUSED',
+        contractId: contractId.A,
+        payload: {
+          contractId: contractId.A,
+          action: 'APPROVE_STATEMENT',
+          side: 'APPROVER',
+          subjectId: statementId.one,
+          reason: 'NOT_STEP_AUTHORITY',
+        },
+      },
+    });
+
+    // Technical step 2, by p1: the technical chain is done.
+    const technicalTwo = correlation('statement-one-technical-2');
+    const second = await send(p1, 'POST', path, stepOf('TECHNICAL', 2), technicalTwo);
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+    expect(second.body).toMatchObject({
+      status: 'TECHNICALLY_APPROVED',
+      approvalChains: {
+        technical: {
+          steps: [
+            { stepOrder: 1, decision: { outcome: 'APPROVED' } },
+            { stepOrder: 2, decision: { outcome: 'APPROVED' } },
+          ],
+        },
+        financial: { steps: [{ stepOrder: 1, decision: null }] },
+      },
+    });
+    evidence.push({
+      label: 'statement one technical step 2',
+      correlationId: technicalTwo,
+      events: ['STATEMENT_DECISION_RECORDED', 'STATEMENT_TECHNICALLY_APPROVED'],
+    });
+
+    // Separation of duties across both chains (Q-96 (3)): p1 holds the financial step's role too,
+    // and is refused it — recorded — and nothing changes.
+    const twice = correlation('same-person-twice');
+    expectRefusalExactly(
+      await send(p1, 'POST', path, stepOf('FINANCIAL', 1), twice),
+      {
+        status: 422,
+        code: 'BUSINESS_RULE_VIOLATION',
+        message:
+          'Separation of duties: one person decides a statement at most once, across both chains',
+        details: decisionReason('ALREADY_DECIDED_STATEMENT'),
+      },
+      'the same person deciding a second step',
+    );
+    evidence.push({
+      label: 'same person deciding twice refused',
+      correlationId: twice,
+      events: ['CONTRACT_AUTHORITY_REFUSED'],
+      refusal: {
+        event: 'CONTRACT_AUTHORITY_REFUSED',
+        contractId: contractId.A,
+        payload: {
+          contractId: contractId.A,
+          action: 'APPROVE_STATEMENT',
+          side: 'EMPLOYER',
+          subjectId: statementId.one,
+          reason: 'ALREADY_DECIDED_STATEMENT',
+        },
+      },
+    });
+    expect(await statement(author, statementId.one)).toEqual(second.body);
+
+    // The financial step, by p2, a third person: APPROVED.
+    const key = idempotencyKey(`contract-decision-${RUN}`);
+    const financial = correlation('statement-one-financial-1');
+    const approved = await p2.call('POST', path, {
+      idempotencyKey: key,
+      correlationId: financial,
+      body: stepOf('FINANCIAL', 1),
+    });
+    expect(approved.status, JSON.stringify(approved.body)).toBe(200);
+    expect(approved.body).toMatchObject({
+      id: statementId.one,
+      status: 'APPROVED',
+      grossMinor: STATEMENT_ONE_GROSS,
+      approvalChains: {
+        technical: {
+          steps: [
+            { stepOrder: 1, decision: { outcome: 'APPROVED' } },
+            { stepOrder: 2, decision: { outcome: 'APPROVED' } },
+          ],
+        },
+        financial: { steps: [{ stepOrder: 1, decision: { outcome: 'APPROVED' } }] },
+      },
+    });
+    evidence.push({
+      label: 'statement one financial step 1',
+      correlationId: financial,
+      events: ['STATEMENT_DECISION_RECORDED', 'STATEMENT_APPROVED'],
+    });
+
+    // Idempotency-Key replay: the first response, nothing decided twice.
+    const replay = await p2.call('POST', path, {
+      idempotencyKey: key,
+      body: stepOf('FINANCIAL', 1),
+    });
+    expect(replay.status).toBe(200);
+    expect(replay.body).toEqual(approved.body);
+    expectRefusal(
+      await p2.call('POST', path, { idempotencyKey: key, body: stepOf('FINANCIAL', 1, 'REJECT') }),
+      { status: 409, code: 'IDEMPOTENCY_KEY_REUSED' },
+      'the same key with another decision',
+    );
+    // A fresh key is a new request: the step is decided.
+    expectRefusal(
+      await send(p2, 'POST', path, stepOf('FINANCIAL', 1)),
+      { status: 409, code: 'CONFLICT', reason: 'STEP_DECIDED' },
+      'deciding the decided step again',
+    );
+    for (const reader of [author, c1, tech]) {
+      expect(await statement(reader, statementId.one)).toEqual(approved.body);
+    }
+  });
+
+  test('the cap: a second statement that would take the approved total past the price and the effective amendment is refused at its last approval, and nothing is written', async ({
+    tenantB,
+  }) => {
+    const { author, c1, p2, evaluator, tech } = people;
+    const base = `/v1/contracts/${contractId.A}/statements`;
+
+    const drafting = correlation('statement-two-drafted');
+    const drafted = await send(
+      c1,
+      'POST',
+      base,
+      { lines: statementLines([STATEMENT_TWO_GROSS]) },
+      drafting,
+    );
+    expect(drafted.status, JSON.stringify(drafted.body)).toBe(201);
+    expect(drafted.body).toMatchObject({
+      statementNumber: 2,
+      status: 'DRAFT',
+      grossMinor: STATEMENT_TWO_GROSS,
+      netMinor: STATEMENT_TWO_GROSS,
+    });
+    statementId.two = (drafted.body as StatementBody).id;
+    evidence.push({
+      label: 'statement two drafted',
+      correlationId: drafting,
+      events: ['STATEMENT_DRAFTED'],
+    });
+
+    // The consultant reads a statement only once its chains name it: not this draft.
+    const unnamed = await tech.get(`${base}/${statementId.two}`);
+    expectRefusal(unnamed, NOT_FOUND, 'the consultant reading a draft');
+    expect(refusalOf(unnamed), 'the consultant: against a missing statement').toEqual(
+      refusalOf(await tech.get(`${base}/STM_${RUN}_MISSING`)),
+    );
+
+    const submitting = correlation('statement-two-submitted');
+    const submitted = await send(c1, 'POST', `${base}/${statementId.two}/submit`, {}, submitting);
+    expect(submitted.status, JSON.stringify(submitted.body)).toBe(200);
+    expect(submitted.body).toMatchObject({ status: 'SUBMITTED' });
+    evidence.push({
+      label: 'statement two submitted',
+      correlationId: submitting,
+      events: ['STATEMENT_SUBMITTED'],
+    });
+
+    const path = `${base}/${statementId.two}/decisions`;
+    const technicalOne = correlation('statement-two-technical-1');
+    expect((await send(tech, 'POST', path, stepOf('TECHNICAL', 1), technicalOne)).status).toBe(200);
+    evidence.push({
+      label: 'statement two technical step 1',
+      correlationId: technicalOne,
+      events: ['STATEMENT_DECISION_RECORDED'],
+    });
+    const technicalTwo = correlation('statement-two-technical-2');
+    const technicallyApproved = await send(
+      evaluator,
+      'POST',
+      path,
+      stepOf('TECHNICAL', 2),
+      technicalTwo,
+    );
+    expect(technicallyApproved.status, JSON.stringify(technicallyApproved.body)).toBe(200);
+    expect(technicallyApproved.body).toMatchObject({ status: 'TECHNICALLY_APPROVED' });
+    evidence.push({
+      label: 'statement two technical step 2',
+      correlationId: technicalTwo,
+      events: ['STATEMENT_DECISION_RECORDED', 'STATEMENT_TECHNICALLY_APPROVED'],
+    });
+
+    // Approved gross so far: statement one. Statement two on top passes the price plus the
+    // effective amendment (Q-96 (5)): refused, and nothing is written — no decision, no move.
+    expect(
+      BigInt(STATEMENT_ONE_GROSS) + BigInt(STATEMENT_TWO_GROSS),
+      'the scenario’s amounts must pass the cap',
+    ).toBeGreaterThan(BigInt(PRICE.A.c1) + BigInt(AMENDMENT_ONE));
+    expect(BigInt(STATEMENT_TWO_GROSS)).toBeLessThanOrEqual(
+      BigInt(PRICE.A.c1) + BigInt(AMENDMENT_ONE),
+    );
+    const contractBefore = await contract(author, contractId.A);
+    expectRefusalExactly(
+      await send(p2, 'POST', path, stepOf('FINANCIAL', 1)),
+      {
+        status: 422,
+        code: 'BUSINESS_RULE_VIOLATION',
+        message:
+          'Approving this statement would take the approved total past the contract’s price and its effective amendments',
+        details: decisionReason('APPROVED_TOTAL_EXCEEDS_CAP'),
+      },
+      'approving past the cap',
+    );
+    for (const party of [author, c1]) {
+      expect(await statement(party, statementId.two)).toEqual(technicallyApproved.body);
+      expect(await statement(party, statementId.one)).toMatchObject({ status: 'APPROVED' });
+    }
+    expect(await contract(author, contractId.A)).toEqual(contractBefore);
+
+    await assertInvisibleToStranger(
+      tenantB,
+      { contractId: contractId.A, statementIds: [statementId.one, statementId.two] },
+      'another tenant',
+    );
+  });
+
   // ---- an organization move (D-050 / D-051) ---------------------------------
 
   test('moving the employer out from under the union that wrote its signing policy suspends the policy, and a pending signature is refused', async ({
@@ -1820,6 +2715,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     test.setTimeout(AUDIT_RECORDS_WAIT_MS + 2 * EVENTS_WAIT_MS + HTTP_WORK_MS);
 
     interface AuditItem {
+      occurredAt: string;
       organizationId: string | null;
       correlationId: string;
       sourceTopic: string;
@@ -1841,6 +2737,14 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
         CONTRACT_AMENDED: 1,
         CONTRACT_MILESTONE_PLANNED: 1,
         CONTRACT_MILESTONE_CHANGED: 1,
+        // Two statements; three decisions on the first, two on the second, whose financial
+        // approval was refused at the cap and wrote nothing; nothing rejected.
+        STATEMENT_DRAFTED: 2,
+        STATEMENT_SUBMITTED: 2,
+        STATEMENT_DECISION_RECORDED: 5,
+        STATEMENT_TECHNICALLY_APPROVED: 2,
+        STATEMENT_APPROVED: 1,
+        STATEMENT_REJECTED: 0,
       },
       B: { CONTRACT_DRAFTED: 1, CONTRACT_CANCELLED: 1 },
       // The contract signed just before the move: its employer signature flagged, once.
@@ -1853,14 +2757,16 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     };
     // Refusals of a party for want of authority or for separation of duties: on contract A, the
     // employer signing without the policy's role and as a member of both parties, the contractor
-    // proposing an amendment, planning a milestone and changing one, and the employer signing an
-    // amendment after its policy was suspended; on B, the contractor cancelling. Each is in
-    // `evidence` with its correlation id.
+    // proposing an amendment, planning a milestone and changing one, the employer drafting a
+    // statement, the employer and the consultant deciding each other's step, a member of the
+    // contractor deciding, the same person deciding twice, and the employer signing an amendment
+    // after its policy was suspended; on B, the contractor cancelling. Each is in `evidence` with
+    // its correlation id.
     const refusals = evidence.filter((entry) => entry.refusal);
     const authorityRefusals = refusals.filter(
       (entry) => entry.refusal!.event === 'CONTRACT_AUTHORITY_REFUSED',
     );
-    expect(authorityRefusals).toHaveLength(7);
+    expect(authorityRefusals).toHaveLength(12);
 
     const records = await until(
       'audit records of every contract decision and refusal',
@@ -1913,7 +2819,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
         ).toHaveLength(count);
       }
     }
-    // Exactly the seven authority refusals, no more: one audit record per refusal, found by the
+    // Exactly the twelve authority refusals, no more: one audit record per refusal, found by the
     // correlation id the call carried, naming the refusal's event, its contract and the tenant,
     // stored as REFUSED under the closed action and reason the refusal names (#243; a
     // CONTRACT_SIGNATURE_REFUSED is always the contract's own signature, SIGN_CONTRACT).
@@ -1937,6 +2843,54 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
         resourceType: 'Contract',
         resourceId: refusedContract,
       });
+    }
+    // Each statement's life, in order, as audit-service holds it: every call that moved it left
+    // exactly its own events — recorded under the contract, the employer's tenant and the call's
+    // correlation id — and each call's events are no earlier than the previous call's.
+    for (const [which, calls] of [
+      [
+        'statement one',
+        [
+          'statement one drafted',
+          'statement one submitted',
+          'statement one technical step 1',
+          'statement one technical step 2',
+          'statement one financial step 1',
+        ],
+      ],
+      [
+        'statement two',
+        [
+          'statement two drafted',
+          'statement two submitted',
+          'statement two technical step 1',
+          'statement two technical step 2',
+        ],
+      ],
+    ] as const) {
+      let previous = 0;
+      for (const label of calls) {
+        const entry = evidence.find((item) => item.label === label)!;
+        const recorded = records.filter((item) => item.correlationId === entry.correlationId);
+        expect(
+          recorded.map((item) => item.sourceEventName).sort(),
+          `audit records of "${label}"`,
+        ).toEqual([...entry.events].sort());
+        for (const item of recorded) {
+          expect(item, label).toMatchObject({
+            organizationId: org.owner,
+            outcome: 'SUCCESS',
+            resourceType: 'Contract',
+            resourceId: contractId.A,
+          });
+        }
+        const instants = recorded.map((item) => Date.parse(item.occurredAt)).sort((a, b) => a - b);
+        expect(
+          instants[0]!,
+          `${which}: "${label}" is no earlier than the call before it`,
+        ).toBeGreaterThanOrEqual(previous);
+        previous = instants[instants.length - 1]!;
+      }
     }
     // At most one flag on contract A (whether it falls in the window depends on the run's
     // length); exactly one on C is in `expectedByContract`.
@@ -2011,8 +2965,12 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       PRICE.C.c2,
       AMENDMENT_ONE,
       AMENDMENT_TWO,
+      ...STATEMENT_ONE_LINES,
+      STATEMENT_ONE_GROSS,
+      STATEMENT_TWO_GROSS,
       'wrong lot',
       'Additional resurfacing',
+      'Resurfacing works, section',
     ];
     const contractKey = new Map(TENDERS.map((key) => [contractId[key], key] as const));
     const ofContracts = await until(
@@ -2031,7 +2989,12 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       },
       EVENTS_WAIT_MS,
     );
-    for (const name of ['CONTRACT_DRAFTED', 'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED']) {
+    for (const name of [
+      'CONTRACT_DRAFTED',
+      'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED',
+      'STATEMENT_DRAFTED',
+      'STATEMENT_APPROVED',
+    ]) {
       expect(
         ofContracts.some((event) => event.eventName === name),
         `${name} is among the events inspected`,
@@ -2062,5 +3025,39 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     expect(
       payloadOf(deliveriesOf('employer signature recorded and contract signed'), 'CONTRACT_SIGNED'),
     ).toMatchObject({ contractId: contractId.A });
+    // The statement's facts name the statement and the step decided, by whom it was decided as
+    // (organization and role), and nothing else.
+    const statementFacts = {
+      contractId: contractId.A,
+      statementId: statementId.one,
+      statementNumber: 1,
+      organizationId: org.owner,
+      contractorOrganizationId: org.c1,
+    };
+    expect(payloadOf(deliveriesOf('statement one submitted'), 'STATEMENT_SUBMITTED')).toMatchObject(
+      {
+        ...statementFacts,
+        technicalPolicyId: statementPolicy.technical,
+        financialPolicyId: statementPolicy.financial,
+        milestoneIds: [milestoneId],
+      },
+    );
+    for (const [label, chain, stepOrder, decider] of [
+      ['statement one technical step 1', 'TECHNICAL', 1, org.consultant],
+      ['statement one technical step 2', 'TECHNICAL', 2, org.owner],
+      ['statement one financial step 1', 'FINANCIAL', 1, org.owner],
+    ] as const) {
+      expect(payloadOf(deliveriesOf(label), 'STATEMENT_DECISION_RECORDED'), label).toMatchObject({
+        ...statementFacts,
+        chain,
+        stepOrder,
+        outcome: 'APPROVED',
+        deciderOrganizationId: decider,
+        deciderRole: OWNER_ROLE,
+      });
+    }
+    expect(
+      payloadOf(deliveriesOf('statement one financial step 1'), 'STATEMENT_APPROVED'),
+    ).toMatchObject(statementFacts);
   });
 });

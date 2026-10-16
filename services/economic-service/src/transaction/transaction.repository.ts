@@ -119,7 +119,8 @@ export class TransactionRepository {
                  occurred_at                     AS "occurredAt",
                  source_type                     AS "sourceType",
                  source_reference                AS "sourceReference",
-                 correlation_id                  AS "correlationId"
+                 correlation_id                  AS "correlationId",
+                 dispute_id                      AS "disputeId"
             FROM "transaction"
            WHERE id = ${id}
              FOR UPDATE
@@ -287,6 +288,8 @@ export interface LockedTransaction {
   sourceType: string | null;
   sourceReference: string | null;
   correlationId: string;
+  /** The dispute it holds, or held last; null if never disputed. */
+  disputeId: string | null;
 }
 
 export interface TransactionRow {

@@ -169,7 +169,7 @@ export class TransactionController {
       key,
       targeted(id),
       200,
-      (answer) => this.transactions.authoriseSettlement(id, answer.map(detailView)),
+      (answer) => this.transactions.authoriseSettlement(id, answer.map(detailView), key),
       { mayReplay: () => this.transactions.assertMayReplay(id, 'COMMIT') },
     );
   }
