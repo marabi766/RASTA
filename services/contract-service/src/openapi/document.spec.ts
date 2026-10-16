@@ -76,6 +76,7 @@ describe('the committed OpenAPI document', () => {
       'POST /v1/contracts/{id}/milestones',
       'POST /v1/contracts/{id}/sign',
       'POST /v1/contracts/{id}/statements',
+      'POST /v1/contracts/{id}/statements/{statementId}/decisions',
       'POST /v1/contracts/{id}/statements/{statementId}/submit',
     ]);
     for (const { key, operation } of operations) {
@@ -449,6 +450,70 @@ describe('the committed OpenAPI document', () => {
       ).properties;
       expect(view.approvalChains).toBeDefined();
       expect(view.submittedAt).toBeDefined();
+    });
+
+    it('publishes a statement’s decision as a keyed command naming its step, its refusals typed by the decision area, recorded but asking nobody (CON-003 PR 6)', () => {
+      const path = '/v1/contracts/{id}/statements/{statementId}/decisions';
+      const decide = operation(path, 'post');
+      expect(
+        decide.parameters.filter((p) => p.in === 'header').map((p) => p.name as string),
+      ).toEqual(['Idempotency-Key']);
+      expect(Object.keys(decide.responses).sort()).toEqual(
+        ['200', '400', '401', '403', '404', '409', '422', '500', '503'].sort(),
+      );
+      const body = decide.requestBody!.content['application/json']!.schema as {
+        additionalProperties?: boolean;
+        required: string[];
+        properties: Record<string, { enum?: string[] }>;
+      };
+      expect(body.additionalProperties).toBe(false);
+      expect(body.required).toEqual(['chain', 'stepOrder', 'decision']);
+      expect(body.properties.chain?.enum).toEqual(['TECHNICAL', 'FINANCIAL']);
+      expect(body.properties.decision?.enum).toEqual(['APPROVE', 'REJECT']);
+      const codesOf = (status: string) => {
+        const item = (
+          decide.responses[status]!.content['application/json']!.schema as {
+            properties: {
+              details: {
+                items: { properties: { path: { const: string }; code: { enum: string[] } } };
+              };
+            };
+          }
+        ).properties.details.items.properties;
+        return { area: item.path.const, codes: item.code.enum };
+      };
+      expect(codesOf('403')).toEqual({
+        area: 'decision',
+        codes: ['NOT_STEP_AUTHORITY', 'MEMBER_OF_CONTRACTOR'],
+      });
+      expect(codesOf('409')).toEqual({ area: 'decision', codes: ['STEP_DECIDED'] });
+      expect(codesOf('422').codes).toEqual([
+        'SUBMITTER_MAY_NOT_DECIDE',
+        'ALREADY_DECIDED_STATEMENT',
+        'ACTOR_IDENTITY_UNKNOWN',
+        'CONTRACT_NOT_SIGNED',
+        'STATEMENT_NOT_SUBMITTED',
+        'STATEMENT_DECIDED',
+        'STEP_NOT_IN_CHAIN',
+        'CHAIN_NOT_OPEN',
+        'STEP_NOT_NEXT',
+        'APPROVED_TOTAL_EXCEEDS_CAP',
+      ]);
+      // Each step of the view carries its decision.
+      const step = (
+        decide.responses['200']!.content['application/json']!.schema as {
+          properties: {
+            approvalChains: {
+              properties: {
+                technical: {
+                  properties: { steps: { items: { properties: Record<string, unknown> } } };
+                };
+              };
+            };
+          };
+        }
+      ).properties.approvalChains.properties.technical.properties.steps.items.properties;
+      expect(step.decision).toBeDefined();
     });
   });
 

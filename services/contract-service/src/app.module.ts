@@ -64,6 +64,7 @@ import { MilestoneController } from './milestone/milestone.controller';
 import { MilestoneRepository } from './milestone/milestone.repository';
 import { MilestoneService } from './milestone/milestone.service';
 import { StatementController } from './statement/statement.controller';
+import { StatementDecisionService } from './statement/statement-decision.service';
 import { StatementRepository } from './statement/statement.repository';
 import { StatementService } from './statement/statement.service';
 import { AuthorityRefusals } from './signing/authority-refusals';
@@ -89,9 +90,9 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
  * consent, ADR-043). Since PR 2 a second consumer (`ORGANIZATION_MOVED`, a trigger that queues a
  * re-check — Q-83) and the sweeper that works that queue suspend a signing policy whose union has
  * lost the employer; nothing a user calls writes through either. Since PR 4 the contractor drafts
- * statements, and since PR 5 submits them with a snapshot of the technical and financial approval
- * chains; recording those approvals, and the settlement boundary with economic-service, are later
- * changes (ADR-068 § 9) with their own wiring.
+ * statements, since PR 5 submits them with a snapshot of the technical and financial approval
+ * chains, and since PR 6 each step of those chains is decided by the authority it names; the
+ * settlement boundary with economic-service is a later change (ADR-068 § 9) with its own wiring.
  */
 @Module({
   controllers: [
@@ -149,6 +150,7 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
     MilestoneService,
     StatementRepository,
     StatementService,
+    StatementDecisionService,
     PolicyAccess,
     PolicyRepository,
     PolicyService,

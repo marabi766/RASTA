@@ -123,4 +123,22 @@ describe('the closed reasons', () => {
       POLICY_AUTHOR_NOT_GOVERNING: 422,
     });
   });
+
+  it('refuse a decision 403 for want of authority, 422 for separation of duties and for the statement’s state, 409 for a step decided meanwhile (CON-003 PR 6)', () => {
+    expect(REFUSAL_REASONS.decision).toEqual({
+      NOT_STEP_AUTHORITY: 403,
+      MEMBER_OF_CONTRACTOR: 403,
+      SUBMITTER_MAY_NOT_DECIDE: 422,
+      ALREADY_DECIDED_STATEMENT: 422,
+      ACTOR_IDENTITY_UNKNOWN: 422,
+      CONTRACT_NOT_SIGNED: 422,
+      STATEMENT_NOT_SUBMITTED: 422,
+      STATEMENT_DECIDED: 422,
+      STEP_NOT_IN_CHAIN: 422,
+      CHAIN_NOT_OPEN: 422,
+      STEP_NOT_NEXT: 422,
+      STEP_DECIDED: 409,
+      APPROVED_TOTAL_EXCEEDS_CAP: 422,
+    });
+  });
 });

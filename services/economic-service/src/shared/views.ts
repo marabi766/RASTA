@@ -193,6 +193,7 @@ export interface TransactionRowLike {
   organizationId: string;
   counterpartyOrganizationId: string | null;
   transactionType: string;
+  businessLine: string | null;
   status: string;
   grossAmountMinor: bigint;
   commissionAmountMinor: bigint;
@@ -215,6 +216,7 @@ export function toTransactionView(row: TransactionRowLike): TransactionView {
     organizationId: row.organizationId,
     counterpartyOrganizationId: row.counterpartyOrganizationId,
     transactionType: row.transactionType,
+    businessLine: row.businessLine,
     status: row.status,
     grossAmountMinor: formatMinor(row.grossAmountMinor),
     commissionAmountMinor: formatMinor(row.commissionAmountMinor),
@@ -238,6 +240,7 @@ export function toTransactionDetailView(
     commission: {
       id: string;
       ruleId: string | null;
+      outcome: string;
       rateBasisPoints: number;
       amountMinor: bigint;
     } | null;
@@ -266,6 +269,7 @@ export function toTransactionDetailView(
       ? {
           id: row.commission.id,
           ruleId: row.commission.ruleId,
+          outcome: row.commission.outcome,
           rateBasisPoints: row.commission.rateBasisPoints,
           amountMinor: formatMinor(row.commission.amountMinor),
         }
@@ -287,7 +291,8 @@ export function toTransactionDetailView(
 export interface CommissionRuleRow {
   id: string;
   organizationId: string | null;
-  transactionType: string;
+  businessLine: string | null;
+  transactionType: string | null;
   rateBasisPoints: number;
   minAmountMinor: bigint | null;
   maxAmountMinor: bigint | null;
@@ -301,6 +306,7 @@ export function toCommissionRuleView(row: CommissionRuleRow): CommissionRuleView
   return {
     id: row.id,
     organizationId: row.organizationId,
+    businessLine: row.businessLine,
     transactionType: row.transactionType,
     rateBasisPoints: row.rateBasisPoints,
     minAmountMinor: row.minAmountMinor === null ? null : formatMinor(row.minAmountMinor),
@@ -317,6 +323,8 @@ export interface CommissionRow {
   transactionId: string;
   organizationId: string;
   ruleId: string | null;
+  businessLine: string | null;
+  outcome: string;
   rateBasisPoints: number;
   grossAmountMinor: bigint;
   amountMinor: bigint;
@@ -330,6 +338,8 @@ export function toCommissionView(row: CommissionRow): CommissionView {
     transactionId: row.transactionId,
     organizationId: row.organizationId,
     ruleId: row.ruleId,
+    businessLine: row.businessLine,
+    outcome: row.outcome,
     rateBasisPoints: row.rateBasisPoints,
     grossAmountMinor: formatMinor(row.grossAmountMinor),
     amountMinor: formatMinor(row.amountMinor),

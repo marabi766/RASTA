@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { amountMinorSchema, currencySchema, organizationIdSchema } from '@rasta/contracts';
+import {
+  amountMinorSchema,
+  businessLineSchema,
+  currencySchema,
+  organizationIdSchema,
+} from '@rasta/contracts';
 import { queryBoolean } from '@rasta/config';
 import { cursorQueryParameter } from '../shared/cursor';
 
@@ -45,6 +50,16 @@ export const createTransactionSchema = z
      * conjure a credit with no payment behind it.
      */
     transactionType: z.enum(TRANSACTION_TYPES),
+    /**
+     * Why the platform may earn from it (ADR-045 § 1), as the service that
+     * owns the fact knows it. Never inferred from the type here: an order may
+     * sell parts or broker a service.
+     *
+     * Optional for now (docs/24 Q-130): a transaction without a line is priced
+     * only by the type-only rules that predate business lines, and with none
+     * its commission is recorded as `NO_ACTIVE_RULE`.
+     */
+    businessLine: businessLineSchema.optional(),
     counterpartyOrganizationId: organizationIdSchema.optional(),
     grossAmountMinor: amountMinorSchema,
     currency: currencySchema.default('IRR'),
@@ -155,6 +170,8 @@ export interface TransactionView {
   organizationId: string;
   counterpartyOrganizationId: string | null;
   transactionType: string;
+  /** Why the platform may earn from it (ADR-045); null where the source sent none. */
+  businessLine: string | null;
   status: string;
   grossAmountMinor: string;
   commissionAmountMinor: string;
@@ -189,8 +206,10 @@ export interface TransactionDetailView extends TransactionView {
     id: string;
     rateBasisPoints: number;
     amountMinor: string;
-    /** False when no rule matched — zero because unconfigured, not free. */
+    /** Null when no rule matched — zero because unconfigured, not free. */
     ruleId: string | null;
+    /** `RULE_APPLIED`, or `NO_ACTIVE_RULE` (ADR-045 § 2). */
+    outcome: string;
   } | null;
   settlement: { id: string; journalId: string; settledAt: string } | null;
 }
