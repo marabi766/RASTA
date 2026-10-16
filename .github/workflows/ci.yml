@@ -144,6 +144,14 @@ jobs:
         # dry run). Codex r1 and r4 on #268.
         run: pnpm run test:database-turbo-env
 
+      - name: Every service's own settings reach it through turbo
+        # Every task that starts a service passes every key of that service's
+        # own schema, save the ones withheld before this check
+        # (scripts/service-env-turbo-withheld.json, which only shrinks); and
+        # the root commands resolve asset-service's claim-document settings
+        # (turbo dry run). Codex r2 on #304.
+        run: pnpm run test:service-env-turbo
+
       - name: Optional database-side statement timeout for the runtime roles
         # Behind PgBouncer the services' own statement_timeout option is
         # dropped, so the bootstrap, the split and the rotation can set one
