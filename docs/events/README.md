@@ -534,6 +534,19 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 | `SHIPMENT_DISPATCHED`   | notification                 | `shipmentId`, `consigneeOrganizationId`, `trackingEventId`, `shipmentVersion` (۲), `dispatchedBy`, `dispatchedAt`, …                       |
 | `SHIPMENT_DELIVERED`    | marketplace · notification   | `shipmentId`, `consigneeOrganizationId`, `trackingEventId`, `shipmentVersion` (۳), `deliveredBy`, `deliveredAt`, …                         |
 
+### محمولهٔ برگشت — RUN-005 / ADR-048 (2026-10-16)
+
+نیمهٔ فیزیکی لجستیک معکوس. Aggregate: `ReturnShipment`؛ کلید پارتیشن: `returnShipmentId` (STRICT، `streamSeq` = `returnShipmentVersion`: ۱
+`IN_TRANSIT`، ۲ `RECEIVED`). همان قرارداد مصرف محموله‌های رفت (D-027): مصرف‌کننده با `streamSeq` Envelope مرتب و تکراری‌زدایی می‌کند.
+این رویدادها **واقعیت دربارهٔ کالا**ند، نه اجازهٔ مرجوعی: inventory درخواست مرجوعی را نمی‌خواند، و مصرف‌کننده‌ای که اثر تجاری دارد
+(marketplace، PR بعد) هر رویداد را با درخواست خودش می‌سنجد. Payload فقط شناسه، تعداد صحیح و لحظه دارد — **نه حمل‌کننده، نه
+یادداشت، نه مبلغ**. هیچ رویدادی موجودی را تغییر نمی‌دهد یا Refund می‌خواهد.
+
+| رویداد                       | مصرف‌کنندگان                     | Payload کلیدی                                                                                                                                                                                                                                 |
+| ---------------------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RETURN_SHIPMENT_DISPATCHED` | **audit** · marketplace (PR بعد) | `returnShipmentId`, `returnRequestId`, `orderId`, `buyerOrganizationId`, `destinationWarehouseId`, `lines[]` (`orderLineId`, `productId`, `expectedQuantity`), `returnShipmentVersion` (۱), `dispatchedBy`, `dispatchedAt`, `trackingEventId` |
+| `RETURN_SHIPMENT_RECEIVED`   | **audit** · marketplace (PR بعد) | همان، `lines[]` با `receivedQuantity` (۰ تا `expectedQuantity`), `returnShipmentVersion` (۲), `receivedBy`, `receivedAt`                                                                                                                      |
+
 ## Construction — `rasta.construction.v1`
 
 > **CON-001 PR نخست (2026-09-26).** `construction-service` هفت رویداد زیر را تولید می‌کند: `PROJECT_CREATED` و شش

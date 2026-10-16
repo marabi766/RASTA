@@ -52,6 +52,9 @@ import { ReservationSweeper } from './reservation/reservation.sweeper';
 import { ShipmentController } from './shipment/shipment.controller';
 import { ShipmentRepository } from './shipment/shipment.repository';
 import { ShipmentService } from './shipment/shipment.service';
+import { ReturnShipmentController } from './return-shipment/return-shipment.controller';
+import { ReturnShipmentRepository } from './return-shipment/return-shipment.repository';
+import { ReturnShipmentService } from './return-shipment/return-shipment.service';
 import { CommandRunner } from './shared/command-runner';
 import { IdempotencyStore } from './shared/idempotency';
 import { inventoryReservationsOverdue } from './observability/metrics';
@@ -79,6 +82,7 @@ import { loadInventoryEnv, SERVICE_NAME, type InventoryEnv } from './config/env'
     ReservationController,
     StockController,
     ShipmentController,
+    ReturnShipmentController,
     HealthController,
     MetricsController,
   ],
@@ -128,6 +132,8 @@ import { loadInventoryEnv, SERVICE_NAME, type InventoryEnv } from './config/env'
     ReservationService,
     ShipmentRepository,
     ShipmentService,
+    ReturnShipmentRepository,
+    ReturnShipmentService,
 
     {
       provide: ReservationSweeper,
