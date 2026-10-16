@@ -6,6 +6,13 @@ import { Alert, Button, Field, controlClassName } from '@/ui';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { normalizePersianText, toPersianDigits } from '@/lib/format';
 import {
+  clearUnresolvedDispute,
+  restoreUnresolvedDispute,
+  saveUnresolvedDispute,
+  type RestoredDispute,
+} from '@/lib/unresolved-dispute';
+import type { Binding } from '@/lib/unresolved-order';
+import {
   DISPUTE_COMMAND_CONSEQUENCES,
   DISPUTE_COMMAND_FIELD,
   DISPUTE_COMMAND_FIELDS,
@@ -36,14 +43,23 @@ import {
  * ## Sent and not confirmed
  *
  * The pattern of `PlaceOrderForm` (PR 245): the form is replaced by a view that
- * never says "nothing changed", that re-sends the kept body under the kept key
- * ("send the same request again"), and whose only other way out is a full
- * reload of the transaction — the record itself is the answer. Unlike an
- * order, nothing is remembered across a reload: the dispute is a state of a
- * transaction this page reads, and the state machine refuses the command a
- * second time from the state the first one led to (`DISPUTED` has no `DISPUTE`
- * edge, `PENDING_SETTLEMENT` no `RESOLVE_DISPUTE`), so a reload shows whether it
- * happened and a fresh key cannot apply it twice.
+ * never says "nothing changed" and re-sends the kept body under the kept key
+ * ("send the same request again"). Like an order, the submission is
+ * **remembered across a reload** (`lib/unresolved-dispute.ts`): the state
+ * machine does not make a second command under a fresh key harmless —
+ * `PENDING_SETTLEMENT → DISPUTED → PENDING_SETTLEMENT` is legal, so a resolution
+ * that committed unseen and was sent again with a new key after the payer opened
+ * a new dispute would resolve the new one (PR 319 review 1, finding 2). The entry
+ * is written before the request leaves; a confirmed answer drops it, and
+ * otherwise only the person does, once the same request has been tried again or
+ * can no longer be.
+ *
+ * ## When the call itself fails
+ *
+ * Next rejects a dropped response and the request gate's `401` to an action
+ * POST the same way. Only `/auth/session` answering `401` lets the view say the
+ * session has ended; any other failure is "no answer came back" and the same
+ * request may still be sent again (PR 319 review 1, finding 4).
  */
 
 export interface DisputeCommandFormProps {
@@ -51,6 +67,42 @@ export interface DisputeCommandFormProps {
   readonly command: DisputeCommand;
   readonly csrfToken: string;
   readonly submissionId: string;
+  /** Whose login this page was drawn for (`submissionBinding`); one-way tags, not session values. */
+  readonly binding: Binding;
+  /** How long a remembered submission outlives its login at most: the session's lifetime. */
+  readonly sessionMaxAgeSeconds: number;
+  /** A remembered submission this form starts from (`DisputeCommands`); idle otherwise. */
+  readonly initial?: DisputeFormState;
+}
+
+/** The remembered submission as the form's starting state. */
+export function unconfirmedFrom(restored: RestoredDispute): UnconfirmedDispute {
+  const { command, correlationId, submissionId, values } = restored.dispute;
+  return {
+    kind: 'UNCONFIRMED',
+    command,
+    correlationId,
+    submissionId,
+    values,
+    ...(restored.kind === 'VIEW_ONLY' ? { viewOnly: true as const } : {}),
+  };
+}
+
+/**
+ * Whether the portal says, authoritatively, that this browser's session has
+ * ended (`/auth/session` → `401`). Anything else — `204`, another status, no
+ * answer — is not that.
+ */
+async function sessionHasEnded(): Promise<boolean> {
+  try {
+    const response = await fetch('/auth/session', {
+      cache: 'no-store',
+      credentials: 'same-origin',
+    });
+    return response.status === 401;
+  } catch {
+    return false;
+  }
 }
 
 /** A redirect from a server action reaches the client as a rejection whose digest says so. */
@@ -84,25 +136,60 @@ export function DisputeCommandForm({
   command,
   csrfToken,
   submissionId,
+  binding,
+  sessionMaxAgeSeconds,
+  initial = IDLE_DISPUTE_FORM,
 }: DisputeCommandFormProps) {
   const send = useCallback(
     async (previous: DisputeFormState, form: FormData): Promise<DisputeFormState> => {
+      const firstSend = previous.kind !== 'UNCONFIRMED';
+      if (!firstSend) {
+        // The same request is a replay only while the service still holds its
+        // key, and only from the login it is bound to. Past that, never re-sent.
+        const stored = restoreUnresolvedDispute(transactionId, binding, sessionMaxAgeSeconds);
+        if (stored?.kind !== 'RETRYABLE' || stored.dispute.submissionId !== previous.submissionId) {
+          return { ...previous, viewOnly: true };
+        }
+      }
+
+      // Remembered BEFORE it is sent: from here until an answer, a reload or a
+      // lost response must find the same key, not mint another. Not sent if it
+      // cannot be remembered.
+      const unsent = firstSend ? pendingFrom(form, command) : null;
+      if (unsent && !saveUnresolvedDispute(transactionId, unsent, binding)) {
+        return { kind: 'STORAGE_UNAVAILABLE' };
+      }
+
+      let next: DisputeFormState;
       try {
-        return await submitDisputeCommand(transactionId, previous, form);
+        next = await submitDisputeCommand(transactionId, previous, form);
       } catch (error) {
-        if (isRedirect(error)) throw error;
-        // The call itself failed — a lost response after the command may have
-        // committed, or the portal's own gate answering 401 JSON to an action
-        // POST whose session has ended. Either way the doubt is still there.
-        if (previous.kind === 'UNCONFIRMED') return withRetryNote(previous, 'sessionEnded');
-        const unsent = pendingFrom(form, command);
-        if (unsent) return unsent;
+        // Done: the action redirects to the transaction. Nothing is unresolved now.
+        if (isRedirect(error)) {
+          clearUnresolvedDispute(transactionId);
+          throw error;
+        }
+        // The call itself failed. A lost response after the command may have
+        // committed; only an authoritative "the session has ended" says more.
+        const ended = await sessionHasEnded();
+        if (!firstSend) {
+          return withRetryNote(previous, ended ? 'sessionEnded' : 'retryUnknown');
+        }
+        if (unsent) return ended ? { ...unsent, sessionEnded: true } : unsent;
         throw error;
       }
+
+      if (firstSend) {
+        // Answered: still in doubt (kept, now with its tracking code), or a
+        // definite refusal of a request that was never in doubt (dropped).
+        if (next.kind === 'UNCONFIRMED') saveUnresolvedDispute(transactionId, next, binding);
+        else clearUnresolvedDispute(transactionId);
+      }
+      return next;
     },
-    [transactionId, command],
+    [transactionId, command, binding, sessionMaxAgeSeconds],
   );
-  const [state, action, pending] = useActionState(send, IDLE_DISPUTE_FORM);
+  const [state, action, pending] = useActionState(send, initial);
   const headingId = `command-${command}`;
 
   if (state.kind === 'UNCONFIRMED') {
@@ -114,6 +201,7 @@ export function DisputeCommandForm({
         csrfToken={csrfToken}
         headingId={headingId}
         transactionHref={`/transactions/${encodeURIComponent(transactionId)}`}
+        onForget={() => clearUnresolvedDispute(transactionId)}
       />
     );
   }
@@ -197,6 +285,16 @@ function CommandBanner({ state }: { state: DisputeFormState }) {
     return <Alert tone="warning">این تراکنش دیگر در دسترس نیست. صفحه را تازه کنید.</Alert>;
   }
 
+  if (state.kind === 'STORAGE_UNAVAILABLE') {
+    return (
+      <Alert tone="danger">
+        درخواست ارسال نشد: این مرورگر نمی‌تواند درخواست را تا روشن‌شدن نتیجه‌اش به خاطر بسپارد
+        (مثلاً حالت خصوصی یا حافظهٔ پر)، و بی آن ممکن است یک اقدام دو بار انجام شود. از مرورگر دیگری
+        استفاده کنید یا فضا را آزاد کنید و دوباره تلاش کنید.
+      </Alert>
+    );
+  }
+
   return null;
 }
 
@@ -212,6 +310,7 @@ function UnconfirmedCommand({
   csrfToken,
   headingId,
   transactionHref,
+  onForget,
 }: {
   state: UnconfirmedDispute;
   action: (form: FormData) => void;
@@ -219,11 +318,16 @@ function UnconfirmedCommand({
   csrfToken: string;
   headingId: string;
   transactionHref: string;
+  /** Forgets the remembered submission: the one action allowed to. */
+  onForget: () => void;
 }) {
   const field = DISPUTE_COMMAND_FIELDS[state.command];
-  // A call the gate refused because the session ended: its id is bound to the
-  // old login and cannot be sent after a new one.
-  const canRetry = !state.sessionEnded;
+  // Not re-sent from another login, past the replay window, or with the session
+  // ended (its id is bound to the old login).
+  const canRetry = !state.viewOnly && !state.sessionEnded;
+  // Put aside only once the same request has been tried again and refused, or
+  // can no longer be sent: never before the original key had its chance.
+  const canForget = (state.viewOnly || state.retryRefused) && !state.sessionEnded;
   const what = DISPUTE_COMMAND_LABELS[state.command];
 
   return (
@@ -266,6 +370,12 @@ function UnconfirmedCommand({
           ممکن است درخواست انجام شده باشد.
         </Alert>
       ) : null}
+      {state.viewOnly ? (
+        <Alert tone="warning">
+          این درخواست در نشست پیشین یا بیش از یک ساعت پیش فرستاده شده است و دیگر نمی‌توان همان را با
+          اطمینان دوباره فرستاد؛ ممکن است انجام شده باشد. وضعیت تراکنش را ببینید.
+        </Alert>
+      ) : null}
       {canRetry ? (
         <div>
           <Button type="submit" disabled={pending}>
@@ -273,9 +383,22 @@ function UnconfirmedCommand({
           </Button>
         </div>
       ) : null}
+      {canForget ? (
+        <div>
+          {/* A full navigation: the page reads the transaction again and offers what it allows. */}
+          <a
+            href={transactionHref}
+            onClick={onForget}
+            onAuxClick={onForget}
+            className="text-sm underline"
+          >
+            وضعیت تراکنش را دیدم؛ این درخواست را کنار بگذار
+          </a>
+        </div>
+      ) : null}
       <p className="text-sm text-content-muted">
         {canRetry
-          ? '«ارسال دوباره» همان درخواست را با همان شناسهٔ ارسال و همان متن می‌فرستد و ممکن است نتیجهٔ درخواست نخست را برگرداند، اما این تضمین نیست؛ وضعیت تراکنش مرجع است.'
+          ? '«ارسال دوباره» همان درخواست را با همان شناسهٔ ارسال و همان متن می‌فرستد و ممکن است نتیجهٔ درخواست نخست را برگرداند، اما این تضمین نیست؛ وضعیت تراکنش مرجع است. تا روشن‌شدن نتیجه، اقدام تازه‌ای روی این تراکنش عرضه نمی‌شود.'
           : 'وضعیت تراکنش مرجع است.'}
       </p>
     </form>

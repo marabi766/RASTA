@@ -12,11 +12,14 @@ import {
 } from '@/ui';
 import { formatJalaliDateLong } from '@/lib/format';
 import { transactionStatusLabel, transactionTypeLabel } from '@/lib/labels';
-import type { DisputeCommand } from '@/lib/transaction-dispute-fields';
+import { disputedThroughOrder, type DisputeCommand } from '@/lib/transaction-dispute-fields';
+import type { Binding } from '@/lib/unresolved-order';
 import { formatOrderAmount } from '@/app/orders/OrdersScreen';
 import type { ReadResult, Transaction } from '@/server/transactions';
 
-import { DisputeCommandForm } from './DisputeCommandForm';
+import { ConsumedFlash } from '@/app/ConsumedFlash';
+
+import { DisputeCommands } from './DisputeCommands';
 
 /**
  * One transaction and its dispute (`/transactions/[id]`, EXP-003).
@@ -28,16 +31,25 @@ import { DisputeCommandForm } from './DisputeCommandForm';
  * identically.
  *
  * The forms are the commands `disputeCommandsFor` offered this viewer; this
- * screen never decides which.
+ * screen never decides which. A `MARKETPLACE_ORDER` transaction is disputed
+ * only through its order (Q-138): the screen links there instead.
  */
 
 /** No bank behind any of it (CLAUDE.md, ADR-024) — said wherever money is shown. */
 export const TRANSACTION_SIMULATION_NOTICE =
   'این تراکنش در حالت نمایشی است: پلتفرم به هیچ بانک یا درگاه واقعی متصل نیست و پولی جابه‌جا نمی‌شود.';
 
-const DONE_MESSAGES: Readonly<Record<DisputeCommand, string>> = {
-  DISPUTE: 'اعتراض ثبت شد و تسویهٔ این تراکنش متوقف است.',
-  RESOLVE_DISPUTE: 'رسیدگی ثبت شد و تراکنش به صف «در انتظار تسویه» برگشت. تسویه انجام نشده است.',
+/**
+ * What the person's own request did, in the past tense and nothing more. The
+ * banner may outlive the moment (a slow reload inside the token's window), so
+ * it claims nothing about the transaction **now** — that is the record below,
+ * read fresh for this page (PR 319 review 1, finding 3).
+ */
+const NOTICE_MESSAGES: Readonly<Record<DisputeCommand, string>> = {
+  DISPUTE:
+    'اعتراض شما ثبت شد. وضعیت کنونی تراکنش همان است که در زیر، از سامانهٔ مالی، خوانده شده است.',
+  RESOLVE_DISPUTE:
+    'رسیدگی شما ثبت شد. وضعیت کنونی تراکنش همان است که در زیر، از سامانهٔ مالی، خوانده شده است.',
 };
 
 export interface TransactionDetailScreenProps {
@@ -47,7 +59,11 @@ export interface TransactionDetailScreenProps {
   readonly csrfToken: string;
   /** One fresh submission id per form: each is its own idempotency key. */
   readonly mintSubmissionId: () => string;
-  readonly done?: DisputeCommand;
+  /** Whose login this page is for (`submissionBinding`): one-way tags. */
+  readonly binding: Binding;
+  readonly sessionMaxAgeSeconds: number;
+  /** The command this session's own request just completed, from a verified flash token. */
+  readonly notice?: DisputeCommand;
 }
 
 function Row({ term, children }: { term: string; children: React.ReactNode }) {
@@ -64,7 +80,9 @@ export function TransactionDetailScreen({
   commands,
   csrfToken,
   mintSubmissionId,
-  done,
+  binding,
+  sessionMaxAgeSeconds,
+  notice,
 }: TransactionDetailScreenProps) {
   if (result.kind === 'FORBIDDEN') {
     return <NoAccessState description="این تراکنش در اختیار شما نیست." />;
@@ -83,10 +101,18 @@ export function TransactionDetailScreen({
 
   const t = result.data;
   const money = (minor: string) => formatOrderAmount(minor, t.currency);
+  const throughOrder = disputedThroughOrder(t);
+  const submissionIds: Partial<Record<DisputeCommand, string>> = {};
+  for (const command of commands) submissionIds[command] = mintSubmissionId();
 
   return (
     <div className="flex flex-col gap-4">
-      {done ? <Alert tone="success">{DONE_MESSAGES[done]}</Alert> : null}
+      {notice ? (
+        <>
+          <Alert tone="success">{NOTICE_MESSAGES[notice]}</Alert>
+          <ConsumedFlash />
+        </>
+      ) : null}
       <Alert tone="info" title="حالت نمایشی">
         {TRANSACTION_SIMULATION_NOTICE}
       </Alert>
@@ -148,19 +174,34 @@ export function TransactionDetailScreen({
 
       <Section headingId="dispute" title="اعتراض">
         <DisputeState transaction={t} />
-        {commands.length > 0 ? (
-          <div className="mt-4 flex flex-col gap-4">
-            {commands.map((command) => (
-              <DisputeCommandForm
-                key={command}
-                transactionId={t.id}
-                command={command}
-                csrfToken={csrfToken}
-                submissionId={mintSubmissionId()}
-              />
-            ))}
+        {throughOrder ? (
+          <div className="mt-4 flex flex-col gap-2 text-sm">
+            <p>
+              این تراکنش از یک سفارش بازارگاه است. اعتراض به آن فقط از صفحهٔ همان سفارش ثبت و رسیدگی
+              می‌شود؛ آنجا نتیجه و مسئولیت هم ثبت می‌شود.
+            </p>
+            <p>
+              <Link href={throughOrder.href} className="underline">
+                {throughOrder.orderId ? 'رفتن به صفحهٔ سفارش' : 'رفتن به فهرست سفارش‌ها'}
+              </Link>
+              {throughOrder.orderId ? null : (
+                <span className="text-content-muted">
+                  {' '}
+                  (شناسهٔ سفارش در اطلاعات این تراکنش نیامده است؛ سفارش را در فهرست پیدا کنید.)
+                </span>
+              )}
+            </p>
           </div>
-        ) : null}
+        ) : (
+          <DisputeCommands
+            transactionId={t.id}
+            commands={commands}
+            csrfToken={csrfToken}
+            submissionIds={submissionIds}
+            binding={binding}
+            sessionMaxAgeSeconds={sessionMaxAgeSeconds}
+          />
+        )}
       </Section>
     </div>
   );

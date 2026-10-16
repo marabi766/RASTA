@@ -14,6 +14,7 @@ import {
   parseDisputeCommand,
   type Transaction,
 } from './transactions';
+import { tokenAuthority } from './realm-roles';
 import type { WebSession } from './session';
 
 /**
@@ -198,7 +199,13 @@ describe('reading one transaction', () => {
 describe('which commands are offered', () => {
   const PAYER = 'ORG-DEH-0001';
   const PAYEE = 'ORG-DEH-0002';
-  const tx = (status: string) => ({ status, organizationId: PAYER });
+  const tx = (status: string, transactionType = 'MAINTENANCE_SERVICE') => ({
+    status,
+    organizationId: PAYER,
+    transactionType,
+    sourceType: transactionType === 'MARKETPLACE_ORDER' ? 'ORDER' : null,
+    sourceReference: transactionType === 'MARKETPLACE_ORDER' ? 'ORD_1' : null,
+  });
 
   it('offers the payer’s administrator a dispute from HELD and PENDING_SETTLEMENT only', () => {
     const viewer = { roles: ['ORGANIZATION_ADMIN'], organizationId: PAYER };
@@ -247,6 +254,48 @@ describe('which commands are offered', () => {
 
   it('offers nothing when the roles could not be read', () => {
     expect(disputeCommandsFor(tx('HELD'), { roles: null, organizationId: PAYER })).toEqual([]);
+  });
+
+  it('offers nothing on a marketplace order’s transaction, to anyone (Q-138)', () => {
+    for (const roles of [['ORGANIZATION_ADMIN'], ['SYSTEM_ADMIN'], ['UNION_ADMIN']]) {
+      const viewer = { roles, organizationId: PAYER };
+      expect(disputeCommandsFor(tx('HELD', 'MARKETPLACE_ORDER'), viewer)).toEqual([]);
+      expect(disputeCommandsFor(tx('DISPUTED', 'MARKETPLACE_ORDER'), viewer)).toEqual([]);
+    }
+  });
+});
+
+describe('which commands are offered, from the token the service will see (review 1, finding 1)', () => {
+  const PAYER = 'ORG-DEH-0001';
+  const jwt = (claims: unknown): string =>
+    `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`;
+  const viewerOf = (token: string) => {
+    const authority = tokenAuthority(token);
+    return { roles: authority?.roles ?? null, organizationId: authority?.organizationId ?? null };
+  };
+  const held = {
+    status: 'HELD',
+    organizationId: PAYER,
+    transactionType: 'MAINTENANCE_SERVICE',
+    sourceType: null,
+    sourceReference: null,
+  };
+
+  it('a role removed after the token was minted still counts: the payer’s dispute stays offered', () => {
+    // identity-service's rows no longer hold ORGANIZATION_ADMIN; the token, until
+    // refreshed, does — and economic-service accepts the dispute on the token.
+    const token = jwt({
+      org_id: PAYER,
+      org_ids: [PAYER],
+      org_roles: [`${PAYER}:ORGANIZATION_ADMIN`],
+    });
+    expect(disputeCommandsFor(held, viewerOf(token))).toEqual(['DISPUTE']);
+  });
+
+  it('a role added after the token was minted does not count yet: no resolution form for a 403', () => {
+    // The rows now hold UNION_ADMIN; the token does not, so the service refuses.
+    const token = jwt({ org_id: PAYER, org_ids: [PAYER], org_roles: [`${PAYER}:FLEET_MANAGER`] });
+    expect(disputeCommandsFor({ ...held, status: 'DISPUTED' }, viewerOf(token))).toEqual([]);
   });
 });
 

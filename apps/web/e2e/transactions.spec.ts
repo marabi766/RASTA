@@ -64,6 +64,11 @@ async function hold(
   request: APIRequestContext,
   token: string,
   counterpartyOrganizationId: string,
+  source: { transactionType: string; sourceType: string; sourceReference: string } = {
+    transactionType: 'MAINTENANCE_SERVICE',
+    sourceType: 'E2E',
+    sourceReference: `e2e-transactions-${randomUUID()}`,
+  },
 ): Promise<string> {
   const wallet = await call<{ id: string }>(request, token, 'get', '/v1/wallets/me');
   expect(wallet.status).toBe(200);
@@ -79,12 +84,10 @@ async function hold(
     'post',
     '/v1/transactions',
     {
-      transactionType: 'MAINTENANCE_SERVICE',
+      ...source,
       counterpartyOrganizationId,
       grossAmountMinor: GROSS_MINOR,
       currency: 'IRR',
-      sourceType: 'E2E',
-      sourceReference: `e2e-transactions-${randomUUID()}`,
       holdFunds: true,
     },
   );
@@ -106,6 +109,8 @@ test.describe('transaction disputes through the live stack', () => {
 
   let ownId = '';
   let thirdId = '';
+  let orderTransactionId = '';
+  const ORDER_ID = `ORD_E2E_${randomUUID().replace(/-/g, '').slice(0, 20)}`;
 
   test.beforeAll(async ({ browser, playwright }) => {
     const context = await browser.newContext();
@@ -116,6 +121,12 @@ test.describe('transaction disputes through the live stack', () => {
     try {
       ownId = await hold(request, session.accessToken, OWN_PAYEE);
       thirdId = await hold(request, session.accessToken, THIRD_ORGANIZATION);
+      // Shaped as marketplace-service records an order's obligation.
+      orderTransactionId = await hold(request, session.accessToken, OWN_PAYEE, {
+        transactionType: 'MARKETPLACE_ORDER',
+        sourceType: 'ORDER',
+        sourceReference: ORDER_ID,
+      });
     } finally {
       await request.dispose();
     }
@@ -136,19 +147,33 @@ test.describe('transaction disputes through the live stack', () => {
     expect(before).toContain(GROSS_SHOWN);
     expect(before).toContain('اعتراضی ثبت نشده است');
     expect(before).toContain('به هیچ بانک یا درگاه واقعی متصل نیست');
+
+    // The forms are drawn once the browser has been asked for an unresolved
+    // submission on this transaction (there is none).
+    const form = page.getByRole('form', { name: 'ثبت اعتراض' });
+    await expect(form).toBeVisible();
     // An organization administrator is never offered the resolution.
     await expect(page.getByRole('form', { name: 'رسیدگی به اعتراض' })).toHaveCount(0);
 
-    const form = page.getByRole('form', { name: 'ثبت اعتراض' });
     await form.getByLabel('دلیل اعتراض').fill(REASON);
     await form.getByRole('button', { name: 'ثبت اعتراض' }).click();
 
-    await page.waitForURL(`**/transactions/${ownId}?done=DISPUTE`);
+    // The confirmation is a signed token, shown once and taken out of the address.
+    await expect(page.getByText(/اعتراض شما ثبت شد/)).toBeVisible();
+    await expect.poll(() => new URL(page.url()).searchParams.has('flash')).toBe(false);
+    expect(new URL(page.url()).pathname).toBe(`/transactions/${ownId}`);
     const after = await mainText(page);
-    expect(after).toContain('اعتراض ثبت شد');
     expect(after).toContain('تسویهٔ آن متوقف است');
     expect(after).toContain(REASON);
     await expect(page.getByRole('form', { name: 'ثبت اعتراض' })).toHaveCount(0);
+
+    // A reload shows the record, not the confirmation; a typed flag confirms nothing.
+    await page.reload();
+    await expect(page.getByText(REASON)).toBeVisible();
+    await expect(page.getByText(/اعتراض شما ثبت شد/)).toHaveCount(0);
+    await page.goto(`/transactions/${ownId}?flash=DISPUTE`);
+    await expect(page.getByText(REASON)).toBeVisible();
+    await expect(page.getByText(/اعتراض شما ثبت شد/)).toHaveCount(0);
 
     // The record agrees with the screen.
     const read = await call<{ status: string; disputeReason: string | null }>(
@@ -236,9 +261,9 @@ test.describe('transaction disputes through the live stack', () => {
     await form.getByLabel('شرح تصمیم').fill(RESOLUTION);
     await form.getByRole('button', { name: 'رسیدگی به اعتراض' }).click();
 
-    await page.waitForURL(`**/transactions/${ownId}?done=RESOLVE_DISPUTE`);
+    await expect(page.getByText(/رسیدگی شما ثبت شد/)).toBeVisible();
+    await expect.poll(() => new URL(page.url()).searchParams.has('flash')).toBe(false);
     const text = await mainText(page);
-    expect(text).toContain('تسویه انجام نشده است');
     expect(text).toContain('در انتظار تسویه');
     expect(text).toContain('اعتراض ثبت شده بود');
 
@@ -251,5 +276,19 @@ test.describe('transaction disputes through the live stack', () => {
     expect(read.status).toBe(200);
     expect(read.body.status).toBe('PENDING_SETTLEMENT');
     expect(read.body.settlement).toBeNull();
+  });
+
+  test('a marketplace order’s transaction: no dispute here, a link to its order (Q-138)', async ({
+    context,
+    page,
+  }) => {
+    await installLiveSession(context, 'orgAdmin');
+    await page.goto(`/transactions/${orderTransactionId}`);
+
+    const link = page.getByRole('link', { name: 'رفتن به صفحهٔ سفارش' });
+    await expect(link).toHaveAttribute('href', `/orders/${ORDER_ID}`);
+    expect(await mainText(page)).toContain('فقط از صفحهٔ همان سفارش');
+    await expect(page.locator('main form')).toHaveCount(0);
+    await expect(page.locator('main textarea')).toHaveCount(0);
   });
 });

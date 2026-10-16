@@ -10,6 +10,7 @@ import {
   DISPUTE_TARGET_STATE,
   NEVER_ROLE,
   PLATFORM_ROLES,
+  disputedThroughOrder,
   isDisputeCommand,
   type DisputeCommand,
   type DisputeField,
@@ -131,9 +132,13 @@ export async function fetchTransaction(
 // ---------------------------------------------------------------------------
 
 export interface DisputeViewer {
-  /** The service's view of the request's roles (`requestRoles`), or `null` when they could not be read. */
+  /**
+   * The roles the service will act on for this request — read from the access
+   * token (`tokenAuthority`), never from `/v1/users/me` — or `null` when they
+   * could not be read.
+   */
   readonly roles: readonly string[] | null;
-  /** The organization the session acts for — the token's, which is the one the service compares. */
+  /** The organization the request resolves to — the token's `org_id`, the one the service compares. */
   readonly organizationId: string | null;
 }
 
@@ -149,15 +154,22 @@ export interface DisputeViewer {
  * - `canCommitOrganization(transaction.organizationId)`: a platform role, or
  *   the payer's own organization — the payee's administrator gets `403`.
  *
+ * And one product rule (Q-138): a `MARKETPLACE_ORDER` transaction is disputed
+ * only through its order, so neither command is offered on it.
+ *
  * Roles that could not be read offer nothing: a form that leads to a refusal is
  * the worse mistake, and the page still shows the transaction.
  */
 export function disputeCommandsFor(
-  transaction: Pick<Transaction, 'status' | 'organizationId'>,
+  transaction: Pick<
+    Transaction,
+    'status' | 'organizationId' | 'transactionType' | 'sourceType' | 'sourceReference'
+  >,
   viewer: DisputeViewer,
 ): readonly DisputeCommand[] {
   const { roles } = viewer;
   if (roles === null || roles.includes(NEVER_ROLE)) return [];
+  if (disputedThroughOrder(transaction) !== null) return [];
   const platform = PLATFORM_ROLES.some((role) => roles.includes(role));
   const commitsPayer = platform || viewer.organizationId === transaction.organizationId;
 

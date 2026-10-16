@@ -49,6 +49,8 @@ afterEach(() => {
 });
 
 const CSRF = 'csrf-token-for-this-session';
+const BINDING = { owner: 'owner-tag', session: 'session-tag' };
+const SESSION_MAX_AGE = 12 * 60 * 60;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const REASON = 'کالا تحویل نشده و پاسخی هم نیامده است';
 
@@ -85,7 +87,7 @@ const ok = (data: Transaction): ReadResult<Transaction> => ({ kind: 'OK', data }
 function renderScreen(
   result: ReadResult<Transaction>,
   commands: readonly DisputeCommand[] = [],
-  done?: DisputeCommand,
+  notice?: DisputeCommand,
 ) {
   return render(
     <TransactionDetailScreen
@@ -93,10 +95,14 @@ function renderScreen(
       commands={commands}
       csrfToken={CSRF}
       mintSubmissionId={() => SUBMISSION}
-      done={done}
+      binding={BINDING}
+      sessionMaxAgeSeconds={SESSION_MAX_AGE}
+      notice={notice}
     />,
   );
 }
+
+beforeEach(() => window.sessionStorage.clear());
 
 async function expectAccessible(container: HTMLElement) {
   expect(await axe(container)).toHaveNoViolations();
@@ -190,12 +196,111 @@ describe('the dispute state, as the record says it', () => {
   });
 
   it.each([
-    ['DISPUTE', 'اعتراض ثبت شد'],
-    ['RESOLVE_DISPUTE', 'تسویه انجام نشده است'],
-  ] as const)('after %s, confirms only what the service confirmed', async (done, words) => {
-    const { container } = renderScreen(ok(DISPUTED), [], done);
-    expect(container.textContent).toContain(words);
+    ['DISPUTE', 'اعتراض شما ثبت شد'],
+    ['RESOLVE_DISPUTE', 'رسیدگی شما ثبت شد'],
+  ] as const)(
+    'after %s, confirms only what the person’s own request did',
+    async (notice, words) => {
+      const { container, getByText } = renderScreen(ok(DISPUTED), [], notice);
+      expect(getByText(new RegExp(words)).closest('[role="status"]')).not.toBeNull();
+      await expectAccessible(container);
+    },
+  );
+
+  it('a notice never claims a present state: a settled record next to a dispute notice says settled', async () => {
+    const SETTLED: Transaction = {
+      ...DISPUTED,
+      status: 'SETTLED',
+      settledAt: '2026-10-04T09:00:00.000Z',
+      settlement: { id: 'SET_9', settledAt: '2026-10-04T09:00:00.000Z' },
+    };
+    const { container, getByText } = renderScreen(ok(SETTLED), [], 'DISPUTE');
+    const notice = getByText(/اعتراض شما ثبت شد/).closest('[role="status"]') as HTMLElement;
+    expect(notice).not.toBeNull();
+    expect(notice.textContent).not.toMatch(/متوقف|در انتظار تسویه|تسویه انجام نشده/);
+    expect(container.textContent).toContain('تسویه‌شده');
     await expectAccessible(container);
+  });
+
+  it('removes the confirmation token from the address once shown, keeping the rest', () => {
+    window.history.replaceState(null, '', '/transactions/TXN_1?flash=TOKEN&tab=1#dispute');
+    renderScreen(ok(DISPUTED), [], 'DISPUTE');
+    expect(window.location.pathname).toBe('/transactions/TXN_1');
+    expect(window.location.search).toBe('?tab=1');
+    expect(window.location.hash).toBe('#dispute');
+  });
+
+  it('without a notice, the address is left alone', () => {
+    window.history.replaceState(null, '', '/transactions/TXN_1?flash=FORGED');
+    renderScreen(ok(DISPUTED));
+    expect(window.location.search).toBe('?flash=FORGED');
+    window.history.replaceState(null, '', '/');
+  });
+});
+
+describe('a marketplace order’s transaction (Q-138)', () => {
+  const ORDER_TX: Transaction = {
+    ...HELD,
+    transactionType: 'MARKETPLACE_ORDER',
+    sourceType: 'ORDER',
+    sourceReference: 'ORD_42',
+  };
+
+  it('offers no dispute form and links to its order', async () => {
+    const { container, getByRole, queryByRole } = renderScreen(ok(ORDER_TX), ['DISPUTE']);
+    expect(queryByRole('form')).toBeNull();
+    expect(container.querySelector('textarea')).toBeNull();
+    expect(container.textContent).toContain('فقط از صفحهٔ همان سفارش');
+    expect(getByRole('link', { name: 'رفتن به صفحهٔ سفارش' })).toHaveAttribute(
+      'href',
+      '/orders/ORD_42',
+    );
+    await expectAccessible(container);
+  });
+
+  it('a disputed order transaction: no resolution here either — the order’s is the operator path', async () => {
+    const { container, queryByRole } = renderScreen(
+      ok({
+        ...ORDER_TX,
+        status: 'DISPUTED',
+        disputedAt: DISPUTED.disputedAt,
+        disputeReason: REASON,
+      }),
+      ['RESOLVE_DISPUTE'],
+    );
+    expect(queryByRole('form')).toBeNull();
+    expect(container.textContent).toContain('تسویهٔ آن متوقف است');
+    await expectAccessible(container);
+  });
+
+  it('with no order id in the view: links to the order list and says why', async () => {
+    const { container, getByRole } = renderScreen(
+      ok({ ...ORDER_TX, sourceType: null, sourceReference: null }),
+    );
+    expect(getByRole('link', { name: 'رفتن به فهرست سفارش‌ها' })).toHaveAttribute(
+      'href',
+      '/orders',
+    );
+    expect(container.textContent).toContain('شناسهٔ سفارش در اطلاعات این تراکنش نیامده است');
+    await expectAccessible(container);
+  });
+
+  it('a remembered dispute submission is not offered for it either', () => {
+    window.sessionStorage.setItem(
+      'rasta.unresolved-dispute.TXN_1',
+      JSON.stringify({
+        v: 1,
+        command: 'DISPUTE',
+        submissionId: SUBMISSION,
+        text: REASON,
+        correlationId: null,
+        savedAt: Date.now(),
+        owner: BINDING.owner,
+        session: BINDING.session,
+      }),
+    );
+    const { queryByRole } = renderScreen(ok(ORDER_TX));
+    expect(queryByRole('form')).toBeNull();
   });
 });
 
@@ -239,6 +344,8 @@ function renderForm(state: DisputeFormState, command: DisputeCommand = 'DISPUTE'
       command={command}
       csrfToken={CSRF}
       submissionId={SUBMISSION}
+      binding={BINDING}
+      sessionMaxAgeSeconds={SESSION_MAX_AGE}
     />,
   );
 }
@@ -345,6 +452,36 @@ describe('a dispute form, in each state', () => {
     const { container, queryByRole } = renderForm({ ...UNCONFIRMED, sessionEnded: true });
     expect(container.textContent).toContain('نشست شما پایان یافته است');
     expect(queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
+    expect(queryByRole('link', { name: /کنار بگذار/ })).toBeNull();
+    await expectAccessible(container);
+  });
+
+  it('unconfirmed, not yet tried again: no way to put it aside', () => {
+    const { queryByRole } = renderForm(UNCONFIRMED);
+    expect(queryByRole('link', { name: /کنار بگذار/ })).toBeNull();
+  });
+
+  it('unconfirmed, retry refused: may be put aside after seeing the record', async () => {
+    const { container, getByRole } = renderForm({ ...UNCONFIRMED, retryRefused: true });
+    expect(getByRole('link', { name: /کنار بگذار/ })).toHaveAttribute(
+      'href',
+      '/transactions/TXN_1',
+    );
+    expect(getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeEnabled();
+    await expectAccessible(container);
+  });
+
+  it('unconfirmed, view only: shown, not re-sent, may be put aside', async () => {
+    const { container, getByRole, queryByRole } = renderForm({ ...UNCONFIRMED, viewOnly: true });
+    expect(container.textContent).toContain('نشست پیشین یا بیش از یک ساعت پیش');
+    expect(queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
+    expect(getByRole('link', { name: /کنار بگذار/ })).toBeInTheDocument();
+    await expectAccessible(container);
+  });
+
+  it('storage unavailable: says nothing was sent, and why', async () => {
+    const { container } = renderForm({ kind: 'STORAGE_UNAVAILABLE' });
+    expect(container.textContent).toContain('درخواست ارسال نشد');
     await expectAccessible(container);
   });
 

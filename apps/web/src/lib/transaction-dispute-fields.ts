@@ -113,3 +113,33 @@ export const DISPUTE_FIELD_LABELS: Readonly<Record<DisputeField, string>> = {
   reason: 'دلیل اعتراض',
   resolution: 'شرح تصمیم',
 };
+
+/**
+ * The transaction type disputed only through its order (Q-138, answered by the
+ * Product Owner on 2026-10-16): a marketplace order's own dispute flow
+ * (`/orders/[id]`) records outcome and responsibility, so the transaction page
+ * offers neither opening nor resolving a dispute on such a transaction and
+ * links to the order instead.
+ */
+export const ORDER_DISPUTED_TRANSACTION_TYPE = 'MARKETPLACE_ORDER';
+
+/**
+ * Where a transaction is disputed instead of here, or null when it is disputed
+ * here. The order id is taken only from what the transaction view carries:
+ * marketplace-service records its obligation with `sourceType: 'ORDER'` and
+ * the order id as `sourceReference`. Anything else links to the order list.
+ */
+export function disputedThroughOrder(transaction: {
+  readonly transactionType: string;
+  readonly sourceType: string | null;
+  readonly sourceReference: string | null;
+}): { readonly href: string; readonly orderId: string | null } | null {
+  if (transaction.transactionType !== ORDER_DISPUTED_TRANSACTION_TYPE) return null;
+  const orderId =
+    transaction.sourceType === 'ORDER' &&
+    transaction.sourceReference !== null &&
+    transaction.sourceReference.trim() !== ''
+      ? transaction.sourceReference
+      : null;
+  return { href: orderId ? `/orders/${encodeURIComponent(orderId)}` : '/orders', orderId };
+}

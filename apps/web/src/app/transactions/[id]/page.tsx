@@ -1,11 +1,13 @@
 import { redirect } from 'next/navigation';
 
 import { AppShell, Button, ButtonLink, PageHeader, TopBar } from '@/ui';
-import { isDisputeCommand } from '@/lib/transaction-dispute-fields';
+import { FLASH_PARAM } from '@/lib/form-fields';
+import { DISPUTE_COMMANDS } from '@/lib/transaction-dispute-fields';
 import { currentSession } from '@/server/current-session';
-import { fetchCurrentUser } from '@/server/identity';
-import { requestRoles } from '@/server/realm-roles';
-import { mintSubmissionId } from '@/server/submission';
+import { webServerEnv } from '@/server/env';
+import { readFlash } from '@/server/flash';
+import { tokenAuthority } from '@/server/realm-roles';
+import { mintSubmissionId, submissionBinding } from '@/server/submission';
 import { disputeCommandsFor, fetchTransaction } from '@/server/transactions';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
@@ -18,8 +20,13 @@ import { TransactionDetailScreen } from './TransactionDetailScreen';
  * transaction the caller is not party to, exactly as for a missing one, and the
  * screen renders both the same way. Which dispute forms are drawn is
  * `disputeCommandsFor`'s mirror of what the service would refuse, from the
- * roles identity-service reports plus the realm's global ones (`requestRoles`,
- * the set the service acts on) — UX only; the service decides again.
+ * roles **the access token itself** carries for the organization it resolves to
+ * (`tokenAuthority`) — the set economic-service decides on, which the
+ * membership rows `/v1/users/me` reports can differ from until the token is
+ * refreshed (PR 319 review 1, finding 1). UX only; the service decides again.
+ *
+ * The confirmation after a command is a flash token this session earned for
+ * this transaction (`server/flash.ts`), never a query flag.
  */
 export const dynamic = 'force-dynamic';
 
@@ -35,23 +42,25 @@ export default async function TransactionPage({
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/transactions/${id}`)}`);
 
   const query = await searchParams;
-  const done =
-    typeof query.done === 'string' && isDisputeCommand(query.done) ? query.done : undefined;
+  const flash = query[FLASH_PARAM];
+  const notice = readFlash(
+    session,
+    typeof flash === 'string' ? flash : undefined,
+    id,
+    DISPUTE_COMMANDS,
+  );
 
-  const [result, currentUser] = await Promise.all([
-    fetchTransaction(session, id),
-    fetchCurrentUser(session),
-  ]);
+  const result = await fetchTransaction(session, id);
 
-  // An identity answer that is missing or unreadable offers no form: a form
-  // that leads to a refusal is the worse mistake, and the record still shows.
-  const roles =
-    currentUser.kind === 'USER'
-      ? requestRoles(currentUser.user.effectiveRoles, session.accessToken)
-      : null;
+  // A token that cannot be read offers no form: a form that leads to a refusal
+  // is the worse mistake, and the record still shows.
+  const authority = tokenAuthority(session.accessToken);
   const commands =
     result.kind === 'OK'
-      ? disputeCommandsFor(result.data, { roles, organizationId: session.organizationId })
+      ? disputeCommandsFor(result.data, {
+          roles: authority?.roles ?? null,
+          organizationId: authority?.organizationId ?? null,
+        })
       : [];
 
   return (
@@ -83,7 +92,9 @@ export default async function TransactionPage({
           commands={commands}
           csrfToken={session.csrfToken}
           mintSubmissionId={() => mintSubmissionId(session)}
-          done={done}
+          binding={submissionBinding(session)}
+          sessionMaxAgeSeconds={webServerEnv().WEB_SESSION_MAX_AGE_SECONDS}
+          notice={notice}
         />
       </div>
     </AppShell>

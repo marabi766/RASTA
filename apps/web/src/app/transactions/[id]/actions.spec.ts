@@ -4,7 +4,8 @@
 import { CSRF_FIELD } from '@/server/csrf';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
-import { EMPTY_DISPUTE_FORM } from '@/lib/transaction-dispute-fields';
+import { DISPUTE_COMMANDS, EMPTY_DISPUTE_FORM } from '@/lib/transaction-dispute-fields';
+import { readFlash } from '@/server/flash';
 
 import { IDLE_DISPUTE_FORM, type UnconfirmedDispute } from './form-state';
 
@@ -144,7 +145,18 @@ describe('what the answer becomes', () => {
     const submission = mintSubmissionId(SESSION);
     await expect(
       submitDisputeCommand(TXN, IDLE_DISPUTE_FORM, formData(GOOD, { submission })),
-    ).rejects.toThrow(`NEXT_REDIRECT:/transactions/${TXN}?done=DISPUTE`);
+    ).rejects.toThrow(`NEXT_REDIRECT:/transactions/${TXN}?flash=`);
+    // The confirmation is a token this session earned for this transaction and
+    // command — not a flag anybody could type (review 1, finding 3).
+    const url = new URL(redirect.mock.calls[0]![0], 'http://portal.test');
+    expect(url.searchParams.has('done')).toBe(false);
+    const token = url.searchParams.get('flash');
+    expect(readFlash(SESSION, token, TXN, DISPUTE_COMMANDS)).toBe('DISPUTE');
+    expect(readFlash(SESSION, token, 'TXN_OTHER', DISPUTE_COMMANDS)).toBeUndefined();
+    expect(
+      readFlash({ ...SESSION, csrfToken: 'another-login' }, token, TXN, DISPUTE_COMMANDS),
+    ).toBeUndefined();
+    expect(readFlash(SESSION, 'DISPUTE', TXN, DISPUTE_COMMANDS)).toBeUndefined();
     expect(issueDisputeCommand).toHaveBeenCalledWith(
       SESSION,
       TXN,
@@ -226,7 +238,7 @@ describe('a retry of an unconfirmed command', () => {
     submissionId: submission,
     values: { ...EMPTY_DISPUTE_FORM, reason: REASON },
   };
-  const retry = () => formData(GOOD, { submission });
+  const retry = (options: { csrf?: string } = {}) => formData(GOOD, { submission, ...options });
 
   it('sends the same body under the same key', async () => {
     await expect(submitDisputeCommand(TXN, UNCONFIRMED, retry())).rejects.toThrow('NEXT_REDIRECT');
@@ -250,9 +262,16 @@ describe('a retry of an unconfirmed command', () => {
     });
   });
 
-  it('stays unconfirmed when the session ended before the retry', async () => {
+  it('says the session ended — authoritatively — when the action finds none on a retry', async () => {
     currentSession.mockResolvedValue(null);
     expect(await submitDisputeCommand(TXN, UNCONFIRMED, retry())).toEqual({
+      ...UNCONFIRMED,
+      sessionEnded: true,
+    });
+  });
+
+  it('a CSRF refusal of a retry is a refusal, not an ended session', async () => {
+    expect(await submitDisputeCommand(TXN, UNCONFIRMED, retry({ csrf: 'wrong' }))).toEqual({
       ...UNCONFIRMED,
       retryRefused: true,
     });
