@@ -144,6 +144,59 @@ export function canCommitOrganization(organizationId: string): void {
 }
 
 /**
+ * Leave to post a settlement journal on the payer's books while acting for
+ * another organization (docs/23 D-054, review of #287 r4 F3).
+ *
+ * Issued only by {@link settlementBooks} and checked by
+ * `LedgerRepository.createJournal` (by identity, not by shape), so the journal
+ * header is the one row it can carry across the tenant guard.
+ */
+export interface SettlementBooks {
+  /** The payer, whose books the settlement journal is posted on. */
+  readonly organizationId: string;
+  /** The organization the platform administrator is acting for. */
+  readonly actingOrganizationId: string;
+}
+
+const issuedSettlementBooks = new WeakSet<SettlementBooks>();
+
+/**
+ * Whose books a settlement journal is posted on, when that is not the
+ * organization the request acts for.
+ *
+ * A settlement's journal belongs to the payer. A platform administrator acting
+ * for another organization may settle it — `canCommitOrganization` admits
+ * them, the operator resolving a stuck settlement (docs/09 § 9.3) — but the
+ * journal header is tenant-scoped, and without this the guard refused the
+ * write and the settlement failed as a 500. This is the narrow, explicit
+ * leave to make that one write: everything else in the request (its
+ * idempotency key, its attribution) stays with the acting organization.
+ *
+ * `undefined` when the caller acts for the payer: there is nothing to cross.
+ * Anyone else without platform scope — a service whose token names another
+ * organization included — is refused exactly as `canCommitOrganization`
+ * refuses them, so this check holds even where that one was not made first.
+ */
+export function settlementBooks(payerOrganizationId: string): SettlementBooks | undefined {
+  canCommitOrganization(payerOrganizationId);
+  const actingOrganizationId = getOrganizationId();
+  if (actingOrganizationId === payerOrganizationId) return undefined;
+  if (!hasPlatformScope()) {
+    // Unreachable past `canCommitOrganization`; stated so the crossing never
+    // rests on another function's branch staying as it is.
+    throw RastaError.tenantMismatch(payerOrganizationId, [actingOrganizationId]);
+  }
+  const books = Object.freeze({ organizationId: payerOrganizationId, actingOrganizationId });
+  issuedSettlementBooks.add(books);
+  return books;
+}
+
+/** Whether `books` was issued by {@link settlementBooks} — not merely shaped like it. */
+export function isIssuedSettlementBooks(books: SettlementBooks): boolean {
+  return issuedSettlementBooks.has(books);
+}
+
+/**
  * Refuses a transaction the caller is not a party to.
  *
  * Throws `notFound`, never `forbidden`: a 403 confirms the record exists, and

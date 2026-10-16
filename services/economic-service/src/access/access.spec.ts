@@ -7,6 +7,8 @@ import {
   assertWalletVisible,
   canCommitOrganization,
   hasPlatformScope,
+  isIssuedSettlementBooks,
+  settlementBooks,
 } from './access';
 
 /**
@@ -220,6 +222,54 @@ describe('canCommitOrganization', () => {
     expect(() => run(asUser(['AUDITOR']), () => canCommitOrganization('ORG-A'))).toThrow(
       expect.objectContaining({ code: 'FORBIDDEN' }),
     );
+  });
+});
+
+describe('settlementBooks (docs/23 D-054)', () => {
+  // ORG-B pays; the request acts for whichever organization the context names.
+
+  it('is nothing to cross when the caller acts for the payer', () => {
+    expect(run(asUser(['ORGANIZATION_ADMIN'], 'ORG-B'), () => settlementBooks('ORG-B'))).toBe(
+      undefined,
+    );
+    expect(run(asUser(['SYSTEM_ADMIN'], 'ORG-B'), () => settlementBooks('ORG-B'))).toBe(undefined);
+    expect(run(asService('marketplace-service', 'ORG-B'), () => settlementBooks('ORG-B'))).toBe(
+      undefined,
+    );
+  });
+
+  it.each(['SYSTEM_ADMIN', 'UNION_ADMIN'])(
+    'issues %s acting for another organization the payer’s books, naming both',
+    (role) => {
+      const books = run(asUser([role], 'ORG-A'), () => settlementBooks('ORG-B'));
+      expect(books).toEqual({ organizationId: 'ORG-B', actingOrganizationId: 'ORG-A' });
+      expect(isIssuedSettlementBooks(books!)).toBe(true);
+      expect(Object.isFrozen(books)).toBe(true);
+    },
+  );
+
+  it('refuses an organization administrator of another organization', () => {
+    expect(() =>
+      run(asUser(['ORGANIZATION_ADMIN'], 'ORG-A'), () => settlementBooks('ORG-B')),
+    ).toThrow(expect.objectContaining({ code: 'TENANT_MISMATCH' }));
+  });
+
+  it('refuses a service whose token names another organization', () => {
+    expect(() =>
+      run(asService('marketplace-service', 'ORG-A'), () => settlementBooks('ORG-B')),
+    ).toThrow(expect.objectContaining({ code: 'TENANT_MISMATCH' }));
+  });
+
+  it('refuses the oversight role, even holding a platform role', () => {
+    expect(() =>
+      run(asUser(['SYSTEM_ADMIN', 'AUDITOR'], 'ORG-A'), () => settlementBooks('ORG-B')),
+    ).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }));
+  });
+
+  it('does not recognise a look-alike it did not issue', () => {
+    expect(
+      isIssuedSettlementBooks({ organizationId: 'ORG-B', actingOrganizationId: 'ORG-A' }),
+    ).toBe(false);
   });
 });
 

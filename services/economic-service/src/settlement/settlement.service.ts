@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
-import { RastaError, runUnscoped } from '@rasta/nest-common';
+import { RastaError, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { withFinancialSpan } from '@rasta/observability';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
@@ -25,6 +25,7 @@ import {
 import { SERVICE_NAME } from '../config/env';
 import type { DraftEntry } from '../ledger/journal';
 import type { IdempotentAnswer } from '../shared/idempotency';
+import { settlementBooks, type SettlementBooks } from '../access/access';
 
 /**
  * Settlement — the one operation this whole service is arranged around
@@ -139,6 +140,12 @@ export class SettlementService {
     // `SETTLED` at all (docs/10 § 10.5, § 10.12).
     const target = nextStatus(transactionId, transaction.status, 'SETTLE');
 
+    // Whose books the journal goes on, when that is not the organization the
+    // request acts for: a platform administrator acting for another one
+    // (docs/23 D-054). Decided here, under the row lock, against the payer the
+    // journal will name; anyone else is refused before anything is written.
+    const books = settlementBooks(transaction.organizationId);
+
     // Hoisted to a local so the narrowing survives the awaits below. A
     // top-up has no counterparty and never reaches settlement; anything else
     // that got here without one is a defect, not a user error.
@@ -206,6 +213,7 @@ export class SettlementService {
       netAmountMinor,
       settledBy,
       settledAt,
+      books,
     });
 
     if (hold) {
@@ -253,6 +261,9 @@ export class SettlementService {
           currency: transaction.currency,
           settledAt,
           settledBy,
+          // Who acted is `settledBy`; this is whom for. The payer itself, or
+          // the organization a platform administrator acted for (D-054).
+          actingOrganizationId: getOrganizationId(),
         },
       }),
     );
@@ -338,6 +349,7 @@ export class SettlementService {
       netAmountMinor: bigint;
       settledBy: string;
       settledAt: Date;
+      books: SettlementBooks | undefined;
     },
   ) {
     const { transaction } = input;
@@ -406,6 +418,7 @@ export class SettlementService {
         postedAt: input.settledAt,
       },
       input.settledBy,
+      input.books,
     );
   }
 
