@@ -1890,7 +1890,7 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   - هر قاعدهٔ تازه باید خط داشته باشد (`POST /v1/commissions/rules` بی `businessLine` ‏۴۰۰ است). قاعدهٔ قدیمی خواندنی و
     بستنی می‌ماند. Migration هیچ خطی را برای ردیف موجود حدس نمی‌زند و `outcome` ردیف‌های موجود را فقط از
     `rule_id` می‌سازد؛ ردیفی با مبلغ ولی بی قاعده را رد می‌کند و در Migration طبقه‌بندی نمی‌کند.
-  - `NO_ACTIVE_RULE` ثبت و گزارش‌پذیر است (ستون `outcome` در `GET /v1/commissions`، پاسخ تسویه
+  - `NO_ACTIVE_RULE` ثبت و گزارش‌پذیر است (`GET /v1/commissions?outcome=…&businessLine=…`، پاسخ تسویه
     `commissionOutcome`، رویداد `COMMISSION_APPLIED`، برچسب `business_line` روی
     `rasta_economic_commission_applications_total`). رفتار Production در نبود قاعده همچنان Q-29 است؛ امروز تسویه با کارمزد
     صفر ادامه می‌یابد، همان رفتار پیش از این تغییر.
@@ -1963,6 +1963,8 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   ممکن است که هیچ ردیفی خط ندارد (down.sql پیش از هر تغییر رد می‌کند)؛ پس از نخستین خط، اصلاح رو به جلوست. اصلاح کارمزد
   Postشده همچنان فقط با Reversal Entry است و آن عملیات برای تسویه هنوز Q-76 است.
 - **آزمون:** `rule-engine.spec.ts` (هر هفت خط، محدود به نوع، قدیمی، عدم استنتاج، مرز، قیمت با قاعدهٔ ثبت‌شده)؛
+  `test/commission-business-lines.int-spec.ts` (هر خط با نرخ خودش: توازن Journal، بازپخش با همان کلید بی کارمزد دوم، ردیف
+  Append-only و رد Reversal با نام Q-76؛ `NO_ACTIVE_RULE`؛ قاعدهٔ قدیمی؛ جداسازی مستأجر و BOLA روی فیلترها)؛
   `effective-dated.spec.ts`؛ `events.spec.ts` (v1/v2)؛ `commission-pricing-integrity.int-spec.ts` (شش ایجاد هم‌زمان برای
   دامنهٔ سازمان و سراسری، تمدید و بازگرداندن ‏۴۰۹، INSERT/UPDATE دور از API رد در پایگاه داده، قاعدهٔ گذشته‌دار ‏۴۲۲، غیرفعال‌سازی =
   پایان و نرخ قدیم برای آنچه زیر آن رخ داد، قاعدهٔ گذشته‌دارِ دور از API تعهد ثبت‌شده را قیمت دوباره نمی‌کند، `NO_ACTIVE_RULE`

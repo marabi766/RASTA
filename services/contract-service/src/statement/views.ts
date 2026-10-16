@@ -1,6 +1,7 @@
 import type {
   Statement,
   StatementApprovalStep,
+  StatementDecision,
   StatementDeduction,
   StatementLine,
 } from '../generated/prisma';
@@ -12,13 +13,15 @@ export type StatementWithParts = Statement & {
   lines: StatementLine[];
   deductions: StatementDeduction[];
   approvalSteps: StatementApprovalStep[];
+  decisions: StatementDecision[];
 };
 
 type ChainView = NonNullable<StatementView['approvalChains']>['technical'];
 
-/** One chain's snapshot rows, in step order; null when the statement has none (a draft). */
+/** One chain's snapshot rows, in step order, each with its decision; null for a draft. */
 function chainView(
   steps: readonly StatementApprovalStep[],
+  decisions: readonly StatementDecision[],
   chain: StatementChain,
 ): ChainView | null {
   const own = steps
@@ -29,26 +32,37 @@ function chainView(
   return {
     policyId: first.policyId,
     policyVersion: first.policyVersion,
-    steps: own.map((step) => ({
-      stepOrder: step.stepOrder,
-      authorityOrganizationId: step.authorityOrganizationId,
-      authorityRole: step.authorityRole,
-      authorityLabel: step.authorityLabel,
-    })),
+    steps: own.map((step) => {
+      const decision = decisions.find(
+        (candidate) => candidate.chain === chain && candidate.stepOrder === step.stepOrder,
+      );
+      return {
+        stepOrder: step.stepOrder,
+        authorityOrganizationId: step.authorityOrganizationId,
+        authorityRole: step.authorityRole,
+        authorityLabel: step.authorityLabel,
+        decision: decision
+          ? {
+              outcome: decision.outcome as 'APPROVED' | 'REJECTED',
+              decidedAt: decision.decidedAt.toISOString(),
+            }
+          : null,
+      };
+    }),
   };
 }
 
 /**
  * A statement row as a response: money leaves as a decimal string, time as ISO-8601 UTC, the lines
  * in their number order and the deductions in the order of their rules, and the approval chains as
- * they were snapshotted at submission; no person is named.
+ * they were snapshotted at submission, each step with its decision; no person is named.
  */
 export function toStatementView(
   row: StatementWithParts,
   contractorOrganizationId: string,
 ): StatementView {
-  const technical = chainView(row.approvalSteps, 'TECHNICAL');
-  const financial = chainView(row.approvalSteps, 'FINANCIAL');
+  const technical = chainView(row.approvalSteps, row.decisions, 'TECHNICAL');
+  const financial = chainView(row.approvalSteps, row.decisions, 'FINANCIAL');
   return {
     id: row.id,
     contractId: row.contractId,
