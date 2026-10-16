@@ -68,6 +68,29 @@ describe('judgeStep', () => {
     expect(financial).toMatchObject({ ok: true, to: 'APPROVED', command: 'approve_financial' });
   });
 
+  it('a financial step short of its chain’s last completes nothing: the status stays TECHNICALLY_APPROVED, with no command (#315 r3)', () => {
+    const steps = [...STEPS, step('FINANCIAL', 2)];
+    const decided = [approved('TECHNICAL', 1), approved('TECHNICAL', 3)];
+    expect(
+      judgeStep(
+        'TECHNICALLY_APPROVED',
+        steps,
+        decided,
+        { chain: 'FINANCIAL', stepOrder: 1 },
+        'APPROVED',
+      ),
+    ).toEqual({ ok: true, step: step('FINANCIAL', 1), to: 'TECHNICALLY_APPROVED', command: null });
+    expect(
+      judgeStep(
+        'TECHNICALLY_APPROVED',
+        steps,
+        [...decided, approved('FINANCIAL', 1)],
+        { chain: 'FINANCIAL', stepOrder: 2 },
+        'APPROVED',
+      ),
+    ).toMatchObject({ ok: true, to: 'APPROVED', command: 'approve_financial' });
+  });
+
   it('rejects the statement from any step of either open chain, the first included (Q-96 (7))', () => {
     expect(
       judgeStep('SUBMITTED', STEPS, [], { chain: 'TECHNICAL', stepOrder: 1 }, 'REJECTED'),

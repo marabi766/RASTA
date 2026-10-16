@@ -266,6 +266,56 @@ describe('deciding a statement (CON-003 PR 6)', () => {
     ).rejects.toThrow(/ck_contract_approved_total_exact/);
   });
 
+  it('two technical and two financial steps: an event per decision, and a transition’s event only at a transition — never again for a step that leaves the status where it was (#315 r3)', async () => {
+    const c = await signed();
+    await activateStatementPolicies(w, c.employer, {
+      technical: [at(c.employer, 'FLEET_MANAGER'), at(c.employer, 'UNION_ADMIN')],
+      financial: [at(c.employer), at(c.employer)],
+    });
+    const s = await submitted(c);
+    const decided: string[] = [];
+    for (const [chain, stepOrder, role, status] of [
+      ['TECHNICAL', 1, 'FLEET_MANAGER', 'SUBMITTED'],
+      ['TECHNICAL', 2, 'UNION_ADMIN', 'TECHNICALLY_APPROVED'],
+      ['FINANCIAL', 1, 'ORGANIZATION_ADMIN', 'TECHNICALLY_APPROVED'],
+      ['FINANCIAL', 2, 'ORGANIZATION_ADMIN', 'APPROVED'],
+    ] as const) {
+      const res = await decide(c, s.id, person(c.employer, [role]), step(chain, stepOrder)).expect(
+        200,
+      );
+      expect(res.body.status).toBe(status);
+      const key = chain === 'TECHNICAL' ? 'technical' : 'financial';
+      decided.push(res.body.approvalChains[key].steps[stepOrder - 1].decision.decidedAt);
+    }
+    expect((await contractRow(w, c.id)).approvedTotalMinor).toBe(1500000001n);
+
+    // The contract's stream, in its own order (`stream_seq`: allocation order is commit order).
+    const stream = await w.prisma.client.outboxMessage.findMany({
+      where: { aggregateId: c.id, eventName: { startsWith: 'STATEMENT_' } },
+      orderBy: { streamSeq: 'asc' },
+    });
+    const events = stream
+      .map((row) => ({
+        eventName: row.eventName,
+        payload: (row.payload as { payload: Record<string, unknown> }).payload,
+      }))
+      .filter((e) => !['STATEMENT_DRAFTED', 'STATEMENT_SUBMITTED'].includes(e.eventName));
+    expect(
+      events.map(({ eventName, payload }) =>
+        eventName === 'STATEMENT_DECISION_RECORDED'
+          ? [eventName, payload.chain, payload.stepOrder, payload.decidedAt]
+          : [eventName, payload.technicallyApprovedAt ?? payload.approvedAt ?? payload.rejectedAt],
+      ),
+    ).toEqual([
+      ['STATEMENT_DECISION_RECORDED', 'TECHNICAL', 1, decided[0]],
+      ['STATEMENT_DECISION_RECORDED', 'TECHNICAL', 2, decided[1]],
+      ['STATEMENT_TECHNICALLY_APPROVED', decided[1]],
+      ['STATEMENT_DECISION_RECORDED', 'FINANCIAL', 1, decided[2]],
+      ['STATEMENT_DECISION_RECORDED', 'FINANCIAL', 2, decided[3]],
+      ['STATEMENT_APPROVED', decided[3]],
+    ]);
+  });
+
   describe('a rejection is final for that number (Q-96 (7))', () => {
     it.each([
       ['the first technical step', [] as const, step('TECHNICAL', 1, 'REJECT')],

@@ -355,15 +355,18 @@ export class StatementDecisionService {
       decidedAt: at.toISOString(),
     });
 
-    if (judged.to === 'APPROVED') {
+    // A transition's event only for a transition (`judged.command`): a step short of its chain's
+    // last leaves the status where it was — TECHNICALLY_APPROVED under a financial step too — and
+    // is recorded, nothing more.
+    if (judged.command === 'approve_financial') {
       // The cap (ADR-068 § 5): the gross added under the contract's row lock, held by the database.
       await this.addToApprovedTotal(tx, contract, statement.grossMinor, at, context);
       await enqueue('STATEMENT_APPROVED', { approvedAt: at.toISOString() });
-    } else if (judged.to === 'TECHNICALLY_APPROVED') {
+    } else if (judged.command === 'approve_technical') {
       await enqueue('STATEMENT_TECHNICALLY_APPROVED', {
         technicallyApprovedAt: at.toISOString(),
       });
-    } else if (judged.to === 'REJECTED') {
+    } else if (judged.command === 'reject') {
       await enqueue('STATEMENT_REJECTED', {
         chain: step.chain,
         stepOrder: step.stepOrder,
