@@ -5312,6 +5312,133 @@
         }
       }
     },
+    "/v1/internal/statements/{id}": {
+      "get": {
+        "description": "Reserved for `economic-service`’s service token, sent in `X-Internal-Token` with no `Authorization` header and signed for the **employer** — the statement’s own organization; every other service and every user token is 403, and so is a token signed for no organization. A statement of any other organization (the contractor’s included) answers 404, exactly as one that does not exist. Returns the stored row, whatever its status: the status, the net (a decimal string of minor units) and its currency, the payer (the employer) and the beneficiary (the winning contractor), and when the financial chain approved it. The reader builds its obligation from this answer — never from STATEMENT_APPROVED, which carries no amount (Q-97 (2)) — and must refuse a statement that is not APPROVED. Nothing is written.",
+        "operationId": "InternalStatementController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statementId": {
+                      "type": "string"
+                    },
+                    "contractId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "DRAFT",
+                        "SUBMITTED",
+                        "TECHNICALLY_APPROVED",
+                        "APPROVED",
+                        "REJECTED"
+                      ],
+                      "description": "As stored. Only an APPROVED statement may be settled; the reader refuses the rest."
+                    },
+                    "netMinor": {
+                      "type": "string",
+                      "description": "The gross less the deductions, never negative, in minor units (rials), a decimal string."
+                    },
+                    "currency": {
+                      "type": "string",
+                      "enum": ["IRR"],
+                      "description": "Rials: nothing on the contract chain stores another currency (Q-73 (2)); said explicitly so no reader assumes one (ADR-022)."
+                    },
+                    "payerOrganizationId": {
+                      "type": "string",
+                      "description": "The employer: the statement’s organization, the one the token acts for."
+                    },
+                    "beneficiaryOrganizationId": {
+                      "type": "string",
+                      "description": "The contract’s winning contractor."
+                    },
+                    "approvedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the financial chain’s last step approved it (ISO 8601, UTC); null unless APPROVED."
+                    }
+                  },
+                  "required": [
+                    "statementId",
+                    "contractId",
+                    "status",
+                    "netMinor",
+                    "currency",
+                    "payerOrganizationId",
+                    "beneficiaryOrganizationId",
+                    "approvedAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not the service this route answers: any user token (whatever its roles), another service’s internal token, or an internal token signed for no organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a statement of any organization but the one the internal token is signed for (the employer’s), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "State a statement as its owner records it, for settlement (internal)",
+        "tags": ["contract-internal"],
+        "security": [
+          {
+            "internalToken": []
+          }
+        ]
+      }
+    },
     "/v1/contract-approval-policies": {
       "post": {
         "description": "For `contract.signature`, each step names a role of the governed organization itself that may accept a contract for it (alternatives: any one of them may sign); another organization’s role is 422 `AUTHORITY_NOT_GOVERNED_ORGANIZATION`, and naming one role twice is 400. For `contract.statement.technical` and `contract.statement.financial` (the two approval chains of the employer’s statements, ADR-068 § 5) the steps are asked in order and may name any organization, and two steps may name the same organization and role (for two different people); a step may carry `minAmountMinor` (inclusive) and `maxAmountMinor` (exclusive) and then applies only to a statement whose gross lies within them — a signing step with a bound is 422 `AMOUNT_BOUNDS_NOT_APPLICABLE`. The authority is never the oversight role or the platform operator: the platform creates no legal authority, so it approves no tenant’s contract or statement. A DRAFT governs nothing until a platform administrator approves it. Requires an Idempotency-Key. Q-70 (7), decided 2026-09-26: a UNION_ADMIN writes for its own organization or one beneath it (confirmed with organization-service; an unconfirmable answer refuses, 503), a SYSTEM_ADMIN for any existing organization. An ORGANIZATION_ADMIN never writes its own policy (403). The platform stores the authority it is told and creates none (ADR-023).",
@@ -7678,7 +7805,7 @@
   },
   "info": {
     "title": "Rasta — Contract Service",
-    "description": "The contract boundary (CON-003, ADR-068). The draft contract that a tender award creates: the system makes it when construction-service publishes TENDER_AWARDED, after reading the award — and its amount, which is on no event — from construction-service itself (ADR-061 § 4); no user creates one. A contract is read, signed and (while a draft) cancelled by its two parties only: the employer’s organization and the winning contractor’s; anyone else gets 404. Each party signs separately — a recorded acceptance, not a legal signature (Q-95) — and the contract is SIGNED only when both have; the employer may cancel a draft for a closed reason. Who may sign for the employer is the `contract.signature` approval policy of its own organization (/v1/contract-approval-policies): written by a union or the platform, put in force by a platform administrator who is not its author, and never an environment setting; with none in force nobody signs for the employer (422). Amounts are decimal strings of minor units (rials). A SIGNED contract is amended by its employer (a positive change to the price, with a closed reason code and a text), and the amendment takes effect only when both parties have signed it the way they signed the contract; the employer also plans milestones (a title, a planned day and an optional share in basis points) that both parties read. The contractor drafts statements of a signed contract — lines, each optionally against a milestone, the deductions the employer has configured, and the gross, deductions and net computed once by the service — and submits them, which snapshots the separate technical and financial approval chains from the employer’s `contract.statement.technical` and `contract.statement.financial` policies. Each step is then decided by the organization and role it names — technical first, then financial; a person decides a statement at most once and never the one who submitted it — and the last financial approval makes the statement APPROVED, within the contract’s price and its amendments. The settlement boundary with economic-service follows (ADR-068 § 9); no money is ever held or moved here.",
+    "description": "The contract boundary (CON-003, ADR-068). The draft contract that a tender award creates: the system makes it when construction-service publishes TENDER_AWARDED, after reading the award — and its amount, which is on no event — from construction-service itself (ADR-061 § 4); no user creates one. A contract is read, signed and (while a draft) cancelled by its two parties only: the employer’s organization and the winning contractor’s; anyone else gets 404. Each party signs separately — a recorded acceptance, not a legal signature (Q-95) — and the contract is SIGNED only when both have; the employer may cancel a draft for a closed reason. Who may sign for the employer is the `contract.signature` approval policy of its own organization (/v1/contract-approval-policies): written by a union or the platform, put in force by a platform administrator who is not its author, and never an environment setting; with none in force nobody signs for the employer (422). Amounts are decimal strings of minor units (rials). A SIGNED contract is amended by its employer (a positive change to the price, with a closed reason code and a text), and the amendment takes effect only when both parties have signed it the way they signed the contract; the employer also plans milestones (a title, a planned day and an optional share in basis points) that both parties read. The contractor drafts statements of a signed contract — lines, each optionally against a milestone, the deductions the employer has configured, and the gross, deductions and net computed once by the service — and submits them, which snapshots the separate technical and financial approval chains from the employer’s `contract.statement.technical` and `contract.statement.financial` policies. Each step is then decided by the organization and role it names — technical first, then financial; a person decides a statement at most once and never the one who submitted it — and the last financial approval makes the statement APPROVED, within the contract’s price and its amendments. economic-service reads a statement on an internal route, with its own service token signed for the employer, to build the obligation it settles (ADR-068 § 6) — the amount is on no event; no money is ever held or moved here.",
     "version": "0.1.0",
     "contact": {}
   },
@@ -7690,6 +7817,12 @@
         "scheme": "bearer",
         "bearerFormat": "JWT",
         "type": "http"
+      },
+      "internalToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Internal-Token",
+        "description": "A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user."
       }
     },
     "schemas": {
