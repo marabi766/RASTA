@@ -51,6 +51,9 @@ jest.mock('kafkajs', () => {
   };
 });
 
+/** The probe closes its client when it answers, without waiting for the close. */
+const closeBegun = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
 function row(): OutboxRow {
   return {
     id: 'OBX_1',
@@ -75,7 +78,7 @@ describe('KafkaEventPublisher shutdown', () => {
     const publishing = publisher.publish([row()]).catch(() => undefined);
     await Promise.resolve();
 
-    await publisher.onModuleDestroy();
+    await publisher.stop();
 
     expect(disconnect).toHaveBeenCalledTimes(1);
 
@@ -84,7 +87,7 @@ describe('KafkaEventPublisher shutdown', () => {
   });
 
   it('refuses to open a new producer after shutdown rather than connecting again', async () => {
-    await publisher.onModuleDestroy();
+    await publisher.stop();
 
     await expect(publisher.publish([row()])).rejects.toThrow(/shut down/);
     // The refusal is the point: a new producer here is a connection opened
@@ -94,8 +97,8 @@ describe('KafkaEventPublisher shutdown', () => {
   });
 
   it('is safe to destroy twice — shutdown paths get run more than once', async () => {
-    await publisher.onModuleDestroy();
-    await expect(publisher.onModuleDestroy()).resolves.toBeUndefined();
+    await publisher.stop();
+    await expect(publisher.stop()).resolves.toBeUndefined();
   });
 
   it('disconnects a connected producer, once', async () => {
@@ -105,7 +108,7 @@ describe('KafkaEventPublisher shutdown', () => {
     await publishing;
     disconnect.mockClear();
 
-    await publisher.onModuleDestroy();
+    await publisher.stop();
 
     expect(disconnect).toHaveBeenCalledTimes(1);
   });
@@ -155,7 +158,7 @@ describe('KafkaEventPublisher publishing', () => {
       key: 'NTF_1',
       value: JSON.stringify(row().payload),
     });
-    await publisher.onModuleDestroy();
+    await publisher.stop();
   });
 
   it('opens one producer for concurrent first publishes', async () => {
@@ -163,7 +166,7 @@ describe('KafkaEventPublisher publishing', () => {
     const second = publisher.publish([row()]);
     await connectNow(Promise.all([first, second]).then(() => undefined));
     expect(producer).toHaveBeenCalledTimes(1);
-    await publisher.onModuleDestroy();
+    await publisher.stop();
   });
 
   it('forgets a failed connect, so the next publish tries again', async () => {
@@ -174,11 +177,12 @@ describe('KafkaEventPublisher publishing', () => {
 
     await connectNow(publisher.publish([row()]));
     expect(producer).toHaveBeenCalledTimes(2);
-    await publisher.onModuleDestroy();
+    await publisher.stop();
   });
 
   it('reports healthy when the broker lists topics, and closes the probe client', async () => {
     expect(await publisher.isHealthy()).toBe(true);
+    await closeBegun();
     expect(adminDisconnect).toHaveBeenCalledTimes(1);
   });
 
@@ -186,6 +190,7 @@ describe('KafkaEventPublisher publishing', () => {
     // Connected, then refused: the client is open and only `finally` closes it.
     listTopics.mockRejectedValueOnce(new Error('down'));
     expect(await publisher.isHealthy()).toBe(false);
+    await closeBegun();
     expect(adminConnect).toHaveBeenCalledTimes(1);
     expect(adminDisconnect).toHaveBeenCalledTimes(1);
   });
@@ -194,6 +199,7 @@ describe('KafkaEventPublisher publishing', () => {
     // A connect that gave up can leave retry timers behind; disconnect stops them.
     adminConnect.mockRejectedValueOnce(new Error('unreachable'));
     expect(await publisher.isHealthy()).toBe(false);
+    await closeBegun();
     expect(listTopics).not.toHaveBeenCalled();
     expect(adminDisconnect).toHaveBeenCalledTimes(1);
   });

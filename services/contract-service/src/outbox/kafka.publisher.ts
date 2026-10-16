@@ -1,7 +1,19 @@
 import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
 import { Kafka, type Producer, CompressionTypes } from 'kafkajs';
-import { kafkaClientConfig, type KafkaConnectionOptions } from '@rasta/nest-common';
-import type { EventPublisher, OutboxRow } from '@rasta/nest-common';
+import {
+  boundedDisconnect,
+  kafkaClientConfig,
+  kafkaProbeTimeoutMs,
+  KafkaReadinessProbe,
+  kafkaShutdownDeadline,
+  type KafkaConnectionOptions,
+} from '@rasta/nest-common';
+import type {
+  EventPublisher,
+  OutboxRow,
+  OutboxStopOptions,
+  OutboxStoppable,
+} from '@rasta/nest-common';
 
 /** The service's connection to the broker, SASL and TLS included (RUN-006). */
 export type KafkaPublisherOptions = KafkaConnectionOptions;
@@ -22,9 +34,11 @@ export type KafkaPublisherOptions = KafkaConnectionOptions;
  *                          one key concurrently, which is D-027 and open
  */
 @Injectable()
-export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
+export class KafkaEventPublisher implements EventPublisher, OutboxStoppable, OnModuleDestroy {
   private readonly logger = new Logger(KafkaEventPublisher.name);
   private readonly kafka: Kafka;
+  /** The readiness probe, bounded and closed at shutdown (`isHealthy`). */
+  private readonly probe: KafkaReadinessProbe;
   private producer?: Producer;
   private connecting?: Promise<Producer>;
   /**
@@ -37,7 +51,7 @@ export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
    */
   private pendingProducer?: Producer;
   /**
-   * Set by `onModuleDestroy`. After it, this publisher opens nothing.
+   * Set when the close begins (`stop`). After it, this publisher opens nothing.
    *
    * The relay stops on shutdown, but a tick already in flight can still reach
    * `publish()` afterwards — `OutboxRelay.stop()` waits only for a bounded
@@ -45,12 +59,18 @@ export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
    * the application has just finished leaving.
    */
   private destroyed = false;
+  /** The bounded close, once begun (`stop`). */
+  private closing?: Promise<void>;
 
   constructor(private readonly options: KafkaPublisherOptions) {
     this.kafka = new Kafka({
       ...kafkaClientConfig(options),
       retry: { initialRetryTime: 300, retries: 8 },
       logLevel: 1, // ERROR — kafkajs is extremely chatty at INFO
+    });
+    this.probe = new KafkaReadinessProbe(this.kafka, {
+      timeoutMs: kafkaProbeTimeoutMs(options),
+      logger: this.logger,
     });
   }
 
@@ -120,16 +140,23 @@ export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
     });
   }
 
-  async isHealthy(): Promise<boolean> {
-    try {
-      const admin = this.kafka.admin();
-      await admin.connect();
-      await admin.listTopics();
-      await admin.disconnect();
-      return true;
-    } catch {
-      return false;
-    }
+  /**
+   * One short-lived admin client per probe, closed on every path, answering
+   * within a bound well under the shutdown budget — and none once the shutdown
+   * has begun (`KafkaReadinessProbe`, D-052 phase 4b).
+   */
+  isHealthy(): Promise<boolean> {
+    return this.probe.check();
+  }
+
+  /**
+   * The shutdown has begun: `app.close()`'s first hook. No readiness probe
+   * starts from here, and one in flight answers now, so the HTTP server's close
+   * has no probe to wait for. The producer stays open — the relay may still be
+   * finishing a publish through it — until `OutboxShutdown` closes it (`stop`).
+   */
+  onModuleDestroy(): void {
+    this.probe.close();
   }
 
   /**
@@ -140,23 +167,36 @@ export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
    * retry timers behind `connect()`, which keep the event loop alive with no
    * socket to show for it — a process that will not exit and gives no reason
    * why.
+   *
+   * Both by the deadline `OutboxShutdown` hands it, once the relay has
+   * stopped: the one the relay drained by, so what is left of the same budget
+   * (D-052 phase 4b). Without one, the connection's budget from now. kafkajs's
+   * `disconnect()` waits for every request in flight — a connect's included: a
+   * close the broker does not let finish is abandoned with a warning at the
+   * deadline instead of holding `app.close()` past SHUTDOWN_TIMEOUT_MS. One
+   * close: a second call joins it.
    */
-  async onModuleDestroy(): Promise<void> {
+  stop(options?: OutboxStopOptions): Promise<void> {
+    this.closing ??= this.close(options?.deadlineAt ?? kafkaShutdownDeadline(this.options));
+    return this.closing;
+  }
+
+  private async close(deadlineAt: number): Promise<void> {
     this.destroyed = true;
     this.connecting = undefined;
 
-    const pending = this.pendingProducer;
+    // `disconnect()` on a producer that is still connecting cancels the retry
+    // rather than waiting it out — once its request in flight has returned.
+    const clients = [this.pendingProducer, this.producer].filter(
+      (client): client is Producer => client !== undefined,
+    );
     this.pendingProducer = undefined;
-    if (pending) {
-      // `disconnect()` on a producer that is still connecting cancels the
-      // retry rather than waiting it out.
-      await pending.disconnect().catch(() => undefined);
-    }
-
-    if (this.producer) {
-      await this.producer.disconnect();
-      this.producer = undefined;
-    }
+    this.producer = undefined;
+    await Promise.all(
+      clients.map((client) =>
+        boundedDisconnect(client, { deadlineAt, label: 'Kafka producer', logger: this.logger }),
+      ),
+    );
   }
 }
 
@@ -165,7 +205,7 @@ export class KafkaEventPublisher implements EventPublisher, OnModuleDestroy {
  * where Kafka is not up. Records what it was asked to publish so a test can
  * assert on it, and never silently pretends success it did not have.
  */
-export class InMemoryEventPublisher implements EventPublisher {
+export class InMemoryEventPublisher implements EventPublisher, OutboxStoppable {
   readonly published: OutboxRow[] = [];
 
   async publish(rows: readonly OutboxRow[]): Promise<void> {
@@ -175,6 +215,9 @@ export class InMemoryEventPublisher implements EventPublisher {
   async isHealthy(): Promise<boolean> {
     return true;
   }
+
+  /** Nothing to close; `OutboxShutdown` calls it as it would the Kafka publisher's. */
+  async stop(): Promise<void> {}
 
   clear(): void {
     this.published.length = 0;

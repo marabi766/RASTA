@@ -304,6 +304,7 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
         PolicyReconciliationSweeper,
         TenderAwardedConsumer,
         OrganizationMovedConsumer,
+        KafkaEventPublisher,
         ENV,
       ],
       useFactory: (
@@ -312,12 +313,15 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
         reconciliation: PolicyReconciliationSweeper,
         awarded: TenderAwardedConsumer,
         moves: OrganizationMovedConsumer,
+        publisher: KafkaEventPublisher,
         env: ContractEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
           workers: [reconciliation, awarded, moves],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

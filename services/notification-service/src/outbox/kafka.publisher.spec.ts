@@ -71,7 +71,7 @@ describe('KafkaEventPublisher shutdown', () => {
     const publishing = publisher.publish([row()]).catch(() => undefined);
     await Promise.resolve();
 
-    await publisher.onModuleDestroy();
+    await publisher.stop();
 
     expect(disconnect).toHaveBeenCalledTimes(1);
 
@@ -80,7 +80,7 @@ describe('KafkaEventPublisher shutdown', () => {
   });
 
   it('refuses to open a new producer after shutdown rather than connecting again', async () => {
-    await publisher.onModuleDestroy();
+    await publisher.stop();
 
     await expect(publisher.publish([row()])).rejects.toThrow(/shut down/);
     // The refusal is the point: a new producer here is a connection opened
@@ -90,7 +90,7 @@ describe('KafkaEventPublisher shutdown', () => {
   });
 
   it('is safe to destroy twice — shutdown paths get run more than once', async () => {
-    await publisher.onModuleDestroy();
-    await expect(publisher.onModuleDestroy()).resolves.toBeUndefined();
+    await publisher.stop();
+    await expect(publisher.stop()).resolves.toBeUndefined();
   });
 });

@@ -148,6 +148,7 @@ describe('financial consistency (real database)', () => {
           // left behind by one suite silently reprices every settlement in the
           // next — which is exactly how this test first failed.
           organizationId: org.b,
+          businessLine: 'PARTS',
           transactionType: 'MARKETPLACE_ORDER',
           rateBasisPoints: 250,
           status: 'ACTIVE',
@@ -160,6 +161,7 @@ describe('financial consistency (real database)', () => {
       const transaction = await asActor({ organizationId: org.a }, () =>
         wiring.transactions.create({
           transactionType: 'MARKETPLACE_ORDER',
+          businessLine: 'PARTS',
           counterpartyOrganizationId: org.b,
           grossAmountMinor: '4000000',
           currency: 'IRR',
