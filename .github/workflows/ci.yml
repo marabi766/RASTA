@@ -42,6 +42,7 @@ jobs:
           # The tip and its parents: a pull request's merge commit's first
           # parent is the branch it merges into, which the withheld-settings
           # list is compared with (step "Every service's own settings ...").
+          # A push's previous main is fetched by that step.
           fetch-depth: 2
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -157,13 +158,18 @@ jobs:
         # (turbo dry run). Codex r2 on #304.
         #
         # The list may only shrink: each entry must already be listed in the
-        # base's copy — the merge commit's first parent on a pull request, the
-        # previous main on a push — so a change cannot list a new setting
-        # instead of declaring it, alone or swapped for one it removes
-        # (Codex r3 on #304).
+        # base's copy, so a change cannot list a new setting instead of
+        # declaring it, alone or swapped for one it removes (Codex r3 on
+        # #304). The base (scripts/service-env-withheld-base.mjs): the merge
+        # commit's first parent on a pull request; on a push the main it
+        # replaced, github.event.before, fetched — not HEAD^1, a commit of the
+        # same push when it carries several (Codex r1 on #316). No previous
+        # main, or one that cannot be fetched, fails the step.
         env:
-          SERVICE_ENV_WITHHELD_BASE: HEAD^1
-        run: pnpm run test:service-env-turbo
+          SERVICE_ENV_WITHHELD_PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          base="$(node scripts/service-env-withheld-base.mjs)"
+          SERVICE_ENV_WITHHELD_BASE="$base" pnpm run test:service-env-turbo
 
       - name: Optional database-side statement timeout for the runtime roles
         # Behind PgBouncer the services' own statement_timeout option is

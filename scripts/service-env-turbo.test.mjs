@@ -24,16 +24,16 @@
 // a new setting and list it in the same diff, so the list is also compared
 // with the base's: every (service, task, setting) must already be listed
 // there (Codex r3 on #304). The base is a git revision,
-// SERVICE_ENV_WITHHELD_BASE — CI's merge commit's first parent, i.e. the
-// branch it merges into — and origin/main when unset.
+// SERVICE_ENV_WITHHELD_BASE, and origin/main when unset. CI sets it to
+// scripts/service-env-withheld-base.mjs's choice: a pull request's merge
+// commit's first parent, a push's previous main (Codex r1 on #316).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, allows, readJson, taskPatterns, turbo } from './turbo-env-lib.mjs';
-
-const BASELINE_FILE = 'scripts/service-env-turbo-withheld.json';
+import { BASELINE_FILE, flatten, listedAt, notListedIn } from './service-env-withheld-base.mjs';
 
 /**
  * Turbo tasks whose command builds a service's configuration from its process
@@ -109,18 +109,6 @@ function baseline() {
   return flatten(readJson(join(ROOT, BASELINE_FILE)));
 }
 
-/** A withheld list, as `service task SETTING` entries. */
-function flatten(listed) {
-  const entries = [];
-  for (const [service, settings] of Object.entries(listed)) {
-    if (service.startsWith('$')) continue;
-    for (const [name, tasks] of Object.entries(settings)) {
-      for (const task of tasks) entries.push(`${service} ${task} ${name}`);
-    }
-  }
-  return entries;
-}
-
 /**
  * The list as the base revision has it. The revision must resolve: a base
  * that cannot be read fails rather than passing unchecked. A base without the
@@ -128,21 +116,12 @@ function flatten(listed) {
  */
 function baseBaseline() {
   const ref = process.env.SERVICE_ENV_WITHHELD_BASE || 'origin/main';
-  const git = (...args) => spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' });
-  const commit = git('rev-parse', '--verify', '--quiet', `${ref}^{commit}`);
-  assert.equal(
-    commit.status,
-    0,
+  const listed = listedAt(ref, ROOT);
+  assert.ok(
+    listed,
     `cannot resolve the base revision ${ref} (SERVICE_ENV_WITHHELD_BASE); fetch it`,
   );
-  const file = git('show', `${commit.stdout.trim()}:${BASELINE_FILE}`);
-  return { ref, entries: file.status === 0 ? flatten(JSON.parse(file.stdout)) : [] };
-}
-
-/** The entries of `listed` that `base` does not list: growth, or a replacement's new half. */
-function notListedIn(listed, base) {
-  const known = new Set(base);
-  return listed.filter((entry) => !known.has(entry));
+  return { ref, entries: listed.entries };
 }
 
 /** The variables turbo's plan for `<package>#<task>` configures, given `env` (a dry run). */
