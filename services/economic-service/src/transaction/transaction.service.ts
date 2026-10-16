@@ -400,19 +400,36 @@ export class TransactionService {
    * potentially two different people: confirming that the goods arrived, and
    * releasing the money. Collapsing them would make the product document's
    * "تأیید دریافت" control indistinguishable from the payment.
+   *
+   * A service's authorisation also keeps which service asked and under which
+   * `idempotencyKey`, on the row, for good. The stored answer expires; this
+   * does not. It is how the order saga proves its own authorisation took
+   * effect when its retry comes after that expiry and finds the transaction
+   * DISPUTED — a state a dispute reaches from HELD too, with no authorisation
+   * at all (docs/23 D-053). A person's key is their client's, and the row is
+   * shown to the payee, so it is not kept.
    */
   async authoriseSettlement(
     transactionId: string,
     answer?: IdempotentAnswer<TransactionDetail>,
+    idempotencyKey?: string,
   ): Promise<TransactionDetail> {
-    const actor = getContext().userId ?? SERVICE_NAME;
+    const context = getContext();
+    const actor = context.userId ?? SERVICE_NAME;
+    // The signed caller, never a header (ADR-035).
+    const service = context.authType === 'SERVICE' ? (context.callerService ?? null) : null;
     const at = new Date();
     return this.move(
       transactionId,
       'AUTHORISE_SETTLEMENT',
       actor,
       at,
-      { settlementAuthorisedAt: at, settlementAuthorisedBy: actor },
+      {
+        settlementAuthorisedAt: at,
+        settlementAuthorisedBy: actor,
+        settlementAuthorisedService: service,
+        settlementAuthorisationKey: service ? (idempotencyKey ?? null) : null,
+      },
       answer,
     );
   }
@@ -444,6 +461,12 @@ export class TransactionService {
   /**
    * Resolves a dispute back into the settlement queue.
    *
+   * With `dto.disputeId`, the decision is about that dispute and no other:
+   * refused unless the transaction still holds it (Codex on #318 round 2, N1).
+   * The order saga names the dispute its operator decided; without the name,
+   * a dispute resolved here and replaced by another meanwhile was the one
+   * decided, and the new one was cleared with it.
+   *
    * A human decision, recorded with who made it. It does not settle — it only
    * unblocks, so that releasing the money remains a separate, deliberate act.
    */
@@ -461,6 +484,7 @@ export class TransactionService {
       at,
       { disputeResolvedAt: at, disputeResolvedBy: actor, disputeReason: dto.resolution },
       answer,
+      dto.disputeId,
     );
   }
 
@@ -580,6 +604,10 @@ export class TransactionService {
    * row (through `extra`) and on the `TRANSACTION_STATUS_CHANGED` record, in
    * the same transaction as the move — and so does the answer, read from the
    * row the move wrote (see {@link answered}).
+   *
+   * `heldDispute`, when given, is the dispute the transaction must hold for
+   * the move to happen — read under the same lock, so it cannot be replaced
+   * between the check and the write (see {@link resolveDispute}).
    */
   private async move(
     transactionId: string,
@@ -588,6 +616,7 @@ export class TransactionService {
     at: Date,
     extra: Prisma.TransactionUncheckedUpdateManyInput,
     answer?: IdempotentAnswer<TransactionDetail>,
+    heldDispute?: string,
   ): Promise<TransactionDetail> {
     return this.prisma.transaction(async (tx) => {
       const transaction = await this.repository.lockForUpdate(tx, transactionId);
@@ -595,6 +624,15 @@ export class TransactionService {
       this.authorizeAct(transaction, 'COMMIT');
 
       const target = nextStatus(transactionId, transaction.status, event);
+      if (heldDispute !== undefined && transaction.disputeId !== heldDispute) {
+        // Fixed words: the identities stay out of the envelope and the log.
+        throw RastaError.invalidStateTransition(
+          'Transaction',
+          transaction.status,
+          target,
+          'The transaction no longer holds the dispute this decision is about',
+        );
+      }
       const moved = await this.repository.transition(
         tx,
         transactionId,
@@ -780,6 +818,10 @@ export interface TransactionDetail {
   failureReason: string | null;
   createdAt: Date;
   createdBy: string;
+  settlementAuthorisedAt: Date | null;
+  settlementAuthorisedService: string | null;
+  settlementAuthorisationKey: string | null;
+  disputeId: string | null;
   legs: {
     id: string;
     organizationId: string;
