@@ -54,6 +54,9 @@ export const TOPIC_CONSUMERS = Object.freeze({
       'rasta.maintenance.v1',
       'rasta.marketplace.v1',
       'rasta.construction.v1',
+      // Q-128: only DOCUMENT_DELETED, as a trigger — a claim's document reference is
+      // marked DOCUMENT_REMOVED once document-service itself confirms the deletion (A-13).
+      'rasta.document.v1',
     ] as const),
     deadLetterTopic: 'rasta.asset.v1.dlq',
   }),

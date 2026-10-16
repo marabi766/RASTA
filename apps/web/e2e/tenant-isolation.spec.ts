@@ -70,6 +70,41 @@ const MISSING_ID = 'AST-SEED-9999';
 const OWN_DRIVER_NUMBERS = ['OP-104', 'OP-108'] as const;
 const OTHER_TENANT_DRIVER_NUMBER = 'OP-201';
 
+/**
+ * Under `CI`, this file must run, not skip. The "Portal in a browser" job
+ * (`.github/workflows/ci.yml`, `web-browser`) is the one that provides the
+ * evidence, and it sets both flags: `WEB_LIVE_STACK_E2E` for the whole file
+ * and `WEB_LIVE_STACK_E2E_EXP004` for the EXP-004 block. If either is missing
+ * there, this test fails the job instead of letting it go green with the
+ * scenarios skipped.
+ *
+ * It sits at the top level, outside every `describe`, on purpose: a
+ * `test.skip` in an enclosing block skips everything registered inside it,
+ * guard included. The earlier guard lived inside the live-stack block, so
+ * losing `WEB_LIVE_STACK_E2E` skipped it along with the scenarios it was
+ * there to protect (PR #305 review rounds 1 and 2).
+ * `src/test/tenant-isolation-gate.spec.ts` lists this file under every
+ * combination of the two flags and pins the outcome.
+ *
+ * Locally, without `CI`, the plain skips below apply: nobody who has not
+ * started the live stack is forced to.
+ */
+const LIVE_STACK_FLAGS = ['WEB_LIVE_STACK_E2E', 'WEB_LIVE_STACK_E2E_EXP004'] as const;
+const missingLiveStackFlags = process.env.CI
+  ? LIVE_STACK_FLAGS.filter((flag) => process.env[flag] !== 'true')
+  : [];
+if (missingLiveStackFlags.length > 0) {
+  test('CI runs every live tenant-isolation scenario, none skipped', () => {
+    throw new Error(
+      `${missingLiveStackFlags.join(' and ')} must be 'true' in CI. The "Portal in a browser" ` +
+        'job (.github/workflows/ci.yml, web-browser) starts the live stack, including ' +
+        'construction-service and inventory-service, and sets both flags; without them the ' +
+        'scenarios in this file would be skipped and the job would go green with no ' +
+        'live-isolation evidence.',
+    );
+  });
+}
+
 test.describe('tenant isolation through the live stack', () => {
   test.skip(
     process.env.WEB_LIVE_STACK_E2E !== 'true',
@@ -387,4 +422,241 @@ test.describe('tenant isolation through the live stack', () => {
       expect(after.name).not.toBe('تغییر از مستأجر دیگر');
     });
   });
+
+  /**
+   * EXP-004's read-only surfaces (`/projects`, `/tenders`, `/inventory`,
+   * `/contracts`) had no live isolation coverage at all — every check above is
+   * EXP-002. `/projects` and `/inventory` close that gap here.
+   *
+   * Unlike the fleet/maintenance seeds above, construction-service and
+   * inventory-service have no pre-seeded two-tenant fixture on `main`
+   * (neither service has a `prisma/seed.ts`): there is no `AST-SEED`-style
+   * record of ORG-DEH-0002's to read. Each block below creates its own
+   * fixture, live, through the gateway — the same pattern `orders.spec.ts`
+   * and `settlements.spec.ts` already use for a read-only screen that needs
+   * something to read before it can prove isolation on it. A fresh id per
+   * run means the "must not contain" assertions cannot pass by accident of
+   * a previous run having left nothing behind.
+   *
+   * `/tenders` and `/contracts` are **not** covered here — see the file-level
+   * note after this block for why, and the PM-STATE this branch's PR carries.
+   *
+   * **Wired into the required "Portal in a browser" job.** It now starts
+   * construction-service and inventory-service too (`.github/workflows/ci.yml`,
+   * `web-browser`) and sets `WEB_LIVE_STACK_E2E_EXP004=true` alongside the
+   * usual `WEB_LIVE_STACK_E2E`, so this block runs for real in CI, not merely
+   * locally. The gate stays a second, separate variable (not folded into
+   * `WEB_LIVE_STACK_E2E`) because someone running the rest of this suite
+   * locally against the smaller EXP-002 set should not have to also start
+   * these two services.
+   *
+   * Under `CI`, a skip of this block fails the job: see the guard at the top
+   * of this file (`LIVE_STACK_FLAGS`), which checks both flags.
+   */
+  test.describe('EXP-004 — projects and inventory, created live for this run', () => {
+    test.skip(
+      process.env.WEB_LIVE_STACK_E2E_EXP004 !== 'true',
+      'needs construction-service and inventory-service alongside the usual live stack — set ' +
+        'WEB_LIVE_STACK_E2E_EXP004=true locally after starting them (the "Portal in a browser" ' +
+        'CI job always does; see the guard at the top of this file)',
+    );
+
+    const RUN = randomUUID().slice(0, 8);
+
+    async function createProject(
+      request: APIRequestContext,
+      token: string,
+      title: string,
+    ): Promise<string> {
+      const response = await request.post(gatewayUrl('/v1/projects'), {
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+          'idempotency-key': `e2e-contracts-read-${randomUUID()}`,
+        },
+        data: {
+          title,
+          operationType: 'road',
+          scopeOfWork: 'E2E tenant-isolation fixture (EXP-004)',
+          locationDescription: 'E2E',
+          estimatedCostMinor: '1000000',
+        },
+      });
+      expect(response.status(), await response.text()).toBe(201);
+      return ((await response.json()) as { id: string }).id;
+    }
+
+    async function createWarehouse(
+      request: APIRequestContext,
+      token: string,
+      name: string,
+    ): Promise<string> {
+      const response = await request.post(gatewayUrl('/v1/warehouses'), {
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+          'idempotency-key': `e2e-contracts-read-${randomUUID()}`,
+        },
+        data: { name },
+      });
+      expect(response.status(), await response.text()).toBe(201);
+      return ((await response.json()) as { id: string }).id;
+    }
+
+    const PROJECT_A_TITLE = `پروژهٔ ایزولاسیون ${RUN}-A`;
+    const PROJECT_B_TITLE = `پروژهٔ ایزولاسیون ${RUN}-B`;
+    const WAREHOUSE_A_NAME = `انبار ایزولاسیون ${RUN}-A`;
+    const WAREHOUSE_B_NAME = `انبار ایزولاسیون ${RUN}-B`;
+    /** Syntactically valid (`WHS_<ULID>`/the project id's own shape need not be guessed — a
+     * missing project id just needs to be a string the router accepts), but not created by
+     * anything: the non-disclosure check needs an absent id, not a malformed one. */
+    const MISSING_WAREHOUSE = 'WHS_ZZZZZZZZZZZZZZZZZZZZZZZZZZ';
+    const MISSING_PROJECT = `PRJ-E2E-MISSING-${RUN}`;
+
+    let projectA: string;
+    let projectB: string;
+    let warehouseA: string;
+    let warehouseB: string;
+
+    test.beforeAll(async ({ request, browser }) => {
+      const contextA = await browser.newContext();
+      const sessionA = await installLiveSession(contextA, 'orgAdmin');
+      const contextB = await browser.newContext();
+      const sessionB = await installLiveSession(contextB, 'orgAdminB');
+
+      [projectA, projectB, warehouseA, warehouseB] = await Promise.all([
+        createProject(request, sessionA.accessToken, PROJECT_A_TITLE),
+        createProject(request, sessionB.accessToken, PROJECT_B_TITLE),
+        createWarehouse(request, sessionA.accessToken, WAREHOUSE_A_NAME),
+        createWarehouse(request, sessionB.accessToken, WAREHOUSE_B_NAME),
+      ]);
+
+      await contextA.close();
+      await contextB.close();
+    });
+
+    test('ORG-DEH-0001 sees its own project and warehouse, not ORG-DEH-0002’s', async ({
+      page,
+    }) => {
+      await installLiveSession(page.context(), 'orgAdmin');
+
+      await page.goto('/projects');
+      await expect(page.getByRole('heading', { level: 1 })).toHaveText('پروژه‌های عمرانی');
+      const projects = await mainText(page);
+      expect(projects).toContain(PROJECT_A_TITLE);
+      expect(projects).not.toContain(PROJECT_B_TITLE);
+
+      await page.goto('/inventory');
+      await expect(page.getByRole('heading', { level: 1 })).toHaveText('انبار');
+      const warehouses = await mainText(page);
+      expect(warehouses).toContain(WAREHOUSE_A_NAME);
+      expect(warehouses).not.toContain(WAREHOUSE_B_NAME);
+    });
+
+    test('ORG-DEH-0001’s own project and warehouse are shown, not refused', async ({ page }) => {
+      await installLiveSession(page.context(), 'orgAdmin');
+
+      await page.goto(`/projects/${projectA}`);
+      await expect(page.getByText('این پروژه پیدا نشد')).toHaveCount(0);
+      expect(await mainText(page)).toContain(PROJECT_A_TITLE);
+
+      await page.goto(`/inventory?warehouse=${warehouseA}`);
+      await expect(page.getByText('انبار یافت نشد')).toHaveCount(0);
+      expect(await mainText(page)).toContain(WAREHOUSE_A_NAME);
+    });
+
+    test('ORG-DEH-0002’s project is answered exactly as a project that does not exist', async ({
+      page,
+    }) => {
+      await installLiveSession(page.context(), 'orgAdmin');
+
+      await page.goto(`/projects/${projectB}`);
+      await expect(page.getByText('این پروژه پیدا نشد')).toBeVisible();
+      const foreign = await mainText(page);
+
+      await page.goto(`/projects/${MISSING_PROJECT}`);
+      const missing = await mainText(page);
+
+      expect(foreign).toBe(missing);
+      expect(foreign).not.toContain(PROJECT_B_TITLE);
+    });
+
+    test('ORG-DEH-0002’s warehouse is answered exactly as a warehouse that does not exist', async ({
+      page,
+    }) => {
+      await installLiveSession(page.context(), 'orgAdmin');
+
+      await page.goto(`/inventory?warehouse=${warehouseB}`);
+      await expect(page.getByText('انبار یافت نشد')).toBeVisible();
+      const foreign = await mainText(page);
+
+      await page.goto(`/inventory?warehouse=${MISSING_WAREHOUSE}`);
+      const missing = await mainText(page);
+
+      expect(foreign).toBe(missing);
+      expect(foreign).not.toContain(WAREHOUSE_B_NAME);
+    });
+
+    test('from the other side: ORG-DEH-0002 sees its own and not ORG-DEH-0001’s', async ({
+      page,
+    }) => {
+      await installLiveSession(page.context(), 'orgAdminB');
+
+      await page.goto('/projects');
+      const projects = await mainText(page);
+      expect(projects).toContain(PROJECT_B_TITLE);
+      expect(projects).not.toContain(PROJECT_A_TITLE);
+
+      await page.goto(`/projects/${projectA}`);
+      await expect(page.getByText('این پروژه پیدا نشد')).toBeVisible();
+      expect(await mainText(page)).not.toContain(PROJECT_A_TITLE);
+
+      await page.goto('/inventory');
+      const warehouses = await mainText(page);
+      expect(warehouses).toContain(WAREHOUSE_B_NAME);
+      expect(warehouses).not.toContain(WAREHOUSE_A_NAME);
+
+      await page.goto(`/inventory?warehouse=${warehouseA}`);
+      await expect(page.getByText('انبار یافت نشد')).toBeVisible();
+      expect(await mainText(page)).not.toContain(WAREHOUSE_A_NAME);
+    });
+  });
 });
+
+/**
+ * `/tenders` and `/contracts` are not covered by a live isolation test here.
+ *
+ * - **`/tenders`**: a tender is only accepted under a project whose status is
+ *   `APPROVED` (`construction-service`'s `tender.service.ts`: "a tender is
+ *   created only under an APPROVED project"), and a project reaches
+ *   `APPROVED` only through a configured `project.execution` approval policy
+ *   plus a *second* person's decision on it (ADR-063; see
+ *   `tests/e2e/specs/construction/03-tender-lifecycle.e2e-spec.ts`, which
+ *   provisions its own fresh organizations, policies and several accounts
+ *   for exactly this reason). The Keycloak development realm's two seeded
+ *   tenants (`dehyari.admin` / `dehyari.admin.b`) are single-admin fixtures
+ *   with no such policy and no second approver — provisioning one here would
+ *   mean this portal test writing construction-service governance data
+ *   (policies, a second account's membership) well past what a read-only UI
+ *   slice should set up, for a service-level concern `tests/e2e` already
+ *   owns and tests directly.
+ * - **`/contracts`**: `contract-service` has no route that creates a
+ *   contract at all — one is drafted only by the system, consuming
+ *   `TENDER_AWARDED` (ADR-068 § 3; the controller's own words: "Contracts are
+ *   created by the system when a tender is awarded; there is no route that
+ *   creates one"). Reaching that event live means publishing a tender,
+ *   inviting and sealing bids from a second contractor organization, closing
+ *   the bidding window, opening and evaluating, then awarding —
+ *   `tests/e2e/specs/contract/01-contract-lifecycle.e2e-spec.ts` runs exactly
+ *   that, at over 2000 lines and multiple timed waits, provisioning its own
+ *   organizations and people rather than reusing the two seeded tenants.
+ *   Reproducing it inside a browser-driven portal spec would duplicate a
+ *   service-level suite that already exists, at a cost and flakiness risk
+ *   far past what this read-only slice calls for.
+ *
+ * Both are listed as open gaps in this branch's STATUS/PM-STATE for the PM to
+ * decide whether a service-level seed (a `prisma/seed.ts` for
+ * construction-service and contract-service, or a shared fixture-provisioning
+ * script outside this test run) is worth adding — that is a cross-cutting
+ * decision this portal slice should not make unilaterally.
+ */

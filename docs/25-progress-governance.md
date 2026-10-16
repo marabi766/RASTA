@@ -24,14 +24,15 @@ Progress = accepted story points / active committed story points × 100
 
 ## ۲۵٫۲ منبع حقیقت
 
-| فایل                           | نقش                                            |
-| ------------------------------ | ---------------------------------------------- |
-| `planning/backlog.json`        | Backlog مرجع و تنها ورودی محاسبه               |
-| `planning/backlog.schema.json` | قرارداد ماشین‌خوان برای Editor و ابزارها       |
-| `scripts/progress-lib.mjs`     | اعتبارسنجی قواعد و محاسبه                      |
-| `scripts/progress.mjs`         | رابط Validate، تولید گزارش و کنترل Staleness   |
-| `scripts/progress.test.mjs`    | آزمون قواعد اصلی سنجش                          |
-| `docs/25-project-progress.md`  | Snapshot خواندنی و خودکار؛ ویرایش مستقیم ممنوع |
+| فایل                           | نقش                                               |
+| ------------------------------ | ------------------------------------------------- |
+| `planning/backlog.json`        | Backlog مرجع و تنها ورودی محاسبه                  |
+| `planning/backlog.schema.json` | قرارداد ماشین‌خوان؛ در هر Validate اجباری است     |
+| `scripts/progress-schema.mjs`  | اعتبارسنجی واقعی JSON Schema (Draft 2020-12، Ajv) |
+| `scripts/progress-lib.mjs`     | اعتبارسنجی قواعد و محاسبه                         |
+| `scripts/progress.mjs`         | رابط Validate، تولید گزارش و کنترل Staleness      |
+| `scripts/progress.test.mjs`    | آزمون قواعد اصلی سنجش                             |
+| `docs/25-project-progress.md`  | Snapshot خواندنی و خودکار؛ ویرایش مستقیم ممنوع    |
 
 اگر سند دیگری عدد متفاوتی نشان دهد، عدد تولیدشده از Backlog مرجع است؛ البته تا وقتی Baseline در حالت `PROVISIONAL` است، Story Pointها هنوز تعهد تأییدشده مالک محصول نیستند.
 
@@ -90,7 +91,7 @@ PROPOSED → READY → IN_PROGRESS → ACCEPTED
                    BLOCKED
 ```
 
-بازگرداندن `ACCEPTED` به وضعیت دیگر فقط برای اصلاح یک پذیرش اشتباه مجاز است و باید با `STATUS_CORRECTED` در Change Log ثبت شود. Feature دارای Story فقط وقتی `ACCEPTED` می‌شود که تمام Storyهای فعال آن `ACCEPTED` باشند؛ پذیرش هر Story می‌تواند مستقل و همراه Evidence خودش انجام شود.
+بازگرداندن `ACCEPTED` به وضعیت دیگر فقط برای اصلاح یک پذیرش اشتباه مجاز است و باید با `STATUS_CORRECTED` در Change Log ثبت شود؛ این ورودی به انتهای Change Log افزوده می‌شود، `approvalRef` و `recordIds` (شامل همان آیتم) دارد و تاریخ آن از تاریخ پذیرش زودتر نیست. ورودی `ITEM_ACCEPTED` قبلی به‌عنوان تاریخچه باقی می‌ماند و حذف یا بازنویسی نمی‌شود. Feature دارای Story فقط وقتی `ACCEPTED` می‌شود که تمام Storyهای فعال آن `ACCEPTED` باشند؛ پذیرش هر Story می‌تواند مستقل و همراه Evidence خودش انجام شود.
 
 ## ۲۵٫۵ Definition of Ready و Definition of Accepted
 
@@ -111,6 +112,8 @@ PROPOSED → READY → IN_PROGRESS → ACCEPTED
 - برای قابلیت دارای داده مستأجر، Tenant Isolation Test وجود دارد؛
 - برای دامنه حساس، تست‌های مالی/امنیتی/E2E لازم سبزند؛
 - نتیجه توسط مالک محصول یا نماینده صریحاً مجاز او پذیرفته شده است.
+
+پذیرش در Change Log با `ITEM_ACCEPTED` ثبت می‌شود: `approvalRef` می‌گوید چه کسی، کی و کجا پذیرفت و `recordIds` آیتم‌های پذیرفته‌شده را نام می‌برد. Validator و Schema ورودی بدون `approvalRef` یا `recordIds` را رد می‌کنند و Validator ورودی‌ای را که آیتمی غیر `ACCEPTED` را نام ببرد نیز رد می‌کند، مگر آنکه پس از آن ورودی، یک `STATUS_CORRECTED` تأییدشده برای همان آیتم (طبق § ۲۵٫۴) ثبت شده باشد؛ تناقض بدون چنین اصلاحی خطاست. پذیرش‌های پیش از ۲۰۲۶-۱۰-۱۵ این ورودی را ندارند.
 
 Evidence معتبر شامل Commit، PR، CI، Test، Live Runtime یا سند ثبت‌کننده Evidence است. صرف نوشتن عبارت «Done» یا `READY_FOR_NEXT_PHASE` Evidence نیست.
 
@@ -158,7 +161,7 @@ Baseline نخست از Scope رسمی `docs/17` و ADR-044 تا ADR-048 ساخت
 ## ۲۵٫۹ فرمان‌های عملیاتی
 
 ```bash
-pnpm progress:validate  # فقط اعتبارسنجی Backlog و روابط
+pnpm progress:validate  # فقط اعتبارسنجی Backlog (Schema + قواعد و روابط)
 pnpm progress:report    # بازتولید گزارش خواندنی
 pnpm progress:check     # اعتبارسنجی + رد گزارش stale
 pnpm test:progress      # آزمون موتور محاسبه و قواعد ضد دستکاری

@@ -107,4 +107,72 @@ describe('TenderCloseSweeper', () => {
     });
     expect(close).not.toHaveBeenCalled();
   });
+
+  /**
+   * D-052: the sweep stops with the relay and the purge, in the destroy phase, by
+   * their shared deadline — no new tender once stopping, and no wait past the
+   * deadline for the one being closed.
+   */
+  describe('stop', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    /** A sweep the timer started over three tenders, held in closing the first. */
+    async function heldInTheFirstClose() {
+      const built = sweeperWith([claim('A'), claim('B'), claim('C')], {});
+      let finish: () => void = () => undefined;
+      built.close.mockImplementationOnce(
+        () =>
+          new Promise<CloseResult>((resolve) => {
+            finish = () => resolve('CLOSED');
+          }),
+      );
+      built.sweeper.start();
+      await jest.advanceTimersByTimeAsync(5000);
+      expect(built.close).toHaveBeenCalledTimes(1);
+      return { ...built, finish: () => finish() };
+    }
+
+    it('starts no further tender once stopping, and waits for the one being closed', async () => {
+      const { sweeper, close, finish } = await heldInTheFirstClose();
+
+      let stopped = false;
+      const stopping = sweeper.stop({ deadlineAt: Date.now() + 5000 }).then(() => {
+        stopped = true;
+      });
+      await jest.advanceTimersByTimeAsync(100);
+      expect(stopped).toBe(false);
+
+      finish();
+      await stopping;
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(close).toHaveBeenCalledWith({ organizationId: 'ORG_A', tenderId: 'A', fence: 'F1' });
+    });
+
+    it('returns by the deadline when the close in flight never finishes', async () => {
+      const { sweeper } = await heldInTheFirstClose();
+
+      let stopped = false;
+      const stopping = sweeper.stop({ deadlineAt: Date.now() + 300 }).then(() => {
+        stopped = true;
+      });
+      await jest.advanceTimersByTimeAsync(299);
+      expect(stopped).toBe(false);
+      await jest.advanceTimersByTimeAsync(1);
+      await stopping;
+      expect(stopped).toBe(true);
+    });
+
+    it('clears its timer, returns at once when idle, and is one stop', async () => {
+      const { sweeper, claimDue } = sweeperWith([], {});
+      sweeper.start();
+
+      const first = sweeper.stop({ deadlineAt: Date.now() + 1000 });
+      expect(sweeper.stop()).toBe(first);
+      await first;
+      sweeper.start(); // not once stopped
+      await jest.advanceTimersByTimeAsync(3 * 5000);
+      expect(claimDue).not.toHaveBeenCalled();
+    });
+  });
 });
