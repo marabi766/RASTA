@@ -13,8 +13,10 @@ import {
   EventConsumer,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
+  OutboxPurgeScheduler,
   OutboxRelay,
   OutboxShutdown,
+  outboxPurgeSettings,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -96,11 +98,13 @@ import { ECONOMIC_DLQ_TOPIC, loadEconomicEnv, SERVICE_NAME, type EconomicEnv } f
 const MAINTENANCE_TOPICS = ['rasta.maintenance.v1'];
 const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
 
-// A note on the providers nothing below injects — the two consumers,
-// `LedgerBalanceAudit` and `PaymentReconciliationSweeper`. Nest instantiates every provider a module declares, so
-// their `onModuleInit` runs and they subscribe and start their timer without
-// anyone holding a reference. Injecting them into `AppModule` purely to keep
-// them alive would be a lie about the dependency.
+// A note on the providers that start themselves — the two consumers,
+// `LedgerBalanceAudit` and `PaymentReconciliationSweeper`. Nest instantiates
+// every provider a module declares, so their `onModuleInit` runs and they
+// subscribe and start their timer without anyone holding a reference.
+// Injecting them into `AppModule` purely to keep them alive would be a lie
+// about the dependency. `OutboxShutdown` injects the sweeper and the two
+// consumers because it stops them.
 
 @Module({
   controllers: [
@@ -310,14 +314,49 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
     },
 
     {
-      // D-052: the relay and the balance audit stop together in the destroy
-      // phase, by one deadline inside SHUTDOWN_TIMEOUT_MS.
+      // D-052: published rows past OUTBOX_PURGE_RETENTION_HOURS, in bounded batches.
+      provide: OutboxPurgeScheduler,
+      inject: [PrismaOutboxStore, ENV, LOGGER],
+      useFactory: (store: PrismaOutboxStore, env: EconomicEnv, logger: Logger) =>
+        new OutboxPurgeScheduler({
+          store,
+          service: SERVICE_NAME,
+          logger,
+          ...outboxPurgeSettings(env),
+        }),
+    },
+    {
+      // D-052: the relay, the purge, the payment reconciler, the two consumers
+      // and the balance audit stop together in the destroy phase, by one
+      // deadline inside SHUTDOWN_TIMEOUT_MS. The reconciler too (as #247 r3):
+      // stopped later, it kept writing outbox rows while the relay drained. The
+      // consumers too (Codex r1 on #277): stopped later, in their own
+      // onApplicationShutdown and with no bound, their wait came on top of the
+      // relay's; those hooks now only join this stop. The balance audit too
+      // (#279, phase 3): it reads the ledger page by page in transactions.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, LedgerBalanceAudit, ENV],
-      useFactory: (relay: OutboxRelay, audit: LedgerBalanceAudit, env: EconomicEnv) =>
+      inject: [
+        OutboxRelay,
+        OutboxPurgeScheduler,
+        PaymentReconciliationSweeper,
+        SettlementAuthorityConsumer,
+        RewardTriggerConsumer,
+        LedgerBalanceAudit,
+        ENV,
+      ],
+      useFactory: (
+        relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
+        reconciler: PaymentReconciliationSweeper,
+        settlements: SettlementAuthorityConsumer,
+        rewards: RewardTriggerConsumer,
+        audit: LedgerBalanceAudit,
+        env: EconomicEnv,
+      ) =>
         new OutboxShutdown({
           relay,
-          workers: [audit],
+          purge,
+          workers: [reconciler, settlements, rewards, audit],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },
@@ -354,6 +393,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
+    private readonly purge: OutboxPurgeScheduler,
     private readonly outboxShutdown: OutboxShutdown,
     private readonly store: PrismaOutboxStore,
     private readonly ledger: LedgerService,
@@ -380,6 +420,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.ledger.ensurePlatformAccounts('IRR');
 
     this.relay.start();
+    this.purge.start();
 
     const sample = async () => {
       try {
@@ -411,8 +452,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onApplicationShutdown(): Promise<void> {
-    // The relay and the balance audit already stopped in OutboxShutdown's
-    // onModuleDestroy, concurrently and by one deadline; this joins that stop.
+    // The relay, the purge, the payment reconciler, the two consumers and the
+    // balance audit already stopped in OutboxShutdown's onModuleDestroy,
+    // concurrently and by one deadline; this joins that stop and returns at once.
     await this.outboxShutdown.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }
