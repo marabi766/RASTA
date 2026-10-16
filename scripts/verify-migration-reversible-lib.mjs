@@ -1924,7 +1924,8 @@ export const EXPECTED = {
       'ux_approval_policy_version',
       'ux_approval_policy_active',
       'ux_approval_policy_step_order',
-      'ux_approval_policy_step_authority',
+      // `ux_approval_policy_step_authority` is dropped by 20261016120000 (CON-003 PR 5): one step
+      // per authority holds for signing policies only, in `approval_policy_step_guard`.
     ],
     constraints: [
       'ck_contract_cancellation',

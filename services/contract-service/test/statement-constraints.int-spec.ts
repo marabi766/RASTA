@@ -681,6 +681,42 @@ describe('the database keeps the statements and their deductions', () => {
       await technical('10', '11');
       await refuses(draftPolicy('contract.statement.other'), /ck_policy_workflow_key/);
     });
+
+    it('one step per (organization, role) holds for a signing policy only; a chain step is never the oversight role or the platform operator, and the database says why', async () => {
+      const org = newOrganizationId();
+      organizations.push(org);
+      const draftPolicy = async (workflowKey: string) => {
+        const policyId = `APL_${ulid()}`;
+        await exec(`INSERT INTO approval_policy (id, organization_id, author_organization_id, author_role,
+                      workflow_key, policy_version, label, rationale, created_at, created_by,
+                      created_correlation_id)
+                    VALUES ('${policyId}', '${org}', '${org}', 'UNION_ADMIN', '${workflowKey}', 1,
+                            'The suite', 'A rationale for the suite', now(), 'USR_1', 'COR_1')`);
+        return (stepOrder: number, role = 'ORGANIZATION_ADMIN') =>
+          exec(`INSERT INTO approval_policy_step (id, organization_id, policy_id, step_order,
+                  authority_organization_id, authority_role, authority_label)
+                VALUES ('APS_${ulid()}', '${org}', '${policyId}', ${stepOrder}, '${org}', '${role}', 'Authority')`);
+      };
+      // A signing policy's steps are alternatives: one authority, one step.
+      const signing = await draftPolicy('contract.signature');
+      await signing(1);
+      await refuses(signing(2), /ck_step_signing_authority_once/);
+      await signing(2, 'FLEET_MANAGER');
+      // A chain's steps are asked in order: the same authority twice is two people's steps.
+      for (const workflowKey of ['contract.statement.technical', 'contract.statement.financial']) {
+        const chain = await draftPolicy(workflowKey);
+        await chain(1);
+        await chain(2);
+        // Step order stays unique for every workflow.
+        await refuses(chain(2, 'FLEET_MANAGER'), /Key \(organization_id, policy_id, step_order\)/);
+        for (const role of ['AUDITOR', 'SYSTEM_ADMIN']) {
+          await refuses(
+            chain(3, role),
+            /ck_step_authority_not_oversight: .*the platform creates no legal authority, so it approves no tenant's statement/,
+          );
+        }
+      }
+    });
   });
 
   it('a deduction rule is whole basis points of the gross, one in force per name, never changed or removed — only retired, once', async () => {

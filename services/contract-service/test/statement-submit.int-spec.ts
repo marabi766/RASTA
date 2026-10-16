@@ -229,6 +229,32 @@ describe('submitting a statement (CON-003 PR 5)', () => {
     }
   });
 
+  it('two steps naming the same organization and role are both snapshotted, in order: a chain asks two people, not one authority once', async () => {
+    const c = await signed();
+    await activateStatementPolicies(w, c.employer, {
+      technical: [own(c.employer), own(c.employer)],
+      financial: [own(c.employer), own(c.employer, 'FLEET_MANAGER'), own(c.employer)],
+    });
+    const made = await draft(c);
+    const res = await submit(c.id, made.id, c.contractorToken).expect(200);
+    const chain = (steps: { stepOrder: number; authorityRole: string }[]) =>
+      steps.map((step) => [step.stepOrder, step.authorityRole]);
+    expect(chain(res.body.approvalChains.technical.steps)).toEqual([
+      [1, 'ORGANIZATION_ADMIN'],
+      [2, 'ORGANIZATION_ADMIN'],
+    ]);
+    expect(chain(res.body.approvalChains.financial.steps)).toEqual([
+      [1, 'ORGANIZATION_ADMIN'],
+      [2, 'FLEET_MANAGER'],
+      [3, 'ORGANIZATION_ADMIN'],
+    ]);
+    expect(await statementRow(made.id)).toMatchObject({
+      technicalStepCount: 2,
+      financialStepCount: 3,
+    });
+    expect(await snapshotRows(made.id)).toHaveLength(5);
+  });
+
   describe('no complete chain, no submission (422, nothing written)', () => {
     it('no policy in force for either chain, or for one', async () => {
       const c = await signed();
