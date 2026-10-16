@@ -183,6 +183,34 @@ const schema = z.object({
    */
   WEB_CONTRACT_READER_ROLES: roleList('WEB_CONTRACT_READER_ROLES', 'ORGANIZATION_ADMIN'),
 
+  /**
+   * How long economic-service keeps an idempotency record, in hours — the
+   * window in which a dispute command re-sent under its original key is a
+   * replay rather than a new command (`server/dispute-replay.ts`, PR 319
+   * review 2, finding 2).
+   *
+   * This **mirrors** economic-service's `ECONOMIC_IDEMPOTENCY_TTL_HOURS`
+   * (same bounds, 1..168) and must be changed together with it, or set lower.
+   * The default is that setting's **floor**, not its default: a value lower
+   * than the service's only offers the re-send for less time than it could
+   * be; a higher one would offer a re-send the service may execute as new.
+   */
+  WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+
+  /**
+   * How much earlier than that retention the portal stops re-sending a
+   * dispute command, in seconds: room for the request to travel from the
+   * portal to economic-service, so a re-send let through just before the
+   * deadline cannot arrive after the record is gone. At most half an hour,
+   * so the window is never shorter than thirty minutes.
+   */
+  WEB_DISPUTE_REPLAY_MARGIN_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .max(30 * 60)
+    .default(10 * 60),
+
   WEB_COOKIE_SECURE: z
     .enum(['true', 'false'])
     .default('true')
