@@ -1195,7 +1195,7 @@ export class AssetService {
    * across machines is a decision nobody has made (a document holds one owner
    * reference), so it is not made here.
    */
-  private async assertDocumentIsTheirs(
+  async assertDocumentIsTheirs(
     organizationId: string,
     assetId: string,
     documentId: string,
