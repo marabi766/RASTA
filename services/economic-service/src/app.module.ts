@@ -342,6 +342,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
         SettlementAuthorityConsumer,
         RewardTriggerConsumer,
         LedgerBalanceAudit,
+        KafkaEventPublisher,
         ENV,
       ],
       useFactory: (
@@ -351,12 +352,15 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
         settlements: SettlementAuthorityConsumer,
         rewards: RewardTriggerConsumer,
         audit: LedgerBalanceAudit,
+        publisher: KafkaEventPublisher,
         env: EconomicEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
           workers: [reconciler, settlements, rewards, audit],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

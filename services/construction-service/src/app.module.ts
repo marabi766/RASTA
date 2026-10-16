@@ -429,6 +429,7 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
         OrganizationMovedConsumer,
         SupplierStandingConsumer,
         StandingBootstrap,
+        KafkaEventPublisher,
         ENV,
       ],
       useFactory: (
@@ -440,12 +441,15 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
         moves: OrganizationMovedConsumer,
         standing: SupplierStandingConsumer,
         bootstrap: StandingBootstrap,
+        publisher: KafkaEventPublisher,
         env: ConstructionEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
           workers: [reconciliation, tenderClose, awardCheck, moves, standing, bootstrap],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

@@ -203,7 +203,7 @@ describeWithKafka('economic event flow over Kafka', () => {
     await rewardTrigger?.onApplicationShutdown();
     await maintenanceProducer?.disconnect();
     await economicConsumer?.disconnect();
-    await publisher?.onModuleDestroy();
+    await publisher?.stop();
     await cleanup(prisma, [org.a, org.b, org.c]);
     await prisma.onModuleDestroy();
   }, 60_000);
