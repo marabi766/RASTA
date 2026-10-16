@@ -103,14 +103,13 @@ export function coversSubject(rule: CommissionRuleView, subject: CommissionSubje
  *      line.** The narrower statement is the more deliberate one (docs/23
  *      D-057).
  *
- *   5. **Among equals, the latest `validFrom` wins.** Overlapping rules at the
- *      same specificity are a configuration mistake rather than a modelled
- *      case — the database cannot express "no two active rules may overlap in
- *      time" without an exclusion constraint and `btree_gist`, which is not
- *      installed. Choosing deterministically means the same transaction always
- *      gets the same rate, so a misconfiguration is a wrong number rather than
- *      a *varying* number, and `commission.rateBasisPoints` records which one
- *      was used.
+ *   5. **There are no equals.** Two active rules of one scope — tenant or
+ *      platform, line, optional type — cannot overlap in time: the database
+ *      refuses it (`ex_commission_rule_*_no_overlap`, docs/23 D-057), for a
+ *      create, a reactivation and a window extension alike, however many
+ *      writers race. The latest `validFrom`, then the id, still order the
+ *      sort, so that rows written around those constraints — a restore, a
+ *      manual INSERT — could never make the answer depend on row order.
  *
  * `validTo` is exclusive: a rule valid to midnight does not apply at midnight.
  * Half-open intervals are what let a replacement rule start exactly where its
@@ -137,7 +136,9 @@ export function selectRule(
     if (specificity !== 0) return specificity;
     const narrowing = narrownessOf(b) - narrownessOf(a);
     if (narrowing !== 0) return narrowing;
-    return b.validFrom.getTime() - a.validFrom.getTime();
+    const start = b.validFrom.getTime() - a.validFrom.getTime();
+    if (start !== 0) return start;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
 
   // `applicable` is non-empty here, so this is defensive only — but returning
@@ -175,17 +176,50 @@ export function computeCommission(
   input: CommissionSubject & { occurredAt: Date; grossAmountMinor: bigint; currency: string },
 ): CommissionDecision {
   const rule = selectRule(rules, input, input.occurredAt);
+  return rule ? priceWithRule(rule, input) : NO_ACTIVE_RULE_DECISION;
+}
 
-  if (!rule) {
-    return {
-      ruleId: null,
-      rateBasisPoints: 0,
-      amountMinor: 0n,
-      matched: false,
-      outcome: 'NO_ACTIVE_RULE',
-    };
-  }
+/** What "no rule matched" decides: nothing charged, and said so. */
+export const NO_ACTIVE_RULE_DECISION: CommissionDecision = Object.freeze({
+  ruleId: null,
+  rateBasisPoints: 0,
+  amountMinor: 0n,
+  matched: false,
+  outcome: 'NO_ACTIVE_RULE',
+});
 
+/**
+ * Who a rule is matched against for a fact that occurred at `occurredAt`,
+ * given the pricing cutover (docs/23 D-057).
+ *
+ * Before the cutover there were no line rules, and a fact from then is priced
+ * by the type-only rules that were in force for it — exactly as before —
+ * however late it is recorded and whatever line it now arrives with. A
+ * maintenance approval given before the deployment and consumed after it is
+ * the case this exists for (Codex round 1 on #307, F3). From the cutover on,
+ * the line decides ({@link coversSubject}).
+ */
+export function pricingSubjectAt(
+  subject: CommissionSubject,
+  occurredAt: Date,
+  linePricingFrom: Date,
+): CommissionSubject {
+  return occurredAt.getTime() < linePricingFrom.getTime()
+    ? { ...subject, businessLine: null }
+    : subject;
+}
+
+/**
+ * The commission one given rule charges on an amount.
+ *
+ * Used directly for a rule an obligation was priced with when its fact was
+ * recorded: that rule's terms decide the charge at settlement whatever its
+ * status or window has become since, which is the point of recording it.
+ */
+export function priceWithRule(
+  rule: Pick<CommissionRuleView, 'id' | 'rateBasisPoints' | 'minAmountMinor' | 'maxAmountMinor'>,
+  input: { grossAmountMinor: bigint; currency: string },
+): CommissionDecision {
   const raw = commissionFor(input.grossAmountMinor, input.currency, rule.rateBasisPoints);
   const amountMinor = clampCommission(raw, input.grossAmountMinor, {
     minMinor: rule.minAmountMinor,

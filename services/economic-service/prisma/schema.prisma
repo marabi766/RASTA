@@ -422,6 +422,16 @@ model Transaction {
   businessLine    BusinessLine?     @map("business_line")
   status          TransactionStatus @default(CREATED)
 
+  /// The commission pricing decided when the source fact was recorded, at
+  /// `occurredAt` (docs/23 D-057): the rule, or `NO_ACTIVE_RULE`. Settlement
+  /// charges exactly this, whatever happens to the rules afterwards, and
+  /// `trg_transaction_pricing_fixed` keeps it from changing. NULL on rows
+  /// recorded before migration `20261016120000_commission_business_lines` and
+  /// on rows without a payee, which settlement prices at `occurredAt` as before.
+  pricingOutcome CommissionOutcome? @map("pricing_outcome")
+  pricingRuleId  String?            @map("pricing_rule_id")
+  pricingRule    CommissionRule?    @relation("TransactionPricingRule", fields: [pricingRuleId], references: [id], onDelete: Restrict)
+
   /// What is owed. Fixed at creation and never recomputed — for a maintenance
   /// obligation this is exactly the figure the owner approved (ADR-028).
   grossAmountMinor      BigInt @map("gross_amount_minor")
@@ -488,6 +498,7 @@ model Transaction {
   /// business fact per payer: two approvals of one repair cannot both settle.
   @@index([organizationId, sourceType, sourceReference])
   @@index([counterpartyOrganizationId, status])
+  @@index([pricingRuleId])
   @@map("transaction")
 }
 
@@ -839,15 +850,22 @@ enum PaymentIntentStatus {
 /// A commission rate, versioned in time (docs/10 § 10.7, ADR-023).
 ///
 /// **CONSTRAINT from the product document:** "تعیین درصد دقیق کارمزد … ساختگی
-/// و پیشینی نیست". No rate is hard-coded anywhere in this service and no
-/// commercial default is seeded. Q-08 is open; the answer will be an INSERT,
-/// not a deployment.
+/// و پیشینی نیست". No rate is hard-coded in this service's code and no
+/// commercial default is seeded. The one rate in the repository is the guarded
+/// demonstration seed's 200 bps (`prisma/seed.ts`, behind its flag, labelled
+/// "نمونه — نیازمند تصویب") — sample data, never a production default. Q-08 is
+/// open; the answer will be an INSERT, not a deployment.
 ///
 /// Matching, in order: an organization-specific rule beats a global one; then
 /// a rule narrowed to the transaction type beats one for the whole business
-/// line; among equals, the one valid at the transaction's `occurredAt` with the
-/// latest `validFrom` wins. **No active rule means `NO_ACTIVE_RULE`** — a
+/// line; the rule valid at the transaction's `occurredAt` applies. Two active
+/// rules of one scope never overlap in time (`ex_commission_rule_*_no_overlap`),
+/// so there is no tie to break. **No active rule means `NO_ACTIVE_RULE`** — a
 /// recorded outcome, not an error and not a guess (ADR-045 § 2, docs/24 Q-29).
+///
+/// Effective-dated (docs/23 D-057): created from now on, never backdated; terms
+/// fixed; status fixed once the rule has come into force; ended by `validTo`,
+/// at or after the present (`trg_commission_rule_effective_dated`).
 ///
 /// Since ADR-045 a rule is written for a business line, optionally narrowed to
 /// one transaction type. Rules from before it (`businessLine` NULL) keep their
@@ -893,7 +911,8 @@ model CommissionRule {
   updatedAt DateTime @updatedAt @map("updated_at")
   updatedBy String   @map("updated_by")
 
-  commissions Commission[]
+  commissions        Commission[]
+  pricedTransactions Transaction[] @relation("TransactionPricingRule")
 
   @@index([transactionType, status, validFrom])
   @@index([organizationId, transactionType, status])
@@ -904,6 +923,19 @@ model CommissionRule {
 enum RuleStatus {
   ACTIVE
   INACTIVE
+}
+
+/// The instant line rules began to price (docs/23 D-057), written once by
+/// migration `20261016120000_commission_business_lines` with the database
+/// clock. A source fact that occurred before it is priced by the type-only
+/// rules exactly as before, even when it is recorded afterwards with a line.
+/// One row; `trg_commission_pricing_cutover_fixed` refuses any change.
+model CommissionPricingCutover {
+  id              Int      @id @default(1) @db.SmallInt
+  linePricingFrom DateTime @map("line_pricing_from")
+  migrationName   String   @map("migration_name")
+
+  @@map("commission_pricing_cutover")
 }
 
 /// What the commission step decided for one transaction (ADR-045 § 2).

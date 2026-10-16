@@ -334,7 +334,8 @@ describe('commission by business line (ADR-045)', () => {
     });
     expect(lined.settled.commissionOutcome).toBe('NO_ACTIVE_RULE');
 
-    // Still closable, and the close is recorded with the line it lacks.
+    // Still closable — deactivating a rule in force ends it now (docs/23
+    // D-057) — and the close is recorded with the line it lacks.
     await request(http)
       .patch(`/v1/commissions/rules/${legacy.id}`)
       .set('authorization', asSystem())
@@ -343,9 +344,10 @@ describe('commission by business line (ADR-045)', () => {
     const [change] = await outboxPayloads('COMMISSION_RULE_CHANGED', legacy.id);
     expect(change).toMatchObject({
       change: 'UPDATED',
-      before: { businessLine: null, transactionType: 'LOGISTICS', status: 'ACTIVE' },
-      after: { businessLine: null, transactionType: 'LOGISTICS', status: 'INACTIVE' },
+      before: { businessLine: null, transactionType: 'LOGISTICS', status: 'ACTIVE', validTo: null },
+      after: { businessLine: null, transactionType: 'LOGISTICS', status: 'ACTIVE' },
     });
+    expect((change?.after as { validTo: string | null }).validTo).not.toBeNull();
   });
 
   describe('configuring a rule', () => {

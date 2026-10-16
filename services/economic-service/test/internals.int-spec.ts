@@ -132,8 +132,14 @@ describe('economic internals', () => {
       const recent = await writeRow({ publishedAt: new Date() });
       const pending = await writeRow({ createdAt: old });
 
-      const removed = await store.purgePublished(7);
-      expect(removed).toBeGreaterThanOrEqual(1);
+      // One bounded batch, as `OutboxPurgeScheduler` issues it (D-052).
+      const { deleted } = await store.purgePublished({
+        retentionSeconds: 7 * 24 * 60 * 60,
+        limit: 10_000,
+        statementTimeoutMs: 5000,
+        maxWaitMs: 2000,
+      });
+      expect(deleted).toBeGreaterThanOrEqual(1);
 
       const survivors = await runUnscoped('the suite checks what survived the purge', () =>
         prisma.client.outboxMessage.findMany({

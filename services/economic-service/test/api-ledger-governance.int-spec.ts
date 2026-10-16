@@ -299,13 +299,15 @@ describe('ledger and governance API', () => {
     );
 
     // Closing a rule is a `validTo`, never a delete: a commission already
-    // charged references the rule that produced it.
+    // charged references the rule that produced it. Deactivating a rule in
+    // force is that close, from now (docs/23 D-057).
     const closed = await request(http)
       .patch(`/v1/commissions/rules/${created.body.id}`)
       .set('authorization', asSystem())
       .send({ status: 'INACTIVE' })
       .expect(200);
-    expect(closed.body.status).toBe('INACTIVE');
+    expect(closed.body.status).toBe('ACTIVE');
+    expect(closed.body.validTo).not.toBeNull();
   });
 
   it('refuses a rate outside nought to one hundred per cent', async () => {

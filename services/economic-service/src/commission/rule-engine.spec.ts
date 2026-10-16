@@ -2,6 +2,9 @@ import { BUSINESS_LINES } from '@rasta/contracts';
 import {
   computeCommission,
   coversSubject,
+  NO_ACTIVE_RULE_DECISION,
+  priceWithRule,
+  pricingSubjectAt,
   selectRule,
   type CommissionRuleView,
   type CommissionSubject,
@@ -93,9 +96,9 @@ describe('selectRule', () => {
   });
 
   it('prefers the latest validFrom among rules of equal specificity', () => {
-    // Overlapping rules at the same specificity are a misconfiguration the
-    // database cannot refuse without btree_gist. Choosing deterministically
-    // makes it a *wrong* rate rather than a *varying* one.
+    // Overlapping rules at the same specificity cannot be written any more
+    // (`ex_commission_rule_*_no_overlap`); one restored around the constraint
+    // still gets a deterministic answer rather than a row-order one.
     const chosen = selectRule(
       [
         rule({ id: 'OLD', validFrom: new Date('2026-01-01T00:00:00.000Z') }),
@@ -105,6 +108,15 @@ describe('selectRule', () => {
       AT,
     );
     expect(chosen?.id).toBe('NEW');
+  });
+
+  it('breaks an exact tie by id, whatever order the rows arrive in (Codex r1 on #307, F1)', () => {
+    // The probe that found F1: equal starts at 100 and 500 bps charged 100 or
+    // 500 rial on one subject depending on row order.
+    const low = rule({ id: 'CMR_A', rateBasisPoints: 100 });
+    const high = rule({ id: 'CMR_B', rateBasisPoints: 500 });
+    expect(selectRule([low, high], subject('ORG-A'), AT)?.id).toBe('CMR_A');
+    expect(selectRule([high, low], subject('ORG-A'), AT)?.id).toBe('CMR_A');
   });
 
   it('applies the rate in force when the transaction occurred, not the newest', () => {
@@ -390,5 +402,74 @@ describe('business lines (ADR-045 § 2, docs/23 D-057)', () => {
       new Date('2026-03-01T00:00:00.000Z'),
     );
     expect(chosen?.id).toBe('THEN');
+  });
+});
+
+describe('the pricing cutover (docs/23 D-057; Codex r1 on #307, F3)', () => {
+  const CUTOVER = new Date('2026-10-16T12:00:00.000Z');
+  const legacy = rule({
+    id: 'LEGACY',
+    businessLine: null,
+    transactionType: 'MAINTENANCE_SERVICE',
+    rateBasisPoints: 300,
+    validFrom: new Date('2026-01-01T00:00:00.000Z'),
+  });
+  const line = rule({
+    id: 'LINE',
+    businessLine: 'MAINTENANCE',
+    rateBasisPoints: 120,
+    validFrom: CUTOVER,
+  });
+  const approval = (occurredAt: Date) => ({
+    organizationId: 'ORG-A',
+    businessLine: 'MAINTENANCE' as const,
+    transactionType: 'MAINTENANCE_SERVICE',
+    occurredAt,
+    grossAmountMinor: 1_000_000n,
+    currency: 'IRR',
+  });
+
+  it('prices a fact from before the cutover by the type-only rules, as before, line or not', () => {
+    const before = new Date(CUTOVER.getTime() - 3_600_000);
+    const then = pricingSubjectAt(approval(before), before, CUTOVER);
+    expect(then.businessLine).toBeNull();
+    const decision = computeCommission([legacy, line], { ...approval(before), ...then });
+    expect(decision).toMatchObject({ ruleId: 'LEGACY', amountMinor: 30_000n });
+  });
+
+  it('prices a fact from the cutover on by its line', () => {
+    const now = pricingSubjectAt(approval(CUTOVER), CUTOVER, CUTOVER);
+    expect(now.businessLine).toBe('MAINTENANCE');
+    const decision = computeCommission([legacy, line], { ...approval(CUTOVER), ...now });
+    expect(decision).toMatchObject({ ruleId: 'LINE', amountMinor: 12_000n });
+  });
+});
+
+describe('priceWithRule: the rule an obligation was priced with', () => {
+  it("charges that rule's terms whatever its status or window has become", () => {
+    const ended = rule({
+      id: 'BOUND',
+      rateBasisPoints: 250,
+      maxAmountMinor: 1_000n,
+      status: 'INACTIVE',
+      validTo: new Date('2026-02-01T00:00:00.000Z'),
+    });
+    expect(priceWithRule(ended, { grossAmountMinor: 1_000_000n, currency: 'IRR' })).toEqual({
+      ruleId: 'BOUND',
+      rateBasisPoints: 250,
+      amountMinor: 1_000n,
+      matched: true,
+      outcome: 'RULE_APPLIED',
+    });
+  });
+
+  it('has one shape for "no rule matched"', () => {
+    const decision = computeCommission([], {
+      ...subject('ORG-A'),
+      occurredAt: AT,
+      grossAmountMinor: 1n,
+      currency: 'IRR',
+    });
+    expect(decision).toEqual(NO_ACTIVE_RULE_DECISION);
   });
 });

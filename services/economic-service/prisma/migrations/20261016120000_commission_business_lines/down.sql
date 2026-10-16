@@ -36,6 +36,29 @@ BEGIN
 END
 $$;
 
+-- The pricing recorded with an unsettled obligation goes with its columns. Its
+-- rule is a type-only one (a line rule was refused above), which the earlier
+-- engine finds again at settlement from the same rules.
+DROP TRIGGER IF EXISTS "trg_transaction_pricing_fixed" ON "transaction";
+DROP FUNCTION IF EXISTS reject_transaction_repricing();
+DROP INDEX IF EXISTS "transaction_pricing_rule_id_idx";
+ALTER TABLE "transaction" DROP CONSTRAINT IF EXISTS "transaction_pricing_rule_id_fkey";
+ALTER TABLE "transaction" DROP CONSTRAINT IF EXISTS "ck_transaction_pricing";
+ALTER TABLE "transaction" DROP COLUMN IF EXISTS "pricing_rule_id", DROP COLUMN IF EXISTS "pricing_outcome";
+
+DROP TRIGGER IF EXISTS "trg_commission_pricing_cutover_fixed" ON "commission_pricing_cutover";
+DROP FUNCTION IF EXISTS reject_commission_pricing_cutover_mutation();
+DROP TABLE IF EXISTS "commission_pricing_cutover";
+
+DROP TRIGGER IF EXISTS "trg_commission_rule_effective_dated" ON "commission_rule";
+DROP FUNCTION IF EXISTS commission_rule_effective_dated();
+ALTER TABLE "commission_rule" DROP CONSTRAINT IF EXISTS "ex_commission_rule_line_type_no_overlap";
+ALTER TABLE "commission_rule" DROP CONSTRAINT IF EXISTS "ex_commission_rule_line_no_overlap";
+ALTER TABLE "commission_rule" DROP CONSTRAINT IF EXISTS "ex_commission_rule_type_only_no_overlap";
+ALTER TABLE "commission_rule" DROP CONSTRAINT IF EXISTS "ck_commission_rule_organization_not_blank";
+-- btree_gist stays: the bootstrap installs it into every database, so this
+-- migration may not have been the one that added it (as organization-service).
+
 DROP TRIGGER IF EXISTS "trg_commission_append_only" ON "commission";
 DROP FUNCTION IF EXISTS reject_commission_mutation();
 

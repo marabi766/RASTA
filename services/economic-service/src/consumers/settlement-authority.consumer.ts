@@ -8,6 +8,7 @@ import {
   UnprocessableEventError,
   type EventConsumer,
   type HandlerOutcome,
+  type OutboxStopOptions,
 } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 import { TransactionService } from '../transaction/transaction.service';
@@ -112,8 +113,23 @@ export class SettlementAuthorityConsumer implements OnModuleInit, OnApplicationS
     await this.consumer.start();
   }
 
-  async onApplicationShutdown(): Promise<void> {
-    await this.consumer.stop();
+  /**
+   * An `OutboxShutdown` worker: stopped in Nest's destroy phase, beside the
+   * relay, the purge and the payment sweep, by the shutdown's one deadline; an
+   * approval still in flight (the owner's answer, or the obligation's
+   * transaction) is abandoned uncommitted and delivered again, and its
+   * `processed_event` marker keeps a second obligation out. Before, this
+   * class's own `onApplicationShutdown` stopped it with no bound, after the
+   * relay had drained, so the waits added up past SHUTDOWN_TIMEOUT_MS (Codex r1
+   * on #277). One stop per process; a later call joins it.
+   */
+  stop(options?: OutboxStopOptions): Promise<void> {
+    return this.consumer.stop(options);
+  }
+
+  /** Joins the stop `OutboxShutdown` began; returns at once. */
+  onApplicationShutdown(): Promise<void> {
+    return this.stop();
   }
 
   async handle(envelope: EventEnvelope): Promise<HandlerOutcome> {

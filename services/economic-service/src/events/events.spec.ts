@@ -1,7 +1,10 @@
 import { NEVER_AUTO_REPLAY, isAutoReplayable } from '@rasta/contracts';
 import {
   ECONOMIC_EVENTS,
+  ECONOMIC_EVENT_DECODERS,
   ECONOMIC_EVENT_SCHEMAS,
+  ECONOMIC_EVENT_VERSIONS,
+  decodeEconomicPayload,
   validateEconomicPayload,
   type EconomicEventName,
 } from './events';
@@ -611,4 +614,81 @@ describe('the refund outcome events (ADR-064 § 9)', () => {
       expect(NEVER_AUTO_REPLAY.has(name)).toBe(true);
     },
   );
+});
+
+describe('event versions (docs/07 § 7.8; Codex r1 on #307, F4)', () => {
+  /** COMMISSION_APPLIED exactly as published before ADR-045. */
+  const appliedV1 = {
+    commissionId: 'CMS_1',
+    transactionId: 'TXN_1',
+    organizationId: 'ORG-B',
+    ruleId: 'CMR_1',
+    rateBasisPoints: 200,
+    grossAmountMinor: '10000000',
+    amountMinor: '200000',
+    currency: 'IRR',
+    appliedAt: '2026-09-01T00:00:00.000Z',
+  };
+  /** COMMISSION_RULE_CHANGED's terms exactly as published before ADR-045. */
+  const termsV1 = {
+    organizationId: null,
+    transactionType: 'MARKETPLACE_ORDER',
+    rateBasisPoints: 200,
+    minAmountMinor: null,
+    maxAmountMinor: null,
+    validFrom: '2026-09-01T00:00:00.000Z',
+    validTo: null,
+    status: 'ACTIVE',
+    label: null,
+  };
+  const ruleChangedV1 = {
+    ruleId: 'CMR_1',
+    change: 'UPDATED',
+    changedBy: 'USR-1',
+    changedAt: '2026-09-24T00:00:00.000Z',
+    before: termsV1,
+    after: { ...termsV1, status: 'INACTIVE' },
+  };
+
+  it('publishes the two commission events as v2 and every other event as v1', () => {
+    const versions = Object.entries(ECONOMIC_EVENT_VERSIONS);
+    expect(
+      versions
+        .filter(([, version]) => version === 2)
+        .map(([name]) => name)
+        .sort(),
+    ).toEqual(['COMMISSION_APPLIED', 'COMMISSION_RULE_CHANGED']);
+    expect(versions.every(([, version]) => version === 1 || version === 2)).toBe(true);
+    for (const name of Object.values(ECONOMIC_EVENTS)) {
+      // The published version is always one a reader can decode, by the same schema.
+      expect(ECONOMIC_EVENT_DECODERS[name][ECONOMIC_EVENT_VERSIONS[name]]).toBe(
+        ECONOMIC_EVENT_SCHEMAS[name],
+      );
+    }
+  });
+
+  it('still decodes every v1 payload already in the log', () => {
+    expect(decodeEconomicPayload('COMMISSION_APPLIED', 1, appliedV1)).toEqual(appliedV1);
+    expect(decodeEconomicPayload('COMMISSION_RULE_CHANGED', 1, ruleChangedV1)).toEqual(
+      ruleChangedV1,
+    );
+  });
+
+  it('does not read a v1 payload as v2: the fields ADR-045 added are required there', () => {
+    expect(() => decodeEconomicPayload('COMMISSION_APPLIED', 2, appliedV1)).toThrow();
+    expect(() => decodeEconomicPayload('COMMISSION_RULE_CHANGED', 2, ruleChangedV1)).toThrow();
+    expect(() => validateEconomicPayload('COMMISSION_APPLIED', appliedV1)).toThrow();
+  });
+
+  it('keeps v1 what it was: a rule without a type is not a v1 rule', () => {
+    const wholeLine = { ...ruleChangedV1, after: { ...termsV1, transactionType: null } };
+    expect(() => decodeEconomicPayload('COMMISSION_RULE_CHANGED', 1, wholeLine)).toThrow();
+  });
+
+  it('refuses a version it never published', () => {
+    expect(() => decodeEconomicPayload('COMMISSION_APPLIED', 3, appliedV1)).toThrow(
+      'COMMISSION_APPLIED has no version 3',
+    );
+    expect(() => decodeEconomicPayload('FUNDS_HELD', 2, {})).toThrow('FUNDS_HELD has no version 2');
+  });
 });
