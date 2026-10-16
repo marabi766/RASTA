@@ -81,7 +81,9 @@
         "INVENTORY_LOCK_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
-        "GATEWAY_*"
+        "GATEWAY_*",
+        "INSURANCE_CLAIM_MAX_DOCUMENTS",
+        "INSURANCE_CLAIM_DOCUMENT_STATUSES"
       ]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
@@ -132,7 +134,9 @@
         "INVENTORY_LOCK_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
-        "GATEWAY_*"
+        "GATEWAY_*",
+        "INSURANCE_CLAIM_MAX_DOCUMENTS",
+        "INSURANCE_CLAIM_DOCUMENT_STATUSES"
       ]
     },
     // identity-service's two 500-write aggregation proofs, run alone after the
@@ -212,6 +216,16 @@
     // the trap again — `CONSTRUCTION_TRANSACTION_TIMEOUT_MS=60000 pnpm dev` ran
     // on the .env value. scripts/construction-turbo-env.test.mjs holds every
     // task that starts the service to every CONSTRUCTION_* key of its schema.
+    //
+    // INSURANCE_CLAIM_MAX_DOCUMENTS and INSURANCE_CLAIM_DOCUMENT_STATUSES
+    // (Codex r2 on #304): asset-service's claim-document policy (Q-128), the
+    // trap once more — `INSURANCE_CLAIM_MAX_DOCUMENTS=1 pnpm dev` accepted a
+    // second document on the .env limit of 20, and `=0` never met the boot
+    // refusal. Declared here and in the test tasks above. From this one on,
+    // scripts/service-env-turbo.test.mjs holds every task that starts a
+    // service to every key of that service's own schema: a new setting is
+    // declared or the check fails. The settings withheld before it are listed
+    // in scripts/service-env-turbo-withheld.json, a list that may only shrink.
     "dev": {
       "cache": false,
       "persistent": true,
@@ -228,7 +242,9 @@
         "INVENTORY_LOCK_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
-        "GATEWAY_*"
+        "GATEWAY_*",
+        "INSURANCE_CLAIM_MAX_DOCUMENTS",
+        "INSURANCE_CLAIM_DOCUMENT_STATUSES"
       ]
     },
     "clean": { "cache": false }
