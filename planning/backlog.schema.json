@@ -16,6 +16,7 @@
     "changeLog"
   ],
   "properties": {
+    "$schema": { "type": "string", "format": "uri-reference" },
     "version": { "const": 2 },
     "project": { "const": "RASTA" },
     "asOf": { "type": "string", "format": "date" },
@@ -213,7 +214,8 @@
               "POINTS_CHANGED",
               "STATUS_CORRECTED",
               "BASELINE_APPROVED",
-              "ITEM_DECOMPOSED"
+              "ITEM_DECOMPOSED",
+              "ITEM_ACCEPTED"
             ]
           },
           "reason": { "type": "string", "minLength": 1 },
@@ -230,6 +232,16 @@
           {
             "if": {
               "properties": { "type": { "const": "ITEM_DECOMPOSED" } },
+              "required": ["type"]
+            },
+            "then": {
+              "required": ["recordIds"],
+              "properties": { "approvalRef": { "type": "string", "minLength": 1 } }
+            }
+          },
+          {
+            "if": {
+              "properties": { "type": { "const": "ITEM_ACCEPTED" } },
               "required": ["type"]
             },
             "then": {

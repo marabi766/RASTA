@@ -103,6 +103,24 @@ describe('the contract refusal projection', () => {
     ]);
   });
 
+  it('stores a statement draft refused to the employer as a refused DRAFT_STATEMENT (CON-003 PR 4)', () => {
+    const record = toAuditEventRecord(
+      envelope('CONTRACT_AUTHORITY_REFUSED', {
+        ...authorityPayload,
+        action: 'DRAFT_STATEMENT',
+        subjectId: null,
+        reason: 'NOT_CONTRACTOR',
+      }),
+      delivery(),
+    );
+
+    expect([record.outcome, record.action, record.reason]).toEqual([
+      'REFUSED',
+      'DRAFT_STATEMENT',
+      'NOT_CONTRACTOR',
+    ]);
+  });
+
   it('stores a policy approval refused by four eyes as a refused APPROVE_POLICY', () => {
     const record = toAuditEventRecord(
       envelope('APPROVAL_POLICY_APPROVAL_REFUSED', policyApprovalPayload),

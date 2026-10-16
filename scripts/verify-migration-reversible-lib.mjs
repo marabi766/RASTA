@@ -669,6 +669,11 @@ export const ECONOMIC_DATA_ROLLBACK = {
     {
       label: 'down: the rollback succeeds while no task is open (the resolutions first)',
       runDownScript: [
+        // An index on the resolution table, which 20261001100000's down drops:
+        // rolled back with it, or its ledger row stays and the re-apply below
+        // never recreates the index — masked while it was the newest
+        // migration, exposed by the next one's exact-inverse check (#287 r2).
+        '20261004120000_payment_resolution_intent_index',
         // Its foreign key needs the intent's (organization_id, id) index,
         // which 20260930200000's down script drops.
         '20261003100000_payment_refund_decline',

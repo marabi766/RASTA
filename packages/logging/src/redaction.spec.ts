@@ -208,16 +208,20 @@ describe('scrubMessage is bounded and linear on adversarial input', () => {
     expect(best(text)).toBeLessThan(50);
   });
 
-  it('scrubs a password cut off at the cap rather than leaving its start', () => {
+  it('drops a password cut off at the cap, with the rest of its word', () => {
     const head = `${'a '.repeat((SCRUB_MESSAGE_MAX - 30) / 2)}db://user:s3cr3tpassword`;
     const result = scrubMessage(head + 'x'.repeat(OVER));
     expect(result).not.toContain('s3cr3t');
-    expect(result).toContain(`db://user:${REDACTED}`);
+    expect(result).toBe(`${'a '.repeat((SCRUB_MESSAGE_MAX - 30) / 2)}${TRUNCATED_MESSAGE}`);
+  });
+
+  it('keeps nothing of a text with no whitespace before the cap', () => {
+    expect(scrubMessage('x'.repeat(OVER))).toBe(TRUNCATED_MESSAGE);
   });
 
   it('does not split a surrogate pair at the cap', () => {
-    const text = `${'a'.repeat(SCRUB_MESSAGE_MAX - 1)}😀${'b'.repeat(10)}`;
-    expect(scrubMessage(text)).toBe(`${'a'.repeat(SCRUB_MESSAGE_MAX - 1)}${TRUNCATED_MESSAGE}`);
+    const text = `${' '.repeat(SCRUB_MESSAGE_MAX - 1)}😀${'b'.repeat(10)}`;
+    expect(scrubMessage(text)).toBe(`${' '.repeat(SCRUB_MESSAGE_MAX - 1)}${TRUNCATED_MESSAGE}`);
   });
 
   it('leaves a message of exactly the cap untouched', () => {

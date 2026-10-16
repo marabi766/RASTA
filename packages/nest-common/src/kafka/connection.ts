@@ -9,6 +9,7 @@ import {
   type BaseEnv,
   type KafkaEnv,
 } from '@rasta/config';
+import { kafkaLogCreator } from './log-creator';
 
 /**
  * How every Kafka client on the platform reaches the broker (ADR-061 § 3,
@@ -125,10 +126,12 @@ export function kafkaConnection(
  */
 export function kafkaClientConfig(
   connection: KafkaConnectionOptions,
-): Pick<KafkaConfig, 'brokers' | 'clientId' | 'sasl' | 'ssl'> {
+): Pick<KafkaConfig, 'brokers' | 'clientId' | 'sasl' | 'ssl' | 'logCreator'> {
   return {
     clientId: connection.clientId,
     brokers: connection.brokers,
+    // KafkaJS logs through `console` by default, raw and uncapped.
+    logCreator: kafkaLogCreator(connection.clientId),
     ...(connection.sasl ? { sasl: { ...connection.sasl } } : {}),
     ...(connection.ssl ? { ssl: connection.ssl } : {}),
   };

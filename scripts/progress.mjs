@@ -2,14 +2,16 @@ import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { renderProgressReport, validateBacklog } from './progress-lib.mjs';
+import { validateBacklogSchema } from './progress-schema.mjs';
 
 const root = process.cwd();
 const backlogPath = path.join(root, 'planning', 'backlog.json');
+const schemaPath = path.join(root, 'planning', 'backlog.schema.json');
 const reportPath = path.join(root, 'docs', '25-project-progress.md');
 const command = process.argv[2] ?? 'validate';
 
-async function load() {
-  return JSON.parse(await readFile(backlogPath, 'utf8'));
+async function load(file) {
+  return JSON.parse(await readFile(file, 'utf8'));
 }
 
 function fail(message) {
@@ -17,8 +19,11 @@ function fail(message) {
   process.exitCode = 1;
 }
 
-const backlog = await load();
-const errors = validateBacklog(backlog);
+const backlog = await load(backlogPath);
+const errors = [
+  ...validateBacklogSchema(backlog, await load(schemaPath)),
+  ...validateBacklog(backlog),
+];
 if (errors.length > 0) {
   fail(`Backlog validation failed (${errors.length}):\n- ${errors.join('\n- ')}`);
 } else if (command === 'validate') {
