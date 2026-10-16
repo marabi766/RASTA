@@ -6,6 +6,7 @@ import { Alert, Button, Field, controlClassName } from '@/ui';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import type { UpdateAssetField, UpdateAssetFormValues } from '@/lib/asset-form-fields';
+import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
 import { submitUpdateAsset } from './actions';
 import { IDLE_UPDATE_ASSET_FORM, type UpdateAssetFormState } from './form-state';
@@ -155,8 +156,8 @@ function FormBanner({ state }: { state: UpdateAssetFormState }) {
   if (state.kind === 'REFUSED') {
     return (
       <Alert tone="danger">
-        {state.reason === 'NO_SESSION'
-          ? 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.'
+        {isSessionRefusal(state.reason)
+          ? SESSION_REFUSAL_MESSAGES[state.reason]
           : state.reason === 'BASELINE'
             ? 'این فرم منقضی شده است. صفحه را تازه کنید و دوباره ویرایش کنید.'
             : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.'}

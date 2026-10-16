@@ -25,6 +25,7 @@ import {
   type DisputeFormValues,
 } from '@/lib/transaction-dispute-fields';
 
+import { isRedirect, sessionHasEnded, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import { submitDisputeCommand } from './actions';
 import {
   IDLE_DISPUTE_FORM,
@@ -100,29 +101,6 @@ export function unconfirmedFrom(restored: RestoredDispute): UnconfirmedDispute {
     ...(restored.kind === 'VIEW_ONLY' ? { viewOnly: true as const } : {}),
     ...(marker ? { marker: true as const } : {}),
   };
-}
-
-/**
- * Whether the portal says, authoritatively, that this browser's session has
- * ended (`/auth/session` → `401`). Anything else — `204`, `503` (the refresh is
- * unavailable for now), another status, no answer — is not that.
- */
-async function sessionHasEnded(): Promise<boolean> {
-  try {
-    const response = await fetch('/auth/session', {
-      cache: 'no-store',
-      credentials: 'same-origin',
-    });
-    return response.status === 401;
-  } catch {
-    return false;
-  }
-}
-
-/** A redirect from a server action reaches the client as a rejection whose digest says so. */
-function isRedirect(error: unknown): boolean {
-  const digest = (error as { digest?: unknown } | null)?.digest;
-  return typeof digest === 'string' && digest.startsWith('NEXT_REDIRECT');
 }
 
 /**
@@ -281,9 +259,7 @@ export function DisputeCommandForm({
 
 /** Nothing was sent in any of these. */
 const REFUSAL_MESSAGES: Record<Extract<DisputeFormState, { kind: 'REFUSED' }>['reason'], string> = {
-  NO_SESSION: 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.',
-  SESSION_UNAVAILABLE:
-    'نشست شما همین حالا در دسترس نیست و درخواست ارسال نشد. چند لحظه بعد دوباره بفرستید؛ اگر باز هم نشد، دوباره وارد شوید.',
+  ...SESSION_REFUSAL_MESSAGES,
   REPLAY: 'مهلت این فرم گذشته است و درخواست ارسال نشد. صفحه را تازه کنید و دوباره تلاش کنید.',
   CSRF: 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.',
   SUBMISSION: 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.',

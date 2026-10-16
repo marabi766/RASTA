@@ -134,12 +134,18 @@ describe('the roles the portal mirrors', () => {
 
 describe('the bodies', () => {
   it.each(DISPUTE_COMMAND_TABLE)(
-    '$command: strict, with only the one field the portal sends, and its limits',
+    '$command: strict, the one field the portal sends required with its limits, anything else optional',
     ({ command }) => {
       const field = DISPUTE_COMMAND_FIELDS[command];
       const schema = squash(topLevelConst(dto, SCHEMAS[command]).getText()) ?? '';
       expect(schema).toContain('.strict()');
-      expect([...schemaProperties(dto, SCHEMAS[command]).keys()]).toEqual([field]);
+      const properties = schemaProperties(dto, SCHEMAS[command]);
+      expect(properties.has(field)).toBe(true);
+      // A property the portal does not send must be optional, or the portal's
+      // body is refused — `disputeId` on a resolution (D-053) is one today.
+      for (const [name, initializer] of properties) {
+        if (name !== field) expect(squash(initializer)).toMatch(/\.optional\(\)$/);
+      }
       const { min, max } = DISPUTE_FIELD_LIMITS[field];
       expect(schema).toContain(`${field}:z.string().trim().min(${min}).max(${max})`);
     },

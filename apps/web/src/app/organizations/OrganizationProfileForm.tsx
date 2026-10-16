@@ -9,6 +9,7 @@ import type {
   UpdateOrganizationField,
   UpdateOrganizationFormValues,
 } from '@/lib/organization-fields';
+import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
 import { submitUpdateOrganization } from './actions';
 import { IDLE_UPDATE_ORGANIZATION_FORM, type UpdateOrganizationFormState } from './form-state';
@@ -114,8 +115,8 @@ function ProfileBanner({ state }: { state: UpdateOrganizationFormState }) {
   if (state.kind === 'REFUSED') {
     return (
       <Alert tone="danger">
-        {state.reason === 'NO_SESSION'
-          ? 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.'
+        {isSessionRefusal(state.reason)
+          ? SESSION_REFUSAL_MESSAGES[state.reason]
           : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.'}
       </Alert>
     );

@@ -2,7 +2,7 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, PageHeader, Section, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { canManageDrivers, fetchDrivers, type DriverListQuery } from '@/server/drivers';
-import { fetchCurrentUser } from '@/server/identity';
+import { tokenRoles } from '@/server/realm-roles';
 import { mintSubmissionId } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { DriversScreen } from './DriversScreen';
@@ -39,6 +39,10 @@ export default async function DriversPage({
 }) {
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/drivers');
+  // What the forms are offered on: the access token's own roles (`tokenRoles`),
+  // the set the service decides on — not `/v1/users/me`, which runs ahead of the
+  // token until it is refreshed.
+  const roles = tokenRoles(session.accessToken);
 
   const params = await searchParams;
   const query: DriverListQuery = {
@@ -47,14 +51,11 @@ export default async function DriversPage({
     cursor: one(params.cursor),
   };
 
-  const [result, currentUser] = await Promise.all([
-    fetchDrivers(session, query),
-    fetchCurrentUser(session),
-  ]);
+  const result = await fetchDrivers(session, query);
 
-  // A failed identity read shows no registration form rather than one that
+  // A token whose roles cannot be read shows no registration form rather than one that
   // might not work — the same fail-closed default `canManageDrivers` documents.
-  const manage = currentUser.kind === 'USER' && canManageDrivers(currentUser.user.effectiveRoles);
+  const manage = roles !== null && canManageDrivers(roles);
 
   return (
     <AppShell
@@ -68,7 +69,7 @@ export default async function DriversPage({
           </form>
         </TopBar>
       }
-      sidebar={<PortalSidebar session={session} currentHref="/drivers" current={currentUser} />}
+      sidebar={<PortalSidebar session={session} currentHref="/drivers" />}
     >
       <PageHeader
         title="راننده و تخصیص"

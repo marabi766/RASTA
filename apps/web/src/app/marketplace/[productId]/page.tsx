@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
-import { fetchCurrentUser } from '@/server/identity';
+import { tokenRoles } from '@/server/realm-roles';
 import { canPlaceOrder } from '@/server/place-order';
 import { webServerEnv } from '@/server/env';
 import { mintSubmissionId, submissionBinding } from '@/server/submission';
@@ -43,15 +43,17 @@ export default async function ProductOffersPage({
   const search = await searchParams;
   const sort = sortOf(search.sort);
 
-  const [product, offers, currentUser] = await Promise.all([
+  const [product, offers] = await Promise.all([
     fetchProduct(session, productId),
     fetchOffers(session, productId, sort),
-    fetchCurrentUser(session),
   ]);
 
-  // A Route Guard as UX, not as security: a failed identity read shows no form
-  // rather than one that might not work, and marketplace-service decides again.
-  const canOrder = currentUser.kind === 'USER' && canPlaceOrder(currentUser.user.effectiveRoles);
+  // A Route Guard as UX, not as security: offered on the access token's own
+  // roles (`tokenRoles`), the set marketplace-service decides on — not
+  // `/v1/users/me`, which runs ahead of the token until it is refreshed. A token
+  // whose roles cannot be read shows no form, and the service decides again.
+  const roles = tokenRoles(session.accessToken);
+  const canOrder = roles !== null && canPlaceOrder(roles);
 
   return (
     <AppShell

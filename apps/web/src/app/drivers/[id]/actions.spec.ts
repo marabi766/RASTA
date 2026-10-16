@@ -39,7 +39,10 @@ const redirect = jest.fn((url: string) => {
   throw new Error(`NEXT_REDIRECT:${url}`);
 });
 
-jest.mock('@/server/current-session', () => ({ currentSession: () => currentSession() }));
+jest.mock('@/server/current-session', () => ({
+  currentSession: () => currentSession(),
+  missingSessionReason: async () => 'NO_SESSION',
+}));
 jest.mock('next/navigation', () => ({ redirect: (url: string) => redirect(url) }));
 jest.mock('@/server/drivers', () => {
   const actual = jest.requireActual('@/server/drivers');

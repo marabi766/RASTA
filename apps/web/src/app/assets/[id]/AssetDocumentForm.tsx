@@ -12,6 +12,7 @@ import {
   UPLOAD_TOKEN_FIELD,
 } from '@/lib/asset-document-fields';
 import { documentKindLabel } from '@/lib/labels';
+import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
 import { IDLE_DOCUMENT_FORM, type DocumentFormState } from './document-form-state';
 import { submitAttachDocument } from './document-actions';
@@ -65,8 +66,8 @@ function Banner({ state }: { state: DocumentFormState }) {
     case 'REFUSED':
       return (
         <Alert tone="danger">
-          {state.reason === 'NO_SESSION'
-            ? 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.'
+          {isSessionRefusal(state.reason)
+            ? SESSION_REFUSAL_MESSAGES[state.reason]
             : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.'}
         </Alert>
       );

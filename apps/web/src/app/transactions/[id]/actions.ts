@@ -3,7 +3,7 @@
 import { redirect } from 'next/navigation';
 
 import { EMPTY_DISPUTE_FORM, DISPUTE_COMMAND_FIELDS } from '@/lib/transaction-dispute-fields';
-import { currentSession, sessionTemporarilyUnavailable } from '@/server/current-session';
+import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
 import { verifyReplayStamp } from '@/server/dispute-replay';
 import { mintFlash } from '@/server/flash';
@@ -60,8 +60,7 @@ async function attempt(transactionId: string, form: FormData): Promise<DisputeFo
   const session = await currentSession();
   if (!session) {
     // Ended, or only unavailable while its refresh is (`server/session-state.ts`).
-    const unavailable = await sessionTemporarilyUnavailable();
-    return { kind: 'REFUSED', reason: unavailable ? 'SESSION_UNAVAILABLE' : 'NO_SESSION' };
+    return { kind: 'REFUSED', reason: await missingSessionReason() };
   }
 
   const csrf = verifyCsrf(session, form);

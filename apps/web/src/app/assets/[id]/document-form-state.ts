@@ -1,3 +1,4 @@
+import type { SessionRefusal } from '@/lib/session-refusal';
 import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type { AttachDocumentField, AttachDocumentFormValues } from '@/lib/asset-document-fields';
 
@@ -37,7 +38,7 @@ export type DocumentFormState =
   /** The post could not be trusted as this person's own. */
   | {
       readonly kind: 'REFUSED';
-      readonly reason: 'NO_SESSION' | 'CSRF' | 'SUBMISSION' | 'BASELINE' | 'UPLOAD';
+      readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION' | 'BASELINE' | 'UPLOAD';
     }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   | {

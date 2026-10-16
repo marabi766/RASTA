@@ -28,7 +28,7 @@ Object.assign(process.env, {
 });
 
 const currentSession = jest.fn();
-const sessionTemporarilyUnavailable = jest.fn();
+const missingSessionReason = jest.fn();
 const issueDisputeCommand = jest.fn();
 const redirect = jest.fn((url: string) => {
   throw new Error(`NEXT_REDIRECT:${url}`);
@@ -36,7 +36,7 @@ const redirect = jest.fn((url: string) => {
 
 jest.mock('@/server/current-session', () => ({
   currentSession: () => currentSession(),
-  sessionTemporarilyUnavailable: () => sessionTemporarilyUnavailable(),
+  missingSessionReason: () => missingSessionReason(),
 }));
 jest.mock('next/navigation', () => ({ redirect: (url: string) => redirect(url) }));
 jest.mock('@/server/transactions', () => {
@@ -90,7 +90,7 @@ function formData(
 
 beforeEach(() => {
   currentSession.mockResolvedValue(SESSION);
-  sessionTemporarilyUnavailable.mockResolvedValue(false);
+  missingSessionReason.mockResolvedValue('NO_SESSION');
   issueDisputeCommand.mockReset();
   issueDisputeCommand.mockResolvedValue({
     kind: 'CREATED',
@@ -313,7 +313,7 @@ describe('a session that is only unavailable, not ended (PR 319 review 2, findin
   // middleware hid the session and marked the request (`session-state.ts`).
   beforeEach(() => {
     currentSession.mockResolvedValue(null);
-    sessionTemporarilyUnavailable.mockResolvedValue(true);
+    missingSessionReason.mockResolvedValue('SESSION_UNAVAILABLE');
   });
 
   it('a first send is refused as unavailable — not "ended" — and nothing is sent', async () => {

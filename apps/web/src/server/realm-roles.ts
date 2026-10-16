@@ -37,14 +37,6 @@ export function globalRealmRoles(accessToken: string): string[] {
   }
 }
 
-/** The service's view of a request: the membership's roles plus the global realm roles. */
-export function requestRoles(
-  membershipRoles: readonly string[],
-  accessToken: string,
-): readonly string[] {
-  return [...new Set([...membershipRoles, ...globalRealmRoles(accessToken)])];
-}
-
 /** Mirrors `PLATFORM_ROLES` in `packages/nest-common` (`auth/tenant-roles.ts`): a pair naming any other role is refused. */
 const KNOWN_ROLES: ReadonlySet<string> = new Set([
   'SYSTEM_ADMIN',
@@ -132,4 +124,15 @@ export function tokenAuthority(accessToken: string): TokenAuthority | null {
     organizationId,
     roles: [...new Set([...granted, ...globalRealmRoles(accessToken)])],
   };
+}
+
+/**
+ * The roles every screen in this portal draws from: the token's own role set
+ * for the organization it resolves to ({@link tokenAuthority}) — never the
+ * membership rows `/v1/users/me` reports, which disagree with what the service
+ * decides on until the token is refreshed. Null when the token cannot be read
+ * or the guard would refuse it outright; a screen then offers nothing gated.
+ */
+export function tokenRoles(accessToken: string): readonly string[] | null {
+  return tokenAuthority(accessToken)?.roles ?? null;
 }
