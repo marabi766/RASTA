@@ -24,6 +24,8 @@ export function toPolicyView(row: PolicyWithSteps): PolicyView {
       authorityOrganizationId: step.authorityOrganizationId,
       authorityRole: step.authorityRole,
       authorityLabel: step.authorityLabel,
+      minAmountMinor: step.minAmountMinor?.toString() ?? null,
+      maxAmountMinor: step.maxAmountMinor?.toString() ?? null,
     })),
     createdAt: row.createdAt.toISOString(),
     createdBy: row.createdBy,

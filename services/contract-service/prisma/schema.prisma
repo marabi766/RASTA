@@ -1,9 +1,9 @@
 // contract-service — the contract boundary (CON-003, ADR-068, docs/04 § 4.13).
 // It holds the draft contract a tender award creates, and — since PR 2 — its signatures
 // and its cancellation, and — since PR 3 — the amendments and planned milestones of a signed
-// contract, and — since PR 4 — its statements, drafted with configured deductions; their
-// submission with the separate technical and financial approvals, and the settlement boundary,
-// are later changes (ADR-068 § 9).
+// contract, and — since PR 4 — its statements, drafted with configured deductions, and — since
+// PR 5 — their submission with a snapshot of the separate technical and financial approval chains;
+// recording those approvals, and the settlement boundary, are later changes (ADR-068 § 9).
 //
 // Everything here is owned by this service alone (AGENTS.md A-01). There is no
 // foreign key into another service's database: `organizationId` (the employer),
@@ -331,7 +331,8 @@ model AmendmentSignatureReview {
 
 /// A planned milestone of a SIGNED contract: a title, a planned DATE (a day, never an instant) and
 /// an optional planned share in basis points. Edited by the employer while no statement refers to
-/// it; `firstReferencedAt` is set by the statement change of PR 4 (never by PR 3) and freezes it.
+/// it; `firstReferencedAt` is set when the first statement whose line refers to it is submitted
+/// (CON-003 PR 5, Q-100 (4)) and freezes it.
 model Milestone {
   id             String @id
   organizationId String @map("organization_id")
@@ -352,7 +353,8 @@ model Milestone {
 
   version Int @default(1)
 
-  contract Contract @relation(fields: [organizationId, contractId], references: [organizationId, id])
+  contract       Contract        @relation(fields: [organizationId, contractId], references: [organizationId, id])
+  statementLines StatementLine[]
 
   @@unique([organizationId, id], map: "ux_milestone_org_id")
   @@index([organizationId, contractId, plannedDate, id], map: "ix_milestone_contract")
@@ -364,8 +366,8 @@ model Milestone {
 // ---------------------------------------------------------------------------
 
 /// `src/statement/statement.state-machine.ts`. The whole ADR-068 § 5 lifecycle is declared (adding
-/// a value to a PostgreSQL enum cannot be reversed); this change opens no transition — a statement
-/// stays DRAFT until submission opens with the approval chains' snapshot (the next change).
+/// a value to a PostgreSQL enum cannot be reversed); one transition is open — DRAFT → SUBMITTED, with
+/// the approval chains' snapshot (CON-003 PR 5). The approvals that move it on are the next change.
 enum StatementStatus {
   DRAFT
   SUBMITTED
@@ -425,39 +427,50 @@ model Statement {
 
   /// Set with the transition to SUBMITTED, and only then (`ck_statement_submission`): the person,
   /// with the token's verified issuer and subject, so the approvals can keep the submitter out of
-  /// both chains (Q-96 (3), #188). No transition reaches SUBMITTED yet: these stay null until the
-  /// next change opens submission with the approval chains' snapshot.
+  /// both chains (Q-96 (3), #188). Never changed once set.
   submittedAt        DateTime? @map("submitted_at") @db.Timestamptz(3)
   submittedBy        String?   @map("submitted_by")
   submittedByIssuer  String?   @map("submitted_by_issuer")
   submittedBySubject String?   @map("submitted_by_subject")
 
+  /// How many steps each approval chain was snapshotted with at submission (`ck_statement_chain_counts`:
+  /// null exactly while DRAFT, at least 1 after), checked at commit against the snapshot
+  /// (`statement_submission_consistent`): a step added later no longer matches.
+  technicalStepCount Int? @map("technical_step_count")
+  financialStepCount Int? @map("financial_step_count")
+
   updatedAt DateTime @map("updated_at") @db.Timestamptz(3)
   version   Int      @default(1)
 
-  contract   Contract             @relation(fields: [organizationId, contractId], references: [organizationId, id])
-  lines      StatementLine[]
-  deductions StatementDeduction[]
+  contract      Contract                @relation(fields: [organizationId, contractId], references: [organizationId, id])
+  lines         StatementLine[]
+  deductions    StatementDeduction[]
+  approvalSteps StatementApprovalStep[]
 
   @@unique([organizationId, id], map: "ux_statement_org_id")
   @@unique([organizationId, contractId, statementNumber], map: "ux_statement_number")
   @@map("statement")
 }
 
-/// What a statement claims: a bounded description and a positive amount. Written with its statement.
+/// What a statement claims: a bounded description and a positive amount, and optionally the planned
+/// milestone of the same contract it is against (CON-003 PR 5, Q-100 (4)). Written with its statement.
 model StatementLine {
   id             String @id
   organizationId String @map("organization_id")
   contractId     String @map("contract_id")
   statementId    String @map("statement_id")
 
-  lineNumber  Int    @map("line_number")
+  lineNumber  Int     @map("line_number")
   description String
-  amountMinor BigInt @map("amount_minor")
+  amountMinor BigInt  @map("amount_minor")
+  /// A milestone of the line's own contract (`ck_statement_line_milestone`), or none.
+  milestoneId String? @map("milestone_id")
 
-  statement Statement @relation(fields: [organizationId, statementId], references: [organizationId, id])
+  statement Statement  @relation(fields: [organizationId, statementId], references: [organizationId, id])
+  milestone Milestone? @relation(fields: [organizationId, milestoneId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
 
   @@unique([organizationId, statementId, lineNumber], map: "ux_statement_line_number")
+  @@index([organizationId, milestoneId], map: "ix_statement_line_milestone")
   @@map("statement_line")
 }
 
@@ -483,6 +496,41 @@ model StatementDeduction {
   @@map("statement_deduction")
 }
 
+/// One step of a statement's approval chain — technical or financial — as the policy in force for
+/// that chain said it when the statement was submitted (ADR-068 § 5: "the policy is snapshotted at
+/// submission"): the policy's id and version, the step's order and its authority. Every step of the
+/// policy that applies to the statement's gross, written in the submitting transaction, never
+/// changed (`statement_approval_step_guard`, `statement_submission_consistent`). The decisions
+/// recorded against these steps are the next change.
+model StatementApprovalStep {
+  id             String @id
+  organizationId String @map("organization_id")
+  contractId     String @map("contract_id")
+  statementId    String @map("statement_id")
+
+  /// `TECHNICAL` or `FINANCIAL` (`ck_statement_approval_step_terms`).
+  chain     String
+  /// The policy step's own order: the financial chain opens only after the technical chain is done.
+  stepOrder Int    @map("step_order")
+
+  policyId      String @map("policy_id")
+  policyVersion Int    @map("policy_version")
+
+  authorityOrganizationId String @map("authority_organization_id")
+  authorityRole           String @map("authority_role")
+  authorityLabel          String @map("authority_label")
+
+  /// The statement's submission instant.
+  createdAt DateTime @map("created_at") @db.Timestamptz(3)
+
+  statement Statement      @relation(fields: [organizationId, statementId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  policy    ApprovalPolicy @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([organizationId, statementId, chain, stepOrder], map: "ux_statement_approval_step")
+  @@index([organizationId, policyId], map: "ix_statement_approval_step_policy")
+  @@map("statement_approval_step")
+}
+
 // ---------------------------------------------------------------------------
 // Approval policy — configuration as data (ADR-068 § 5, ADR-063, ADR-023, Q-70, Q-95)
 // ---------------------------------------------------------------------------
@@ -500,8 +548,9 @@ enum ApprovalPolicyStatus {
 
 /// Who may do what to a contract, as rows written by the people entitled to write them, never by
 /// code or environment: the platform stores the authority it is told and creates none (ADR-023).
-/// `contract.signature` is the one workflow so far — which roles of the employer's organization
-/// accept a contract for it. A policy is immutable once written (the database keeps it so): a
+/// `contract.signature` says which roles of the employer's organization accept a contract for it;
+/// `contract.statement.technical` and `contract.statement.financial` (CON-003 PR 5) the ordered steps
+/// of each approval chain of the employer's statements. A policy is immutable once written (the database keeps it so): a
 /// change is a new version, put in force in place of the old one, so what a signature recorded
 /// stays true.
 model ApprovalPolicy {
@@ -515,7 +564,8 @@ model ApprovalPolicy {
   /// `UNION_ADMIN` or `SYSTEM_ADMIN` (`ck_policy_author_role`).
   authorRole           String @map("author_role")
 
-  /// `contract.signature` (`ck_policy_workflow_key`).
+  /// `contract.signature`, `contract.statement.technical` or `contract.statement.financial`
+  /// (`ck_policy_workflow_key`).
   workflowKey   String @map("workflow_key")
   /// 1, 2, 3 … per (organization, workflow key).
   policyVersion Int    @map("policy_version")
@@ -554,12 +604,13 @@ model ApprovalPolicy {
 
   version Int @default(1)
 
-  steps               ApprovalPolicyStep[]
-  signatures          ContractSignature[]
-  amendmentSignatures AmendmentSignature[]
-  amendmentReviews    AmendmentSignatureReview[]
-  reconciliationTasks PolicyReconciliationTask[]
-  reviews             SignatureAuthorityReview[]
+  steps                  ApprovalPolicyStep[]
+  signatures             ContractSignature[]
+  amendmentSignatures    AmendmentSignature[]
+  amendmentReviews       AmendmentSignatureReview[]
+  reconciliationTasks    PolicyReconciliationTask[]
+  reviews                SignatureAuthorityReview[]
+  statementApprovalSteps StatementApprovalStep[]
 
   // SQL-only: `ux_approval_policy_active` — at most one ACTIVE policy per
   // (organization, workflow key).
@@ -622,7 +673,11 @@ model PolicyReconciliationTask {
 }
 
 /// One authority a policy names. For `contract.signature` each step is a role of the governed
-/// organization that may accept a contract for it (alternatives, not a sequence).
+/// organization that may accept a contract for it (alternatives, not a sequence). For a statement
+/// chain the steps are a sequence, of any organization but the contractor's (Q-96 (1)), each
+/// applying to a statement whose gross is within its optional bounds. Never `AUDITOR` or
+/// `SYSTEM_ADMIN` (`ck_step_authority_not_oversight`): the platform is no approval authority on a
+/// tenant's contract or statement (Q-96 (1) as clarified, CLAUDE.md principle 9).
 model ApprovalPolicyStep {
   id String @id
 
@@ -640,8 +695,15 @@ model ApprovalPolicyStep {
   authorityRole           String @map("authority_role")
   authorityLabel          String @map("authority_label")
 
+  /// Statement chains only (`ck_step_bounds_statement_only`): the step applies to a statement whose
+  /// gross is ≥ the minimum and < the maximum, in minor units; neither = every statement (Q-134).
+  minAmountMinor BigInt? @map("min_amount_minor")
+  maxAmountMinor BigInt? @map("max_amount_minor")
+
+  /// A signing policy names each (organization, role) once (`ck_step_signing_authority_once`, in
+  /// `approval_policy_step_guard`: no index can name the parent's workflow). A statement chain may
+  /// name one twice — two steps for two different people, kept apart when they decide.
   @@unique([organizationId, policyId, stepOrder], map: "ux_approval_policy_step_order")
-  @@unique([organizationId, policyId, authorityOrganizationId, authorityRole], map: "ux_approval_policy_step_authority")
   @@map("approval_policy_step")
 }
 
