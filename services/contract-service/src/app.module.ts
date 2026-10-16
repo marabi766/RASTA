@@ -12,7 +12,10 @@ import {
   AUTH_OPTIONS,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
+  OutboxPurgeScheduler,
   OutboxRelay,
+  OutboxShutdown,
+  outboxPurgeSettings,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -20,6 +23,7 @@ import {
   type AuthGuardOptions,
   kafkaConnection,
 } from '@rasta/nest-common';
+import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
   outboxAckFencedTotal,
@@ -59,6 +63,9 @@ import { AmendmentService } from './amendment/amendment.service';
 import { MilestoneController } from './milestone/milestone.controller';
 import { MilestoneRepository } from './milestone/milestone.repository';
 import { MilestoneService } from './milestone/milestone.service';
+import { StatementController } from './statement/statement.controller';
+import { StatementRepository } from './statement/statement.repository';
+import { StatementService } from './statement/statement.service';
 import { AuthorityRefusals } from './signing/authority-refusals';
 import { SigningAuthority } from './signing/signing-authority';
 import { PolicyAccess } from './policy/policy.access';
@@ -81,15 +88,16 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
  * and a read API for the two parties. No Temporal (nothing here has a deadline; silence is never
  * consent, ADR-043). Since PR 2 a second consumer (`ORGANIZATION_MOVED`, a trigger that queues a
  * re-check — Q-83) and the sweeper that works that queue suspend a signing policy whose union has
- * lost the employer; nothing a user calls writes through either. Statements, their separate
- * technical and financial approvals and the settlement boundary with economic-service are later
- * changes (ADR-068 § 9) and bring their own wiring.
+ * lost the employer; nothing a user calls writes through either. Since PR 4 the contractor drafts
+ * statements; their submission with the separate technical and financial approvals, and the
+ * settlement boundary with economic-service, are later changes (ADR-068 § 9) with their own wiring.
  */
 @Module({
   controllers: [
     ContractController,
     AmendmentController,
     MilestoneController,
+    StatementController,
     PolicyController,
     HealthController,
     MetricsController,
@@ -138,6 +146,8 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
     AmendmentService,
     MilestoneRepository,
     MilestoneService,
+    StatementRepository,
+    StatementService,
     PolicyAccess,
     PolicyRepository,
     PolicyService,
@@ -267,6 +277,49 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
     },
 
     {
+      // D-052: published rows past OUTBOX_PURGE_RETENTION_HOURS, in bounded batches.
+      provide: OutboxPurgeScheduler,
+      inject: [PrismaOutboxStore, ENV, LOGGER],
+      useFactory: (store: PrismaOutboxStore, env: ContractEnv, logger: Logger) =>
+        new OutboxPurgeScheduler({
+          store,
+          service: SERVICE_NAME,
+          logger,
+          ...outboxPurgeSettings(env),
+        }),
+    },
+    {
+      // D-052: the relay, the purge, the reconciliation sweep and the two consumers stop
+      // together in the destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. The sweep too
+      // (as #247 r3): stopped later, it kept writing outbox rows while the relay drained. The
+      // consumers too (Codex r1 on #277): stopped later, one after the other in
+      // onApplicationShutdown and with no bound, their waits came on top of the relay's.
+      provide: OutboxShutdown,
+      inject: [
+        OutboxRelay,
+        OutboxPurgeScheduler,
+        PolicyReconciliationSweeper,
+        TenderAwardedConsumer,
+        OrganizationMovedConsumer,
+        ENV,
+      ],
+      useFactory: (
+        relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
+        reconciliation: PolicyReconciliationSweeper,
+        awarded: TenderAwardedConsumer,
+        moves: OrganizationMovedConsumer,
+        env: ContractEnv,
+      ) =>
+        new OutboxShutdown({
+          relay,
+          purge,
+          workers: [reconciliation, awarded, moves],
+          budgetMs: outboxShutdownBudgetMs(env),
+        }),
+    },
+
+    {
       provide: AUTH_OPTIONS,
       inject: [ENV, InternalTokenService],
       useFactory: (env: ContractEnv, internalTokens: InternalTokenService): AuthGuardOptions => ({
@@ -293,6 +346,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
+    private readonly purge: OutboxPurgeScheduler,
+    private readonly outboxShutdown: OutboxShutdown,
     private readonly awarded: TenderAwardedConsumer,
     private readonly moves: OrganizationMovedConsumer,
     private readonly sweeper: PolicyReconciliationSweeper,
@@ -319,6 +374,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.moves.start();
     this.sweeper.start();
     this.relay.start();
+    this.purge.start();
 
     const sample = async () => {
       try {
@@ -356,9 +412,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
-    await this.awarded.stop();
-    await this.moves.stop();
-    await this.sweeper.stop();
-    await this.relay.stop();
+    // The relay, the purge, the sweep and the two consumers already stopped in OutboxShutdown's
+    // onModuleDestroy, concurrently and by one deadline; this joins that stop and returns at once.
+    await this.outboxShutdown.stop();
   }
 }

@@ -8,6 +8,7 @@ import {
 } from '@temporalio/client';
 import { ENV } from '../tokens';
 import type { MarketplaceEnv } from '../config/env';
+import { installTemporalRuntimeLogger } from './runtime-logger';
 
 /**
  * Starts and signals `OrderSagaWorkflow`.
@@ -53,6 +54,7 @@ export class OrderSagaClient implements OnModuleDestroy {
     if (this.connecting) return this.connecting;
 
     this.connecting = (async () => {
+      installTemporalRuntimeLogger(this.env);
       const connection = await Connection.connect({ address: this.env.TEMPORAL_ADDRESS });
       this.connection = connection;
       const client = new Client({ connection, namespace: this.env.TEMPORAL_NAMESPACE });

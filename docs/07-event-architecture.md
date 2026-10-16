@@ -376,6 +376,7 @@ Payload نامعتبر هرگز به Kafka نمی‌رسد و هرگز بی‌ص
 | `INSURANCE_CLAIM_REVIEW_STARTED`      | asset (ماژول insurance) | audit · analytics                                                      |
 | `INSURANCE_CLAIM_DECIDED`             | asset (ماژول insurance) | **economic (مبلغ تأییدشده، بدون حرکت پول)** · notification · analytics |
 | `INSURANCE_CLAIM_SETTLEMENT_RECORDED` | asset (ماژول insurance) | economic · analytics — ثبت واقعیت تسویه، نه اجرای آن                   |
+| `INSURANCE_CLAIM_DOCUMENT_ATTACHED`   | asset (ماژول insurance) | audit · analytics — فقط شناسهٔ مدرک (Q-128)                            |
 
 ### Marketplace · Procurement · Supplier · Inventory
 

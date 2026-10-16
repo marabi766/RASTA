@@ -176,9 +176,10 @@ function applyEnvironment(): void {
   process.env.ECONOMIC_BALANCE_AUDIT_ENABLED = 'false';
 }
 
+/** Stopped as an `OutboxShutdown` worker, like the consumers it stands in for. */
 const inertConsumer = {
   onModuleInit: async () => undefined,
-  onModuleDestroy: async () => undefined,
+  stop: async () => undefined,
 };
 
 /** A relay that never polls. See the note on the overrides above. */

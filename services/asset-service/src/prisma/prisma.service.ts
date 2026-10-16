@@ -27,6 +27,7 @@ export const TENANT_SCOPED_MODELS = [
   'AssetDocumentRef',
   'InsurancePolicy',
   'InsuranceClaim',
+  'InsuranceClaimDocument',
   'TechnicalInspection',
   'AssetTimelineEntry',
   'IdempotencyKey',

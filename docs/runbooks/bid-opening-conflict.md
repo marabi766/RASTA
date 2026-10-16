@@ -18,7 +18,8 @@
 
 ## ۲. بررسی
 
-1. رویداد `BID_OPENING_CONFLICT_DETECTED` (Outbox و `rasta.construction.v1`): `tenderId`، `openedAt`، `openedBy`، `proposedBy`، `windowStart`، `checkedAt` (بازه = `windowStart` تا `checkedAt`) و
+1. رویداد `BID_OPENING_CONFLICT_DETECTED` (Outbox و `rasta.construction.v1`؛ ردیف Outbox فقط تا
+   `OUTBOX_PURGE_RETENTION_HOURS` پس از انتشار می‌ماند، پیش‌فرض ۱۶۸ ساعت، D-052): `tenderId`، `openedAt`، `openedBy`، `proposedBy`، `windowStart`، `checkedAt` (بازه = `windowStart` تا `checkedAt`) و
    `conflicts[]` (کاربر، نقش `PROPOSER`/`APPROVER` و شناسهٔ سازمان‌های پیشنهاددهنده؛ فقط شناسه).
 2. در identity-service عضویت‌های آن کاربر را ببینید: `membership.created_at`/`valid_from` نسبت به `tender.opened_at`. عضویتی که **پس از**
    خواندن در لحظهٔ تأیید ساخته شده، مسابقهٔ مستند است؛ عضویتی که **پیش از** پیشنهاد بوده نشانهٔ خطای دیگری است (توکن، Cache، نقص در identity) — به

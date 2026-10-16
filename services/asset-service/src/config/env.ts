@@ -7,6 +7,7 @@ import {
   loadEnv,
   outboxPurgeEnvSchema,
 } from '@rasta/config';
+import { CLAIM_STATUSES } from '../asset/dto';
 import { INSURANCE_COVERAGES } from '../insurance/ownership';
 import { assetOperationBudgets } from './operation-budgets';
 
@@ -59,6 +60,31 @@ export const assetEnvSchema = baseEnvSchema
       .regex(/^\d{0,30}$/, 'Must be a non-negative integer in minor units, or empty')
       .default('')
       .transform((raw) => (raw === '' ? null : BigInt(raw))),
+
+    /**
+     * The most documents one insurance claim holds (docs/24 Q-128, temporary).
+     * Configuration, not code (AGENTS.md § 9); the conservative default is 20.
+     */
+    INSURANCE_CLAIM_MAX_DOCUMENTS: z.coerce.number().int().min(1).max(200).default(20),
+
+    /**
+     * The claim statuses in which a document may still be attached (Q-128).
+     * Default: the open ones. A later decision to accept evidence after the
+     * decision adds a status here; an unknown or repeated status, or an empty
+     * list, stops the service at start-up.
+     */
+    INSURANCE_CLAIM_DOCUMENT_STATUSES: z
+      .string()
+      .default('SUBMITTED,UNDER_REVIEW')
+      .transform((raw) => raw.split(',').map((status) => status.trim()))
+      .pipe(
+        z
+          .array(z.enum(CLAIM_STATUSES))
+          .nonempty()
+          .refine((list) => new Set(list).size === list.length, {
+            message: 'INSURANCE_CLAIM_DOCUMENT_STATUSES lists a status more than once',
+          }),
+      ),
 
     /**
      * Which coverages follow the vehicle when it changes owner.
