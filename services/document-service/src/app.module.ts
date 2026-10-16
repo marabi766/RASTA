@@ -221,17 +221,20 @@ import { clamdAddress, loadDocumentEnv, SERVICE_NAME, type DocumentEnv } from '.
       // too (Codex r3 on #247): stopped later, it kept polling while the relay
       // drained and then waited for a scan of up to DOCUMENT_SCAN_TIMEOUT_MS.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OutboxPurgeScheduler, ScanWorker, ENV],
+      inject: [OutboxRelay, OutboxPurgeScheduler, ScanWorker, KafkaEventPublisher, ENV],
       useFactory: (
         relay: OutboxRelay,
         purge: OutboxPurgeScheduler,
         scanWorker: ScanWorker,
+        publisher: KafkaEventPublisher,
         env: DocumentEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
           workers: [scanWorker],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

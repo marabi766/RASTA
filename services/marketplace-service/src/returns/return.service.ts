@@ -8,6 +8,7 @@ import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { returnRefusalsTotal, returnTransitionsTotal } from '../observability/metrics';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { RecordResponse } from '../shared/idempotency';
+import { isUniqueViolation, violatedConstraint } from '../shared/prisma-errors';
 import { ENV } from '../tokens';
 import type { CreateReturnDto, ListReturnsQuery, ReturnRequestView } from './dto';
 import { RETURN_AUTHORISATION, assertReturnVisible, type ReturnCommand } from './return-access';
@@ -16,6 +17,19 @@ import { assertReturnTransition, versionAfter, type ReturnStatus } from './state
 import { toReturnView } from './views';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** One request per (buyer, command key): the database backstop of the creation key. */
+const REQUEST_COMMAND_INDEX = 'ux_return_request_command';
+
+/** Whether a unique violation is the creation key's, by index name or by its column. */
+function isRequestCommandIndex(target: string | undefined): boolean {
+  return (
+    target !== undefined &&
+    (target === REQUEST_COMMAND_INDEX ||
+      target.includes('command_key_hash') ||
+      target.includes('commandKeyHash'))
+  );
+}
 
 /** The order status a return may be asked of (Q-132, temporary decision): only a settled order. */
 const RETURNABLE_ORDER_STATUS = 'COMPLETED';
@@ -65,6 +79,34 @@ export class ReturnService {
     const actor = context.userId ?? context.callerService ?? SERVICE_NAME;
     const keyHash = commandKeyHash('POST /v1/orders/:id/returns', orderId, idempotencyKey);
 
+    try {
+      return await this.fileRequest(orderId, dto, keyHash, actor, record);
+    } catch (error) {
+      // The key already filed a request on this order, and its idempotency record — which would
+      // have replayed that request — is gone: expired and claimed afresh, or purged. The command
+      // index refuses a second request; the caller learns it as a conflict, not a 500, and without
+      // Retry-After, because waiting will not change it (as `OrderService.place`).
+      if (isUniqueViolation(error) && isRequestCommandIndex(violatedConstraint(error))) {
+        returnRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'COMMAND_ALREADY_APPLIED' });
+        throw new RastaError(
+          'CONFLICT',
+          'A return has already been requested on this order with this Idempotency-Key',
+          // The index, never the key or its hash (S-09).
+          { internalContext: { constraint: REQUEST_COMMAND_INDEX } },
+        );
+      }
+      throw error;
+    }
+  }
+
+  private fileRequest(
+    orderId: string,
+    dto: CreateReturnDto,
+    keyHash: string,
+    actor: string,
+    record?: RecordResponse<ReturnRequestView>,
+  ): Promise<ReturnRequestView> {
+    const context = getContext();
     return this.prisma.transaction(async (tx) => {
       const order = await this.repository.lockOrder(tx, orderId);
       if (!order) throw RastaError.notFound('Order', orderId);

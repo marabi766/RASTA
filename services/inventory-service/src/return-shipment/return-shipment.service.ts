@@ -491,11 +491,19 @@ export class ReturnShipmentService {
 
   // -- reads --------------------------------------------------------------------------------
 
+  /**
+   * The shipment, its lines and its dispositions, read in one snapshot: a view the database held at
+   * one instant.
+   */
   async get(id: string): Promise<ReturnShipmentView> {
-    const row = await this.visible(id);
-    const lines = await this.shipments.linesOf([row]);
-    const dispositions = await this.shipments.dispositionsOf([row]);
-    return toReturnShipmentView(row, lines.get(row.id) ?? [], dispositions.get(row.id) ?? []);
+    const reader = this.access.assertReturnShipmentReader();
+    return this.shipments.inSnapshot(async (tx) => {
+      const row = await this.shipments.findVisible(reader, id, tx);
+      if (!row) throw RastaError.notFound('ReturnShipment', id);
+      const lines = await this.shipments.linesOf([row], tx);
+      const dispositions = await this.shipments.dispositionsOf([row], tx);
+      return toReturnShipmentView(row, lines.get(row.id) ?? [], dispositions.get(row.id) ?? []);
+    });
   }
 
   /** The status and the tracking history, in lifecycle order, read together in one statement. */
@@ -506,21 +514,30 @@ export class ReturnShipmentService {
     return toReturnTrackingView(tracked.shipment, tracked.events);
   }
 
+  /** A page of shipments with their lines and dispositions, read in one snapshot, as {@link get}. */
   async list(query: ListReturnShipmentsQuery): Promise<CursorPage<ReturnShipmentView>> {
     const reader = this.access.assertReturnShipmentReader();
-    const rows = await this.shipments.listVisible(reader, {
-      ...(query.side === undefined ? {} : { side: query.side }),
-      ...(query.status === undefined ? {} : { status: query.status }),
-      ...(query.returnRequestId === undefined ? {} : { returnRequestId: query.returnRequestId }),
-      ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
-      limit: query.limit,
+    return this.shipments.inSnapshot(async (tx) => {
+      const rows = await this.shipments.listVisible(
+        reader,
+        {
+          ...(query.side === undefined ? {} : { side: query.side }),
+          ...(query.status === undefined ? {} : { status: query.status }),
+          ...(query.returnRequestId === undefined
+            ? {}
+            : { returnRequestId: query.returnRequestId }),
+          ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+          limit: query.limit,
+        },
+        tx,
+      );
+      const page = rows.slice(0, query.limit);
+      const lines = await this.shipments.linesOf(page, tx);
+      const dispositions = await this.shipments.dispositionsOf(page, tx);
+      return pageOf(rows, query.limit, (row) =>
+        toReturnShipmentView(row, lines.get(row.id) ?? [], dispositions.get(row.id) ?? []),
+      );
     });
-    const page = rows.slice(0, query.limit);
-    const lines = await this.shipments.linesOf(page);
-    const dispositions = await this.shipments.dispositionsOf(page);
-    return pageOf(rows, query.limit, (row) =>
-      toReturnShipmentView(row, lines.get(row.id) ?? [], dispositions.get(row.id) ?? []),
-    );
   }
 
   /** Whether the caller may still see this return shipment (the replay of a command). */

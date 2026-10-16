@@ -357,6 +357,7 @@ const CONSUMED_TOPICS = [
         InsuranceExpirySweepScheduler,
         TimelineConsumer,
         DocumentRemovalConsumer,
+        KafkaEventPublisher,
         ENV,
       ],
       useFactory: (
@@ -365,12 +366,15 @@ const CONSUMED_TOPICS = [
         expirySweep: InsuranceExpirySweepScheduler,
         timeline: TimelineConsumer,
         documentRemoval: DocumentRemovalConsumer,
+        publisher: KafkaEventPublisher,
         env: AssetEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
           workers: [expirySweep, timeline, documentRemoval],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

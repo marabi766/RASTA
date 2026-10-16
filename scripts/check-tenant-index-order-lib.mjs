@@ -410,6 +410,11 @@ export const EXEMPTIONS = {
   // lookups name the rule's key, not a tenant (TENANT_SCOPE_EXEMPTIONS in
   // services/economic-service/src/prisma/prisma.service.ts).
   economic: {
+    commission_rule_business_line_status_valid_from_idx: {
+      index: 'commission_rule (business_line, status, valid_from)',
+      reason:
+        'platform-wide (organization_id NULL) and tenant rules matched together by business line (ADR-045; CommissionService.candidateRules and listRules, runUnscoped with an explicit OR on organization_id)',
+    },
     commission_rule_transaction_type_status_valid_from_idx: {
       index: 'commission_rule (transaction_type, status, valid_from)',
       reason:

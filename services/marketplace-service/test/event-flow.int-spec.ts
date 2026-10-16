@@ -125,7 +125,7 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
 
   afterAll(async () => {
     await consumer?.disconnect();
-    await publisher?.onModuleDestroy();
+    await publisher?.stop();
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
     await prisma?.onModuleDestroy();
   }, 60_000);

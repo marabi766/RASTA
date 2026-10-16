@@ -6,6 +6,7 @@ import {
   kafkaPasswordVariable,
   kafkaPlaintextAllowed,
   kafkaSaslConfigured,
+  outboxShutdownBudgetMs,
   type BaseEnv,
   type KafkaEnv,
 } from '@rasta/config';
@@ -28,9 +29,19 @@ export interface KafkaConnectionOptions {
   sasl?: { mechanism: KafkaEnv['KAFKA_SASL_MECHANISM']; username: string; password: string };
   /** `true` trusts the system store; `{ ca }` pins the broker's CA. */
   ssl?: true | { ca: string[]; rejectUnauthorized: true };
+  /**
+   * `outboxShutdownBudgetMs`, the budget `OutboxShutdown` drains by: the bound
+   * of a client close handed no deadline (`kafkaShutdownDeadline`), and what a
+   * readiness probe's bound is cut from (`kafkaProbeTimeoutMs`), so a broker
+   * that stops answering cannot hold `app.close()` past SHUTDOWN_TIMEOUT_MS
+   * (D-052 phase 4b). Absent when the environment has no SHUTDOWN_TIMEOUT_MS:
+   * a script's connection.
+   */
+  shutdownBudgetMs?: number;
 }
 
 export type KafkaConnectionEnv = Pick<BaseEnv, 'NODE_ENV' | 'SERVICE_NAME'> &
+  Partial<Pick<BaseEnv, 'SHUTDOWN_TIMEOUT_MS'>> &
   Pick<
     KafkaEnv,
     | 'KAFKA_BROKERS'
@@ -93,6 +104,12 @@ export function kafkaConnection(
   }
 
   const connection: KafkaConnectionOptions = { brokers, clientId };
+
+  if (env.SHUTDOWN_TIMEOUT_MS !== undefined) {
+    connection.shutdownBudgetMs = outboxShutdownBudgetMs({
+      SHUTDOWN_TIMEOUT_MS: env.SHUTDOWN_TIMEOUT_MS,
+    });
+  }
 
   if (kafkaSaslConfigured(env)) {
     const username = env.KAFKA_SASL_USERNAME as string;

@@ -348,6 +348,16 @@ export class ReturnShipmentRepository {
 
   // -- reads (destination owner or sender) ----------------------------------------------------
 
+  /**
+   * Runs a read of several statements — a shipment, then its lines — in **one snapshot**: one
+   * `REPEATABLE READ` transaction, so every statement sees what a single instant held. Without it a
+   * command committing between the header and the lines produced a view that never existed (an
+   * `IN_TRANSIT` header with received quantities; Codex r1 on #311). Nothing is locked or written.
+   */
+  inSnapshot<T>(read: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
+    return this.prisma.transaction(read, { isolationLevel: 'RepeatableRead' });
+  }
+
   /** One return shipment, if the reader may see it from a side its roles open. */
   async findVisible(
     reader: ReturnShipmentVisibility,
@@ -371,6 +381,7 @@ export class ReturnShipmentRepository {
       cursor?: string;
       limit: number;
     },
+    client: ExtendedPrismaClient = this.prisma.client,
   ): Promise<ReturnShipmentRow[]> {
     const visible = returnVisibleTo(reader, filter.side);
     if (visible === null) return [];
@@ -382,7 +393,7 @@ export class ReturnShipmentRepository {
         : Prisma.sql`AND "return_request_id" = ${filter.returnRequestId}`;
     const after =
       filter.cursor === undefined ? Prisma.empty : Prisma.sql`AND "id" < ${filter.cursor}`;
-    return this.prisma.client.$queryRaw<ReturnShipmentRow[]>`
+    return client.$queryRaw<ReturnShipmentRow[]>`
       SELECT ${COLUMNS} FROM "return_shipment"
        WHERE ${visible} ${status} ${request} ${after}
        ORDER BY "id" DESC
