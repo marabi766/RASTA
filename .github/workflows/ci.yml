@@ -151,6 +151,13 @@ jobs:
         # asks for it, refused when malformed, never on a migrator (#268 r4).
         run: pnpm run test:session-statement-timeout
 
+      - name: Marketplace saga deployment gate (D-053)
+        # The check a marketplace-service deployment runs between stopping the
+        # old replicas and starting the new: passes only on no poller and no
+        # pending order-saga activity, blocks on everything it cannot verify
+        # (docs/runbooks/marketplace-saga-deploy.md). Codex r2 on #283.
+        run: pnpm run test:marketplace-saga-drain-check
+
       - name: Image scope rule
         # The rule that decides which images a pull request builds and scans
         # (L7-35). A wrong rule would quietly skip a changed image.
@@ -205,11 +212,23 @@ jobs:
       - name: Integration split is aggregated
         # The integration work runs as parallel `integration-*` jobs and
         # `integration` ("Integration and security tests", the required check)
-        # only aggregates them. Static: every split job is needed by it, it
-        # runs always() and fails unless all succeeded, each step of the old
-        # single job runs in exactly one split job, and every step has the
-        # broker, bucket, scanner, Redis or database it reads.
+        # only aggregates them. Every split job is needed by it, it runs
+        # always() and nothing else, and its verdict script, executed here
+        # against each job failed, cancelled and skipped, fails on all of
+        # them. Each step of the old single job runs in exactly one split job,
+        # with its declared command, env and time limit, no `if:` and no
+        # `continue-on-error`, and has the broker, bucket, scanner, Redis or
+        # database it reads.
         run: pnpm run test:ci-integration-split
+
+      - name: Image pre-pull retries only transient registry errors
+        # `scripts/ci-pull-image.sh` runs before the steps that start a
+        # container: a 5xx, timeout or connection reset is retried (10/30/60 s),
+        # a 404, "manifest unknown", unauthorized, digest mismatch or any
+        # error it does not recognise fails at once, and a reference without a
+        # sha256 digest is refused. Also fails if a step runs a digest-pinned
+        # image that no earlier step of its job pre-pulls.
+        run: pnpm run test:ci-pull-image
 
       - name: Grafana dashboard contract
         # The provisioned local `Rasta Audit Evidence` dashboard: stable
@@ -283,6 +302,12 @@ jobs:
         # packages and the generated Prisma client.
         run: pnpm run test:dev-loader
 
+      - name: Services trace Kafka from the built entry point
+        # Each built dist/main.js, loaded up to its app.module, must have
+        # kafkajs wrapped by the OpenTelemetry instrumentation: an import that
+        # loads kafkajs before initTelemetry() leaves it untraced (audit-service).
+        run: pnpm run test:telemetry-order
+
   # ---------------------------------------------------------------------------
   # Security. Every gate here fails the build rather than warning: a warning
   # nobody is forced to read is not a control.
@@ -328,6 +353,11 @@ jobs:
         # does hold the ledger, so a known-exploitable transitive dependency is
         # not something to merge past.
         run: pnpm audit --audit-level=high
+
+      - name: Pre-pull Semgrep (retries transient registry errors)
+        run: |
+          scripts/ci-pull-image.sh \
+            semgrep/semgrep:1.175.0@sha256:b94b53d02fd4a022f9eac4e2af1380f5c3c4c21400e79d3336bdff1d1db5e796
 
       - name: Static analysis
         # Run the maintained image directly rather than semgrep/semgrep-action@v1.
@@ -427,6 +457,12 @@ jobs:
           echo "KEYCLOAK_ADMIN_PASSWORD=${keycloak_password}" >> "$GITHUB_ENV"
           echo "INTERNAL_TOKEN_SECRET=${internal_secret}" >> "$GITHUB_ENV"
           echo "WEB_SESSION_SECRET=${web_session_secret}" >> "$GITHUB_ENV"
+
+      - name: Pre-pull Keycloak and MinIO (retries transient registry errors)
+        run: |
+          scripts/ci-pull-image.sh \
+            quay.io/keycloak/keycloak:26.0@sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858 \
+            "$MINIO_IMAGE" "$MC_IMAGE"
 
       - name: Start Keycloak with the platform realm
         # Service containers start before checkout, so the checked-in realm
@@ -895,6 +931,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - name: Pre-pull Prometheus (retries transient registry errors)
+        run: |
+          scripts/ci-pull-image.sh \
+            prom/prometheus:v3.1.0@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218
+
       - name: Check config and rule syntax
         # Also fails when a file named in `rule_files` does not exist.
         run: |
@@ -938,7 +979,12 @@ jobs:
   # `integration` itself keeps the name branch protection and the merge queue
   # know, "Integration and security tests", and passes only when all four
   # passed. `scripts/ci-integration-split.test.mjs` fails if a job named
-  # `integration-*` is left out of it.
+  # `integration-*` is left out of it, and holds every test and guard step to
+  # the inventory in `scripts/ci-integration-split-lib.mjs`: its exact
+  # command, the env it was declared with, and a limit of its own (the
+  # PostgreSQL guards and retry replay 5 minutes, test independence 8; they
+  # took 2–60 s on run 38676719548). No step here, and no job, may carry
+  # `if:` or `continue-on-error`.
   #
   # Service containers rather than Testcontainers here: GitHub provisions them
   # before the job starts, which is faster and avoids docker-in-docker.
@@ -1024,6 +1070,12 @@ jobs:
         env:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets
+
+      - name: Pre-pull MinIO and ClamAV (retries transient registry errors)
+        run: |
+          scripts/ci-pull-image.sh \
+            "$MINIO_IMAGE" "$MC_IMAGE" \
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 
       - name: Start MinIO and create the document bucket
         # `docker run` rather than a `services:` container, and not by
@@ -1115,7 +1167,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 
           # Loading ~110 MB of signatures takes a while, and the socket exists
           # before the engine is ready — so this asks clamd itself, which
@@ -1304,6 +1356,7 @@ jobs:
         # Every url the suite touches is passed explicitly. Skipping a service
         # because its variable is missing would turn a missing gate into a
         # green one, which is the failure `pnpm test:e2e` used to have.
+        timeout-minutes: 5
         run: pnpm run test:outbox-b3
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
@@ -1333,6 +1386,7 @@ jobs:
         # lib/supplier-privilege-split.bash and the remaining migrations; the
         # suite checks the rows survive and the runtime role gets 42501 for
         # DISABLE TRIGGER, ALTER, DROP and DROP DATABASE.
+        timeout-minutes: 5
         run: pnpm run test:supplier-privilege-split
         env:
           PGHOST: localhost
@@ -1349,6 +1403,7 @@ jobs:
         # … DISABLE TRIGGER and lift an integrity guard. Runs against every
         # service database this job bootstrapped and migrated; every service
         # must be split (audit its own way), so a new one that is not fails.
+        timeout-minutes: 5
         run: pnpm run check:db-runtime-privileges
         env:
           PGHOST: localhost
@@ -1361,6 +1416,7 @@ jobs:
         # unsplit service is — owned by its runtime role — must be reported in
         # full; after lib/service-privilege-split.bash it must be reported
         # clean, its rows intact and its trigger out of the runtime role's reach.
+        timeout-minutes: 5
         run: pnpm run test:db-runtime-privileges
         env:
           PGHOST: localhost
@@ -1375,6 +1431,7 @@ jobs:
         # (@rasta/config), the migration runner (scripts/prisma.mjs) and the
         # demo seeds must each open their sessions in UTC regardless, and the
         # runner's copy of the URL function must agree with the services'.
+        timeout-minutes: 5
         run: pnpm run test:db-session-utc
         env:
           PGHOST: localhost
@@ -1390,6 +1447,7 @@ jobs:
         # every service's clients are opened on that URL and no other.
         # DATABASE_STATEMENT_TIMEOUT_MS is opt-in: unset, the session keeps
         # the database's own; set, a longer statement is cancelled with 57014.
+        timeout-minutes: 5
         run: pnpm run test:db-pool-config
         env:
           PGHOST: localhost
@@ -1476,6 +1534,12 @@ jobs:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets
 
+      - name: Pre-pull MinIO and ClamAV (retries transient registry errors)
+        run: |
+          scripts/ci-pull-image.sh \
+            "$MINIO_IMAGE" "$MC_IMAGE" \
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+
       - name: Start MinIO and create the document bucket
         # document-service's suites are in the tenant isolation step's
         # selection. Same images, bucket and private policy as in
@@ -1528,7 +1592,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 
           # Loading ~110 MB of signatures takes a while, and the socket exists
           # before the engine is ready — so this asks clamd itself, which
@@ -1635,6 +1699,7 @@ jobs:
         #
         # Scoped to the one file the defect was found in. Widening it is a
         # deliberate act, not a default, because each name costs a jest start.
+        timeout-minutes: 8
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
@@ -1744,6 +1809,7 @@ jobs:
         # [retry-replay]. No other step's scope changes; `check:kafka-credential-scope`
         # allows exactly this step to take it. It fails, rather than skips,
         # without the credential.
+        timeout-minutes: 5
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh replay)"
           eval "${kafka_credentials}"
@@ -2006,6 +2072,12 @@ jobs:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets
 
+      - name: Pre-pull MinIO and ClamAV (retries transient registry errors)
+        run: |
+          scripts/ci-pull-image.sh \
+            "$MINIO_IMAGE" "$MC_IMAGE" \
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+
       - name: Start MinIO and create the document bucket
         # For the document coverage gate. Same images, bucket and private
         # policy as in `integration-suites`; see that job for why.
@@ -2056,7 +2128,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 
           # Loading ~110 MB of signatures takes a while, and the socket exists
           # before the engine is ready — so this asks clamd itself, which
@@ -2337,6 +2409,9 @@ jobs:
     if: ${{ always() }}
     steps:
       - name: Every integration job passed
+        # Named, not the runner's default (bash -e, no pipefail): the split
+        # guard runs this script under exactly the shell set here.
+        shell: bash
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: |
@@ -2731,6 +2806,14 @@ jobs:
           echo "KEYCLOAK_ADMIN_PASSWORD=${keycloak_password}" >> "$GITHUB_ENV"
           echo "INTERNAL_TOKEN_SECRET=${internal_secret}" >> "$GITHUB_ENV"
 
+      - name: Pre-pull Keycloak, Temporal, MinIO and ClamAV (retries transient registry errors)
+        run: |
+          scripts/ci-pull-image.sh \
+            quay.io/keycloak/keycloak:26.0@sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858 \
+            temporalio/admin-tools:1.26.2@sha256:37e2e33dbd7b86a12fa1daecf48f5b42544956ae503a83bd45460587f25591f2 \
+            "$MINIO_IMAGE" "$MC_IMAGE" \
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+
       - name: Start Keycloak with the platform realm
         # A `docker run` rather than a service container, because the realm
         # import needs a file from the repository and service containers start
@@ -2975,7 +3058,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 
           for attempt in $(seq 1 60); do
             if docker exec rasta-e2e-clamav clamdscan --ping 1 >/dev/null 2>&1; then
@@ -3380,10 +3463,13 @@ jobs:
         # By digest, so this job scans exactly what the integration job, the
         # E2E job and `docker-compose.yml` run. A tag here would scan a
         # different image than the one deployed and report on it confidently.
+        # The pull is the retrying helper's: an explicit `docker pull` contacts
+        # the registry even when the image is already local.
         run: |
           set -euo pipefail
-          docker pull clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
-          docker tag clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0 \
+          scripts/ci-pull-image.sh \
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+          docker tag clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6 \
             rasta/clamav-pinned:ci
 
       - name: Scan the image
@@ -3398,9 +3484,6 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: '1'
           ignore-unfixed: true
-          # One time-boxed exception, expiring 2026-10-16 (see the file and
-          # ADR-049). This input appears on this step only.
-          trivyignores: .trivyignore.clamav
 
       - name: Record the engine and signature versions the pin carries
         # Evidence rather than decoration: ADR-049 requires the image source

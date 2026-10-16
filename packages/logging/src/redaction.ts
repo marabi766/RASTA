@@ -92,16 +92,183 @@ export function buildRedactionPaths(): string[] {
   return Array.from(new Set(paths));
 }
 
-const CONNECTION_STRING_CREDENTIALS = /(\w+:\/\/)([^:@/\s]+):([^@/\s]+)@/g;
-const BEARER_TOKEN = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi;
+/**
+ * The longest message {@link scrubMessage} reads, in UTF-16 code units. A
+ * longer one is cut to it first — an error message can quote a request body
+ * or header, read before any authentication — so what a message costs is
+ * bounded however long it arrives. Same value as `REDACT_TEXT_MAX` in
+ * `@rasta/observability`, which this package cannot import.
+ */
+export const SCRUB_MESSAGE_MAX = 4096;
+
+/** What follows a message cut to {@link SCRUB_MESSAGE_MAX}. */
+export const TRUNCATED_MESSAGE = '…[TRUNCATED]';
+
+const SLASH = 0x2f; // /
+const COLON = 0x3a; // :
+const AT = 0x40; // @
+const EQUALS = 0x3d; // =
+
+/** Whether a UTF-16 code unit is whitespace: exactly the set `\s` matches. */
+function isWhitespace(code: number): boolean {
+  return (
+    (code >= 0x09 && code <= 0x0d) ||
+    code === 0x20 ||
+    code === 0xa0 ||
+    code === 0x1680 ||
+    (code >= 0x2000 && code <= 0x200a) ||
+    code === 0x2028 ||
+    code === 0x2029 ||
+    code === 0x202f ||
+    code === 0x205f ||
+    code === 0x3000 ||
+    code === 0xfeff
+  );
+}
+
+/** `\w`: ASCII letters, digits, underscore. */
+function isWordChar(code: number): boolean {
+  return (
+    (code >= 0x30 && code <= 0x39) ||
+    (code >= 0x41 && code <= 0x5a) ||
+    (code >= 0x61 && code <= 0x7a) ||
+    code === 0x5f
+  );
+}
+
+/** `[A-Za-z0-9._~+/-]`: what a bearer or basic token is made of. */
+function isTokenChar(code: number): boolean {
+  return (
+    isWordChar(code) ||
+    code === 0x2e || // .
+    code === 0x7e || // ~
+    code === 0x2b || // +
+    code === SLASH ||
+    code === 0x2d // -
+  );
+}
+
+/**
+ * Replaces the password in every `scheme://user:password@` with
+ * {@link REDACTED}. One forward pass: each `://` is looked at once and the
+ * runs after it end at the next `/`, `@` or whitespace, so no character is
+ * read twice. A cut text never ends inside a password: the word a cut runs
+ * through is dropped first (see `head`).
+ */
+function scrubConnectionStrings(text: string): string {
+  let out = '';
+  let copied = 0;
+  let from = 0;
+  for (;;) {
+    const sep = text.indexOf('://', from);
+    if (sep === -1) break;
+    from = sep + 1;
+    // A scheme is at least one word character, after the previous match.
+    if (sep < copied + 1 || !isWordChar(text.charCodeAt(sep - 1))) continue;
+
+    let at = sep + 3;
+    const userStart = at;
+    while (at < text.length) {
+      const code = text.charCodeAt(at);
+      if (code === COLON || code === AT || code === SLASH || isWhitespace(code)) break;
+      at++;
+    }
+    if (at === userStart || text.charCodeAt(at) !== COLON) continue;
+    const passwordStart = at + 1;
+    at = passwordStart;
+    while (at < text.length) {
+      const code = text.charCodeAt(at);
+      if (code === AT || code === SLASH || isWhitespace(code)) break;
+      at++;
+    }
+    if (at === passwordStart) continue;
+    if (text.charCodeAt(at) !== AT) continue;
+
+    out += `${text.slice(copied, passwordStart)}${REDACTED}`;
+    copied = at;
+    from = at;
+  }
+  return copied === 0 ? text : `${out}${text.slice(copied)}`;
+}
+
+/** The length of the `Bearer` or `Basic` (any case) at `at`, or 0. */
+function schemeLength(text: string, at: number): number {
+  const head = text.slice(at, at + 6).toLowerCase();
+  if (head === 'bearer') return 6;
+  return head.startsWith('basic') ? 5 : 0;
+}
+
+/**
+ * Replaces the token in every `Bearer <token>` and `Basic <token>` (any case,
+ * on a word boundary) with {@link REDACTED}. One forward pass; the scheme,
+ * the whitespace and the token are runs, each read once.
+ */
+function scrubAuthSchemes(text: string): string {
+  let out = '';
+  let copied = 0;
+  let at = 0;
+  while (at < text.length) {
+    const code = text.charCodeAt(at);
+    // Only `B` and `b` start a scheme, and only after a non-word character.
+    if ((code === 0x42 || code === 0x62) && (at === 0 || !isWordChar(text.charCodeAt(at - 1)))) {
+      const length = schemeLength(text, at);
+      if (length > 0) {
+        let end = at + length;
+        const spaceStart = end;
+        while (end < text.length && isWhitespace(text.charCodeAt(end))) end++;
+        const tokenStart = end;
+        if (end > spaceStart) {
+          while (end < text.length && isTokenChar(text.charCodeAt(end))) end++;
+          if (end > tokenStart) {
+            while (end < text.length && text.charCodeAt(end) === EQUALS) end++;
+            out += `${text.slice(copied, at)}${text.slice(at, at + length)} ${REDACTED}`;
+            copied = end;
+            at = end;
+            continue;
+          }
+        }
+        // What lies between is whitespace or the scheme's own letters.
+        at = Math.max(at + 1, end);
+        continue;
+      }
+    }
+    at++;
+  }
+  return copied === 0 ? text : `${out}${text.slice(copied)}`;
+}
 
 /**
  * Scrubs credentials that appear *inside* free-text strings, where key-based
  * redaction cannot reach them. The usual offender is a driver error message
  * echoing the connection string it failed to open.
+ *
+ * Linear in the message, with no regular expression that could backtrack. A
+ * message longer than `max` (default {@link SCRUB_MESSAGE_MAX}) is cut to it first, and
+ * the word the cut runs through is dropped (fail closed: a fragment is never
+ * scrubbed as if it were whole); it ends in {@link TRUNCATED_MESSAGE}.
+ *
+ * `max` bounds the *result* too, not only the input: replacing a token with
+ * {@link REDACTED} can make a text longer (`Bearer a ` doubles), so what the
+ * rules produce is cut to `max` again. The result is at most
+ * `max + TRUNCATED_MESSAGE.length` UTF-16 code units — lengths here and in
+ * `@rasta/logging` are code units, never encoded bytes.
  */
-export function scrubMessage(message: string): string {
-  return message
-    .replace(CONNECTION_STRING_CREDENTIALS, `$1$2:${REDACTED}@`)
-    .replace(BEARER_TOKEN, `$1 ${REDACTED}`);
+export function scrubMessage(message: string, max: number = SCRUB_MESSAGE_MAX): string {
+  const cut = message.length > max;
+  const scrubbed = scrubAuthSchemes(scrubConnectionStrings(cut ? head(message, max) : message));
+  return cut || scrubbed.length > max ? `${head(scrubbed, max)}${TRUNCATED_MESSAGE}` : scrubbed;
+}
+
+/**
+ * The first `max` code units of `text`, without the word the cut runs through
+ * (everything after the last whitespace before it goes). That word is dropped,
+ * not scrubbed: a fragment can have lost what marks its secret — a connection
+ * string's `@` — and no rule could tell (Codex on #290, r5 R5-1). A cut never
+ * keeps half of a surrogate pair, and a text with no whitespace keeps nothing.
+ */
+function head(text: string, max: number): string {
+  if (text.length <= max) return text;
+  let end = max;
+  while (end > 0 && !isWhitespace(text.charCodeAt(end - 1))) end--;
+  return text.slice(0, end);
 }

@@ -595,20 +595,30 @@ export class OrganizationService {
     const actor = getContext().userId ?? 'SYSTEM';
 
     const updated = await this.repository.transaction(async (tx) => {
+      // The hierarchy lock comes first, for every status — the same order
+      // create and move take: hierarchy, then ancestor chain, then the target.
+      //
+      // A cascade locks the target and then every descendant, one row at a
+      // time; a move's path rewrite locks the moved subtree in scan order. With
+      // only a row lock to arrange them, a suspension of D (holding D, wanting
+      // its child E) and a move of D's ancestor (holding E, wanting D) wait on
+      // each other, and PostgreSQL aborts one of two valid requests (40P01).
+      // Holding the one lock first leaves no cycle: whoever has it is the only
+      // hierarchy writer in flight.
+      await this.repository.lockHierarchy(tx);
+
       if (dto.status === 'ACTIVE') {
         // Reactivating beneath a suspended or deactivated ancestor would undo
         // that ancestor's cascade for this one branch. The ancestors are
         // share-locked, so a suspension racing this request either commits
         // first (and is seen here) or waits and then cascades over this row.
         //
-        // Which rows are the ancestors is itself a read of the tree, so the
-        // hierarchy lock comes first — the same order create and move take:
-        // hierarchy, then ancestor chain, then the target. Without it, a move
-        // of this organization that had written but not committed left this
-        // request share-locking the *old* chain; the move then committed it
-        // beneath a suspended parent, and the compare-and-set below, which
-        // waited on the moved row, woke and set it ACTIVE there.
-        await this.repository.lockHierarchy(tx);
+        // Which rows are the ancestors is itself a read of the tree, so it is
+        // read under the hierarchy lock. Without it, a move of this
+        // organization that had written but not committed left this request
+        // share-locking the *old* chain; the move then committed it beneath a
+        // suspended parent, and the compare-and-set below, which waited on the
+        // moved row, woke and set it ACTIVE there.
         const ancestors = await this.repository.lockAncestorChain(tx, id, { includeSelf: false });
         assertNoBlockingAncestor(ancestors, 'reactivate an organization');
       }
@@ -1018,14 +1028,7 @@ export class OrganizationService {
   // =========================================================================
 
   private assertWithinDepth(resultingDepth: number, context: Record<string, unknown>): void {
-    if (resultingDepth > this.maxDepth) {
-      throw RastaError.businessRule(`Hierarchy may not exceed ${this.maxDepth} levels`, {
-        rule: 'HIERARCHY_TOO_DEEP',
-        maxDepth: this.maxDepth,
-        resultingDepth,
-        ...context,
-      });
-    }
+    assertWithinHierarchyDepth(this.maxDepth, resultingDepth, context);
   }
 
   private async insertLocation(
@@ -1088,9 +1091,10 @@ function rethrowConstraintViolation(aggregate: string, id: string) {
 /**
  * Refuses an operation that would leave an ACTIVE organization beneath a
  * SUSPENDED or DEACTIVATED one. `chain` is ancestors root-first, already
- * locked by the caller; the nearest blocking one is reported.
+ * locked by the caller; the nearest blocking one is reported. The demo seed
+ * applies the same rule to the rows it creates (`seed-organization.ts`).
  */
-function assertNoBlockingAncestor(chain: readonly ChainRow[], action: string): void {
+export function assertNoBlockingAncestor(chain: readonly ChainRow[], action: string): void {
   const blocking = [...chain]
     .reverse()
     .find((row) => BLOCKING_ANCESTOR_STATUSES.includes(row.status));
@@ -1099,6 +1103,27 @@ function assertNoBlockingAncestor(chain: readonly ChainRow[], action: string): v
     `Cannot ${action} beneath a ${blocking.status.toLowerCase()} organization`,
     { rule: 'ANCESTOR_NOT_ACTIVE', ancestorId: blocking.id, ancestorStatus: blocking.status },
   );
+}
+
+/**
+ * Refuses a write that would put an organization deeper than `maxDepth`
+ * (`MAX_HIERARCHY_DEPTH`). `resultingDepth` is computed from rows read under
+ * the hierarchy lock. The demo seed applies the same rule to the rows it
+ * places (`seed-organization.ts`).
+ */
+export function assertWithinHierarchyDepth(
+  maxDepth: number,
+  resultingDepth: number,
+  context: Record<string, unknown>,
+): void {
+  if (resultingDepth > maxDepth) {
+    throw RastaError.businessRule(`Hierarchy may not exceed ${maxDepth} levels`, {
+      rule: 'HIERARCHY_TOO_DEEP',
+      maxDepth,
+      resultingDepth,
+      ...context,
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------

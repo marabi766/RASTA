@@ -1,6 +1,11 @@
-import { Injectable, type OnModuleDestroy } from '@nestjs/common';
+import { Injectable, type OnApplicationShutdown } from '@nestjs/common';
 import type { EventEnvelope } from '@rasta/contracts';
-import type { EventConsumer, EventDelivery, HandlerOutcome } from '@rasta/nest-common';
+import type {
+  EventConsumer,
+  EventDelivery,
+  HandlerOutcome,
+  OutboxStopOptions,
+} from '@rasta/nest-common';
 // Type-only: this provider is built by an explicit `useFactory` in
 // `app.module.ts`, so no constructor parameter doubles as an injection token.
 import type { NotificationRepository } from '../notification/notification.repository';
@@ -43,7 +48,7 @@ export type ConsumerFactory = (
  *   database    thrown, so nothing is marked processed — the retry is real.
  */
 @Injectable()
-export class DispatcherConsumer implements OnModuleDestroy {
+export class DispatcherConsumer implements OnApplicationShutdown {
   private consumer?: EventConsumer;
 
   constructor(
@@ -58,8 +63,22 @@ export class DispatcherConsumer implements OnModuleDestroy {
     await this.consumer.start();
   }
 
-  async onModuleDestroy(): Promise<void> {
-    await this.consumer?.stop();
+  /**
+   * An `OutboxShutdown` worker: stopped in Nest's destroy phase, beside the
+   * relay, the purge and both workers, by the shutdown's one deadline; an
+   * event still in flight is abandoned uncommitted and delivered again, and
+   * its `processed_event` marker keeps a second intent out (A-09). Before, its
+   * own `onModuleDestroy` stopped the consumer with no bound, and an ingest
+   * transaction (up to 30 s) or a stalled dead letter could hold the close
+   * into the forced exit (Codex r1 on #276).
+   */
+  stop(options?: OutboxStopOptions): Promise<void> {
+    return this.consumer?.stop(options) ?? Promise.resolve();
+  }
+
+  /** Joins the stop `OutboxShutdown` began; returns at once. */
+  onApplicationShutdown(): Promise<void> {
+    return this.stop();
   }
 
   /** For the readiness probe. Delegated to the consumer's own flag, which is set only after `run()`. */

@@ -1229,7 +1229,10 @@ describe('reactivation reads the tree under the hierarchy lock', () => {
     expect(chainOrder).toBeLessThan(casOrder);
   });
 
-  it('a suspension takes no hierarchy lock — it reads no ancestors', async () => {
+  it('a suspension takes the hierarchy lock before its compare-and-set, and reads no ancestors', async () => {
+    // Its cascade locks descendants one row at a time; a move rewrites the same
+    // rows in scan order. Only the one lock, taken first, keeps the two from
+    // waiting on each other (40P01).
     const h = harness();
     h.repository.findById.mockResolvedValue(orgRow(DEH1) as never);
     h.tx.organization.findFirstOrThrow.mockResolvedValue(orgRow(DEH1, { status: 'SUSPENDED' }));
@@ -1238,7 +1241,12 @@ describe('reactivation reads the tree under the hierarchy lock', () => {
       h.service.changeStatus(DEH1, { status: 'SUSPENDED', reason: 'x' }),
     );
 
-    expect(h.repository.lockHierarchy).not.toHaveBeenCalled();
+    const lockOrder = h.repository.lockHierarchy.mock.invocationCallOrder[0] ?? Infinity;
+    const casOrder = h.repository.compareAndSetStatus.mock.invocationCallOrder[0] ?? -Infinity;
+    const cascadeOrder = h.repository.cascadeStatus.mock.invocationCallOrder[0] ?? -Infinity;
+    expect(lockOrder).toBeLessThan(casOrder);
+    expect(casOrder).toBeLessThan(cascadeOrder);
+    expect(h.repository.lockAncestorChain).not.toHaveBeenCalled();
   });
 });
 

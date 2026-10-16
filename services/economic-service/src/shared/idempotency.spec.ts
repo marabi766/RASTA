@@ -2,9 +2,25 @@ import { createHash } from 'node:crypto';
 import type { ArgumentsHost } from '@nestjs/common';
 import type { Logger } from '@rasta/logging';
 import { AllExceptionsFilter, createSystemContext, runWithContext } from '@rasta/nest-common';
-import { IdempotencyStore, hashRequestBody, targeted } from './idempotency';
-import type { PrismaService } from '../prisma/prisma.service';
+import {
+  IdempotencyStore,
+  TerminalRefusalError,
+  hashRequestBody,
+  requestActor,
+  targeted,
+  type IdempotentAnswer,
+} from './idempotency';
+import type { ExtendedPrismaClient, PrismaService } from '../prisma/prisma.service';
 import type { EconomicEnv } from '../config/env';
+
+/** The stored answers of these tests are nobody's object: any caller may have them. */
+const openly = { mayReplay: async () => undefined };
+
+/** The claim token the store reserved its key under: the first insert's. */
+function tokenOf(idempotencyKey: { create: jest.Mock }): string {
+  const [[{ data }]] = idempotencyKey.create.mock.calls as [[{ data: { claimToken: string } }]];
+  return data.claimToken;
+}
 
 /**
  * A claim-side statement runs in a short transaction of its own, its lock
@@ -114,6 +130,65 @@ describe('targeted — the request identity of a route that acts on one resource
 });
 
 /**
+ * The actor a record is bound to (review of #287 r2, finding 1): a person by
+ * the verified issuer and subject, a service by its name — never by the
+ * platform user id, which is `rasta_uid` on one token and the IdP subject on
+ * the next refresh of the same person's.
+ */
+describe('requestActor — who an idempotency record is bound to', () => {
+  const ISSUER = 'https://idp.unit.test/realms/rasta';
+
+  const actorOf = (context: Parameters<typeof createSystemContext>[0]) =>
+    runWithContext(createSystemContext(context), () => hashRequestBody(requestActor()));
+
+  const person = (overrides: Parameters<typeof createSystemContext>[0]) =>
+    actorOf({
+      authType: 'USER',
+      roles: ['ORGANIZATION_ADMIN'],
+      organizationId: 'ORG-UNIT',
+      issuer: ISSUER,
+      subject: 'sub-1',
+      ...overrides,
+    });
+
+  it('is one person whether or not the token carries rasta_uid', () => {
+    const withoutPlatformId = person({
+      correlationId: 'a',
+      userId: 'sub-1',
+      platformUserId: false,
+    });
+    const withPlatformId = person({
+      correlationId: 'b',
+      userId: 'USR-1',
+      platformUserId: true,
+    });
+    expect(withPlatformId).toBe(withoutPlatformId);
+  });
+
+  it('tells two subjects apart, even under one platform user id', () => {
+    expect(person({ correlationId: 'a', userId: 'USR-1', subject: 'sub-1' })).not.toBe(
+      person({ correlationId: 'b', userId: 'USR-1', subject: 'sub-2' }),
+    );
+  });
+
+  it('tells two issuers apart for the same subject', () => {
+    expect(person({ correlationId: 'a' })).not.toBe(
+      person({ correlationId: 'b', issuer: 'https://idp.other.test/realms/rasta' }),
+    );
+  });
+
+  it('is a service by its name alone, and never a person with the same name', () => {
+    const service = (callerService: string) =>
+      actorOf({ correlationId: callerService, organizationId: 'ORG-UNIT', callerService });
+    expect(service('marketplace-service')).toBe(service('marketplace-service'));
+    expect(service('marketplace-service')).not.toBe(service('contract-service'));
+    expect(service('marketplace-service')).not.toBe(
+      person({ correlationId: 'p', subject: 'marketplace-service' }),
+    );
+  });
+});
+
+/**
  * The claim race (economic batch 2, item g), with the database scripted so
  * each interleaving happens exactly, every run. The same property against a
  * real database, under real concurrency, is in `idempotency.int-spec.ts`.
@@ -159,8 +234,62 @@ describe('IdempotencyStore.claim — who may proceed', () => {
 
     await expect(asTenant(() => store.claim('POST /x', 'K', {}))).resolves.toEqual({
       kind: 'PROCEED',
+      token: expect.any(String),
     });
     expect(idempotencyKey.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('reserves under a new random token every time', async () => {
+    const { store, idempotencyKey } = storeWith({ create: jest.fn().mockResolvedValue({}) });
+
+    const first = await asTenant(() => store.claim('POST /x', 'K1', {}));
+    const second = await asTenant(() => store.claim('POST /x', 'K2', {}));
+    const tokens = idempotencyKey.create.mock.calls.map(
+      ([{ data }]: [{ data: { claimToken: string } }]) => data.claimToken,
+    );
+    expect(tokens).toEqual([
+      (first as { token: string }).token,
+      (second as { token: string }).token,
+    ]);
+    expect(tokens[0]).not.toBe(tokens[1]);
+  });
+
+  it('refuses a live key another actor reserved, as a key reused — never a replay', async () => {
+    const { store } = storeWith({
+      create: jest.fn().mockRejectedValue(uniqueViolation),
+      findUnique: jest.fn().mockResolvedValue({
+        requestHash: hashRequestBody({}),
+        actorHash: hashRequestBody({ someone: 'else' }),
+        state: 'COMPLETED',
+        responseStatus: 200,
+        responseBody: { secret: true },
+        expiresAt: new Date(Date.now() + hour),
+      }),
+    });
+
+    await expect(asTenant(() => store.claim('POST /x', 'K', {}))).rejects.toMatchObject({
+      code: 'IDEMPOTENCY_KEY_REUSED',
+    });
+  });
+
+  it('replays a record from before actors were bound — the replay guard decides', async () => {
+    const { store } = storeWith({
+      create: jest.fn().mockRejectedValue(uniqueViolation),
+      findUnique: jest.fn().mockResolvedValue({
+        requestHash: hashRequestBody({}),
+        actorHash: null,
+        state: 'COMPLETED',
+        responseStatus: 200,
+        responseBody: { id: 'TXN_OLD' },
+        expiresAt: new Date(Date.now() + hour),
+      }),
+    });
+
+    await expect(asTenant(() => store.claim('POST /x', 'K', {}))).resolves.toEqual({
+      kind: 'REPLAY',
+      status: 200,
+      body: { id: 'TXN_OLD' },
+    });
   });
 
   it('removes an expired row only while it is still expired, then retries the insert', async () => {
@@ -175,6 +304,7 @@ describe('IdempotencyStore.claim — who may proceed', () => {
 
     await expect(asTenant(() => store.claim('POST /x', 'K', {}))).resolves.toEqual({
       kind: 'PROCEED',
+      token: expect.any(String),
     });
     // Conditional on expiry, so a fresh claim a racer put in its place — or
     // a row a racer already deleted — is never touched and never a 500.
@@ -206,6 +336,7 @@ describe('IdempotencyStore.claim — who may proceed', () => {
       create: jest.fn().mockRejectedValue(uniqueViolation),
       findUnique: jest.fn().mockResolvedValue({
         requestHash: hashRequestBody({}),
+        actorHash: null,
         state: 'IN_PROGRESS',
         expiresAt: new Date(Date.now() + hour),
       }),
@@ -279,6 +410,7 @@ describe('IdempotencyStore.claim — who may proceed', () => {
         create: jest.fn().mockRejectedValue(uniqueViolation),
         findUnique: jest.fn().mockResolvedValue({
           requestHash: hashRequestBody({}),
+          actorHash: null,
           state,
           expiresAt: new Date(Date.now() + hour),
         }),
@@ -309,10 +441,13 @@ describe('IdempotencyStore.claim — who may proceed', () => {
 });
 
 /**
- * Which failure frees the key (review of #141). The work's own failure does,
- * so a corrected retry can run; a failure to record the response does not,
- * because by then the work has committed — freeing the key there let a retry
- * execute it a second time.
+ * Which failure frees the key. The answer is stored inside the effect's own
+ * transaction (review of #283, finding 2), so the effect and the completed key
+ * commit together or not at all: a failure before that commit — the answer's
+ * own write included — rolls both back and frees the key; a failure after it
+ * finds the row COMPLETED, and the release, which only ever removes an
+ * IN_PROGRESS row, removes nothing. The same property against a real database
+ * is `idempotency.int-spec.ts` and `idempotent-answer-after-commit.int-spec.ts`.
  */
 describe('IdempotencyStore.run — when the claim is released', () => {
   function claimedStore(updateMany: jest.Mock) {
@@ -325,7 +460,9 @@ describe('IdempotencyStore.run — when the claim is released', () => {
     const store = new IdempotencyStore(prisma, {
       ECONOMIC_IDEMPOTENCY_TTL_HOURS: 24,
     } as EconomicEnv);
-    return { store, idempotencyKey };
+    // The effect's transaction, as the fake hands it out.
+    const tx = { idempotencyKey } as unknown as ExtendedPrismaClient;
+    return { store, idempotencyKey, tx };
   }
 
   const asTenant = <T>(fn: () => Promise<T>) =>
@@ -334,16 +471,84 @@ describe('IdempotencyStore.run — when the claim is released', () => {
       fn,
     );
 
-  it('keeps the claim, and surfaces the error, when recording fails after the work committed', async () => {
-    const { store, idempotencyKey } = claimedStore(
-      jest.fn().mockRejectedValueOnce(new Error('connection reset while recording')),
-    );
-    const work = jest.fn().mockResolvedValue({ id: 'TXN_UNIT' });
+  /** This request's own reservation: its key, still in progress, under its token (#287 r1, F2). */
+  const ownClaim = (idempotencyKey: { create: jest.Mock }) => ({
+    organizationId: 'ORG-UNIT',
+    endpoint: 'POST /x',
+    key: 'K',
+    claimToken: tokenOf(idempotencyKey),
+    state: 'IN_PROGRESS',
+  });
+  const completedOnly = (idempotencyKey: { create: jest.Mock }) => ({
+    where: ownClaim(idempotencyKey),
+    data: { state: 'COMPLETED', responseStatus: 201, responseBody: { id: 'TXN_UNIT' } },
+  });
 
-    await expect(asTenant(() => store.run('POST /x', 'K', {}, 201, work))).rejects.toThrow(
-      'connection reset while recording',
-    );
-    expect(work).toHaveBeenCalledTimes(1);
+  it('stores the answer in the transaction the work hands it, and returns that answer', async () => {
+    const { store, idempotencyKey, tx } = claimedStore(jest.fn().mockResolvedValue({ count: 1 }));
+
+    await expect(
+      asTenant(() =>
+        store.run(
+          'POST /x',
+          'K',
+          {},
+          201,
+          (answer: IdempotentAnswer<{ id: string }>) => answer.respond(tx, { id: 'TXN_UNIT' }),
+          openly,
+        ),
+      ),
+    ).resolves.toEqual({ id: 'TXN_UNIT' });
+    expect(idempotencyKey.updateMany).toHaveBeenCalledWith(completedOnly(idempotencyKey));
+    expect(idempotencyKey.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('after a stored answer, a later failure releases only an IN_PROGRESS row — none is left', async () => {
+    const { store, idempotencyKey, tx } = claimedStore(jest.fn().mockResolvedValue({ count: 1 }));
+
+    await expect(
+      asTenant(() =>
+        store.run(
+          'POST /x',
+          'K',
+          {},
+          201,
+          async (answer: IdempotentAnswer<{ id: string }>) => {
+            await answer.respond(tx, { id: 'TXN_UNIT' });
+            throw new Error('the read after the commit failed');
+          },
+          openly,
+        ),
+      ),
+    ).rejects.toThrow('the read after the commit failed');
+    // The committed row is COMPLETED; this predicate cannot match it.
+    expect(idempotencyKey.deleteMany).toHaveBeenCalledWith({ where: ownClaim(idempotencyKey) });
+  });
+
+  it('fails the effect when its answer matches no claim in progress, so it never commits keyless', async () => {
+    const { store, tx } = claimedStore(jest.fn().mockResolvedValue({ count: 0 }));
+
+    await expect(
+      asTenant(() =>
+        store.run(
+          'POST /x',
+          'K',
+          {},
+          201,
+          (answer: IdempotentAnswer<{ id: string }>) => answer.respond(tx, { id: 'TXN_UNIT' }),
+          openly,
+        ),
+      ),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('keeps the claim of a work that returned without storing an answer', async () => {
+    const { store, idempotencyKey } = claimedStore(jest.fn());
+
+    await expect(
+      asTenant(() => store.run('POST /x', 'K', {}, 201, async () => ({ id: 'TXN_UNIT' }), openly)),
+    ).rejects.toMatchObject({ code: 'INTERNAL_ERROR' });
+    expect(idempotencyKey.updateMany).not.toHaveBeenCalled();
     expect(idempotencyKey.deleteMany).not.toHaveBeenCalled();
   });
 
@@ -351,13 +556,107 @@ describe('IdempotencyStore.run — when the claim is released', () => {
     const { store, idempotencyKey } = claimedStore(jest.fn());
     const work = jest.fn().mockRejectedValue(new Error('insufficient balance'));
 
-    await expect(asTenant(() => store.run('POST /x', 'K', {}, 201, work))).rejects.toThrow(
+    await expect(asTenant(() => store.run('POST /x', 'K', {}, 201, work, openly))).rejects.toThrow(
       'insufficient balance',
     );
-    expect(idempotencyKey.deleteMany).toHaveBeenCalledWith({
-      where: { organizationId: 'ORG-UNIT', endpoint: 'POST /x', key: 'K', state: 'IN_PROGRESS' },
-    });
+    expect(idempotencyKey.deleteMany).toHaveBeenCalledWith({ where: ownClaim(idempotencyKey) });
     expect(idempotencyKey.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('records a declared refusal only on its own claim', async () => {
+    const { store, idempotencyKey } = claimedStore(jest.fn().mockResolvedValue({ count: 1 }));
+    const refusals = { DECLINED: { code: 'BUSINESS_RULE_VIOLATION', message: 'Final' } } as const;
+    const work = jest
+      .fn()
+      .mockRejectedValue(new TerminalRefusalError('DECLINED', refusals.DECLINED));
+
+    await expect(
+      asTenant(() =>
+        store.run('POST /x', 'K', {}, 201, work, { ...openly, terminalRefusals: refusals }),
+      ),
+    ).rejects.toThrow('Final');
+    expect(idempotencyKey.updateMany).toHaveBeenCalledWith({
+      where: ownClaim(idempotencyKey),
+      data: { state: 'COMPLETED', responseStatus: 422, responseBody: { refusal: 'DECLINED' } },
+    });
+    expect(idempotencyKey.deleteMany).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A stored answer goes back only through the endpoint's replay guard (review
+ * of #287, finding 1): what a fresh request would be refused, a replay is
+ * refused too, and nothing of the record leaves first.
+ */
+describe('IdempotencyStore.run — a replay passes the endpoint’s object checks first', () => {
+  const uniqueViolation = Object.assign(new Error('Unique constraint failed'), { code: 'P2002' });
+
+  function storedStore(row: { responseStatus: number; responseBody: unknown }) {
+    const idempotencyKey = {
+      create: jest.fn().mockRejectedValue(uniqueViolation),
+      findUnique: jest.fn().mockResolvedValue({
+        requestHash: hashRequestBody({}),
+        actorHash: null,
+        state: 'COMPLETED',
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+        ...row,
+      }),
+      updateMany: jest.fn(),
+      deleteMany: jest.fn(),
+    };
+    const store = new IdempotencyStore(withTransaction(idempotencyKey), {
+      ECONOMIC_IDEMPOTENCY_TTL_HOURS: 24,
+    } as EconomicEnv);
+    return { store, idempotencyKey };
+  }
+
+  const asTenant = <T>(fn: () => Promise<T>) =>
+    runWithContext(
+      createSystemContext({ correlationId: 'unit-replay', organizationId: 'ORG-UNIT' }),
+      fn,
+    );
+  const work = jest.fn();
+  const notFound = Object.assign(new Error('Transaction not found'), { code: 'NOT_FOUND' });
+  const refusals = {
+    DECLINED: { code: 'BUSINESS_RULE_VIOLATION', message: 'Declined, and final' },
+  } as const;
+
+  it('asks the guard with the stored response, then returns it', async () => {
+    const { store } = storedStore({ responseStatus: 200, responseBody: { id: 'TXN_STORED' } });
+    const mayReplay = jest.fn().mockResolvedValue(undefined);
+
+    await expect(
+      asTenant(() => store.run('POST /x', 'K', {}, 200, work, { mayReplay })),
+    ).resolves.toEqual({ id: 'TXN_STORED' });
+    expect(mayReplay).toHaveBeenCalledWith({ id: 'TXN_STORED' });
+    expect(work).not.toHaveBeenCalled();
+  });
+
+  it('answers what the guard refuses with, and nothing of the stored response', async () => {
+    const { store, idempotencyKey } = storedStore({
+      responseStatus: 200,
+      responseBody: { id: 'TXN_STORED' },
+    });
+
+    const outcome = await asTenant(() =>
+      store.run('POST /x', 'K', {}, 200, work, { mayReplay: () => Promise.reject(notFound) }),
+    ).catch((error: unknown) => error);
+    expect(outcome).toBe(notFound);
+    expect(work).not.toHaveBeenCalled();
+    // A refused replay is not a failed attempt: the record stays.
+    expect(idempotencyKey.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('asks the guard before a recorded refusal too, with no response to name', async () => {
+    const { store } = storedStore({ responseStatus: 422, responseBody: { refusal: 'DECLINED' } });
+    const mayReplay = jest.fn().mockRejectedValue(notFound);
+
+    await expect(
+      asTenant(() =>
+        store.run('POST /x', 'K', {}, 200, work, { mayReplay, terminalRefusals: refusals }),
+      ),
+    ).rejects.toBe(notFound);
+    expect(mayReplay).toHaveBeenCalledWith(undefined);
   });
 });
 

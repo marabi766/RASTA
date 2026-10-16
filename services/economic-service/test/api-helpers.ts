@@ -15,7 +15,7 @@ import { PAYMENT_PROVIDER } from '../src/tokens';
 import type { PaymentProvider } from '../src/payment/provider';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl, PLATFORM_ORGANIZATION_ID } from './helpers';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { ulid } from 'ulid';
 
 /**
@@ -99,11 +99,28 @@ export function bearer(claims: TestClaims): string {
   return `test.${Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url')}`;
 }
 
-/** A financial administrator for one organization. */
-export function admin(organizationId: string, roles = ['ORGANIZATION_ADMIN']): string {
+/**
+ * A financial administrator for one organization.
+ *
+ * **One person per organization, roles and `person`**: every call with the
+ * same three is the same subject and platform user id. An idempotency key is
+ * bound to the actor who sent it (review of #287), so a retry built from a
+ * second `admin()` call must still be the same person; two people with the
+ * same roles — a proposer and an approver — are told apart by `person`.
+ */
+export function admin(
+  organizationId: string,
+  roles = ['ORGANIZATION_ADMIN'],
+  person = 'admin',
+): string {
+  const identity = createHash('sha256')
+    .update(JSON.stringify([organizationId, [...roles].sort(), person]))
+    .digest('hex')
+    .slice(0, 16)
+    .toUpperCase();
   return bearer({
-    sub: `sub-${ulid()}`,
-    rastaUserId: `USR-APITEST-${ulid().slice(-8)}`,
+    sub: `sub-${identity}`,
+    rastaUserId: `USR-APITEST-${identity}`,
     organizationId,
     organizationIds: [organizationId],
     roles,

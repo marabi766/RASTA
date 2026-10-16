@@ -64,4 +64,94 @@ describe('MembershipExpiryScanner', () => {
 
     await expect(scanner.scan(now)).resolves.toBe(0);
   });
+
+  it('never runs two passes at once', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const expire = jest.fn(async () => {
+      await gate;
+      return true;
+    });
+    const { scanner, repository } = scannerWith(expire);
+
+    const first = scanner.scan(now);
+    await expect(scanner.scan(now)).resolves.toBe(0);
+    release();
+    await expect(first).resolves.toBe(3);
+    expect(repository.findLapsedMemberships).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * D-052: an `OutboxShutdown` worker. Every lapse writes an outbox row, so
+   * the stop ends the pass by the shutdown's shared deadline rather than only
+   * clearing the timer.
+   */
+  describe('the stop', () => {
+    it('waits for the lapse in flight, and starts no further one', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const expire = jest.fn(async () => {
+        await gate;
+        return true;
+      });
+      const { scanner } = scannerWith(expire);
+
+      const pass = scanner.scan(now);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(expire).toHaveBeenCalledTimes(1);
+
+      let stopped = false;
+      const stopping = scanner.stop({ deadlineAt: Date.now() + 5000 }).then(() => {
+        stopped = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(stopped).toBe(false);
+
+      release();
+      await stopping;
+      // MBR_2 and MBR_3 are left for the next pass.
+      await expect(pass).resolves.toBe(1);
+      expect(expire).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns by the deadline, with a warning, when the lapse in flight does not end', async () => {
+      const expire = jest.fn(() => new Promise<boolean>(() => undefined));
+      const { scanner } = scannerWith(expire);
+      const warn = jest
+        .spyOn(
+          (scanner as unknown as { logger: { warn: (message: string) => void } }).logger,
+          'warn',
+        )
+        .mockImplementation(() => undefined);
+
+      void scanner.scan(now);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const startedAt = Date.now();
+      await scanner.stop({ deadlineAt: Date.now() + 200 });
+      expect(Date.now() - startedAt).toBeLessThan(1000);
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/abandoned/));
+      expect(expire).toHaveBeenCalledTimes(1);
+    });
+
+    it('starts no pass once stopping, and a later stop joins the first', async () => {
+      const expire = jest.fn(async () => true);
+      const { scanner, repository } = scannerWith(expire);
+
+      const first = scanner.stop({ deadlineAt: Date.now() + 1000 });
+      expect(scanner.stop()).toBe(first);
+      expect(scanner.onApplicationShutdown()).toBe(first);
+      await first;
+
+      await expect(scanner.scan(now)).resolves.toBe(0);
+      expect(repository.findLapsedMemberships).not.toHaveBeenCalled();
+    });
+
+    it('with nothing in flight, returns at once', async () => {
+      const { scanner } = scannerWith(jest.fn());
+      const startedAt = Date.now();
+      await scanner.stop({ deadlineAt: Date.now() + 5000 });
+      expect(Date.now() - startedAt).toBeLessThan(100);
+    });
+  });
 });

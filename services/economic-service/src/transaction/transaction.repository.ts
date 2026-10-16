@@ -157,9 +157,10 @@ export class TransactionRepository {
    * because "the tenant guard let it through" is not an authorization decision
    * for a row that names two tenants.
    */
-  findByIdForParty(id: string) {
+  /** `client` is the caller's transaction when the read answers for what it just wrote. */
+  findByIdForParty(id: string, client: ExtendedPrismaClient = this.client) {
     return runUnscoped('a transaction is visible to both its payer and its payee', () =>
-      this.client.transaction.findUnique({
+      client.transaction.findUnique({
         where: { id },
         include: { legs: true, commission: true, settlement: true },
       }),
