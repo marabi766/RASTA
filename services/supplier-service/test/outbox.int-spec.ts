@@ -1,4 +1,4 @@
-import { runUnscoped } from '@rasta/nest-common';
+import { releaseWithin, runUnscoped } from '@rasta/nest-common';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import {
   asOperator,
@@ -209,7 +209,8 @@ describe('the transactional outbox', () => {
       // Release whatever else this claim swept up, so the suite does not park
       // another organization's rows behind its lease.
       const others = claim.rows.filter((row) => row.organizationId !== org).map((row) => row.id);
-      if (others.length > 0) await store.release(others, claim.token as string);
+      if (others.length > 0)
+        await store.release(others, claim.token as string, releaseWithin(5_000));
     });
 
     it('fences a stale token — the second claimant cannot acknowledge the first claim', async () => {
@@ -225,6 +226,7 @@ describe('the transactional outbox', () => {
       await store.release(
         first.rows.map((row) => row.id),
         stale,
+        releaseWithin(5_000),
       );
 
       const second = await store.claimPending({ limit: 100, owner: 'b', leaseSeconds: 60 });
@@ -237,6 +239,7 @@ describe('the transactional outbox', () => {
       await store.release(
         second.rows.map((row) => row.id),
         second.token as string,
+        releaseWithin(5_000),
       );
     });
   });

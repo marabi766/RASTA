@@ -6,6 +6,7 @@ import {
   databaseEnvSchema,
   kafkaEnvSchema,
   loadEnv,
+  outboxPurgeEnvSchema,
 } from '@rasta/config';
 import { marketplaceOperationBudgets } from './operation-budgets';
 
@@ -20,6 +21,7 @@ import { marketplaceOperationBudgets } from './operation-budgets';
 export const marketplaceEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
   .merge(kafkaEnvSchema)
+  .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
     CORS_ORIGINS: z.string().default(''),

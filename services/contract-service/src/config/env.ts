@@ -7,6 +7,7 @@ import {
   databaseEnvSchema,
   kafkaEnvSchema,
   loadEnv,
+  outboxPurgeEnvSchema,
 } from '@rasta/config';
 import { contractOperationBudgets } from './operation-budgets';
 
@@ -163,6 +164,7 @@ function optionalRoleList(name: string) {
 export const contractEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
   .merge(kafkaEnvSchema)
+  .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
     CORS_ORIGINS: z.string().default(''),

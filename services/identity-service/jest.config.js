@@ -1,5 +1,7 @@
 const swcOptions = require('../../jest.swc.cjs');
-const swcTransform = { '^.+\\.(t|j)s$': ['@swc/jest', swcOptions] };
+// `.mjs` too, as in asset-service: test/outbox-purge.int-spec.ts starts psql
+// through `libpqInvocation` from scripts/verify-migration-reversible-lib.mjs.
+const swcTransform = { '^.+\\.(t|j|mj)s$': ['@swc/jest', swcOptions] };
 
 // The aggregation spec's two 500-write proofs serialize on one hot row, so
 // their pace is the database's commit latency. Beside every other service's

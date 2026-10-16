@@ -491,7 +491,14 @@ describe('transactional outbox (real database)', () => {
         }),
       );
 
-      await store.purgePublished(1);
+      // One bounded batch, as `OutboxPurgeScheduler` issues it (D-052). The
+      // isolated proof of what the purge keeps is `outbox-purge.int-spec.ts`.
+      await store.purgePublished({
+        retentionSeconds: 24 * 60 * 60,
+        limit: 10_000,
+        statementTimeoutMs: 5000,
+        maxWaitMs: 2000,
+      });
 
       const survivor = await runUnscoped('the outbox audit reads platform plumbing', () =>
         prisma.client.outboxMessage.findUnique({ where: { id: unpublished } }),

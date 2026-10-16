@@ -34,7 +34,12 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
-import { installGracefulShutdown } from '@rasta/nest-common';
+import {
+  bootstrapLogger,
+  installGracefulShutdown,
+  installNestLogger,
+  logFatal,
+} from '@rasta/nest-common';
 import { AppModule } from './app.module';
 import { applyTrustProxy } from './http/trust-proxy';
 import { corsOptions } from './http/cors';
@@ -43,9 +48,13 @@ async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     // Nest's own logger is replaced by pino at the module level; this keeps
     // bootstrap noise out of the structured stream.
-    logger: env.NODE_ENV === 'development' ? ['log', 'warn', 'error'] : ['warn', 'error'],
+    logger: bootstrapLogger(env, SERVICE_NAME),
     bufferLogs: true,
   });
+
+  // Every `new Logger(...)` and Nest itself write through the pino logger, so
+  // message scrubbing and capping apply to them too (installNestLogger).
+  installNestLogger(app);
 
   // Before any middleware reads `req.ip`: the request-context middleware
   // records it for audit, and anonymous rate limits key on it (L1-03).
@@ -103,6 +112,6 @@ async function bootstrap(): Promise<void> {
 }
 
 bootstrap().catch((error) => {
-  console.error(`[${SERVICE_NAME}] failed to start`, error);
+  logFatal({ serviceName: SERVICE_NAME }, `[${SERVICE_NAME}] failed to start`, error);
   process.exit(1);
 });
