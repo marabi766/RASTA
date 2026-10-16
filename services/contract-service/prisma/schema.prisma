@@ -1,9 +1,9 @@
 // contract-service — the contract boundary (CON-003, ADR-068, docs/04 § 4.13).
 // It holds the draft contract a tender award creates, and — since PR 2 — its signatures
 // and its cancellation, and — since PR 3 — the amendments and planned milestones of a signed
-// contract, and — since PR 4 — its statements, drafted and submitted with configured deductions;
-// the separate technical and financial approvals and the settlement boundary are later changes
-// (ADR-068 § 9).
+// contract, and — since PR 4 — its statements, drafted with configured deductions; their
+// submission with the separate technical and financial approvals, and the settlement boundary,
+// are later changes (ADR-068 § 9).
 //
 // Everything here is owned by this service alone (AGENTS.md A-01). There is no
 // foreign key into another service's database: `organizationId` (the employer),
@@ -364,7 +364,8 @@ model Milestone {
 // ---------------------------------------------------------------------------
 
 /// `src/statement/statement.state-machine.ts`. The whole ADR-068 § 5 lifecycle is declared (adding
-/// a value to a PostgreSQL enum cannot be reversed); this change reaches SUBMITTED only.
+/// a value to a PostgreSQL enum cannot be reversed); this change opens no transition — a statement
+/// stays DRAFT until submission opens with the approval chains' snapshot (the next change).
 enum StatementStatus {
   DRAFT
   SUBMITTED
@@ -395,7 +396,7 @@ model DeductionRule {
   @@map("deduction_rule")
 }
 
-/// A statement of work on a SIGNED contract, made and submitted by the contractor (ADR-068 § 5).
+/// A statement of work on a SIGNED contract, made by the contractor (ADR-068 § 5).
 /// `organizationId` is the contract's tenant — the employer's — and the contractor's statement is
 /// written across the tenant boundary on purpose, naming it explicitly. What it says (its lines,
 /// deductions and totals) is written once with it and never changes; `net = gross − deductions`
@@ -413,13 +414,19 @@ model Statement {
   deductionsMinor BigInt @map("deductions_minor")
   netMinor        BigInt @map("net_minor")
 
+  /// How many lines and deductions it was written with (`ck_statement_part_counts`), checked at
+  /// commit like the totals: a part added later, even a deduction of 0, no longer matches.
+  lineCount      Int @map("line_count")
+  deductionCount Int @map("deduction_count")
+
   createdAt            DateTime @map("created_at") @db.Timestamptz(3)
   createdBy            String   @map("created_by")
   createdCorrelationId String   @map("created_correlation_id")
 
   /// Set with the transition to SUBMITTED, and only then (`ck_statement_submission`): the person,
   /// with the token's verified issuer and subject, so the approvals can keep the submitter out of
-  /// both chains (Q-96 (3), #188).
+  /// both chains (Q-96 (3), #188). No transition reaches SUBMITTED yet: these stay null until the
+  /// next change opens submission with the approval chains' snapshot.
   submittedAt        DateTime? @map("submitted_at") @db.Timestamptz(3)
   submittedBy        String?   @map("submitted_by")
   submittedByIssuer  String?   @map("submitted_by_issuer")

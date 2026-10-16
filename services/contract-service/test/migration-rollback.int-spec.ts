@@ -615,9 +615,9 @@ describe('each down.sql, run whole with psql --file', () => {
     const statement = `BEGIN;
        INSERT INTO "statement"
          ("id", "organization_id", "contract_id", "statement_number", "gross_minor",
-          "deductions_minor", "net_minor", "created_at", "created_by", "created_correlation_id",
-          "updated_at")
-       VALUES ('STM_rb', 'ORG_E', 'CTR_rb', 1, 10, 0, 10, now(), 'USR_1', 'COR_1', now());
+          "deductions_minor", "net_minor", "line_count", "deduction_count", "created_at",
+          "created_by", "created_correlation_id", "updated_at")
+       VALUES ('STM_rb', 'ORG_E', 'CTR_rb', 1, 10, 0, 10, 1, 0, now(), 'USR_1', 'COR_1', now());
        INSERT INTO "statement_line"
          ("id", "organization_id", "contract_id", "statement_id", "line_number", "description",
           "amount_minor")
@@ -654,5 +654,57 @@ describe('each down.sql, run whole with psql --file', () => {
         expect(shape(unused)).toBe(shape(scratch(REFUSAL_DEDUPE)));
       },
     );
+
+    // Review #301 r1: CI and the verifier run the migrations on an empty database. A real one
+    // already holds contracts, with their milestones and policies, when this migration arrives.
+    it('up → down → up over a schema that already holds contracts: each way the shape is exact, the contracts and their history are untouched, and the contract takes a statement after the second up', () => {
+      const draftContract = signedContract
+        .replace("'CTR_rb'", "'CTR_rb_draft'")
+        .replace("'TND_1'", "'TND_2'")
+        .replace("'SIGNED'", "'DRAFT'");
+      const milestone = `INSERT INTO "milestone"
+           ("id", "organization_id", "contract_id", "title", "planned_date", "created_at",
+            "created_by", "created_correlation_id", "updated_at", "updated_by")
+         VALUES ('MLS_rb', 'ORG_E', 'CTR_rb', 't', '2026-12-01', now(), 'USR_1', 'COR_1', now(),
+                 'USR_1')`;
+      /** Every row the earlier migrations hold, in one comparable string. */
+      const held = (schema: string) =>
+        mustRun(schema, [
+          '-c',
+          `SELECT jsonb_build_object(
+             'contracts', (SELECT jsonb_agg(to_jsonb(c) ORDER BY c."id") FROM "contract" c),
+             'milestones', (SELECT jsonb_agg(to_jsonb(m) ORDER BY m."id") FROM "milestone" m),
+             'policies', (SELECT jsonb_agg(to_jsonb(p) ORDER BY p."id") FROM "approval_policy" p)
+           )::text`,
+        ]);
+      const up = (schema: string) => {
+        mustRun(schema, ['--file', join(MIGRATIONS, STATEMENTS, 'migration.sql')]);
+        mustRun(schema, ['-c', `INSERT INTO "_prisma_migrations" VALUES ('${STATEMENTS}')`]);
+      };
+
+      const schema = scratch(REFUSAL_DEDUPE);
+      mustRun(schema, ['-c', `${signedContract}; ${draftContract}; ${milestone}; ${policyRow}`]);
+      const before = shape(schema);
+      const rows = held(schema);
+      expect(rows).toContain('"CTR_rb_draft"');
+
+      up(schema);
+      const afterUp = shape(schema);
+      expect(afterUp).toBe(shape(scratch(STATEMENTS)));
+      expect(held(schema)).toBe(rows);
+
+      const result = psql(schema, ['--file', down(STATEMENTS)]);
+      expect(result.out).toBe('');
+      expect(result.ok).toBe(true);
+      expect(shape(schema)).toBe(before);
+      expect(held(schema)).toBe(rows);
+
+      up(schema);
+      expect(shape(schema)).toBe(afterUp);
+      expect(held(schema)).toBe(rows);
+      // The contract that was there before any of this takes its first statement.
+      mustRun(schema, ['-c', statement]);
+      expect(mustRun(schema, ['-c', `SELECT count(*) FROM "statement"`])).toBe('1');
+    });
   });
 });
