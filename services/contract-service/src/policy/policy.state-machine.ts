@@ -25,11 +25,35 @@ import { RastaError } from '@rasta/nest-common';
  * fails if the two differ.
  */
 
-/** The workflows a policy can govern. One so far; statement chains (ADR-068 § 5) add theirs. */
-export const WORKFLOW_KEYS = ['contract.signature'] as const;
+/**
+ * The workflows a policy can govern: who signs for the employer, and the two approval chains of
+ * the employer's statements (ADR-068 § 5, Q-96 (1); CON-003 PR 5). The database keeps the same list
+ * (`ck_policy_workflow_key`).
+ */
+export const WORKFLOW_KEYS = [
+  'contract.signature',
+  'contract.statement.technical',
+  'contract.statement.financial',
+] as const;
 export type WorkflowKey = (typeof WORKFLOW_KEYS)[number];
 
 export const SIGNATURE_WORKFLOW: WorkflowKey = 'contract.signature';
+
+/**
+ * A statement's two approval chains, in the order they run (Q-96 (2): technical, then financial),
+ * and the workflow whose policy says each chain's steps.
+ */
+export const STATEMENT_CHAINS = ['TECHNICAL', 'FINANCIAL'] as const;
+export type StatementChain = (typeof STATEMENT_CHAINS)[number];
+
+export const CHAIN_WORKFLOW: Readonly<Record<StatementChain, WorkflowKey>> = Object.freeze({
+  TECHNICAL: 'contract.statement.technical',
+  FINANCIAL: 'contract.statement.financial',
+});
+
+export function isStatementChainWorkflow(workflowKey: string): boolean {
+  return Object.values(CHAIN_WORKFLOW).includes(workflowKey as WorkflowKey);
+}
 
 export const POLICY_STATES = [
   'DRAFT',

@@ -94,6 +94,7 @@ describe('contract refusals in the audit store (real PostgreSQL)', () => {
       envelope('CONTRACT_SIGNED', { contractId }, at(13)),
       authorityRefused('CANCEL_CONTRACT', 'PLATFORM_ADMINISTRATOR', at(14)).source,
       authorityRefused('DRAFT_STATEMENT', 'NOT_CONTRACTOR', at(16)).source,
+      authorityRefused('SUBMIT_STATEMENT', 'ROLE_NOT_PERMITTED', at(17)).source,
       {
         ...envelope(
           'APPROVAL_POLICY_APPROVAL_REFUSED',
@@ -141,6 +142,7 @@ describe('contract refusals in the audit store (real PostgreSQL)', () => {
       ['PLAN_MILESTONE', 'NOT_EMPLOYER', 'REFUSED'],
       ['SIGN_AMENDMENT', 'MEMBER_OF_BOTH_PARTIES', 'REFUSED'],
       ['SIGN_CONTRACT', 'SIGNATURE_POLICY_REQUIRED', 'REFUSED'],
+      ['SUBMIT_STATEMENT', 'ROLE_NOT_PERMITTED', 'REFUSED'],
     ]);
   });
 
@@ -150,6 +152,10 @@ describe('contract refusals in the audit store (real PostgreSQL)', () => {
     const drafts = await search({ outcome: 'REFUSED', action: 'DRAFT_STATEMENT' });
     expect(drafts.body.items.map((item: { reason: string }) => item.reason)).toEqual([
       'NOT_CONTRACTOR',
+    ]);
+    const submissions = await search({ outcome: 'REFUSED', action: 'SUBMIT_STATEMENT' });
+    expect(submissions.body.items.map((item: { reason: string }) => item.reason)).toEqual([
+      'ROLE_NOT_PERMITTED',
     ]);
 
     const succeeded = await search({ outcome: 'SUCCESS' });

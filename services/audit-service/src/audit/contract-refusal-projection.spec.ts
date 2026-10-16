@@ -121,6 +121,26 @@ describe('the contract refusal projection', () => {
     ]);
   });
 
+  it('stores a statement submission refused to the contractor’s person without the role as a refused SUBMIT_STATEMENT (CON-003 PR 5)', () => {
+    const record = toAuditEventRecord(
+      envelope('CONTRACT_AUTHORITY_REFUSED', {
+        ...authorityPayload,
+        action: 'SUBMIT_STATEMENT',
+        side: 'CONTRACTOR',
+        subjectId: 'STM_1',
+        reason: 'ROLE_NOT_PERMITTED',
+      }),
+      delivery(),
+    );
+
+    expect([record.outcome, record.action, record.reason]).toEqual([
+      'REFUSED',
+      'SUBMIT_STATEMENT',
+      'ROLE_NOT_PERMITTED',
+    ]);
+    expect(JSON.stringify(record)).not.toContain('STM_1');
+  });
+
   it('stores a policy approval refused by four eyes as a refused APPROVE_POLICY', () => {
     const record = toAuditEventRecord(
       envelope('APPROVAL_POLICY_APPROVAL_REFUSED', policyApprovalPayload),
