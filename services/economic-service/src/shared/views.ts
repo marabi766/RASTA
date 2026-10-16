@@ -203,7 +203,11 @@ export interface TransactionRowLike {
   sourceType: string | null;
   sourceReference: string | null;
   disputedAt: Date | null;
+  disputedBy: string | null;
   disputeReason: string | null;
+  disputeResolvedAt: Date | null;
+  disputeResolvedBy: string | null;
+  disputeResolution: string | null;
   settledAt: Date | null;
   failureReason: string | null;
   createdAt: Date;
@@ -226,7 +230,11 @@ export function toTransactionView(row: TransactionRowLike): TransactionView {
     sourceType: row.sourceType,
     sourceReference: row.sourceReference,
     disputedAt: iso(row.disputedAt),
+    disputedBy: row.disputedBy,
     disputeReason: row.disputeReason,
+    disputeResolvedAt: iso(row.disputeResolvedAt),
+    disputeResolvedBy: row.disputeResolvedBy,
+    disputeResolution: row.disputeResolution,
     settledAt: iso(row.settledAt),
     failureReason: row.failureReason,
     createdAt: row.createdAt.toISOString(),

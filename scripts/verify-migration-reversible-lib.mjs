@@ -944,10 +944,141 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
   },
 ];
 
+const TRANSACTION_DISPUTE_RESOLUTION = '20261016160000_transaction_dispute_resolution';
+
+/** A transaction's dispute fields, as `resolve-dispute` and `dispute` wrote them. */
+const DISPUTE_MIGCHECK = (id, reason, disputedAt, resolvedAt) => `
+UPDATE "transaction"
+   SET status = '${resolvedAt ? 'PENDING_SETTLEMENT' : 'DISPUTED'}',
+       disputed_at = '${disputedAt}', disputed_by = 'USR-MIGCHECK', dispute_reason = '${reason}',
+       dispute_resolved_at = ${resolvedAt ? `'${resolvedAt}'` : 'NULL'},
+       dispute_resolved_by = ${resolvedAt ? `'USR-MIGCHECK-PLATFORM'` : 'NULL'}
+ WHERE id = '${id}';`;
+
+/** Every dispute probe row, exactly as the release before the migration left it. */
+const DISPUTE_ROWS_UNTOUCHED = `
+DO $$
+DECLARE found INT;
+BEGIN
+  SELECT count(*) INTO found FROM "transaction"
+   WHERE (id, dispute_reason, dispute_resolved_at IS NOT NULL) IN (
+           ('TXN_MIGCHECK_DSP_RESOLVED', 'resolution text written over the reason', true),
+           ('TXN_MIGCHECK_DSP_AGAIN', 'a second objection after the first was resolved', true),
+           ('TXN_MIGCHECK_DSP_OPEN', 'an objection nobody has resolved yet', false));
+  IF found <> 3 THEN RAISE EXCEPTION 'a dispute row changed (found % of 3 as they were)', found; END IF;
+END $$;`;
+
+/**
+ * The resolution's own column (docs/23 D-060), rolled back and re-applied over
+ * disputes the previous release wrote: one resolved (its reason overwritten by
+ * the resolution), one disputed again after a resolution, one still open. Up
+ * guesses nothing — every reason stays as it was and every resolution starts
+ * NULL. Down refuses while any row holds a resolution, before changing
+ * anything, and once none does it drops the column and leaves the reasons.
+ */
+const TRANSACTION_DISPUTE_RESOLUTION_STEPS = [
+  {
+    label: 'dispute resolution: down to the schema before the column (empty)',
+    runDownScript: [TRANSACTION_DISPUTE_RESOLUTION],
+  },
+  {
+    label: 'dispute resolution: disputes as the previous release wrote them',
+    sql: [
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_DSP_RESOLVED'),
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_DSP_AGAIN'),
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_DSP_OPEN'),
+      DISPUTE_MIGCHECK(
+        'TXN_MIGCHECK_DSP_RESOLVED',
+        'resolution text written over the reason',
+        '2026-10-01T10:00:00Z',
+        '2026-10-02T10:00:00Z',
+      ),
+      DISPUTE_MIGCHECK(
+        'TXN_MIGCHECK_DSP_AGAIN',
+        'a second objection after the first was resolved',
+        '2026-10-03T10:00:00Z',
+        '2026-10-02T10:00:00Z',
+      ),
+      DISPUTE_MIGCHECK(
+        'TXN_MIGCHECK_DSP_OPEN',
+        'an objection nobody has resolved yet',
+        '2026-10-01T10:00:00Z',
+        null,
+      ),
+    ].join('\n'),
+  },
+  { label: 'dispute resolution: up again over them', reapply: true },
+  {
+    label: 'dispute resolution: no row guessed — every reason as it was, every resolution NULL',
+    sql: `${DISPUTE_ROWS_UNTOUCHED}
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "transaction"
+         WHERE id LIKE 'TXN_MIGCHECK_DSP_%' AND dispute_resolution IS NOT NULL;
+        IF found <> 0 THEN RAISE EXCEPTION 'a resolution was backfilled for % row(s)', found; END IF;
+      END $$;`,
+  },
+  {
+    label: 'dispute resolution: a resolution recorded beside its reason, as the new release does',
+    sql: `UPDATE "transaction" SET dispute_resolution = 'decided in the supplier''s favour'
+           WHERE id = 'TXN_MIGCHECK_DSP_OPEN';`,
+  },
+  {
+    label: 'dispute resolution: the rollback refuses while any row holds a resolution',
+    runDownScript: [TRANSACTION_DISPUTE_RESOLUTION],
+    mustFail: 'hold a dispute resolution; refusing to drop dispute_resolution',
+  },
+  {
+    label: 'dispute resolution: …and changed nothing — the column, the resolution, the ledger row',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "transaction"
+         WHERE id = 'TXN_MIGCHECK_DSP_OPEN' AND dispute_resolution = 'decided in the supplier''s favour';
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback touched the resolution'; END IF;
+        SELECT count(*) INTO found FROM "_prisma_migrations"
+         WHERE migration_name = '${TRANSACTION_DISPUTE_RESOLUTION}' AND rolled_back_at IS NULL;
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback left the ledger'; END IF;
+      END $$;`,
+  },
+  {
+    label: 'dispute resolution: the resolution cleared (in the probe), and down again',
+    sql: `UPDATE "transaction" SET dispute_resolution = NULL WHERE id = 'TXN_MIGCHECK_DSP_OPEN';`,
+  },
+  {
+    label: 'dispute resolution: down succeeds with no resolution anywhere',
+    runDownScript: [TRANSACTION_DISPUTE_RESOLUTION],
+  },
+  {
+    label: 'dispute resolution: the column is gone and every reason is still there',
+    sql: `${DISPUTE_ROWS_UNTOUCHED}
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema() AND table_name = 'transaction'
+                      AND column_name = 'dispute_resolution') THEN
+          RAISE EXCEPTION 'dispute_resolution survived its rollback';
+        END IF;
+        IF EXISTS (SELECT 1 FROM "_prisma_migrations"
+                    WHERE migration_name = '${TRANSACTION_DISPUTE_RESOLUTION}') THEN
+          RAISE EXCEPTION 'the rollback left its ledger row';
+        END IF;
+      END $$;`,
+  },
+  { label: 'dispute resolution: up again', reapply: true },
+  {
+    label: 'dispute resolution: clean up the probe rows',
+    sql: `DELETE FROM "transaction_leg" WHERE transaction_id LIKE 'TXN_MIGCHECK_DSP_%';
+          DELETE FROM "transaction" WHERE organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_DSP_%';`,
+  },
+];
+
 export const ECONOMIC_DATA_ROLLBACK = {
   migration: '20260930200000_payment_reconciliation_task',
   label:
-    'intents B0 left marked, and the open tasks they get; then charges and rules before and under business lines',
+    'intents B0 left marked, and the open tasks they get; then charges and rules before and under business lines; then disputes before and beside their resolution column',
   steps: [
     {
       label: 'down: the rollback succeeds while no task is open (the resolutions first)',
@@ -1100,6 +1231,7 @@ export const ECONOMIC_DATA_ROLLBACK = {
             DELETE FROM "payment_intent" WHERE organization_id = 'ORG-MIGCHECK';`,
     },
     ...COMMISSION_BUSINESS_LINES_STEPS,
+    ...TRANSACTION_DISPUTE_RESOLUTION_STEPS,
   ],
 };
 

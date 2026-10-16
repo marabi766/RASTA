@@ -1,5 +1,6 @@
 import { runWithContext, type RequestContext } from '@rasta/nest-common';
 import {
+  assertMayDisputeDirectly,
   assertMayRefund,
   assertNotAuditor,
   assertPlatformScope,
@@ -394,5 +395,53 @@ describe('assertMayRefund (docs/24 Q-62)', () => {
     expect(() => refund(asUser(['ORGANIZATION_ADMIN'], 'ORG-B'), 'DISPUTED')).toThrow(
       expect.objectContaining({ code: 'FORBIDDEN' }),
     );
+  });
+});
+
+describe('assertMayDisputeDirectly (docs/24 Q-138)', () => {
+  const dispute = (context: RequestContext, transactionType: string) =>
+    run(context, () => assertMayDisputeDirectly({ transactionType }));
+
+  describe('an order’s obligation (MARKETPLACE_ORDER)', () => {
+    it('permits the order saga — marketplace-service', () => {
+      expect(() => dispute(asService('marketplace-service'), 'MARKETPLACE_ORDER')).not.toThrow();
+    });
+
+    it.each([
+      ['the payer’s administrator', asUser(['ORGANIZATION_ADMIN'])],
+      ['a union administrator', asUser(['UNION_ADMIN'])],
+      ['a system administrator', asUser(['SYSTEM_ADMIN'])],
+      ['another service', asService('contract-service')],
+      // A person whose token somehow names the saga is still a person.
+      [
+        'a person whose context names the saga',
+        { ...asUser(['SYSTEM_ADMIN']), callerService: 'marketplace-service' },
+      ],
+    ])('refuses %s with BUSINESS_RULE_VIOLATION, saying nothing internal', (_, context) => {
+      let refusal: unknown;
+      try {
+        dispute(context, 'MARKETPLACE_ORDER');
+      } catch (error) {
+        refusal = error;
+      }
+      expect(refusal).toEqual(expect.objectContaining({ code: 'BUSINESS_RULE_VIOLATION' }));
+      const message = (refusal as Error).message;
+      expect(message).toBe(
+        'A marketplace order’s transaction is disputed and resolved only through the order',
+      );
+      expect(message).not.toMatch(/marketplace-service|ORG-|USR-|TXN_/);
+    });
+  });
+
+  describe.each([
+    'MAINTENANCE_SERVICE',
+    'LOGISTICS',
+    'CONSTRUCTION_STATEMENT',
+    'PROCUREMENT_ORDER',
+  ])('any other source (%s)', (transactionType) => {
+    it('is unchanged: a person may dispute it directly', () => {
+      expect(() => dispute(asUser(['ORGANIZATION_ADMIN']), transactionType)).not.toThrow();
+      expect(() => dispute(asUser(['UNION_ADMIN']), transactionType)).not.toThrow();
+    });
   });
 });

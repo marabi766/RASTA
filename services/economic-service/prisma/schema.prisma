@@ -465,6 +465,12 @@ model Transaction {
   disputeReason     String?   @map("dispute_reason")
   disputeResolvedAt DateTime? @map("dispute_resolved_at")
   disputeResolvedBy String?   @map("dispute_resolved_by")
+  /// What the resolver decided, beside the reason rather than over it. NULL
+  /// until a resolution, and on rows resolved before migration
+  /// `20261016160000_transaction_dispute_resolution`, whose `disputeReason`
+  /// holds the resolution text instead — left there: the migration does not
+  /// guess which text was which (docs/23 D-060).
+  disputeResolution String?   @map("dispute_resolution")
 
   /// Who confirmed receipt, cancelled or refunded, and when (economic batch 2,
   /// item b). Every lifecycle step is also announced as

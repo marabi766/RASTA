@@ -2,6 +2,7 @@ import type { OpenAPIObject } from '@nestjs/swagger';
 import { apiErrorSchema } from '@rasta/contracts';
 import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
 import { toJsonSchema, type JsonSchema } from './zod-schema';
+import { TRANSACTION_RESPONSES, TRANSACTION_VIEW_SCHEMAS } from './transaction-view';
 import {
   listEntriesQuerySchema,
   reverseJournalSchema,
@@ -208,6 +209,10 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   // The one error shape every Rasta service returns. Referenced rather than
   // inlined per response, so a client generates a single error type.
   document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
+  // The transaction a response carries — referenced for the same reason.
+  for (const [name, schema] of Object.entries(TRANSACTION_VIEW_SCHEMAS)) {
+    document.components.schemas[name] = schema as never;
+  }
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {
@@ -247,10 +252,13 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       // A success body, unless the route genuinely returns none.
       const success = method.toUpperCase() === 'POST' && !body ? '200' : successStatus(method);
+      const view = TRANSACTION_RESPONSES[key];
       operation.responses ??= {};
       operation.responses[success] = {
         description: 'Success',
-        content: { 'application/json': { schema: {} } },
+        content: {
+          'application/json': { schema: view ? { $ref: `#/components/schemas/${view}` } : {} },
+        },
       };
 
       for (const status of ERRORS[key] ?? []) {

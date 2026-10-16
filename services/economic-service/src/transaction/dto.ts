@@ -181,7 +181,17 @@ export interface TransactionView {
   sourceType: string | null;
   sourceReference: string | null;
   disputedAt: string | null;
+  /** Who raised the latest dispute — the person, or this service for a service caller. */
+  disputedBy: string | null;
+  /** Why it was raised. Kept through the resolution (docs/23 D-060). */
   disputeReason: string | null;
+  disputeResolvedAt: string | null;
+  disputeResolvedBy: string | null;
+  /**
+   * What the resolver decided. Null on a transaction resolved before it had a
+   * field of its own, whose `disputeReason` holds it instead (docs/23 D-060).
+   */
+  disputeResolution: string | null;
   settledAt: string | null;
   failureReason: string | null;
   createdAt: string;
