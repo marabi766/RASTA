@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import type { INestApplication } from '@nestjs/common';
 import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 import {
+  INTERNAL_TOKEN_SCHEME,
   RESPONSE_BODIES,
   buildContractOpenApiDocument,
   buildDocumentationApp,
@@ -81,7 +82,14 @@ describe('the committed OpenAPI document', () => {
       'POST /v1/contracts/{id}/statements/{statementId}/submit',
     ]);
     for (const { key, operation } of operations) {
-      expect(operation.security).toEqual([{ bearer: [] }]);
+      // A user's bearer token everywhere but the internal routes, which take a service's internal
+      // token only (asserted in the settlement read's own case below).
+      expect({ key, security: operation.security }).toEqual({
+        key,
+        security: key.startsWith('GET /v1/internal/')
+          ? [{ [INTERNAL_TOKEN_SCHEME]: [] }]
+          : [{ bearer: [] }],
+      });
       // The routes that create (a policy, an amendment, a milestone, a statement) answer 201;
       // every other 200.
       const created = [
@@ -532,9 +540,10 @@ describe('the committed OpenAPI document', () => {
     }
   });
 
-  it('publishes the settlement read as an internal route: no body, no key, 401/403/404 for its own reasons, the net as a string and no person (CON-003 PR 6a)', () => {
+  it('publishes the settlement read as an internal route: the internal token alone, no body, no key, 401/403/404 for its own reasons, the net as a string and no person (CON-003 PR 6a)', () => {
     const document = buildContractOpenApiDocument(app);
     const op = document.paths?.['/v1/internal/statements/{id}']?.get as unknown as {
+      security: Record<string, string[]>[];
       parameters: { name: string; in: string }[];
       requestBody?: unknown;
       responses: Record<
@@ -542,6 +551,19 @@ describe('the committed OpenAPI document', () => {
         { description: string; content: Record<string, { schema: Record<string, unknown> }> }
       >;
     };
+    // AuthGuard takes the service path only for X-Internal-Token WITHOUT a bearer token: the
+    // document names that header, not `Authorization` (a service JWT there is 401).
+    expect(op.security).toEqual([{ [INTERNAL_TOKEN_SCHEME]: [] }]);
+    expect(document.components?.securitySchemes?.[INTERNAL_TOKEN_SCHEME]).toEqual({
+      type: 'apiKey',
+      in: 'header',
+      name: 'X-Internal-Token',
+      description: expect.stringContaining('`Authorization`'),
+    });
+    expect(document.components?.securitySchemes?.bearer).toMatchObject({
+      type: 'http',
+      scheme: 'bearer',
+    });
     expect(Object.keys(op.responses).sort()).toEqual(['200', '401', '403', '404', '500']);
     expect(op.requestBody).toBeUndefined();
     expect(op.parameters.filter((p) => p.in === 'header')).toEqual([]);

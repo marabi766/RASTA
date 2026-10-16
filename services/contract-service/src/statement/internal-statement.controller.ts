@@ -21,9 +21,10 @@ export class InternalStatementController {
   @ApiOperation({
     summary: 'State a statement as its owner records it, for settlement (internal)',
     description:
-      'Reserved for `economic-service`’s service token, signed for the **employer** — the ' +
-      'statement’s own organization; every other service and every user token is 403, and so ' +
-      'is a token signed for no organization. A statement of any other organization (the ' +
+      'Reserved for `economic-service`’s service token, sent in `X-Internal-Token` with no ' +
+      '`Authorization` header and signed for the **employer** — the statement’s own ' +
+      'organization; every other service and every user token is 403, and so is a token signed ' +
+      'for no organization. A statement of any other organization (the ' +
       'contractor’s included) answers 404, exactly as one that does not exist. Returns the ' +
       'stored row, whatever its status: the status, the net (a decimal string of minor units) ' +
       'and its currency, the payer (the employer) and the beneficiary (the winning contractor), ' +

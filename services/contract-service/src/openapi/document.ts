@@ -291,6 +291,13 @@ export const INTERNAL_ERROR_DESCRIPTIONS: Record<number, string> = {
   500: 'Unexpected server error.',
 };
 
+/**
+ * The internal routes' credential: a service's internal token in `X-Internal-Token` and nothing
+ * else. `AuthGuard` judges a request that also carries `Authorization` on that bearer token, as
+ * a user — so the internal routes cannot be described by the bearer scheme.
+ */
+export const INTERNAL_TOKEN_SCHEME = 'internalToken';
+
 const DESCRIPTION =
   'The contract boundary (CON-003, ADR-068). The draft contract that a tender award creates: ' +
   'the system makes it when construction-service publishes TENDER_AWARDED, after reading the ' +
@@ -327,6 +334,16 @@ export function buildContractOpenApiDocument(app: INestApplication): OpenAPIObje
       .setDescription(DESCRIPTION)
       .setVersion(CONTRACT_VERSION)
       .addBearerAuth()
+      .addApiKey(
+        {
+          type: 'apiKey',
+          in: 'header',
+          name: 'X-Internal-Token',
+          description:
+            'A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user.',
+        },
+        INTERNAL_TOKEN_SCHEME,
+      )
       .build(),
   );
   return enrichOpenApiDocument(document);
@@ -377,8 +394,11 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       const key = `${method.toUpperCase()} ${path}`;
 
       // `addBearerAuth()` declares the scheme; it does not apply it. Without this the
-      // contract would describe endpoints anybody can call.
-      operation.security ??= [{ bearer: [] }];
+      // contract would describe endpoints anybody can call. The internal routes answer a
+      // service's internal token only, which is not a bearer token.
+      operation.security ??= path.startsWith('/v1/internal/')
+        ? [{ [INTERNAL_TOKEN_SCHEME]: [] }]
+        : [{ bearer: [] }];
 
       const query = QUERY_SCHEMAS[key];
       const body = REQUEST_BODIES[key];

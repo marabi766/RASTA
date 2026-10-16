@@ -1,5 +1,6 @@
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
+import { buildContractOpenApiDocument } from '../src/openapi/document';
 import {
   auditor,
   internalToken,
@@ -288,6 +289,31 @@ describe('the settlement read of a statement (CON-003 PR 6a)', () => {
           code: 'FORBIDDEN',
         });
       }
+    });
+
+    it('is called as the published document says: the token in the header its security scheme names answers 200, the same token as the bearer token answers 401', async () => {
+      const document = buildContractOpenApiDocument(api.app);
+      const [requirement] = (
+        document.paths?.['/v1/internal/statements/{id}']?.get as unknown as {
+          security: Record<string, string[]>[];
+        }
+      ).security;
+      const scheme = document.components?.securitySchemes?.[
+        Object.keys(requirement!)[0]!
+      ] as unknown as { type: string; in: string; name: string };
+      expect({ type: scheme.type, in: scheme.in }).toEqual({ type: 'apiKey', in: 'header' });
+      const token = await internalToken(ECONOMIC, { organizationId: c.employer });
+
+      const documented = await http(api)
+        .get(`/v1/internal/statements/${id}`)
+        .set(scheme.name, token)
+        .expect(200);
+      expect(documented.body.statementId).toBe(id);
+      // What a bearer-only document would have had a client send: verified as a user token.
+      await http(api)
+        .get(`/v1/internal/statements/${id}`)
+        .set('authorization', `Bearer ${token}`)
+        .expect(401);
     });
 
     it('refuses economic-service’s token signed for no organization with 403, and no token at all with 401', async () => {
