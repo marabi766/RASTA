@@ -1,6 +1,7 @@
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { enrichOpenApiDocument } from './document';
 import { TRANSACTION_RESPONSES, TRANSACTION_VIEW_SCHEMAS } from './transaction-view';
+import { schemaMismatches } from './schema-mismatches';
 import { toTransactionDetailView, toTransactionView } from '../shared/views';
 import type { JsonSchema } from './zod-schema';
 
@@ -70,46 +71,8 @@ describe('the documented transaction view', () => {
   };
 
   /** The problems with `value` against `schema`, at `path`. */
-  function mismatches(schema: JsonSchema, value: unknown, path: string): string[] {
-    if (value === null) return schema.nullable === true ? [] : [`${path}: null, not nullable`];
-    if (typeof schema.$ref === 'string') {
-      const name = schema.$ref.replace('#/components/schemas/', '');
-      const target = TRANSACTION_VIEW_SCHEMAS[name];
-      return target ? mismatches(target, value, path) : [`${path}: unknown ${name}`];
-    }
-    switch (schema.type) {
-      case 'string':
-        if (typeof value !== 'string') return [`${path}: ${typeof value}, not string`];
-        if (schema.format === 'date-time' && Number.isNaN(Date.parse(value))) {
-          return [`${path}: not a date-time`];
-        }
-        if (typeof schema.pattern === 'string' && !new RegExp(schema.pattern).test(value)) {
-          return [`${path}: does not match ${schema.pattern}`];
-        }
-        return [];
-      case 'integer':
-        return Number.isInteger(value) ? [] : [`${path}: not an integer`];
-      case 'boolean':
-        return typeof value === 'boolean' ? [] : [`${path}: not a boolean`];
-      case 'array':
-        if (!Array.isArray(value)) return [`${path}: not an array`];
-        return value.flatMap((item, i) =>
-          mismatches(schema.items as JsonSchema, item, `${path}[${i}]`),
-        );
-      case 'object': {
-        if (typeof value !== 'object') return [`${path}: not an object`];
-        const record = value as Record<string, unknown>;
-        const properties = schema.properties as Record<string, JsonSchema>;
-        return Object.entries(properties).flatMap(([key, property]) =>
-          key in record
-            ? mismatches(property, record[key], `${path}.${key}`)
-            : [`${path}.${key}: documented, never written`],
-        );
-      }
-      default:
-        return [`${path}: undocumented type ${String(schema.type)}`];
-    }
-  }
+  const mismatches = (schema: JsonSchema, value: unknown, path: string): string[] =>
+    schemaMismatches(schema, value, path, TRANSACTION_VIEW_SCHEMAS);
 
   it.each([
     ['every field set', full],
@@ -155,19 +118,22 @@ describe('the documented transaction view', () => {
   });
 
   it('answers every transaction route with the documented view', () => {
-    const operation = () => ({ responses: {} });
+    // Each operation as Nest emits it, with its handler's success status. The
+    // document generated from the real controllers is checked against the
+    // statuses the routes actually send in transaction-openapi-responses.int-spec.ts.
+    const operation = (status = '200') => ({ responses: { [status]: { description: '' } } });
     const document = {
       openapi: '3.0.0',
       info: { title: 't', version: '1' },
       paths: {
-        '/v1/transactions': { get: operation(), post: operation() },
+        '/v1/transactions': { get: operation(), post: operation('201') },
         '/v1/transactions/{id}': { get: operation() },
         '/v1/transactions/{id}/authorise-settlement': { post: operation() },
         '/v1/transactions/{id}/dispute': { post: operation() },
         '/v1/transactions/{id}/resolve-dispute': { post: operation() },
         '/v1/transactions/{id}/refund': { post: operation() },
         '/v1/transactions/{id}/cancel': { post: operation() },
-        '/v1/settlements': { post: operation() },
+        '/v1/settlements': { post: operation('201') },
       },
     } as unknown as OpenAPIObject;
 

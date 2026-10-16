@@ -250,8 +250,8 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         ];
       }
 
-      // A success body, unless the route genuinely returns none.
-      const success = method.toUpperCase() === 'POST' && !body ? '200' : successStatus(method);
+      // The success body, under the status the handler answers with.
+      const success = successStatus(key, operation);
       const view = TRANSACTION_RESPONSES[key];
       operation.responses ??= {};
       operation.responses[success] = {
@@ -278,8 +278,29 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   return document;
 }
 
-function successStatus(method: string): string {
-  return method.toUpperCase() === 'POST' ? '201' : '200';
+/**
+ * The status a route answers success with: the one Nest wrote into the
+ * document for it — the handler's `@HttpCode`, or without one Nest's default
+ * (201 for a POST, 200 otherwise), which is also what the route sends.
+ *
+ * Read from the route, never guessed from the request. Guessing that a POST
+ * with a body creates something documented the dispute, resolution, refund
+ * and cancel views under a 201 those routes never send, and left their real
+ * 200 with no schema (Codex on #322). A route with no success status, or
+ * more than one, is refused: there is nothing to attach the body to that
+ * would not be a guess.
+ */
+function successStatus(key: string, operation: MutableOperation): string {
+  const declared = Object.keys(operation.responses ?? {}).filter((status) =>
+    /^2\d\d$/.test(status),
+  );
+  if (declared.length !== 1) {
+    throw new Error(
+      `OpenAPI: ${key} declares ${declared.length} success statuses (${declared.join(', ')}); ` +
+        'exactly one is needed to document its body',
+    );
+  }
+  return declared[0]!;
 }
 
 /**

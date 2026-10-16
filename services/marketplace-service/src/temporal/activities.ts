@@ -406,12 +406,11 @@ export function createActivities(deps: ActivityDependencies) {
         {
           transactionId,
           // Out of the dispute and back in the settlement queue (or since
-          // settled), carrying this resolution's words, which the resolution
-          // writes over the objection.
+          // settled), carrying this resolution's words.
           answer: (transaction) =>
             (transaction.status === 'PENDING_SETTLEMENT' || transaction.status === 'SETTLED') &&
             transaction.disputedAt !== null &&
-            transaction.disputeReason === resolution
+            resolutionOf(transaction) === resolution
               ? { result: undefined }
               : null,
         },
@@ -472,6 +471,24 @@ function systemContext(organizationId: string | undefined, correlationId: string
  */
 function refusedForState(error: unknown): boolean {
   return isRastaError(error) && error.code === 'INVALID_STATE_TRANSITION';
+}
+
+/**
+ * The words the last resolution left on the transaction.
+ *
+ * economic-service keeps them in `disputeResolution`, beside the objection
+ * (docs/23 D-060). Before it did, the resolution was written over the
+ * objection, in `disputeReason`, and that is all a transaction resolved then
+ * still has: `disputeResolution` is null there, and absent altogether from an
+ * economic-service older than the field. Only then is `disputeReason` read —
+ * on a transaction resolved since, it is the objection, and a resolution
+ * worded like it proves nothing (Codex on #322).
+ */
+function resolutionOf(transaction: TransactionDetailView): string | null {
+  const keptApart = transaction.disputeResolution;
+  if (keptApart !== null && keptApart !== undefined) return keptApart;
+  // Resolved before the field: the resolution is where it was written.
+  return transaction.disputeReason;
 }
 
 function asTemporalFailure(error: unknown): Error {

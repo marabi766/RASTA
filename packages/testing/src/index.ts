@@ -46,3 +46,6 @@ export type { StubKafkaBrokerOptions } from './stub-kafka-broker';
 
 export { publisherCloseProblems, runOutboxShutdownProvider } from './outbox-shutdown-wiring';
 export type { ParticipantStop, ShutdownFactoryProvider } from './outbox-shutdown-wiring';
+
+export { SAGA_DISPUTE_RECOVERY } from './saga-dispute-recovery';
+export type { SagaDisputeRecoveryRow } from './saga-dispute-recovery';
