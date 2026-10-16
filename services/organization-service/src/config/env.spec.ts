@@ -1,4 +1,4 @@
-import { loadOrganizationEnv } from './env';
+import { loadMaxHierarchyDepth, loadOrganizationEnv } from './env';
 import { organizationOperationBudgets } from './operation-budgets';
 
 /**
@@ -41,6 +41,23 @@ describe('GOVERNANCE_POLICY_SETTER_ROLES', () => {
 
   it('refuses an empty list rather than silently admitting nobody', () => {
     expect(() => loadOrganizationEnv({ ...base, GOVERNANCE_POLICY_SETTER_ROLES: ' , ' })).toThrow();
+  });
+});
+
+describe('MAX_HIERARCHY_DEPTH for the demo seed (Codex r1 on #295)', () => {
+  it('is the value the service runs with: default, configured, and refused alike', () => {
+    expect(loadMaxHierarchyDepth({})).toBe(8);
+    expect(loadMaxHierarchyDepth({})).toBe(loadOrganizationEnv({ ...base }).MAX_HIERARCHY_DEPTH);
+    expect(loadMaxHierarchyDepth({ MAX_HIERARCHY_DEPTH: '3' })).toBe(3);
+    expect(loadOrganizationEnv({ ...base, MAX_HIERARCHY_DEPTH: '3' }).MAX_HIERARCHY_DEPTH).toBe(3);
+    for (const invalid of ['0', '21', '2.5', 'deep']) {
+      expect(() => loadMaxHierarchyDepth({ MAX_HIERARCHY_DEPTH: invalid })).toThrow(
+        /MAX_HIERARCHY_DEPTH/,
+      );
+      expect(() => loadOrganizationEnv({ ...base, MAX_HIERARCHY_DEPTH: invalid })).toThrow(
+        /MAX_HIERARCHY_DEPTH/,
+      );
+    }
   });
 });
 

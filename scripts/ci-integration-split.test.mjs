@@ -251,6 +251,54 @@ test('a test step that loses a declared variable, or changes a pinned one, is re
   fails(production, /"Economic coverage gate" must set NODE_ENV: test/);
 });
 
+test('a declared variable set empty, or from an expression that may resolve to empty, is refused', () => {
+  const REPLAY = 'Retry replay, published as ops-replay';
+  // The review's trigger, in the text: every broker suite would skip.
+  const at = TEXT.indexOf(`- name: ${REPLAY}`);
+  const brokers = TEXT.indexOf('KAFKA_BROKERS: localhost:9092', at);
+  assert.ok(at > 0 && brokers > at);
+  const emptied = `${TEXT.slice(0, brokers)}KAFKA_BROKERS: ''${TEXT.slice(brokers + 29)}`;
+  assert.deepEqual(checkIntegrationSplitText(emptied), [
+    `${jobRunning(PARSED, REPLAY)}: "${REPLAY}" sets KAFKA_BROKERS empty`,
+  ]);
+
+  for (const [name, { env }] of Object.entries(STEP_INVENTORY)) {
+    for (const key of Object.keys(env)) {
+      const workflow = real();
+      stepNamed(workflow, name).env[key] = '';
+      fails(workflow, new RegExp(`"${escape(name)}" sets ${key} empty`));
+    }
+  }
+  const values = [
+    [' ', /sets KAFKA_BROKERS empty/],
+    [null, /sets KAFKA_BROKERS to no value/],
+    [['localhost:9092'], /sets KAFKA_BROKERS to no value/],
+    [
+      '${{ secrets.KAFKA_BROKERS }}',
+      /sets KAFKA_BROKERS from \$\{\{ secrets\.KAFKA_BROKERS \}\}, which may resolve to empty/,
+    ],
+    ['${{ vars.KAFKA_BROKERS }}', /from \$\{\{ vars\.KAFKA_BROKERS \}\}, which may resolve/],
+    ['localhost:${{env.KAFKA_PORT}}', /from \$\{\{ env\.KAFKA_PORT \}\}, which may resolve/],
+    ['localhost:9092${{', /sets KAFKA_BROKERS to an unclosed expression/],
+  ];
+  for (const [value, pattern] of values) {
+    const workflow = real();
+    stepNamed(workflow, REPLAY).env.KAFKA_BROKERS = value;
+    fails(workflow, pattern);
+  }
+  const pinned = real();
+  stepNamed(pinned, REPLAY).env.RETRY_REPLAY_REQUIRED = '${{ vars.RETRY_REPLAY_REQUIRED }}';
+  fails(pinned, /sets RETRY_REPLAY_REQUIRED from \$\{\{ vars\.RETRY_REPLAY_REQUIRED \}\}/);
+  const workspace = real();
+  stepNamed(workspace, REPLAY).env.KAFKA_SECRETS_DIR = '${{ github.workspace }}/secrets';
+  fails(workspace, /sets KAFKA_SECRETS_DIR from \$\{\{ github\.workspace \}\}/);
+
+  // runner.temp is set on every runner; a value built on it is resolved.
+  const temp = real();
+  stepNamed(temp, REPLAY).env.KAFKA_SECRETS_DIR = '${{runner.temp}}/elsewhere';
+  assert.deepEqual(checkIntegrationSplit(temp), []);
+});
+
 test('the verdict is run, and one that passes a failed, cancelled or skipped job is refused', () => {
   const rewrite = (from, to) => {
     const workflow = real();
@@ -297,9 +345,51 @@ test('a verdict that cannot see the needs context, or is not alone, is refused',
   const second = real();
   second.jobs[AGGREGATE_JOB].steps.push({ name: 'after', run: 'true' });
   fails(second, /must have exactly one step, its verdict/);
-  const shell = real();
-  verdict(shell).shell = 'bash {0}';
-  fails(shell, /"integration"'s verdict sets shell/);
+  const directory = real();
+  verdict(directory)['working-directory'] = 'apps';
+  fails(directory, /"integration"'s verdict sets working-directory/);
+});
+
+test('the verdict runs here under the shell it names; a pipe that hides its failure is refused', () => {
+  const piped = (shell) => {
+    const workflow = real();
+    const step = verdict(workflow);
+    step.run = `${step.run.trimEnd()} | cat\n`;
+    if (shell === undefined) delete step.shell;
+    else step.shell = shell;
+    return workflow;
+  };
+  // The runner's default options: `| cat` exits 0 with a dependency failed.
+  fails(piped('bash -e {0}'), /it passes when integration-suites failure/);
+  fails(piped('bash {0}'), /it passes when every needed job skipped/);
+  fails(piped(undefined), /verdict must set shell: bash; without it the runner uses bash -e/);
+  // With pipefail, as `shell: bash` runs, node's exit status survives the pipe.
+  assert.deepEqual(checkIntegrationSplit(piped('bash')), []);
+  assert.deepEqual(checkIntegrationSplit(piped('bash --noprofile --norc -eo pipefail {0}')), []);
+  // The committed script is one command, right under any of them.
+  const plain = real();
+  verdict(plain).shell = 'bash -e {0}';
+  assert.deepEqual(checkIntegrationSplit(plain), []);
+});
+
+test('a verdict whose shell is unset, or not one it can be run under here, is refused', () => {
+  const unset = real();
+  delete verdict(unset).shell;
+  fails(unset, /"integration"'s verdict must set shell: bash; without it/);
+  for (const shell of [
+    'sh',
+    'pwsh',
+    'python',
+    'node {0}',
+    'bash -e',
+    'bash -c "exit 0" {0}',
+    'bash $X {0}',
+    ['bash'],
+  ]) {
+    const workflow = real();
+    verdict(workflow).shell = shell;
+    fails(workflow, /"integration"'s verdict must set shell: bash, or "bash <options> \{0\}", not/);
+  }
 });
 
 test('a step dropped from every job, or run twice, is refused', () => {

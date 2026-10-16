@@ -175,6 +175,113 @@ export class OrderRepository {
     );
   }
 
+  /**
+   * What a saga step recorded when it took effect, or null if it has not
+   * (D-053).
+   *
+   * A local transition reads this under the order's row lock, so another
+   * attempt of the same step has either committed its record or not begun.
+   * A key that answers for a different activity is refused: Temporal never
+   * reuses one, so that is a broken invariant, and replaying another step's
+   * answer would be the wrong thing done quietly.
+   */
+  async findSagaStep(
+    client: ExtendedPrismaClient,
+    order: { id: string; organizationId: string },
+    step: SagaStep,
+    activity: SagaActivity,
+  ): Promise<{ result: Prisma.JsonValue } | null> {
+    const row = await runUnscoped('a saga step reads its own record on the order it drives', () =>
+      client.sagaStep.findUnique({
+        where: {
+          organizationId_orderId_stepKey: {
+            organizationId: order.organizationId,
+            orderId: order.id,
+            stepKey: step.key,
+          },
+        },
+        select: { activity: true, result: true },
+      }),
+    );
+    if (!row) return null;
+    if (row.activity !== activity) {
+      throw new Error(
+        `Saga step ${step.key} of order ${order.id} was recorded by ${row.activity}, not ${activity}`,
+      );
+    }
+    return { result: row.result };
+  }
+
+  /**
+   * Records that a saga step took effect and what it returned (D-053).
+   *
+   * `skipDuplicates`: two attempts of one economic call can overlap after a
+   * timeout, and both reach here with the same answer from economic-service's
+   * idempotent replay. A local transition never collides — it read the record
+   * under the lock it still holds.
+   */
+  async recordSagaStep(
+    client: ExtendedPrismaClient,
+    order: { id: string; organizationId: string },
+    step: SagaStep,
+    activity: SagaActivity,
+    result: Prisma.InputJsonValue | undefined,
+  ): Promise<void> {
+    await runUnscoped('a saga step records itself on the order it drives, under its tenant', () =>
+      client.sagaStep.createMany({
+        data: [
+          {
+            organizationId: order.organizationId,
+            orderId: order.id,
+            stepKey: step.key,
+            activity,
+            ...(result === undefined ? {} : { result }),
+          },
+        ],
+        skipDuplicates: true,
+      }),
+    );
+  }
+
+  /**
+   * Whether the order's history holds a row a saga step wrote since `since`
+   * (D-053): evidence of a step that took effect before its record could
+   * exist — its first attempt ran on a worker older than `saga_step`.
+   *
+   * The history row is written in the step's own transaction, so it exists
+   * exactly when the effect does. Read under the order's lock, like the record.
+   */
+  async hasSagaHistorySince(
+    tx: ExtendedPrismaClient,
+    order: { id: string; organizationId: string },
+    row: {
+      kind: 'TRANSITION' | 'REMINDER';
+      from?: readonly OrderStatus[];
+      to?: OrderStatus;
+      /** Matched exactly when given; `null` matches a row written without one. */
+      reason?: string | null;
+      since: Date;
+    },
+  ): Promise<boolean> {
+    const found = await runUnscoped(
+      'a saga step looks for its own history row on the order it drives',
+      () =>
+        tx.orderStatusHistory.findFirst({
+          where: {
+            organizationId: order.organizationId,
+            orderId: order.id,
+            kind: row.kind,
+            ...(row.from ? { fromStatus: { in: [...row.from] } } : {}),
+            ...(row.to ? { toStatus: row.to } : {}),
+            ...(row.reason === undefined ? {} : { reason: row.reason }),
+            occurredAt: { gte: row.since },
+          },
+          select: { id: true },
+        }),
+    );
+    return found !== null;
+  }
+
   /** Lists orders the caller is a party to, on whichever side. */
   async listForCaller(query: {
     status?: OrderStatus;
@@ -201,6 +308,39 @@ export class OrderRepository {
     );
   }
 }
+
+/**
+ * One scheduled saga activity, the same on every Temporal retry of it (D-053).
+ *
+ * `key` is `<workflowId>/<runId>/<activityId>`. The activity id is the
+ * workflow's own sequence number for the call, so a second settlement attempt
+ * or a second reminder is a different step, while a retry of either is not.
+ */
+export interface SagaStep {
+  key: string;
+  /**
+   * When the workflow first scheduled the activity — the same on every retry
+   * of it. Anything the step wrote is newer; the same edge written by an
+   * earlier step is older (D-053).
+   */
+  scheduledAt: Date;
+}
+
+/** The saga activities that leave a record: every one with an effect. */
+export type SagaActivity =
+  | 'createObligation'
+  | 'markFundsHeld'
+  | 'markFailed'
+  | 'authoriseSettlement'
+  | 'markSettling'
+  | 'settle'
+  | 'markSettlementFailed'
+  | 'markCompleted'
+  | 'compensate'
+  | 'disputeObligation'
+  | 'resolveObligationDispute'
+  | 'markCancelled'
+  | 'recordReminder';
 
 export interface LockedOfferRow {
   id: string;

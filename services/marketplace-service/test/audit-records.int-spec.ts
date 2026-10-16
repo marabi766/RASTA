@@ -7,6 +7,7 @@ import {
   newPrisma,
   outboxFor,
   publishOffer,
+  sagaStep,
   tenants,
   wire,
   type Wiring,
@@ -181,7 +182,9 @@ describe('L7-14 audit records (real database)', () => {
   it('records the funds hold under the buyer, with this service as actor, and nowhere else', async () => {
     const order = await pendingOrder();
 
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN-${ulid()}`));
+    const transactionId = `TXN-${ulid()}`;
+    const step = sagaStep();
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, transactionId, step));
 
     const rows = await eventsAbout(org.buyer, order.id, 'ORDER_FUNDS_HELD');
     expect(rows).toHaveLength(1);
@@ -202,14 +205,16 @@ describe('L7-14 audit records (real database)', () => {
     expect(await eventsAbout(org.other, order.id, 'ORDER_FUNDS_HELD')).toEqual([]);
 
     // A Temporal retry of the same step changes nothing and records nothing.
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, 'TXN-RETRY'));
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, transactionId, step));
     expect(await eventsAbout(org.buyer, order.id, 'ORDER_FUNDS_HELD')).toHaveLength(1);
   });
 
   it('records a failed funding without the refusal text', async () => {
     const order = await pendingOrder();
 
-    await asSaga(() => wiring.orders.markFailed(order.id, 'wallet ORG-X has insufficient funds'));
+    await asSaga(() =>
+      wiring.orders.markFailed(order.id, 'wallet ORG-X has insufficient funds', sagaStep()),
+    );
 
     const rows = await eventsAbout(org.buyer, order.id, 'ORDER_FAILED');
     expect(rows).toHaveLength(1);
@@ -222,7 +227,7 @@ describe('L7-14 audit records (real database)', () => {
 
     try {
       await expect(
-        asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN-${ulid()}`)),
+        asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN-${ulid()}`, sagaStep())),
       ).rejects.toThrow('failure after the outbox insert');
     } finally {
       spy.mockRestore();
@@ -346,7 +351,7 @@ describe('L7-14 audit records (real database)', () => {
 
   async function receiptConfirmedOrder() {
     const order = await pendingOrder();
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN-${ulid()}`));
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN-${ulid()}`, sagaStep()));
     await asSupplier(() => wiring.orders.confirm(order.id));
     await asSupplier(() => wiring.orders.fulfill(order.id, { trackingReference: 'WB-AUDIT' }));
     await asBuyer(() => wiring.orders.confirmReceipt(order.id, {}));
@@ -358,7 +363,7 @@ describe('L7-14 audit records (real database)', () => {
     const spy = failAfterInsert();
 
     try {
-      await expect(asSaga(() => wiring.orders.markSettling(order.id))).rejects.toThrow(
+      await expect(asSaga(() => wiring.orders.markSettling(order.id, sagaStep()))).rejects.toThrow(
         'failure after the outbox insert',
       );
     } finally {
@@ -371,13 +376,13 @@ describe('L7-14 audit records (real database)', () => {
 
   it('rolls ORDER_SETTLEMENT_FAILED back with the return to RECEIPT_CONFIRMED', async () => {
     const order = await receiptConfirmedOrder();
-    await asSaga(() => wiring.orders.markSettling(order.id));
+    await asSaga(() => wiring.orders.markSettling(order.id, sagaStep()));
     const spy = failAfterInsert();
 
     try {
-      await expect(asSaga(() => wiring.orders.markSettlementFailed(order.id))).rejects.toThrow(
-        'failure after the outbox insert',
-      );
+      await expect(
+        asSaga(() => wiring.orders.markSettlementFailed(order.id, sagaStep())),
+      ).rejects.toThrow('failure after the outbox insert');
     } finally {
       spy.mockRestore();
     }
@@ -385,7 +390,7 @@ describe('L7-14 audit records (real database)', () => {
     expect((await asBuyer(() => wiring.orders.get(order.id))).status).toBe('SETTLING');
     expect(await eventsAbout(org.buyer, order.id, 'ORDER_SETTLEMENT_FAILED')).toEqual([]);
     // And committed when nothing fails.
-    await asSaga(() => wiring.orders.markSettlementFailed(order.id));
+    await asSaga(() => wiring.orders.markSettlementFailed(order.id, sagaStep()));
     expect(await eventsAbout(org.buyer, order.id, 'ORDER_SETTLEMENT_FAILED')).toHaveLength(1);
   });
 });

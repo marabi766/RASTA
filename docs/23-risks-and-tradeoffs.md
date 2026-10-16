@@ -1405,8 +1405,8 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
 - **رفع:** Job زمان‌بندی‌شده در هر سرویس که `purgePublished` را با Retention از پیکربندی (اعتبارسنجی‌شده در env سرویس)
   صدا بزند، با Metric و آزمون یکپارچگی. پیاده‌سازی کار جداگانه است، نه #242.
 - **پیشرفت:** **فاز ۱ انجام شد (#247): fleet، asset، document، maintenance، organization. فاز ۲a انجام شد
-  (#276): notification، supplier، inventory** — همان الگو، همان تنظیم‌ها و همان پیش‌فرض‌ها. identity در فاز ۲a
-  سیم‌کشی نشد (پایین، «مانده»). زمان‌بند مشترک
+  (#276): notification، supplier، inventory. identity انجام شد (#280)** — همان الگو، همان تنظیم‌ها و همان پیش‌فرض‌ها
+  (پایین، «identity»). زمان‌بند مشترک
   `OutboxPurgeScheduler` و دستور `purgePublishedSql` در `@rasta/nest-common`، env در `outboxPurgeEnvSchema`
   (`@rasta/config`):
   - `OUTBOX_PURGE_ENABLED` پیش‌فرض روشن است، و خاموش‌بودنش در شروع سرویس هشدار Log می‌کند.
@@ -1464,8 +1464,9 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
     در nest-common با Producer وفادار به kafkajs (`__tests__/fake-kafka.ts`)، و در fleet: `test/outbox-shutdown.int-spec.ts`
     (Handler بی‌پایان کنار Publish و Batch بی‌پایان؛ Send بی‌پایان DLQ که پس از بستن می‌رسد؛ Handler واقعی که پس از بستن
     Commit می‌کند و تحویل دوباره‌اش بی‌اثر است) و `test/insurance-parked.int-spec.ts` (جاروی منتظر asset-service در
-    توقف) ⇐ خروج ۰ زیر مهلت، پیام Commit‌نشده، اثر یک‌بار. Consumerهای notification و supplier در فاز ۲a آمدند
-    (پایین). سرویس‌های دیگر (contract، construction، economic، marketplace، identity، audit) هنوز Coordinator ندارند و در
+    توقف) ⇐ خروج ۰ زیر مهلت، پیام Commit‌نشده، اثر یک‌بار. Consumerهای notification و supplier در فاز ۲a آمدند و
+    Consumer ـِ identity با Purge آن (پایین). سرویس‌های دیگر (contract، construction، economic، marketplace، audit) هنوز
+    Coordinator ندارند و در
     فاز بعد می‌آیند.
   - **بودجه برای هر سرویسِ دارای رله (Codex روی #267، Low):** `loadEnv` Grace رله را فقط در سرویسی که Purge هم داشت با
     بودجه می‌سنجید و در بقیه با کل `SHUTDOWN_TIMEOUT_MS`؛ notification (رله و کارگرها با `OutboxShutdown`، بی Purge) Grace
@@ -1483,6 +1484,38 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
     Ingest بی‌پایان، تنها یا کنار Publish، Batch Purge و Batch Mail بی‌پایان؛ Ingest ـی که پس از بستن برمی‌گردد) و در
     supplier (Consumer روشن از راه Gate واقعی؛ Handler بی‌پایان کنار Publish و Batch بی‌پایان؛ Handler دیررس) ⇐ خروج ۰
     زیر مهلت، پیام Commit‌نشده؛ و `src/app.module.shutdown.spec.ts` در هر دو (سیم‌کشی و یک مهلت).
+  - **identity (#280، تصمیم مدیر پروژه — گزینهٔ a):** identity هم Purge می‌شود، فقط `outbox_message`؛
+    `security_event_outbox` جدولی جداست و Purge نمی‌شود، و `audit_correction_command` هم نه. `audit-gap-detected.md`
+    گام ۵ («اصلاح identity») نبودِ ردیف Outbox را **با شاهد** می‌سنجد، هرگز با سن: `event_id` در `audit-service`
+    جست‌وجو می‌شود، با نقش فقط‌خواندنی و در دامنهٔ مستأجر مورد بررسی. **پیدا شد** ⇐ رویداد منتشر و مصرف شده، و نبودِ ردیف
+    با Purge (یا هر حذفی پس از انتشار) توضیح داده می‌شود؛ شکاف نیست. **پیدا نشد** ⇐ توضیح‌نداده و تشدید، هر سنی که فرمان
+    داشته باشد. سن و Retention فقط زمینه‌اند («احتمالاً Purge شده، انتشار تأییدنشده»). ردیف `audit_event` با سه ستون به فرمان
+    بسته می‌شود: `source_event_id` = `event_id` فرمان (روی `rasta.audit.trail.v1` و از `identity-service`)،
+    `correction_of` = `target_id` فرمان، و `organization_id` = مستأجر مورد بررسی. این آخری مستأجر رکورد هدف است که identity
+    از جست‌وجوی مورداعتماد `audit-service` در رویداد می‌گذارد؛ برای رکورد پلتفرمی تهی است و فقط با دامنهٔ صریح پلتفرم پیدا
+    می‌شود. `audit_correction_command` خودش ستون مستأجر ندارد.
+    **قاعدهٔ سنیِ نسخهٔ اول این PR کنار گذاشته شد** (Codex r1 روی #280، F1 و F3). آن قاعده می‌گفت فرمانی قدیمی‌تر از
+    Retention به‌اضافهٔ Interval Purge یعنی «ردیف پس از انتشار Purge شده». ولی سن فقط **واجد** Purge بودن را ثابت می‌کند، نه
+    انتشار و نه حذف. ردیفی که پیش از انتشار گم شده، Purgeی که اجرا نشده یا کوتاه شده، Retentionی که از آن پس عوض شده، و
+    جابه‌جایی ساعت پایگاه داده، همه همان سن را نشان می‌دهند. جست‌وجوی `audit_event` آن نسخه هم مستأجر را نه محدود می‌کرد نه
+    می‌سنجید. مسیر A همان گام هم به همین قاعده درآمد، چون قاعدهٔ سنی فاز ۱ را داشت و identity را هم در بر می‌گرفت.
+    شاهد مسیر A نوع رویداد را هم می‌بندد (Codex r2 روی #280). Projector هر Envelope را با همان نامی که دارد ثبت می‌کند، پس
+    ردیفی با همان شناسه، مستأجر، تولیدکننده و Topic ولی **نام دیگر** شاهد این رویداد نیست. نام مورد انتظار از شواهد مبدأ
+    پرونده می‌آید و در بلوک `sql path-a-evidence` شرط است؛ ناهمخوانی ⇐ تشدید. نسخهٔ رویداد در `audit_event` ذخیره نمی‌شود و
+    سنجیده نمی‌شود. پرسش مسیر B از پیش بسته است: ردیف `rasta.audit.trail.v1` فقط `AUDIT_EVENT_RECORDED` نسخهٔ ۱ است.
+    Purge با این قاعده هنوز امن است: `audit-service` فقط افزودنی است، پس شاهد بیش از ردیف Outbox می‌ماند؛ و جدول کران‌دار
+    پیش‌نیاز Production است.
+    کارگرها: رلهٔ رد (`security_event_outbox`)، `MembershipExpiryScanner` (هر Lapse ردیف Outbox می‌نویسد؛ حالا مانند جاروی
+    asset توقف با مهلت دارد) و `KeycloakProjectionConsumer` (`stop({ deadlineAt })` ـِ #270؛ `onModuleDestroy` بی‌کرانش
+    حذف شد) `workers`ِ `OutboxShutdown`اند، و `AppModule.onApplicationShutdown` فقط به همان توقف می‌پیوندد. **مانده:** Claimی
+    از رلهٔ رد که پس از بازگشت `stop()` برسد هنوز Publish و Ack را شروع می‌کند (Codex r1 روی #280، F2). این نقص مشترک
+    `OutboxRelay` در nest-common است، نه مال identity، و با `disconnect()` بی‌کران Publisher به فاز ۴ خاموشی میان‌سرویسی
+    منتقل شد. آزمون: `test/outbox-purge.int-spec.ts` (مال fleet، به‌اضافهٔ دو جدول دست‌نخورده و بلوک identity گام ۵ با `psql`،
+    که برای ردیف Purge‌شده، ردیف گم‌شده پیش از انتشار و ردیف گمشدهٔ فرمان جوان همان پاسخ را می‌دهد)، بلوک `audit-service` گام ۵
+    در `services/audit-service/test/correction-linkage.int-spec.ts` (پیدا شد برای اصلاح ثبت‌شده، قدیمی یا جوان؛ پیدا نشد برای
+    اصلاح ثبت‌نشده، مستأجر دیگر، رکورد هدف دیگر و Producer دیگر؛ و بلوک مسیر A روی ردیف Projector واقعی: پیدا نشد برای
+    نام دیگر با همان شناسه، مستأجر، تولیدکننده و Topic)، `test/outbox-shutdown.int-spec.ts` (Publish، Claim رد، Batch
+    Purge، Lapse و Projection بی‌پایان ⇐ خروج ۰ زیر مهلت، پیام Commit‌نشده) و `src/app.module.shutdown.spec.ts`.
   - **دو حلقهٔ پس‌زمینه و Worker موقتی در همان مهلت (Codex r1 روی #277، فاز ۳ خاموش‌شدن):** construction، economic و
     marketplace تا اینجا `OutboxShutdown` نداشتند؛ حالا هر سه دارند (رله به‌اضافهٔ `workers`)، و `onApplicationShutdown`
     فقط به همان توقف می‌پیوندد.
@@ -1504,8 +1537,8 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
       ثبت شده باشد دوباره نمی‌فرستد، و گذارهای محلی (`systemTransition`) در وضعیت مقصد بی‌صدا برمی‌گردند. Temporal برای
       تلاشی که کامل نشده نتیجه‌ای ثبت نمی‌کند و Worker بعدی دوباره اجرایش می‌کند.
     - آزمون: `standing-bootstrap.shutdown.spec.ts`، `balance-audit.shutdown.spec.ts`، `worker.shutdown.spec.ts` و
-      `app.module.shutdown.spec.ts` در هر سه سرویس. سرویس‌های contract، identity و audit (notification، supplier و
-      inventory با فاز ۲a، #276، آمدند) و Consumerهای Kafka سه سرویس بالا هنوز بیرون از Coordinatorاند.
+      `app.module.shutdown.spec.ts` در هر سه سرویس. سرویس‌های contract و audit (notification، supplier و inventory با
+      فاز ۲a، #276، و identity با #280 آمدند) و Consumerهای Kafka سه سرویس بالا هنوز بیرون از Coordinatorاند.
   - **پیامد:** رله حالا پیش از بسته شدن سرور HTTP می‌ایستد، نه پس از آن. ردیفی که درخواستی در همین فاصله بنویسد در
     شروع بعدی (یا Replica دیگر) منتشر می‌شود — همان چیزی که پیش‌تر برای ردیف‌های لحظهٔ آخر هم بود.
 
@@ -1520,7 +1553,7 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   هزارتایی ۱۱ ms، اجرای بی‌کار ۰٫۱ ms.
 
   `stream_seq` و تشخیص Gap دست نمی‌خورند، چون تخصیص از `outbox_stream_sequence` است، نه از ردیف‌ها. آزمون
-  `test/outbox-purge.int-spec.ts` در هر هشت سرویس این را نشان می‌دهد.
+  `test/outbox-purge.int-spec.ts` در هر سرویسِ دارای Purge این را نشان می‌دهد.
 
   **B2 پیش از Purge:** B2 (`outbox-b2-backfill.md`) شماره‌گذاری را از بیشینهٔ `stream_seq` باقی‌مانده در جدول می‌گیرد،
   نه از شمارنده. پس B2 هر سرویس را **پیش از روشن شدن Purge آن** اجرا کن. اگر Purge ردیف‌های شماره‌دار یک Stream را
@@ -1538,15 +1571,119 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   که **پیش از** این تغییر رخ داده و ردیف‌هایش پیش از اجرای بعدی Purge شده‌اند ردی نگذاشته و تشخیص‌پذیر نیست؛ قاعدهٔ
   «B2 پیش از Purge» برای آن همچنان لازم است.
 
-  **مانده (فازهای بعد، با مالک هر سرویس):**
-  - identity: `outbox_message`، و `security_event_outbox` که جدولی جداست. **در فاز ۲a متوقف شد و تصمیمش با مدیر
-    پروژه است:** `audit-gap-detected.md` گام ۵ برای فرمان اصلاح، ردیف منتشرشدهٔ `outbox_message` را با
-    `audit_correction_command` Join می‌کند و نبودن آن را **توضیح‌نداده** می‌داند و تشدید می‌کند. Purge این ردیف‌ها را
-    پس از Retention پاک می‌کند، پس آن گام را بی تصمیم می‌شکند.
-  - economic، marketplace، construction، contract.
+  **مانده (فازهای بعد، با مالک هر سرویس):** economic، marketplace، construction، contract.
+  `security_event_outbox` ـِ identity عمداً بیرون است (بالا).
 
 - **اولویت:** متوسط (پیش‌نیاز Production)
 - **ثبت‌شده:** 2026-10-13 (#242 r1)
+
+### D-053 · Retry یک Activity در Saga سفارش، کار خودش را پس از جلو رفتن سفارش نمی‌شناخت — ✅ **بسته شد (2026-10-15)**
+
+- **چه چیزی:** Temporal یک Activity را که تکمیلش ثبت نشده دوباره اجرا می‌کند: Worker پس از Commit مرده یا خاموش شده، یا پاسخ
+  در راه گم شده. `systemTransition` در marketplace-service چنین Retry ـی را فقط وقتی می‌شناخت که سفارش **هنوز** در وضعیت مقصد
+  همان گام بود. سناریوی Codex (بازبینی #279، یافتهٔ ۱): `markFundsHeld` ‏`FUNDS_HELD` و شناسهٔ تعهد را Commit می‌کند ⇐ تکمیل به
+  Temporal نمی‌رسد ⇐ تأمین‌کننده از API تأیید می‌کند (`CONFIRMED`) ⇐ Retry ‏`CONFIRMED → FUNDS_HELD` را
+  `BUSINESS_RULE_VIOLATION` می‌گیرد، که غیرقابل‌Retry است ⇐ Workflow شکست می‌خورد، تعهد اقتصادی `HELD` می‌ماند و هیچ
+  Saga‌ای نیست که تسویه یا بازگرداندش. همین الگو در `markSettlementFailed` (پس از اعتراض خریدار) و `markSettling` (گامی که به
+  اعتراض «کنار کشیده» بود، پس از حل `REFUND`) هم بود. یافتهٔ ۲: `recordReminder` در هر Retry شمارنده را یکی بالا می‌برد و
+  ردیف تاریخچهٔ دیگری می‌نوشت.
+- **چرا:** نشانهٔ «اثر از پیش اعمال شده» وضعیت **کنونی** سفارش بود، نه چیزی متعلق به خود گام. وضعیت را طرف‌ها هم عوض می‌کنند.
+- **رفع:** جدول `saga_step` (Migration `20261015120000_saga_step`، برگشت‌پذیر): هر Activity دارای اثر، نتیجه‌اش را با کلید
+  `<workflowId>/<runId>/<activityId>` ثبت می‌کند — هویتی که Temporal در همهٔ تلاش‌های **یک** Activity زمان‌بندی‌شده نگه
+  می‌دارد و هیچ Activity دیگری ندارد (همان کلید `docs/08` § ۸٫۸ و ADR-010). Retry ـی که ردیف را بیابد همان پاسخ تلاش اول را
+  برمی‌گرداند و هیچ چیز نمی‌نویسد؛ تلاش دوم تسویه یا یادآور بعدی Activity دیگری است و کلید دیگری دارد.
+  - گذارهای محلی (`markFundsHeld`، `markFailed`، `markSettling`، `markSettlementFailed`، `markCompleted`، `markCancelled`)
+    و `recordReminder`: ردیف در **همان تراکنش** گذار، زیر قفل ردیف سفارش خوانده و نوشته می‌شود؛ همهٔ نتیجه‌ها — جابه‌جایی،
+    کنار کشیدن، «از پیش آنجا» — ثبت می‌شوند. ردِ واقعی ثبت نمی‌شود، پس Retry اش دوباره سنجیده می‌شود.
+  - `markFundsHeld` برای Retry ـی که تلاش اولش پیش از این جدول اجرا شده، اثرش را از خود تعهد هم می‌شناسد:
+    `economic_transaction_id` یکتاست و فقط همین گام آن را می‌نویسد.
+  - **گامی که Worker قدیمی (بی `saga_step`) اعمال کرده** (Codex روی #283، یافتهٔ ۳): Retry ـی که ردیف ندارد و وضعیت سفارش
+    ردش می‌کند، ردیف تاریخچه‌ای را می‌جوید که تلاش اول در **همان تراکنش** نوشته: یال خود گام (`from` ← `to`، با `reason`
+    اگر گام دارد) در `order_status_history` که پس از زمان‌بندی **نخستین** Activity نوشته شده
+    (`scheduledTimestampMs` ـِ Temporal، که Retry عوضش نمی‌کند). اگر باشد، پاسخ همان `to` ـِ تلاش اول است و ثبت می‌شود.
+    درستی‌اش بر سه واقعیت است: هر یالی که گامی از Saga می‌پیماید فقط همان گام می‌پیماید (طرف‌ها یال‌های دیگری دارند)؛ Workflow
+    هر بار یک گام اجرا می‌کند و منتظر همین گام است؛ و همان یال از گامی پیشین دست‌کم به اندازهٔ Backoff تسویه (۳۰ ثانیه) قدیمی‌تر
+    است، یا یالی است که سفارش یک بار می‌پیماید. فاصلهٔ ساعت‌ها با `SAGA_CLOCK_SKEW_MS` (۵ ثانیه) پذیرفته می‌شود، که بسیار کمتر
+    از آن ۳۰ ثانیه است. فقط وقتی سراغ تاریخچه می‌رود که گام وگرنه رد می‌شد، و هرگز برای سفارش پایان‌یافته (فقط گامی **بعدی**
+    سفارش را تمام می‌کند و هیچ گام بعدی در انتظار این گام اجرا نمی‌شود). `recordReminder` همین را با ردیف `REMINDER` می‌کند
+    (یادآور پیشین دست‌کم یک روز قدیمی‌تر است). این همهٔ گام‌های محلی را می‌پوشاند؛ سناریوی Codex: `markSettlementFailed` با
+    Worker قدیمی ⇐ تکمیل گم ⇐ استقرار ⇐ اعتراض خریدار ⇐ Retry ـِ تازه دیگر `DISPUTED → RECEIPT_CONFIRMED` را رد نمی‌کند.
+  - `markSettling` به `CANCELLING` هم «کنار می‌کشد»، نه فقط به `DISPUTED`: اعتراضی که این گام به آن کنار کشیده بود (یا
+    Worker ـی که هنگام تصمیم دربارهٔ اعتراض خاموش بود) و سپس به `REFUND` حل شد. Saga سفارش را می‌خواند و وجه را برمی‌گرداند؛
+    پیش از این رد غیرقابل‌Retry بود.
+  - فراخوانی‌های economic-service (`createObligation`، `authoriseSettlement`، `settle`، `compensate`، `disputeObligation`،
+    `resolveObligationDispute`): کلیدشان از سفارش است و economic-service پاسخ ذخیره‌شده را بی‌توجه به وضعیت کنونی تراکنش
+    برمی‌گرداند — ولی فقط تا `ECONOMIC_IDEMPOTENCY_TTL_HOURS` (پیش‌فرض ۲۴ ساعت). پاسخ اینجا هم ثبت می‌شود، پس Retry ـی که
+    پس از آن برسد (Worker یک روز خاموش) فراخوانی نمی‌کند. ثبت پس از فراخوانی است، نه با آن (تراکنشی میان دو سرویس نیست)؛
+    شکست ثبت Log می‌شود و پاسخ برمی‌گردد، و Retry احتمالی را همان بازپخش economic-service جواب می‌دهد.
+  - **پاسخی که economic-service منقضی کرده** (Codex روی #283، یافتهٔ ۱): اگر فراخوانی Commit شود و Worker پیش از ثبت
+    `saga_step` بمیرد (یا پاسخ گم شود) و Retry پس از TTL برسد، economic-service فرمان را در برابر وضعیتی می‌سنجد که خود تلاش
+    اول ساخته و ردش می‌کند (`INVALID_STATE_TRANSITION`). پس **فقط** برای همین رد، Activity تعهد خود سفارش را با همان
+    توکن سرویس و به‌عنوان پرداخت‌کننده می‌خواند (`GET /v1/transactions/{id}`، که از پیش برای marketplace-service باز بود؛
+    endpoint تازه‌ای لازم نشد) و `EconomicClient.readObligation` شناسه، پرداخت‌کننده، `sourceReference` = سفارش و نوع
+    `MARKETPLACE_ORDER` را می‌سنجد — تراکنشی که مال این سفارش نیست هیچ چیز را ثابت نمی‌کند. اگر اثر **همین فرمان** دیده شود،
+    همان پاسخ است و مثل هر پاسخ دیگری ثبت می‌شود:
+    `authoriseSettlement` ⇐ `PENDING_SETTLEMENT` یا `SETTLED` (نه `DISPUTED`/`REFUNDED`، که بی مجوز هم از `HELD` می‌رسند)؛
+    `settle` ⇐ `SETTLED` با تسویهٔ آن (شناسهٔ تسویه، کارمزد و خالص — همان سه مقدار پاسخ اول؛ هر تراکنش یک بار تسویه می‌شود)؛
+    `compensate` ⇐ `REFUNDED`؛ `disputeObligation` ⇐ `DISPUTED` با همان متن اعتراض؛ `resolveObligationDispute` ⇐
+    `PENDING_SETTLEMENT` یا `SETTLED` با `disputedAt` و همان متن حل. هر رد دیگر، یا وضعیتی که این فرمان نمی‌سازد، همان رد
+    می‌ماند. `createObligation` را Workflow خود می‌پوشاند (`placeHold` ⇐ `findObligation`).
+  - خواندن‌ها (`readOrder`، `findObligation`) اثری ندارند و ثبت نمی‌شوند.
+- **پیش‌شرط استقرار — اجباری، بی استثنا (Codex روی #283، یافتهٔ ۳؛ دور ۲).** استقراری که یک طرفش نسخه‌ای بی D-053 است
+  (نخستین استقرار همین تغییر، جلو رفتن از نسخه‌ای قدیمی‌تر، بازگشت به آن) فقط پس از اثبات این مجاز است که هیچ Workflow
+  سفارشی Activity در انتظار ندارد؛ نتوانستن از بررسی هم استقرار را متوقف می‌کند. مسیر جایگزین تاریخچه (بالا) بر ساعت تکیه
+  دارد و با اختلاف ساعت بیش از `SAGA_CLOCK_SKEW_MS` Saga را با وجه در Hold متوقف می‌کند (Codex آن را بازتولید کرد)، پس
+  جای این Gate را نمی‌گیرد. توالی: همهٔ نمونه‌های قدیمی متوقف (Scale به صفر، نه Rolling Update) ⇐ Gate ⇐ فقط با کد خروج ۰
+  نسخهٔ جدید بالا می‌آید:
+  `TEMPORAL_ADDRESS=… TEMPORAL_NAMESPACE=… MARKETPLACE_TEMPORAL_TASK_QUEUE=… node scripts/marketplace-saga-drain-check.mjs`
+  — مقادیر همان‌هایی که سرویس با آن‌ها اجرا می‌شود، هر سه اجباری و بی پیش‌فرض. Gate با Query ـِ Visibility
+  `WorkflowType="orderSaga" AND ExecutionStatus="Running"` Workflowها را می‌شمارد و فهرست می‌کند
+  (`temporal workflow count` / `temporal workflow list --query … --output json`، هیچ اجرایی — `workflowId` و `runId` با هم —
+  دو بار فهرست نشود، شمار با شمار اجراهای یکتا یکی باشد و تا پایان عوض نشود؛ Codex دور ۴ روی #283: `[A, A]` با شمار ۲ جای
+  اجرای فهرست‌نشدهٔ B را پر می‌کرد و B هرگز توصیف نمی‌شد)، هر اجرای فهرست‌شده را دقیقاً یک بار `temporal workflow describe --workflow-id <id> --run-id <runId> --output json` می‌کند (Visibility
+  فعالیت در انتظار را نمایه نمی‌کند) و `pendingActivities` باید نباشد یا خالی باشد؛ و با
+  `temporal task-queue describe --task-queue <queue> --output json` هیچ Poller ـی روی Queue نباید باشد (Worker قدیمی واقعاً
+  رفته، پس میان بررسی و جابه‌جایی کسی Activity آغاز نمی‌کند). هر پاسخ پیش از هر تفسیری با شکل خروجی CLI ـِ سنجاق‌شده
+  (`temporalio/auto-setup:1.26.2`) سنجیده می‌شود: شمار فقط `{"count": "<n>"}` یا عدد صحیح نامنفی، و `{}` برای صفر؛ پاسخ
+  Queue شیئی با `pollers` (`null` یا فهرست) و `stats`؛ توصیف فقط وقتی پذیرفته است که `workflowId` و `runId` همان ردیف فهرست،
+  نوع `orderSaga` و Queue همان Queue ـِ بررسی‌شده باشد (Codex دور ۳ روی #283). کد ۱ = Poller یا Activity در انتظار یافت شد؛
+  کد ۲ = بررسی ممکن نشد، از جمله هر پاسخ دیگر؛ هر دو متوقف می‌کنند. Activity در انتظار ⇐ نسخهٔ قدیمی دوباره بالا می‌آید تا کار خودش را تمام کند و توالی از نو؛
+  `terminate`/`reset` برای گذشتن از Gate ممنوع (Q-118). جزئیات و دستورهای دقیق: Runbook
+  [`marketplace-saga-deploy`](runbooks/marketplace-saga-deploy.md). مخزن اسکریپت یا Job استقراری برای marketplace-service
+  ندارد (`ci.yml` فقط می‌سازد و می‌آزماید)، پس Gate گامی دستی است و هر خط استقراری که ساخته شود باید آن را اجرا کند و با کد
+  غیرصفر متوقف شود. رفتار Gate را `scripts/marketplace-saga-drain-check.test.mjs` در CI می‌آزماید.
+- **آزمون:** `test/saga-activity-replay.int-spec.ts` — Activityها در `MockActivityEnvironment` (کلید از Context واقعی
+  Activity)، با دامنه، قفل و پایگاه دادهٔ واقعی: Commit ⇐ تکمیل گم ⇐ تأیید تأمین‌کننده ⇐ Retry، دو سناریوی دیگر، تسویه‌ای که
+  economic-service فراموشش کرده، و یادآور. روی پیاده‌سازی `main` هفت مورد از نه شکست می‌خورند (همان
+  `CONFIRMED → FUNDS_HELD` غیرقابل‌Retry، و شمارندهٔ ۲)؛ دو مورد باقی‌مانده نشان می‌دهند گام‌های جدا یکی شمرده نمی‌شوند.
+  دور ۲ (#283): (الف) economic-service ـی که پاسخ‌هایش منقضی شده (بدلی با ماشین حالت تراکنش، بی بازپخش): `authoriseSettlement`
+  و `settle` Commit ⇐ پاسخ گم ⇐ Retry پس از TTL ⇐ پاسخ از روی تعهد، و سفارش تا `COMPLETED` با همان تسویه می‌رود؛ و سه مورد
+  منفی (ردِ وضعیتی که این فرمان نساخته، تراکنشی که مال این سفارش نیست، ردِ غیروضعیتی — هیچ کدام «انجام‌شده» خوانده نمی‌شود).
+  (ب) بین‌نسخه‌ای: اثر گام بی ردیف `saga_step` (همان چیزی که Worker قدیمی می‌گذارد) ⇐ گذار بعدی یک طرف ⇐ Retry با کد تازه:
+  `markSettlementFailed` پس از اعتراض، `markSettling` پس از حل `REFUND`، یادآور؛ و یالی از گامی پیشین که اثبات نمی‌کند.
+  با برداشتن هر یک از سه رفع، آزمون‌های همان رفع شکست می‌خورند (همان `INVALID_STATE_TRANSITION`، همان
+  `DISPUTED → RECEIPT_CONFIRMED`، شمارندهٔ ۲).
+- **ریسک باقی‌مانده:**
+  - Workflow ـی که با `reset` یا اجرای تازه دوباره از Activity یک آغاز شود، Run تازه دارد و گام‌هایش تصمیم‌های تازه‌اند، نه
+    بازپخش.
+  - در economic-service، `get(id)` پس از Commit و درون کار Idempotent اجرا می‌شود (`transaction.service.ts`)؛ اگر شکست
+    بخورد کلید آزاد می‌شود و Retry بی‌درنگ در برابر وضعیت جلو رفته سنجیده می‌شود (Codex روی #283، یافتهٔ ۲). رفعش در
+    economic-service و در PR جداگانه است (کار ۱۴۷ کارگر ۱). تا آن زمان، پیامدش برای Saga را خواندن تعهد (بالا) می‌پوشاند:
+    همان رد وضعیتی به خواندن و پاسخ می‌رسد. برای فراخوان‌های دیگر economic-service باز است.
+  - مسیر جایگزین تاریخچه بر ساعت تکیه دارد: ساعت Temporal (زمان‌بندی Activity) و ساعت نویسندهٔ تاریخچه باید کمتر از
+    `SAGA_CLOCK_SKEW_MS` اختلاف داشته باشند. اختلاف بزرگ‌تر (منفی، یعنی تاریخچه بیش از ۵ ثانیه عقب‌تر)، ردیف خود گام را
+    نمی‌یابد (Retry مثل پیش رد می‌شود و Saga با وجه در Hold می‌ایستد)؛ به اشتباه «انجام‌شده» خواندن یالی پیشین با اختلاف
+    مثبت **۲۵ ثانیه یا بیشتر** ممکن است (مرز پنجره `>=` است، پس دقیقاً ۲۵ ثانیه هم). به همین دلیل این مسیر لایهٔ دوم است و
+    Gate ـِ استقرار (بالا) اجباری: با صفر Activity در انتظار هنگام جابه‌جایی، هیچ Retry ـی با کد تازه به اثر بی‌رسیدِ Worker
+    قدیمی نمی‌رسد.
+  - Gate به Visibility ـِ Temporal تکیه دارد: پاسخ ناقص اما خوش‌شکل و هم‌سازگار (اجرایی که نه در شمار است نه در فهرست) را
+    نمی‌تواند تشخیص دهد؛ فقط پاسخ‌های بدشکل، ناسازگار (شمار ≠ اجراهای یکتا، شمار در حین بررسی عوض شود) و تکراری را رد می‌کند.
+    فرض این است که Visibility هر Saga ـی را که پیش از توقف نسخهٔ قدیمی آغاز شده تا زمان Gate نمایه کرده است؛ تأخیر
+    نمایه‌سازی بیش از فاصلهٔ توقف تا Gate این فرض را می‌شکند.
+  - شکست غیرقابل‌Retry یا پایان تلاش‌های یک Activity، Workflow را با وجه در Hold متوقف می‌کند و مسیر جبرانی ندارد:
+    `docs/24` **Q-118**.
+- **اولویت:** بالا
+- **ثبت‌شده:** 2026-10-15 (بازبینی Codex روی #279، یافته‌های ۱ و ۲؛ دور ۲: Codex روی #283، یافته‌های ۱ و ۳)
 
 ## ۲۳٫۶ ثبت بدهی معماری
 

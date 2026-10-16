@@ -15,7 +15,10 @@
  *     That is executed, not read: the verdict step's own script runs here
  *     against every needed job failed, cancelled and skipped in turn, and all
  *     of them skipped, and must exit non-zero for each and zero only when all
- *     succeeded. It must be the aggregate's only step, with no condition;
+ *     succeeded. It must be the aggregate's only step, with no condition, and
+ *     name its shell (bash): without one the runner uses `bash -e`, no
+ *     pipefail, so the options it is run with here are exactly the ones it
+ *     declares and `node -e … | cat` cannot pass here and succeed there;
  *   - `continue-on-error`, `if:`, `strategy` or `defaults` on a split job or
  *     the aggregate, `continue-on-error` or `if:` on any step of one (the
  *     allowlist below is empty: main has none), and `defaults` for the whole
@@ -24,7 +27,9 @@
  *     (comments and blank lines aside), so `true`, `cmd || true` or an `echo`
  *     of the command are refused; that lacks an environment variable it was
  *     declared with (without KAFKA_BROKERS the broker suites skip themselves,
- *     without RETRY_REPLAY_REQUIRED retry replay does); that has any key but
+ *     without RETRY_REPLAY_REQUIRED retry replay does), or sets one empty or
+ *     from an expression that may resolve to empty (`KAFKA_BROKERS: ''` skips
+ *     the broker suites just the same); that has any key but
  *     name, run, env and timeout-minutes (so no `shell`, `working-directory`,
  *     `if` or `continue-on-error`); or whose time limit is missing, above its
  *     declared one or above its job's;
@@ -37,16 +42,20 @@
  *     suites resolve to their dist.
  *
  * Workflow text (or its parsed object) in, problems out. The one side effect
- * is running the verdict script under bash, memoised per script.
+ * is running the verdict script under bash from a temporary file, memoised per
+ * script and shell.
  */
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
 export const AGGREGATE_JOB = 'integration';
 export const AGGREGATE_NAME = 'Integration and security tests';
 export const SPLIT_PREFIX = 'integration-';
 
-/** Present, any value. */
+/** Present and not empty, any value. */
 const ANY = null;
 
 const SERVICES = [
@@ -174,8 +183,19 @@ export const SPLIT_STEPS = Object.freeze(Object.keys(STEP_INVENTORY));
  */
 export const ALLOWED_CONDITIONS = Object.freeze([]);
 
-/** The keys a test step, and the verdict, may have: nothing that skips it, forgives it or changes its shell. */
+/** The keys a test step may have: nothing that skips it, forgives it or changes its shell. */
 const STEP_KEYS = new Set(['name', 'run', 'env', 'timeout-minutes']);
+/** The verdict's, which must also name the shell it is run with here. */
+const VERDICT_KEYS = new Set([...STEP_KEYS, 'shell']);
+/**
+ * What the runner runs `shell: bash` as (GitHub's documented
+ * `bash --noprofile --norc -eo pipefail {0}`). A custom `bash <options> {0}`
+ * is run with its own options.
+ */
+const BASH_OPTIONS = ['--noprofile', '--norc', '-eo', 'pipefail'];
+const SHELL_TOKEN = /^(?:-[A-Za-z]+|--[a-z]+(?:-[a-z]+)*|[a-z]+)$/;
+/** Expressions a required variable may be built from: set on every runner, never empty. */
+const RESOLVED_EXPRESSIONS = new Set(['runner.temp']);
 const REFUSED_JOB_KEYS = {
   if: 'a condition can skip it, and a skipped job counts as passing',
   'continue-on-error': 'a failure would not fail the job',
@@ -371,7 +391,12 @@ function testStepProblems(label, step, declared, jobMinutes) {
   }
   const env = isMapping(step.env) ? step.env : {};
   for (const [key, value] of Object.entries(declared.env)) {
-    if (!(key in env)) problems.push(`${label} lost ${key} from its env`);
+    if (!(key in env)) {
+      problems.push(`${label} lost ${key} from its env`);
+      continue;
+    }
+    const unresolved = unresolvedProblem(env[key]);
+    if (unresolved) problems.push(`${label} sets ${key} ${unresolved}`);
     else if (value !== ANY && String(env[key]) !== value) {
       problems.push(`${label} must set ${key}: ${value}, not ${env[key]}`);
     }
@@ -391,6 +416,25 @@ function testStepProblems(label, step, declared, jobMinutes) {
 }
 
 /**
+ * Why a required variable's value may reach the step empty, or undefined if
+ * it cannot. An empty variable reads like a missing one to
+ * `if (!process.env.X)`, and an expression with nothing behind it (a secret,
+ * a `vars` or `env` entry nobody set) resolves to the empty string.
+ */
+function unresolvedProblem(value) {
+  if (value === null || typeof value === 'object') return 'to no value';
+  const text = String(value);
+  const expressions = [...text.matchAll(/\$\{\{(.*?)\}\}/gs)].map(([, inner]) => squash(inner));
+  const unknown = expressions.filter((expression) => !RESOLVED_EXPRESSIONS.has(expression));
+  if (unknown.length > 0) {
+    return `from \${{ ${unknown[0]} }}, which may resolve to empty (only ${[...RESOLVED_EXPRESSIONS].join(', ')} may be used)`;
+  }
+  if (text.replace(/\$\{\{(.*?)\}\}/gs, 'x').includes('${{')) return 'to an unclosed expression';
+  if (text.trim() === '') return 'empty';
+  return undefined;
+}
+
+/**
  * The aggregate's one step must be a verdict that runs unconditionally and
  * whose script, run with the needs context GitHub would give it, fails on
  * every result but `success`. Its only expression is `${{ toJSON(needs) }}`
@@ -405,12 +449,14 @@ function verdictProblems(aggregate, needs) {
   const [step] = steps;
   const problems = [];
   for (const key of Object.keys(step)) {
-    if (!STEP_KEYS.has(key)) {
+    if (!VERDICT_KEYS.has(key)) {
       problems.push(
         `${label}'s verdict sets ${key}; it must run unconditionally, its failure failing the job`,
       );
     }
   }
+  const shell = bashOptions(step.shell);
+  if (typeof shell === 'string') problems.push(`${label}'s verdict ${shell}`);
   const run = typeof step.run === 'string' ? step.run : '';
   if (run.includes('${{')) {
     problems.push(`${label}'s verdict run has an expression; pass it through env`);
@@ -430,18 +476,57 @@ function verdictProblems(aggregate, needs) {
     return [...problems, `${label} must fail unless every needed job's result is "success"`];
   }
   const literal = Object.fromEntries(Object.entries(env).filter(([key]) => key !== needsVar));
-  for (const failure of verdictFailures(run, literal, needsVar, needs)) {
+  for (const failure of verdictFailures(run, shell, literal, needsVar, needs)) {
     problems.push(`${label} must fail unless every needed job's result is "success": ${failure}`);
   }
   return problems;
 }
 
+/**
+ * The bash options the runner runs a step with `shell` under, or why that is
+ * not known here. Unset is refused rather than taken as the runner's default
+ * (`bash -e {0}`, no pipefail): the verdict states its options, and they are
+ * the ones it is run with below.
+ */
+function bashOptions(shell) {
+  if (shell === undefined) {
+    return 'must set shell: bash; without it the runner uses bash -e, no pipefail';
+  }
+  if (shell === 'bash') return BASH_OPTIONS;
+  const tokens = typeof shell === 'string' ? shell.trim().split(/\s+/) : [];
+  const options = tokens.slice(1, -1);
+  if (
+    tokens[0] !== 'bash' ||
+    tokens.at(-1) !== '{0}' ||
+    !options.every((token) => SHELL_TOKEN.test(token))
+  ) {
+    return `must set shell: bash, or "bash <options> {0}", not ${JSON.stringify(shell)}`;
+  }
+  return options;
+}
+
 const verdictMemo = new Map();
 
-/** Runs the verdict as the runner does (bash -eo pipefail) for each case; returns the wrong outcomes. */
-export function verdictFailures(run, env, needsVar, needs) {
-  const memoKey = JSON.stringify([run, env, needsVar, needs]);
+/**
+ * Runs the verdict as the runner does, from a file under `bash <options>`,
+ * for each case; returns the wrong outcomes.
+ */
+export function verdictFailures(run, options, env, needsVar, needs) {
+  const memoKey = JSON.stringify([run, options, env, needsVar, needs]);
   if (verdictMemo.has(memoKey)) return verdictMemo.get(memoKey);
+  const directory = mkdtempSync(join(tmpdir(), 'ci-integration-verdict-'));
+  try {
+    const script = join(directory, 'verdict.sh');
+    writeFileSync(script, run);
+    const failures = runVerdictCases(script, options, env, needsVar, needs);
+    verdictMemo.set(memoKey, failures);
+    return failures;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function runVerdictCases(script, options, env, needsVar, needs) {
   const all = (result) => Object.fromEntries(needs.map((id) => [id, result]));
   const cases = [
     { what: 'every needed job succeeded', results: all('success'), pass: true },
@@ -459,7 +544,7 @@ export function verdictFailures(run, env, needsVar, needs) {
     const context = Object.fromEntries(
       Object.entries(results).map(([id, result]) => [id, { result, outputs: {} }]),
     );
-    const outcome = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', run], {
+    const outcome = spawnSync('bash', [...options, script], {
       env: {
         PATH: process.env.PATH,
         ...Object.fromEntries(Object.entries(env).map(([key, value]) => [key, String(value)])),
@@ -475,6 +560,5 @@ export function verdictFailures(run, env, needsVar, needs) {
     const passed = outcome.status === 0;
     if (passed !== pass) failures.push(`it ${passed ? 'passes' : 'fails'} when ${what}`);
   }
-  verdictMemo.set(memoKey, failures);
   return failures;
 }
