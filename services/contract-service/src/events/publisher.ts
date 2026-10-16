@@ -124,6 +124,8 @@ export const ID_PREFIX = {
   statement: ID_PREFIXES.statement,
   statementLine: 'STL',
   statementDeduction: 'STD',
+  /** One step of a statement's approval chains, as snapshotted when it was submitted (CON-003 PR 5). */
+  statementApprovalStep: 'SAS',
   /** An approval policy and its steps, the prefixes construction-service gives its own. */
   policy: 'APL',
   policyStep: 'APS',

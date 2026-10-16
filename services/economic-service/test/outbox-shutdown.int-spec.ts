@@ -288,6 +288,8 @@ async function boot(options: {
         return never<void>();
       },
       isHealthy: async () => true,
+      // OutboxShutdown closes the publisher after the drain (D-052 phase 4b).
+      stop: async () => undefined,
     })
     .overrideProvider(SOURCE_FACTS)
     .useValue(sources)

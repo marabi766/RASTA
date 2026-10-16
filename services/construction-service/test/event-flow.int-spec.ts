@@ -92,7 +92,7 @@ describeWithKafka('construction event flow over Kafka', () => {
 
   afterAll(async () => {
     await consumer?.disconnect();
-    await publisher?.onModuleDestroy();
+    await publisher?.stop();
     await cleanup(w.prisma, [org]);
     await w.close();
   }, 60_000);

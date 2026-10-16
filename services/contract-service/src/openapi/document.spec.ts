@@ -76,6 +76,7 @@ describe('the committed OpenAPI document', () => {
       'POST /v1/contracts/{id}/milestones',
       'POST /v1/contracts/{id}/sign',
       'POST /v1/contracts/{id}/statements',
+      'POST /v1/contracts/{id}/statements/{statementId}/submit',
     ]);
     for (const { key, operation } of operations) {
       expect(operation.security).toEqual([{ bearer: [] }]);
@@ -140,6 +141,7 @@ describe('the committed OpenAPI document', () => {
       expect(schema.properties.details.items.properties.path.const).toBe('policy');
       expect(schema.properties.details.items.properties.code.enum).toEqual([
         'AUTHORITY_NOT_GOVERNED_ORGANIZATION',
+        'AMOUNT_BOUNDS_NOT_APPLICABLE',
       ]);
     });
 
@@ -407,6 +409,46 @@ describe('the committed OpenAPI document', () => {
         true,
         false,
       ]);
+      // A statement draft's refusals are recorded; a submission also asks organization-service.
+      expect(answers('/v1/contracts/{id}/statements', 'post')).toEqual([true, false]);
+      expect(answers('/v1/contracts/{id}/statements/{statementId}/submit', 'post')).toEqual([
+        true,
+        true,
+      ]);
+    });
+
+    it('publishes the submission of a statement as a keyed command answering 200 with its chains (CON-003 PR 5)', () => {
+      const submit = operation('/v1/contracts/{id}/statements/{statementId}/submit', 'post');
+      expect(
+        submit.parameters.filter((p) => p.in === 'header').map((p) => p.name as string),
+      ).toEqual(['Idempotency-Key']);
+      expect(Object.keys(submit.responses).sort()).toEqual(
+        ['200', '400', '401', '403', '404', '409', '422', '500', '503', '504'].sort(),
+      );
+      const codes = (
+        submit.responses['422']!.content['application/json']!.schema as {
+          properties: { details: { items: { properties: { code: { enum: string[] } } } } };
+        }
+      ).properties.details.items.properties.code.enum;
+      expect(codes).toEqual(
+        expect.arrayContaining([
+          'STATEMENT_NOT_DRAFT',
+          'TECHNICAL_POLICY_REQUIRED',
+          'FINANCIAL_POLICY_REQUIRED',
+          'TECHNICAL_STEP_NOT_APPLICABLE',
+          'FINANCIAL_STEP_NOT_APPLICABLE',
+          'APPROVAL_STEP_NAMES_CONTRACTOR',
+          'POLICY_AUTHOR_NOT_GOVERNING',
+          'ACTOR_IDENTITY_UNKNOWN',
+        ]),
+      );
+      const view = (
+        submit.responses['200']!.content['application/json']!.schema as {
+          properties: Record<string, { type?: string | string[] }>;
+        }
+      ).properties;
+      expect(view.approvalChains).toBeDefined();
+      expect(view.submittedAt).toBeDefined();
     });
   });
 

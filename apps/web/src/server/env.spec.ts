@@ -134,6 +134,27 @@ describe('who is shown the Inventory link', () => {
   );
 });
 
+describe('who is shown the Contracts link', () => {
+  it("defaults to contract-service's own default: ORGANIZATION_ADMIN reads", () => {
+    const env = loadWebServerEnv(REQUIRED);
+    expect(env.WEB_CONTRACT_READER_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+  });
+
+  it('reads comma lists, trimmed, with empty elements dropped', () => {
+    const env = loadWebServerEnv({
+      ...REQUIRED,
+      WEB_CONTRACT_READER_ROLES: ' ORGANIZATION_ADMIN , FLEET_MANAGER,, ',
+    });
+    expect(env.WEB_CONTRACT_READER_ROLES).toEqual(['ORGANIZATION_ADMIN', 'FLEET_MANAGER']);
+  });
+
+  it('refuses to start when it names AUDITOR, as the service does', () => {
+    expect(() =>
+      loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_READER_ROLES: 'ORGANIZATION_ADMIN,AUDITOR' }),
+    ).toThrow(/WEB_CONTRACT_READER_ROLES/);
+  });
+});
+
 describe('refresh coordination in production (ADR-059 addendum)', () => {
   it('refuses to start in production without WEB_REDIS_URL', () => {
     // Two replicas are the documented topology; without shared coordination

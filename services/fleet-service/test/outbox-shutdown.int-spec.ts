@@ -304,6 +304,8 @@ async function boot(options: {
         calls.publish += 1;
         return never<void>();
       },
+      // OutboxShutdown closes the publisher after the drain (D-052 phase 4b).
+      stop: async () => undefined,
     })
     .overrideProvider(AUTH_OPTIONS)
     .useValue({

@@ -16,8 +16,16 @@ import {
   milestoneRows,
   reasons,
   seedSigned,
+  type SignedContract,
 } from './amendment-helpers';
-import { cleanup, eventsOf, seedDraft, wire, type Wiring } from './helpers';
+import {
+  activateStatementPolicies,
+  cleanup,
+  eventsOf,
+  seedDraft,
+  wire,
+  type Wiring,
+} from './helpers';
 
 /**
  * CON-003 PR 3 (ADR-068 § 9, Q-100): the planned milestones of a SIGNED contract, from the real
@@ -66,14 +74,25 @@ describe('milestones of a signed contract', () => {
     http(api).get(`/v1/contracts/${contractId}/milestones`).set('authorization', `Bearer ${token}`);
   const refusedEvents = (employer: string) =>
     eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED');
-  /** What only a statement (PR 4) does: marks the milestone as referenced. */
-  const reference = (id: string) =>
-    runUnscoped('the suite stands in for the statement of PR 4', () =>
-      w.prisma.client.milestone.updateMany({
-        where: { id },
-        data: { firstReferencedAt: new Date() },
-      }),
-    );
+  /**
+   * What only a statement does (CON-003 PR 5): the contractor submits one with a line against the
+   * milestone, which marks it referenced. The database refuses any other way (`milestone_guard`).
+   */
+  const reference = async (c: SignedContract, milestoneId: string) => {
+    await activateStatementPolicies(w, c.employer);
+    const drafted = await http(api)
+      .post(`/v1/contracts/${c.id}/statements`)
+      .set('authorization', `Bearer ${c.contractorToken}`)
+      .set('idempotency-key', idemKey('stm'))
+      .send({ lines: [{ description: 'Foundations', amountMinor: '100', milestoneId }] })
+      .expect(201);
+    await http(api)
+      .post(`/v1/contracts/${c.id}/statements/${drafted.body.id}/submit`)
+      .set('authorization', `Bearer ${c.contractorToken}`)
+      .set('idempotency-key', idemKey('stm-submit'))
+      .send({})
+      .expect(200);
+  };
 
   beforeAll(async () => {
     api = await startApi({ CONTRACT_MILESTONE_LIMIT: '3' });
@@ -307,7 +326,16 @@ describe('milestones of a signed contract', () => {
     it('is refused for a milestone a statement refers to: 422 MILESTONE_REFERENCED, by the service and by the database', async () => {
       const c = await signed();
       const made = (await plan(c.id, c.employerToken).expect(201)).body;
-      await reference(made.id);
+      // Marked by hand, the database refuses: only a submitted statement's line references it.
+      await expect(
+        runUnscoped('the suite tries the shortcut the statement used to stand in for', () =>
+          w.prisma.client.milestone.updateMany({
+            where: { id: made.id },
+            data: { firstReferencedAt: new Date() },
+          }),
+        ),
+      ).rejects.toThrow(/ck_milestone_referenced_by_submission/);
+      await reference(c, made.id);
 
       const res = await change(c.id, made.id, c.employerToken, { title: 'Too late' }).expect(422);
       expect(reasons(res.body)).toEqual(['milestone:MILESTONE_REFERENCED']);

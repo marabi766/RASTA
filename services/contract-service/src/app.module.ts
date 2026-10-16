@@ -89,8 +89,9 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
  * consent, ADR-043). Since PR 2 a second consumer (`ORGANIZATION_MOVED`, a trigger that queues a
  * re-check — Q-83) and the sweeper that works that queue suspend a signing policy whose union has
  * lost the employer; nothing a user calls writes through either. Since PR 4 the contractor drafts
- * statements; their submission with the separate technical and financial approvals, and the
- * settlement boundary with economic-service, are later changes (ADR-068 § 9) with their own wiring.
+ * statements, and since PR 5 submits them with a snapshot of the technical and financial approval
+ * chains; recording those approvals, and the settlement boundary with economic-service, are later
+ * changes (ADR-068 § 9) with their own wiring.
  */
 @Module({
   controllers: [
@@ -301,6 +302,7 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
         PolicyReconciliationSweeper,
         TenderAwardedConsumer,
         OrganizationMovedConsumer,
+        KafkaEventPublisher,
         ENV,
       ],
       useFactory: (
@@ -309,12 +311,15 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
         reconciliation: PolicyReconciliationSweeper,
         awarded: TenderAwardedConsumer,
         moves: OrganizationMovedConsumer,
+        publisher: KafkaEventPublisher,
         env: ContractEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
           workers: [reconciliation, awarded, moves],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },
