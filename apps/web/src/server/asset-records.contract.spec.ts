@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { plainText } from '@rasta/contracts';
 import ts from 'typescript';
 
+import { guardAdmitsAlone } from '@/test/service-source';
+
 import { INSPECTION_RESULTS } from '@/lib/asset-fields';
 import { POLICY_COVERAGES } from '@/lib/asset-record-fields';
 import {
@@ -140,7 +142,9 @@ describe('who may record', () => {
       });
       expect(admitted.length).toBeGreaterThan(0);
       const offered = EVERY_ROLE.filter((role) => canRecordAssetCompliance([role]));
-      expect(offered.sort()).toEqual(EVERY_ROLE.filter((role) => admitted.includes(role)).sort());
+      expect(offered.sort()).toEqual(
+        EVERY_ROLE.filter((role) => guardAdmitsAlone(role, admitted)).sort(),
+      );
     },
   );
 

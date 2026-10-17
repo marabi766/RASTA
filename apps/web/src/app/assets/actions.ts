@@ -2,7 +2,7 @@
 
 import { redirect } from 'next/navigation';
 
-import { currentSession } from '@/server/current-session';
+import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
 import { FLASH_PARAM } from '@/lib/form-fields';
 import { mintFlash } from '@/server/flash';
@@ -29,7 +29,7 @@ export async function submitRegisterAsset(
   form: FormData,
 ): Promise<RegisterAssetFormState> {
   const session = await currentSession();
-  if (!session) return { kind: 'REFUSED', reason: 'NO_SESSION' };
+  if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
   const csrf = verifyCsrf(session, form);
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };

@@ -71,7 +71,11 @@ describe('who is offered the report form', () => {
   );
 
   it('offers it when any one held role qualifies', () => {
-    expect(canReportMaintenance(['AUDITOR', 'OPERATOR'])).toBe(true);
+    expect(canReportMaintenance(['FLEET_MANAGER', 'SUPPLIER'])).toBe(true);
+  });
+
+  it('offers it to nobody holding AUDITOR, whatever else they hold — the guard refuses the oversight role first', () => {
+    expect(canReportMaintenance(['AUDITOR', 'OPERATOR'])).toBe(false);
   });
 });
 

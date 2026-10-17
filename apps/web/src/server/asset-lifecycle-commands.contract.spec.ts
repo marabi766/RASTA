@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { UNSUPPORTED_CHARACTERS, plainText } from '@rasta/contracts';
 import ts from 'typescript';
 
+import { guardAdmitsAlone } from '@/test/service-source';
+
 import {
   CHANGE_STATUS_TARGETS,
   USER_TRANSITIONS,
@@ -134,7 +136,9 @@ describe('who may use the commands', () => {
       });
       expect(admitted.length).toBeGreaterThan(0);
       const offered = EVERY_ROLE.filter((role) => offeredTo([role]));
-      expect(offered.sort()).toEqual(EVERY_ROLE.filter((role) => admitted.includes(role)).sort());
+      expect(offered.sort()).toEqual(
+        EVERY_ROLE.filter((role) => guardAdmitsAlone(role, admitted)).sort(),
+      );
     },
   );
 

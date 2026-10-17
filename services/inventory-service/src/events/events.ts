@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { INVENTORY_SHIPMENT_EVENTS, INVENTORY_SHIPMENT_EVENT_SCHEMAS } from '@rasta/contracts';
+import {
+  INVENTORY_RETURN_EVENTS,
+  INVENTORY_RETURN_EVENT_SCHEMAS,
+  INVENTORY_SHIPMENT_EVENTS,
+  INVENTORY_SHIPMENT_EVENT_SCHEMAS,
+} from '@rasta/contracts';
 
 /**
  * Events published by inventory-service, on `rasta.inventory.v1` (ADR-056 § 6).
@@ -36,6 +41,7 @@ export const INVENTORY_EVENTS = {
   STOCK_RELEASED: 'STOCK_RELEASED',
   STOCK_ISSUED: 'STOCK_ISSUED',
   ...INVENTORY_SHIPMENT_EVENTS,
+  ...INVENTORY_RETURN_EVENTS,
 } as const;
 
 export type InventoryEventName = keyof typeof INVENTORY_EVENTS;
@@ -154,6 +160,7 @@ export const INVENTORY_EVENT_SCHEMAS = {
   STOCK_RELEASED: stockReleasedPayload,
   STOCK_ISSUED: stockIssuedPayload,
   ...INVENTORY_SHIPMENT_EVENT_SCHEMAS,
+  ...INVENTORY_RETURN_EVENT_SCHEMAS,
 } as const satisfies Record<InventoryEventName, z.ZodTypeAny>;
 
 export type InventoryEventPayload<N extends InventoryEventName> = z.infer<

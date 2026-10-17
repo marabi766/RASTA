@@ -2125,10 +2125,12 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   ندارند. هیچ Refund هم از هیچ وضعیتی ساخته نمی‌شود (ADR-048 § ۳). جدول `return_request` وضعیت را با `CHECK` نگه می‌دارد
   (نه enum) تا وضعیت‌های فیزیکی بعداً با Migration برگشت‌پذیر افزوده شوند.
 - **تصمیم موقت:** PR ۱ (این تغییر): `ReturnRequest` در marketplace با `REQUESTED → AUTHORIZED | REJECTED | CANCELLED`، Trigger پایگاه
-  داده، Outbox و تاریخچهٔ وضعیت. PR ۲: محمولهٔ برگشت، بازرسی و Disposition در inventory-service، مصرف‌کنندهٔ
-  Idempotent رویدادهای marketplace. PR ۳: درخواست Refund از مسیر موجود economic-service. پنجرهٔ مرجوعی پیکربندی است و
-  پیش‌فرض ندارد (**Q-132**).
-- **رفع:** تکمیل PR ۲ و ۳ و بستن Q-132 و Q-133.
+  داده، Outbox و تاریخچهٔ وضعیت. PR ۲ (الف): محمولهٔ برگشت در inventory-service (`IN_TRANSIT → RECEIVED`، فقط REST و
+  Outbox؛ inventory مصرف‌کنندهٔ رویداد نیست، ADR-056 § ۷). PR ۲ (ب): بازرسی و Disposition. PR ۳: marketplace رویدادهای
+  `RETURN_SHIPMENT_*` را Idempotent (`processed_event` + `streamSeq`) مصرف می‌کند و وضعیت درخواست را به `IN_TRANSIT … RESOLVED`
+  می‌برد. **Refund ساخته نمی‌شود:** economic-service برای سفارش تسویه‌شده عملیاتی ندارد (`docs/10` § ۱۰٫۴، **Q-76**)؛ این
+  زنجیره فقط واقعیت‌هایی را روی Topic می‌گذارد که آن عملیات روزی لازم دارد. پنجرهٔ مرجوعی پیکربندی است و پیش‌فرض ندارد (**Q-132**).
+- **رفع:** تکمیل PR ۲ و ۳، پاسخ Q-76 (برای Refund) و بستن Q-132 و Q-133.
 - **اولویت:** متوسط
 - **ثبت‌شده:** 2026-10-16
 

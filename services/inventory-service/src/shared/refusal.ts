@@ -13,6 +13,7 @@ export const REFUSAL_AREAS = {
   stock: 'Stock cannot be moved',
   reservation: 'Reservation cannot be made or ended',
   shipment: 'Shipment cannot be moved',
+  returnShipment: 'Return shipment cannot be recorded or moved',
 } as const;
 export type RefusalArea = keyof typeof REFUSAL_AREAS;
 
@@ -46,6 +47,26 @@ export const REFUSAL_REASONS = {
     SHIPMENT_NOT_CREATED: 409,
     /** Not dispatched yet, or delivered already: a shipment is delivered once, from DISPATCHED. */
     SHIPMENT_NOT_DISPATCHED: 409,
+  },
+  returnShipment: {
+    /** This return request already has its return shipment in this owner's books: one consignment (Q-133). */
+    RETURN_ALREADY_DISPATCHED: 409,
+    /** Received already: a return shipment is received once, from IN_TRANSIT. */
+    RETURN_SHIPMENT_NOT_IN_TRANSIT: 409,
+    /** The lines of a receipt are not exactly the lines the shipment was dispatched with. */
+    RECEIPT_LINES_MISMATCH: 422,
+    /** A line arrived in a larger quantity than it was said to be coming in. */
+    RECEIVED_EXCEEDS_EXPECTED: 422,
+    /** Not received yet, or inspected already: inspection happens once, from RECEIVED. */
+    RETURN_SHIPMENT_NOT_RECEIVED: 409,
+    /** Not inspected yet, or resolved already: resolution happens once, from INSPECTED. */
+    RETURN_SHIPMENT_NOT_INSPECTED: 409,
+    /** A disposition the deployment does not allow — or none is allowed at all (Q-133). */
+    DISPOSITION_NOT_ALLOWED: 422,
+    /** Per line, the dispositions' quantities do not add up to what was received. */
+    DISPOSITIONS_DO_NOT_BALANCE: 422,
+    /** Nothing arrived, and this deployment does not resolve such a return (Q-133 (4)). */
+    NOTHING_RECEIVED_TO_RESOLVE: 422,
   },
 } as const satisfies Record<RefusalArea, Record<string, 409 | 422>>;
 

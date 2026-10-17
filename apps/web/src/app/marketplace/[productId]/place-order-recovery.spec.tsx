@@ -19,6 +19,8 @@ import type { PlaceOrderFormState } from './place-order-form-state';
  */
 
 const submit = jest.fn<Promise<PlaceOrderFormState>, [PlaceOrderFormState, FormData]>();
+/** `GET /auth/session`, which the form asks only after a send whose call itself failed. */
+const sessionProbe = jest.fn<Promise<{ status: number }>, [string]>();
 jest.mock('./place-order-actions', () => ({
   submitPlaceOrder: (previous: PlaceOrderFormState, form: FormData) => submit(previous, form),
 }));
@@ -167,6 +169,9 @@ class Catch extends Component<{ children: ReactNode; onError: (error: unknown) =
 
 beforeEach(() => {
   submit.mockReset();
+  sessionProbe.mockReset();
+  sessionProbe.mockResolvedValue({ status: 204 });
+  global.fetch = ((url: string) => sessionProbe(url)) as unknown as typeof fetch;
   window.sessionStorage.clear();
   markAccountOpen();
 });
@@ -431,6 +436,9 @@ describe('an unresolved order survives a navigation (F1)', () => {
 describe('a session that ended behind an unresolved order (F2)', () => {
   const EXPIRED = sealSession({ ...SESSION, issuedAt: 1_000 }, SECRET);
 
+  // The portal's own answer behind the same cookie: the session has ended.
+  beforeEach(() => sessionProbe.mockResolvedValue({ status: 401 }));
+
   it('the real gate refuses the action POST, and the uncertainty view stays with its original data', async () => {
     plant();
     // The real gate in front of the action: an expired cookie never reaches it.
@@ -444,6 +452,7 @@ describe('a session that ended behind an unresolved order (F2)', () => {
     await retry(container);
 
     expect(submit).toHaveBeenCalledTimes(1);
+    expect(sessionProbe).toHaveBeenCalledWith('/auth/session');
     expect(screen.getByText(/نشست شما پایان یافته است. دوباره وارد شوید/)).toBeInTheDocument();
     expect(screen.getByText(/فهرست سفارش‌ها را\s*ببینید/)).toBeInTheDocument();
     expect(screen.getByText(/COR_ORIGINAL/)).toBeInTheDocument();
@@ -497,8 +506,80 @@ describe('a session that ended behind an unresolved order (F2)', () => {
     const { container } = loadPage();
     await fillAndSend(container);
 
-    expect(screen.getByText(/ممکن است سفارش ثبت شده باشد/)).toBeInTheDocument();
+    expect(screen.getAllByText(/ممکن است سفارش ثبت شده باشد/).length).toBeGreaterThan(0);
+    // `/auth/session` says 401 behind the same cookie: ended, and said so.
+    expect(screen.getByText(/نشست شما پایان یافته است/)).toBeInTheDocument();
     expect(container.querySelector('[name="submission"]')).toHaveValue(PAGE_KEY);
+    expect(stored()).toMatchObject({ submissionId: PAGE_KEY });
+  });
+});
+
+/**
+ * A call that itself fails says nothing about the session: only `/auth/session`
+ * answering 401 does. Anything else — its 503 for a refresh unavailable for now,
+ * a 204, no answer — leaves the order unknown with its retry, which sends the
+ * same key and the same body (the dispute form's rule, PR 319 review 1,
+ * finding 4 and review 2, finding 3).
+ */
+describe('a send whose call fails while the session has not been said to end', () => {
+  const LOST = () => Promise.reject(new Error(UNEXPECTED_RESPONSE));
+
+  it.each([
+    ['/auth/session answers 503 (refresh unavailable)', () => Promise.resolve({ status: 503 })],
+    ['/auth/session answers 204', () => Promise.resolve({ status: 204 })],
+    ['/auth/session gets no answer', () => Promise.reject(new TypeError('network'))],
+  ])(
+    'a retry: %s → unknown, the retry stays and resends the same request',
+    async (_name, probe) => {
+      plant();
+      submit.mockImplementationOnce(LOST);
+      sessionProbe.mockImplementationOnce(probe);
+      const { container } = loadPage();
+      await waitFor(() => expect(container.querySelector('[name="submission"]')).toHaveValue(KEY));
+
+      await retry(container);
+
+      expect(sessionProbe).toHaveBeenCalledWith('/auth/session');
+      expect(screen.getByText(/ارسال دوباره نیز نتیجهٔ روشنی نداشت/)).toBeInTheDocument();
+      expect(screen.queryByText(/نشست شما پایان یافته است/)).toBeNull();
+      expect(screen.getByText(/COR_ORIGINAL/)).toBeInTheDocument();
+      expect(stored()).toMatchObject({ submissionId: KEY });
+
+      // The retry is kept, and it is the same request: same key, same body.
+      submit.mockImplementationOnce(LOST);
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' }));
+      });
+      expect(submit).toHaveBeenCalledTimes(2);
+      const resent = submit.mock.calls[1]![1];
+      expect(resent.get('submission')).toBe(KEY);
+      expect(resent.get('offerId')).toBe('OFR_1');
+      expect(resent.get('quantity')).toBe('3');
+    },
+  );
+
+  it('a first send while /auth/session answers 503: unconfirmed with its retry, not ended', async () => {
+    submit.mockImplementationOnce(LOST);
+    sessionProbe.mockResolvedValueOnce({ status: 503 });
+    const { container } = loadPage();
+    await fillAndSend(container);
+
+    expect(screen.getAllByText(/ممکن است سفارش ثبت شده باشد/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/نشست شما پایان یافته است/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeInTheDocument();
+    expect(container.querySelector('[name="submission"]')).toHaveValue(PAGE_KEY);
+    expect(stored()).toMatchObject({ submissionId: PAGE_KEY });
+  });
+
+  it('a first send while /auth/session answers 401: unconfirmed, the session ended, no retry', async () => {
+    submit.mockImplementationOnce(LOST);
+    sessionProbe.mockResolvedValueOnce({ status: 401 });
+    const { container } = loadPage();
+    await fillAndSend(container);
+
+    expect(screen.getAllByText(/ممکن است سفارش ثبت شده باشد/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/نشست شما پایان یافته است/)).toBeInTheDocument();
+    expect(screen.queryByRole('button')).toBeNull();
     expect(stored()).toMatchObject({ submissionId: PAGE_KEY });
   });
 });
@@ -545,7 +626,7 @@ describe('an order is remembered before it is sent (F1)', () => {
     const { container } = loadPage();
     await fillAndSend(container);
 
-    expect(screen.getByText(/ممکن است سفارش ثبت شده باشد/)).toBeInTheDocument();
+    expect(screen.getAllByText(/ممکن است سفارش ثبت شده باشد/).length).toBeGreaterThan(0);
     expect(container.querySelector('[name="submission"]')).toHaveValue(PAGE_KEY);
     expect(stored()).toMatchObject({ submissionId: PAGE_KEY, pending: true });
 

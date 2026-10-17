@@ -88,6 +88,13 @@ const transactionSchema = z.object({
    * The screen says so rather than labelling it one or the other.
    */
   disputeReason: z.string().nullable(),
+  /**
+   * The dispute the transaction holds or last held (docs/23 D-053): a new one on
+   * every move into `DISPUTED`, kept until the next. A resolution names it, so a
+   * decision about one dispute can never clear another raised since. `null` for
+   * a transaction never disputed.
+   */
+  disputeId: z.string().min(1).nullable(),
   settledAt: utcInstant.nullable(),
   /** The cancellation, refund or failure reason. */
   failureReason: z.string().nullable(),
@@ -155,7 +162,10 @@ export interface DisputeViewer {
  *   the payer's own organization — the payee's administrator gets `403`.
  *
  * And one product rule (Q-138): a `MARKETPLACE_ORDER` transaction is disputed
- * only through its order, so neither command is offered on it.
+ * only through its order, so neither command is offered on it. A resolution is
+ * offered only with a `disputeId` to name (D-053): every move into `DISPUTED`
+ * gets one, so a disputed transaction without it is a view this portal cannot
+ * bind a decision to.
  *
  * Roles that could not be read offer nothing: a form that leads to a refusal is
  * the worse mistake, and the page still shows the transaction.
@@ -163,7 +173,7 @@ export interface DisputeViewer {
 export function disputeCommandsFor(
   transaction: Pick<
     Transaction,
-    'status' | 'organizationId' | 'transactionType' | 'sourceType' | 'sourceReference'
+    'status' | 'organizationId' | 'transactionType' | 'sourceType' | 'sourceReference' | 'disputeId'
   >,
   viewer: DisputeViewer,
 ): readonly DisputeCommand[] {
@@ -177,7 +187,9 @@ export function disputeCommandsFor(
     (command) =>
       DISPUTE_FROM_STATES[command].includes(transaction.status) &&
       DISPUTE_COMMAND_ROLES[command].some((role) => roles.includes(role)) &&
-      commitsPayer,
+      commitsPayer &&
+      // A resolution must name the dispute it decides; with none to name, none is offered.
+      (command !== 'RESOLVE_DISPUTE' || transaction.disputeId !== null),
   );
 }
 
@@ -225,8 +237,11 @@ const COMMAND_PATHS: Readonly<Record<DisputeCommand, string>> = {
 
 export interface DisputeCommandRequest {
   readonly command: DisputeCommand;
-  /** Exactly the body the command's `.strict()` DTO accepts: its one field. */
-  readonly body: Readonly<Partial<Record<DisputeField, string>>>;
+  /**
+   * Exactly the body the command's `.strict()` DTO accepts: its one text field,
+   * and for a resolution the dispute it decides ({@link boundDisputeRequest}).
+   */
+  readonly body: Readonly<Partial<Record<DisputeField, string>> & { disputeId?: string }>;
 }
 
 export type ParsedDisputeCommand =
@@ -259,6 +274,23 @@ export function parseDisputeCommand(input: DisputeFormInput): ParsedDisputeComma
     if (key === field) fieldErrors[field] ??= issue.message;
   }
   return { ok: false, command, fieldErrors };
+}
+
+/**
+ * The request as it is sent: a resolution carries the dispute its form was
+ * drawn for — read from the submission's signed stamp, the same on every send
+ * under that key — so economic-service applies it only while the transaction
+ * still holds that dispute, and refuses it (`409 INVALID_STATE_TRANSITION`)
+ * once another has replaced it (docs/23 D-053). Null for a resolution that has
+ * no dispute to name: it is not sent. Opening a dispute names none.
+ */
+export function boundDisputeRequest(
+  request: DisputeCommandRequest,
+  disputeId: string | null,
+): DisputeCommandRequest | null {
+  if (request.command !== 'RESOLVE_DISPUTE') return request;
+  if (disputeId === null) return null;
+  return { ...request, body: { ...request.body, disputeId } };
 }
 
 const lengthRule = (field: DisputeField): string =>

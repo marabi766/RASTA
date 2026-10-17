@@ -70,6 +70,7 @@ const HELD: Transaction = {
   sourceReference: 'ref-1',
   disputedAt: null,
   disputeReason: null,
+  disputeId: null,
   settledAt: null,
   failureReason: null,
   createdAt: '2026-10-01T08:00:01.000Z',
@@ -81,6 +82,7 @@ const DISPUTED: Transaction = {
   status: 'DISPUTED',
   disputedAt: '2026-10-02T09:00:00.000Z',
   disputeReason: REASON,
+  disputeId: 'TXD_A',
 };
 
 const ok = (data: Transaction): ReadResult<Transaction> => ({ kind: 'OK', data });
@@ -182,6 +184,37 @@ describe('the dispute state, as the record says it', () => {
     expect(form.querySelector('textarea[name="resolution"]')).toHaveAttribute('minlength', '10');
     expect(form.querySelector('textarea[name="resolution"]')).toHaveAttribute('maxlength', '1000');
     await expectAccessible(container);
+  });
+
+  it('binds the resolution’s submission to the dispute this page shows (PR 325 r1, F1)', () => {
+    const mint = jest.fn(() => ({ id: SUBMISSION, replay: STAMP }));
+    render(
+      <TransactionDetailScreen
+        result={ok(DISPUTED)}
+        commands={['RESOLVE_DISPUTE']}
+        csrfToken={CSRF}
+        mintSubmission={mint}
+        binding={BINDING}
+        sessionMaxAgeSeconds={SESSION_MAX_AGE}
+      />,
+    );
+    expect(mint).toHaveBeenCalledTimes(1);
+    expect(mint).toHaveBeenCalledWith({ transactionId: 'TXN_1', disputeId: 'TXD_A' });
+  });
+
+  it('binds an opening dispute to no dispute at all', () => {
+    const mint = jest.fn(() => ({ id: SUBMISSION, replay: STAMP }));
+    render(
+      <TransactionDetailScreen
+        result={ok({ ...DISPUTED, status: 'PENDING_SETTLEMENT' })}
+        commands={['DISPUTE']}
+        csrfToken={CSRF}
+        mintSubmission={mint}
+        binding={BINDING}
+        sessionMaxAgeSeconds={SESSION_MAX_AGE}
+      />,
+    );
+    expect(mint).toHaveBeenCalledWith({ transactionId: 'TXN_1', disputeId: null });
   });
 
   it('disputed earlier, now elsewhere: says when, and that the text may be either', async () => {
