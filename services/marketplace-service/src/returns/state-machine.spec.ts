@@ -1,6 +1,8 @@
 import { RastaError } from '@rasta/nest-common';
 import {
+  PHYSICAL_RETURN_STATUSES,
   RETURN_STATUSES,
+  RETURN_STATUSES_HOLDING_UNITS,
   RETURN_TERMINAL_STATUSES,
   RETURN_TRANSITIONS,
   assertReturnTransition,
@@ -9,22 +11,39 @@ import {
 } from './state-machine';
 
 describe('return request state machine (ADR-048 § 3)', () => {
-  it('allows exactly the commercial moves of this version', () => {
+  it('allows exactly the commercial moves and the physical steps in order', () => {
     const allowed = RETURN_STATUSES.flatMap((from) =>
       RETURN_STATUSES.filter((to) => canMoveReturn(from, to)).map((to) => `${from}>${to}`),
     );
     expect(allowed.sort()).toEqual([
       'AUTHORIZED>CANCELLED',
+      'AUTHORIZED>IN_TRANSIT',
+      'INSPECTED>RESOLVED',
+      'IN_TRANSIT>RECEIVED',
+      'RECEIVED>INSPECTED',
       'REQUESTED>AUTHORIZED',
       'REQUESTED>CANCELLED',
       'REQUESTED>REJECTED',
     ]);
   });
 
-  it('has no way out of REJECTED or CANCELLED', () => {
+  it('has no way out of REJECTED, CANCELLED or RESOLVED', () => {
+    expect(RETURN_TERMINAL_STATUSES).toEqual(['REJECTED', 'CANCELLED', 'RESOLVED']);
     for (const status of RETURN_TERMINAL_STATUSES) {
       expect(RETURN_TRANSITIONS[status]).toEqual([]);
     }
+  });
+
+  it('does not let the buyer cancel goods already on the road (Q-133 (5))', () => {
+    for (const from of PHYSICAL_RETURN_STATUSES) {
+      expect(canMoveReturn(from, 'CANCELLED')).toBe(false);
+    }
+  });
+
+  it('counts every request not refused or withdrawn against the order line', () => {
+    expect([...RETURN_STATUSES_HOLDING_UNITS].sort()).toEqual(
+      ['AUTHORIZED', 'INSPECTED', 'IN_TRANSIT', 'RECEIVED', 'REQUESTED', 'RESOLVED'].sort(),
+    );
   });
 
   it('does not let a supplier take an authorization back', () => {
@@ -41,6 +60,10 @@ describe('return request state machine (ADR-048 § 3)', () => {
     expect(versionAfter('REJECTED', 'REQUESTED')).toBe(2);
     expect(versionAfter('CANCELLED', 'REQUESTED')).toBe(2);
     expect(versionAfter('CANCELLED', 'AUTHORIZED')).toBe(3);
+    expect(versionAfter('IN_TRANSIT', 'AUTHORIZED')).toBe(3);
+    expect(versionAfter('RECEIVED', 'IN_TRANSIT')).toBe(4);
+    expect(versionAfter('INSPECTED', 'RECEIVED')).toBe(5);
+    expect(versionAfter('RESOLVED', 'INSPECTED')).toBe(6);
   });
 
   it('refuses an illegal move as a business rule, and says when the request is over', () => {
