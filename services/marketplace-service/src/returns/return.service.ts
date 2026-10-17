@@ -13,7 +13,15 @@ import { ENV } from '../tokens';
 import type { CreateReturnDto, ListReturnsQuery, ReturnRequestView } from './dto';
 import { RETURN_AUTHORISATION, assertReturnVisible, type ReturnCommand } from './return-access';
 import { ReturnRepository, type ReturnRequestRow } from './return.repository';
-import { assertReturnTransition, versionAfter, type ReturnStatus } from './state-machine';
+import {
+  RETURN_STATUSES_HOLDING_UNITS,
+  assertReturnTransition,
+  versionAfter,
+  type ReturnStatus,
+} from './state-machine';
+
+/** What a party's command can move a request to; the physical states are inventory's events. */
+type DecidedStatus = 'AUTHORIZED' | 'REJECTED' | 'CANCELLED';
 import { toReturnView } from './views';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -237,7 +245,7 @@ export class ReturnService {
 
   private async decide(
     id: string,
-    to: Exclude<ReturnStatus, 'REQUESTED'>,
+    to: DecidedStatus,
     command: Exclude<ReturnCommand, 'request'>,
     idempotencyKey: string,
     record?: RecordResponse<ReturnRequestView>,
@@ -309,7 +317,7 @@ export class ReturnService {
   private async publish(
     tx: ExtendedPrismaClient,
     row: ReturnRequestRow,
-    to: Exclude<ReturnStatus, 'REQUESTED'>,
+    to: DecidedStatus,
     from: ReturnStatus,
     actor: string,
     at: Date,
@@ -426,7 +434,10 @@ export class ReturnService {
     }
   }
 
-  /** What other requests of these order lines already take: REQUESTED and AUTHORIZED ones. */
+  /**
+   * What other requests of these order lines already take: every one not REJECTED or CANCELLED.
+   * Goods on the road, received or resolved were returned and are not returnable again.
+   */
   private async openQuantities(
     tx: ExtendedPrismaClient,
     orderLineIds: readonly string[],
@@ -434,7 +445,7 @@ export class ReturnService {
     const taken = await tx.returnLine.findMany({
       where: {
         orderLineId: { in: [...orderLineIds] },
-        returnRequest: { status: { in: ['REQUESTED', 'AUTHORIZED'] } },
+        returnRequest: { status: { in: [...RETURN_STATUSES_HOLDING_UNITS] } },
       },
       select: { orderLineId: true, quantity: true },
     });
@@ -447,7 +458,7 @@ export class ReturnService {
 }
 
 /** What every return event says about the request: which, for what, between whom. */
-function facts(row: ReturnRequestRow) {
+export function facts(row: ReturnRequestRow) {
   return {
     returnRequestId: row.id,
     orderId: row.orderId,

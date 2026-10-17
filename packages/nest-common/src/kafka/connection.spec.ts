@@ -263,10 +263,10 @@ describe('EventConsumer and TOPIC_CONSUMERS', () => {
     expect(() =>
       build({
         ...fleet,
-        groupId: 'marketplace-service.orders',
-        sasl: { ...sasl, username: 'marketplace-service' },
+        groupId: 'organization-service.orders',
+        sasl: { ...sasl, username: 'organization-service' },
       }),
-    ).toThrow(/marketplace-service is not declared/);
+    ).toThrow(/organization-service is not declared/);
   });
 
   it('refuses, even unauthenticated, a service’s consumer that is not declared at all', () => {

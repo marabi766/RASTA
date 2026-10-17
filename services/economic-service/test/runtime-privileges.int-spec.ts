@@ -50,6 +50,9 @@ const GUARDS: readonly (readonly [table: string, trigger: string])[] = [
   ['payment_reconciliation_requeue', 'trg_payment_requeue_append_only'],
   // A posted commission is corrected by a reversal entry, never edited (ADR-045 § 3).
   ['commission', 'trg_commission_append_only'],
+  // A participation rule version is the record of what was in force (ADR-047 § 3).
+  ['participation_rule', 'trg_participation_rule_append_only'],
+  ['participation_rule', 'trg_participation_rule_no_truncate'],
 ];
 
 describe('the runtime role cannot lift an integrity guard (D-045)', () => {

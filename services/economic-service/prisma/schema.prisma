@@ -1171,8 +1171,36 @@ model RewardSourceEvaluation {
 
   evaluatedAt DateTime @default(now()) @map("evaluated_at")
 
+  /// Whose behaviour the fact was, as its owner recorded it (`recordedBy`,
+  /// `completedBy`), and when it happened: what a participation score counts
+  /// (ADR-047). Null on a fact recorded by no user, on backfilled rows, and on
+  /// every row written before 20261016190000_participation_rule. Indexed by
+  /// `ix_reward_source_evaluation_subject` (organization, subject, instant),
+  /// partial, in the migration.
+  subjectUserId String?   @map("subject_user_id")
+  occurredAt    DateTime? @map("occurred_at")
+
   @@id([organizationId, triggerEvent, sourceReference])
   @@map("reward_source_evaluation")
+}
+
+/// One version of the participation rule (ADR-047 § 1, docs/24 Q-139): which
+/// verified facts count toward a `ParticipationScore`, with what weight, at
+/// most how many per window, and the window. Platform-wide; the highest
+/// version is in force from its creation. Append-only: a change is a new
+/// version (`trg_participation_rule_append_only`). None is seeded.
+model ParticipationRule {
+  /// `PRL_<ULID>`.
+  id            String   @id
+  version       Int      @unique(map: "ux_participation_rule_version")
+  windowDays    Int      @map("window_days")
+  /// `[{ triggerEvent, weight, maxPerWindow? }]`, validated by the service.
+  contributions Json
+  label         String?
+  createdAt     DateTime @default(now()) @map("created_at")
+  createdBy     String   @map("created_by")
+
+  @@map("participation_rule")
 }
 
 /// The reward evaluation cutover (PR #110 round 2 #3, round 3 #1-#2): one
