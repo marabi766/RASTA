@@ -39,8 +39,9 @@ describe('TOPIC_CONSUMERS', () => {
         subscribes: ['rasta.fleet.v1', 'rasta.asset.v1'],
         deadLetterTopic: 'rasta.maintenance.v1.dlq',
       },
+      // CON-003 PR 6b: STATEMENT_APPROVED, confirmed by contract-service before any obligation.
       'economic-service': {
-        subscribes: ['rasta.maintenance.v1', 'rasta.fleet.v1'],
+        subscribes: ['rasta.maintenance.v1', 'rasta.fleet.v1', 'rasta.contract.v1'],
         deadLetterTopic: 'rasta.economic.v1.dlq',
       },
       'notification-service': {

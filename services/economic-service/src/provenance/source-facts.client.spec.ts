@@ -45,6 +45,17 @@ describe('SourceFactsClient', () => {
     recordedBy: 'USR-RECORDER',
   };
 
+  const statement = {
+    statementId: 'STM_1',
+    contractId: 'CTR_1',
+    status: 'APPROVED',
+    netMinor: '9223372036854775807',
+    currency: 'IRR',
+    payerOrganizationId: 'ORG-EMPLOYER',
+    beneficiaryOrganizationId: 'ORG-CONTRACTOR',
+    approvedAt: '2026-10-16T11:00:00.000Z',
+  };
+
   interface Call {
     url: string;
     headers: Record<string, string>;
@@ -62,6 +73,7 @@ describe('SourceFactsClient', () => {
       facts: new SourceFactsClient({
         maintenanceBaseUrl: 'http://maintenance.internal:3105/',
         fleetBaseUrl: 'http://fleet.internal:3104',
+        contractBaseUrl: 'http://contract.internal:3111/',
         timeoutMs,
         tokens,
         fetch: fake,
@@ -182,6 +194,75 @@ describe('SourceFactsClient', () => {
 
     await expect(facts.maintenanceRequest('ORG-A', 'MNT_1')).rejects.toMatchObject({
       code: 'UPSTREAM_TIMEOUT',
+    });
+  });
+
+  describe('a statement, from contract-service (ADR-068 § 6 (2))', () => {
+    it('asks with an X-Internal-Token for contract-service, signed for the employer, and keeps the net exact at 2^63 - 1', async () => {
+      const { calls, facts } = client(() => json(statement));
+
+      await expect(facts.statement('ORG-EMPLOYER', 'STM_1')).resolves.toEqual(statement);
+
+      expect(calls[0]!.url).toBe('http://contract.internal:3111/v1/internal/statements/STM_1');
+      // The route's apiKey scheme: the internal token alone, no Authorization (#320).
+      expect(calls[0]!.headers).not.toHaveProperty('authorization');
+      expect(calls[0]!.headers).not.toHaveProperty('x-organization-id');
+      const claims = await tokens.verify(
+        calls[0]!.headers['x-internal-token']!,
+        'contract-service',
+      );
+      expect(claims).toMatchObject({
+        callerService: 'economic-service',
+        purpose: 'SERVICE',
+        organizationId: 'ORG-EMPLOYER',
+      });
+    });
+
+    it('returns a statement in any status as stated: refusing it is the consumer’s verdict, not a parse failure', async () => {
+      const draft = { ...statement, status: 'DRAFT', approvedAt: null };
+      const { facts } = client(() => json(draft));
+      await expect(facts.statement('ORG-EMPLOYER', 'STM_1')).resolves.toEqual(draft);
+    });
+
+    it('answers "no such statement" only for contract-service’s own Statement not found', async () => {
+      const found = client(() => json({ code: 'NOT_FOUND', message: 'Statement not found' }, 404));
+      await expect(found.facts.statement('ORG-OTHER', 'STM_1')).resolves.toBeNull();
+
+      const route = client(() =>
+        json({ code: 'NOT_FOUND', message: 'Cannot GET /v1/internal/statements/STM_1' }, 404),
+      );
+      await expect(route.facts.statement('ORG-EMPLOYER', 'STM_1')).rejects.toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+      });
+    });
+
+    it.each<[string, () => Response]>([
+      ['a net past BIGINT', () => json({ ...statement, netMinor: '9223372036854775808' })],
+      ['a negative net', () => json({ ...statement, netMinor: '-1' })],
+      ['a numeric net', () => json({ ...statement, netMinor: 7350000 })],
+      ['an answer about another statement', () => json({ ...statement, statementId: 'STM_2' })],
+      ['a body without a payer', () => json({ ...statement, payerOrganizationId: undefined })],
+      [
+        'a 403 for a token signed for no organization',
+        () => json({ code: 'SERVICE_TENANT_CONTEXT_INVALID' }, 403),
+      ],
+      ['a 503', () => json({ code: 'INTERNAL_ERROR' }, 503)],
+    ])('never says yes for %s: retried as UPSTREAM_UNAVAILABLE', async (_case, respond) => {
+      const { facts } = client(respond);
+      await expect(facts.statement('ORG-EMPLOYER', 'STM_1')).rejects.toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+      });
+    });
+
+    it('times out as UPSTREAM_TIMEOUT', async () => {
+      const { facts } = client(
+        () =>
+          new Promise<Response>((_resolve, reject) => setTimeout(() => reject(new Error('x')), 50)),
+        10,
+      );
+      await expect(facts.statement('ORG-EMPLOYER', 'STM_1')).rejects.toMatchObject({
+        code: 'UPSTREAM_TIMEOUT',
+      });
     });
   });
 
