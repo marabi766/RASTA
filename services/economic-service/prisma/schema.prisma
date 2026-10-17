@@ -448,7 +448,12 @@ model Transaction {
   occurredAt DateTime @map("occurred_at")
 
   /// What caused this, in the owning service's identifier space. Never a
-  /// foreign key — that row is in another database (ADR-005).
+  /// foreign key — that row is in another database (ADR-005). The types
+  /// economic-service records itself (`src/transaction/recorded-sources.ts`)
+  /// are refused on POST /v1/transactions, and `MAINTENANCE_REQUEST` /
+  /// `PAYMENT_INTENT` rows have their writer's shape
+  /// (`ck_transaction_recorded_source`, migration
+  /// `20261017130000_transaction_recorded_source`).
   sourceType      String? @map("source_type")
   sourceReference String? @map("source_reference")
 

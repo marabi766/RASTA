@@ -1598,6 +1598,8 @@ export const EXPECTED = {
       // An obligation's recorded pricing names a rule exactly when one applied.
       'ck_transaction_pricing',
       'transaction_pricing_rule_id_fkey',
+      // Only economic-service records MAINTENANCE_REQUEST / PAYMENT_INTENT rows (recorded-sources.ts).
+      'ck_transaction_recorded_source',
       'ck_commission_pricing_cutover_single',
       'ck_payment_reconciliation_done_complete',
       'ck_payment_reconciliation_lease_pair',

@@ -7,6 +7,7 @@ import {
 } from '@rasta/contracts';
 import { queryBoolean } from '@rasta/config';
 import { cursorQueryParameter } from '../shared/cursor';
+import { isEconomicRecordedSource, RECORDED_SOURCE_REFUSAL } from './recorded-sources';
 
 /**
  * Request and response shapes for transactions.
@@ -85,7 +86,18 @@ export const createTransactionSchema = z
     /** Mirrors the `Idempotency-Key` header onto the row, for tracing. */
     idempotencyKey: z.string().trim().min(8).max(128).optional(),
   })
-  .strict();
+  .strict()
+  // No caller — person or service — may record under a source type
+  // economic-service records itself from the owner (`recorded-sources.ts`).
+  .superRefine((dto, ctx) => {
+    if (dto.sourceType !== undefined && isEconomicRecordedSource(dto.sourceType)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['sourceType'],
+        message: RECORDED_SOURCE_REFUSAL,
+      });
+    }
+  });
 
 export type CreateTransactionDto = z.infer<typeof createTransactionSchema>;
 

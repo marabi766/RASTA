@@ -256,7 +256,12 @@ export class TransactionService {
       occurredAt: Date;
       sourceType: string;
       sourceReference: string;
-      causationId?: string;
+      /**
+       * The event that authorised it. Required: it, and the absent
+       * Idempotency-Key, are how `ck_transaction_recorded_source` tells a row
+       * recorded from an event from one written over HTTP.
+       */
+      causationId: string;
     },
   ): Promise<{ id: string; created: boolean }> {
     const existing = await this.repository.findBySource(
@@ -298,7 +303,7 @@ export class TransactionService {
         sourceType: input.sourceType,
         sourceReference: input.sourceReference,
         correlationId: getContext().correlationId,
-        causationId: input.causationId ?? null,
+        causationId: input.causationId,
         createdBy: SERVICE_NAME,
       },
       this.legsFor(
