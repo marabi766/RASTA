@@ -39,13 +39,19 @@ import { SESSION_COOKIE, newCsrfToken, sealSession } from '../src/server/session
  *   scenario can show that what it owns is invisible to `orgAdmin` and the
  *   reverse.
  * - `unionAdmin` — `union.admin`, ORG-UNION-YAZD, `UNION_ADMIN`: a platform
- *   role, the one that may resolve a transaction dispute (EXP-003).
+ *   role. It acts financially for another organization only within its
+ *   union’s subtree (docs/24 Q-136), and the seeds put the dehyaris under
+ *   ORG-COUNTY-YAZD, not under the union.
+ * - `systemAdmin` — `system.admin`, ORG-UNION-YAZD, `SYSTEM_ADMIN`: the
+ *   platform operator, who may resolve a transaction dispute for any
+ *   organization (EXP-003).
  */
 export const LIVE_PERSONAS = {
   operator: 'operator.one',
   orgAdmin: 'dehyari.admin',
   orgAdminB: 'dehyari.admin.b',
   unionAdmin: 'union.admin',
+  systemAdmin: 'system.admin',
 } as const;
 
 export type LivePersona = keyof typeof LIVE_PERSONAS;

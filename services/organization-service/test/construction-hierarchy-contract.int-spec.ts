@@ -284,8 +284,37 @@ describe('GET /v1/organizations/:id for construction-service (Q-70 (7) contract)
       .expect(403);
   });
 
-  it('refuses every other calling service (403): only construction-service and contract-service may ask', async () => {
-    const token = await serviceToken('marketplace-service', union);
+  it.each([['economic-service'], ['marketplace-service']])(
+    'answers %s the same question the same way (docs/24 Q-136): { id, hierarchyVersion } within, its own 404 outside and upward',
+    async (caller) => {
+      const token = await serviceToken(caller, union);
+      const within = await http()
+        .get(`/v1/organizations/${dehyari}`)
+        .set('x-internal-token', token)
+        .expect(200);
+      expect(within.body).toEqual({ id: dehyari, hierarchyVersion: expect.any(Number) });
+      // The caller reads only this body as "not within"; any other answer is 503 there.
+      const outside = await http()
+        .get(`/v1/organizations/${stranger}`)
+        .set('x-internal-token', token)
+        .expect(404);
+      expect(outside.body).toMatchObject({ code: 'NOT_FOUND', message: 'Organization not found' });
+      const downward = await serviceToken(caller, dehyari);
+      const upward = await http()
+        .get(`/v1/organizations/${union}`)
+        .set('x-internal-token', downward)
+        .expect(404);
+      expect(upward.body).toMatchObject({ code: 'NOT_FOUND', message: 'Organization not found' });
+      // And only that route.
+      await http()
+        .get(`/v1/organizations/${union}/subtree`)
+        .set('x-internal-token', token)
+        .expect(403);
+    },
+  );
+
+  it('refuses every other calling service (403): only construction-service, contract-service, economic-service and marketplace-service may ask', async () => {
+    const token = await serviceToken('fleet-service', union);
     await http().get(`/v1/organizations/${dehyari}`).set('x-internal-token', token).expect(403);
   });
 

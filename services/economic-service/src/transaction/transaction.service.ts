@@ -10,9 +10,14 @@ import { nextStatus } from './state-machine';
 import {
   assertMayRefund,
   assertTransactionVisible,
-  canCommitOrganization,
+  canActFinanciallyFor,
+  reconfirmFinancialAuthority,
+  recordFinancialCommand,
+  type FinancialAuthority,
+  type FinancialCommand,
   type RefundableTransaction,
 } from '../access/access';
+import { OrganizationHierarchy } from '../organization/organization-hierarchy';
 import { formatMinor, parseMinor } from '../shared/money';
 import { isUniqueViolation } from '../ledger/ledger.repository';
 import { LedgerService } from '../ledger/ledger.service';
@@ -48,6 +53,7 @@ export class TransactionService {
     @Inject(ENV) private readonly env: EconomicEnv,
     private readonly ledger: LedgerService,
     private readonly commissions: CommissionService,
+    private readonly hierarchy: OrganizationHierarchy,
   ) {}
 
   // ==========================================================================
@@ -517,10 +523,10 @@ export class TransactionService {
     });
 
     try {
-      return await this.prisma.transaction(async (tx) => {
+      const { detail, authority } = await this.prisma.transaction(async (tx) => {
         const transaction = await this.repository.lockForUpdate(tx, transactionId);
         if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-        this.authorizeAct(transaction, 'REFUND');
+        const lockedRowAuthority = await this.authorizeAct(transaction, 'REFUND');
 
         const target = nextStatus(transactionId, transaction.status, 'REFUND');
 
@@ -535,6 +541,13 @@ export class TransactionService {
         if (!locked) throw RastaError.internal('Wallet vanished while locking it');
 
         const hold = await this.walletRepository.findActiveHold(tx, wallet.id, transactionId);
+
+        // The wallet lock was the last lock this refund takes: ask the
+        // hierarchy again, so a union administrator's authority is the one
+        // confirmed after that wait, immediately before the refund journal
+        // (docs/23 D-054; Codex on #314 round 3, F2).
+        const authority = await reconfirmFinancialAuthority(lockedRowAuthority, this.hierarchy);
+
         if (hold) {
           // The refund journal is the payer's — it moves the payer's escrow back
           // into the payer's wallet — but the caller may be another party: the
@@ -574,8 +587,10 @@ export class TransactionService {
           at: refundedAt,
         });
 
-        return this.answered(tx, transactionId, answer);
+        return { detail: await this.answered(tx, transactionId, answer), authority };
       });
+      recordFinancialCommand(transactionId, authority);
+      return detail;
     } finally {
       stop();
     }
@@ -623,10 +638,15 @@ export class TransactionService {
     answer?: IdempotentAnswer<TransactionDetail>,
     heldDispute?: string,
   ): Promise<TransactionDetail> {
-    return this.prisma.transaction(async (tx) => {
+    const { detail, authority } = await this.prisma.transaction(async (tx) => {
       const transaction = await this.repository.lockForUpdate(tx, transactionId);
       if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-      this.authorizeAct(transaction, 'COMMIT');
+      // Judged here, under the row lock and in the transaction that commits the
+      // move, so the authority and the state it moves are read together; the
+      // hierarchy question, when there is one, is asked here too (Q-136). No
+      // lock is taken after the row's, so this answer is already the last
+      // thing read before the write — nothing to ask again (docs/23 D-054).
+      const authority = await this.authorizeAct(transaction, event);
 
       const target = nextStatus(transactionId, transaction.status, event);
       if (heldDispute !== undefined && transaction.disputeId !== heldDispute) {
@@ -655,28 +675,32 @@ export class TransactionService {
         at,
       });
 
-      return this.answered(tx, transactionId, answer);
+      return { detail: await this.answered(tx, transactionId, answer), authority };
     });
+    recordFinancialCommand(transactionId, authority);
+    return detail;
   }
 
   /**
-   * Who may act on this transaction, as a command asks it: `COMMIT` for a
-   * lifecycle move, `REFUND` for a refund (docs/24 Q-62), `READ` for what only
-   * shows it. A non-party learns nothing — `NOT_FOUND` first, always.
+   * Who may make one of the five transaction commands on this transaction, and
+   * on what authority: a refund by its own rule (docs/24 Q-62), the other four
+   * by {@link canActFinanciallyFor} — and both, for acting from another
+   * organization, by that one rule of docs/24 Q-136. A non-party learns
+   * nothing — `NOT_FOUND` first, always.
    */
-  private authorizeAct(transaction: RefundableTransaction, act: TransactionAct): void {
-    switch (act) {
-      case 'READ':
-        assertTransactionVisible(transaction);
-        return;
-      case 'COMMIT':
-        assertTransactionVisible(transaction);
-        canCommitOrganization(transaction.organizationId);
-        return;
-      case 'REFUND':
-        assertMayRefund(transaction, { payeeMayRefund: this.env.ECONOMIC_REFUND_BY_PAYEE_ENABLED });
-        return;
+  private authorizeAct(
+    transaction: RefundableTransaction,
+    command: TransactionCommand,
+  ): Promise<FinancialAuthority> {
+    if (command === 'REFUND') {
+      return assertMayRefund(
+        transaction,
+        { payeeMayRefund: this.env.ECONOMIC_REFUND_BY_PAYEE_ENABLED },
+        this.hierarchy,
+      );
     }
+    assertTransactionVisible(transaction);
+    return canActFinanciallyFor(command, transaction.organizationId, this.hierarchy);
   }
 
   /**
@@ -689,7 +713,8 @@ export class TransactionService {
   async assertMayReplay(transactionId: string, act: TransactionAct): Promise<void> {
     const transaction = await this.repository.findByIdForParty(transactionId);
     if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-    this.authorizeAct(transaction, act);
+    if (act === 'READ') assertTransactionVisible(transaction);
+    else await this.authorizeAct(transaction, act);
   }
 
   /**
@@ -793,7 +818,10 @@ export class TransactionService {
 const UNPRICED = { pricingOutcome: null, pricingRuleId: null } as const;
 
 /** What a caller asks to do to a transaction — see `TransactionService.authorizeAct`. */
-export type TransactionAct = 'READ' | 'COMMIT' | 'REFUND';
+export type TransactionAct = 'READ' | TransactionCommand;
+
+/** The five financial commands made on `/v1/transactions/:id` (settlement is its own resource). */
+export type TransactionCommand = Exclude<FinancialCommand, 'SETTLE'>;
 
 type StatusChangeAction =
   | 'CREATE'

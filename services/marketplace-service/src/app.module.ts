@@ -47,6 +47,7 @@ import { ReturnService } from './returns/return.service';
 import { CatalogueService } from './offer/catalogue.service';
 import { OfferController, ProductController } from './offer/catalogue.controller';
 import { EconomicClient } from './economic/economic.client';
+import { OrganizationHierarchy } from './organization/organization-hierarchy';
 import { OrderSagaClient } from './temporal/saga.client';
 import { OrderSagaWorker } from './temporal/worker';
 import { HealthController, MetricsController } from './health/health.controller';
@@ -135,6 +136,22 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
     },
 
     EconomicClient,
+
+    /**
+     * The owner of the organization hierarchy (A-13), asked whether a union
+     * administrator decides a dispute for an order whose buyer is within its
+     * union (docs/24 Q-136). Its token is minted by the service above.
+     */
+    {
+      provide: OrganizationHierarchy,
+      inject: [ENV, InternalTokenService],
+      useFactory: (env: MarketplaceEnv, tokens: InternalTokenService) =>
+        new OrganizationHierarchy({
+          baseUrl: env.ORGANIZATION_SERVICE_URL,
+          timeoutMs: env.MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS,
+          tokens,
+        }),
+    },
 
     {
       provide: OutboxRelay,

@@ -71,6 +71,15 @@ import type {
  */
 const PROFILE_ADMIN_ROLES: readonly string[] = ['ORGANIZATION_ADMIN', 'SYSTEM_ADMIN'];
 
+/**
+ * The services that may read which organizations a user belongs to
+ * (`GET /v1/users/:id/organizations`): construction-service (CON-002 PR 8) and
+ * procurement-service (ADR-070 § 7). The controller's `@AllowService` and
+ * {@link IdentityService.getMemberships} both name this list; either alone would
+ * leave the other layer refusing, or granting, on its own.
+ */
+export const MEMBERSHIP_READ_CALLERS = ['construction-service', 'procurement-service'] as const;
+
 @Injectable()
 export class IdentityService {
   private readonly logger = new Logger(IdentityService.name);
@@ -143,8 +152,9 @@ export class IdentityService {
   /**
    * The organizations a user belongs to **now**, with the roles held in each, for
    * construction-service's conflict-of-interest check and its owner-side authorisation
-   * (CON-002 PR 8, Q-91). Service-only: `construction-service` with a token signed for no
-   * tenant; anyone else is refused. Live memberships only (`isMembershipLive`'s predicate),
+   * (CON-002 PR 8, Q-91), and procurement-service's at an RFQ opening, evaluation, selection
+   * and approval (ADR-070 § 7). Service-only: one of {@link MEMBERSHIP_READ_CALLERS} with a
+   * token signed for no tenant; anyone else is refused. Live memberships only (`isMembershipLive`'s predicate),
    * judged on the **database's** clock, which is the one that stamps `validFrom`.
    *
    * With `from`: the organizations the user held a membership in at any time between `from`
@@ -161,11 +171,11 @@ export class IdentityService {
     const context = getContext();
     if (
       context.authType !== 'SERVICE' ||
-      context.callerService !== 'construction-service' ||
+      !MEMBERSHIP_READ_CALLERS.some((caller) => caller === context.callerService) ||
       context.organizationId !== undefined
     ) {
       throw RastaError.forbidden(
-        'Only construction-service may read which organizations a user belongs to',
+        'Only construction-service or procurement-service may read which organizations a user belongs to',
       );
     }
     if (from) {

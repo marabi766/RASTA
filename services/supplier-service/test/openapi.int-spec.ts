@@ -173,6 +173,32 @@ describe('the OpenAPI document describes the application that is running', () =>
     }
   });
 
+  it('publishes GOODS_SUPPLY on the single-organization standing only (ADR-070 § 7, additive)', () => {
+    const schemaOf = (path: string) =>
+      (
+        document.paths[path]?.get?.responses['200'] as unknown as {
+          content: { 'application/json': { schema: Record<string, unknown> } };
+        }
+      ).content['application/json'].schema as {
+        properties: Record<string, { properties?: Record<string, unknown> }>;
+        required?: string[];
+      };
+
+    const one = schemaOf('/v1/suppliers/standing-snapshot/{organizationId}');
+    expect(Object.keys(one.properties).sort()).toEqual([
+      'asOf',
+      'contractingApprovedAt',
+      'goodsSupplyApprovedAt',
+      'organizationId',
+      'suspensions',
+    ]);
+    expect(one.required).toContain('goodsSupplyApprovedAt');
+
+    const page = schemaOf('/v1/suppliers/standing-snapshot');
+    const item = (page.properties.items as unknown as { items: { properties: object } }).items;
+    expect(Object.keys(item.properties)).not.toContain('goodsSupplyApprovedAt');
+  });
+
   it('marks every operation as requiring a bearer token', () => {
     // Closed by default is a property of the contract as well as of the guard.
     for (const [path, item] of Object.entries(document.paths ?? {})) {
