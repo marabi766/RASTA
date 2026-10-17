@@ -66,6 +66,29 @@ function roleList(name: string, fallback: string, alsoRefused: readonly string[]
     });
 }
 
+/** A closed code, as contract-service keeps it: upper-case words, 2 to 64 characters. */
+const REASON_CODE = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+/** A comma-separated list of closed codes, trimmed, at least one, none twice. */
+function reasonCodeList(name: string, fallback: string) {
+  return z
+    .string()
+    .default(fallback)
+    .transform((raw) =>
+      raw
+        .split(',')
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0),
+    )
+    .refine((codes) => codes.length > 0, { message: `${name} must name at least one reason` })
+    .refine((codes) => codes.every((code) => REASON_CODE.test(code)), {
+      message: `${name} names a code that is not upper-case words`,
+    })
+    .refine((codes) => new Set(codes).size === codes.length, {
+      message: `${name} names a reason twice`,
+    });
+}
+
 const schema = z.object({
   /**
    * The only origin this portal's server code is allowed to call.
@@ -184,6 +207,52 @@ const schema = z.object({
   WEB_CONTRACT_READER_ROLES: roleList('WEB_CONTRACT_READER_ROLES', 'ORGANIZATION_ADMIN'),
 
   /**
+   * Who, on the employer's side, is drawn the forms that cancel a draft,
+   * propose an amendment and plan or change a milestone (`server/contract-commands.ts`).
+   *
+   * These **mirror** contract-service's `CONTRACT_CANCEL_ROLES`,
+   * `CONTRACT_AMENDMENT_ROLES` and `CONTRACT_MILESTONE_ROLES` (each default
+   * `ORGANIZATION_ADMIN`; empty means nobody, as there) and must be changed
+   * together with them. The contract view carries no list of what the caller
+   * may do, so this is how the page knows; they decide only what is drawn —
+   * the service decides again, and a refusal is said in fixed words. Who signs
+   * for the employer is not one of these: it is the `contract.signature`
+   * policy in force, which the page reads.
+   */
+  WEB_CONTRACT_CANCEL_ROLES: roleList('WEB_CONTRACT_CANCEL_ROLES', 'ORGANIZATION_ADMIN'),
+  WEB_CONTRACT_AMENDMENT_ROLES: roleList('WEB_CONTRACT_AMENDMENT_ROLES', 'ORGANIZATION_ADMIN'),
+  WEB_CONTRACT_MILESTONE_ROLES: roleList('WEB_CONTRACT_MILESTONE_ROLES', 'ORGANIZATION_ADMIN'),
+
+  /**
+   * The closed lists of reasons a draft is cancelled for and an amendment is
+   * proposed for — the choices the two forms offer. These **mirror**
+   * contract-service's `CONTRACT_CANCEL_REASON_CODES` and
+   * `CONTRACT_AMENDMENT_REASON_CODES` (same defaults, same shape) and must be
+   * changed together with them: a code the service does not list is refused
+   * (`CANCEL_REASON_NOT_ALLOWED`, `AMENDMENT_REASON_NOT_ALLOWED`) and said in
+   * fixed words. The codes have no legal meaning; a code the portal has no
+   * Persian word for is offered as itself (`lib/contract-command-fields.ts`).
+   */
+  WEB_CONTRACT_CANCEL_REASON_CODES: reasonCodeList(
+    'WEB_CONTRACT_CANCEL_REASON_CODES',
+    'TERMS_NOT_AGREED,CONTRACTOR_WITHDREW,AWARD_ERROR,OTHER',
+  ),
+  WEB_CONTRACT_AMENDMENT_REASON_CODES: reasonCodeList(
+    'WEB_CONTRACT_AMENDMENT_REASON_CODES',
+    'SCOPE_CHANGE,PRICE_ADJUSTMENT,SCHEDULE_CHANGE,OTHER',
+  ),
+
+  /**
+   * Whether a draft one side has already signed is still drawn a cancel form.
+   * This **mirrors** contract-service's `CONTRACT_CANCEL_AFTER_SIGNATURE`
+   * (default false, Q-95 (4)) and must be changed together with it.
+   */
+  WEB_CONTRACT_CANCEL_AFTER_SIGNATURE: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+
+  /**
    * How long economic-service keeps an idempotency record, in hours — the
    * window in which a dispute command re-sent under its original key is a
    * replay rather than a new command (`server/dispute-replay.ts`, PR 319
@@ -213,10 +282,11 @@ const schema = z.object({
 
   /**
    * How long contract-service keeps an idempotency record, in hours — the
-   * window in which a statement command re-sent under its original key is a
-   * replay rather than a new command (`server/statement-replay.ts`). A draft
-   * run again under a fresh record is a **second statement**, so past this
-   * window the portal never re-sends one.
+   * window in which a statement or contract command re-sent under its
+   * original key is a replay rather than a new command
+   * (`server/statement-replay.ts`, `server/contract-command-replay.ts`). A
+   * draft, an amendment or a milestone run again under a fresh record is a
+   * **second one**, so past this window the portal never re-sends one.
    *
    * This **mirrors** contract-service's `CONTRACT_IDEMPOTENCY_TTL_HOURS`
    * (same bounds, 1..168) and must be changed together with it, or set lower.
