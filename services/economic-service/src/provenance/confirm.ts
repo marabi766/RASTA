@@ -1,4 +1,5 @@
-import type { MaintenanceRequestFact, UsageRecordFact } from './source-facts.client';
+import { CURRENCIES } from '@rasta/contracts';
+import type { MaintenanceRequestFact, StatementFact, UsageRecordFact } from './source-facts.client';
 
 /**
  * Whether the owning service confirms what an event claims (ADR-061 § 4).
@@ -29,7 +30,9 @@ export type Mismatch =
   | 'amount_mismatch'
   | 'currency_mismatch'
   | 'workshop_mismatch'
-  | 'approval_mismatch';
+  | 'approval_mismatch'
+  | 'contract_mismatch'
+  | 'beneficiary_mismatch';
 
 export type Verdict = { confirmed: true } | { confirmed: false; mismatch: Mismatch };
 
@@ -108,6 +111,65 @@ export function confirmApproval(
     return refuted('approval_mismatch');
   }
   return CONFIRMED;
+}
+
+/** `STATEMENT_APPROVED` as contract-service publishes it: identifiers and the instant, no amount (Q-97 (2)). */
+export interface StatementApprovalClaim {
+  statementId: string;
+  contractId: string;
+  organizationId: string;
+  contractorOrganizationId: string;
+  approvedAt: string;
+}
+
+/**
+ * The currencies this service keeps wallets in (`currencySchema`, docs/05 §
+ * 5.5: one wallet per organization per currency). An obligation in any other
+ * could never settle — no payer wallet, no ledger account — so it is refused
+ * rather than recorded to wait forever.
+ */
+const WALLET_CURRENCIES: ReadonlySet<string> = new Set(CURRENCIES);
+
+/**
+ * Whether contract-service confirms the approval `STATEMENT_APPROVED` announces
+ * (ADR-068 § 6 (2), A-13).
+ *
+ * The obligation is built from the fact, not from the event — the amount is
+ * only on the fact — so this compares what the event does claim (the
+ * statement, its contract, the payer, the beneficiary, the instant) and
+ * refuses anything that is not APPROVED: approval is final (`ck_statement_final`),
+ * so a statement the owner holds in any other status was never approved, and
+ * no retry changes that. The net is not compared; it has nothing to be
+ * compared with.
+ */
+export function confirmStatementApproval(
+  claim: StatementApprovalClaim,
+  fact: StatementFact | null,
+): Verdict {
+  if (!fact) return refuted('not_found');
+  if (fact.payerOrganizationId !== claim.organizationId) return refuted('organization_mismatch');
+  if (fact.contractId !== claim.contractId) return refuted('contract_mismatch');
+  if (fact.status !== 'APPROVED') return refuted('status_mismatch');
+  // `ck_transaction_distinct_parties` could not hold it either; a contract
+  // whose employer is its own contractor is the owner's defect, not a payment.
+  if (
+    fact.beneficiaryOrganizationId !== claim.contractorOrganizationId ||
+    fact.beneficiaryOrganizationId === fact.payerOrganizationId
+  ) {
+    return refuted('beneficiary_mismatch');
+  }
+  if (!sameInstant(fact.approvedAt, claim.approvedAt)) return refuted('approval_mismatch');
+  if (!WALLET_CURRENCIES.has(fact.currency)) return refuted('currency_mismatch');
+  return CONFIRMED;
+}
+
+/**
+ * Why a confirmed statement creates no obligation: a net of zero — every rial
+ * of the gross deducted — leaves nobody owed anything (`ck_transaction_amounts`
+ * wants a positive gross). Decided from the owner's figure, as for a repair.
+ */
+export function statementNoObligationReason(fact: StatementFact): NoObligation | null {
+  return BigInt(fact.netMinor) <= 0n ? 'no_cost' : null;
 }
 
 /** Statuses in which a request's work has been completed. */

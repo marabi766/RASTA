@@ -28,7 +28,12 @@ import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { ENV } from '../tokens';
 import type { IdempotentAnswer } from '../shared/idempotency';
 import type { BusinessLine, Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
-import type { CreateTransactionDto, DisputeTransactionDto, ResolveDisputeDto } from './dto';
+import {
+  STATEMENT_SOURCE_TYPE,
+  type CreateTransactionDto,
+  type DisputeTransactionDto,
+  type ResolveDisputeDto,
+} from './dto';
 
 /**
  * Transactions — the obligations everything else in this service acts on.
@@ -255,8 +260,12 @@ export class TransactionService {
       organizationId: string;
       counterpartyOrganizationId: string;
       transactionType: TransactionType;
-      /** Stated by the consumer that knows what the fact is (ADR-045 § 4). */
-      businessLine: BusinessLine;
+      /**
+       * Stated by the consumer that knows what the fact is (ADR-045 § 4), or
+       * null where the line is an open question (docs/24 Q-130): priced then
+       * by the type-only rules alone.
+       */
+      businessLine: BusinessLine | null;
       grossAmountMinor: bigint;
       currency: string;
       occurredAt: Date;
@@ -687,11 +696,17 @@ export class TransactionService {
    * by {@link canActFinanciallyFor} — and both, for acting from another
    * organization, by that one rule of docs/24 Q-136. A non-party learns
    * nothing — `NOT_FOUND` first, always.
+   *
+   * A statement's obligation is never refunded or cancelled, by anyone
+   * ({@link refuseStatementWithdrawal}): judged after visibility and before
+   * any role, so every party gets the same refusal.
    */
   private authorizeAct(
-    transaction: RefundableTransaction,
+    transaction: RefundableTransaction & { sourceType: string | null },
     command: TransactionCommand,
   ): Promise<FinancialAuthority> {
+    assertTransactionVisible(transaction);
+    refuseStatementWithdrawal(transaction, command);
     if (command === 'REFUND') {
       return assertMayRefund(
         transaction,
@@ -699,7 +714,6 @@ export class TransactionService {
         this.hierarchy,
       );
     }
-    assertTransactionVisible(transaction);
     return canActFinanciallyFor(command, transaction.organizationId, this.hierarchy);
   }
 
@@ -816,6 +830,37 @@ export class TransactionService {
  * settles, so there is nothing to price.
  */
 const UNPRICED = { pricingOutcome: null, pricingRuleId: null } as const;
+
+/**
+ * Refuses a refund or a cancellation of a contract statement's obligation —
+ * to every caller, from every state (docs/24 Q-97, temporary decision of
+ * 2026-10-17).
+ *
+ * Nothing was held for such an obligation, so either command moves no money
+ * and only ends it: `REFUNDED` and `CANCELLED` are terminal, and a replay of
+ * the approval finds the ended row and records nothing. The statement would
+ * stay approved and never be paid — a waiver of an approved payable, where
+ * ADR-068 § 6 (I3) corrects an approved statement only by a compensating
+ * statement, never by withdrawing it (review of #329 round 1, finding 1).
+ * Until a statement-specific policy exists, neither command applies.
+ *
+ * A dispute still does: it only freezes. `DISPUTED` leaves by
+ * `RESOLVE_DISPUTE` back to `PENDING_SETTLEMENT`, or by `REFUND` — refused
+ * here — so for this obligation it is a freeze a platform decision lifts.
+ *
+ * Fixed words, no identifiers (S-09).
+ */
+function refuseStatementWithdrawal(
+  transaction: { sourceType: string | null },
+  command: TransactionCommand,
+): void {
+  if (transaction.sourceType !== STATEMENT_SOURCE_TYPE) return;
+  if (command !== 'REFUND' && command !== 'CANCEL') return;
+  throw RastaError.businessRule(STATEMENT_WITHDRAWAL_REFUSED);
+}
+
+export const STATEMENT_WITHDRAWAL_REFUSED =
+  "An approved statement's obligation is not refunded or cancelled; the statement is corrected only by a compensating statement";
 
 /** What a caller asks to do to a transaction — see `TransactionService.authorizeAct`. */
 export type TransactionAct = 'READ' | TransactionCommand;
