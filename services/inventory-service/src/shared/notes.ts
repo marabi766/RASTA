@@ -45,3 +45,21 @@ export const STOCK_COMMAND_NOTE =
   'holds longer than INVENTORY_LOCK_TIMEOUT_MS, or a refusal that reservations past ' +
   '`expiresAt` not yet released could still change, is 409 CONFLICT with Retry-After; retry ' +
   'with the same key.';
+
+export const RETURN_SHIPMENT_READ_NOTE =
+  'Closed by default (S-02). Read by the two organizations of a return shipment (ADR-048 § 2): ' +
+  'the owner of its destination warehouse — a role of INVENTORY_READER_ROLES or ' +
+  'INVENTORY_OPERATOR_ROLES (Q-103) — and its sender — a role of INVENTORY_CONSIGNEE_READER_ROLES ' +
+  '(Q-113, Q-133); all three ORGANIZATION_ADMIN by default, held in the organization the request ' +
+  'acts for. Any other organization, or a side the caller’s roles do not open, gets 404, never 403 ' +
+  '(S-03). No user id is shown. AUDITOR, SYSTEM_ADMIN and service tokens are refused (403).';
+
+export const RETURN_SHIPMENT_MOVE_NOTE =
+  'Only an operator of the destination warehouse’s owner records a return shipment (Q-133: the ' +
+  'order’s supplier); its sender reads it and is refused 403 FORBIDDEN here, any other ' +
+  'organization gets 404. This service records physical facts only: whether the return was ' +
+  'allowed is marketplace’s, which verifies every RETURN_SHIPMENT_* event against its own request. ' +
+  'Nothing here moves stock or money. One transaction: the row is locked, moved by ' +
+  'compare-and-set, and its tracking event, its RETURN_SHIPMENT_* event and the stored response ' +
+  'commit together. A shipment another command holds longer than INVENTORY_LOCK_TIMEOUT_MS is ' +
+  '409 CONFLICT with Retry-After; retry with the same key.';
