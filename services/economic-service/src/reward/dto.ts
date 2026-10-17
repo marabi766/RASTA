@@ -7,6 +7,14 @@ import {
   PARTICIPATION_MAX_WEIGHT,
   PARTICIPATION_MAX_WINDOW_DAYS,
 } from './participation';
+import {
+  RECOGNITION_BADGE_CODE,
+  RECOGNITION_BASES,
+  RECOGNITION_MAX_BADGES,
+  RECOGNITION_MAX_LEVELS,
+  RECOGNITION_MAX_THRESHOLD,
+  levelsAreLadder,
+} from './recognition';
 
 /**
  * Reward rule configuration (ADR-033, docs/10 § 10.8).
@@ -224,6 +232,110 @@ export interface ParticipationView {
     counted: boolean;
     effect: number;
   }[];
+}
+
+// ---------------------------------------------------------------------------
+// Levels and badges (COM-012 criterion 2)
+// ---------------------------------------------------------------------------
+
+const recognitionName = z.string().trim().min(1).max(80);
+const recognitionThreshold = z.number().int().min(0).max(RECOGNITION_MAX_THRESHOLD);
+
+/**
+ * A new version of the levels and badges.
+ *
+ * `basis` says what every threshold in it is measured on, and has no default:
+ * ADR-047 § 1 requires it explicit, and which one the product wants is docs/24
+ * Q-140, as are every threshold and name. Levels are given lowest first and
+ * ranked in that order; their thresholds rise strictly, so a value holds one
+ * level at most. There is no field for a benefit (Q-13, Q-31) and no update:
+ * the next version replaces this one from the instant it is created.
+ */
+export const createRecognitionRuleSchema = z
+  .object({
+    basis: z.enum(RECOGNITION_BASES),
+    levels: z
+      .array(z.object({ name: recognitionName, threshold: recognitionThreshold }).strict())
+      .max(RECOGNITION_MAX_LEVELS)
+      .refine(levelsAreLadder, 'level thresholds must rise strictly, lowest level first')
+      .refine(
+        (items) => new Set(items.map((item) => item.name)).size === items.length,
+        'each level name may appear once',
+      ),
+    badges: z
+      .array(
+        z
+          .object({
+            code: z.string().regex(RECOGNITION_BADGE_CODE),
+            name: recognitionName,
+            threshold: recognitionThreshold,
+          })
+          .strict(),
+      )
+      .max(RECOGNITION_MAX_BADGES)
+      .refine(
+        (items) => new Set(items.map((item) => item.code)).size === items.length,
+        'each badge code may appear once',
+      ),
+    /** "نمونه — نیازمند تصویب" for demonstration data (ADR-023). */
+    label: z.string().trim().max(200).optional(),
+  })
+  .strict()
+  .refine(
+    (dto) => dto.levels.length + dto.badges.length > 0,
+    'a version names at least one level or badge',
+  );
+
+export type CreateRecognitionRuleDto = z.infer<typeof createRecognitionRuleSchema>;
+
+/**
+ * `GET /v1/rewards/me/recognition`. It takes nothing, strictly: naming a user
+ * or an organization is a 400, not a silent read of the caller's own.
+ */
+export const myRecognitionQuerySchema = z.object({}).strict();
+
+export type MyRecognitionQuery = z.infer<typeof myRecognitionQuerySchema>;
+
+export interface RecognitionRuleApiView {
+  id: string;
+  version: number;
+  basis: string;
+  levels: { rank: number; name: string; threshold: number }[];
+  badges: { code: string; name: string; threshold: number }[];
+  label: string | null;
+  createdAt: string;
+  createdBy: string;
+}
+
+/**
+ * The caller's level and badges, and why. Only what is held: never the levels
+ * above, the distance to them, or the badges not held.
+ */
+export interface RecognitionView {
+  organizationId: string;
+  userId: string;
+  /**
+   * `NO_RULE` while no version exists (docs/24 Q-140); `NO_BASIS` when the
+   * version is read on the participation score and no participation rule
+   * exists (Q-139); otherwise `EVALUATED`.
+   */
+  status: 'NO_RULE' | 'NO_BASIS' | 'EVALUATED';
+  asOf: string;
+  rule: {
+    id: string;
+    version: number;
+    basis: string;
+    label: string | null;
+    createdAt: string;
+  } | null;
+  basis: {
+    kind: string;
+    value: number | null;
+    /** The participation rule version the score was read under; null on reward points. */
+    participationRuleVersion: number | null;
+  } | null;
+  level: { rank: number; name: string; threshold: number } | null;
+  badges: { code: string; name: string; threshold: number }[];
 }
 
 export interface RewardView {

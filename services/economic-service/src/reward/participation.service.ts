@@ -68,55 +68,72 @@ export class ParticipationService {
     const breakdown = await this.prisma.client.$transaction(
       async (client) => {
         const tx = client as ExtendedPrismaClient;
-        const asOf = await databaseNow(tx);
-        const rule = await this.ruleInForce(tx);
-        if (!rule)
-          return scoreParticipation({ rule, asOf, factCounts: new Map(), recentFacts: [] });
-
-        const { from, to } = participationWindow(rule, asOf);
-        const events = rule.contributions.map((contribution) => contribution.triggerEvent);
-
-        const counts = await tx.$queryRaw<{ triggerEvent: string; facts: number }[]>`
-          SELECT trigger_event AS "triggerEvent", count(*)::int AS "facts"
-            FROM reward_source_evaluation
-           WHERE organization_id = ${organizationId}
-             AND subject_user_id = ${userId}
-             AND occurred_at > ${from} AND occurred_at <= ${to}
-             AND trigger_event = ANY(${events}::text[])
-           GROUP BY trigger_event
-        `;
-
-        // Each fact's place among its kind in the window decides whether it
-        // counted, so the ordinal is taken over the whole window before the
-        // most recent few are kept.
-        const recentFacts = await tx.$queryRaw<ParticipationFactRow[]>`
-          SELECT "triggerEvent", "sourceReference", "occurredAt", "ordinal"::int AS "ordinal"
-            FROM (
-              SELECT trigger_event AS "triggerEvent", source_reference AS "sourceReference",
-                     occurred_at AS "occurredAt",
-                     row_number() OVER (PARTITION BY trigger_event
-                                        ORDER BY occurred_at, source_reference) AS "ordinal"
-                FROM reward_source_evaluation
-               WHERE organization_id = ${organizationId}
-                 AND subject_user_id = ${userId}
-                 AND occurred_at > ${from} AND occurred_at <= ${to}
-                 AND trigger_event = ANY(${events}::text[])
-            ) AS window_facts
-           ORDER BY "occurredAt" DESC, "sourceReference" DESC
-           LIMIT ${limit}
-        `;
-
-        return scoreParticipation({
-          rule,
-          asOf,
-          factCounts: new Map(counts.map((row) => [row.triggerEvent, row.facts])),
-          recentFacts,
-        });
+        return this.breakdownIn(tx, organizationId, userId, await databaseNow(tx), limit);
       },
       { isolationLevel: 'RepeatableRead' },
     );
 
     return { organizationId, userId, breakdown };
+  }
+
+  /**
+   * One person's score in one organization at `asOf`, read in the caller's
+   * transaction — so a reader that needs the score with something else (the
+   * levels and badges read on it) sees both in one snapshot. `limit` recent
+   * facts are explained; 0 explains none and skips that read.
+   */
+  async breakdownIn(
+    tx: ExtendedPrismaClient,
+    organizationId: string,
+    userId: string,
+    asOf: Date,
+    limit: number,
+  ): Promise<ParticipationBreakdown> {
+    const rule = await this.ruleInForce(tx);
+    if (!rule) return scoreParticipation({ rule, asOf, factCounts: new Map(), recentFacts: [] });
+
+    const { from, to } = participationWindow(rule, asOf);
+    const events = rule.contributions.map((contribution) => contribution.triggerEvent);
+
+    const counts = await tx.$queryRaw<{ triggerEvent: string; facts: number }[]>`
+      SELECT trigger_event AS "triggerEvent", count(*)::int AS "facts"
+        FROM reward_source_evaluation
+       WHERE organization_id = ${organizationId}
+         AND subject_user_id = ${userId}
+         AND occurred_at > ${from} AND occurred_at <= ${to}
+         AND trigger_event = ANY(${events}::text[])
+       GROUP BY trigger_event
+    `;
+
+    // Each fact's place among its kind in the window decides whether it
+    // counted, so the ordinal is taken over the whole window before the
+    // most recent few are kept.
+    const recentFacts =
+      limit === 0
+        ? []
+        : await tx.$queryRaw<ParticipationFactRow[]>`
+      SELECT "triggerEvent", "sourceReference", "occurredAt", "ordinal"::int AS "ordinal"
+        FROM (
+          SELECT trigger_event AS "triggerEvent", source_reference AS "sourceReference",
+                 occurred_at AS "occurredAt",
+                 row_number() OVER (PARTITION BY trigger_event
+                                    ORDER BY occurred_at, source_reference) AS "ordinal"
+            FROM reward_source_evaluation
+           WHERE organization_id = ${organizationId}
+             AND subject_user_id = ${userId}
+             AND occurred_at > ${from} AND occurred_at <= ${to}
+             AND trigger_event = ANY(${events}::text[])
+        ) AS window_facts
+       ORDER BY "occurredAt" DESC, "sourceReference" DESC
+       LIMIT ${limit}
+    `;
+
+    return scoreParticipation({
+      rule,
+      asOf,
+      factCounts: new Map(counts.map((row) => [row.triggerEvent, row.facts])),
+      recentFacts,
+    });
   }
 
   /**
@@ -211,7 +228,7 @@ function ruleTerms(rule: ParticipationRuleView) {
 }
 
 /** The instant a score is taken at: the database's, as every other window here. */
-async function databaseNow(tx: ExtendedPrismaClient): Promise<Date> {
+export async function databaseNow(tx: ExtendedPrismaClient): Promise<Date> {
   const [row] = await tx.$queryRaw<{ now: Date }[]>`SELECT clock_timestamp() AS now`;
   if (!row) throw RastaError.internal('The database returned no clock reading');
   return row.now;
