@@ -485,7 +485,7 @@ Cursor؛ هر سازمانِ دارای تأیید `CONTRACTING` یا دورهٔ
 (Fail Closed). Snapshot و رویداد زنده با هم تکرارپذیرند. **این مدل خواندنی مشورتی است (بازبینی دور دوم Codex):** برای فهرست و UI است، نه منبع تصمیم؛
 چون پس از قطعی بلندتر از نگه‌داشت لاگ (هفت روز) تعلیقِ منقضی‌شده را نمی‌بیند، و تعلیقی که در `supplier-service` Commit شده ولی Outbox هنوز
 نرسانده را هم. **صلاحیت برای پیشنهاد تصمیمی قطعی است:** هنگام ثبت، `construction-service` وضعیت همان یک پیمانکار را با
-`GET /v1/suppliers/standing-snapshot/{organizationId}` (همان `@AllowService` و توکن بی مستأجر) از `supplier-service` می‌پرسد (بیرون از
+`GET /v1/suppliers/standing-snapshot/{organizationId}` (توکن بی مستأجر؛ `@AllowService` این مسیر `procurement-service` را هم دارد و لحظهٔ تأیید `GOODS_SUPPLY` را هم می‌دهد، ADR-070 § ۷) از `supplier-service` می‌پرسد (بیرون از
 تراکنش و قفل مناقصه) و اگر در دسترس نبود `503/504` می‌دهد، یعنی Fail Closed (`StandingAuthority`). همین مسیر، بازسازی پس از `down.sql` است
 (`docs/runbooks/contractor-standing-bootstrap.md`).
 
@@ -515,7 +515,7 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 خواندن** (از جمله ردشده) `bid_access_log` و `BID_ACCESSED` دارد. بازگشایی Idempotent است (بار دوم همان نما با `alreadyOpened`، بی‌رویداد).
 پیش از بازگشایی کارفرما فقط شمار و مهر زمان دریافت را می‌بیند. **چهارچشمی برای بازگشایی** (Q-91، موقت تا تأیید صاحب محصول): بازگشایی به پیشنهاد یک کاربر مجاز و تأیید کاربر دوم نیاز دارد، هیچ‌کدام عضو سازمان پیشنهاددهنده نیست؛
 `CONSTRUCTION_TENDER_OPEN_FOUR_EYES` (پیش‌فرض روشن؛ خاموش فقط در `development` و `test`). **هنگام تأیید** عضویت _فعلی_ هر دو نفر (پیشنهاددهنده
-و تأییدکننده) دوباره از `identity-service` (`GET /v1/users/{id}/organizations`، فقط `construction-service`، توکن بی‌مستأجر) خوانده می‌شود، نه آنچه هنگام
+و تأییدکننده) دوباره از `identity-service` (`GET /v1/users/{id}/organizations`، فقط `construction-service` و `procurement-service`، توکن بی‌مستأجر) خوانده می‌شود، نه آنچه هنگام
 پیشنهاد بود؛ ناخوانا بودن ⇒ `502/504` و هیچ‌چیز باز نمی‌شود (`IDENTITY_SERVICE_URL`، `CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS`). خودِ پیشنهاد هم
 یک ردیف `bid_access_log` و `BID_ACCESSED` (هدف `PROPOSE_OPENING`، بی `bidId`) در همان تراکنش می‌گذارد. بررسی تعارض منافع **پیش از** هر پاسخی دربارهٔ
 وضعیت مناقصه (`NOT_CLOSED`/`NOT_OPENED`) انجام می‌شود. `down.sql` مهاجرت تا وقتی بازگشایی یا پیشنهادی در انتظار ثبت شده باشد رد می‌کند.
