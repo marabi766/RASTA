@@ -11,6 +11,7 @@ import {
   RETURN_COMMAND_LABELS,
   RETURN_REASON_MAX,
   RETURN_REASON_MIN,
+  RETURN_REFUSAL_TEXT,
   quantityField,
   type ReturnCommand,
 } from '@/lib/return-fields';
@@ -351,6 +352,8 @@ const REFUSAL_MESSAGES: Record<Extract<ReturnFormState, { kind: 'REFUSED' }>['re
   CSRF: 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.',
   SUBMISSION: 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.',
   COMMAND: 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.',
+  CANCEL_NOT_IN_PORTAL: RETURN_REFUSAL_TEXT.CANCEL_NOT_IN_PORTAL,
+  CANCEL_UNCHECKED: RETURN_REFUSAL_TEXT.CANCEL_UNCHECKED,
 };
 
 export const HELD_MESSAGE =

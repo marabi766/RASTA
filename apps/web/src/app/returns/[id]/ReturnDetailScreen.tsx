@@ -11,7 +11,7 @@ import {
 } from '@/ui';
 import { formatJalaliDateLong, formatJalaliDateTime, toPersianDigits } from '@/lib/format';
 import {
-  RETURN_CANCEL_WITHHELD,
+  RETURN_CANCEL_NOT_IN_PORTAL,
   RETURN_DONE_MESSAGES,
   RETURN_SHIPMENT_UNVERIFIED,
   returnDispositionLabel,
@@ -45,8 +45,11 @@ export interface ReturnDetailScreenProps {
    * this request (`assessShipments`); null when the request itself was not read.
    */
   readonly shipments: ShipmentAssessment | null;
-  /** Why the buyer is not offered the withdrawal now (`cancelWithheldFor`), if it is not. */
-  readonly cancelWithheld?: keyof typeof RETURN_CANCEL_WITHHELD | null;
+  /**
+   * The viewer is the buyer of an authorized request, which the service would
+   * let it withdraw but this portal does not (`cancelNotInPortal`): told so.
+   */
+  readonly cancelNotInPortal?: boolean;
   readonly offered: readonly OfferedReturnCommand[];
   readonly csrfToken: string;
   readonly binding: Binding;
@@ -273,7 +276,7 @@ export function ReturnDetailScreen({
   result,
   productNames,
   shipments,
-  cancelWithheld = null,
+  cancelNotInPortal = false,
   offered,
   csrfToken,
   binding,
@@ -332,9 +335,9 @@ export function ReturnDetailScreen({
       </Section>
 
       <Section headingId="return-next" title="اقدام بعدی شما">
-        {cancelWithheld ? (
+        {cancelNotInPortal ? (
           <Alert tone="info" className="mb-3">
-            {RETURN_CANCEL_WITHHELD[cancelWithheld]}
+            {RETURN_CANCEL_NOT_IN_PORTAL}
           </Alert>
         ) : null}
         <ReturnCommands
@@ -344,7 +347,7 @@ export function ReturnDetailScreen({
           binding={binding}
           sessionMaxAgeSeconds={sessionMaxAgeSeconds}
           pageHref={pageHref}
-          {...(cancelWithheld ? {} : { emptyNote: 'در این مرحله اقدامی از سوی شما لازم نیست.' })}
+          {...(cancelNotInPortal ? {} : { emptyNote: 'در این مرحله اقدامی از سوی شما لازم نیست.' })}
         />
       </Section>
 

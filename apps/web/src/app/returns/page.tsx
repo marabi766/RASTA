@@ -20,9 +20,9 @@ import { ReturnsScreen } from './ReturnsScreen';
  * (`@Roles` of `GET /v1/returns`) and lists only the caller's own side
  * (`role`), and a refusal is rendered as an outcome. The "action needed" cue
  * is `returnCommandsFor` — a copy of the service's own checks, from the access
- * token's roles — with the goods' state taken as unknown: the list reads no
- * shipment, so an authorized request's withdrawal is never cued here. The
- * actions themselves are on each request's page.
+ * token's roles, as the request's own page uses it, so an authorized request
+ * is never cued for a withdrawal the portal does not offer. The actions
+ * themselves are on each request's page.
  */
 export const dynamic = 'force-dynamic';
 
@@ -56,7 +56,7 @@ export default async function ReturnsPage({
   const actionable = new Set(
     result.kind === 'OK'
       ? result.data.items
-          .filter((request) => returnCommandsFor(caller, request, 'UNKNOWN').length > 0)
+          .filter((request) => returnCommandsFor(caller, request).length > 0)
           .map((request) => request.id)
       : [],
   );

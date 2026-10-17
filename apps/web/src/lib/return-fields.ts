@@ -92,7 +92,7 @@ export const RETURN_COMMAND_CONSEQUENCES: Readonly<Record<ReturnCommand, string>
     'می‌پذیرید که کالا بازگردانده شود. این تصمیم برگشت‌پذیر نیست. چیزی هنوز جابه‌جا نمی‌شود: کالا باید فرستاده، دریافت و بازرسی شود، و هیچ بازپرداختی از این صفحه انجام نمی‌شود.',
   REJECT: 'درخواست بازگشت رد می‌شود و پایان می‌یابد. این تصمیم برگشت‌پذیر نیست.',
   CANCEL:
-    'درخواست بازگشت پیش از ارسال کالا پس گرفته می‌شود و پایان می‌یابد. این کار برگشت‌پذیر نیست.',
+    'درخواست بازگشت پیش از پذیرش تأمین‌کننده پس گرفته می‌شود و پایان می‌یابد. این کار برگشت‌پذیر نیست.',
 };
 
 /** What the page says once a command is confirmed (the signed flash, `server/flash.ts`). */
@@ -167,6 +167,12 @@ export const RETURN_REFUSAL_TEXT = {
   CHANGED: 'این درخواست بازگشت هم‌زمان تغییر کرد. صفحه را تازه کنید و دوباره بسنجید. چیزی ثبت نشد.',
   VALIDATION: 'اطلاعات واردشده پذیرفته نشد؛ دلیل و تعدادها را بررسی کنید. درخواستی ثبت نشد.',
   FALLBACK: 'این درخواست پذیرفته نشد و ثبت نشد. صفحه را تازه کنید و دوباره بسنجید.',
+  /** The action re-read the request: it is no longer one the portal withdraws. Nothing was sent. */
+  CANCEL_NOT_IN_PORTAL:
+    'این درخواست دیگر در وضعیتی نیست که درگاه لغوش را بفرستد (تأمین‌کننده آن را پذیرفته یا تصمیم دیگری گرفته شده است)؛ چیزی فرستاده نشد. صفحه را تازه کنید.',
+  /** The action could not re-read the request, so it could not tell. Nothing was sent. */
+  CANCEL_UNCHECKED:
+    'وضعیت کنونی این درخواست خوانده نشد، پس لغو فرستاده نشد. کمی بعد صفحه را تازه کنید و دوباره تلاش کنید.',
 } as const;
 
 /**
@@ -178,16 +184,12 @@ export const RETURN_REMAINING_UNKNOWN_NOTE =
   'اکنون نمی‌توان همهٔ درخواست‌های بازگشت این سفارش را خواند، پس مقدار قابل بازگشت هر ردیف روشن نیست و فرم درخواست نشان داده نمی‌شود. کمی بعد صفحه را تازه کنید.';
 
 /**
- * Why the buyer is not offered the withdrawal of an AUTHORIZED request: goods
- * of it are recorded on their way (or further), or whether they are cannot be
- * told now. Withdrawing then would release units that are already coming back.
+ * Said to the buyer of an AUTHORIZED request in place of a withdrawal form: the
+ * portal offers the withdrawal only before authorization until the backend can
+ * refuse one once the goods have left (`PORTAL_CANCEL_FROM`, `server/returns.ts`).
  */
-export const RETURN_CANCEL_WITHHELD = {
-  MOVING:
-    'لغو این درخواست عرضه نمی‌شود: کالای آن ثبت شده و در راه بازگشت است یا رسیده است. پس از جابه‌جایی کالا، درخواست دیگر پس گرفته نمی‌شود.',
-  UNKNOWN:
-    'لغو این درخواست اکنون عرضه نمی‌شود: روشن نیست که کالای آن جابه‌جا شده است یا نه (وضعیت محموله خوانده نشد یا به نقش شما نشان داده نمی‌شود). کمی بعد صفحه را تازه کنید.',
-} as const;
+export const RETURN_CANCEL_NOT_IN_PORTAL =
+  'لغو درخواستی که تأمین‌کننده پذیرفته است هنوز در این درگاه ممکن نیست: درگاه نمی‌تواند مطمئن شود که کالای آن هنوز فرستاده نشده است. لغو فقط پیش از پذیرش تأمین‌کننده از این صفحه انجام می‌شود.';
 
 /** A shipment recorded for this request whose facts do not match it — never shown as progress. */
 export const RETURN_SHIPMENT_UNVERIFIED =

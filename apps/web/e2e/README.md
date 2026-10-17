@@ -74,12 +74,13 @@ hundred days ago. The job starts marketplace-service with
 `MARKETPLACE_RETURN_WINDOW_DAYS=30`, a value for that throwaway stack only
 (Q-132 leaves the real window open; with none set every return is refused).
 Everything after that is done **in the browser**: the buyer asks, the old order
-is refused in fixed words, the supplier authorizes, the buyer withdraws a
-second request. The goods' side — inventory-service's commands, which the
+is refused in fixed words, the supplier authorizes (and the buyer's withdrawal
+form drawn before that is refused when sent after, nothing sent), the buyer
+withdraws a second request while it is still only requested. The goods' side — inventory-service's commands, which the
 portal does not offer — is recorded through its API: first a shipment the third
 organization forges into its own warehouse naming the buyer and the request
 (shown to the buyer only as not borne out), then the supplier's own (shown as
-progress, and from then on the withdrawal is withheld).
+progress). An authorized request offers no withdrawal in the portal at all.
 
 - It needs `WEB_LIVE_STACK_E2E_RETURNS=true` (the fixture loaded, the window
   set), and under `CI` a skip fails the job.

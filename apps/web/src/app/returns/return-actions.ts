@@ -10,7 +10,13 @@ import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
 import { mintFlash } from '@/server/flash';
 import { verifyReturnStamp, type VerifiedReturnStamp } from '@/server/return-replay';
-import { issueReturnCommand, issueReturnRequest, type ReturnWriteResult } from '@/server/returns';
+import {
+  fetchReturn,
+  issueReturnCommand,
+  issueReturnRequest,
+  portalSendsCancel,
+  type ReturnWriteResult,
+} from '@/server/returns';
 import type { WebSession } from '@/server/session';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 
@@ -28,7 +34,10 @@ import { afterRetry, type ReturnFormState } from './return-form-state';
  *
  * **Whether the command is allowed is not decided here.** marketplace-service
  * decides — roles, side, state, the return window — and its refusal is said in
- * fixed words; the page only chose what to draw.
+ * fixed words; the page only chose what to draw. One narrowing is the
+ * portal's own: a withdrawal is sent only for a request re-read just before
+ * as not yet authorized (`PORTAL_CANCEL_FROM`, `portalSendsCancel`), so a form
+ * drawn earlier, or a crafted stamp, cannot withdraw an authorized one.
  *
  * Once a command is unconfirmed, no answer to a retry but a successful one
  * (which redirects) may claim the first request did not commit.
@@ -151,6 +160,14 @@ export async function submitReturnCommand(
   const state = await gated(scope, form, async (session, stamp, submissionId) => {
     const { command } = stamp;
     if (command === 'REQUEST') return { kind: 'REFUSED', reason: 'COMMAND' };
+    if (command === 'CANCEL') {
+      const current = await fetchReturn(session, returnId);
+      if (current.kind === 'NOT_FOUND') return { kind: 'NOT_FOUND' };
+      if (current.kind !== 'OK') return { kind: 'REFUSED', reason: 'CANCEL_UNCHECKED' };
+      if (!portalSendsCancel(current.data)) {
+        return { kind: 'REFUSED', reason: 'CANCEL_NOT_IN_PORTAL' };
+      }
+    }
     const result = await issueReturnCommand(session, returnId, command, submissionId);
     return outcome(
       result,

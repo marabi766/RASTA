@@ -30,9 +30,18 @@ export type ReturnFormState =
        * `NO_SESSION`: ended. `SESSION_UNAVAILABLE`: none usable right now, may
        * come back. `REPLAY`: the form's replay deadline has passed or its stamp
        * is not this form's. `COMMAND`: the stamp cannot carry this command.
+       * `CANCEL_NOT_IN_PORTAL`: the request, re-read, is not one the portal
+       * withdraws. `CANCEL_UNCHECKED`: it could not be re-read.
        * Nothing was sent in any of them.
        */
-      readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION' | 'REPLAY' | 'COMMAND';
+      readonly reason:
+        | SessionRefusal
+        | 'CSRF'
+        | 'SUBMISSION'
+        | 'REPLAY'
+        | 'COMMAND'
+        | 'CANCEL_NOT_IN_PORTAL'
+        | 'CANCEL_UNCHECKED';
     }
   /** Not sent: the submission could not be remembered in this browser (`lib/unresolved-return.ts`). */
   | { readonly kind: 'STORAGE_UNAVAILABLE' }

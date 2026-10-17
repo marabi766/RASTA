@@ -21,8 +21,7 @@ import {
 
 import {
   assessShipments,
-  cancelWithheldFor,
-  goodsStateOf,
+  cancelNotInPortal,
   isShipmentOfRequest,
   canReadReturns,
   canRequestReturn,
@@ -32,6 +31,7 @@ import {
   fetchReturnsOfOrder,
   issueReturnCommand,
   issueReturnRequest,
+  portalSendsCancel,
   returnCallerOf,
   returnCommandsFor,
   returnableLines,
@@ -102,36 +102,32 @@ describe('who may ask for a return (mirrors POST /v1/orders/:id/returns)', () =>
 describe('what may be done to a request (mirrors return-access.ts and the transitions)', () => {
   it('the supplier authorizes or rejects a REQUESTED one, and nothing after', () => {
     for (const role of ['SUPPLIER', 'ORGANIZATION_ADMIN', 'UNION_ADMIN', 'SYSTEM_ADMIN']) {
-      expect(returnCommandsFor(caller(SUPPLIER, [role]), REQUESTED, 'NONE')).toEqual([
+      expect(returnCommandsFor(caller(SUPPLIER, [role]), REQUESTED)).toEqual([
         'AUTHORIZE',
         'REJECT',
       ]);
     }
     for (const request of [AUTHORIZED, REJECTED, CANCELLED]) {
-      expect(returnCommandsFor(caller(SUPPLIER, ['SUPPLIER']), request, 'NONE')).toEqual([]);
+      expect(returnCommandsFor(caller(SUPPLIER, ['SUPPLIER']), request)).toEqual([]);
     }
-    expect(returnCommandsFor(caller(SUPPLIER, ['PROCUREMENT_USER']), REQUESTED, 'NONE')).toEqual(
-      [],
-    );
+    expect(returnCommandsFor(caller(SUPPLIER, ['PROCUREMENT_USER']), REQUESTED)).toEqual([]);
   });
 
-  it('the buyer withdraws a REQUESTED or AUTHORIZED one, and never decides', () => {
+  it('the buyer withdraws a REQUESTED one, and never decides', () => {
     const buyer = caller(BUYER, ['PROCUREMENT_USER']);
-    expect(returnCommandsFor(buyer, REQUESTED, 'NONE')).toEqual(['CANCEL']);
-    expect(returnCommandsFor(buyer, AUTHORIZED, 'NONE')).toEqual(['CANCEL']);
-    expect(returnCommandsFor(buyer, REJECTED, 'NONE')).toEqual([]);
-    expect(returnCommandsFor(buyer, CANCELLED, 'NONE')).toEqual([]);
-    expect(returnCommandsFor(caller(BUYER, ['SUPPLIER']), REQUESTED, 'NONE')).toEqual([]);
+    expect(returnCommandsFor(buyer, REQUESTED)).toEqual(['CANCEL']);
+    expect(returnCommandsFor(buyer, AUTHORIZED)).toEqual([]);
+    expect(returnCommandsFor(buyer, REJECTED)).toEqual([]);
+    expect(returnCommandsFor(buyer, CANCELLED)).toEqual([]);
+    expect(returnCommandsFor(caller(BUYER, ['SUPPLIER']), REQUESTED)).toEqual([]);
   });
 
   it('nothing for a third organization, the auditor, or a token with no organization', () => {
-    expect(returnCommandsFor(caller(STRANGER, ['ORGANIZATION_ADMIN']), REQUESTED, 'NONE')).toEqual(
-      [],
-    );
+    expect(returnCommandsFor(caller(STRANGER, ['ORGANIZATION_ADMIN']), REQUESTED)).toEqual([]);
     expect(
-      returnCommandsFor(caller(SUPPLIER, ['ORGANIZATION_ADMIN', 'AUDITOR']), REQUESTED, 'NONE'),
+      returnCommandsFor(caller(SUPPLIER, ['ORGANIZATION_ADMIN', 'AUDITOR']), REQUESTED),
     ).toEqual([]);
-    expect(returnCommandsFor(caller(null, ['SYSTEM_ADMIN']), REQUESTED, 'NONE')).toEqual([]);
+    expect(returnCommandsFor(caller(null, ['SYSTEM_ADMIN']), REQUESTED)).toEqual([]);
   });
 
   it('a side is the organization’s place in the order, nothing else', () => {
@@ -357,7 +353,6 @@ describe('which listed shipments are this request’s goods', () => {
       verified: [],
       unverified: 1,
     });
-    expect(goodsStateOf(AUTHORIZED, assessShipments(AUTHORIZED, listed([forged])))).toBe('NONE');
   });
 
   it.each<[string, Partial<ReturnShipment>]>([
@@ -451,55 +446,55 @@ describe('which listed shipments are this request’s goods', () => {
 });
 
 /**
- * PR 336 review 1, finding 2: with the mirror off, marketplace still says
- * AUTHORIZED after the goods left, and a withdrawal would release their units.
+ * PR 336 review 2, finding 2 and the PM ruling: the portal cannot prove that
+ * no goods of an authorized request have left, so it does not withdraw one.
  */
-describe('the withdrawal, against what the goods did', () => {
+describe('the withdrawal of an authorized request, not in the portal', () => {
   const buyer = caller(BUYER, ['ORGANIZATION_ADMIN']);
-  const known = (verified: ReturnShipment[]) =>
-    ({ kind: 'KNOWN', verified, unverified: 0 }) as const;
 
-  it('offered for an authorized request only while no goods of it are known to be moving', () => {
-    const none = goodsStateOf(AUTHORIZED, known([]));
-    expect(none).toBe('NONE');
-    expect(returnCommandsFor(buyer, AUTHORIZED, none)).toEqual(['CANCEL']);
-    expect(cancelWithheldFor(buyer, AUTHORIZED, none)).toBeNull();
-  });
-
-  it('withheld, and said why, once a verified shipment is listed', () => {
-    const goods = goodsStateOf(AUTHORIZED, known([INSPECTED_SHIPMENT]));
-    expect(goods).toBe('MOVING');
-    expect(returnCommandsFor(buyer, AUTHORIZED, goods)).toEqual([]);
-    expect(cancelWithheldFor(buyer, AUTHORIZED, goods)).toBe('MOVING');
-  });
-
-  it('withheld when the goods’ side is refused, unavailable or incomplete', () => {
-    for (const reason of ['FORBIDDEN', 'UNAVAILABLE', 'INCOMPLETE'] as const) {
-      const goods = goodsStateOf(AUTHORIZED, { kind: 'UNKNOWN', reason });
-      expect(goods).toBe('UNKNOWN');
-      expect(returnCommandsFor(buyer, AUTHORIZED, goods)).toEqual([]);
-      expect(cancelWithheldFor(buyer, AUTHORIZED, goods)).toBe('UNKNOWN');
+  it('not offered, and the buyer is told why — whatever the goods did or did not do', () => {
+    for (const request of [
+      AUTHORIZED,
+      { ...AUTHORIZED, returnShipmentId: null, inTransitAt: null },
+      { ...AUTHORIZED, returnShipmentId: INSPECTED_SHIPMENT.id },
+    ]) {
+      expect(returnCommandsFor(buyer, request)).toEqual([]);
+      expect(cancelNotInPortal(buyer, request)).toBe(true);
     }
   });
 
-  it('withheld whatever inventory says once marketplace mirrored a shipment or a physical step', () => {
+  it('a requested one stays withdrawable, and nothing is said about it', () => {
+    expect(returnCommandsFor(buyer, REQUESTED)).toEqual(['CANCEL']);
+    expect(cancelNotInPortal(buyer, REQUESTED)).toBe(false);
+  });
+
+  it('nothing is said to someone who could not withdraw it anyway, or after the service would not', () => {
+    expect(cancelNotInPortal(caller(SUPPLIER, ['SUPPLIER']), AUTHORIZED)).toBe(false);
+    expect(cancelNotInPortal(caller(STRANGER, ['ORGANIZATION_ADMIN']), AUTHORIZED)).toBe(false);
+    expect(cancelNotInPortal(caller(BUYER, ['AUDITOR']), AUTHORIZED)).toBe(false);
     for (const request of [
-      { ...AUTHORIZED, returnShipmentId: INSPECTED_SHIPMENT.id },
+      REJECTED,
+      CANCELLED,
       { ...AUTHORIZED, status: 'IN_TRANSIT', inTransitAt: '2026-10-08T08:00:00.000Z' },
     ]) {
-      expect(goodsStateOf(request, known([]))).toBe('MOVING');
-      expect(returnCommandsFor(buyer, request, goodsStateOf(request, known([])))).toEqual([]);
+      expect(cancelNotInPortal(buyer, request)).toBe(false);
     }
   });
 
-  it('a requested one stays withdrawable: no shipment can be its progress before authorization', () => {
-    expect(goodsStateOf(REQUESTED, { kind: 'UNKNOWN', reason: 'FORBIDDEN' })).toBe('NONE');
-    expect(returnCommandsFor(buyer, REQUESTED, 'NONE')).toEqual(['CANCEL']);
-  });
-
-  it('nothing is said to someone who could not withdraw it anyway', () => {
-    expect(cancelWithheldFor(caller(SUPPLIER, ['SUPPLIER']), AUTHORIZED, 'MOVING')).toBeNull();
-    expect(cancelWithheldFor(buyer, REJECTED, 'MOVING')).toBeNull();
+  it('the action sends a withdrawal only of a requested one — or the replay of one already made', () => {
+    expect(portalSendsCancel(REQUESTED)).toBe(true);
+    expect(portalSendsCancel(CANCELLED)).toBe(true);
+    for (const status of [
+      'AUTHORIZED',
+      'REJECTED',
+      'IN_TRANSIT',
+      'RECEIVED',
+      'INSPECTED',
+      'RESOLVED',
+      'SOMETHING_NEW',
+    ]) {
+      expect(portalSendsCancel({ ...AUTHORIZED, status })).toBe(false);
+    }
   });
 });
 

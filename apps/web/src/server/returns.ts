@@ -420,31 +420,6 @@ export function assessShipments(
   return { kind: 'KNOWN', verified, unverified: claims.length - verified.length };
 }
 
-/**
- * Whether goods of the request are on their way or further:
- *
- * - `MOVING` — marketplace-service mirrored a shipment or a physical step, or a
- *   verified shipment is listed;
- * - `NONE` — the request is not authorized (no shipment can be its progress),
- *   or inventory's answer was read in full and none of it is this request's;
- * - `UNKNOWN` — for an authorized request whose goods' side was not shown to
- *   this person, could not be read, or not read in full.
- */
-export type GoodsState = 'NONE' | 'MOVING' | 'UNKNOWN';
-
-export function goodsStateOf(request: ReturnRequest, shipments: ShipmentAssessment): GoodsState {
-  if (
-    request.returnShipmentId !== null ||
-    request.inTransitAt !== null ||
-    PHYSICAL_RETURN_STATUSES.includes(request.status as ReturnStatus)
-  ) {
-    return 'MOVING';
-  }
-  if (request.status !== 'AUTHORIZED') return 'NONE';
-  if (shipments.kind === 'UNKNOWN') return 'UNKNOWN';
-  return shipments.verified.length > 0 ? 'MOVING' : 'NONE';
-}
-
 // ---------------------------------------------------------------------------
 // Who may do what (mirrors marketplace-service; pinned by the contract spec)
 // ---------------------------------------------------------------------------
@@ -580,19 +555,25 @@ function mayWithdraw(caller: ReturnCaller, request: ReturnRequest): boolean {
 }
 
 /**
- * The commands on `request` marketplace-service would take from this caller
- * now — **and**, for the withdrawal, only while no goods of it are known to be
- * moving (PR 336 review 1, finding 2). marketplace-service still says
- * AUTHORIZED after a dispatch while its mirror is off, and a withdrawal then
- * releases units that are on their way back, so the buyer could ask for the
- * same units again. The portal withholds it whenever goods are `MOVING` or
- * their state is `UNKNOWN` (`goodsStateOf`); `cancelWithheldFor` says why.
- * The service's own guard is separate backend work.
+ * The statuses the **portal** offers — and its action sends — a withdrawal
+ * from: only a request not yet authorized (PR 336 review 2, PM ruling).
+ *
+ * marketplace-service also takes a withdrawal of an AUTHORIZED request, and
+ * keeps saying AUTHORIZED after the goods left while its mirror is off; the
+ * withdrawal then releases units already on their way back. Whether goods have
+ * moved is not something the portal can prove — a partial shipment, a role
+ * that does not see the goods' side, or a form drawn before the dispatch all
+ * defeat it — so until the backend refuses a withdrawal once a shipment exists
+ * (inventory verifying the return with marketplace before dispatch, and
+ * marketplace refusing the cancel), the portal does not offer one at all for
+ * an authorized request, and its action refuses it (`return-actions.ts`).
  */
+export const PORTAL_CANCEL_FROM: readonly ReturnStatus[] = ['REQUESTED'];
+
+/** The commands on `request` this portal offers this caller now (see {@link PORTAL_CANCEL_FROM}). */
 export function returnCommandsFor(
   caller: ReturnCaller,
   request: ReturnRequest,
-  goods: GoodsState,
 ): ReturnDecisionCommand[] {
   if (caller.organizationId === null) return [];
   const status = request.status as ReturnStatus;
@@ -609,7 +590,7 @@ export function returnCommandsFor(
   if (
     mayWithdraw(caller, request) &&
     RETURN_COMMAND_FROM.CANCEL.includes(status) &&
-    goods === 'NONE'
+    PORTAL_CANCEL_FROM.includes(status)
   ) {
     commands.push('CANCEL');
   }
@@ -617,19 +598,30 @@ export function returnCommandsFor(
 }
 
 /**
- * Why the buyer, who could otherwise withdraw this request, is not offered it:
- * the goods' state — said in fixed words (`RETURN_CANCEL_WITHHELD`) — or null.
+ * Whether the action sends a withdrawal of a request it has just re-read
+ * (`return-actions.ts`): only one the portal withdraws, or one already
+ * withdrawn — that send can only be the replay of this submission's own
+ * withdrawal, which the service confirms under the same key, or a refusal.
+ * Anything else — AUTHORIZED, goods on the way, a status this portal does not
+ * know — is refused before anything is sent.
  */
-export function cancelWithheldFor(
-  caller: ReturnCaller,
-  request: ReturnRequest,
-  goods: GoodsState,
-): Exclude<GoodsState, 'NONE'> | null {
-  if (goods === 'NONE' || !mayWithdraw(caller, request)) return null;
-  return RETURN_COMMAND_FROM.CANCEL.includes(request.status as ReturnStatus) ||
-    PHYSICAL_RETURN_STATUSES.includes(request.status as ReturnStatus)
-    ? goods
-    : null;
+export function portalSendsCancel(request: ReturnRequest): boolean {
+  const status = request.status as ReturnStatus;
+  return PORTAL_CANCEL_FROM.includes(status) || status === 'CANCELLED';
+}
+
+/**
+ * Whether this caller is the buyer of a request the service would let it
+ * withdraw but the portal does not (an AUTHORIZED one): the page says so in
+ * fixed words (`RETURN_CANCEL_NOT_IN_PORTAL`).
+ */
+export function cancelNotInPortal(caller: ReturnCaller, request: ReturnRequest): boolean {
+  const status = request.status as ReturnStatus;
+  return (
+    mayWithdraw(caller, request) &&
+    RETURN_COMMAND_FROM.CANCEL.includes(status) &&
+    !PORTAL_CANCEL_FROM.includes(status)
+  );
 }
 
 /**

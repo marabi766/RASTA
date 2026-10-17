@@ -73,8 +73,12 @@ interface Sent {
   readonly body: unknown;
 }
 
+/** What was written — every read the action makes first is kept apart, in `reads`. */
 let sent: Sent[] = [];
 let answer: () => Response;
+let reads: string[] = [];
+/** What reading the request answers: the action re-reads it before a withdrawal. */
+let current: () => Response;
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -110,7 +114,13 @@ beforeEach(() => {
   missingSessionReason.mockResolvedValue('NO_SESSION');
   redirect.mockClear();
   answer = () => json(200, AUTHORIZED);
+  reads = [];
+  current = () => json(200, REQUESTED);
   jest.spyOn(globalThis, 'fetch').mockImplementation((async (url: string, init: RequestInit) => {
+    if ((init.method ?? 'GET') === 'GET') {
+      reads.push(url);
+      return current();
+    }
     const body = init.body ? (JSON.parse(String(init.body)) as unknown) : null;
     sent.push({ url, key: new Headers(init.headers).get('idempotency-key'), body });
     return answer();
@@ -209,6 +219,93 @@ describe('a decision', () => {
       url: `http://gateway.test:3000/v1/returns/${RETURN_ID}/cancellation`,
       body: {},
     });
+  });
+});
+
+/**
+ * PR 336 review 2, finding 2, PM ruling: the portal withdraws only a request
+ * not yet authorized. A form drawn before the supplier authorized it, or a
+ * crafted stamp, must not withdraw one that is — the action re-reads first.
+ */
+describe('a withdrawal, re-read before it is sent', () => {
+  const CANCEL: ReturnTarget = { command: 'CANCEL', returnId: RETURN_ID };
+  const REQUEST_URL = `http://gateway.test:3000/v1/returns/${RETURN_ID}`;
+
+  it('a REQUESTED one is read, then withdrawn, then confirmed', async () => {
+    answer = () => json(200, { ...REQUESTED, status: 'CANCELLED' });
+    await expect(decide(form({}, CANCEL))).rejects.toThrow('NEXT_REDIRECT');
+    expect(reads).toEqual([REQUEST_URL]);
+    expect(sent.map((write) => write.url)).toEqual([`${REQUEST_URL}/cancellation`]);
+    const url = new URL(redirect.mock.calls[0]![0], 'http://portal.test');
+    expect(readFlash(SESSION, url.searchParams.get('flash'), RETURN_ID, ['CANCEL'])).toBe('CANCEL');
+  });
+
+  it('an AUTHORIZED one is refused, in fixed words, and nothing is sent — even with a validly signed stamp', async () => {
+    current = () => json(200, AUTHORIZED);
+    const state = await decide(form({}, CANCEL));
+    expect(state).toEqual({ kind: 'REFUSED', reason: 'CANCEL_NOT_IN_PORTAL' });
+    expect(reads).toEqual([REQUEST_URL]);
+    expect(sent).toHaveLength(0);
+  });
+
+  it.each(['IN_TRANSIT', 'RECEIVED', 'INSPECTED', 'RESOLVED', 'REJECTED', 'SOMETHING_NEW'])(
+    'nor one that is %s',
+    async (status) => {
+      current = () => json(200, { ...AUTHORIZED, status });
+      expect(await decide(form({}, CANCEL))).toEqual({
+        kind: 'REFUSED',
+        reason: 'CANCEL_NOT_IN_PORTAL',
+      });
+      expect(sent).toHaveLength(0);
+    },
+  );
+
+  it('a request that cannot be re-read is not withdrawn: refused, or not found — nothing sent', async () => {
+    for (const [status, code] of [
+      [503, 'SERVICE_UNAVAILABLE'],
+      [403, 'FORBIDDEN'],
+    ] as const) {
+      current = () => problem(status, code);
+      expect(await decide(form({}, CANCEL))).toEqual({
+        kind: 'REFUSED',
+        reason: 'CANCEL_UNCHECKED',
+      });
+    }
+    current = () => json(200, { id: RETURN_ID });
+    expect(await decide(form({}, CANCEL))).toEqual({ kind: 'REFUSED', reason: 'CANCEL_UNCHECKED' });
+    current = () => problem(404, 'NOT_FOUND');
+    expect(await decide(form({}, CANCEL))).toEqual({ kind: 'NOT_FOUND' });
+    expect(sent).toHaveLength(0);
+  });
+
+  it('a retry of an unconfirmed withdrawal that committed meanwhile is sent again, and confirmed by the replay', async () => {
+    const data = form({}, CANCEL);
+    answer = () => problem(503, 'SERVICE_UNAVAILABLE');
+    const first = (await decide(data)) as UnconfirmedReturn;
+    expect(first.kind).toBe('UNCONFIRMED');
+    current = () => json(200, { ...REQUESTED, status: 'CANCELLED' });
+    answer = () => json(200, { ...REQUESTED, status: 'CANCELLED' });
+    await expect(decide(data, first)).rejects.toThrow('NEXT_REDIRECT');
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.key).toBe(sent[0]!.key);
+  });
+
+  it('a retry refused because the request was authorized meanwhile proves nothing about the first', async () => {
+    const data = form({}, CANCEL);
+    answer = () => problem(503, 'SERVICE_UNAVAILABLE');
+    const first = (await decide(data)) as UnconfirmedReturn;
+    current = () => json(200, AUTHORIZED);
+    expect(await decide(data, first)).toMatchObject({
+      kind: 'UNCONFIRMED',
+      submissionId: first.submissionId,
+      retryRefused: true,
+    });
+    expect(sent).toHaveLength(1);
+  });
+
+  it('a decision is not re-read first: the service decides', async () => {
+    await expect(decide(form({}, AUTHORIZE))).rejects.toThrow('NEXT_REDIRECT');
+    expect(reads).toHaveLength(0);
   });
 });
 

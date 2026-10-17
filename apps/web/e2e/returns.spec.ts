@@ -5,7 +5,7 @@ import { expect, test, type Browser, type Locator, type Page } from '@playwright
 
 import { toLatinDigits, toPersianDigits } from '../src/lib/format';
 import {
-  RETURN_CANCEL_WITHHELD,
+  RETURN_CANCEL_NOT_IN_PORTAL,
   RETURN_REFUSAL_TEXT,
   RETURN_SHIPMENT_UNVERIFIED,
 } from '../src/lib/return-fields';
@@ -48,9 +48,11 @@ import { provisionPerson } from './provisioned-people';
  *   progress; and the request and the order are, to it, the same absence as
  *   an id that does not exist.
  *
- * Once the supplier's own shipment is on its way, the buyer is no longer
- * offered the withdrawal, although marketplace-service — whose mirror this
- * stack does not run — still says AUTHORIZED.
+ * The buyer withdraws only a request not yet authorized (PR 336 review 2, PM
+ * ruling): a withdrawal form drawn before the supplier authorized is refused
+ * when sent after, and nothing is sent; an authorized request — moving or not,
+ * marketplace-service says AUTHORIZED either way while its mirror is off in
+ * this stack — offers none, and says so.
  *
  * No money moves and none is claimed to: a return is not a refund (Q-76).
  */
@@ -241,8 +243,16 @@ test.describe.serial('returns, live (EXP-003)', () => {
     }
   });
 
-  test('the supplier finds it on its side and authorizes it', async ({ browser }) => {
+  test('the supplier finds it on its side and authorizes it; the buyer’s earlier withdrawal form is then refused', async ({
+    browser,
+  }) => {
     expect(returnPath).not.toBe('');
+    // The buyer has the request open, its withdrawal form drawn while REQUESTED.
+    const buyer = await as(browser, 'orgAdmin');
+    await buyer.page.goto(returnPath);
+    const stale = buyer.page.getByRole('form', { name: 'لغو درخواست بازگشت' });
+    await expect(stale).toBeVisible();
+
     const { page, close } = await as(browser, 'orgAdminB');
     try {
       await page.goto('/returns?role=SUPPLIER');
@@ -267,6 +277,26 @@ test.describe.serial('returns, live (EXP-003)', () => {
       await expectAccessible(page);
     } finally {
       await close();
+    }
+
+    try {
+      // Sent after the authorization: the action re-reads the request and
+      // refuses — nothing reaches marketplace-service, which would take it.
+      await stale.getByRole('button', { name: 'لغو درخواست بازگشت' }).click();
+      await expect(buyer.page.getByText(RETURN_REFUSAL_TEXT.CANCEL_NOT_IN_PORTAL)).toBeVisible();
+      await expectAccessible(buyer.page);
+      await buyer.page.goto(returnPath);
+      await expect(buyer.page.getByText('پذیرفته‌شده، در انتظار ارسال کالا').first()).toBeVisible();
+      await expect(
+        buyer.page.getByRole('list', { name: 'سابقهٔ درخواست بازگشت' }),
+      ).not.toContainText('خریدار درخواست را لغو کرد');
+      await expect(buyer.page.getByRole('form', { name: 'لغو درخواست بازگشت' })).toHaveCount(0);
+      await expect(buyer.page.getByRole('region', { name: 'اقدام بعدی شما' })).toContainText(
+        RETURN_CANCEL_NOT_IN_PORTAL,
+      );
+      await expectAccessible(buyer.page);
+    } finally {
+      await buyer.close();
     }
   });
 
@@ -306,15 +336,18 @@ test.describe.serial('returns, live (EXP-003)', () => {
       await expect(goods).toContainText(RETURN_SHIPMENT_UNVERIFIED);
       await expect(goods).toContainText('هنوز محموله‌ای');
       expect(await goods.innerText()).not.toContain('باربری جعلی');
-      // Nothing of this request is moving, so the buyer may still withdraw it.
-      await expect(buyer.page.getByRole('form', { name: 'لغو درخواست بازگشت' })).toBeVisible();
+      // Authorized: no withdrawal in the portal, whatever inventory lists.
+      await expect(buyer.page.getByRole('form', { name: 'لغو درخواست بازگشت' })).toHaveCount(0);
+      await expect(buyer.page.getByRole('region', { name: 'اقدام بعدی شما' })).toContainText(
+        RETURN_CANCEL_NOT_IN_PORTAL,
+      );
       await expectAccessible(buyer.page);
     } finally {
       await buyer.close();
     }
   });
 
-  test('the goods come back: both parties see them on their way, then received; the withdrawal is withheld', async ({
+  test('the goods come back: both parties see them on their way, then received; still no withdrawal', async ({
     browser,
   }) => {
     expect(returnPath).not.toBe('');
@@ -339,11 +372,11 @@ test.describe.serial('returns, live (EXP-003)', () => {
       await expect(goods).toContainText('باربری آزمون');
       // marketplace-service still says AUTHORIZED (its mirror is off here), yet
       // the goods left: withdrawing now would release units already coming
-      // back (PR 336 review 1, finding 2).
+      // back (PR 336 reviews 1 and 2, finding 2).
       await expect(buyer.page.getByText('پذیرفته‌شده، در انتظار ارسال کالا').first()).toBeVisible();
       await expect(buyer.page.getByRole('form', { name: 'لغو درخواست بازگشت' })).toHaveCount(0);
       await expect(buyer.page.getByRole('region', { name: 'اقدام بعدی شما' })).toContainText(
-        RETURN_CANCEL_WITHHELD.MOVING,
+        RETURN_CANCEL_NOT_IN_PORTAL,
       );
       await expectAccessible(buyer.page);
     } finally {

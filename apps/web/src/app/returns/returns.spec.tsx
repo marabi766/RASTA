@@ -2,9 +2,10 @@ import { render, screen, within } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
 import {
-  RETURN_CANCEL_WITHHELD,
+  RETURN_CANCEL_NOT_IN_PORTAL,
   RETURN_DONE_MESSAGES,
   RETURN_ORDER_NOT_COMPLETED_NOTE,
+  RETURN_REFUSAL_TEXT,
   RETURN_REMAINING_UNKNOWN_NOTE,
   RETURN_SHIPMENT_UNVERIFIED,
 } from '@/lib/return-fields';
@@ -64,7 +65,11 @@ beforeEach(() => window.sessionStorage.clear());
 
 describe('the list', () => {
   it.each([
-    ['the buyer’s requests, one needing action', page([REQUESTED, CANCELLED]), 'BUYER'],
+    [
+      'the buyer’s requests, one needing action',
+      page([REQUESTED, { ...CANCELLED, id: RETURN_ID.replace(/A/g, 'C') }]),
+      'BUYER',
+    ],
     [
       'the supplier’s, with the next page',
       { kind: 'OK', data: { items: [REQUESTED], nextCursor: 'RET_0' } },
@@ -135,26 +140,42 @@ describe('one request', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  it('the buyer of an authorized request with nothing moving, offered the withdrawal', async () => {
+  it('the buyer of a request not yet authorized, offered the withdrawal', async () => {
     const { container } = renderDetail({
-      result: { kind: 'OK', data: AUTHORIZED },
+      result: { kind: 'OK', data: REQUESTED },
       offered: [
         { command: 'CANCEL', submission: { id: 'sub_CANCELCANCELCANCELC', replay: STAMP } },
       ],
     });
     expect(await screen.findByRole('form', { name: 'لغو درخواست بازگشت' })).toBeInTheDocument();
+    expect(screen.queryByText(RETURN_CANCEL_NOT_IN_PORTAL)).toBeNull();
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  it('the buyer of an authorized request whose goods are on their way: no withdrawal, and why', async () => {
+  it('the buyer of an authorized request, nothing known to move: no withdrawal, and why', async () => {
+    const { container } = renderDetail({
+      result: { kind: 'OK', data: AUTHORIZED },
+      shipments: { kind: 'KNOWN', verified: [], unverified: 0 },
+      cancelNotInPortal: true,
+    });
+    expect(screen.queryByRole('form', { name: 'لغو درخواست بازگشت' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /لغو/ })).toBeNull();
+    expect(screen.getByRole('region', { name: 'اقدام بعدی شما' })).toHaveTextContent(
+      RETURN_CANCEL_NOT_IN_PORTAL,
+    );
+    expect(screen.queryByText(/اقدامی از سوی شما لازم نیست/)).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('the buyer of an authorized request whose goods are on their way: the same, and the goods', async () => {
     const { container } = renderDetail({
       result: { kind: 'OK', data: AUTHORIZED },
       shipments: { kind: 'KNOWN', verified: [INSPECTED_SHIPMENT], unverified: 0 },
-      cancelWithheld: 'MOVING',
+      cancelNotInPortal: true,
     });
     expect(screen.queryByRole('form', { name: 'لغو درخواست بازگشت' })).toBeNull();
     expect(screen.getByRole('region', { name: 'اقدام بعدی شما' })).toHaveTextContent(
-      RETURN_CANCEL_WITHHELD.MOVING,
+      RETURN_CANCEL_NOT_IN_PORTAL,
     );
     expect(screen.queryByText(/اقدامی از سوی شما لازم نیست/)).toBeNull();
     const goods = screen.getByRole('region', { name: 'جابه‌جایی و بازرسی کالا' });
@@ -195,14 +216,15 @@ describe('one request', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  it('the goods’ side unknown: no withdrawal, and why', async () => {
+  it('the goods’ side unknown: no withdrawal, and the same notice', async () => {
     const { container } = renderDetail({
       result: { kind: 'OK', data: AUTHORIZED },
       shipments: { kind: 'UNKNOWN', reason: 'FORBIDDEN' },
-      cancelWithheld: 'UNKNOWN',
+      cancelNotInPortal: true,
     });
+    expect(screen.queryByRole('form', { name: 'لغو درخواست بازگشت' })).toBeNull();
     expect(screen.getByRole('region', { name: 'اقدام بعدی شما' })).toHaveTextContent(
-      RETURN_CANCEL_WITHHELD.UNKNOWN,
+      RETURN_CANCEL_NOT_IN_PORTAL,
     );
     expect(await axe(container)).toHaveNoViolations();
   });
@@ -389,6 +411,35 @@ describe('what a form says after an attempt', () => {
       />,
     );
     expect(container.textContent).toMatch(text);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it.each<[string, ReturnFormState, string]>([
+    [
+      'a withdrawal of a request authorized meanwhile',
+      { kind: 'REFUSED', reason: 'CANCEL_NOT_IN_PORTAL' },
+      RETURN_REFUSAL_TEXT.CANCEL_NOT_IN_PORTAL,
+    ],
+    [
+      'a withdrawal whose request could not be re-read',
+      { kind: 'REFUSED', reason: 'CANCEL_UNCHECKED' },
+      RETURN_REFUSAL_TEXT.CANCEL_UNCHECKED,
+    ],
+  ])('%s: refused in fixed words, nothing sent', async (_name, initial, text) => {
+    const { container } = render(
+      <ReturnCommandForm
+        scope={{ kind: 'RETURN', returnId: RETURN_ID }}
+        command="CANCEL"
+        csrfToken="csrf"
+        submissionId="sub_CANCELCANCELCANCELC"
+        replay={STAMP}
+        binding={BINDING}
+        sessionMaxAgeSeconds={43_200}
+        pageHref={`/returns/${RETURN_ID}`}
+        initial={initial}
+      />,
+    );
+    expect(container).toHaveTextContent(text);
     expect(await axe(container)).toHaveNoViolations();
   });
 

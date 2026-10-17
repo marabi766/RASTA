@@ -27,6 +27,7 @@ import {
 } from '@/test/service-source';
 
 import {
+  PORTAL_CANCEL_FROM,
   RETURNABLE_ORDER_STATUS,
   RETURN_CANCEL_ROLES,
   RETURN_COMMAND_FIELD_MAPPING,
@@ -135,6 +136,13 @@ describe('who may do what', () => {
     expect(serviceText).toContain("this.decide(id, 'AUTHORIZED', 'authorize'");
     expect(serviceText).toContain("this.decide(id, 'REJECTED', 'reject'");
     expect(serviceText).toContain("this.decide(id, 'CANCELLED', 'cancel'");
+  });
+
+  it('the portal withdraws from fewer statuses than the service, never more — and no authorized one', () => {
+    // PR 336 review 2, PM ruling: until marketplace refuses a withdrawal once a
+    // shipment exists, the portal offers none for an authorized request.
+    for (const status of PORTAL_CANCEL_FROM) expect(RETURN_COMMAND_FROM.CANCEL).toContain(status);
+    expect(PORTAL_CANCEL_FROM).not.toContain('AUTHORIZED');
   });
 });
 
