@@ -51,7 +51,12 @@ import {
   resolveReturnShipmentSchema,
   returnShipmentViewSchema,
   returnTrackingViewSchema,
+  dispatchWithdrawalViewSchema,
+  returnRequestShipmentViewSchema,
+  withdrawDispatchSchema,
 } from '../return-shipment/dto';
+import { ReturnDispatchFenceService } from '../return-shipment/dispatch-fence';
+import { InternalReturnRequestController } from '../return-shipment/internal-return-request.controller';
 import { IdempotencyStore } from '../shared/idempotency';
 import { REFUSAL_REASONS, type RefusalArea } from '../shared/refusal';
 
@@ -124,6 +129,47 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'POST /v1/return-shipments/{id}/receive': { status: '200', schema: returnShipmentViewSchema },
   'POST /v1/return-shipments/{id}/inspection': { status: '200', schema: returnShipmentViewSchema },
   'POST /v1/return-shipments/{id}/resolution': { status: '200', schema: returnShipmentViewSchema },
+  // Internal (Q-133 (9)): marketplace-service asks before a cancellation and a release.
+  'GET /v1/internal/return-requests/{id}/return-shipment': {
+    status: '200',
+    schema: returnRequestShipmentViewSchema,
+  },
+  'POST /v1/internal/return-requests/{id}/dispatch-withdrawal': {
+    status: '200',
+    schema: dispatchWithdrawalViewSchema,
+  },
+};
+
+/**
+ * The internal routes' credential: a service's internal token in `X-Internal-Token` and nothing
+ * else — `AuthGuard` judges a request that also carries `Authorization` on that bearer token, as a
+ * user (marketplace-service's and contract-service's documents say the same).
+ */
+export const INTERNAL_TOKEN_SCHEME = 'internalToken';
+
+export const INTERNAL_TOKEN_API_KEY = {
+  type: 'apiKey' as const,
+  in: 'header',
+  name: 'X-Internal-Token',
+  description:
+    'A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user.',
+};
+
+const isInternal = (path: string): boolean => path.startsWith('/v1/internal/');
+
+/** The internal routes' bodies: no Idempotency-Key — each is idempotent by itself. */
+const INTERNAL_REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
+  'POST /v1/internal/return-requests/{id}/dispatch-withdrawal': withdrawDispatchSchema,
+};
+
+/** What an internal route can answer besides its 200: one named service, no user, no 404. */
+const INTERNAL_ERRORS: Record<number, string> = {
+  400: 'The path names no return request (`RET_<ULID>`), or the body does not match the published schema.',
+  401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
+  403: 'Authenticated, but not the service this route answers: any user token (whatever its roles), another service’s internal token, or an internal token signed for no organization.',
+  409: 'The request’s dispatch lock was held past INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget (CONFLICT, with Retry-After): nothing was withdrawn; ask again.',
+  422: 'The reservation was withdrawn for another return request (BUSINESS_RULE_VIOLATION): nothing was withdrawn.',
+  500: 'Unexpected server error.',
 };
 
 /** Every command takes a strict body, and every command requires an Idempotency-Key. */
@@ -166,13 +212,21 @@ const STOCK_COMMANDS: ReadonlySet<string> = new Set(
 );
 
 /**
- * The non-stock commands with a rule to break (422): a receipt must match what was dispatched, and
- * a resolution must name allowed dispositions that add up to what was received.
+ * The non-stock commands with a rule to break (422): a dispatch must match the return request
+ * marketplace holds, a receipt must match what was dispatched, and a resolution must name allowed
+ * dispositions that add up to what was received.
  */
 const RECEIPT_COMMANDS: ReadonlySet<string> = new Set([
+  'POST /v1/return-shipments',
   'POST /v1/return-shipments/{id}/receive',
   'POST /v1/return-shipments/{id}/resolution',
 ]);
+
+/**
+ * The commands that ask another service before their transaction (A-13): a return shipment reads
+ * and reserves its return request in marketplace-service, and is refused when it cannot.
+ */
+const UPSTREAM_COMMANDS: ReadonlySet<string> = new Set(['POST /v1/return-shipments']);
 
 /** Commands whose **body** names an existing row of the caller's — another's is 404. */
 const BODY_NAMES_A_ROW: ReadonlySet<string> = new Set([
@@ -232,10 +286,12 @@ export const ERROR_DESCRIPTIONS: Record<number, string> = {
   400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
   403: 'Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).',
-  404: 'Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.',
+  404: 'Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.',
   409: 'An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).',
   422: 'Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once.',
   500: 'Unexpected server error.',
+  503: 'marketplace-service, which owns the return request, could not be asked or gave no usable answer (UPSTREAM_UNAVAILABLE): the return shipment is not recorded and its dispatch not reserved; retry with the same Idempotency-Key.',
+  504: 'marketplace-service did not answer within INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS (UPSTREAM_TIMEOUT): the return shipment is not recorded; retry with the same Idempotency-Key.',
 };
 
 const DESCRIPTION =
@@ -263,6 +319,7 @@ export function buildInventoryOpenApiDocument(app: INestApplication): OpenAPIObj
       .setDescription(DESCRIPTION)
       .setVersion(INVENTORY_VERSION)
       .addBearerAuth()
+      .addApiKey(INTERNAL_TOKEN_API_KEY, INTERNAL_TOKEN_SCHEME)
       .build(),
   );
   return enrichOpenApiDocument(document);
@@ -279,8 +336,10 @@ export function buildInventoryOpenApiDocument(app: INestApplication): OpenAPIObj
     StockController,
     ShipmentController,
     ReturnShipmentController,
+    InternalReturnRequestController,
   ],
   providers: [
+    { provide: ReturnDispatchFenceService, useValue: {} },
     { provide: WarehouseService, useValue: {} },
     { provide: StockService, useValue: {} },
     { provide: ReservationService, useValue: {} },
@@ -308,6 +367,11 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       if (!isOperation(operation)) continue;
 
       const key = `${method.toUpperCase()} ${path}`;
+
+      if (isInternal(path)) {
+        enrichInternalOperation(key, operation);
+        continue;
+      }
 
       // `addBearerAuth()` declares the scheme; it does not apply it. Without this the contract
       // would describe endpoints anybody can call.
@@ -360,6 +424,7 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         // has no rule to break, only a state to be in (409).
         if (status === '409' && !body) continue;
         if (status === '422' && !STOCK_COMMANDS.has(key) && !RECEIPT_COMMANDS.has(key)) continue;
+        if ((status === '503' || status === '504') && !UPSTREAM_COMMANDS.has(key)) continue;
         operation.responses[status] ??= {
           description,
           ...(status === '409' && body ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } } : {}),
@@ -375,8 +440,8 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
           if (!typed) continue;
           const existing = operation.responses[String(status)] as
             { description?: string } | undefined;
-          // A command that cannot answer this status (creating a return shipment breaks no 422
-          // rule; its area's 422 is the receipt's) has nothing to type.
+          // A command that cannot answer this status (inspecting a return shipment breaks no 422
+          // rule) has nothing to type.
           if (!existing) continue;
           const listed = Object.entries(REFUSAL_REASONS[area])
             .filter(([, answered]) => answered === status)
@@ -393,6 +458,40 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   }
 
   return document;
+}
+
+/**
+ * An internal route (ADR-061 § 4): the internal token's scheme, never the bearer one; its body,
+ * with no Idempotency-Key; its one success; and only the errors it can give.
+ */
+function enrichInternalOperation(key: string, operation: MutableOperation): void {
+  operation.security = [{ [INTERNAL_TOKEN_SCHEME]: [] }];
+  const body = INTERNAL_REQUEST_BODIES[key];
+  if (body) {
+    operation.requestBody = {
+      required: true,
+      content: { 'application/json': { schema: toJsonSchema(body) } },
+    };
+  }
+  operation.responses ??= {};
+  const response = RESPONSE_BODIES[key];
+  if (response) {
+    delete operation.responses['200'];
+    delete operation.responses['201'];
+    operation.responses[response.status] = {
+      description: 'Success',
+      content: { 'application/json': { schema: toJsonSchema(response.schema) } },
+    };
+  }
+  for (const [status, description] of Object.entries(INTERNAL_ERRORS)) {
+    // Only the withdrawal writes, so only it can contend for the lock or be refused.
+    if ((status === '409' || status === '422') && !body) continue;
+    operation.responses[status] = {
+      description,
+      ...(status === '409' ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } } : {}),
+      content: { 'application/json': { schema: { $ref: '#/components/schemas/ApiError' } } },
+    };
+  }
 }
 
 /**

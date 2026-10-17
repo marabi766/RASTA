@@ -44,7 +44,11 @@ import {
 } from '@rasta/nest-common';
 import { PrismaClient } from './generated/prisma';
 import { AppModule } from './app.module';
-import { enrichOpenApiDocument } from './openapi/document';
+import {
+  INTERNAL_TOKEN_API_KEY,
+  INTERNAL_TOKEN_SCHEME,
+  enrichOpenApiDocument,
+} from './openapi/document';
 
 async function bootstrap(): Promise<void> {
   // D-045: refuse to start as anything but the runtime role before Nest builds a
@@ -115,6 +119,7 @@ async function bootstrap(): Promise<void> {
         )
         .setVersion(env.SERVICE_VERSION)
         .addBearerAuth()
+        .addApiKey(INTERNAL_TOKEN_API_KEY, INTERNAL_TOKEN_SCHEME)
         .build(),
     );
     SwaggerModule.setup(

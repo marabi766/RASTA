@@ -446,7 +446,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -811,7 +811,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1115,7 +1115,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1284,7 +1284,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1573,7 +1573,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2178,7 +2178,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2388,7 +2388,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2697,7 +2697,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3152,7 +3152,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3380,7 +3380,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3503,7 +3503,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3675,7 +3675,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3919,7 +3919,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4071,7 +4071,7 @@
             "schema": {
               "type": "string",
               "pattern": "^RET_[0-9A-HJKMNP-TV-Z]{26}$",
-              "description": "The marketplace return request this shipment is for: an opaque `RET_<ULID>` reference this service never resolves. Marketplace verifies it — the return exists, is authorized, and names this organization as its supplier — before acting on anything published here."
+              "description": "The marketplace return request this shipment is for (`RET_<ULID>`). Read from marketplace-service before anything is written (A-13): it must name the organization the request acts for as its supplier (else 404), be AUTHORIZED, and agree with the order, buyer and lines given here; its dispatch is then reserved there, which ends the buyer’s right to cancel it (Q-133 (5))."
             }
           }
         ],
@@ -4297,7 +4297,7 @@
         ]
       },
       "post": {
-        "description": "An IN_TRANSIT return shipment into `destinationWarehouseId` — a warehouse of the organization the request acts for (another’s is 404) — from `buyerOrganizationId`, for `returnRequestId`, with 1 to 50 order lines and their quantities. One return shipment per return request: a second is 409 `RETURN_ALREADY_DISPATCHED`. It moves no stock. The shipment, its lines, its IN_TRANSIT tracking event and RETURN_SHIPMENT_DISPATCHED (identifiers and quantities only — no carrier) commit in one transaction. Only an operator of the destination warehouse’s owner records a return shipment (Q-133: the order’s supplier); its sender reads it and is refused 403 FORBIDDEN here, any other organization gets 404. This service records physical facts only: whether the return was allowed is marketplace’s, which verifies every RETURN_SHIPMENT_* event against its own request. Nothing here moves stock or money. One transaction: the row is locked, moved by compare-and-set, and its tracking event, its RETURN_SHIPMENT_* event and the stored response commit together. A shipment another command holds longer than INVENTORY_LOCK_TIMEOUT_MS is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "description": "An IN_TRANSIT return shipment into `destinationWarehouseId` — a warehouse of the organization the request acts for (another’s is 404) — from `buyerOrganizationId`, for `returnRequestId`, with 1 to 50 order lines and their quantities. One return shipment per return request: a second is 409 `RETURN_ALREADY_DISPATCHED`. Before anything is written the return request is read from marketplace-service, which owns it (A-13): one this organization does not supply is 404 as if it did not exist; one that is not AUTHORIZED is 422 `RETURN_REQUEST_NOT_AUTHORIZED`; another order or buyer 422 `RETURN_REQUEST_MISMATCH`; lines that are not its own, of another product or over what was authorized — or, unless marketplace allows a partial dispatch (Q-133 (8)), not all of them in exactly their authorized quantities — 422 `RETURN_LINES_MISMATCH`. Then its dispatch is reserved there, after which the buyer can no longer cancel it (Q-133 (5)); the shipment is recorded under that reservation, and one marketplace’s reconciliation has since withdrawn here is 409 `RETURN_DISPATCH_WITHDRAWN` (Q-133 (9)(a)). A marketplace that cannot be asked refuses the dispatch (503/504) and nothing is written. It moves no stock. The shipment, its lines, its IN_TRANSIT tracking event and RETURN_SHIPMENT_DISPATCHED (identifiers and quantities only — no carrier) commit in one transaction. Only an operator of the destination warehouse’s owner records a return shipment (Q-133: the order’s supplier); its sender reads it and is refused 403 FORBIDDEN here, any other organization gets 404. This service records physical facts only: whether the return was allowed is marketplace’s, which verifies every RETURN_SHIPMENT_* event against its own request. Nothing here moves stock or money. One transaction: the row is locked, moved by compare-and-set, and its tracking event, its RETURN_SHIPMENT_* event and the stored response commit together. A shipment another command holds longer than INVENTORY_LOCK_TIMEOUT_MS is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
         "operationId": "ReturnShipmentController_create_v1",
         "parameters": [
           {
@@ -4498,7 +4498,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4508,7 +4508,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_DISPATCH_WITHDRAWN, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -4547,8 +4547,61 @@
                             "enum": [
                               "RETURN_ALREADY_DISPATCHED",
                               "RETURN_SHIPMENT_NOT_IN_TRANSIT",
+                              "RETURN_DISPATCH_WITHDRAWN",
                               "RETURN_SHIPMENT_NOT_RECEIVED",
                               "RETURN_SHIPMENT_NOT_INSPECTED"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_REQUEST_NOT_AUTHORIZED, RETURN_REQUEST_MISMATCH, RETURN_LINES_MISMATCH, RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED, DISPOSITION_NOT_ALLOWED, DISPOSITIONS_DO_NOT_BALANCE, NOTHING_RECEIVED_TO_RESOLVE)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "returnShipment"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "RETURN_REQUEST_NOT_AUTHORIZED",
+                              "RETURN_REQUEST_MISMATCH",
+                              "RETURN_LINES_MISMATCH",
+                              "RECEIPT_LINES_MISMATCH",
+                              "RECEIVED_EXCEEDS_EXPECTED",
+                              "DISPOSITION_NOT_ALLOWED",
+                              "DISPOSITIONS_DO_NOT_BALANCE",
+                              "NOTHING_RECEIVED_TO_RESOLVE"
                             ]
                           },
                           "message": {
@@ -4575,6 +4628,26 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "marketplace-service, which owns the return request, could not be asked or gave no usable answer (UPSTREAM_UNAVAILABLE): the return shipment is not recorded and its dispatch not reserved; retry with the same Idempotency-Key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "marketplace-service did not answer within INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS (UPSTREAM_TIMEOUT): the return shipment is not recorded; retry with the same Idempotency-Key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         },
         "summary": "Record goods of a return as on their way to one of the owner’s warehouses",
@@ -4594,17 +4667,17 @@
                   "returnRequestId": {
                     "type": "string",
                     "pattern": "^RET_[0-9A-HJKMNP-TV-Z]{26}$",
-                    "description": "The marketplace return request this shipment is for: an opaque `RET_<ULID>` reference this service never resolves. Marketplace verifies it — the return exists, is authorized, and names this organization as its supplier — before acting on anything published here."
+                    "description": "The marketplace return request this shipment is for (`RET_<ULID>`). Read from marketplace-service before anything is written (A-13): it must name the organization the request acts for as its supplier (else 404), be AUTHORIZED, and agree with the order, buyer and lines given here; its dispatch is then reserved there, which ends the buyer’s right to cancel it (Q-133 (5))."
                   },
                   "orderId": {
                     "type": "string",
                     "pattern": "^ORD_[0-9A-HJKMNP-TV-Z]{26}$",
-                    "description": "The marketplace order the goods were sold under. Opaque; never resolved here."
+                    "description": "The marketplace order the goods were sold under: the return request’s own."
                   },
                   "buyerOrganizationId": {
                     "type": "string",
                     "pattern": "^ORG(_[0-9A-HJKMNP-TV-Z]{26}|-[A-Z0-9-]{1,48})$",
-                    "description": "The organization the goods come from: it may read the return shipment and its tracking, never move it. An opaque platform organization id, not resolved or verified here, and never the organization the request acts for."
+                    "description": "The organization the goods come from: it may read the return shipment and its tracking, never move it. The return request’s buyer, as marketplace records it (checked before anything is written), and never the organization the request acts for."
                   },
                   "destinationWarehouseId": {
                     "type": "string",
@@ -4619,7 +4692,7 @@
                         "orderLineId": {
                           "type": "string",
                           "pattern": "^OLN_[0-9A-HJKMNP-TV-Z]{26}$",
-                          "description": "A line of that order. Opaque; never resolved here."
+                          "description": "A line of that order, one the return request returns."
                         },
                         "productId": {
                           "type": "string",
@@ -4858,7 +4931,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4981,7 +5054,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5221,7 +5294,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5231,7 +5304,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_DISPATCH_WITHDRAWN, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -5270,6 +5343,7 @@
                             "enum": [
                               "RETURN_ALREADY_DISPATCHED",
                               "RETURN_SHIPMENT_NOT_IN_TRANSIT",
+                              "RETURN_DISPATCH_WITHDRAWN",
                               "RETURN_SHIPMENT_NOT_RECEIVED",
                               "RETURN_SHIPMENT_NOT_INSPECTED"
                             ]
@@ -5290,7 +5364,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED, DISPOSITION_NOT_ALLOWED, DISPOSITIONS_DO_NOT_BALANCE, NOTHING_RECEIVED_TO_RESOLVE)",
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_REQUEST_NOT_AUTHORIZED, RETURN_REQUEST_MISMATCH, RETURN_LINES_MISMATCH, RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED, DISPOSITION_NOT_ALLOWED, DISPOSITIONS_DO_NOT_BALANCE, NOTHING_RECEIVED_TO_RESOLVE)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5316,6 +5390,9 @@
                           "code": {
                             "type": "string",
                             "enum": [
+                              "RETURN_REQUEST_NOT_AUTHORIZED",
+                              "RETURN_REQUEST_MISMATCH",
+                              "RETURN_LINES_MISMATCH",
                               "RECEIPT_LINES_MISMATCH",
                               "RECEIVED_EXCEEDS_EXPECTED",
                               "DISPOSITION_NOT_ALLOWED",
@@ -5376,7 +5453,7 @@
                         "orderLineId": {
                           "type": "string",
                           "pattern": "^OLN_[0-9A-HJKMNP-TV-Z]{26}$",
-                          "description": "A line of that order. Opaque; never resolved here."
+                          "description": "A line of that order, one the return request returns."
                         },
                         "receivedQuantity": {
                           "type": "integer",
@@ -5612,7 +5689,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5622,7 +5699,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_DISPATCH_WITHDRAWN, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -5661,6 +5738,7 @@
                             "enum": [
                               "RETURN_ALREADY_DISPATCHED",
                               "RETURN_SHIPMENT_NOT_IN_TRANSIT",
+                              "RETURN_DISPATCH_WITHDRAWN",
                               "RETURN_SHIPMENT_NOT_RECEIVED",
                               "RETURN_SHIPMENT_NOT_INSPECTED"
                             ]
@@ -5941,7 +6019,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5951,7 +6029,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_DISPATCH_WITHDRAWN, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -5990,6 +6068,7 @@
                             "enum": [
                               "RETURN_ALREADY_DISPATCHED",
                               "RETURN_SHIPMENT_NOT_IN_TRANSIT",
+                              "RETURN_DISPATCH_WITHDRAWN",
                               "RETURN_SHIPMENT_NOT_RECEIVED",
                               "RETURN_SHIPMENT_NOT_INSPECTED"
                             ]
@@ -6010,7 +6089,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED, DISPOSITION_NOT_ALLOWED, DISPOSITIONS_DO_NOT_BALANCE, NOTHING_RECEIVED_TO_RESOLVE)",
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_REQUEST_NOT_AUTHORIZED, RETURN_REQUEST_MISMATCH, RETURN_LINES_MISMATCH, RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED, DISPOSITION_NOT_ALLOWED, DISPOSITIONS_DO_NOT_BALANCE, NOTHING_RECEIVED_TO_RESOLVE)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6036,6 +6115,9 @@
                           "code": {
                             "type": "string",
                             "enum": [
+                              "RETURN_REQUEST_NOT_AUTHORIZED",
+                              "RETURN_REQUEST_MISMATCH",
+                              "RETURN_LINES_MISMATCH",
                               "RECEIPT_LINES_MISMATCH",
                               "RECEIVED_EXCEEDS_EXPECTED",
                               "DISPOSITION_NOT_ALLOWED",
@@ -6096,7 +6178,7 @@
                         "orderLineId": {
                           "type": "string",
                           "pattern": "^OLN_[0-9A-HJKMNP-TV-Z]{26}$",
-                          "description": "A line of that order. Opaque; never resolved here."
+                          "description": "A line of that order, one the return request returns."
                         },
                         "disposition": {
                           "type": "string",
@@ -6131,6 +6213,271 @@
           }
         }
       }
+    },
+    "/v1/internal/return-requests/{id}/return-shipment": {
+      "get": {
+        "description": "Reserved for `marketplace-service`’s service token, sent in `X-Internal-Token` with no `Authorization` header and signed for the return request’s **supplier** — the organization in whose books its shipment would be; every other service and every user token is 403, and so is a token signed for no organization. Answers the return shipment recorded for the request, whatever its status, or `returnShipment: null` when there is none — never 404, so a missing route or a proxy can never be read as \"none\". Asked by marketplace before an AUTHORIZED return is cancelled (Q-133 (9)). Nothing is written.",
+        "operationId": "InternalReturnRequestController_shipmentOf_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "returnRequestId": {
+                      "type": "string"
+                    },
+                    "returnShipment": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": ["IN_TRANSIT", "RECEIVED", "INSPECTED", "RESOLVED"]
+                        }
+                      },
+                      "required": ["id", "status"],
+                      "additionalProperties": false,
+                      "nullable": true,
+                      "description": "The return shipment recorded for the request in the books of the organization the internal token is signed for, whatever its status — or `null`: there is none."
+                    }
+                  },
+                  "required": ["returnRequestId", "returnShipment"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The path names no return request (`RET_<ULID>`), or the body does not match the published schema.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not the service this route answers: any user token (whatever its roles), another service’s internal token, or an internal token signed for no organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "State whether a return request has a return shipment here (internal)",
+        "tags": ["return-requests-internal"],
+        "security": [
+          {
+            "internalToken": []
+          }
+        ]
+      }
+    },
+    "/v1/internal/return-requests/{id}/dispatch-withdrawal": {
+      "post": {
+        "description": "Reserved for `marketplace-service`’s service token, sent in `X-Internal-Token` with no `Authorization` header and signed for the return request’s **supplier** — the organization in whose books its shipment would be; every other service and every user token is 403, and so is a token signed for no organization. Under the lock a return shipment of the request is recorded under: if the request has a return shipment here, `outcome: DISPATCHED` names it and nothing is written; otherwise the reservation is recorded as withdrawn (`outcome: WITHDRAWN`) and no return shipment carrying it is ever recorded — a later dispatch under it is 409 `RETURN_DISPATCH_WITHDRAWN`. Idempotent: a reservation already withdrawn answers as it was. Marketplace releases its reservation only on WITHDRAWN (Q-133 (9)(a)). No Idempotency-Key: the withdrawal is its own idempotency.",
+        "operationId": "InternalReturnRequestController_withdraw_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "outcome": {
+                      "type": "string",
+                      "enum": ["WITHDRAWN", "DISPATCHED"],
+                      "description": "WITHDRAWN: the request has no shipment here, and none will ever be recorded under this reservation. DISPATCHED: a shipment exists for the request; nothing was withdrawn."
+                    },
+                    "returnRequestId": {
+                      "type": "string"
+                    },
+                    "reservationId": {
+                      "type": "string"
+                    },
+                    "withdrawnAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When it was withdrawn; `null` when DISPATCHED."
+                    },
+                    "returnShipment": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": ["IN_TRANSIT", "RECEIVED", "INSPECTED", "RESOLVED"]
+                        }
+                      },
+                      "required": ["id", "status"],
+                      "additionalProperties": false,
+                      "nullable": true,
+                      "description": "The shipment the request has here when DISPATCHED; `null` when WITHDRAWN."
+                    }
+                  },
+                  "required": [
+                    "outcome",
+                    "returnRequestId",
+                    "reservationId",
+                    "withdrawnAt",
+                    "returnShipment"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The path names no return request (`RET_<ULID>`), or the body does not match the published schema.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not the service this route answers: any user token (whatever its roles), another service’s internal token, or an internal token signed for no organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request’s dispatch lock was held past INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget (CONFLICT, with Retry-After): nothing was withdrawn; ask again.",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item or shipment another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The reservation was withdrawn for another return request (BUSINESS_RULE_VIOLATION): nothing was withdrawn.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Withdraw a dispatch reservation of a return request, unless it has a shipment (internal)",
+        "tags": ["return-requests-internal"],
+        "security": [
+          {
+            "internalToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reservationId": {
+                    "type": "string",
+                    "pattern": "^RDR_[0-9A-HJKMNP-TV-Z]{26}$",
+                    "description": "The dispatch reservation marketplace-service gave this return request (`RDR_<ULID>`). A return shipment is recorded under it; once withdrawn here, none ever is."
+                  }
+                },
+                "required": ["reservationId"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
     }
   },
   "info": {
@@ -6147,6 +6494,12 @@
         "scheme": "bearer",
         "bearerFormat": "JWT",
         "type": "http"
+      },
+      "internalToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Internal-Token",
+        "description": "A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user."
       }
     },
     "schemas": {

@@ -35,6 +35,10 @@ const GUARDS = [
   ['shipment_leg', 'tg_shipment_leg_no_truncate'],
   ['tracking_event', 'tg_tracking_event_guard'],
   ['tracking_event', 'tg_tracking_event_no_truncate'],
+  // Q-133 (9)(a): the dispatch fence.
+  ['return_shipment', 'tg_return_shipment_dispatch_fence'],
+  ['return_dispatch_withdrawal', 'tg_return_dispatch_withdrawal_guard'],
+  ['return_dispatch_withdrawal', 'tg_return_dispatch_withdrawal_no_truncate'],
 ] as const;
 
 describe('the runtime role cannot lift an integrity guard (D-045)', () => {
@@ -142,6 +146,7 @@ describe('the runtime role cannot lift an integrity guard (D-045)', () => {
       'idempotency_key',
       'outbox_message',
       'outbox_stream_sequence',
+      'return_dispatch_withdrawal',
       'return_disposition',
       'return_shipment',
       'return_shipment_line',

@@ -1939,6 +1939,8 @@ export const EXPECTED = {
       'return_request',
       'return_line',
       'return_status_history',
+      // 20261017160000_return_dispatch_reservation (Q-133 (9)(a)): a reconciliation's release.
+      'return_dispatch_release',
     ],
     triggers: [
       'tg_return_request_guard',
@@ -1948,12 +1950,15 @@ export const EXPECTED = {
       'tg_return_line_no_truncate',
       'tg_return_status_history_guard',
       'tg_return_status_history_no_truncate',
+      'tg_return_dispatch_release_guard',
+      'tg_return_dispatch_release_no_truncate',
     ],
     functions: [
       'return_request_guard',
       'return_request_history_check',
       'return_line_guard',
       'return_status_history_guard',
+      'return_dispatch_release_guard',
     ],
     constraints: [
       'ck_return_request_status',
@@ -1965,6 +1970,11 @@ export const EXPECTED = {
       // 20261016140000_return_request_physical (RUN-005 PR 3): which shipment, and its report.
       'ck_return_request_shipment_id',
       'ck_return_request_report_document_id',
+      // 20261017160000_return_dispatch_reservation (Codex r1 on #336, F2): the reservation's columns.
+      'ck_return_request_dispatch_reservation',
+      'ck_return_dispatch_release_ids',
+      'ck_return_dispatch_release_actors',
+      'fk_return_dispatch_release_request',
       'ck_saga_step_key_not_blank',
       'ck_order_settled_after_receipt',
       'ck_order_completed_has_settlement',
@@ -1989,6 +1999,9 @@ export const EXPECTED = {
       'ux_return_history_version',
       'ux_return_line_order_line',
       'ux_return_request_shipment',
+      'ux_return_dispatch_release_reservation',
+      'ux_return_dispatch_release_command',
+      'ix_return_dispatch_release_request',
     ],
     types: ['ResponsibilityAttribution'],
     dataRollback: MARKETPLACE_DATA_ROLLBACK,
@@ -2620,6 +2633,8 @@ export const EXPECTED = {
       'return_tracking_event',
       // 20261016130000_return_inspection_resolution: what becomes of received goods.
       'return_disposition',
+      // 20261017170000_return_dispatch_withdrawal: reservations withdrawn on reconciliation.
+      'return_dispatch_withdrawal',
     ],
     types: ['StockMovementType', 'StockReservationStatus'],
     triggers: [
@@ -2650,6 +2665,9 @@ export const EXPECTED = {
       'tg_return_tracking_event_no_truncate',
       'tg_return_disposition_guard',
       'tg_return_disposition_no_truncate',
+      'tg_return_shipment_dispatch_fence',
+      'tg_return_dispatch_withdrawal_guard',
+      'tg_return_dispatch_withdrawal_no_truncate',
     ],
     functions: [
       'warehouse_guard',
@@ -2668,6 +2686,8 @@ export const EXPECTED = {
       'return_shipment_line_guard',
       'return_tracking_event_guard',
       'return_disposition_guard',
+      'return_shipment_dispatch_fence',
+      'return_dispatch_withdrawal_guard',
     ],
     indexes: [
       'ux_warehouse_org_id',
@@ -2693,6 +2713,8 @@ export const EXPECTED = {
       'ux_return_tracking_event_command',
       'ux_return_tracking_event_sequence',
       'ux_return_disposition_line',
+      'ux_return_dispatch_withdrawal_reservation',
+      'ix_return_dispatch_withdrawal_request',
     ],
     constraints: [
       'fk_stock_item_warehouse',
@@ -2739,6 +2761,10 @@ export const EXPECTED = {
       'ck_return_shipment_inspection',
       'ck_return_disposition_value',
       'ck_return_disposition_quantity_positive',
+      // 20261017170000_return_dispatch_withdrawal (Q-133 (9)(a)): the dispatch fence.
+      'ck_return_shipment_dispatch_reservation',
+      'ck_return_dispatch_withdrawal_ids',
+      'ck_return_dispatch_withdrawal_actor_recorded',
       'ck_idempotency_state',
       'ck_idempotency_completed_has_response',
       'ck_outbox_claim_triple',
