@@ -31,6 +31,7 @@
     "@rasta/logging": "workspace:*",
     "@rasta/nest-common": "workspace:*",
     "@rasta/observability": "workspace:*",
+    "@rasta/sealing": "workspace:*",
     "helmet": "^8.0.0",
     "kafkajs": "^2.2.4",
     "reflect-metadata": "^0.2.2",

@@ -52,6 +52,8 @@ import { CommissionService } from './commission/commission.service';
 import { CommissionController } from './commission/commission.controller';
 import { RewardService } from './reward/reward.service';
 import { RewardController } from './reward/reward.controller';
+import { ParticipationService } from './reward/participation.service';
+import { RecognitionService } from './reward/recognition.service';
 import { PaymentService } from './payment/payment.service';
 import { PaymentReconciliationRepository } from './payment/payment-reconciliation.repository';
 import { PaymentController } from './payment/payment.controller';
@@ -172,6 +174,8 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
     TransactionService,
     CommissionService,
     RewardService,
+    ParticipationService,
+    RecognitionService,
     PaymentService,
     PaymentReconciliationRepository,
     PaymentReconciler,

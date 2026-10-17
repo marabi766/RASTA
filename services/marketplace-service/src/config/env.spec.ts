@@ -1,5 +1,9 @@
 import { EnvValidationError } from '@rasta/config';
-import { ORGANIZATION_REQUEST_CEILING_MS, loadMarketplaceEnv } from './env';
+import {
+  ORGANIZATION_REQUEST_CEILING_MS,
+  brokerConnectionIsAuthenticated,
+  loadMarketplaceEnv,
+} from './env';
 import { marketplaceOperationBudgets } from './operation-budgets';
 
 /**
@@ -132,6 +136,64 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets', () => {
       /DATABASE_STATEMENT_TIMEOUT_MS: \(12500 ms\) is not above OUTBOX_CLAIM_LEASE_SECONDS, 12500 ms/,
     );
     expect(at('12501')).not.toThrow();
+  });
+});
+
+/**
+ * RUN-005 PR 3 — the return mirror moves a buyer's request on an event published in the
+ * supplier's name, so it is off by default and refuses to start where the broker does not
+ * authenticate the publisher (ADR-061 § 3), as supplier-service's performance consumer does.
+ */
+describe('the return mirror is off by default and fails closed', () => {
+  const env = (extra: NodeJS.ProcessEnv) => loadMarketplaceEnv({ ...BASE, ...extra });
+  const AUTHENTICATED: NodeJS.ProcessEnv = {
+    KAFKA_SASL_PASSWORD_MARKETPLACE: 'a-marketplace-broker-password',
+    KAFKA_SSL: 'true',
+  };
+  const ENABLED: NodeJS.ProcessEnv = { MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED: 'true' };
+  const REFUSED = /MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED=true is refused.*RUN-006/s;
+
+  it('is off unless asked for — even where it may run', () => {
+    expect(env({}).MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED).toBe(false);
+    expect(env(AUTHENTICATED).MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED).toBe(false);
+  });
+
+  it('starts over this service’s own SASL credential and TLS', () => {
+    const loaded = env({ ...AUTHENTICATED, ...ENABLED });
+    expect(loaded.MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED).toBe(true);
+    expect(brokerConnectionIsAuthenticated(loaded)).toBe(true);
+  });
+
+  it('refuses the PLAINTEXT opt-out, SASL without TLS, TLS without SASL and another principal', () => {
+    expect(() =>
+      env({ NODE_ENV: 'test', KAFKA_ALLOW_PLAINTEXT: 'true', ...AUTHENTICATED, ...ENABLED }),
+    ).toThrow(REFUSED);
+    expect(() =>
+      env({ KAFKA_SASL_PASSWORD_MARKETPLACE: 'p', KAFKA_SSL: 'false', ...ENABLED }),
+    ).toThrow(REFUSED);
+    expect(() => env({ KAFKA_SSL: 'true', ...ENABLED })).toThrow(REFUSED);
+    expect(() =>
+      env({
+        KAFKA_SASL_USERNAME: 'inventory-service',
+        KAFKA_SASL_PASSWORD: 'p',
+        KAFKA_SSL: 'true',
+        ...ENABLED,
+      }),
+    ).toThrow(REFUSED);
+    expect(() => env(ENABLED)).toThrow(REFUSED);
+  });
+});
+
+describe('MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED (Q-133 (8))', () => {
+  it('is false unless a deployment decides otherwise — a shipment names what was authorized', () => {
+    expect(loadMarketplaceEnv(BASE).MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED).toBe(false);
+    expect(
+      loadMarketplaceEnv({ ...BASE, MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED: 'true' })
+        .MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED,
+    ).toBe(true);
+    expect(() =>
+      loadMarketplaceEnv({ ...BASE, MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED: 'some' }),
+    ).toThrow(EnvValidationError);
   });
 });
 

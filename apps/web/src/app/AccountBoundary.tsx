@@ -12,11 +12,19 @@ import {
   purgeAllUnresolvedDisputes,
   purgeForeignUnresolvedDisputes,
 } from '@/lib/unresolved-dispute';
+import {
+  markStatementsOpen,
+  purgeAllUnresolvedStatements,
+  purgeForeignUnresolvedStatements,
+} from '@/lib/unresolved-statement';
 
 /**
- * The browser's side of an account boundary: what an unresolved order or
- * dispute command left in `sessionStorage` (`lib/unresolved-order.ts`,
- * `lib/unresolved-dispute.ts`) must not outlive. Both follow the same rules.
+ * The browser's side of an account boundary: what an unresolved order,
+ * dispute command or statement command left in `sessionStorage`
+ * (`lib/unresolved-order.ts`, `lib/unresolved-dispute.ts`,
+ * `lib/unresolved-statement.ts`) must not outlive. All follow the same rules;
+ * a statement command is reduced to a marker at logout like a dispute command
+ * (a draft repeated under a fresh key is a second statement).
  *
  * - **Logout.** Any form posting to `/auth/logout` — every portal page has its
  *   own — empties every remembered order before the navigation leaves. A capture
@@ -47,8 +55,10 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
     if (owner === null) return;
     markAccountOpen();
     markDisputesOpen();
+    markStatementsOpen();
     purgeForeignUnresolvedOrders(owner);
     purgeForeignUnresolvedDisputes(owner);
+    purgeForeignUnresolvedStatements(owner);
   }, [owner]);
 
   useEffect(() => {
@@ -57,6 +67,7 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
       if (form instanceof HTMLFormElement && isLogout(form)) {
         purgeAllUnresolvedOrders();
         purgeAllUnresolvedDisputes();
+        purgeAllUnresolvedStatements();
       }
     };
     document.addEventListener('submit', onSubmit, true);

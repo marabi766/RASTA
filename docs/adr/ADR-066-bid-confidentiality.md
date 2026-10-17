@@ -39,6 +39,7 @@
   AES-256-GCM برای محتوا، AAD = `tenderId|bidId|bidderOrgId|revision|keyId` با رمزگذاری طول‌دار)، Hash تعهد و زنجیرهٔ رسید،
   و درگاه `TenderKeyProvider` با `EnvKekProvider` (`CONSTRUCTION_TENDER_KEKS` = `id:base64` هر کدام ۳۲ بایت،
   `CONSTRUCTION_TENDER_KEK_CURRENT`). بی KEK هیچ چیز پیچیده یا باز نمی‌شود (`KEY_UNAVAILABLE`)؛ کلید پیش‌فرض وجود ندارد.
+  از ADR-070 PR 4 رمزنگاری این توابع در `@rasta/sealing` است و `src/tender/sealing/sealing.ts` فقط نام‌های مناقصه و برچسب‌های `rasta.bid.*` را نگه می‌دارد.
   **بازگشایی بی رسید ممکن نیست** (بازبینی Codex روی #163): `openBid` رسیدهای مناقصه و **سر زنجیره** را که بیرون از پایگاه دادهٔ
   این سرویس نگه داشته می‌شود (`audit-service`) الزامی می‌گیرد؛ پیش از رمزگشایی زنجیره را تا همان سر وارسی می‌کند
   (`RECEIPT_CHAIN_BROKEN`؛ کوتاه‌شده، افزوده یا جایگزین هم همین است)، Digest را از بایت‌های ذخیره‌شده **دوباره حساب** می‌کند و با رسید

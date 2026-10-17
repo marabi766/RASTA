@@ -327,13 +327,46 @@ describe('4. a service reads what it subscribes to, in its own group namespace',
     );
   });
 
-  test('marketplace-service, which subscribes to nothing, may not read rasta.economic.v1', async () => {
+  test('marketplace-service, which subscribes only to rasta.inventory.v1, may not read rasta.economic.v1', async () => {
     const outcome = await consume(
       'marketplace-service',
       `marketplace-service.acl-test-${run}`,
       'rasta.economic.v1',
     );
     assert.match(outcome, /AUTHORIZATION_FAILED/);
+  });
+
+  test('marketplace-service joins its own group on rasta.inventory.v1 — the return mirror (RUN-005)', async () => {
+    assert.equal(
+      await consume(
+        'marketplace-service',
+        `marketplace-service.acl-mirror-${run}`,
+        'rasta.inventory.v1',
+      ),
+      'JOINED',
+    );
+    assert.equal(
+      await consume(
+        'marketplace-service',
+        `marketplace-service.acl-mirror-retry-${run}`,
+        'rasta.inventory.v1.retry',
+      ),
+      'JOINED',
+    );
+  });
+
+  test('marketplace-service writes its own dead-letter topic, and never inventory-service’s stream', async () => {
+    assert.equal(
+      await refusal(() => produce('marketplace-service', 'rasta.marketplace.v1.dlq')),
+      'ALLOWED',
+    );
+    for (const topic of ['rasta.inventory.v1', 'rasta.inventory.v1.retry']) {
+      assert.equal(
+        await refusal(() => produce('marketplace-service', topic)),
+        'TOPIC_AUTHORIZATION_FAILED',
+        topic,
+      );
+    }
   });
 
   test('fleet-service may not read economic-service’s topic even in its own namespace', async () => {

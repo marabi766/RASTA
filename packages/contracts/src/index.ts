@@ -208,6 +208,10 @@ export {
   returnAuthorizedPayloadSchema,
   returnRejectedPayloadSchema,
   returnCancelledPayloadSchema,
+  returnInTransitPayloadSchema,
+  returnReceivedPayloadSchema,
+  returnInspectedPayloadSchema,
+  returnResolvedPayloadSchema,
 } from './events/return-requests';
 export type {
   ReturnRequestEventName,
@@ -216,6 +220,10 @@ export type {
   ReturnAuthorizedPayload,
   ReturnRejectedPayload,
   ReturnCancelledPayload,
+  ReturnInTransitPayload,
+  ReturnReceivedPayload,
+  ReturnInspectedPayload,
+  ReturnResolvedPayload,
 } from './events/return-requests';
 export type {
   InventoryShipmentEventName,

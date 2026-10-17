@@ -72,8 +72,11 @@ describe('listing return requests', () => {
     expect(listReturnsQuerySchema.parse({})).toEqual({ role: 'BUYER', limit: 25 });
   });
 
-  it('knows only the four statuses and two roles', () => {
-    expect(listReturnsQuerySchema.safeParse({ status: 'RESOLVED' }).success).toBe(false);
+  it('knows only the eight statuses and two roles', () => {
+    expect(listReturnsQuerySchema.safeParse({ status: 'REFUNDED' }).success).toBe(false);
+    // RUN-005 PR 3: the physical states are listed like the commercial ones.
+    expect(listReturnsQuerySchema.safeParse({ status: 'RESOLVED' }).success).toBe(true);
+    expect(listReturnsQuerySchema.safeParse({ status: 'IN_TRANSIT' }).success).toBe(true);
     expect(listReturnsQuerySchema.safeParse({ role: 'ADMIN' }).success).toBe(false);
     expect(
       listReturnsQuerySchema.safeParse({ status: 'AUTHORIZED', role: 'SUPPLIER' }).success,

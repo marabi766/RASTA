@@ -1,8 +1,16 @@
 import { redirect } from 'next/navigation';
 
 import { AppShell, Button, ButtonLink, PageHeader, TopBar } from '@/ui';
+import {
+  canDraftStatement,
+  fetchStatements,
+  statementCallerOf,
+} from '@/server/contract-statements';
 import { currentSession } from '@/server/current-session';
 import { fetchAmendments, fetchContract, fetchMilestones } from '@/server/contracts';
+import { webServerEnv } from '@/server/env';
+import { mintStatementSubmission } from '@/server/statement-replay';
+import { submissionBinding } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ContractDetailScreen } from './ContractDetailScreen';
@@ -16,9 +24,14 @@ import { ContractDetailScreen } from './ContractDetailScreen';
  * refuses everyone else with `404`, never `403`, so existence is never
  * disclosed. A refusal is rendered as an outcome, not chased with a redirect.
  *
- * Amendments and milestones are read only once the contract itself answers
- * `OK`: asking for a sub-resource of a contract the caller may not see would
- * be a second chance to learn something the first read already refused.
+ * Amendments, milestones and statements are read only once the contract
+ * itself answers `OK`: asking for a sub-resource of a contract the caller may
+ * not see would be a second chance to learn something the first read already
+ * refused.
+ *
+ * The contractor's draft form is drawn when `canDraftStatement` — a copy of
+ * contract-service's own checks, from the roles **the access token** carries —
+ * says the service would accept it. UX only; the service decides again.
  */
 export const dynamic = 'force-dynamic';
 
@@ -39,16 +52,41 @@ export default async function ContractPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/contracts/${id}`)}`);
 
-  const amendmentCursor = one((await searchParams).amendmentCursor);
+  const query = await searchParams;
+  const amendmentCursor = one(query.amendmentCursor);
+  const statementCursor = one(query.statementCursor);
 
   const result = await fetchContract(session, id);
-  const [amendments, milestones] =
+  const [amendments, milestones, statements] =
     result.kind === 'OK'
       ? await Promise.all([
           fetchAmendments(session, id, amendmentCursor),
           fetchMilestones(session, id),
+          fetchStatements(session, id, statementCursor),
         ])
-      : [null, null];
+      : [null, null, null];
+
+  const draft =
+    result.kind === 'OK' && canDraftStatement(statementCallerOf(session.accessToken), result.data)
+      ? {
+          offered: [
+            {
+              command: 'DRAFT' as const,
+              submission: mintStatementSubmission(session, { command: 'DRAFT', contractId: id }),
+            },
+          ],
+          csrfToken: session.csrfToken,
+          binding: submissionBinding(session),
+          sessionMaxAgeSeconds: webServerEnv().WEB_SESSION_MAX_AGE_SECONDS,
+          milestones:
+            milestones?.kind === 'OK'
+              ? milestones.data.items.map((milestone) => ({
+                  id: milestone.id,
+                  title: milestone.title,
+                }))
+              : [],
+        }
+      : null;
 
   return (
     <AppShell
@@ -66,7 +104,7 @@ export default async function ContractPage({
     >
       <PageHeader
         title="جزئیات قرارداد"
-        description="وضعیت، طرفین، مبلغ، امضاها، الحاقیه‌ها و Milestoneها."
+        description="وضعیت، طرفین، مبلغ، امضاها، الحاقیه‌ها، Milestoneها و صورت‌وضعیت‌ها."
       />
       <div className="mt-2">
         <ButtonLink href="/contracts" tone="quiet">
@@ -74,7 +112,13 @@ export default async function ContractPage({
         </ButtonLink>
       </div>
       <div className="mt-4">
-        <ContractDetailScreen result={result} amendments={amendments} milestones={milestones} />
+        <ContractDetailScreen
+          result={result}
+          amendments={amendments}
+          milestones={milestones}
+          statements={statements}
+          draft={draft}
+        />
       </div>
     </AppShell>
   );
