@@ -1813,6 +1813,8 @@ export const EXPECTED = {
       'trg_commission_rule_effective_dated',
       'trg_commission_pricing_cutover_fixed',
       'trg_transaction_pricing_fixed',
+      // A statement's obligation is never changed nor deleted (ADR-068 § 6).
+      'trg_transaction_statement_obligation_fixed',
       // A participation rule version is never edited: the next one replaces it.
       'trg_participation_rule_append_only',
       'trg_participation_rule_no_truncate',
@@ -1831,6 +1833,7 @@ export const EXPECTED = {
       'commission_pricing_scope_lock',
       'reject_commission_pricing_cutover_mutation',
       'reject_transaction_repricing',
+      'reject_statement_obligation_change',
       'reject_participation_rule_mutation',
       'reject_recognition_rule_mutation',
     ],
@@ -1855,6 +1858,8 @@ export const EXPECTED = {
       'ck_payment_resolution_four_eyes',
       // The creator's stable identity: both or neither (ADR-064 § 6).
       'ck_payment_intent_creator_identity',
+      // Only the STATEMENT_APPROVED consumer records a statement's obligation (ADR-068 § 6).
+      'ck_transaction_statement_obligation',
       // A participation subject is a person with an instant; versions are numbered once.
       'ck_reward_source_evaluation_subject',
       'ck_participation_rule_contributions',
