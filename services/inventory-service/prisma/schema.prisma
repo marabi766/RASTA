@@ -284,18 +284,26 @@ model ReturnShipment {
   carrierReference       String? @map("carrier_reference")
   /// How many lines it was created with: fixed once created (`tg_return_shipment_line_guard`).
   lineCount              Int     @map("line_count")
-  /// IN_TRANSIT | RECEIVED (CHECK ck_return_shipment_status).
+  /// IN_TRANSIT | RECEIVED | INSPECTED | RESOLVED (CHECK ck_return_shipment_status).
   status                 String  @default("IN_TRANSIT")
   commandKeyHash         String  @map("command_key_hash")
 
-  createdAt            DateTime  @map("created_at") @db.Timestamptz(3)
-  createdBy            String    @map("created_by")
-  createdCorrelationId String    @map("created_correlation_id")
-  receivedAt           DateTime? @map("received_at") @db.Timestamptz(3)
-  receivedBy           String?   @map("received_by")
-  updatedAt            DateTime  @map("updated_at") @db.Timestamptz(3)
-  /// 1, 2 — one per status reached (CHECK ck_return_shipment_version_matches_status).
-  version              Int       @default(1)
+  createdAt                  DateTime  @map("created_at") @db.Timestamptz(3)
+  createdBy                  String    @map("created_by")
+  createdCorrelationId       String    @map("created_correlation_id")
+  receivedAt                 DateTime? @map("received_at") @db.Timestamptz(3)
+  receivedBy                 String?   @map("received_by")
+  inspectedAt                DateTime? @map("inspected_at") @db.Timestamptz(3)
+  inspectedBy                String?   @map("inspected_by")
+  /// Free text of the inspector, kept here and never on an event.
+  inspectionNote             String?   @map("inspection_note")
+  /// A file in document-service, by id; never resolved here.
+  inspectionReportDocumentId String?   @map("inspection_report_document_id")
+  resolvedAt                 DateTime? @map("resolved_at") @db.Timestamptz(3)
+  resolvedBy                 String?   @map("resolved_by")
+  updatedAt                  DateTime  @map("updated_at") @db.Timestamptz(3)
+  /// 1..4 — one per status reached (CHECK ck_return_shipment_version_matches_status).
+  version                    Int       @default(1)
 
   @@unique([organizationId, id], map: "ux_return_shipment_org_id")
   @@unique([organizationId, commandKeyHash], map: "ux_return_shipment_command")
@@ -330,7 +338,7 @@ model ReturnTrackingEvent {
 
   organizationId   String   @map("organization_id")
   returnShipmentId String   @map("return_shipment_id")
-  /// IN_TRANSIT | RECEIVED (CHECK ck_return_tracking_event_type).
+  /// IN_TRANSIT | RECEIVED | INSPECTED | RESOLVED (CHECK ck_return_tracking_event_type).
   type             String
   /// The shipment version this event records (= the event's `returnShipmentVersion` and `streamSeq`).
   shipmentVersion  Int      @map("shipment_version")
@@ -343,6 +351,25 @@ model ReturnTrackingEvent {
   @@unique([organizationId, commandKeyHash], map: "ux_return_tracking_event_command")
   @@unique([organizationId, returnShipmentId, shipmentVersion], map: "ux_return_tracking_event_sequence")
   @@map("return_tracking_event")
+}
+
+/// What becomes of received goods (RUN-005 PR 2b, ADR-048 § 1): one row per line and disposition,
+/// whose quantity is how many went that way. Written with the resolution that makes it, never
+/// changed (`tg_return_disposition_guard`); per line the quantities add up to what was received
+/// (`tg_return_shipment_history_check`). Moves no stock and no money.
+model ReturnDisposition {
+  id String @id
+
+  organizationId   String   @map("organization_id")
+  returnShipmentId String   @map("return_shipment_id")
+  orderLineId      String   @map("order_line_id")
+  /// RESTOCK | REPAIR | REPLACE | RETURN_TO_SUPPLIER | SCRAP | RECYCLE (CHECK ck_return_disposition_value).
+  disposition      String
+  quantity         Int
+  createdAt        DateTime @map("created_at") @db.Timestamptz(3)
+
+  @@unique([organizationId, returnShipmentId, orderLineId, disposition], map: "ux_return_disposition_line")
+  @@map("return_disposition")
 }
 
 // ---------------------------------------------------------------------------

@@ -21,7 +21,9 @@ export type CommandName =
   | 'dispatch_shipment'
   | 'deliver_shipment'
   | 'create_return_shipment'
-  | 'receive_return_shipment';
+  | 'receive_return_shipment'
+  | 'inspect_return_shipment'
+  | 'resolve_return_shipment';
 
 /**
  * The one shape of a command's transaction (ADR-056 § 3):

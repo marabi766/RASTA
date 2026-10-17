@@ -32,6 +32,8 @@ export const AGGREGATE_OF = {
   SHIPMENT_DELIVERED: SHIPMENT_AGGREGATE,
   RETURN_SHIPMENT_DISPATCHED: RETURN_SHIPMENT_AGGREGATE,
   RETURN_SHIPMENT_RECEIVED: RETURN_SHIPMENT_AGGREGATE,
+  RETURN_SHIPMENT_INSPECTED: RETURN_SHIPMENT_AGGREGATE,
+  RETURN_SHIPMENT_RESOLVED: RETURN_SHIPMENT_AGGREGATE,
 } as const satisfies Record<InventoryEventName, string>;
 
 export const PARTITION_SCOPES = {
@@ -75,6 +77,14 @@ export const PARTITION_KEY_POLICY: { [N in InventoryEventName]: PartitionRule<N>
     key: payload.returnShipmentId,
   }),
   RETURN_SHIPMENT_RECEIVED: (payload) => ({
+    scope: 'RETURN_SHIPMENT',
+    key: payload.returnShipmentId,
+  }),
+  RETURN_SHIPMENT_INSPECTED: (payload) => ({
+    scope: 'RETURN_SHIPMENT',
+    key: payload.returnShipmentId,
+  }),
+  RETURN_SHIPMENT_RESOLVED: (payload) => ({
     scope: 'RETURN_SHIPMENT',
     key: payload.returnShipmentId,
   }),

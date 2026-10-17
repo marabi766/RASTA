@@ -1,5 +1,6 @@
 import type { ReturnShipmentView, ReturnTrackingView } from './dto';
 import type {
+  ReturnDispositionRow,
   ReturnShipmentLineRow,
   ReturnShipmentRow,
   ReturnTrackingEventRow,
@@ -8,6 +9,7 @@ import type {
 export function toReturnShipmentView(
   row: ReturnShipmentRow,
   lines: readonly ReturnShipmentLineRow[],
+  dispositions: readonly ReturnDispositionRow[] = [],
 ): ReturnShipmentView {
   return {
     id: row.id,
@@ -27,6 +29,15 @@ export function toReturnShipmentView(
     carrierReference: row.carrierReference,
     createdAt: row.createdAt.toISOString(),
     receivedAt: row.receivedAt?.toISOString() ?? null,
+    inspectedAt: row.inspectedAt?.toISOString() ?? null,
+    inspectionNote: row.inspectionNote,
+    inspectionReportDocumentId: row.inspectionReportDocumentId,
+    resolvedAt: row.resolvedAt?.toISOString() ?? null,
+    dispositions: dispositions.map((disposition) => ({
+      orderLineId: disposition.orderLineId,
+      disposition: disposition.disposition,
+      quantity: disposition.quantity,
+    })),
     updatedAt: row.updatedAt.toISOString(),
     version: row.version,
   };

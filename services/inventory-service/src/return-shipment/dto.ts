@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { cursorPaginationSchema, plainText, referenceId } from '@rasta/contracts';
+import {
+  RETURN_DISPOSITIONS,
+  cursorPaginationSchema,
+  plainText,
+  referenceId,
+} from '@rasta/contracts';
 import {
   expectedVersionSchema,
   productIdSchema,
@@ -19,8 +24,8 @@ import { consigneeOrganizationIdSchema } from '../shipment/dto';
 
 export const MAX_RETURN_SHIPMENT_LINES = 50;
 
-/** IN_TRANSIT → RECEIVED in this version; INSPECTED and RESOLVED widen it (ADR-048 § 3). */
-export const RETURN_SHIPMENT_STATES = ['IN_TRANSIT', 'RECEIVED'] as const;
+/** The physical half of `REQUESTED → … → RESOLVED` (ADR-048 § 3). */
+export const RETURN_SHIPMENT_STATES = ['IN_TRANSIT', 'RECEIVED', 'INSPECTED', 'RESOLVED'] as const;
 export type ReturnShipmentStatus = (typeof RETURN_SHIPMENT_STATES)[number];
 
 /** Which side of a return shipment a list reads. */
@@ -135,6 +140,77 @@ export const receiveReturnShipmentSchema = z
   .strict();
 export type ReceiveReturnShipmentDto = z.infer<typeof receiveReturnShipmentSchema>;
 
+/** `POST /v1/return-shipments/{id}/inspection`: the received goods were examined. */
+export const inspectReturnShipmentSchema = z
+  .object({
+    expectedVersion: expectedVersionSchema,
+    note: plainText()
+      .min(1)
+      .max(1000)
+      .optional()
+      .describe(
+        'Optional: what the inspector found, in words. Trimmed, 1 to 1000 characters. Shown to ' +
+          'the return shipment’s readers; kept here and never on an event.',
+      ),
+    reportDocumentId: z
+      .string()
+      .regex(new RegExp(`^DOC_${ULID}$`))
+      .optional()
+      .describe(
+        'Optional: the inspection report, a file in document-service (`DOC_<ULID>`), referenced ' +
+          'by id and never resolved here. Files and images are stored only there (ADR-048).',
+      ),
+  })
+  .strict();
+export type InspectReturnShipmentDto = z.infer<typeof inspectReturnShipmentSchema>;
+
+/**
+ * `POST /v1/return-shipments/{id}/resolution`: what becomes of every received unit. Which
+ * dispositions an organization may choose is configuration (INVENTORY_RETURN_DISPOSITIONS_ALLOWED,
+ * Q-133) and is checked by the service, not by this shape.
+ */
+export const resolveReturnShipmentSchema = z
+  .object({
+    expectedVersion: expectedVersionSchema,
+    dispositions: z
+      .array(
+        z
+          .object({
+            orderLineId: orderLineIdSchema,
+            disposition: z.enum(RETURN_DISPOSITIONS),
+            quantity: quantitySchema.describe('How many units of this line go this way.'),
+          })
+          .strict(),
+      )
+      // Empty is a shape, not a permission: it balances only a shipment of which nothing arrived,
+      // and resolves one only where the deployment allows it (Q-133 (4); the service decides).
+      .min(0)
+      .max(MAX_RETURN_SHIPMENT_LINES * RETURN_DISPOSITIONS.length)
+      .superRefine((rows, context) => {
+        const seen = new Set<string>();
+        for (const [index, row] of rows.entries()) {
+          const pair = `${row.orderLineId}|${row.disposition}`;
+          if (seen.has(pair)) {
+            context.addIssue({
+              code: 'custom',
+              path: [index, 'disposition'],
+              message: 'A line has one row per disposition',
+            });
+          }
+          seen.add(pair);
+        }
+      })
+      .describe(
+        'Per line, its units by disposition; for every line the quantities add up to exactly ' +
+          'what was received (a line that received none needs no row). Empty only when nothing ' +
+          'arrived at all, and then only where INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED allows ' +
+          'it (Q-133). This records an outcome for the goods. It moves no stock and asks for no ' +
+          'money.',
+      ),
+  })
+  .strict();
+export type ResolveReturnShipmentDto = z.infer<typeof resolveReturnShipmentSchema>;
+
 export const listReturnShipmentsQuerySchema = cursorPaginationSchema
   .extend({
     side: z
@@ -161,6 +237,15 @@ export const returnShipmentLineViewSchema = z
   .strict();
 export type ReturnShipmentLineView = z.infer<typeof returnShipmentLineViewSchema>;
 
+export const returnDispositionViewSchema = z
+  .object({
+    orderLineId: z.string(),
+    disposition: z.enum(RETURN_DISPOSITIONS),
+    quantity: z.number().int(),
+  })
+  .strict();
+export type ReturnDispositionView = z.infer<typeof returnDispositionViewSchema>;
+
 /**
  * A return shipment as both of its organizations read it. No user id: the sender is another
  * organization, and who in the owner did what is the owner's audit trail (the events).
@@ -179,8 +264,18 @@ export const returnShipmentViewSchema = z
     carrierReference: z.string().nullable(),
     createdAt: z.string().describe('When the goods were recorded as on their way.'),
     receivedAt: z.string().nullable(),
+    inspectedAt: z.string().nullable(),
+    inspectionNote: z.string().nullable(),
+    inspectionReportDocumentId: z.string().nullable(),
+    resolvedAt: z.string().nullable(),
+    dispositions: z
+      .array(returnDispositionViewSchema)
+      .describe('Empty until RESOLVED; then every received unit, by line and disposition.'),
     updatedAt: z.string(),
-    version: z.number().int().describe('1 while IN_TRANSIT, 2 once RECEIVED.'),
+    version: z
+      .number()
+      .int()
+      .describe('1 while IN_TRANSIT, 2 once RECEIVED, 3 once INSPECTED, 4 once RESOLVED.'),
   })
   .strict();
 export type ReturnShipmentView = z.infer<typeof returnShipmentViewSchema>;
@@ -204,7 +299,9 @@ export const returnTrackingViewSchema = z
     buyerOrganizationId: z.string(),
     events: z
       .array(returnTrackingEventViewSchema)
-      .describe('What happened, in lifecycle order: IN_TRANSIT, then RECEIVED.'),
+      .describe(
+        'What happened, in lifecycle order: IN_TRANSIT, RECEIVED, INSPECTED, RESOLVED — as far as it got.',
+      ),
   })
   .strict();
 export type ReturnTrackingView = z.infer<typeof returnTrackingViewSchema>;
