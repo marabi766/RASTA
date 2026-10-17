@@ -201,6 +201,11 @@ export const EXEMPTIONS = {
     },
   },
   inventory: {
+    ix_return_shipment_buyer: {
+      index: 'return_shipment (buyer_organization_id, id)',
+      reason:
+        "the sender's own return shipments (GET /v1/return-shipments, /{id}, /{id}/tracking; RUN-005, ADR-048 § 2): a return shipment belongs to the organization that owns its destination warehouse, but the sender asking is another tenant, whose organization is buyer_organization_id — the column this index leads with, and the predicate of that read (ReturnShipmentRepository returnVisibleTo, raw SQL)",
+    },
     ix_shipment_consignee: {
       index: 'shipment (consignee_organization_id, id)',
       reason:
@@ -319,6 +324,11 @@ export const EXEMPTIONS = {
     },
   },
   marketplace: {
+    ix_return_request_supplier: {
+      index: 'return_request (supplier_organization_id, id)',
+      reason:
+        "the supplier's own return requests (GET /v1/returns?role=SUPPLIER; RUN-005): a request belongs to the buyer's organization, but the supplier asking is another tenant, whose organization is supplier_organization_id — the column this index leads with, and the predicate of that read (ReturnRepository.list with role SUPPLIER, runUnscoped)",
+    },
     ix_offer_product_status: {
       index: 'offer (product_id, status)',
       reason:

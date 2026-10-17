@@ -46,16 +46,13 @@ export interface TendersQuery extends TenderListQuery {
   readonly openCursor?: string;
 }
 
-export type TendersView =
-  /** Who the person is could not be read, so which door to knock on is unknown. */
-  | { readonly kind: 'IDENTITY_UNAVAILABLE'; readonly correlationId: string }
-  | {
-      readonly kind: 'SIDES';
-      /** `null`: the owner's door was not asked. */
-      readonly own: ReadResult<TenderPage> | null;
-      /** `null`: the bidder's door was not asked. */
-      readonly open: ReadResult<OpenTenderPage> | null;
-    };
+export type TendersView = {
+  readonly kind: 'SIDES';
+  /** `null`: the owner's door was not asked. */
+  readonly own: ReadResult<TenderPage> | null;
+  /** `null`: the bidder's door was not asked. */
+  readonly open: ReadResult<OpenTenderPage> | null;
+};
 
 export interface TendersScreenProps {
   readonly view: TendersView;
@@ -144,15 +141,6 @@ function OpenTenderRow({ tender }: { tender: OpenTenderSummary }) {
 }
 
 export function TendersScreen({ view, query }: TendersScreenProps) {
-  if (view.kind === 'IDENTITY_UNAVAILABLE') {
-    return (
-      <ErrorState
-        description="نقش شما در این سازمان خوانده نشد، پس فهرست مناقصه‌ها نشان داده نمی‌شود. کمی بعد دوباره تلاش کنید."
-        correlationId={view.correlationId}
-      />
-    );
-  }
-
   return (
     <div className="flex flex-col gap-8">
       {view.own ? <OwnSection result={view.own} query={query} /> : null}

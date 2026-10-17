@@ -5,6 +5,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import ts from 'typescript';
 
+import { guardAdmitsAlone } from '@/test/service-source';
+
 import {
   APPROVE_REQUEST_FIELD_MAPPING,
   ASSIGN_WORKSHOP_FIELD_MAPPING,
@@ -105,9 +107,11 @@ describe('who may use the commands', () => {
       const admitted = rolesOf(handler);
       expect(admitted.length).toBeGreaterThan(0);
       const offered = EVERY_ROLE.filter((role) => canManageMaintenance([role]));
-      expect(offered.sort()).toEqual(EVERY_ROLE.filter((role) => admitted.includes(role)).sort());
-      // …and no role the portal offers is one the service would not admit.
-      for (const role of offered) expect(admitted).toContain(role);
+      expect(offered.sort()).toEqual(
+        EVERY_ROLE.filter((role) => guardAdmitsAlone(role, admitted)).sort(),
+      );
+      // …and no role the portal offers is one the guard would not admit.
+      for (const role of offered) expect(guardAdmitsAlone(role, admitted)).toBe(true);
     },
   );
 

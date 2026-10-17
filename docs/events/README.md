@@ -444,6 +444,20 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 است، نه تحویل مرتب: Relay هنوز می‌تواند ردیف بعدیِ یک کلید را پیش از ردیف قبلی منتشر کند (D-027، باز؛ رفعش ADR-051 B4
 است و در این تغییر نیست). ترتیب واقعی را `occurredAt` و `streamSeq` می‌گویند، نه ترتیب رسیدن.
 
+### مرجوعی — RUN-005 / ADR-048 (2026-10-16)
+
+نیمهٔ تجاری لجستیک معکوس. Aggregate: `ReturnRequest`؛ کلید پارتیشن: `returnRequestId`؛ `returnVersion` جای هر رویداد در
+تاریخچهٔ همان درخواست است (۱ = `REQUESTED`، ۲ = وضعیت دوم، ۳ = وضعیت سوم). Payloadها فقط شناسه، تعداد صحیح و لحظه دارند —
+**متن آزاد دلیل خریدار روی رویداد نمی‌آید** و مبلغی هم حمل نمی‌شود. هیچ رویدادی Refund را نمی‌خواهد یا نشان نمی‌دهد: Refund
+را economic-service می‌سازد (ADR-048 § ۳). مصرف‌کنندگان ترتیب و تکرار را با `streamSeq` Envelope حل می‌کنند (D-027).
+
+| رویداد              | Aggregate / کلید                | مصرف‌کنندگان                                                        | Payload کلیدی                                                                                                                               |
+| ------------------- | ------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RETURN_REQUESTED`  | ReturnRequest / returnRequestId | **audit** (و اعلان: ساخته نشده)                                     | `returnRequestId`, `orderId`, `buyerOrganizationId`, `supplierOrganizationId`, `lines[]`, `returnVersion` (۱), `requestedBy`, `requestedAt` |
+| `RETURN_AUTHORIZED` | همان                            | **audit** (و اعلان: ساخته نشده) · inventory (محمولهٔ برگشت، PR بعد) | همان، `returnVersion` (۲), `authorizedBy`, `authorizedAt`                                                                                   |
+| `RETURN_REJECTED`   | همان                            | **audit** (و اعلان: ساخته نشده)                                     | همان، `returnVersion` (۲), `rejectedBy`, `rejectedAt`                                                                                       |
+| `RETURN_CANCELLED`  | همان                            | **audit** (و اعلان: ساخته نشده) · inventory                         | همان، `returnVersion` (۲ یا ۳), `cancelledFrom` (`REQUESTED`\|`AUTHORIZED`), `cancelledBy`, `cancelledAt`                                   |
+
 ## Procurement — `rasta.procurement.v1`
 
 | رویداد                   | مصرف‌کنندگان                        | Payload کلیدی                                    |
@@ -519,6 +533,19 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 | `SHIPMENT_CREATED`      | marketplace · notification   | `shipmentId`, `originWarehouseId`, `consigneeOrganizationId`, `orderReference`, `legCount`, `shipmentVersion` (۱), `createdBy`, …          |
 | `SHIPMENT_DISPATCHED`   | notification                 | `shipmentId`, `consigneeOrganizationId`, `trackingEventId`, `shipmentVersion` (۲), `dispatchedBy`, `dispatchedAt`, …                       |
 | `SHIPMENT_DELIVERED`    | marketplace · notification   | `shipmentId`, `consigneeOrganizationId`, `trackingEventId`, `shipmentVersion` (۳), `deliveredBy`, `deliveredAt`, …                         |
+
+### محمولهٔ برگشت — RUN-005 / ADR-048 (2026-10-16)
+
+نیمهٔ فیزیکی لجستیک معکوس. Aggregate: `ReturnShipment`؛ کلید پارتیشن: `returnShipmentId` (STRICT، `streamSeq` = `returnShipmentVersion`: ۱
+`IN_TRANSIT`، ۲ `RECEIVED`). همان قرارداد مصرف محموله‌های رفت (D-027): مصرف‌کننده با `streamSeq` Envelope مرتب و تکراری‌زدایی می‌کند.
+این رویدادها **واقعیت دربارهٔ کالا**ند، نه اجازهٔ مرجوعی: inventory درخواست مرجوعی را نمی‌خواند، و مصرف‌کننده‌ای که اثر تجاری دارد
+(marketplace، PR بعد) هر رویداد را با درخواست خودش می‌سنجد. Payload فقط شناسه، تعداد صحیح و لحظه دارد — **نه حمل‌کننده، نه
+یادداشت، نه مبلغ**. هیچ رویدادی موجودی را تغییر نمی‌دهد یا Refund می‌خواهد.
+
+| رویداد                       | مصرف‌کنندگان                     | Payload کلیدی                                                                                                                                                                                                                                 |
+| ---------------------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RETURN_SHIPMENT_DISPATCHED` | **audit** · marketplace (PR بعد) | `returnShipmentId`, `returnRequestId`, `orderId`, `buyerOrganizationId`, `destinationWarehouseId`, `lines[]` (`orderLineId`, `productId`, `expectedQuantity`), `returnShipmentVersion` (۱), `dispatchedBy`, `dispatchedAt`, `trackingEventId` |
+| `RETURN_SHIPMENT_RECEIVED`   | **audit** · marketplace (PR بعد) | همان، `lines[]` با `receivedQuantity` (۰ تا `expectedQuantity`), `returnShipmentVersion` (۲), `receivedBy`, `receivedAt`                                                                                                                      |
 
 ## Construction — `rasta.construction.v1`
 

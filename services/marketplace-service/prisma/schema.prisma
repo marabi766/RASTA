@@ -445,6 +445,106 @@ model OrderDispute {
   @@map("order_dispute")
 }
 
+/// The buyer's request to return goods of a completed order, and the supplier's decision about it
+/// (RUN-005, ADR-048). Marketplace's half of reverse logistics: the physical half is
+/// inventory-service's and every Hold, Refund and Reversal is economic-service's.
+///
+/// Tenant-scoped to the **buyer**, as `Order` is; the supplier reads and decides across the guard
+/// with a written reason, in `access.ts`. No Prisma relation to `Order`: the foreign key, the
+/// lifecycle trigger and the history check live in the migration SQL, and the repository reads the
+/// order itself, under its lock.
+///
+/// `status` is text with a CHECK, not an enum — the physical states widen it reversibly. The
+/// lifecycle is `REQUESTED → AUTHORIZED | REJECTED | CANCELLED`, and `AUTHORIZED → CANCELLED`.
+model ReturnRequest {
+  /// `RET_<ULID>`.
+  id String @id
+
+  /// The **buyer** — the tenant.
+  organizationId         String @map("organization_id")
+  supplierOrganizationId String @map("supplier_organization_id")
+  orderId                String @map("order_id")
+
+  status  String @default("REQUESTED")
+  /// One per status reached; the number of history rows.
+  version Int    @default(1)
+
+  /// Free text from the buyer, shown to the supplier; never on an event.
+  reason String
+
+  /// SHA-256 of route + Idempotency-Key; never the raw key (S-09).
+  commandKeyHash String @map("command_key_hash")
+
+  requestedAt            DateTime @map("requested_at") @db.Timestamptz(3)
+  requestedBy            String   @map("requested_by")
+  requestedCorrelationId String   @map("requested_correlation_id")
+
+  authorizedAt DateTime? @map("authorized_at") @db.Timestamptz(3)
+  authorizedBy String?   @map("authorized_by")
+  rejectedAt   DateTime? @map("rejected_at") @db.Timestamptz(3)
+  rejectedBy   String?   @map("rejected_by")
+  cancelledAt  DateTime? @map("cancelled_at") @db.Timestamptz(3)
+  cancelledBy  String?   @map("cancelled_by")
+  /// `REQUESTED` or `AUTHORIZED`: where a cancellation left from.
+  cancelledFrom String? @map("cancelled_from")
+
+  updatedAt DateTime @map("updated_at") @db.Timestamptz(3)
+
+  lines   ReturnLine[]
+  history ReturnStatusHistory[]
+
+  @@unique([organizationId, commandKeyHash], map: "ux_return_request_command")
+  @@index([organizationId, status, id], map: "ix_return_request_org_status")
+  @@index([organizationId, orderId, id], map: "ix_return_request_order")
+  @@index([supplierOrganizationId, id], map: "ix_return_request_supplier")
+  @@map("return_request")
+}
+
+/// One order line being returned, and how many of it. Written with the request, never changed.
+model ReturnLine {
+  /// `RTL_<ULID>`.
+  id String @id
+
+  organizationId  String @map("organization_id")
+  returnRequestId String @map("return_request_id")
+  returnRequest   ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Restrict)
+
+  orderLineId String @map("order_line_id")
+  /// Copied from the order line (the trigger checks it); what the supplier is asked to take back.
+  productId   String @map("product_id")
+  quantity    Int
+
+  createdAt DateTime @map("created_at") @db.Timestamptz(3)
+
+  @@unique([organizationId, returnRequestId, orderLineId], map: "ux_return_line_order_line")
+  @@index([orderLineId], map: "ix_return_line_order_line")
+  @@map("return_line")
+}
+
+/// Append-only: one row per status a request reached, in the order it reached them.
+model ReturnStatusHistory {
+  /// `RSH_<ULID>`.
+  id String @id
+
+  organizationId  String        @map("organization_id")
+  returnRequestId String        @map("return_request_id")
+  returnRequest   ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Restrict)
+
+  fromStatus String? @map("from_status")
+  toStatus   String  @map("to_status")
+  version    Int
+
+  actorId        String @map("actor_id")
+  correlationId  String @map("correlation_id")
+  commandKeyHash String @map("command_key_hash")
+
+  occurredAt DateTime @map("occurred_at") @db.Timestamptz(3)
+
+  @@unique([organizationId, returnRequestId, version], map: "ux_return_history_version")
+  @@unique([organizationId, commandKeyHash], map: "ux_return_history_command")
+  @@map("return_status_history")
+}
+
 model Review {
   id String @id
 

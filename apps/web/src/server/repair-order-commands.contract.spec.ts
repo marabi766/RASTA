@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { referenceId } from '@rasta/contracts';
 import ts from 'typescript';
 
+import { guardAdmitsAlone } from '@/test/service-source';
+
 import {
   CANCEL_REPAIR_FIELD_MAPPING,
   COMPLETE_REPAIR_FIELD_MAPPING,
@@ -138,7 +140,9 @@ describe('who may use the commands', () => {
       });
       expect(admitted.length).toBeGreaterThan(0);
       const offered = EVERY_ROLE.filter((role) => canManageMaintenance([role]));
-      expect(offered.sort()).toEqual(EVERY_ROLE.filter((role) => admitted.includes(role)).sort());
+      expect(offered.sort()).toEqual(
+        EVERY_ROLE.filter((role) => guardAdmitsAlone(role, admitted)).sort(),
+      );
     },
   );
 

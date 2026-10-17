@@ -60,7 +60,7 @@ export default async function HomePage() {
           </form>
         </TopBar>
       }
-      sidebar={<PortalSidebar session={session} currentHref="/" current={result} />}
+      sidebar={<PortalSidebar session={session} currentHref="/" />}
     >
       <PageHeader title="خانه" description="وضعیت حساب و سازمان فعال شما." />
 

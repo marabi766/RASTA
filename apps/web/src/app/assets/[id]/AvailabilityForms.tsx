@@ -9,6 +9,7 @@ import {
   AVAILABILITY_CHOICES,
   EMPTY_DECLARE_AVAILABILITY_FORM,
 } from '@/lib/fleet-availability-fields';
+import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
 import {
   IDLE_AVAILABILITY_FORM,
@@ -79,8 +80,8 @@ function Banner({
     case 'REFUSED':
       return (
         <Alert tone="danger">
-          {state.reason === 'NO_SESSION'
-            ? 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.'
+          {isSessionRefusal(state.reason)
+            ? SESSION_REFUSAL_MESSAGES[state.reason]
             : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.'}
         </Alert>
       );

@@ -18,6 +18,7 @@ import { BIDI_CONTROL } from './drivers';
 import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
+import { rolesGuardAdmits } from './roles-guard';
 
 /**
  * Commissioning, changing the status of, and decommissioning a machine,
@@ -60,11 +61,11 @@ import type { WebSession } from './session';
 const STATUS_ROLES: readonly string[] = ['ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN'];
 const DECOMMISSION_ROLES: readonly string[] = ['ORGANIZATION_ADMIN', 'UNION_ADMIN'];
 
-export const canChangeAssetStatus = (effectiveRoles: readonly string[]): boolean =>
-  effectiveRoles.some((role) => STATUS_ROLES.includes(role));
+export const canChangeAssetStatus = (roles: readonly string[]): boolean =>
+  rolesGuardAdmits(roles, STATUS_ROLES);
 
-export const canDecommissionAsset = (effectiveRoles: readonly string[]): boolean =>
-  effectiveRoles.some((role) => DECOMMISSION_ROLES.includes(role));
+export const canDecommissionAsset = (roles: readonly string[]): boolean =>
+  rolesGuardAdmits(roles, DECOMMISSION_ROLES);
 
 // ---------------------------------------------------------------------------
 // What a person types

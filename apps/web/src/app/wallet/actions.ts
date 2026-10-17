@@ -2,7 +2,7 @@
 
 import { redirect } from 'next/navigation';
 
-import { currentSession } from '@/server/current-session';
+import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { parseTopUpForm, topUpFormValues, topUpWallet } from '@/server/wallet';
@@ -23,7 +23,7 @@ export async function submitTopUp(
   form: FormData,
 ): Promise<TopUpFormState> {
   const session = await currentSession();
-  if (!session) return { kind: 'REFUSED', reason: 'NO_SESSION' };
+  if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
   const csrf = verifyCsrf(session, form);
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };

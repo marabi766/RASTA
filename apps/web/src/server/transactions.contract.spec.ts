@@ -10,6 +10,7 @@ import {
   DISPUTE_FIELD_LIMITS,
   DISPUTE_FROM_STATES,
   DISPUTE_TARGET_STATE,
+  EMPTY_DISPUTE_FORM,
   NEVER_ROLE,
   PLATFORM_ROLES,
   TRANSACTION_READ_ROLES,
@@ -28,7 +29,13 @@ import {
   topLevelConst,
 } from '@/test/service-source';
 
-import { DISPUTE_COMMAND_TABLE, DISPUTE_FIELD_MAPPING, TRANSACTION_SCHEMA } from './transactions';
+import {
+  boundDisputeRequest,
+  DISPUTE_COMMAND_TABLE,
+  DISPUTE_FIELD_MAPPING,
+  parseDisputeCommand,
+  TRANSACTION_SCHEMA,
+} from './transactions';
 
 /**
  * What the transaction page depends on, pinned to economic-service's source —
@@ -146,32 +153,72 @@ describe('the roles the portal mirrors', () => {
 });
 
 /**
- * Optional fields economic-service accepts that the portal does not send yet. Listed exactly, so a
- * new field still fails here: `disputeId` (#318, docs/23 D-053) names the dispute a resolution
- * decides; omitting it keeps the pre-#318 behaviour.
+ * What a body carries besides its text: a resolution names the dispute it
+ * decides (`disputeId`, #318, docs/23 D-053), which the portal sends from the
+ * submission's signed stamp (PR 325 review 1, finding 1). Pinned to the
+ * service's own declaration.
  */
-const OPTIONAL_UNSENT: Readonly<Record<DisputeCommand, Readonly<Record<string, string>>>> = {
+const SENT_IDENTITY: Readonly<Record<DisputeCommand, Readonly<Record<string, string>>>> = {
   DISPUTE: {},
   RESOLVE_DISPUTE: { disputeId: 'disputeId:z.string().trim().min(1).max(64).optional()' },
 };
 
+/**
+ * Optional fields economic-service accepts that the portal does not send. None
+ * today; listed exactly, so a new field still fails here.
+ */
+const OPTIONAL_UNSENT: Readonly<Record<DisputeCommand, Readonly<Record<string, string>>>> = {
+  DISPUTE: {},
+  RESOLVE_DISPUTE: {},
+};
+
 describe('the bodies', () => {
   it.each(DISPUTE_COMMAND_TABLE)(
-    '$command: strict, with the one field the portal sends, its limits, and only listed optional extras',
+    '$command: strict, with the field the portal sends, its limits, its identity, and only listed optional extras',
     ({ command }) => {
       const field = DISPUTE_COMMAND_FIELDS[command];
       const schema = squash(topLevelConst(dto, SCHEMAS[command]).getText()) ?? '';
       expect(schema).toContain('.strict()');
+      const sent = SENT_IDENTITY[command];
       const extras = OPTIONAL_UNSENT[command];
       expect([...schemaProperties(dto, SCHEMAS[command]).keys()]).toEqual([
         field,
+        ...Object.keys(sent),
         ...Object.keys(extras),
       ]);
-      for (const declaration of Object.values(extras)) expect(schema).toContain(declaration);
+      for (const declaration of [...Object.values(sent), ...Object.values(extras)]) {
+        expect(schema).toContain(declaration);
+      }
       const { min, max } = DISPUTE_FIELD_LIMITS[field];
       expect(schema).toContain(`${field}:z.string().trim().min(${min}).max(${max})`);
     },
   );
+
+  it.each(DISPUTE_COMMAND_TABLE)(
+    '$command: the body the portal builds is exactly its field and its identity',
+    ({ command }) => {
+      const field = DISPUTE_COMMAND_FIELDS[command];
+      const parsed = parseDisputeCommand({
+        command,
+        values: { ...EMPTY_DISPUTE_FORM, [field]: 'متنی به اندازهٔ کافی بلند' },
+      });
+      if (!parsed.ok) throw new Error('expected a valid form');
+      const request = boundDisputeRequest(parsed.request, 'TXD_A');
+      expect(Object.keys(request?.body ?? {})).toEqual([
+        field,
+        ...Object.keys(SENT_IDENTITY[command]),
+      ]);
+    },
+  );
+
+  it('a resolution with no dispute to name is never built', () => {
+    const parsed = parseDisputeCommand({
+      command: 'RESOLVE_DISPUTE',
+      values: { ...EMPTY_DISPUTE_FORM, resolution: 'متنی به اندازهٔ کافی بلند' },
+    });
+    if (!parsed.ok) throw new Error('expected a valid form');
+    expect(boundDisputeRequest(parsed.request, null)).toBeNull();
+  });
 });
 
 describe('the state machine', () => {

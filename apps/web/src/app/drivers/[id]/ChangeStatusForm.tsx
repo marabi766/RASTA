@@ -7,6 +7,7 @@ import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { driverStatusOptions } from '@/lib/labels';
 import { EMPTY_CHANGE_STATUS_FORM } from '@/lib/driver-fields';
+import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
 import { submitChangeStatus } from './actions';
 import { IDLE_CHANGE_STATUS_FORM, type ChangeStatusFormState } from './form-state';
@@ -117,8 +118,8 @@ function FormBanner({ state }: { state: ChangeStatusFormState }) {
   if (state.kind === 'REFUSED') {
     return (
       <Alert tone="danger">
-        {state.reason === 'NO_SESSION'
-          ? 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.'
+        {isSessionRefusal(state.reason)
+          ? SESSION_REFUSAL_MESSAGES[state.reason]
           : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.'}
       </Alert>
     );

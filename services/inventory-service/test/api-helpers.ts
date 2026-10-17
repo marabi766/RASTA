@@ -15,7 +15,13 @@ import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { ReservationSweeper } from '../src/reservation/reservation.sweeper';
-import { databaseUrl, newProductId } from './helpers';
+import {
+  databaseUrl,
+  newOrderLineId,
+  newOrderReference,
+  newProductId,
+  newReturnRequestId,
+} from './helpers';
 
 /**
  * The HTTP surface, booted from the **real** `AppModule` — the harness contract-service built,
@@ -245,6 +251,31 @@ export function client(api: ApiHarness, token: string) {
       post(`/v1/shipments/${shipmentId}/deliver`, body, k),
     shipment: (id: string) => get(`/v1/shipments/${id}`),
     tracking: (id: string) => get(`/v1/shipments/${id}/tracking`),
+    /** Goods of a return, `quantity` of one fresh order line, coming back to `destinationWarehouseId`. */
+    dispatchReturn: (
+      destinationWarehouseId: string,
+      buyerOrganizationId: string,
+      extra: object = {},
+      k?: string,
+    ) =>
+      post(
+        '/v1/return-shipments',
+        {
+          returnRequestId: newReturnRequestId(),
+          orderId: newOrderReference(),
+          buyerOrganizationId,
+          destinationWarehouseId,
+          lines: [{ orderLineId: newOrderLineId(), productId: newProductId(), quantity: 3 }],
+          carrierName: 'Road freight',
+          carrierReference: 'WB-2001',
+          ...extra,
+        },
+        k,
+      ),
+    receiveReturn: (id: string, body: object, k?: string) =>
+      post(`/v1/return-shipments/${id}/receive`, body, k),
+    returnShipment: (id: string) => get(`/v1/return-shipments/${id}`),
+    returnTracking: (id: string) => get(`/v1/return-shipments/${id}/tracking`),
   };
 }
 

@@ -86,7 +86,8 @@
         "CONSTRUCTION_*",
         "GATEWAY_*",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
-        "INSURANCE_CLAIM_DOCUMENT_STATUSES"
+        "INSURANCE_CLAIM_DOCUMENT_STATUSES",
+        "MARKETPLACE_RETURN_WINDOW_DAYS"
       ]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
@@ -142,7 +143,8 @@
         "CONSTRUCTION_*",
         "GATEWAY_*",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
-        "INSURANCE_CLAIM_DOCUMENT_STATUSES"
+        "INSURANCE_CLAIM_DOCUMENT_STATUSES",
+        "MARKETPLACE_RETURN_WINDOW_DAYS"
       ]
     },
     // identity-service's two 500-write aggregation proofs, run alone after the
@@ -232,6 +234,10 @@
     // service to every key of that service's own schema: a new setting is
     // declared or the check fails. The settings withheld before it are listed
     // in scripts/service-env-turbo-withheld.json, a list that may only shrink.
+    //
+    // MARKETPLACE_RETURN_WINDOW_DAYS (RUN-005, Q-132): marketplace's return
+    // window, no default — unset, every return request is refused. The first
+    // new setting under that check, declared here and in the test tasks above.
     "dev": {
       "cache": false,
       "persistent": true,
@@ -253,7 +259,8 @@
         "CONSTRUCTION_*",
         "GATEWAY_*",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
-        "INSURANCE_CLAIM_DOCUMENT_STATUSES"
+        "INSURANCE_CLAIM_DOCUMENT_STATUSES",
+        "MARKETPLACE_RETURN_WINDOW_DAYS"
       ]
     },
     "clean": { "cache": false }
