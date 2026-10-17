@@ -23,9 +23,12 @@ import { installLiveSession } from './live-session';
  * ## Who does what
  *
  * The payer's administrator opens the dispute; the payee's administrator sees
- * it and is offered no form (economic-service refuses it 403); the union's
- * administrator — a platform role — resolves it, which puts the transaction
- * back in the settlement queue and settles nothing.
+ * it and is offered no form (economic-service refuses it 403); the system
+ * administrator — the platform operator — resolves it, which puts the
+ * transaction back in the settlement queue and settles nothing. Not the
+ * union's administrator: it acts for another organization only within its
+ * union's subtree (docs/24 Q-136), and the seeded union does not hold the
+ * payer.
  */
 
 const GROSS_MINOR = '3456789';
@@ -253,7 +256,7 @@ test.describe('transaction disputes through the live stack', () => {
     page,
     request,
   }) => {
-    const session = await installLiveSession(context, 'unionAdmin');
+    const session = await installLiveSession(context, 'systemAdmin');
     await page.goto(`/transactions/${ownId}`);
 
     const form = page.getByRole('form', { name: 'رسیدگی به اعتراض' });

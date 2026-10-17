@@ -54,6 +54,19 @@ export const returnTransitionsTotal = new Counter({
   registers: [registry],
 });
 
+/**
+ * What the return mirror did with each inventory-service return event (RUN-005 PR 3): `applied`,
+ * `duplicate` (already applied), `stale` (an earlier step of a request already past it), `ahead`
+ * (a later step before the one it follows; retried, then dead-lettered) or `refused` (dead-
+ * lettered at once). A closed set; the event is the inventory event's name.
+ */
+export const returnMirrorEventsTotal = new Counter({
+  name: 'rasta_marketplace_return_mirror_events_total',
+  help: 'Inventory return events mirrored onto return requests, by event and result',
+  labelNames: ['service', 'event', 'result'] as const,
+  registers: [registry],
+});
+
 /** Return commands refused for a business rule, by which rule (a closed set, see ReturnService). */
 export const returnRefusalsTotal = new Counter({
   name: 'rasta_marketplace_return_refusals_total',

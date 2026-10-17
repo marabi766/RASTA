@@ -1321,6 +1321,13 @@ model Settlement {
   settledAt DateTime @map("settled_at")
   settledBy String   @map("settled_by")
 
+  /// The organization the settler acted for: the payer itself, or — for a
+  /// system administrator settling another organization's transaction — the
+  /// one they were acting in (docs/23 D-054). `settledBy` is who; the journal
+  /// and `organizationId` are whose books. NULL only on rows settled before
+  /// 20261016120000_settlement_acting_organization.
+  actingOrganizationId String? @map("acting_organization_id")
+
   transaction Transaction @relation(fields: [transactionId], references: [id])
 
   @@index([organizationId, settledAt(sort: Desc)])
