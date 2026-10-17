@@ -231,6 +231,33 @@ const PAYLOADS = {
     cancelledBy: 'USR-1',
     cancelledAt: '2026-10-16T00:00:03.000Z',
   },
+  RETURN_IN_TRANSIT: {
+    ...RETURN_FACTS,
+    returnVersion: 3,
+    returnShipmentId: 'RSP_01JBQ0000000000000000000EF',
+    inTransitAt: '2026-10-16T00:00:03.000Z',
+  },
+  RETURN_RECEIVED: {
+    ...RETURN_FACTS,
+    returnVersion: 4,
+    returnShipmentId: 'RSP_01JBQ0000000000000000000EF',
+    receivedLines: [{ orderLineId: 'OLN_1', receivedQuantity: 1 }],
+    receivedAt: '2026-10-16T00:00:04.000Z',
+  },
+  RETURN_INSPECTED: {
+    ...RETURN_FACTS,
+    returnVersion: 5,
+    returnShipmentId: 'RSP_01JBQ0000000000000000000EF',
+    reportDocumentId: null,
+    inspectedAt: '2026-10-16T00:00:05.000Z',
+  },
+  RETURN_RESOLVED: {
+    ...RETURN_FACTS,
+    returnVersion: 6,
+    returnShipmentId: 'RSP_01JBQ0000000000000000000EF',
+    outcomes: [{ orderLineId: 'OLN_1', disposition: 'SCRAP' as const, quantity: 1 }],
+    resolvedAt: '2026-10-16T00:00:06.000Z',
+  },
 } satisfies { [N in MarketplaceEventName]: Parameters<(typeof PARTITION_KEY_POLICY)[N]>[0] };
 
 const EXPECTED: { [N in MarketplaceEventName]: { scope: PartitionScope; key: string } } = {
@@ -255,6 +282,10 @@ const EXPECTED: { [N in MarketplaceEventName]: { scope: PartitionScope; key: str
   RETURN_AUTHORIZED: { scope: 'RETURN_REQUEST', key: RETURN },
   RETURN_REJECTED: { scope: 'RETURN_REQUEST', key: RETURN },
   RETURN_CANCELLED: { scope: 'RETURN_REQUEST', key: RETURN },
+  RETURN_IN_TRANSIT: { scope: 'RETURN_REQUEST', key: RETURN },
+  RETURN_RECEIVED: { scope: 'RETURN_REQUEST', key: RETURN },
+  RETURN_INSPECTED: { scope: 'RETURN_REQUEST', key: RETURN },
+  RETURN_RESOLVED: { scope: 'RETURN_REQUEST', key: RETURN },
 };
 
 const NAMES = Object.values(MARKETPLACE_EVENTS);
@@ -268,10 +299,10 @@ describe('every published marketplace event has a partition decision', () => {
     expect(resolve(name)).toEqual(EXPECTED[name]);
   });
 
-  it('covers exactly the twenty-one events this service publishes', () => {
+  it('covers exactly the twenty-five events this service publishes', () => {
     expect(Object.keys(EXPECTED).sort()).toEqual([...NAMES].sort());
     expect(Object.keys(PARTITION_KEY_POLICY).sort()).toEqual([...NAMES].sort());
-    expect(NAMES).toHaveLength(21);
+    expect(NAMES).toHaveLength(25);
   });
 });
 
@@ -371,6 +402,10 @@ describe('aggregate identity is separate from partition ordering', () => {
       RETURN_AUTHORIZED: 'ReturnRequest',
       RETURN_REJECTED: 'ReturnRequest',
       RETURN_CANCELLED: 'ReturnRequest',
+      RETURN_IN_TRANSIT: 'ReturnRequest',
+      RETURN_RECEIVED: 'ReturnRequest',
+      RETURN_INSPECTED: 'ReturnRequest',
+      RETURN_RESOLVED: 'ReturnRequest',
     });
   });
 

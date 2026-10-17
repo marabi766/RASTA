@@ -42,6 +42,8 @@ export interface LockedReturnRow {
   status: ReturnStatus;
   version: number;
   authorizedAt: Date | null;
+  /** The inventory shipment mirrored onto it, once goods are on the road (RUN-005 PR 3). */
+  returnShipmentId: string | null;
   updatedAt: Date;
 }
 
@@ -53,6 +55,7 @@ interface RawLockedReturn {
   status: ReturnStatus;
   version: number;
   authorized_at: Date | null;
+  return_shipment_id: string | null;
   updated_at: Date;
 }
 
@@ -105,7 +108,7 @@ export class ReturnRepository {
       'a return request names two organizations and its supplier decides it; the party check follows in access',
       () => tx.$queryRaw<RawLockedReturn[]>`
         SELECT id, organization_id, supplier_organization_id, order_id, status, version,
-               authorized_at, updated_at
+               authorized_at, return_shipment_id, updated_at
         FROM "return_request"
         WHERE id = ${id}
         FOR UPDATE
@@ -121,6 +124,7 @@ export class ReturnRepository {
       status: row.status,
       version: row.version,
       authorizedAt: row.authorized_at,
+      returnShipmentId: row.return_shipment_id,
       updatedAt: row.updated_at,
     };
   }

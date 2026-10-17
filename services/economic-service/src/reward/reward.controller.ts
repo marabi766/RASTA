@@ -1,8 +1,22 @@
-import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { RewardService } from './reward.service';
+import { ParticipationService } from './participation.service';
+import { toParticipationRuleApiView, toParticipationView } from './participation-views';
 import { assertNotAuditor } from '../access/access';
+import { IdempotencyStore } from '../shared/idempotency';
+import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import {
   toRewardBalanceView,
   toRewardView,
@@ -10,11 +24,15 @@ import {
   type RewardRow,
 } from '../shared/views';
 import {
+  createParticipationRuleSchema,
   createRewardRuleSchema,
   listRewardRulesQuerySchema,
+  myParticipationQuerySchema,
   myRewardsQuerySchema,
   updateRewardRuleSchema,
+  type CreateParticipationRuleDto,
   type CreateRewardRuleDto,
+  type MyParticipationQuery,
   type ListRewardRulesQuery,
   type MyRewardsQuery,
   type UpdateRewardRuleDto,
@@ -42,7 +60,11 @@ import {
 @ApiTags('rewards')
 @Controller({ path: 'rewards', version: '1' })
 export class RewardController {
-  constructor(private readonly rewards: RewardService) {}
+  constructor(
+    private readonly rewards: RewardService,
+    private readonly participation: ParticipationService,
+    private readonly idempotency: IdempotencyStore,
+  ) {}
 
   // ---- The caller's own standing -------------------------------------------
 
@@ -66,6 +88,76 @@ export class RewardController {
         : null,
       rewards: result.rewards.map((row) => toRewardView(row as RewardRow)),
     };
+  }
+
+  @Get('me/participation')
+  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'OPERATOR', 'DRIVER')
+  @ApiOperation({
+    summary: 'The calling user participation score, explained — not spendable',
+    description:
+      'ParticipationScore is a rolling index of the verified facts the caller did in the ' +
+      'active organization (ADR-047): never spent, granted or converted, and separate from the ' +
+      'reward points of GET /v1/rewards/me. `spendable` is always false. The score is the sum ' +
+      'of `breakdown[].contribution`, each `counted × weight`, under the participation rule ' +
+      'version named in `rule`, over `window`; `recentFacts` says which recent facts counted ' +
+      'and what each added. Only facts the owning service confirmed and attributed to the ' +
+      'caller count. `status` is NO_RULE, with a null score, while no participation rule has ' +
+      'been created (docs/24 Q-139). Own score only: there is no parameter naming another ' +
+      'user, and no comparison with anybody else.',
+  })
+  async myParticipation(@Query(zodPipe(myParticipationQuerySchema)) query: MyParticipationQuery) {
+    assertNotAuditor();
+    return toParticipationView(await this.participation.myParticipation(query.limit));
+  }
+
+  // ---- Participation rule versions -----------------------------------------
+
+  @Get('participation-rules')
+  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'ORGANIZATION_ADMIN')
+  @ApiOperation({
+    summary: 'Participation rule versions, newest first',
+    description: 'Platform-wide. The first item is the version in force.',
+  })
+  async listParticipationRules() {
+    assertNotAuditor();
+    const rows = await this.participation.listRules();
+    return { items: rows.map(toParticipationRuleApiView) };
+  }
+
+  @Post('participation-rules')
+  @HttpCode(201)
+  @Roles('SYSTEM_ADMIN')
+  @ApiOperation({
+    summary: 'Create the next participation rule version',
+    description:
+      'Which verified facts count toward ParticipationScore, the weight of each, at most how ' +
+      'many per window, and the window in days. In force from now for every organization; the ' +
+      'previous version stays as the record and is never edited. No number has a default — the ' +
+      'product document gives none (docs/24 Q-139). Publishes PARTICIPATION_RULE_CHANGED with ' +
+      'the actor and the terms before and after. Weights are positive: no penalties. ' +
+      '`expectedCurrentVersion` is the version being replaced (0 while none exists); if another ' +
+      'version was created since, 409 OPTIMISTIC_LOCK_FAILED and nothing is written. Requires ' +
+      'an `Idempotency-Key`: a retry returns the version the first request created, never ' +
+      'another one.',
+  })
+  async createParticipationRule(
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Body(zodPipe(createParticipationRuleSchema)) dto: CreateParticipationRuleDto,
+  ) {
+    assertNotAuditor();
+    const key = requireIdempotencyKey(idempotencyKey);
+
+    return this.idempotency.run(
+      'POST /v1/rewards/participation-rules',
+      key,
+      dto,
+      201,
+      (answer) => this.participation.createRule(dto, answer.map(toParticipationRuleApiView)),
+      // Nothing to re-check: a version is platform-wide and listed to every
+      // administrator, and the role and oversight checks above have already
+      // run as the caller now is. The record answers only its own actor.
+      { mayReplay: async () => undefined },
+    );
   }
 
   // ---- Rules ---------------------------------------------------------------

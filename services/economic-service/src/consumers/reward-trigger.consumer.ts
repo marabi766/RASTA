@@ -477,6 +477,7 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
         this.prisma.client,
         envelope,
         claim,
+        fact,
         outcome,
         ruleIds,
       );
@@ -499,7 +500,7 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
     // re-emitted under a new event id. That is a retroactive grant, and one
     // belongs to an authorised backfill, not to a replay.
     return this.prisma.transaction(async (tx) => {
-      const held = await this.claimEvaluation(tx, envelope, claim, outcome, []);
+      const held = await this.claimEvaluation(tx, envelope, claim, fact, outcome, []);
       if (!held) return null;
       // Only the delivery that wrote the row marks the event: a concurrent
       // delivery of the same event that wrote it first commits its own
@@ -524,6 +525,7 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
     client: Pick<PrismaService['client'], 'rewardSourceEvaluation'>,
     envelope: EventEnvelope,
     claim: Claim,
+    fact: ConfirmedFact,
     outcome: EvaluationOutcome,
     ruleIds: readonly string[],
   ): Promise<{ inserted: boolean; evaluation: Evaluation } | null> {
@@ -539,6 +541,11 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
           eventId: envelope.eventId,
           outcome,
           ruleIds: [...ruleIds],
+          // Whose behaviour the fact was and when, as the owner recorded it:
+          // what a participation score counts, whether or not a reward rule
+          // paid (ADR-047). Nobody when the owner recorded no user.
+          subjectUserId: fact.subject,
+          occurredAt: fact.subject ? fact.occurredAt : null,
         },
       ],
       skipDuplicates: true,
