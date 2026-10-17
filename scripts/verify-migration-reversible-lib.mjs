@@ -1600,6 +1600,8 @@ export const EXPECTED = {
       'transaction_pricing_rule_id_fkey',
       // Only economic-service records MAINTENANCE_REQUEST / PAYMENT_INTENT rows (recorded-sources.ts).
       'ck_transaction_recorded_source',
+      // ORDER is recorded by a service over the API, never by a person (recorded-sources.ts).
+      'ck_transaction_order_source',
       'ck_commission_pricing_cutover_single',
       'ck_payment_reconciliation_done_complete',
       'ck_payment_reconciliation_lease_pair',

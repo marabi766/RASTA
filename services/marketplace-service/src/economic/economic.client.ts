@@ -45,6 +45,7 @@ export interface TransactionView {
   commissionAmountMinor: string;
   netAmountMinor: string;
   currency: string;
+  sourceType: string | null;
   sourceReference: string | null;
 }
 
@@ -109,6 +110,42 @@ export interface SettlementView {
 /** The economic transaction type an order's obligation is recorded as. */
 const OBLIGATION_TYPE = 'MARKETPLACE_ORDER';
 
+/** The source type it is recorded under, with the order id as the reference. */
+const OBLIGATION_SOURCE_TYPE = 'ORDER';
+
+/** What the saga records an order's obligation with: read from the order alone. */
+export interface ObligationTerms {
+  orderId: string;
+  buyerOrganizationId: string;
+  supplierOrganizationId: string;
+  totalAmountMinor: bigint;
+  currency: string;
+}
+
+/**
+ * Which of the terms `createObligation` sends `transaction` does not carry,
+ * by name; empty when it is exactly the obligation the saga records.
+ *
+ * Every term, not the key: payer, payee, amount, currency, type, source type
+ * and reference. A row under the order's key on other terms is somebody
+ * else's — 1 rial to an accomplice, recorded first by the buyer's
+ * administrator, was settled as the order's payment (review of #334 round 1,
+ * F1). Amounts compare as economic-service writes them, decimal minor units.
+ */
+export function termsDiffer(terms: ObligationTerms, transaction: TransactionView): string[] {
+  const differ: string[] = [];
+  if (transaction.organizationId !== terms.buyerOrganizationId) differ.push('payer');
+  if (transaction.counterpartyOrganizationId !== terms.supplierOrganizationId) {
+    differ.push('payee');
+  }
+  if (transaction.grossAmountMinor !== terms.totalAmountMinor.toString()) differ.push('amount');
+  if (transaction.currency !== terms.currency) differ.push('currency');
+  if (transaction.transactionType !== OBLIGATION_TYPE) differ.push('transactionType');
+  if (transaction.sourceType !== OBLIGATION_SOURCE_TYPE) differ.push('sourceType');
+  if (transaction.sourceReference !== terms.orderId) differ.push('sourceReference');
+  return differ;
+}
+
 /** Keys derived from identity, so a retry is a replay rather than a new act. */
 export const idempotencyKeyFor = {
   hold: (orderId: string) => `order:${orderId}:hold`,
@@ -148,14 +185,9 @@ export class EconomicClient {
    * hold itself, and a separate check would be a TOCTOU: between the check and
    * the hold the money can go.
    */
-  async createObligation(input: {
-    orderId: string;
-    buyerOrganizationId: string;
-    supplierOrganizationId: string;
-    totalAmountMinor: bigint;
-    currency: string;
-    correlationId: string;
-  }): Promise<TransactionView> {
+  async createObligation(
+    input: ObligationTerms & { correlationId: string },
+  ): Promise<TransactionView> {
     return this.call<TransactionView>('createObligation', {
       method: 'POST',
       path: '/v1/transactions',
@@ -167,7 +199,7 @@ export class EconomicClient {
         counterpartyOrganizationId: input.supplierOrganizationId,
         grossAmountMinor: input.totalAmountMinor.toString(),
         currency: input.currency,
-        sourceType: 'ORDER',
+        sourceType: OBLIGATION_SOURCE_TYPE,
         sourceReference: input.orderId,
         holdFunds: true,
       },
@@ -175,7 +207,8 @@ export class EconomicClient {
   }
 
   /**
-   * The obligation recorded for this order, if there is one.
+   * Every transaction economic-service holds for the buyer that names this
+   * order as its source reference, as an order's obligation type.
    *
    * The saga's answer to "did the hold happen?" when `createObligation` ended
    * without a definite reply. A timeout, an exhausted retry or a lost response
@@ -184,12 +217,16 @@ export class EconomicClient {
    * buyer's money stayed held. economic-service keeps at most one obligation
    * per payer and source fact (`ux_transaction_source_fact`), so this read is
    * a complete answer, not a best guess.
+   *
+   * Every candidate, not the first: a row under the order's id is not the
+   * order's obligation because of the id. Which one is — if any — is decided
+   * on its terms (`termsDiffer`), by the caller that knows them.
    */
-  async findObligation(input: {
+  async findObligations(input: {
     orderId: string;
     buyerOrganizationId: string;
     correlationId: string;
-  }): Promise<TransactionView | null> {
+  }): Promise<TransactionView[]> {
     const query = new URLSearchParams({
       sourceReference: input.orderId,
       transactionType: OBLIGATION_TYPE,
@@ -200,11 +237,8 @@ export class EconomicClient {
       organizationId: input.buyerOrganizationId,
       correlationId: input.correlationId,
     });
-    return (
-      page.items.find(
-        (item) =>
-          item.sourceReference === input.orderId && item.transactionType === OBLIGATION_TYPE,
-      ) ?? null
+    return page.items.filter(
+      (item) => item.sourceReference === input.orderId && item.transactionType === OBLIGATION_TYPE,
     );
   }
 

@@ -16,6 +16,9 @@ import { installLiveSession } from './live-session';
  * - **own** — ORG-DEH-0001 pays ORG-DEH-0002, funds held. Both are parties.
  * - **third** — ORG-DEH-0001 pays `ORG-E2E-THIRD`. ORG-DEH-0002 is **not** a
  *   party (the same stand-in third organization as the settlement scenarios).
+ * - **order** — a `MARKETPLACE_ORDER` ORG-DEH-0001 owes ORG-DEH-0002, under a
+ *   source type of the test's own: `ORDER` is recorded only by
+ *   marketplace-service (#334), and no saga runs in this stack.
  *
  * Money moves nowhere: the payment provider is the mock one, and nothing here
  * settles.
@@ -124,10 +127,12 @@ test.describe('transaction disputes through the live stack', () => {
     try {
       ownId = await hold(request, session.accessToken, OWN_PAYEE);
       thirdId = await hold(request, session.accessToken, THIRD_ORGANIZATION);
-      // Shaped as marketplace-service records an order's obligation.
+      // A marketplace order's transaction type. Not under `ORDER`: only
+      // marketplace-service records that, and this stack runs no saga (the
+      // refusal is the last test here).
       orderTransactionId = await hold(request, session.accessToken, OWN_PAYEE, {
         transactionType: 'MARKETPLACE_ORDER',
-        sourceType: 'ORDER',
+        sourceType: 'E2E_ORDER',
         sourceReference: ORDER_ID,
       });
     } finally {
@@ -288,10 +293,45 @@ test.describe('transaction disputes through the live stack', () => {
     await installLiveSession(context, 'orgAdmin');
     await page.goto(`/transactions/${orderTransactionId}`);
 
-    const link = page.getByRole('link', { name: 'رفتن به صفحهٔ سفارش' });
-    await expect(link).toHaveAttribute('href', `/orders/${ORDER_ID}`);
+    // Not under `ORDER`, so no order id to link to: the order list. The
+    // link to one order is `transactions.spec.tsx`'s, from an ORDER row.
+    const link = page.getByRole('link', { name: 'رفتن به فهرست سفارش‌ها' });
+    await expect(link).toHaveAttribute('href', '/orders');
     expect(await mainText(page)).toContain('فقط از صفحهٔ همان سفارش');
     await expect(page.locator('main form')).toHaveCount(0);
     await expect(page.locator('main textarea')).toHaveCount(0);
+  });
+
+  test('the payer’s administrator cannot record an order’s obligation under ORDER — only marketplace-service does', async ({
+    context,
+    request,
+  }) => {
+    // Review of #334 round 1, F1: recorded first, a pending order's key made
+    // the saga's own obligation 409, and the saga then settled this one.
+    const session = await installLiveSession(context, 'orgAdmin');
+    const refused = await call<{ code: string; details: unknown[] }>(
+      request,
+      session.accessToken,
+      'post',
+      '/v1/transactions',
+      {
+        transactionType: 'MARKETPLACE_ORDER',
+        counterpartyOrganizationId: THIRD_ORGANIZATION,
+        grossAmountMinor: '1',
+        currency: 'IRR',
+        sourceType: 'ORDER',
+        sourceReference: `ORD_E2E_${randomUUID().replace(/-/g, '').slice(0, 20)}`,
+        holdFunds: true,
+      },
+    );
+    expect(refused.status).toBe(400);
+    expect(refused.body.code).toBe('VALIDATION_FAILED');
+    expect(refused.body.details).toEqual([
+      {
+        path: 'sourceType',
+        code: 'custom',
+        message: 'This source type is recorded only from its owning service',
+      },
+    ]);
   });
 });

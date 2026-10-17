@@ -20,8 +20,9 @@
  * `20261017130000_transaction_recorded_source`) and, with its consumer, for
  * `STATEMENT` (`ck_transaction_statement_obligation`).
  *
- * A source type an owner records by calling the route itself (`ORDER`,
- * marketplace-service) is not one of these: there the caller is the owner.
+ * A source type its owner records by calling the route itself (`ORDER`,
+ * marketplace-service) is not one of these: there the caller is the owner,
+ * and `OWNER_RECORDED_SOURCE_TYPES` below reserves it to that caller.
  */
 export const ECONOMIC_RECORDED_SOURCE_TYPES = {
   /**
@@ -59,3 +60,53 @@ export function isEconomicRecordedSource(sourceType: string): boolean {
 
 /** The refusal's text: fixed, it never echoes what the caller sent. */
 export const RECORDED_SOURCE_REFUSAL = 'This source type is recorded only from its owning service';
+
+/**
+ * Source types their owning service records through `POST /v1/transactions`
+ * itself, each with the one transaction type it is recorded as.
+ *
+ * The same pre-emption, from the other side. marketplace-service's order saga
+ * records an order's obligation as `ORDER/<order id>`, and when that call
+ * ends without a definite answer — a 409 for the key included — it looks the
+ * obligation up and carries on with what it finds. While an order was still
+ * PENDING, the buyer's administrator could record `ORDER/<order id>` first, 1
+ * rial to an accomplice: the saga's own creation got 409, and the saga then
+ * authorised and settled the administrator's row as the order's payment
+ * (review of #334 round 1, F1).
+ *
+ * So `ORDER` is recorded only by marketplace-service, signed as itself
+ * (`callerService`, inside the internal token's signature), and only as
+ * `MARKETPLACE_ORDER`. Everyone else — every person, every other service —
+ * gets the same 400 as for the types above. The database holds the person
+ * half of the line (`ck_transaction_order_source`: a person's row names the
+ * person in `created_by`, a service's names economic-service); which service
+ * signed is known only here. marketplace-service, for its part, adopts a
+ * found obligation only on exactly the terms it would have recorded.
+ */
+export const OWNER_RECORDED_SOURCE_TYPES: Readonly<
+  Record<string, { readonly service: string; readonly transactionType: string }>
+> = {
+  ORDER: { service: 'marketplace-service', transactionType: 'MARKETPLACE_ORDER' },
+};
+
+/**
+ * Whether this caller may record a transaction of `transactionType` under
+ * `sourceType`: false for a type economic-service records itself, and for an
+ * owner's type unless the caller is that owner — a service, signed as it —
+ * recording it as the owner's transaction type.
+ */
+export function mayRecordSource(
+  caller: { authType?: string; callerService?: string },
+  sourceType: string | undefined,
+  transactionType: string,
+): boolean {
+  if (sourceType === undefined) return true;
+  if (isEconomicRecordedSource(sourceType)) return false;
+  if (!Object.hasOwn(OWNER_RECORDED_SOURCE_TYPES, sourceType)) return true;
+  const owner = OWNER_RECORDED_SOURCE_TYPES[sourceType]!;
+  return (
+    caller.authType === 'SERVICE' &&
+    caller.callerService === owner.service &&
+    transactionType === owner.transactionType
+  );
+}

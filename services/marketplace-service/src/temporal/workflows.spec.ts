@@ -981,6 +981,68 @@ describe('the order saga', () => {
       expect(order.economicTransactionId).toBe(TRANSACTION);
     });
 
+    // Review of #334 round 1, F1: the buyer's administrator recorded
+    // ORDER/<order id> first, 1 rial to an accomplice; the saga's creation got
+    // 409, its recovery adopted that row, and the saga settled it.
+    it('stops, adopting nothing, when the obligation found names the order on other terms', async () => {
+      const order = new FakeOrder();
+      const { calls, activities } = recordingActivities(order, {
+        createObligation: async () => {
+          throw ApplicationFailure.nonRetryable(
+            'An obligation for this source is already recorded for this organization',
+            'CONFLICT',
+          );
+        },
+        findObligation: async () => ({
+          mismatch: true,
+          transactionIds: ['TXN_PRE_RECORDED'],
+          differ: ['payee', 'amount'],
+        }),
+      });
+
+      await expect(run(order, activities, async () => undefined)).rejects.toMatchObject({
+        cause: { type: 'OBLIGATION_TERMS_MISMATCH' },
+      });
+
+      // Nothing adopted, nothing decided: the funds stay where they are.
+      expect(order.status).toBe('PENDING');
+      expect(order.economicTransactionId).toBeNull();
+      for (const step of [
+        'markFundsHeld',
+        'markFailed',
+        'authoriseSettlement',
+        'settle',
+        'compensate',
+        'markCancelled',
+      ]) {
+        expect(calls).not.toContain(step);
+      }
+    });
+
+    it('refunds nothing it did not record when a cancelled order’s lookup finds other terms', async () => {
+      const order = new FakeOrder();
+      let lookups = 0;
+      const { calls, activities } = recordingActivities(order, {
+        createObligation: async () => {
+          order.cancel('found a cheaper supplier');
+          throw ApplicationFailure.nonRetryable('economic-service timed out', 'UPSTREAM_TIMEOUT');
+        },
+        // Nothing yet when the hold is checked; a row by the time the
+        // cancellation asks again.
+        findObligation: async () =>
+          (lookups += 1) === 1
+            ? null
+            : { mismatch: true, transactionIds: ['TXN_PRE_RECORDED'], differ: ['amount'] },
+      });
+
+      await expect(run(order, activities, async () => undefined)).rejects.toMatchObject({
+        cause: { type: 'OBLIGATION_TERMS_MISMATCH' },
+      });
+      expect(lookups).toBe(2);
+      expect(calls).not.toContain('compensate');
+      expect(calls).not.toContain('markCancelled');
+    });
+
     it('closes as cancelled, with nothing to refund, when the buyer cancelled and the hold was refused', async () => {
       const order = new FakeOrder();
       const { calls, activities } = recordingActivities(order, {

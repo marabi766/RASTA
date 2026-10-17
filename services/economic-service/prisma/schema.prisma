@@ -453,7 +453,9 @@ model Transaction {
   /// are refused on POST /v1/transactions, and `MAINTENANCE_REQUEST` /
   /// `PAYMENT_INTENT` rows have their writer's shape
   /// (`ck_transaction_recorded_source`, migration
-  /// `20261017130000_transaction_recorded_source`).
+  /// `20261017130000_transaction_recorded_source`). `ORDER` is
+  /// marketplace-service's alone on that route, and a person's row cannot
+  /// carry it (`ck_transaction_order_source`).
   sourceType      String? @map("source_type")
   sourceReference String? @map("source_reference")
 

@@ -36,10 +36,15 @@ import {
  * capture's write fail on the same key, so money captured at the provider was
  * not credited. `STATEMENT` was the same hole, closed in CON-003 PR 6b.
  *
+ * `ORDER/<order id>` held first by the buyer's administrator made the order
+ * saga's own creation 409, and its recovery adopted the administrator's row —
+ * 1 rial to an accomplice — and settled it (review of #334 round 1, F1).
+ *
  * Each case drives the attack and then the owner's real fact through the real
- * writer — the consumer, the top-up — and asserts the owner's terms won. The
- * database half (`ck_transaction_recorded_source`) is driven past the API, as
- * code that skipped the rule, or an earlier release, would write.
+ * writer — the consumer, the top-up, the saga's call — and asserts the owner's
+ * terms won. The database half (`ck_transaction_recorded_source`,
+ * `ck_transaction_order_source`) is driven past the API, as code that skipped
+ * the rule, or an earlier release, would write.
  */
 describe('source types economic-service records itself — no caller pre-empts one', () => {
   let harness: ApiHarness;
@@ -471,6 +476,177 @@ describe('source types economic-service records itself — no caller pre-empts o
         expect(await rowsUnder('STATEMENT', statementId)).toHaveLength(0);
       },
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // ORDER — marketplace-service's alone (review of #334 round 1, F1)
+  // -------------------------------------------------------------------------
+
+  describe('ORDER', () => {
+    const ORDER_TOTAL = '250000';
+    const asSaga = async (): Promise<[string, string]> => [
+      'x-internal-token',
+      await internalToken('marketplace-service', { organizationId: payer }),
+    ];
+
+    /** The saga's own call, as marketplace-service's `EconomicClient.createObligation` sends it. */
+    const sagaCreates = async (orderId: string) =>
+      request(http)
+        .post('/v1/transactions')
+        .set(...(await asSaga()))
+        .set('idempotency-key', `order:${orderId}:hold`)
+        .send({
+          transactionType: 'MARKETPLACE_ORDER',
+          counterpartyOrganizationId: workshop,
+          grossAmountMinor: ORDER_TOTAL,
+          currency: 'IRR',
+          sourceType: 'ORDER',
+          sourceReference: orderId,
+          holdFunds: true,
+        });
+
+    /** The attack: 1 rial to the accomplice, held, under the pending order's key. */
+    const preRecord = (caller: [string, string], orderId: string) =>
+      claim(caller, 'ORDER', orderId, { transactionType: 'MARKETPLACE_ORDER', holdFunds: true });
+
+    /** What the saga's recovery reads (`EconomicClient.findObligations`). */
+    const sagaFinds = async (orderId: string) => {
+      const query = new URLSearchParams({
+        sourceReference: orderId,
+        transactionType: 'MARKETPLACE_ORDER',
+      });
+      const page = await request(http)
+        .get(`/v1/transactions?${query.toString()}`)
+        .set(...(await asSaga()))
+        .expect(200);
+      return page.body.items as Record<string, unknown>[];
+    };
+
+    beforeAll(async () => {
+      const wallet = await request(http)
+        .get('/v1/wallets/me')
+        .set('authorization', `Bearer ${admin(payer)}`)
+        .expect(200);
+      await request(http)
+        .post(`/v1/wallets/${wallet.body.id}/top-up`)
+        .set('authorization', `Bearer ${admin(payer)}`)
+        .set('idempotency-key', id('rsv-order-funds'))
+        .send({ amountMinor: '5000000' })
+        .expect(201);
+    });
+
+    const others = callers.filter(([who]) => !who.startsWith('marketplace-service'));
+
+    it.each(others)(
+      'refuses ORDER from %s: 400 VALIDATION_FAILED, nothing written, nothing held',
+      async (_who, caller) => {
+        const orderId = `ORD_${ulid()}`;
+        const response = await preRecord(await caller(), orderId).expect(400);
+        expect(response.body.code).toBe('VALIDATION_FAILED');
+        expect(response.body.details).toEqual([
+          { path: 'sourceType', code: 'custom', message: RECORDED_SOURCE_REFUSAL },
+        ]);
+        expect(JSON.stringify(response.body)).not.toContain(orderId);
+        expect(await rowsUnder('ORDER', orderId)).toHaveLength(0);
+      },
+    );
+
+    it('refuses ORDER from marketplace-service as any other transaction type', async () => {
+      const orderId = `ORD_${ulid()}`;
+      const response = await claim(await asSaga(), 'ORDER', orderId, {
+        transactionType: 'LOGISTICS',
+      }).expect(400);
+      expect(response.body.details).toEqual([
+        { path: 'sourceType', code: 'custom', message: RECORDED_SOURCE_REFUSAL },
+      ]);
+      expect(await rowsUnder('ORDER', orderId)).toHaveLength(0);
+    });
+
+    it('the exact attack: the buyer’s administrator records a pending order’s obligation first — refused, and the saga records the order’s terms', async () => {
+      const orderId = `ORD_${ulid()}`;
+
+      const attack = await preRecord(['authorization', `Bearer ${admin(payer)}`], orderId);
+      // Before: 201, and the saga's own creation below got 409; its recovery
+      // then found this row and settled 1 rial to the accomplice.
+      expect(attack.status).toBe(400);
+
+      const created = await sagaCreates(orderId);
+      expect(created.status).toBe(201);
+      expect(created.body).toMatchObject({
+        status: 'HELD',
+        organizationId: payer,
+        counterpartyOrganizationId: workshop,
+        grossAmountMinor: ORDER_TOTAL,
+        sourceType: 'ORDER',
+        sourceReference: orderId,
+      });
+      const found = await sagaFinds(orderId);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({ id: created.body.id, grossAmountMinor: ORDER_TOTAL });
+    });
+
+    it('the database refuses a person’s ORDER row past the API, and the saga still records', async () => {
+      const orderId = `ORD_${ulid()}`;
+
+      // TransactionService.create is what the route calls after its checks: a
+      // caller that skipped them writes exactly this — as a person.
+      await expect(
+        asActor({ organizationId: payer }, () =>
+          transactions.create({
+            transactionType: 'MARKETPLACE_ORDER',
+            counterpartyOrganizationId: accomplice,
+            grossAmountMinor: '1',
+            currency: 'IRR',
+            sourceType: 'ORDER',
+            sourceReference: orderId,
+            holdFunds: false,
+            idempotencyKey: id('rsv-order-bypass'),
+          }),
+        ),
+      ).rejects.toThrow(/ck_transaction_order_source/);
+
+      const insert = (overrides: Record<string, string | null>, reference = orderId) => {
+        const row = {
+          transaction_type: 'MARKETPLACE_ORDER',
+          idempotency_key: `order:${reference}:hold` as string | null,
+          created_by: 'economic-service',
+          counterparty_organization_id: accomplice as string | null,
+          ...overrides,
+        };
+        return runUnscoped('the suite writes as code that skipped the API would', () =>
+          harness.prisma.client.$executeRawUnsafe(
+            `INSERT INTO "transaction" (id, organization_id, counterparty_organization_id,
+               transaction_type, status, gross_amount_minor, currency, occurred_at, source_type,
+               source_reference, idempotency_key, correlation_id, created_by, updated_at)
+             VALUES ($1, $2, $3, $4::"TransactionType", 'CREATED', 1, 'IRR', now(),
+               'ORDER', $5, $6, 'corr', $7, now())`,
+            id('TXN'),
+            payer,
+            row.counterparty_organization_id,
+            row.transaction_type,
+            reference,
+            row.idempotency_key,
+            row.created_by,
+          ),
+        );
+      };
+      const unlikeAService: Record<string, string | null>[] = [
+        { created_by: 'USR-SOMEONE' },
+        { idempotency_key: null },
+        { transaction_type: 'LOGISTICS' },
+        { counterparty_organization_id: null },
+      ];
+      for (const overrides of unlikeAService) {
+        await expect(insert(overrides)).rejects.toThrow(/ck_transaction_order_source/);
+      }
+      // The control: a service's shape, under another order, is admitted — so
+      // each refusal above is this CHECK's, for that column.
+      await expect(insert({}, `ORD_${ulid()}`)).resolves.toBe(1);
+      expect(await rowsUnder('ORDER', orderId)).toHaveLength(0);
+
+      expect((await sagaCreates(orderId)).status).toBe(201);
+      expect(await sagaFinds(orderId)).toHaveLength(1);
+    });
   });
 
   // -------------------------------------------------------------------------

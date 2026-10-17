@@ -339,10 +339,34 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
       const held = await createObligation(orderId);
       return { held: true, transactionId: held.transactionId };
     } catch (error) {
-      const found = await findObligation(orderId);
-      if (found) return { held: true, transactionId: found.transactionId };
+      const found = await findOwnObligation();
+      if (found) return { held: true, transactionId: found };
       return { held: false, reason: describe(error) };
     }
+  }
+
+  /**
+   * The order's obligation as economic-service holds it, or null if it holds
+   * none — adopted only on the terms the saga records it with.
+   *
+   * A transaction naming this order on any other terms is somebody else's
+   * (review of #334 round 1, F1). The saga stops: it adopts nothing, records
+   * nothing on the order, authorises, settles and refunds nothing, and
+   * whatever is held stays held for a person — failing the order or
+   * refunding instead would be deciding about money it cannot account for.
+   */
+  async function findOwnObligation(): Promise<string | null> {
+    const found = await findObligation(orderId);
+    if (found && 'mismatch' in found) {
+      status.phase = 'OBLIGATION_MISMATCH';
+      throw ApplicationFailure.nonRetryable(
+        `economic-service holds a transaction for order ${orderId} on terms the order did not set ` +
+          `(${found.differ.join(', ')}); it is not adopted, and funds remain held for a human decision`,
+        'OBLIGATION_TERMS_MISMATCH',
+        found.transactionIds,
+      );
+    }
+    return found?.transactionId ?? null;
   }
 
   /**
@@ -527,8 +551,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         const reason = order.cancellationReason ?? 'Cancelled';
         // An order cancelled before its hold was recorded may still have one:
         // economic-service is asked rather than assumed, as in step 1.
-        const transactionId =
-          order.economicTransactionId ?? (await findObligation(orderId))?.transactionId;
+        const transactionId = order.economicTransactionId ?? (await findOwnObligation());
         if (transactionId) await compensate(orderId, transactionId, reason);
         await markCancelled(orderId, reason);
         status.phase = 'CANCELLED';

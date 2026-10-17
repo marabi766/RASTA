@@ -2,7 +2,7 @@ import { ApplicationFailure } from '@temporalio/activity';
 import { RastaError, getContext, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { createActivities, type OrderActivities } from '../src/temporal/activities';
-import type { EconomicClient } from '../src/economic/economic.client';
+import { EconomicClient } from '../src/economic/economic.client';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import {
   asActor,
@@ -97,7 +97,7 @@ describe('order saga activities (real database)', () => {
       cancel: method('cancel', undefined),
       dispute: method('dispute', { disputeId: 'TXD_STUB' }),
       resolveDispute: method('resolveDispute', undefined),
-      findObligation: method('findObligation', null),
+      findObligations: method('findObligations', []),
       // JUSTIFIED-ANY: only the eight methods the activities call are needed,
       // and naming the class would drag its HTTP internals into a suite about
       // the activities. The client's own behaviour has its own spec.
@@ -618,15 +618,151 @@ describe('order saga activities (real database)', () => {
     it('asks economic-service for the order obligation as the buyer', async () => {
       const { orderId } = await placeOrder();
       const { calls, economic } = stubEconomic({
-        findObligation: async () => ({ id: 'TXN_FOUND' }),
+        findObligations: async () => [obligation(orderId, { id: 'TXN_FOUND' })],
       });
 
       await expect(activitiesWith(economic).findObligation(orderId)).resolves.toEqual({
         transactionId: 'TXN_FOUND',
       });
-      expect(calls[0].method).toBe('findObligation');
+      expect(calls[0].method).toBe('findObligations');
       expect(calls[0].input.orderId).toBe(orderId);
       expect(calls[0].contextOrganizationId).toBe(org.buyer);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Review of #334 round 1, F1 — an obligation is adopted on its terms, never
+  // on its key
+  // -------------------------------------------------------------------------
+
+  /** The order's obligation exactly as `createObligation` records it (500 000 IRR, buyer → supplier). */
+  function obligation(orderId: string, overrides: Record<string, unknown> = {}) {
+    return {
+      id: `TXN_${ulid()}`,
+      organizationId: org.buyer,
+      counterpartyOrganizationId: org.supplier,
+      transactionType: 'MARKETPLACE_ORDER',
+      status: 'HELD',
+      grossAmountMinor: '500000',
+      commissionAmountMinor: '0',
+      netAmountMinor: '500000',
+      currency: 'IRR',
+      sourceType: 'ORDER',
+      sourceReference: orderId,
+      ...overrides,
+    };
+  }
+
+  describe('adopting an obligation the saga did not see created', () => {
+    const original = globalThis.fetch;
+    afterEach(() => {
+      globalThis.fetch = original;
+    });
+
+    /**
+     * economic-service without the reservation (main before #334), over HTTP
+     * to the real `EconomicClient`: the buyer's administrator's row already
+     * holds `ORDER/<order id>`, so the saga's creation is answered 409 and the
+     * lookup lists that row.
+     */
+    function economicHolding(rows: Record<string, unknown>[]) {
+      const requests: string[] = [];
+      globalThis.fetch = (async (url: string, init: RequestInit) => {
+        requests.push(`${init.method} ${new URL(url).pathname}`);
+        const [status, body] =
+          init.method === 'POST'
+            ? [
+                409,
+                {
+                  code: 'CONFLICT',
+                  message:
+                    'An obligation for this source is already recorded for this organization',
+                },
+              ]
+            : [200, { items: rows, nextCursor: null, hasMore: false }];
+        return {
+          ok: status < 300,
+          status,
+          text: async () => JSON.stringify(body),
+        } as Response;
+      }) as typeof fetch;
+      const economic = new EconomicClient(
+        {
+          ECONOMIC_SERVICE_URL: 'http://economic.test',
+          ECONOMIC_REQUEST_TIMEOUT_MS: 5_000,
+        } as never,
+        { issue: async () => 'minted-token' } as never,
+      );
+      return { requests, economic };
+    }
+
+    it('the exact attack: 1 rial to an accomplice under the pending order’s key is not adopted', async () => {
+      const { orderId } = await placeOrder();
+      const attacker = obligation(orderId, {
+        id: 'TXN_PRE_RECORDED',
+        counterpartyOrganizationId: org.other,
+        grossAmountMinor: '1',
+        netAmountMinor: '1',
+      });
+      const { requests, economic } = economicHolding([attacker]);
+      const acts = activitiesWith(economic);
+
+      await expect(acts.createObligation(orderId)).rejects.toMatchObject({ type: 'CONFLICT' });
+      // Before: { transactionId: 'TXN_PRE_RECORDED' }, which the saga then
+      // recorded on the order, authorised and settled.
+      await expect(acts.findObligation(orderId)).resolves.toEqual({
+        mismatch: true,
+        transactionIds: ['TXN_PRE_RECORDED'],
+        differ: ['payee', 'amount'],
+      });
+      expect(requests).toEqual(['POST /v1/transactions', 'GET /v1/transactions']);
+
+      // Nothing recorded on the order: it is still PENDING, with no transaction.
+      const view = await acts.readOrder(orderId);
+      expect(view.status).toBe('PENDING');
+      expect(view.economicTransactionId).toBeNull();
+    });
+
+    const terms: [string, Record<string, unknown>][] = [
+      ['payer', { organizationId: org.other }],
+      ['payee', { counterpartyOrganizationId: org.other }],
+      ['payee', { counterpartyOrganizationId: null }],
+      ['amount', { grossAmountMinor: '499999' }],
+      ['amount', { grossAmountMinor: '0500000' }],
+      ['currency', { currency: 'USD' }],
+      ['transactionType', { transactionType: 'LOGISTICS' }],
+      ['sourceType', { sourceType: 'E2E' }],
+      ['sourceType', { sourceType: null }],
+      ['sourceReference', { sourceReference: 'ORD_SOMETHING_ELSE' }],
+    ];
+
+    it.each(terms)('a row differing only in %s (%j) is not adopted', async (differ, overrides) => {
+      const { orderId } = await placeOrder();
+      const { economic } = economicHolding([obligation(orderId, overrides)]);
+      const found = await activitiesWith(economic).findObligation(orderId);
+      // A row of another type, or naming another order, is not even a
+      // candidate: the lookup asks for this order's reference and type.
+      if (differ === 'sourceReference' || differ === 'transactionType') expect(found).toBeNull();
+      else expect(found).toMatchObject({ mismatch: true, differ: [differ] });
+    });
+
+    it('adopts the row on exactly the order’s terms, and only that one, beside a look-alike', async () => {
+      const { orderId } = await placeOrder();
+      const own = obligation(orderId);
+      const decoy = obligation(orderId, {
+        sourceType: 'E2E',
+        counterpartyOrganizationId: org.other,
+      });
+      const { economic } = economicHolding([decoy, own]);
+      await expect(activitiesWith(economic).findObligation(orderId)).resolves.toEqual({
+        transactionId: own.id,
+      });
+    });
+
+    it('answers null when economic-service holds nothing for the order', async () => {
+      const { orderId } = await placeOrder();
+      const { economic } = economicHolding([]);
+      await expect(activitiesWith(economic).findObligation(orderId)).resolves.toBeNull();
     });
   });
 });
