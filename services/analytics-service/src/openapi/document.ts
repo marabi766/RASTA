@@ -61,8 +61,11 @@ const DESCRIPTION =
   'events this service received — never from another service’s database — and only for the ' +
   'organization the request acts for. This release offers the maintenance part of the fleet ' +
   'dashboard, from MAINTENANCE_COMPLETED. Amounts are decimal strings of minor units, per ' +
-  'currency. No route writes. The governance view (aggregate-only, for AUDITOR), the KPIs with ' +
-  'INSUFFICIENT_BASELINE and the other dashboards follow (ADR-071 implementation plan).';
+  'currency. No route writes, and no parameter names an organization, a subtree or a scope. ' +
+  'The governance view (aggregate-only, for AUDITOR) is not served yet; when it is, it answers ' +
+  'only an organization that is a root of the hierarchy, as one group, for one closed period, ' +
+  'from an immutable release — never a child subtree, never live facts (ADR-071 § 5). The ' +
+  'KPIs with INSUFFICIENT_BASELINE and the other dashboards follow (ADR-071 implementation plan).';
 
 /** Builds the finished document for a booted application. */
 export function buildAnalyticsOpenApiDocument(app: INestApplication): OpenAPIObject {

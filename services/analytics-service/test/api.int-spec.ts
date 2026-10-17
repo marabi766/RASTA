@@ -226,6 +226,27 @@ describe('tenant isolation: organization A never sees organization B', () => {
     await fleet(actor(a, ['FLEET_MANAGER']), { ...WINDOW, organizationId: b }).expect(400);
   });
 
+  it.each(['scope', 'rootOrganizationId', 'subtree', 'childOrganizationId', 'organizationIds'])(
+    'refuses a scope parameter (%s) rather than widening or narrowing the organization (ADR-071 § 5 (2))',
+    async (name) => {
+      const response = await fleet(actor(a, ['FLEET_MANAGER']), { ...WINDOW, [name]: b }).expect(
+        400,
+      );
+      expect(JSON.stringify(response.body)).not.toContain('777777');
+    },
+  );
+
+  it('serves no governance view in this release, to any role: numbers come only from releases (ADR-071 § 5 (4))', async () => {
+    for (const roles of [['AUDITOR'], ['SYSTEM_ADMIN'], ['ORGANIZATION_ADMIN']]) {
+      const response = await request(api.app.getHttpServer())
+        .get('/v1/dashboards/governance')
+        .query({ period: '2026-10' })
+        .set('authorization', `Bearer ${actor(a, roles)}`);
+      expect(response.status).toBe(404);
+      expect(JSON.stringify(response.body)).not.toMatch(/777777|50000/);
+    }
+  });
+
   it('lets a SYSTEM_ADMIN read only the organization it acts for', async () => {
     const response = await fleet(actor(b, ['SYSTEM_ADMIN'])).expect(200);
     expect(response.body.organizationId).toBe(b);

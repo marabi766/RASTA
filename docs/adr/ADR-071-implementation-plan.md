@@ -35,7 +35,10 @@ Projection رویدادمحور و ایمن) و با ۴ تا ۶ گسترده؛ *
 ### PR 1 — Skeleton و نخستین Projection (`XL`)
 
 > **وضعیت (2026-10-17):** پیاده در `feat/analytics-skeleton`. دروازهٔ پوشش CI ـِ analytics (Step جدا در `integration-coverage`)
-> در این برش نیست؛ آستانهٔ ۷۵٪ `docs/14` در `jest.config.js` هست و Step آن پیگیری بعدی است.
+> در این برش نیست؛ آستانهٔ ۷۵٪ `docs/14` در `jest.config.js` هست و Step آن پیگیری بعدی است. **هم‌راستا با حکم بازبینی #335
+> دور ۲:** هیچ پارامتری سازمان، زیردرخت یا محدوده را برنمی‌گزیند (آزمون OpenAPI و `400`)، و هیچ مسیر حاکمیتی‌ای نیست (`404`).
+> دو قاعدهٔ طراحی پیشاپیش به‌صورت تابع خالص با آزمون آمده‌اند، بی سیم‌کشی: ترتیب ترکیب ناوگان (`src/asset/asset-current.ts`،
+> برای PR 4) و چیدمان انتشار حاکمیتی با آزمون کلاس امضای برهان (`src/governance/publication-layout.ts`، برای PR 7).
 
 - `services/analytics-service` (پورت ۳۱۱۶، `rasta_analytics`، نقش مالک/زمان‌اجرا D-045) با همان اسکلت سرویس‌های دیگر: `env`،
   Health، OpenAPI از Zod، Prisma با Tenant Scope، متریک بی برچسب سازمان، Dockerfile، CI (Integration و Migration).

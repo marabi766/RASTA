@@ -24,7 +24,9 @@ import type { AnalyticsEnv } from '../config/env';
  *
  * `SYSTEM_ADMIN` is accepted, as `RolesGuard.SUPER_ROLE` is everywhere on the platform — but only
  * while acting for an organization it selected with `X-Organization-Id`: "all organizations" is
- * not a tenant, and their sum is the governance view's, not this one's (ADR-071 § 4).
+ * not a tenant. A sum over several organizations is the governance view's alone, and that view
+ * answers only a hierarchy root, as one group, from a closed period's immutable release — never
+ * from the live facts this dashboard reads (ADR-071 § 5).
  *
  * ## The oversight role, three times
  *

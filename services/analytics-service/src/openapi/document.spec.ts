@@ -72,6 +72,27 @@ describe('the committed OpenAPI document', () => {
     expect(schema).toContain('"amountMinor":{"type":"string"');
   });
 
+  it('declares no parameter that could choose an organization, a subtree or a scope (ADR-071 § 5 (2))', () => {
+    const document = buildAnalyticsOpenApiDocument(app);
+    const names = Object.values(document.paths ?? {}).flatMap((item) =>
+      Object.values(item as Record<string, { parameters?: { name: string }[] }>).flatMap(
+        (operation) => (operation.parameters ?? []).map((parameter) => parameter.name),
+      ),
+    );
+
+    expect(names.length).toBeGreaterThan(0);
+    expect(
+      names.filter((name) => /organi[sz]ation|tenant|scope|root|subtree|child|node/i.test(name)),
+    ).toEqual([]);
+  });
+
+  it('serves no governance number yet: no governance route, no period-free aggregate across organizations', () => {
+    const document = buildAnalyticsOpenApiDocument(app);
+    expect(
+      Object.keys(document.paths ?? {}).filter((path) => /governance|kpis/.test(path)),
+    ).toEqual([]);
+  });
+
   it('keeps the health probes and the metrics target out of the contract', () => {
     const document = buildAnalyticsOpenApiDocument(app);
     expect(Object.keys(document.paths ?? {}).some((path) => /^\/(health|metrics)/.test(path))).toBe(
