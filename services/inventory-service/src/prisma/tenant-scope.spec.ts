@@ -130,6 +130,9 @@ describe('the schema models nothing COM-006 has not decided', () => {
       'Shipment',
       'ShipmentLeg',
       'TrackingEvent',
+      'ReturnShipment',
+      'ReturnShipmentLine',
+      'ReturnTrackingEvent',
       'IdempotencyKey',
     ]);
   });
