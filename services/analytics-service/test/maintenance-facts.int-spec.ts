@@ -276,13 +276,13 @@ describe('tenant isolation (A-04)', () => {
           callerService: 'test',
         }),
         () =>
-          w.facts.totals(
+          w.facts.fleetMaintenance(
             new Date('2026-10-01T00:00:00.000Z'),
             new Date('2026-11-01T00:00:00.000Z'),
           ),
       );
-    expect((await totalsFor(a)).map((row) => row.maintenanceType)).toEqual(['PREVENTIVE']);
-    expect((await totalsFor(b)).map((row) => row.maintenanceType)).toEqual(['CORRECTIVE']);
+    expect((await totalsFor(a)).rows.map((row) => row.maintenanceType)).toEqual(['PREVENTIVE']);
+    expect((await totalsFor(b)).rows.map((row) => row.maintenanceType)).toEqual(['CORRECTIVE']);
   });
 
   it.each([
@@ -376,5 +376,32 @@ describe('a fact is never changed or erased', () => {
         `INSERT INTO "fact_maintenance" (${columns}) VALUES (${Object.values(values).join(', ')})`,
       ),
     ).rejects.toThrow(new RegExp(constraint));
+  });
+});
+
+describe('recorded_at is the database clock at the insert (ADR-071 § 2 (8))', () => {
+  it('stamps the insert itself — not the transaction’s start, and not what the writer sent', async () => {
+    // A governance release cut decides membership and lateness by `recorded_at` (ADR-071 § 5):
+    // a transaction that began before a cut and inserts after it must not be stamped before
+    // it, and a writer must not be able to backdate a fact into a released period.
+    const tenant = org();
+    const [stamp] = await runtime.$transaction(async (tx) => {
+      const [{ started }] = await tx.$queryRaw<{ started: Date }[]>`SELECT now() AS started`;
+      await tx.$executeRaw`SELECT pg_sleep(0.3)`;
+      await tx.$executeRawUnsafe(
+        `INSERT INTO "fact_maintenance" ("organization_id", "request_id", "asset_id",
+           "maintenance_type", "completed_at", "total_cost_minor", "currency", "source_event_id",
+           "recorded_at")
+         VALUES ($1, $2, 'AST_1', 'PREVENTIVE', now(), 0, 'IRR', 'EVT_RAW',
+           '2000-01-01T00:00:00Z')`,
+        tenant,
+        `MRQ_${ulid()}`,
+      );
+      const [{ recorded }] = await tx.$queryRaw<{ recorded: Date }[]>`
+        SELECT recorded_at AS recorded FROM fact_maintenance WHERE organization_id = ${tenant}`;
+      return [{ started, recorded }];
+    });
+
+    expect(stamp!.recorded.getTime()).toBeGreaterThanOrEqual(stamp!.started.getTime() + 250);
   });
 });

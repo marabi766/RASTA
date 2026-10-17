@@ -33,7 +33,11 @@ const amountSchema = z
     currency: z.string().describe('ISO 4217, as the producer stated it.'),
     amountMinor: z
       .string()
-      .describe('The sum in minor units (rials for IRR), a decimal string; never a float.'),
+      .regex(/^\d+$/)
+      .describe(
+        'The sum in minor units (rials for IRR), a decimal string; never a float. Exact, and ' +
+          'may exceed a 64-bit integer: each cost fits a bigint, their sum need not.',
+      ),
   })
   .strict();
 
@@ -54,7 +58,12 @@ const completedByTypeSchema = z
           .describe(
             'Completions whose downtime the producer knew. The others are not counted as zero.',
           ),
-        totalMinutes: z.number().int().describe('Summed over those completions only.'),
+        totalMinutes: z
+          .string()
+          .regex(/^\d+$/)
+          .describe(
+            'Summed over those completions only; a decimal string, exact however large the sum.',
+          ),
       })
       .strict(),
     cost: z

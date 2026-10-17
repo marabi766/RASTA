@@ -74,8 +74,9 @@
                                     "description": "Completions whose downtime the producer knew. The others are not counted as zero."
                                   },
                                   "totalMinutes": {
-                                    "type": "integer",
-                                    "description": "Summed over those completions only."
+                                    "type": "string",
+                                    "pattern": "^\\d+$",
+                                    "description": "Summed over those completions only; a decimal string, exact however large the sum."
                                   }
                                 },
                                 "required": ["knownCount", "totalMinutes"],
@@ -92,7 +93,8 @@
                                     },
                                     "amountMinor": {
                                       "type": "string",
-                                      "description": "The sum in minor units (rials for IRR), a decimal string; never a float."
+                                      "pattern": "^\\d+$",
+                                      "description": "The sum in minor units (rials for IRR), a decimal string; never a float. Exact, and may exceed a 64-bit integer: each cost fits a bigint, their sum need not."
                                     }
                                   },
                                   "required": ["currency", "amountMinor"],

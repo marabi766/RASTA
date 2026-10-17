@@ -20,6 +20,7 @@ import {
   type AuthGuardOptions,
   kafkaConnection,
 } from '@rasta/nest-common';
+import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import { PrismaService } from './prisma/prisma.service';
 import { DashboardAccess } from './access/access';
@@ -41,8 +42,9 @@ import { loadAnalyticsEnv, SERVICE_NAME, type AnalyticsEnv } from './config/env'
  *
  * One projection (`analytics-service.maintenance-facts`: `MAINTENANCE_COMPLETED` →
  * `fact_maintenance`) and one tenant dashboard that reads it. This service publishes no domain
- * event (`docs/04` § 4.15: "only a consumer"), so it owns no `outbox_message`, runs no relay and
- * has nothing to drain on shutdown; the only topic it writes is its own dead-letter topic. No
+ * event (`docs/04` § 4.15: "only a consumer"), so it owns no `outbox_message` and runs no relay;
+ * on shutdown only the projection drains, by the deadline, before the database disconnects
+ * (`onModuleDestroy` below). The only topic it writes is its own dead-letter topic. No
  * route writes: there is no `POST` anywhere, and a caller who tries one gets the router's `404`.
  *
  * ## The projection starts only where the broker authenticates who publishes
@@ -166,9 +168,20 @@ export class AppModule implements NestModule, OnModuleInit, OnModuleDestroy {
     if (this.env.ANALYTICS_MAINTENANCE_FACTS_CONSUMER_ENABLED) await this.projection.start();
   }
 
+  /**
+   * The projection stops here, in the destroy phase, by one deadline inside
+   * SHUTDOWN_TIMEOUT_MS (`outboxShutdownBudgetMs`: the timeout less the reserve for the rest of
+   * the close — the D-052 budget every service's drain is held to). The database disconnects
+   * only afterwards, in `PrismaService.onApplicationShutdown` (#337 r1, Medium): Nest runs a
+   * module's providers' destroy hooks before the module's own, so a disconnect in the destroy
+   * phase came first and a handler still in flight lost its database under it.
+   *
+   * By the deadline the stop returns whatever is still running — a handler that has not
+   * finished, a broker that does not answer the disconnect, a dead letter that is not
+   * acknowledged. The message in flight is then abandoned uncommitted and delivered again, and
+   * its marker keeps a second effect out.
+   */
   async onModuleDestroy(): Promise<void> {
-    // In the destroy phase, before Prisma disconnects: an event in flight is abandoned
-    // uncommitted and delivered again, and its marker keeps a second effect out.
-    await this.projection.stop();
+    await this.projection.stop({ deadlineAt: Date.now() + outboxShutdownBudgetMs(this.env) });
   }
 }

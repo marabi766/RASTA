@@ -132,7 +132,7 @@ export function wire(): Wiring {
     facts,
     silent,
   );
-  return { prisma, facts, consumer, close: () => prisma.onModuleDestroy() };
+  return { prisma, facts, consumer, close: () => prisma.disconnect() };
 }
 
 /** A connection as the owner, for the suites' inspection and cleanup only. */

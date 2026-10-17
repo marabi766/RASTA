@@ -2759,8 +2759,12 @@ export const EXPECTED = {
     connectAs: 'migrator',
     tables: ['fact_maintenance', 'processed_event'],
     types: [],
-    triggers: ['tg_fact_maintenance_append_only', 'tg_fact_maintenance_no_truncate'],
-    functions: ['fact_maintenance_append_only'],
+    triggers: [
+      'tg_fact_maintenance_append_only',
+      'tg_fact_maintenance_no_truncate',
+      'tg_fact_maintenance_recorded_at',
+    ],
+    functions: ['fact_maintenance_append_only', 'fact_recorded_at_now'],
     indexes: ['fact_maintenance_pkey', 'ix_fact_maintenance_org_completed', 'processed_event_pkey'],
     constraints: [
       'ck_processed_event_ids',

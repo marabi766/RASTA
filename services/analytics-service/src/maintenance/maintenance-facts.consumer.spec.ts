@@ -164,11 +164,12 @@ describe('MaintenanceFactsConsumer lifecycle', () => {
     await expect(consumer.stop()).resolves.toBeUndefined();
   });
 
-  it('starts the consumer its factory builds and stops the same one', async () => {
+  it('starts the consumer its factory builds and stops the same one, by the deadline it is given', async () => {
     const calls: string[] = [];
     const fake = {
       start: async () => void calls.push('start'),
-      stop: async () => void calls.push('stop'),
+      stop: async (options?: { deadlineAt?: number }) =>
+        void calls.push(`stop by ${options?.deadlineAt}`),
       isRunning: () => true,
     };
     const consumer = new MaintenanceFactsConsumer(
@@ -179,7 +180,7 @@ describe('MaintenanceFactsConsumer lifecycle', () => {
     );
     await consumer.start();
     expect(consumer.isRunning()).toBe(true);
-    await consumer.stop();
-    expect(calls).toEqual(['start', 'stop']);
+    await consumer.stop({ deadlineAt: 1234 });
+    expect(calls).toEqual(['start', 'stop by 1234']);
   });
 });

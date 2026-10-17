@@ -25,10 +25,7 @@ export class DashboardService {
     const from = new Date(query.from);
     const to = new Date(query.to);
 
-    const [rows, earliestCompletion] = await Promise.all([
-      this.facts.totals(from, to),
-      this.facts.earliestCompletion(),
-    ]);
+    const { rows, earliestCompletion } = await this.facts.fleetMaintenance(from, to);
 
     return toFleetDashboardView({ organizationId, from, to, earliestCompletion, rows });
   }

@@ -7,8 +7,8 @@ const row = (overrides: Partial<MaintenanceTotalsRow>): MaintenanceTotalsRow => 
   currency: 'IRR',
   completedCount: 1,
   downtimeKnownCount: 1,
-  downtimeMinutes: 60,
-  totalCostMinor: 100n,
+  downtimeMinutes: '60',
+  totalCostMinor: '100',
   ...overrides,
 });
 
@@ -20,28 +20,28 @@ describe('completedByType', () => {
           currency: 'EUR',
           completedCount: 1,
           downtimeKnownCount: 0,
-          downtimeMinutes: 0,
-          totalCostMinor: 7n,
+          downtimeMinutes: '0',
+          totalCostMinor: '7',
         }),
         row({
           currency: 'IRR',
           completedCount: 2,
           downtimeKnownCount: 2,
-          downtimeMinutes: 30,
-          totalCostMinor: 9_000_000_000_000_000_000n,
+          downtimeMinutes: '30',
+          totalCostMinor: '9000000000000000000',
         }),
         row({
           maintenanceType: 'CORRECTIVE',
           completedCount: 3,
           downtimeKnownCount: 1,
-          downtimeMinutes: 45,
+          downtimeMinutes: '45',
         }),
       ]),
     ).toEqual([
       {
         type: 'PREVENTIVE',
         count: 3,
-        downtime: { knownCount: 2, totalMinutes: 30 },
+        downtime: { knownCount: 2, totalMinutes: '30' },
         cost: [
           { currency: 'EUR', amountMinor: '7' },
           { currency: 'IRR', amountMinor: '9000000000000000000' },
@@ -50,9 +50,23 @@ describe('completedByType', () => {
       {
         type: 'CORRECTIVE',
         count: 3,
-        downtime: { knownCount: 1, totalMinutes: 45 },
+        downtime: { knownCount: 1, totalMinutes: '45' },
         cost: [{ currency: 'IRR', amountMinor: '100' }],
       },
+    ]);
+  });
+
+  it('keeps sums past 2^63 − 1 and 2^53 exact (#337 r1)', () => {
+    // A cost sum the database returned past a bigint is passed through as it came; downtime
+    // added across currencies past Number.MAX_SAFE_INTEGER stays exact.
+    const [preventive] = completedByType([
+      row({ currency: 'EUR', downtimeMinutes: '9007199254740993', totalCostMinor: '1' }),
+      row({ currency: 'IRR', downtimeMinutes: '1', totalCostMinor: '9223372036854775808' }),
+    ]);
+    expect(preventive?.downtime.totalMinutes).toBe('9007199254740994');
+    expect(preventive?.cost).toEqual([
+      { currency: 'EUR', amountMinor: '1' },
+      { currency: 'IRR', amountMinor: '9223372036854775808' },
     ]);
   });
 

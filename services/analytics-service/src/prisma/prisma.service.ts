@@ -1,4 +1,4 @@
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { SERVICE_NAME } from '../config/env';
 import {
   createTenantGuardExtension,
@@ -28,7 +28,7 @@ export const TENANT_SCOPE_EXEMPT_MODELS: readonly string[] = Object.keys(TENANT_
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 
 @Injectable()
-export class PrismaService implements OnModuleInit, OnModuleDestroy {
+export class PrismaService implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(PrismaService.name);
   private readonly base: PrismaClient;
 
@@ -82,7 +82,18 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async onModuleDestroy(): Promise<void> {
+  /**
+   * The last thing the close does (#337 r1, Medium): Nest's `onApplicationShutdown`, after the
+   * destroy phase — in which `AppModule` stops the projection by the shutdown deadline — and
+   * after the HTTP server has closed. Disconnecting in the destroy phase instead ran before
+   * `AppModule`'s own hook (Nest destroys a module's providers before the module), so a
+   * handler still in flight lost its database under it.
+   */
+  async onApplicationShutdown(): Promise<void> {
+    await this.disconnect();
+  }
+
+  async disconnect(): Promise<void> {
     await this.base.$disconnect();
   }
 

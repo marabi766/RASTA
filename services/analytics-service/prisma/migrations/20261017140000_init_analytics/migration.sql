@@ -35,7 +35,12 @@ CREATE TABLE "fact_maintenance" (
     "total_cost_minor" BIGINT NOT NULL,
     "currency" CHAR(3) NOT NULL,
     "source_event_id" VARCHAR(128) NOT NULL,
-    "recorded_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- When the fact became visible to analytics: the database clock at the insert, never the
+    -- transaction's start (`now()`) and never a value a writer supplies (tg_fact_maintenance_
+    -- recorded_at). A governance release cut takes the table in SHARE mode and stamps
+    -- clock_timestamp(), so a fact is in the cut exactly when it was recorded before it, and
+    -- one recorded after it is late (ADR-071 § 2 (8), § 5 (5)).
+    "recorded_at" TIMESTAMPTZ(3) NOT NULL DEFAULT clock_timestamp(),
 
     CONSTRAINT "fact_maintenance_pkey" PRIMARY KEY ("organization_id", "request_id"),
     CONSTRAINT "ck_fact_maintenance_ids" CHECK (
@@ -67,3 +72,16 @@ CREATE TRIGGER "tg_fact_maintenance_append_only"
 CREATE TRIGGER "tg_fact_maintenance_no_truncate"
   BEFORE TRUNCATE ON "fact_maintenance"
   FOR EACH STATEMENT EXECUTE FUNCTION "fact_maintenance_append_only"();
+
+-- `recorded_at` is the database's own clock at the insert, whatever the writer sent: the
+-- column default alone would accept a supplied (or backdated) instant.
+CREATE FUNCTION "fact_recorded_at_now"() RETURNS trigger AS $$
+BEGIN
+  NEW."recorded_at" := clock_timestamp();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "tg_fact_maintenance_recorded_at"
+  BEFORE INSERT ON "fact_maintenance"
+  FOR EACH ROW EXECUTE FUNCTION "fact_recorded_at_now"();

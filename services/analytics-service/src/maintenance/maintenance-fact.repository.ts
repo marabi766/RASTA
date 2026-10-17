@@ -1,4 +1,6 @@
 import { Injectable } from '@nestjs/common';
+import { getOrganizationId } from '@rasta/nest-common';
+import { z } from 'zod';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { MaintenanceFact } from './maintenance-fact';
 
@@ -17,17 +19,44 @@ export interface MaintenanceTotalsRow {
   readonly completedCount: number;
   /** Completions whose downtime the producer knew; the rest are not counted as zero. */
   readonly downtimeKnownCount: number;
-  readonly downtimeMinutes: number;
-  readonly totalCostMinor: bigint;
+  /** Exact decimal strings, summed as `numeric`: each value fits its column, a sum need not. */
+  readonly downtimeMinutes: string;
+  readonly totalCostMinor: string;
 }
+
+/** The fleet dashboard's read, from one statement and therefore one snapshot. */
+export interface FleetMaintenanceRead {
+  readonly rows: MaintenanceTotalsRow[];
+  /** The earliest completion held in any window, or null when none is. */
+  readonly earliestCompletion: Date | null;
+}
+
+const decimal = z.string().regex(/^\d+$/);
+const count = z.number().int().nonnegative();
+
+/** What the statement returns, checked rather than cast: a drift in the SQL fails loudly. */
+const fleetMaintenanceResult = z.object({
+  earliest_completion: z.date().nullable(),
+  cells: z.array(
+    z.object({
+      maintenance_type: z.string(),
+      currency: z.string(),
+      completed_count: count,
+      downtime_known_count: count,
+      downtime_minutes: decimal,
+      total_cost_minor: decimal,
+    }),
+  ),
+});
 
 /**
  * The maintenance facts and the projection's idempotency marker.
  *
- * Every query here runs through the tenant-guarded client: a fact is written under the
+ * Every query here is tenant-scoped: a fact is written through the guarded client under the
  * organization of the system context the consumer opened for its envelope, and read under
- * the organization a request acts for. Nothing here crosses the boundary (`runUnscoped`
- * appears nowhere in this service).
+ * the organization a request acts for — by the guard, or, in the one raw statement, by the
+ * same `getOrganizationId()` written into its predicates. Nothing here crosses the boundary
+ * (`runUnscoped` appears nowhere in this service).
  */
 @Injectable()
 export class MaintenanceFactRepository {
@@ -97,37 +126,56 @@ export class MaintenanceFactRepository {
   }
 
   /**
-   * The organization's completions in `[from, to)`, by type and currency. One grouped read
-   * over `ix_fact_maintenance_org_completed`; the organization is the request's, injected by
-   * the guard.
+   * The organization's completions in `[from, to)` by type and currency, and the earliest
+   * completion held in any window — a dashboard says from when it counts, so an empty window
+   * is not read as "no maintenance happened" before the projection existed (ADR-071,
+   * Consequences).
+   *
+   * **Summed in SQL as `numeric`, returned as text** (#337 r1, Medium). Every cost fits a
+   * bigint, but the sum of two need not: PostgreSQL's `sum(bigint)` is already `numeric`,
+   * while Prisma's `groupBy` hands it back through a 64-bit `BigInt` field and fails past
+   * 2^63 − 1 — a 500 for a valid dataset. The decimal string is exact at any size; downtime
+   * gets the same treatment, since a sum of valid `integer` minutes can pass 2^53.
+   *
+   * **One statement**, so the cells and the earliest completion come from one snapshot. Raw
+   * SQL is outside the tenant extension, so the organization is in every predicate, taken
+   * from the request context exactly as the guard would (`getOrganizationId`): no caller can
+   * pass another. Reads `ix_fact_maintenance_org_completed`.
    */
-  async totals(from: Date, to: Date): Promise<MaintenanceTotalsRow[]> {
-    const groups = await this.prisma.client.factMaintenance.groupBy({
-      by: ['maintenanceType', 'currency'],
-      where: { completedAt: { gte: from, lt: to } },
-      _count: { _all: true, downtimeMinutes: true },
-      _sum: { downtimeMinutes: true, totalCostMinor: true },
-      orderBy: [{ maintenanceType: 'asc' }, { currency: 'asc' }],
-    });
-    return groups.map((group) => ({
-      maintenanceType: group.maintenanceType,
-      currency: group.currency,
-      completedCount: group._count._all,
-      downtimeKnownCount: group._count.downtimeMinutes,
-      downtimeMinutes: group._sum.downtimeMinutes ?? 0,
-      totalCostMinor: group._sum.totalCostMinor ?? 0n,
-    }));
-  }
+  async fleetMaintenance(from: Date, to: Date): Promise<FleetMaintenanceRead> {
+    const organizationId = getOrganizationId();
+    const [result] = await this.prisma.client.$queryRaw<unknown[]>`
+      SELECT
+        (SELECT min(completed_at) FROM fact_maintenance
+          WHERE organization_id = ${organizationId}) AS earliest_completion,
+        COALESCE((
+          SELECT json_agg(cell ORDER BY cell.maintenance_type, cell.currency)
+          FROM (
+            SELECT maintenance_type,
+                   currency,
+                   count(*) AS completed_count,
+                   count(downtime_minutes) AS downtime_known_count,
+                   COALESCE(sum(downtime_minutes::numeric), 0)::text AS downtime_minutes,
+                   sum(total_cost_minor::numeric)::text AS total_cost_minor
+            FROM fact_maintenance
+            WHERE organization_id = ${organizationId}
+              AND completed_at >= ${from}::timestamptz
+              AND completed_at < ${to}::timestamptz
+            GROUP BY maintenance_type, currency
+          ) AS cell
+        ), '[]'::json) AS cells`;
 
-  /**
-   * The earliest completion this service holds a fact for, in any window: a dashboard says
-   * from when it counts, so an empty window is not read as "no maintenance happened" before
-   * the projection existed (ADR-071, Consequences).
-   */
-  async earliestCompletion(): Promise<Date | null> {
-    const result = await this.prisma.client.factMaintenance.aggregate({
-      _min: { completedAt: true },
-    });
-    return result._min.completedAt;
+    const parsed = fleetMaintenanceResult.parse(result);
+    return {
+      earliestCompletion: parsed.earliest_completion,
+      rows: parsed.cells.map((cell) => ({
+        maintenanceType: cell.maintenance_type,
+        currency: cell.currency,
+        completedCount: cell.completed_count,
+        downtimeKnownCount: cell.downtime_known_count,
+        downtimeMinutes: cell.downtime_minutes,
+        totalCostMinor: cell.total_cost_minor,
+      })),
+    };
   }
 }

@@ -35,6 +35,10 @@ datasource db {
 // ---------------------------------------------------------------------------
 
 /// One completed maintenance request, from `MAINTENANCE_COMPLETED` (ADR-071 § 3, PR 1).
+///
+/// A historical fact: it stays with the organization the completion was published under, also
+/// after the asset is transferred — only the current fleet membership moves (ADR-071 § 3-الف).
+/// A terminal fact needs no ordering, so no stream position is kept for it (§ 2 (3)).
 model FactMaintenance {
   /// The tenant: the envelope's `tenantId`, proved equal to the payload's organization.
   organizationId  String   @map("organization_id") @db.VarChar(128)
@@ -53,7 +57,10 @@ model FactMaintenance {
   /// The event the fact was made from: a second event for the same completion is compared
   /// with this row, never written over it.
   sourceEventId   String   @map("source_event_id") @db.VarChar(128)
-  recordedAt      DateTime @default(now()) @map("recorded_at") @db.Timestamptz(3)
+  /// When the fact became visible here: the database clock at the insert, set by
+  /// `tg_fact_maintenance_recorded_at` whatever a writer sends. A governance release decides
+  /// membership and lateness by it (ADR-071 § 2 (8)).
+  recordedAt      DateTime @default(dbgenerated("clock_timestamp()")) @map("recorded_at") @db.Timestamptz(3)
 
   @@id([organizationId, requestId])
   @@index([organizationId, completedAt], map: "ix_fact_maintenance_org_completed")

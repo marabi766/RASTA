@@ -6,6 +6,7 @@ import {
   runWithContext,
   type EventHandler,
   type HandlerOutcome,
+  type OutboxStopOptions,
   type kafkaConnection,
 } from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
@@ -99,9 +100,15 @@ export class MaintenanceFactsConsumer {
     await this.consumer.start();
   }
 
-  /** Stopped in Nest's destroy phase; an event in flight is abandoned uncommitted and redelivered. */
-  async stop(): Promise<void> {
-    await this.consumer?.stop();
+  /**
+   * Stopped in Nest's destroy phase by `AppModule`, before the database disconnects, and by
+   * `deadlineAt` — the shutdown's deadline inside SHUTDOWN_TIMEOUT_MS. Without one the shared
+   * `EventConsumer.stop()` waits for the message in flight and a stalled broker without bound
+   * (#337 r1, Medium). An event still in flight at the deadline is abandoned uncommitted and
+   * delivered again; its marker keeps a second effect out.
+   */
+  async stop(options: OutboxStopOptions = {}): Promise<void> {
+    await this.consumer?.stop(options);
   }
 
   isRunning(): boolean {

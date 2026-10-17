@@ -117,7 +117,7 @@ describe('the fleet dashboard', () => {
           {
             type: 'CORRECTIVE',
             count: 2,
-            downtime: { knownCount: 2, totalMinutes: 330 },
+            downtime: { knownCount: 2, totalMinutes: '330' },
             cost: [
               { currency: 'EUR', amountMinor: '5' },
               { currency: 'IRR', amountMinor: '50000' },
@@ -126,7 +126,7 @@ describe('the fleet dashboard', () => {
           {
             type: 'PREVENTIVE',
             count: 2,
-            downtime: { knownCount: 1, totalMinutes: 60 },
+            downtime: { knownCount: 1, totalMinutes: '60' },
             cost: [{ currency: 'IRR', amountMinor: '3000' }],
           },
         ],
@@ -141,6 +141,48 @@ describe('the fleet dashboard', () => {
     }).expect(200);
     expect(response.body.maintenance.completed).toEqual([
       expect.objectContaining({ type: 'PREVENTIVE', count: 1 }),
+    ]);
+  });
+
+  it('sums past the signed 64-bit boundary exactly, as decimal strings (#337 r1)', async () => {
+    // Each value is valid on its own — the cost is bigint's maximum, the downtime integer's —
+    // and their sums are not: 2^63 and, over enough rows, past 2^53. Prisma's BigInt aggregate
+    // failed here with a 500; the SQL sums as numeric and answers the exact string.
+    const big = newOrganizationId();
+    organizations.push(big);
+    const at = (day: number) => `2026-10-${String(day).padStart(2, '0')}T08:00:00.000Z`;
+    await project(big, {
+      type: 'CORRECTIVE',
+      totalCostMinor: '9223372036854775807',
+      downtimeMinutes: 2_147_483_647,
+      completedAt: at(3),
+    });
+    await project(big, {
+      type: 'CORRECTIVE',
+      totalCostMinor: '1',
+      downtimeMinutes: 2_147_483_647,
+      completedAt: at(4),
+    });
+    await project(big, {
+      type: 'CORRECTIVE',
+      totalCostMinor: '9223372036854775807',
+      downtimeMinutes: 1,
+      currency: 'EUR',
+      completedAt: at(5),
+    });
+
+    const response = await fleet(actor(big, ['FLEET_MANAGER'])).expect(200);
+    expect(fleetDashboardViewSchema.parse(response.body).maintenance.completed).toEqual([
+      {
+        type: 'CORRECTIVE',
+        count: 3,
+        // 2 × (2^31 − 1) + 1, added across the two currencies' cells.
+        downtime: { knownCount: 3, totalMinutes: '4294967295' },
+        cost: [
+          { currency: 'EUR', amountMinor: '9223372036854775807' },
+          { currency: 'IRR', amountMinor: '9223372036854775808' },
+        ],
+      },
     ]);
   });
 
@@ -167,7 +209,7 @@ describe('tenant isolation: organization A never sees organization B', () => {
       {
         type: 'CORRECTIVE',
         count: 1,
-        downtime: { knownCount: 1, totalMinutes: 1 },
+        downtime: { knownCount: 1, totalMinutes: '1' },
         cost: [{ currency: 'IRR', amountMinor: '777777' }],
       },
     ]);
