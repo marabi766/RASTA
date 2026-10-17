@@ -23,7 +23,6 @@
   "construction-service": {
     "AUDIT_SERVICE_URL": ["dev", "test", "test:integration"],
     "IDENTITY_SERVICE_URL": ["dev", "test", "test:integration"],
-    "ORGANIZATION_SERVICE_URL": ["dev", "test", "test:integration"],
     "SUPPLIER_SERVICE_URL": ["dev", "test", "test:integration"]
   },
   "contract-service": {
@@ -46,8 +45,7 @@
     "CONTRACT_RECONCILE_BACKOFF_SECONDS": ["dev", "test", "test:integration"],
     "CONTRACT_RECONCILE_BATCH_SIZE": ["dev", "test", "test:integration"],
     "CONTRACT_RECONCILE_INTERVAL_MS": ["dev", "test", "test:integration"],
-    "CONTRACT_RECONCILE_LEASE_SECONDS": ["dev", "test", "test:integration"],
-    "ORGANIZATION_SERVICE_URL": ["dev", "test", "test:integration"]
+    "CONTRACT_RECONCILE_LEASE_SECONDS": ["dev", "test", "test:integration"]
   },
   "document-service": {
     "DOCUMENT_CLAMAV_HOST": ["dev"],

@@ -170,7 +170,7 @@ export class TransactionController {
       targeted(id),
       200,
       (answer) => this.transactions.authoriseSettlement(id, answer.map(detailView), key),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'COMMIT') },
+      { mayReplay: () => this.transactions.assertMayReplay(id, 'AUTHORISE_SETTLEMENT') },
     );
   }
 
@@ -199,7 +199,7 @@ export class TransactionController {
       targeted(id, dto),
       200,
       (answer) => this.transactions.dispute(id, dto, answer.map(detailView)),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'COMMIT') },
+      { mayReplay: () => this.transactions.assertMayReplay(id, 'DISPUTE') },
     );
   }
 
@@ -232,7 +232,7 @@ export class TransactionController {
       targeted(id, dto),
       200,
       (answer) => this.transactions.resolveDispute(id, dto, answer.map(detailView)),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'COMMIT') },
+      { mayReplay: () => this.transactions.assertMayReplay(id, 'RESOLVE_DISPUTE') },
     );
   }
 
@@ -247,10 +247,11 @@ export class TransactionController {
       'rather than reversing the hold: the hold really happened and was then cancelled, and an ' +
       'auditor needs to be able to tell those apart. Requires an `Idempotency-Key`. ' +
       'Never available to the payer, from any state (403): a payer that could refund its own ' +
-      'escrow could step around the dispute resolution. Available to platform scope, to ' +
+      'escrow could step around the dispute resolution. Available to a system administrator, ' +
+      'to a union administrator for a payer within its union’s subtree (docs/24 Q-136), to ' +
       'marketplace-service as its order saga, and to the payee’s financial administrator — ' +
-      'except while DISPUTED, which needs platform scope (docs/24 Q-62). A caller that is ' +
-      'not a party gets 404.',
+      'except while DISPUTED, which needs one of the first two (docs/24 Q-62). A caller that ' +
+      'is not a party gets 404.',
   })
   async refund(
     @Param('id') id: string,
@@ -294,7 +295,7 @@ export class TransactionController {
       targeted(id, dto),
       200,
       (answer) => this.transactions.cancel(id, dto.reason, answer.map(detailView)),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'COMMIT') },
+      { mayReplay: () => this.transactions.assertMayReplay(id, 'CANCEL') },
     );
   }
 }

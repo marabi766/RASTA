@@ -120,17 +120,30 @@ describe('the roles the portal mirrors', () => {
   });
 
   it('the payer rule: both commands commit the payer, which only a platform role may cross', () => {
-    // `move` is how dispute and resolveDispute change state; it authorizes COMMIT.
+    // `move` is how dispute and resolveDispute change state; it authorizes the
+    // command itself, through the one financial rule of docs/24 Q-136, which
+    // starts from `canCommitOrganization` on the payer's books. A union
+    // administrator crosses only within its union's subtree — a question to
+    // organization-service the portal does not ask; it offers the command to
+    // the platform roles and the service answers 403 outside the subtree.
     expect(squash(service)).toContain("this.move(transactionId,'DISPUTE',");
     expect(squash(service)).toContain("this.move(transactionId,'RESOLVE_DISPUTE',");
-    expect(squash(service)).toContain("this.authorizeAct(transaction,'COMMIT')");
-    expect(squash(service)).toContain('canCommitOrganization(transaction.organizationId)');
-    const commit = squash(
-      collect(access, ts.isFunctionDeclaration)
-        .find((node) => node.name?.text === 'canCommitOrganization')
-        ?.getText(),
+    expect(squash(service)).toContain('this.authorizeAct(transaction,event)');
+    expect(squash(service)).toContain(
+      'canActFinanciallyFor(command,transaction.organizationId,this.hierarchy)',
     );
-    expect(commit).toContain('getOrganizationId()!==organizationId&&!hasPlatformScope()');
+    const functionText = (name: string) =>
+      squash(
+        collect(access, ts.isFunctionDeclaration)
+          .find((node) => node.name?.text === name)
+          ?.getText(),
+      );
+    expect(functionText('canActFinanciallyFor')).toContain(
+      'canCommitOrganization(booksOrganizationId)',
+    );
+    expect(functionText('canCommitOrganization')).toContain(
+      'getOrganizationId()!==organizationId&&!hasPlatformScope()',
+    );
   });
 
   it('the oversight role is refused whatever else it holds', () => {

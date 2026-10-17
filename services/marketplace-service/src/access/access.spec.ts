@@ -1,4 +1,5 @@
-import { isRastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
+import { RastaError, isRastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
+import type { HierarchyQuestion, WithinAnswer } from '../organization/organization-hierarchy';
 import {
   assertBuyer,
   assertDisputeResolver,
@@ -237,25 +238,128 @@ describe('an offer belongs to the supplier that published it', () => {
   });
 });
 
-describe('resolving a dispute is an operator decision', () => {
-  it('permits a platform role', () => {
-    expect(() =>
-      as({ organizationId: STRANGER, roles: ['UNION_ADMIN'] }, () => assertDisputeResolver()),
-    ).not.toThrow();
+describe('resolving a dispute is an operator decision, and a financial one (docs/24 Q-136)', () => {
+  const UNION = 'ORG-UNION';
+
+  /** organization-service's answer, by (signed union, organization asked); every question kept. */
+  function hierarchy(answer: (scope: string, id: string) => Promise<WithinAnswer | null>) {
+    const asked: [string, string][] = [];
+    return {
+      asked,
+      question: {
+        withinVersion: (scope: string, id: string) => {
+          asked.push([scope, id]);
+          return answer(scope, id);
+        },
+      } satisfies HierarchyQuestion,
+    };
+  }
+  const buyerWithinUnion = () =>
+    hierarchy(async (scope, id) =>
+      scope === UNION && id === BUYER ? { hierarchyVersion: 4 } : null,
+    );
+
+  async function asyncCodeOf(fn: () => Promise<unknown>): Promise<string> {
+    try {
+      await fn();
+    } catch (error) {
+      if (isRastaError(error)) return error.code;
+      return `NOT_A_PLATFORM_ERROR: ${String(error)}`;
+    }
+    return 'NO_ERROR';
+  }
+
+  it('permits a SYSTEM_ADMIN for any buyer, and asks nothing', async () => {
+    const { asked, question } = buyerWithinUnion();
+    const authority = await as(
+      { organizationId: STRANGER, roles: ['SYSTEM_ADMIN'], userId: 'USR-SYS' },
+      () => assertDisputeResolver(ORDER, question),
+    );
+    expect(authority).toEqual({
+      basis: 'SYSTEM_ADMIN',
+      actor: 'USR-SYS',
+      actingOrganizationId: STRANGER,
+      buyerOrganizationId: BUYER,
+      hierarchyVersion: null,
+    });
+    expect(asked).toEqual([]);
   });
 
-  it('refuses the buyer, who raised it', () => {
+  it('permits a UNION_ADMIN whose union holds the buyer, at the version organization-service gave', async () => {
+    const { asked, question } = buyerWithinUnion();
+    const authority = await as(
+      { organizationId: UNION, roles: ['UNION_ADMIN'], userId: 'USR-UNION' },
+      () => assertDisputeResolver(ORDER, question),
+    );
+    expect(authority).toMatchObject({ basis: 'UNION_SUBTREE', hierarchyVersion: 4 });
+    // Signed for the union the request acts for; asked about the buyer — never the supplier.
+    expect(asked).toEqual([[UNION, BUYER]]);
+  });
+
+  it('refuses a UNION_ADMIN whose union does not hold the buyer (403), even acting for the supplier', async () => {
+    for (const organizationId of [STRANGER, SUPPLIER]) {
+      const { asked, question } = buyerWithinUnion();
+      expect(
+        await asyncCodeOf(() =>
+          as({ organizationId, roles: ['UNION_ADMIN'] }, () =>
+            assertDisputeResolver(ORDER, question),
+          ),
+        ),
+      ).toBe('FORBIDDEN');
+      expect(asked).toEqual([[organizationId, BUYER]]);
+    }
+  });
+
+  it('permits a UNION_ADMIN acting for the buyer itself without asking', async () => {
+    const { asked, question } = buyerWithinUnion();
+    const authority = await as({ organizationId: BUYER, roles: ['UNION_ADMIN'] }, () =>
+      assertDisputeResolver(ORDER, question),
+    );
+    expect(authority.basis).toBe('OWN_ORGANIZATION');
+    expect(asked).toEqual([]);
+  });
+
+  it('fails closed: organization-service unable to answer is its error, never a yes', async () => {
+    const { question } = hierarchy(async () => {
+      throw RastaError.upstreamUnavailable('organization-service');
+    });
     expect(
-      codeOf(() =>
-        as({ organizationId: BUYER, roles: ['ORGANIZATION_ADMIN'] }, () => assertDisputeResolver()),
+      await asyncCodeOf(() =>
+        as({ organizationId: UNION, roles: ['UNION_ADMIN'] }, () =>
+          assertDisputeResolver(ORDER, question),
+        ),
       ),
-    ).toBe('FORBIDDEN');
+    ).toBe('UPSTREAM_UNAVAILABLE');
   });
 
-  it('refuses the supplier, who is the other party to it', () => {
+  it('refuses the buyer, who raised it, and the supplier, the other party — before asking', async () => {
+    for (const [organizationId, roles] of [
+      [BUYER, ['ORGANIZATION_ADMIN']],
+      [SUPPLIER, ['SUPPLIER']],
+    ] as const) {
+      const { asked, question } = buyerWithinUnion();
+      expect(
+        await asyncCodeOf(() =>
+          as({ organizationId, roles: [...roles] }, () => assertDisputeResolver(ORDER, question)),
+        ),
+      ).toBe('FORBIDDEN');
+      expect(asked).toEqual([]);
+    }
+  });
+
+  it('refuses a service, even one whose token names the buyer', async () => {
+    const { question } = buyerWithinUnion();
     expect(
-      codeOf(() =>
-        as({ organizationId: SUPPLIER, roles: ['SUPPLIER'] }, () => assertDisputeResolver()),
+      await asyncCodeOf(() =>
+        as(
+          {
+            authType: 'SERVICE',
+            callerService: 'x',
+            roles: ['SERVICE', 'SYSTEM_ADMIN'],
+            organizationId: BUYER,
+          },
+          () => assertDisputeResolver(ORDER, question),
+        ),
       ),
     ).toBe('FORBIDDEN');
   });

@@ -847,6 +847,112 @@ Aggregate خودشان را نگه می‌دارند.
 ADR-035 شعاع انفجارش را به یک سازمان، یک سرویس مقصد و پنج دقیقه کاهش می‌دهد؛
 حذفش با mTLS در Production است (ADR-020).
 
+### Q-136 ✅ آیا `UNION_ADMIN` می‌تواند به نام سازمان دیگری اقدام مالی کند؟ — **بسته شد (تصمیم صاحب محصول، 2026-10-16)**
+
+**پرسش.** `SYSTEM_ADMIN` ـی که برای سازمان A عمل می‌کند می‌تواند تراکنش B→C را تسویه کند — اپراتوری که تسویهٔ گیرکرده
+را حل می‌کند (`docs/23` D-054). docs/09 § ۹٫۳ به `UNION_ADMIN` هم دامنهٔ پلتفرم و «موتور اقتصادی» می‌دهد و او امروز
+تراکنش هر سازمانی را **می‌خواند**؛ ولی اینکه مدیر اتحادیه اسکرو ـِ سازمان دیگری را **آزاد کند** قاعده‌ای بود که هیچ‌کس
+تصمیمش را نگرفته بود. همچنین: اگر آری، فقط برای سازمان‌های زیردرخت اتحادیه (مانند Q-42 و Q-43) یا هر سازمانی؟ و
+تأیید، اعتراض، حل اعتراض، لغو و بازپرداخت به نام سازمان دیگر هم همین حکم را می‌گیرند یا نه؟
+
+**تصمیم موقت پیشین (مدیر پروژه، 2026-10-16، #314 دور ۲): رد** — فقط برای تسویه؛ با پاسخ زیر جایگزین شد.
+
+**پاسخ صاحب محصول (مالک مخزن، گفت‌وگوی مدیر پروژه، 2026-10-16) — عین متن:**
+
+> A UNION_ADMIN MAY act financially on behalf of another organization ONLY when that organization is inside the
+> union's own subtree (e.g. its member DEHYARIs). The authority covers: settlement (releasing escrow), payment
+> authorisation/approval, opening a dispute, resolving a dispute, cancellation and refund. Outside the union's
+> subtree: refused (403) as today. SYSTEM_ADMIN behaviour unchanged.
+
+**پیاده‌سازی (#314 دور ۳، `services/economic-service/src/access/access.ts`).**
+
+- **یک تابع برای هر شش فرمان:** `canActFinanciallyFor(command, booksOrganizationId, hierarchy)` — برای
+  `POST /v1/settlements` و `…/authorise-settlement`، `…/dispute`، `…/resolve-dispute`، `…/cancel`، `…/refund` ـِ
+  `/v1/transactions/:id`. «سازمان دیگر» یعنی سازمانی که دفتر تراکنش مال اوست (تنانت خود تراکنش، پرداخت‌کننده) و
+  درخواست برایش عمل نمی‌کند. قاعدهٔ بازپرداخت (Q-62) سر جایش است — پرداخت‌کننده هرگز، مدیر مالی دریافت‌کننده جز در
+  `DISPUTED` — و اقدامِ برای پرداخت‌کننده از سازمان دیگر از همین تابع می‌گذرد.
+- **زیردرخت را مالک سلسله‌مراتب تعیین می‌کند (A-13):** از `organization-service` با REST ـِ احرازشده پرسیده می‌شود، همان
+  پرسشی که construction-service و contract-service می‌پرسند: `GET /v1/organizations/{books}` با `X-Internal-Token` ـِ
+  economic-service برای organization-service، امضاشده برای سازمانی که درخواست برایش عمل می‌کند (اتحادیه). پاسخ
+  `{ id, hierarchyVersion }` یعنی درون؛ فقط ۴۰۴ با بدنهٔ خود آن سرویس (`Organization not found`) یعنی بیرون. هیچ
+  سلسله‌مراتبی از Client پذیرفته نمی‌شود. `organization-service` ‏economic-service را به `@AllowService` همان Route افزود
+  و آزمون Provider آن (`construction-hierarchy-contract.int-spec.ts`) همین پاسخ را برای economic-service هم می‌آزماید.
+- **بسته در خطا:** هر پاسخ دیگر — وضعیت دیگر، ۴۰۴ ـِ دیگر، بدنهٔ بی نسخه یا بزرگ‌تر از حد، Timeout
+  (`ECONOMIC_ORGANIZATION_REQUEST_TIMEOUT_MS`، پیش‌فرض ۳۰۰۰)، خطای شبکه — `503 UPSTREAM_UNAVAILABLE` یا
+  `504 UPSTREAM_TIMEOUT` است و چیزی نوشته نمی‌شود (کلید Idempotency آزاد می‌شود).
+- **بیرون از زیردرخت:** `403 FORBIDDEN` با پیام ثابت («Acting financially for another organization is limited to the
+  organizations within your union's subtree»)، پیش از هر نوشتن.
+- **`SYSTEM_ADMIN`:** بی‌تغییر؛ چیزی پرسیده نمی‌شود. مدیر سازمان عادیِ سازمان دیگر همچنان رد می‌شود (۴۰۴ برای غیرطرف،
+  ۴۰۳ `TENANT_MISMATCH` برای طرف دیگر) و چیزی پرسیده نمی‌شود. `UNION_ADMIN` در سازمان خودش همان مدیر مالی آن سازمان است.
+- **قفل و جابه‌جایی همزمان:** پرسش زیر قفل ردیف تراکنش (`FOR UPDATE`) و در همان تراکنشی که فرمان را Commit می‌کند
+  پرسیده می‌شود — همان ترتیب قفل یگانهٔ سرویس (ردیف تراکنش، سپس کیف پول‌ها به ترتیب شناسه). تسویه پیش از قفل هم یک بار
+  می‌پرسد (درخواست ردشده قفلی نمی‌گیرد) و تصمیمی که تسویه بر آن Commit می‌شود همانی است که زیر قفل گرفته شد. جابه‌جایی
+  سازمانی که پس از پاسخ و پیش از Commit در organization-service بنشیند دیده نمی‌شود — همان پنجرهٔ «خواندن، سپس Commit»
+  میان دو پایگاه داده که D-050 برای امضای قرارداد ثبت کرده است؛ این‌جا با مهلت پرسش و تراکنش کران دارد. نسخهٔ
+  سلسله‌مراتب (`hierarchyVersion`) پاسخ در سطر ثبت فرمان می‌آید، پس فرمان با نسخهٔ `ORGANIZATION_MOVED` قابل ترتیب‌دادن
+  است (نسخهٔ فرمان کمتر از نسخهٔ جابه‌جایی ⇐ درخت پیش از جابه‌جایی را خوانده). economic-service ‏`ORGANIZATION_MOVED`
+  را مصرف نمی‌کند و فرمانی را پس از Commit بازبینی نمی‌کند (`docs/23` D-054، ریسک باقی‌مانده). هر فرمان بعدی دوباره
+  می‌پرسد.
+- **پرسش دوباره پس از همهٔ قفل‌ها (#314 دور ۴، Codex دور ۳ F2؛ حکم مدیر پروژه، پذیرش ریسک فنی، نه قاعدهٔ کسب‌وکار
+  تازه):** اختیار در **لحظهٔ تأیید** سنجیده می‌شود. پاسخ organization-service یک Snapshot بی قفل است و تسویه و
+  بازپرداخت پس از آن منتظر قفل کیف پول می‌مانند (تا مهلت تراکنش)؛ پس همان پرسش (همان REST، بسته در خطا) **پس از گرفتن
+  همهٔ قفل‌های ردیف و کیف پول و درست پیش از نوشتن مالی** دوباره پرسیده می‌شود (`reconfirmFinancialAuthority`،
+  `access.ts`): بیرون رفته ⇐ همان ۴۰۳ (سطر رد با `reason=OUTSIDE_UNION_SUBTREE_BEFORE_WRITE`)، پاسخ نیامد ⇐ ۵۰۳/۵۰۴، چیزی
+  نوشته نمی‌شود؛ درون ⇐ سطر ثبت نسخهٔ همین پاسخ آخر را می‌برد. چهار فرمان دیگر پس از قفل ردیف قفلی نمی‌گیرند، پس پاسخ
+  زیر قفل ردیف همان آخرین خواندن پیش از نوشتن است. **باقی‌ماندهٔ پذیرفته‌شده:** فاصلهٔ چند میلی‌ثانیه‌ای از این پاسخ آخر تا
+  Commit (بی هیچ انتظار قفل در آن) — `docs/23` D-054 محرک دقیقش را ثبت کرده است. **اگر صاحب محصول بعدها پنجرهٔ صفر
+  بخواهد:** حصار میان‌سرویسی — رزرو در organization-service که جابه‌جایی (Reparenting) سازمانی را که فرمان مالی بازی
+  رویش دارد تا پایان آن فرمان نگه دارد یا رد کند — راه آن است؛ عمداً اکنون ساخته نمی‌شود.
+- **ورود از راه marketplace (#314 دور ۴، Codex دور ۳ F1):** حل اختلاف سفارش
+  (`POST /v1/orders/{id}/disputes/resolve`، `SETTLE` یا `REFUND`) همان اقدام مالی است: Saga سپس با توکن سرویسِ
+  marketplace امضاشده برای **خریدار** تسویه یا بازپرداخت می‌کند و economic-service مدیر و اتحادیه‌اش را نمی‌بیند.
+  پس marketplace-service همین قاعده را دربارهٔ خریدار سفارش (پرداخت‌کننده) اجرا می‌کند (`assertDisputeResolver`،
+  `services/marketplace-service/src/access/access.ts`): `SYSTEM_ADMIN` ⇐ هر سفارشی، بی پرسش؛ `UNION_ADMIN` برای خود
+  خریدار ⇐ بی پرسش؛ `UNION_ADMIN` ـِ اتحادیهٔ دیگر ⇐ فقط اگر organization-service بگوید خریدار درون زیردرخت اوست (همان
+  REST، توکن marketplace-service امضاشده برای اتحادیه؛ organization-service ‏marketplace-service را به `@AllowService`
+  افزود)، وگرنه ۴۰۳ با پیام ثابت («Resolving a dispute is limited to orders whose buyer is within your union's
+  subtree») و سطر رد؛ پاسخ نیامد ⇐ ۵۰۳/۵۰۴ (`MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS`، پیش‌فرض ۲۰۰۰، حداکثر نیمِ
+  تراکنش ۵ ثانیه‌ای که در آن پرسیده می‌شود). زیر قفل ردیف سفارش و درست پیش از نوشتن تصمیم پرسیده می‌شود (تصمیم پس از آن
+  قفلی نمی‌گیرد)، و نگهبان بازپخش دوباره می‌پرسد. یک سطر Log پس از Commit (`Dispute decision <SETTLE|REFUND> on order
+…` با کنشگر، سازمان در حال اقدام، خریدار، اختیار و نسخه). اجرای Saga پس از تصمیم (جبران، تسویه) بی‌تغییر و مجاز
+  است: اجرای تصمیمی است که در لحظهٔ تأیید پذیرفته شد، به نام خود خریدار. فهرست اقدام‌های سفارش (`availableActions`)
+  برای خواندن سلسله‌مراتب را نمی‌پرسد: `RESOLVE_DISPUTE` به مدیر اتحادیه پیشنهاد می‌شود و فرمان بیرون از زیردرخت ۴۰۳
+  می‌دهد.
+- **بازپخش کلید:** با همان تابع مجوز می‌گیرد (`mayReplay`)، پس پرسش دوباره پرسیده می‌شود: سازمانی که از زیردرخت بیرون
+  رفته ⇐ ۴۰۳ بی پاسخ ذخیره‌شده؛ organization-service در دسترس نیست ⇐ ۵۰۳.
+- **دفتر، درخواست، ثبت:** دفتر مال تنانت خود تراکنش می‌ماند (عبور باریک سند تسویه از دور ۱ و ۲، اکنون برای
+  `UNION_SUBTREE` هم). کلید Idempotency و انتساب درخواست مال سازمانِ در حال اقدام است؛ `settlement.acting_organization_id`
+  آن را برای تسویه نگه می‌دارد (پنج فرمان دیگر ستونی ندارند؛ بی Migration). برای هر یک از شش فرمان یک سطر Log
+  (`FinancialAuthority`) پس از Commit: `Financial command <فرمان> on <تراکنش>` با `actor`، `actingOrganization`،
+  `booksOrganization`، `authority` (`OWN_ORGANIZATION`، `PAYEE`، `SYSTEM_ADMIN` یا `UNION_SUBTREE`) و برای آخری
+  `hierarchyVersion`.
+- **ثبت رد:** ردِ بیرون از زیردرخت **Log** می‌شود — سطر `Financial command <فرمان> refused` با `actor`،
+  `actingOrganization`، `booksOrganization` و `reason=OUTSIDE_UNION_SUBTREE`، و Log ـِ `Access denied: FORBIDDEN` ـِ
+  فیلتر خطا (S-06: ثبت ماندگارِ
+  رد در حسابرسی، پیگیری ثبت‌شده‌ای برای همهٔ ردهای economic-service است). economic-service امروز هیچ ردی را در
+  `audit_event` ماندگار نمی‌کند.
+- **آزمون:** `test/union-admin-financial-authority.int-spec.ts` (HTTP، پایگاه دادهٔ واقعی، organization-service به‌صورت
+  سرور محلی که توکن را با Verifier واقعی می‌سنجد)، برای هر شش فرمان: `UNION_ADMIN` ـِ U برای عضوش B ⇐ موفق، دفتر B،
+  کلید U، سطر ثبت، و بازپخش که دوباره پرسیده می‌شود (B بیرون رفته ⇐ ۴۰۳، organization-service از کار افتاده ⇐ ۵۰۳،
+  برگشته ⇐ همان پاسخ)؛ `UNION_ADMIN` ـِ اتحادیهٔ دیگر ⇐ ۴۰۳ بی هیچ نوشتن (ردیف تراکنش، کلید، Outbox، تسویه، سند)؛
+  organization-service از کار افتاده ⇐ ۵۰۳ بی هیچ نوشتن؛ `ORGANIZATION_ADMIN` ـِ U ⇐ همان رد پیشین، بی پرسش؛ `SYSTEM_ADMIN`
+  ⇐ بی‌تغییر، بی پرسش. به‌علاوه: پرسش زیر قفل ردیف است (فرمان رقیب منتظر می‌ماند و سپس ۴۰۹ می‌گیرد)، و تسویه‌گر
+  `SYSTEM_ADMIN` ـی که فقط `UNION_ADMIN` ـِ اتحادیهٔ دیگری شده بازپخش را ۴۰۳ می‌گیرد. `access.spec.ts`،
+  `organization-hierarchy.spec.ts` (ماتریس بسته‌بودن در خطا) و `tenant-isolation.int-spec.ts` (بی‌تغییر سبز).
+  **دور ۴:** همان فایل، برای تسویه و بازپرداخت، با تراکنشی که کیف پول B را قفل نگه می‌دارد: فرمان در انتظار قفل دیده
+  می‌شود، سپس B بیرون می‌رود ⇐ ۴۰۳ بی هیچ نوشتن / organization-service از کار می‌افتد ⇐ ۵۰۳ / نسخه عوض می‌شود ⇐ Commit با
+  نسخهٔ تازه در سطر ثبت؛ دقیقاً یک پرسش پس از انتظار. marketplace: `test/dispute-decision-authority.int-spec.ts` (HTTP،
+  organization-service محلی): `UNION_ADMIN` ـِ U برای خریدار B ⇐ هر دو نتیجه، پرسش دربارهٔ B (نه C)، سطر ثبت؛ اتحادیهٔ
+  دیگر یا عمل برای فروشنده ⇐ ۴۰۳ بی نوشتن (سفارش `DISPUTED`، اعتراض `OPEN`، بی `ORDER_DISPUTE_RESOLVED`، بی کلید)؛
+  organization-service از کار افتاده یا پاسخ خارج از قرارداد ⇐ ۵۰۳؛ بازپخش دوباره پرسیده می‌شود (B بیرون ⇐ ۴۰۳، از کار
+  افتاده ⇐ ۵۰۳)؛ تصمیمی که منتظر قفل ردیف سفارش است تا آزاد شدن آن چیزی نپرسیده؛ کنترل `SYSTEM_ADMIN` بی پرسش؛ جبران Saga
+  پس از `REFUND` ـِ مدیر اتحادیه حتی پس از بیرون رفتن B بی پرسش انجام می‌شود. Provider: همان پاسخ برای marketplace-service.
+
+**آنچه تغییر نکرد.** خواندن تراکنش (دامنهٔ پلتفرم)، بازگرداندن سند (`journal reversal`) و بازپرداخت شارژ کیف پول
+(`/v1/payment-intents/:id/refund`) بخشی از این شش فرمان نیستند و دست نخوردند.
+
+**مرجع تصمیم:** صاحب محصول
+
 ---
 
 ## ۲۴٫۸ توسعهٔ محصول پس از بازارگاه
