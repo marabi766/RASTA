@@ -97,6 +97,17 @@ Endpoint هایی که مصرف‌کننده سرویسی دارند. وقتی `
 (`rasta_economic_transactions_pending_settlement`)، به‌جای اینکه رویداد به DLQ برود و
 تأیید یک انسان بی‌صدا گم شود.
 
+> **اصلاحیهٔ 2026-10-17 — کلید تعهد را کسی پیش‌دستی نمی‌کند.** کلید یکتای این تعهد
+> `(organizationId, MAINTENANCE_REQUEST, requestId)` است و Consumer پیش از نوشتن، ردیف موجود زیر همین کلید را
+> می‌پذیرد. `POST /v1/transactions` تا این اصلاحیه `sourceType` را آزاد می‌گرفت؛ پس مدیر سازمانِ پرداخت‌کننده یا هر
+> سرویسِ مجاز روی آن مسیر می‌توانست زودتر همین کلید را با مبلغ و ذی‌نفعِ خودش بنویسد و تأیید واقعی دیگر چیزی ثبت
+> نمی‌کرد. اکنون یک قاعدهٔ واحد (`src/transaction/recorded-sources.ts`) نوع‌های منبعی را که economic خودش از سابقهٔ
+> مالک می‌سازد — `MAINTENANCE_REQUEST`، `PAYMENT_INTENT` (شارژ کیف پول از Intent پرداخت) و `STATEMENT` (ADR-068) —
+> روی آن مسیر برای **همهٔ** فراخواننده‌ها، کاربر یا سرویس، با `400 VALIDATION_FAILED` رد می‌کند؛ و پایگاه داده با
+> `ck_transaction_recorded_source` همان مرز را نگه می‌دارد: ردیف `MAINTENANCE_REQUEST` همان شکلی است که Consumer
+> می‌نویسد (شناسهٔ رویدادِ علت، بی Idempotency-Key)، ردیف `PAYMENT_INTENT` همان `WALLET_TOP_UP` شارژ. نوع منبعی که
+> مالکش خودش با همین مسیر ثبت می‌کند (`ORDER`، marketplace-service) جزو این‌ها نیست.
+
 ### ۴. `PAYMENT_COMPLETED` به `maintenance-service` برنمی‌گردد — هنوز
 
 `docs/04` § ۴٫۷ آن را برای «بستن چرخه» فهرست کرده و `maintenance-service` آگاهانه
@@ -147,3 +158,7 @@ Endpoint هایی که مصرف‌کننده سرویسی دارند. وقتی `
 - `docs/events/README.md` بخش Economic، مصرف‌کننده‌های فعال و موکول را جدا فهرست می‌کند.
 - `grep -rn "ORDER_CREATED\|STATEMENT_APPROVED" services/economic-service/src` فقط باید
   به کامنت‌هایی برسد که همین تعویق را توضیح می‌دهند.
+- `test/recorded-source-reservation.int-spec.ts` برای هر نوع منبع رزروشده و هر فراخوانندهٔ مجاز روی
+  `POST /v1/transactions` حمله را اجرا می‌کند و سپس واقعیت مالک را از نویسندهٔ واقعی‌اش (Consumer، شارژ) می‌گذراند:
+  تعهد با مبلغ و ذی‌نفعِ مالک ثبت می‌شود و شارژ کیف پول را اعتبار می‌دهد؛ و ردیفِ شبیه HTTP را پایگاه داده، حتی
+  از پشت API، رد می‌کند.
