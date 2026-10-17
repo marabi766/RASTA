@@ -168,9 +168,10 @@ ALTER TABLE "demand_aggregation" ADD CONSTRAINT "ck_demand_aggregation_window"
   CHECK ("closes_at" > "opened_at" AND "window_hours" BETWEEN 1 AND 8760);
 
 -- The snapshot of the settings the window opened with (Q-10): a quantity, never an amount, and a
--- policy from the closed set.
+-- policy from the closed set. The threshold is at most MAX_QUANTITY, the most the window can hold
+-- (PR-300 r2 R2-1): a higher one could never be reached.
 ALTER TABLE "demand_aggregation" ADD CONSTRAINT "ck_demand_aggregation_snapshot"
-  CHECK ("min_quantity" >= 0
+  CHECK ("min_quantity" BETWEEN 0 AND 2147483647
          AND "shortfall_policy" IN ('EXTEND', 'REFER', 'CLOSE')
          AND ("setting_version" IS NULL OR "setting_version" >= 1));
 
@@ -412,6 +413,14 @@ CREATE TRIGGER "tg_demand_request_no_truncate"
 -- demand that joined it and was not withdrawn. A demand written without its window, or a window
 -- total moved without its demand, is refused when the transaction commits — deferred, so the
 -- two writes of one command may come in either order.
+--
+-- Only a write that can change what is compared rescans the window (PR-327 r1 F1): an insert, a
+-- demand that leaves or rejoins the counted set (WITHDRAWN) or moves quantity, organization or
+-- window, and a window whose stated total or count moved. A window's end moves every live demand
+-- SUBMITTED → REFERRED or LAPSED and the window's status only — counted before and after — so
+-- those rows return at once instead of each rescanning the window: closing N demands is N
+-- constant checks and no rescan, not N rescans of N demands. Each event keeps the OLD and NEW of
+-- its own row even when deferred, so the skip judges exactly the change that queued it.
 CREATE FUNCTION "demand_aggregation_totals_check"() RETURNS trigger AS $$
 DECLARE
   target_org TEXT;
@@ -421,6 +430,22 @@ DECLARE
   actual_total BIGINT;
   actual_count INTEGER;
 BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    IF TG_TABLE_NAME = 'demand_request' THEN
+      IF (OLD."status" = 'WITHDRAWN') = (NEW."status" = 'WITHDRAWN')
+         AND NEW."quantity" = OLD."quantity"
+         AND NEW."organization_id" = OLD."organization_id"
+         AND NEW."aggregation_id" = OLD."aggregation_id" THEN
+        RETURN NULL;
+      END IF;
+    ELSIF NEW."total_quantity" = OLD."total_quantity"
+          AND NEW."demand_count" = OLD."demand_count"
+          AND NEW."organization_id" = OLD."organization_id"
+          AND NEW."id" = OLD."id" THEN
+      RETURN NULL;
+    END IF;
+  END IF;
+
   IF TG_TABLE_NAME = 'demand_request' THEN
     target_org := NEW."organization_id";
     target_id := NEW."aggregation_id";

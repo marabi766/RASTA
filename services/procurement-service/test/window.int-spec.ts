@@ -305,6 +305,28 @@ describe('the window of an aggregation', () => {
     });
   });
 
+  it('a threshold of exactly MAX_QUANTITY is reachable: a full window ends READY (PR-300 r2 R2-1)', async () => {
+    const { harness, clock } = await api({ hours: 10, min: MAX_QUANTITY, policy: 'EXTEND' });
+    const a = org();
+    const as = client(harness, buyer(a));
+    const productId = newProductId();
+
+    clock.set(T0);
+    const full = await as.submit({ productId, quantity: MAX_QUANTITY });
+    expect((await as.aggregation(full.body.aggregationId)).body).toMatchObject({
+      setting: { minQuantity: MAX_QUANTITY, shortfallPolicy: 'EXTEND' },
+      totalQuantity: MAX_QUANTITY,
+    });
+    clock.set(new Date(T0.getTime() + 10 * HOUR));
+    const next = await as.submit({ productId, quantity: 1 });
+    expect(next.status).toBe(201);
+    expect(next.body.aggregationId).not.toBe(full.body.aggregationId);
+    expect((await as.aggregation(full.body.aggregationId)).body).toMatchObject({
+      status: 'READY',
+      extensionCount: 0,
+    });
+  });
+
   it('refuses a withdrawal at closesAt, while the status still says OPEN (422 AGGREGATION_WINDOW_ENDED)', async () => {
     const { harness, clock } = await api({ hours: 10 });
     const a = org();

@@ -1,6 +1,7 @@
 import { Module, VersioningType, type INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
+import { apiErrorSchema as sharedApiErrorSchema } from '@rasta/contracts';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
 import { toJsonSchema } from './zod-schema';
@@ -42,13 +43,18 @@ import { REFUSAL_REASONS, type RefusalArea } from '../shared/refusal';
 /** Pinned so the committed document is deterministic. */
 export const PROCUREMENT_VERSION = '0.1.0';
 
-const apiErrorSchema = z
-  .object({
-    code: z.string(),
-    message: z.string(),
-    correlationId: z.string().optional(),
-    details: z.array(z.unknown()).optional(),
-  })
+const errorDetailSchema = z
+  .object({ path: z.string(), message: z.string(), code: z.string().optional() })
+  .strict();
+
+/**
+ * The platform error envelope exactly as `AllExceptionsFilter` emits it: `correlationId` and
+ * `timestamp` always, `traceId` and `path` when the request context has them, `details` only when
+ * non-empty. Taken from the shared schema so the two cannot drift (PR-327 r1 F3: a strict local copy
+ * without `timestamp` and `path` refused every real error body); only strictness is this service's.
+ */
+const apiErrorSchema = sharedApiErrorSchema
+  .extend({ details: z.array(errorDetailSchema).optional() })
   .strict();
 
 const cursorPageOf = (item: z.ZodTypeAny) =>

@@ -1,3 +1,5 @@
+import { EXCEPTION_FILTER_LOGGER } from '@rasta/nest-common';
+import type { Logger } from '@rasta/logging';
 import request from 'supertest';
 import { actor, buyer, client, internalToken, key, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, newOrganizationId, newProductId } from './helpers';
@@ -161,6 +163,72 @@ describe('tenant isolation and authorization', () => {
     expect((await as.demand(demand.id)).status).toBe(200);
     expect((await as.submit({ quantity: 1 })).status).toBe(403);
     expect((await as.withdraw(demand.id, 1)).status).toBe(403);
+    await unchanged();
+  });
+
+  it('logs every refusal once, structured — code, status, method, path — and nothing the caller sent', async () => {
+    // Refusals are logged, not durably audited — as on every service today; a durable refusal
+    // record is the platform's S-06 follow-up (PM ruling on PR-327 r1 F2).
+    const logger = api.app.get<Logger>(EXCEPTION_FILTER_LOGGER);
+    const warn = jest.spyOn(logger, 'warn');
+    const NOTE = 'T175 note the log must never hold';
+    const service = await internalToken('economic-service', owner);
+    const http = () => request(api.app.getHttpServer());
+    const submitAs = (headers: Record<string, string>) => {
+      let built = http().post('/v1/demand-requests').set('idempotency-key', key());
+      for (const [name, value] of Object.entries(headers)) built = built.set(name, value);
+      return built.send({ productId: newProductId(), quantity: 1, note: NOTE });
+    };
+    const bearerOf = (token: string) => ({ authorization: `Bearer ${token}` });
+    const paths: [string, Record<string, string>][] = [
+      ['a role the configuration does not grant', bearerOf(actor(owner, ['FLEET_MANAGER']))],
+      ['AUDITOR (RolesGuard)', bearerOf(actor(owner, ['AUDITOR', 'PROCUREMENT_USER']))],
+      [
+        'the platform administrator',
+        { ...bearerOf(actor(org(), ['SYSTEM_ADMIN'])), 'x-organization-id': owner },
+      ],
+      ['a service token', { 'x-internal-token': service }],
+      [
+        'a command without a platform user id',
+        bearerOf(actor(owner, ['PROCUREMENT_USER'], { rastaUserId: null })),
+      ],
+      [
+        'another organization’s X-Organization-Id',
+        { ...bearerOf(actor(org(), ['PROCUREMENT_USER'])), 'x-organization-id': owner },
+      ],
+    ];
+    try {
+      for (const [label, headers] of paths) {
+        warn.mockClear();
+        const response = await submitAs(headers);
+        expect({ label, status: response.status }).toEqual({ label, status: 403 });
+        expect({ label, calls: warn.mock.calls.length }).toEqual({ label, calls: 1 });
+        const [payload, message] = warn.mock.calls[0] as unknown as [
+          Record<string, unknown>,
+          string,
+        ];
+        expect({ label, message }).toEqual({
+          label,
+          message: `Access denied: ${response.body.code}`,
+        });
+        expect(payload).toMatchObject({
+          errorCode: response.body.code,
+          status: 403,
+          method: 'POST',
+          path: '/v1/demand-requests',
+        });
+        const logged = JSON.stringify(warn.mock.calls);
+        expect({ label, note: logged.includes(NOTE) }).toEqual({ label, note: false });
+        for (const value of Object.values(headers)) {
+          expect({ label, credential: logged.includes(value) }).toEqual({
+            label,
+            credential: false,
+          });
+        }
+      }
+    } finally {
+      warn.mockRestore();
+    }
     await unchanged();
   });
 

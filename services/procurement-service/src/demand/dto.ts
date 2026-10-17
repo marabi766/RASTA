@@ -111,7 +111,14 @@ export type DemandView = z.infer<typeof demandViewSchema>;
 export const settingSnapshotSchema = z
   .object({
     windowHours: z.number().int().min(1),
-    minQuantity: z.number().int().min(0).describe('A quantity, not an amount (Q-10).'),
+    minQuantity: z
+      .number()
+      .int()
+      .min(0)
+      .max(MAX_QUANTITY)
+      .describe(
+        'A quantity, not an amount (Q-10); never above MAX_QUANTITY, so a window can reach it.',
+      ),
     shortfallPolicy: z.enum(SHORTFALL_POLICIES),
     settingVersion: z.number().int().nullable().describe('null = the environment defaults (Q-10).'),
   })

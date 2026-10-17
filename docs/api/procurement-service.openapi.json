@@ -153,9 +153,6 @@
                     "message": {
                       "type": "string"
                     },
-                    "correlationId": {
-                      "type": "string"
-                    },
                     "details": {
                       "type": "array",
                       "items": {
@@ -175,9 +172,22 @@
                         "required": ["path", "code", "message"],
                         "additionalProperties": false
                       }
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "traceId": {
+                      "type": "string"
+                    },
+                    "timestamp": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "path": {
+                      "type": "string"
                     }
                   },
-                  "required": ["code", "message"],
+                  "required": ["code", "message", "correlationId", "timestamp"],
                   "additionalProperties": false
                 }
               }
@@ -708,9 +718,6 @@
                     "message": {
                       "type": "string"
                     },
-                    "correlationId": {
-                      "type": "string"
-                    },
                     "details": {
                       "type": "array",
                       "items": {
@@ -730,9 +737,22 @@
                         "required": ["path", "code", "message"],
                         "additionalProperties": false
                       }
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "traceId": {
+                      "type": "string"
+                    },
+                    "timestamp": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "path": {
+                      "type": "string"
                     }
                   },
-                  "required": ["code", "message"],
+                  "required": ["code", "message", "correlationId", "timestamp"],
                   "additionalProperties": false
                 }
               }
@@ -883,7 +903,8 @@
                               "minQuantity": {
                                 "type": "integer",
                                 "minimum": 0,
-                                "description": "A quantity, not an amount (Q-10)."
+                                "maximum": 2147483647,
+                                "description": "A quantity, not an amount (Q-10); never above MAX_QUANTITY, so a window can reach it."
                               },
                               "shortfallPolicy": {
                                 "type": "string",
@@ -1061,7 +1082,8 @@
                         "minQuantity": {
                           "type": "integer",
                           "minimum": 0,
-                          "description": "A quantity, not an amount (Q-10)."
+                          "maximum": 2147483647,
+                          "description": "A quantity, not an amount (Q-10); never above MAX_QUANTITY, so a window can reach it."
                         },
                         "shortfallPolicy": {
                           "type": "string",
@@ -1191,15 +1213,40 @@
           "message": {
             "type": "string"
           },
+          "details": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                }
+              },
+              "required": ["path", "message"],
+              "additionalProperties": false
+            }
+          },
           "correlationId": {
             "type": "string"
           },
-          "details": {
-            "type": "array",
-            "items": {}
+          "traceId": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "path": {
+            "type": "string"
           }
         },
-        "required": ["code", "message"],
+        "required": ["code", "message", "correlationId", "timestamp"],
         "additionalProperties": false
       }
     }

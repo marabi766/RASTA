@@ -190,6 +190,32 @@ describe('the database keeps the demand and aggregation invariants', () => {
                 'USR_1', 'corr-1', ${T0}, ${T0})`,
       /ck_demand_aggregation_totals/,
     );
+    // A demand that leaves the counted set without its window giving the quantity back: the
+    // update is checked, not skipped as a window's end is (PR-327 r1 F1).
+    const demand = await join(a, agg, T0);
+    await refusedWith(
+      db.$executeRaw`UPDATE demand_request SET status = 'WITHDRAWN', withdrawn_at = ${T0},
+                       withdrawn_by = 'USR_1', withdraw_reason = 'left the window alone',
+                       version = version + 1 WHERE id = ${demand}`,
+      /ck_demand_aggregation_totals/,
+    );
+  });
+
+  it('lets a window end with its demands: a status-only move keeps the totals', async () => {
+    const a = org();
+    const agg = await window(a);
+    const demand = await join(a, agg, T0, 4);
+    const end = new Date(T0.getTime() + 10 * HOUR);
+    // The window's end moves statuses only: counted before and after, its totals still hold.
+    await db.$transaction([
+      db.$executeRaw`UPDATE demand_aggregation SET status = 'REFERRED', closed_at = ${end},
+                       updated_at = ${end}, version = version + 1 WHERE id = ${agg.id}`,
+      db.$executeRaw`UPDATE demand_request SET status = 'REFERRED', closed_at = ${end},
+                       updated_at = ${end}, version = version + 1 WHERE id = ${demand}`,
+    ]);
+    const [row] = await db.$queryRaw<{ total_quantity: bigint; demand_count: number }[]>`
+      SELECT total_quantity, demand_count FROM demand_aggregation WHERE id = ${agg.id}`;
+    expect(row).toEqual({ total_quantity: 4n, demand_count: 1 });
   });
 
   it('never edits a demand, never erases one, and keeps what a window opened with', async () => {

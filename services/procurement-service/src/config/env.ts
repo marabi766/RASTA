@@ -112,7 +112,12 @@ export const procurementEnvSchema = baseEnvSchema
     /** Q-10: seven days. At most a year: a window nobody closes is not a window. */
     PROCUREMENT_AGGREGATION_WINDOW_HOURS: z.coerce.number().int().min(1).max(8760).default(168),
 
-    /** Q-10: no threshold. A whole quantity of the product's base unit, as a demand's is (Q-105). */
+    /**
+     * Q-10: no threshold. A whole quantity of the product's base unit, as a demand's is (Q-105).
+     * At most MAX_QUANTITY (`demand/dto.ts`), the most a window can hold (PR-300 r2 R2-1): above
+     * it no window could ever be READY — EXTEND would extend it forever. The literal, because
+     * `dto.ts` imports this module; `env.spec.ts` holds the two equal.
+     */
     PROCUREMENT_AGGREGATION_MIN_QUANTITY: z.coerce
       .number()
       .int()

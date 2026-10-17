@@ -1,3 +1,4 @@
+import { MAX_QUANTITY } from '../demand/dto';
 import { corsOrigins, loadProcurementEnv } from './env';
 import { procurementOperationBudgets } from './operation-budgets';
 
@@ -82,6 +83,13 @@ describe('overrides', () => {
     });
   });
 
+  it('accepts a threshold of exactly MAX_QUANTITY, the most a window can hold (PR-300 r2 R2-1)', () => {
+    expect(
+      load({ PROCUREMENT_AGGREGATION_MIN_QUANTITY: String(MAX_QUANTITY) })
+        .PROCUREMENT_AGGREGATION_MIN_QUANTITY,
+    ).toBe(MAX_QUANTITY);
+  });
+
   it.each([
     ['AUDITOR among the demand roles', { PROCUREMENT_DEMAND_ROLES: 'PROCUREMENT_USER,AUDITOR' }],
     ['SYSTEM_ADMIN among the demand roles', { PROCUREMENT_DEMAND_ROLES: 'SYSTEM_ADMIN' }],
@@ -92,8 +100,8 @@ describe('overrides', () => {
     ['a fractional window', { PROCUREMENT_AGGREGATION_WINDOW_HOURS: '1.5' }],
     ['a negative threshold', { PROCUREMENT_AGGREGATION_MIN_QUANTITY: '-1' }],
     [
-      'a threshold past a PostgreSQL integer',
-      { PROCUREMENT_AGGREGATION_MIN_QUANTITY: '2147483648' },
+      'a threshold past MAX_QUANTITY, which no window could reach (PR-300 r2 R2-1)',
+      { PROCUREMENT_AGGREGATION_MIN_QUANTITY: String(MAX_QUANTITY + 1) },
     ],
     [
       'a shortfall policy outside the closed set',
