@@ -331,3 +331,18 @@ describe('the bid replay deadline', () => {
     }
   });
 });
+
+describe('the tender opening roles', () => {
+  it('default to none — the owner’s own role set — and refuse what never opens a bid', () => {
+    expect(loadWebServerEnv(REQUIRED).WEB_TENDER_OPEN_ROLES).toEqual([]);
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_TENDER_OPEN_ROLES: 'FLEET_MANAGER, ORGANIZATION_ADMIN' })
+        .WEB_TENDER_OPEN_ROLES,
+    ).toEqual(['FLEET_MANAGER', 'ORGANIZATION_ADMIN']);
+    for (const value of ['SYSTEM_ADMIN', 'CONTRACTOR', 'AUDITOR']) {
+      expect(() => loadWebServerEnv({ ...REQUIRED, WEB_TENDER_OPEN_ROLES: value })).toThrow(
+        'WEB_TENDER_OPEN_ROLES',
+      );
+    }
+  });
+});

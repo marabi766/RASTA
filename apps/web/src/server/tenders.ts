@@ -14,7 +14,8 @@ export type { ReadResult };
  * Reading tenders through the gateway (EXP-004 slice 2).
  *
  * Read-only: no command is issued from this module, so there is no
- * Idempotency-Key here. Two sides, each its own gateway door and each decided by
+ * Idempotency-Key here (the owner's commands are `tender-owner.ts`, the
+ * bidder's `tender-bids.ts`). Two sides, each its own gateway door and each decided by
  * construction-service, never by the portal:
  *
  * - **The owner's side** — `GET /v1/tenders`, `/v1/tenders/{id}` and
@@ -34,8 +35,9 @@ export type { ReadResult };
  *
  * ## What is kept
  *
- * Only what a screen renders. The actor ids (`createdBy`, `statusChangedBy`, …),
- * the owner's `organizationId` and the optimistic-lock `version` are dropped: a
+ * Only what a screen renders, and the owner's `version`, which the owner's
+ * publication is bound to. The actor ids (`createdBy`, `statusChangedBy`, …)
+ * and the owner's `organizationId` are dropped: a
  * React tree is serialized into the page, and a value nobody reads should not
  * travel with it. Every rendered timestamp is a valid UTC instant
  * (`instant.ts`): a malformed one is a `MALFORMED` outcome, not a render-time
@@ -63,6 +65,8 @@ const tenderDetailSchema = tenderSummarySchema.extend({
   statusReasonCode: z.string().nullable().default(null),
   publishedAt: utcInstant.nullable().default(null),
   createdAt: utcInstant,
+  /** What a publication is bound to (`expectedVersion`, `server/tender-owner.ts`). */
+  version: z.number().int().min(1),
 });
 
 export type TenderDetail = z.infer<typeof tenderDetailSchema>;

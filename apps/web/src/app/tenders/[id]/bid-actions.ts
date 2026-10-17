@@ -3,6 +3,7 @@
 import { redirect } from 'next/navigation';
 
 import { FLASH_PARAM, REPLAY_FIELD } from '@/lib/form-fields';
+import { UNREPEATABLE_BID_COMMANDS } from '@/lib/bid-fields';
 import { bidFormValues, parseBid, type BidContent, type BidFormValues } from '@/lib/bid-input';
 import { verifyBidStamp } from '@/server/bid-replay';
 import { currentSession, missingSessionReason } from '@/server/current-session';
@@ -35,6 +36,8 @@ export async function submitBidCommand(
   previous: BidFormState,
   form: FormData,
 ): Promise<BidFormState> {
+  // A view-only record is never sent again, whatever the form posts.
+  if (previous.kind === 'UNCONFIRMED' && previous.viewOnly) return previous;
   const state = await attempt(tenderId, form);
   return previous.kind === 'UNCONFIRMED' ? afterRetry(previous, state) : state;
 }
@@ -104,7 +107,20 @@ async function attempt(tenderId: string, form: FormData): Promise<BidFormState> 
     case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
       // Sent, maybe committed, not confirmed: never "nothing changed". What is
-      // kept for the retry is what was sent, so the retry is the same request.
+      // kept for the retry is what was sent, so the retry is the same request —
+      // except a replacement or a withdrawal, which is never sent again.
+      if (UNREPEATABLE_BID_COMMANDS.includes(command)) {
+        return {
+          kind: 'UNCONFIRMED',
+          command,
+          correlationId: result.correlationId,
+          submissionId,
+          values,
+          replay: null,
+          viewOnly: true,
+          unrepeatable: true,
+        };
+      }
       return {
         kind: 'UNCONFIRMED',
         command,

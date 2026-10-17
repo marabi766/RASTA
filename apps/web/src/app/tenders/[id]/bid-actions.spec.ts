@@ -309,9 +309,9 @@ describe('unconfirmed', () => {
 
   it('a retry sends the same key and body; a refusal of it proves nothing', async () => {
     answer = () => problem(504, 'UPSTREAM_TIMEOUT');
-    const data = form(CONTENT_FIELDS, REVISE);
+    const data = form(CONTENT_FIELDS, SUBMIT);
     const first = (await send(data)) as UnconfirmedBid;
-    answer = () => problem(409, 'OPTIMISTIC_LOCK_FAILED');
+    answer = () => problem(409, 'ALREADY_EXISTS');
     const second = await send(data, first);
     expect(sent[1]).toEqual(sent[0]);
     expect(second).toMatchObject({
@@ -319,6 +319,28 @@ describe('unconfirmed', () => {
       correlationId: first.correlationId,
       retryRefused: true,
     });
+  });
+
+  it('a replacement or a withdrawal, unconfirmed, is view-only from the start and never sent again', async () => {
+    for (const [target, fields] of [
+      [REVISE, CONTENT_FIELDS],
+      [WITHDRAW, {}],
+    ] as const) {
+      sent = [];
+      answer = () => problem(504, 'UPSTREAM_TIMEOUT');
+      const data = form(fields, target);
+      const first = (await send(data)) as UnconfirmedBid;
+      expect(first).toMatchObject({
+        kind: 'UNCONFIRMED',
+        command: target.command,
+        replay: null,
+        viewOnly: true,
+        unrepeatable: true,
+      });
+      // Whatever the form posts again — the same key, a valid stamp — nothing is sent.
+      expect(await send(data, first)).toEqual(first);
+      expect(sent).toHaveLength(1);
+    }
   });
 
   it('a retry whose session ended says so; a passed deadline makes it view-only', async () => {

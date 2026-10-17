@@ -11,6 +11,7 @@ import {
   BID_REFUSAL_TEXT,
   NOTE_FIELD,
   PRICE_FIELD,
+  UNREPEATABLE_BID_COMMANDS,
   answerField,
   criterionField,
   type BidCommand,
@@ -85,6 +86,13 @@ export interface BidCommandFormProps {
   readonly heldBy?: string | null;
 }
 
+/**
+ * Why a replacement or a withdrawal whose outcome is unknown is not sent again
+ * (`UNREPEATABLE_BID_COMMANDS`).
+ */
+export const UNREPEATABLE_BID_TEXT =
+  'جایگزینی یا انصرافی که نتیجه‌اش معلوم نیست دوباره فرستاده نمی‌شود: ارسال دوباره روی پیشنهاد سازمان آن‌طور که در آن لحظه است عمل می‌کند، که ممکن است از صفحهٔ دیگری تغییر کرده باشد. رسید پیشنهاد را با تازه‌کردن صفحه ببینید و اگر لازم بود از نو اقدام کنید.';
+
 /** A record restored after a reload, as the form's starting state: view-only. */
 export function unconfirmedFrom(restored: UnresolvedBid): UnconfirmedBid {
   return {
@@ -155,15 +163,28 @@ export function BidCommandForm({
         const ended = await sessionHasEnded();
         if (!firstSend) return withRetryNote(previous, ended ? 'sessionEnded' : 'retryUnknown');
         if (unsent) {
-          return {
-            kind: 'UNCONFIRMED',
-            command,
-            correlationId: null,
-            submissionId: sentId,
-            values: unsent === 'WITHDRAW' ? null : unsent,
-            replay,
-            ...(ended ? { sessionEnded: true as const } : {}),
-          };
+          const values = unsent === 'WITHDRAW' ? null : unsent;
+          return UNREPEATABLE_BID_COMMANDS.includes(command)
+            ? {
+                kind: 'UNCONFIRMED',
+                command,
+                correlationId: null,
+                submissionId: sentId,
+                values,
+                replay: null,
+                viewOnly: true,
+                unrepeatable: true,
+                ...(ended ? { sessionEnded: true as const } : {}),
+              }
+            : {
+                kind: 'UNCONFIRMED',
+                command,
+                correlationId: null,
+                submissionId: sentId,
+                values,
+                replay,
+                ...(ended ? { sessionEnded: true as const } : {}),
+              };
         }
         throw error;
       }
@@ -496,7 +517,9 @@ function UnconfirmedCommand({
           ممکن است درخواست انجام شده باشد.
         </Alert>
       ) : null}
-      {state.restored ? (
+      {state.unrepeatable ? (
+        <Alert tone="warning">{UNREPEATABLE_BID_TEXT}</Alert>
+      ) : state.restored ? (
         <Alert tone="warning">
           این درخواست پیش از تازه‌شدن صفحه فرستاده شد و نتیجه‌اش تأیید نشد. محتوای پیشنهاد در این
           مرورگر نگه داشته نمی‌شود و همان درخواست دوباره فرستاده نمی‌شود؛ آنچه سرویس اکنون از

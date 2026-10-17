@@ -14,7 +14,7 @@ import type { BidNote, BidReceipt } from '@/server/tender-bids';
 import type { OpenTenderDetail } from '@/server/tenders';
 import { OPEN_TENDER, RECEIPT, TENDER_ID, WITHDRAWN } from '@/test/bid-fixtures';
 
-import { BidCommandForm } from './[id]/BidCommandForm';
+import { BidCommandForm, UNREPEATABLE_BID_TEXT } from './[id]/BidCommandForm';
 import { BidCommands, type OfferedBidCommand } from './[id]/BidCommands';
 import type { BidFormState } from './[id]/bid-form-state';
 import { OpenTenderDetailScreen, OwnBidSection } from './[id]/TenderDetailScreen';
@@ -337,4 +337,38 @@ describe('a bid form, in every state its action can put it in', () => {
     expect(screen.queryByRole('link', { name: /کنار بگذار/ })).toBeNull();
     expect(await axe(container)).toHaveNoViolations();
   });
+});
+
+describe('a replacement or a withdrawal whose outcome is unknown', () => {
+  it.each(['REVISE', 'WITHDRAW'] as const)(
+    '%s: says why it is not sent again, offers no retry, lets the person set it aside',
+    async (command) => {
+      formState = {
+        kind: 'UNCONFIRMED',
+        command,
+        correlationId: 'COR_1',
+        submissionId: 'sub_AAAAAAAAAAAAAAAAAAAA',
+        values: null,
+        replay: null,
+        viewOnly: true,
+        unrepeatable: true,
+      };
+      const { container } = render(
+        <BidCommandForm
+          tenderId={TENDER_ID}
+          command={command}
+          criteria={CRITERIA}
+          csrfToken={CSRF}
+          submissionId="sub_AAAAAAAAAAAAAAAAAAAA"
+          replay={STAMP}
+          owner={OWNER}
+          pageHref={PAGE}
+        />,
+      );
+      expect(screen.getByText(UNREPEATABLE_BID_TEXT)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
+      expect(screen.getByRole('link', { name: /کنار بگذار/ })).toBeInTheDocument();
+      expect(await axe(container)).toHaveNoViolations();
+    },
+  );
 });

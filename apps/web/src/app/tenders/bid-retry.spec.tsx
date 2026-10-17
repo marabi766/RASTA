@@ -192,6 +192,18 @@ describe('a bid sent and not confirmed', () => {
     expect(screen.getByText(/نشست شما پایان یافته است/)).toBeInTheDocument();
   });
 
+  it('a withdrawal whose call was lost is remembered, view-only, never sent again', async () => {
+    action.mockRejectedValue(lostResponse());
+    sessionProbe.mockResolvedValue({ status: 503 });
+    const { container } = renderForm('WITHDRAW');
+    await submit(container);
+    expect(stored()).toMatchObject({ command: 'WITHDRAW', submissionId: KEY });
+    expect(screen.queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
+    expect(screen.getByRole('link', { name: /کنار بگذار/ })).toBeInTheDocument();
+    await submit(container);
+    expect(action).toHaveBeenCalledTimes(1);
+  });
+
   it('a definite answer to the first send drops its record', async () => {
     action.mockResolvedValue({
       kind: 'INVALID',

@@ -28,11 +28,12 @@ import { provisionPerson, provisionedAccessToken } from './provisioned-people';
  * - **another tenant's contractor** — a `CONTRACTOR` acting for ORG-DEH-0002,
  *   invited to nothing.
  *
- * ## Once per test (`publishedTender`)
+ * ## Once per test (`draftTender`, `publishedTender`)
  *
  * A fresh RESTRICTED tender on that project, both contractors invited, its
- * criteria written out, its window set, published through its approval round
- * — so a retry of a test bids on a tender nobody has bid on.
+ * criteria written out, its window set — left in draft for the owner's own
+ * scenarios, or published through its approval round — so a retry of a test
+ * acts on a tender nobody has acted on.
  */
 
 const OWNER_ROLE = 'ORGANIZATION_ADMIN';
@@ -97,6 +98,9 @@ export interface TenderCast {
   readonly projectId: string;
   readonly author: string;
   readonly approver: string;
+  /** The same two, to act in a browser. */
+  readonly authorPerson: ProvisionedPerson;
+  readonly approverPerson: ProvisionedPerson;
   readonly contractor: ProvisionedPerson;
   readonly unqualified: ProvisionedPerson;
   readonly stranger: ProvisionedPerson;
@@ -232,6 +236,8 @@ export async function castForRun(run: string): Promise<TenderCast> {
     projectId: project.id,
     author,
     approver,
+    authorPerson,
+    approverPerson,
     contractor,
     unqualified,
     stranger,
@@ -239,14 +245,17 @@ export async function castForRun(run: string): Promise<TenderCast> {
 }
 
 /**
- * A fresh RESTRICTED tender, published, open for bids from now until
- * `closesInMs` from now, both contractors invited. Its id and its closing.
+ * A fresh RESTRICTED tender in draft, open for bids from now until
+ * `closesInMs` from now, both contractors invited and — unless `criteria` is
+ * false — its criteria written out: everything a publication needs but the
+ * approval. Its id, its closing and the version a publication binds.
  */
-export async function publishedTender(
+export async function draftTender(
   cast: TenderCast,
   closesInMs: number,
-): Promise<{ readonly id: string; readonly closesAt: number }> {
-  const { author, approver } = cast;
+  { criteria = true }: { readonly criteria?: boolean } = {},
+): Promise<{ readonly id: string; readonly closesAt: number; readonly version: number }> {
+  const { author } = cast;
   const drafted = versioned.parse(
     await gateway(author, 'POST', `/v1/projects/${cast.projectId}/tenders`, 201, {
       title: 'بهسازی راه دسترسی',
@@ -271,23 +280,58 @@ export async function publishedTender(
     });
   }
   current = versioned.parse(await gateway(author, 'GET', `/v1/tenders/${id}`, 200));
-  await gateway(author, 'PUT', `/v1/tenders/${id}/criteria`, 200, {
-    expectedVersion: current.version,
-    criteria: TENDER_CRITERIA,
-  });
-  current = versioned.parse(await gateway(author, 'GET', `/v1/tenders/${id}`, 200));
+  if (criteria) {
+    await gateway(author, 'PUT', `/v1/tenders/${id}/criteria`, 200, {
+      expectedVersion: current.version,
+      criteria: TENDER_CRITERIA,
+    });
+    current = versioned.parse(await gateway(author, 'GET', `/v1/tenders/${id}`, 200));
+  }
+  return { id, closesAt, version: current.version };
+}
+
+/**
+ * A fresh tender as `draftTender` makes it, published through its approval
+ * round. Its id and its closing.
+ */
+export async function publishedTender(
+  cast: TenderCast,
+  closesInMs: number,
+): Promise<{ readonly id: string; readonly closesAt: number }> {
+  const { author, approver } = cast;
+  const { id, closesAt, version } = await draftTender(cast, closesInMs);
 
   // Publication: asked, granted by a second person, then executed on the same version.
   const asked = z.object({ steps: z.array(z.object({ approvalId: z.string() })).min(1) }).parse(
     await gateway(author, 'POST', `/v1/tenders/${id}/publish`, 202, {
-      expectedVersion: current.version,
+      expectedVersion: version,
     }),
   );
   await grant(approver, asked.steps[0]!.approvalId);
   z.object({ status: z.literal('PUBLISHED') }).parse(
     await gateway(author, 'POST', `/v1/tenders/${id}/publish`, 200, {
-      expectedVersion: current.version,
+      expectedVersion: version,
     }),
   );
   return { id, closesAt };
+}
+
+/** The contractor's bid on an open tender, through the gateway: `priceMinor` and one answer. */
+export async function contractorBid(
+  cast: TenderCast,
+  tenderId: string,
+  priceMinor: string,
+): Promise<void> {
+  await gateway(
+    await provisionedAccessToken(cast.contractor),
+    'POST',
+    `/v1/tenders/${tenderId}/bids`,
+    201,
+    {
+      content: {
+        priceMinor,
+        answers: [{ criterionCode: 'technical', response: 'روش اجرا با ماشین‌آلات خودی' }],
+      },
+    },
+  );
 }

@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 
 import { AppShell, Button, ButtonLink, PageHeader, TopBar } from '@/ui';
 import { BID_COMMANDS } from '@/lib/bid-fields';
+import { OWNER_DONE } from '@/lib/tender-owner-fields';
 import { FLASH_PARAM } from '@/lib/form-fields';
 import { currentSession } from '@/server/current-session';
 import { webServerEnv } from '@/server/env';
@@ -12,12 +13,41 @@ import { tenderDoorsFor } from '@/server/portal-nav';
 import { tokenRoles } from '@/server/realm-roles';
 import { submissionBinding } from '@/server/submission';
 import { bidderCallerOf, canBid, fetchOwnBid } from '@/server/tender-bids';
-import { fetchOpenTender, fetchTender, fetchTenderCriteria } from '@/server/tenders';
+import {
+  canOpenBids,
+  decidableStep,
+  fetchApproval,
+  fetchOwnerBids,
+  fetchPublicationRequest,
+  isOpeningOnly,
+  openingOnlyOffers,
+  ownerCallerOf,
+  ownerOffers,
+  readsOwnerBids,
+} from '@/server/tender-owner';
+import {
+  fetchOpenTender,
+  fetchTender,
+  fetchTenderCriteria,
+  type ReadResult,
+  type TenderCriteria,
+  type TenderDetail,
+} from '@/server/tenders';
+import type { WebSession } from '@/server/session';
 import { tenderDetailPath } from '@/lib/tender-fields';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { BidCommands } from './BidCommands';
 import { bidCommandOffers } from './bid-offers';
+import { ownerCommandOffers } from './owner-offers';
+import { OwnerCommands } from './OwnerCommands';
+import {
+  OpeningOnlyScreen,
+  OpeningSection,
+  OwnerBidsSection,
+  OwnerFlash,
+  PublicationSection,
+} from './OwnerSections';
 import { OpenTenderDetailScreen, OwnBidSection, OwnTenderDetailScreen } from './TenderDetailScreen';
 
 /**
@@ -104,10 +134,15 @@ export default async function TenderPage({
         />
       ) : null;
     body = <OpenTenderDetailScreen result={result} ownBid={ownBid} />;
+  } else if (isOpeningOnly(ownerCallerOf(session.accessToken), webServerEnv())) {
+    // An opener refused the tender read is given the opening without it (PR 345 r1, finding 4).
+    body = await openingOnlyBody(session, id, query);
   } else {
     const result = await fetchTender(session, id);
     const criteria = result.kind === 'OK' ? await fetchTenderCriteria(session, id) : null;
-    body = <OwnTenderDetailScreen result={result} criteria={criteria} />;
+    const owner =
+      result.kind === 'OK' ? await ownerSections(session, id, result.data, query, criteria) : null;
+    body = <OwnTenderDetailScreen result={result} criteria={criteria} owner={owner} />;
   }
 
   return (
@@ -135,5 +170,122 @@ export default async function TenderPage({
       </div>
       <div className="mt-4">{body}</div>
     </AppShell>
+  );
+}
+
+/**
+ * The page of an opener who may not read the tender (`isOpeningOnly`): only
+ * `GET …/bids`, which construction-service answers an opener — `404` for
+ * another organization's tender or a missing one, exactly as the tender read
+ * would — and the opening's forms while the bids are not opened.
+ */
+async function openingOnlyBody(
+  session: WebSession,
+  id: string,
+  query: Record<string, string | string[] | undefined>,
+): Promise<ReactNode> {
+  const caller = ownerCallerOf(session.accessToken);
+  const bids = await fetchOwnerBids(session, id);
+  if (bids.kind !== 'OK') return <OwnTenderDetailScreen result={bids} criteria={null} />;
+  const forms = ownerCommandOffers(session, id, openingOnlyOffers(caller, bids, webServerEnv()));
+  const flash = query[FLASH_PARAM];
+  const done = readFlash(session, typeof flash === 'string' ? flash : undefined, id, OWNER_DONE);
+  return (
+    <OpeningOnlyScreen tenderId={id}>
+      <OwnerFlash done={done} />
+      <OpeningSection
+        status={null}
+        opened={bids.data.opened}
+        notes={[]}
+        commands={
+          <OwnerCommands
+            tenderId={id}
+            offered={forms.opening}
+            csrfToken={session.csrfToken}
+            owner={submissionBinding(session).owner}
+            pageHref={tenderDetailPath(id, 'own')}
+            showsRestored
+            pageSubmissionIds={forms.opening.map(({ submission }) => submission.id)}
+          />
+        }
+      />
+      <OwnerBidsSection bids={bids} criteria={new Map()} />
+    </OpeningOnlyScreen>
+  );
+}
+
+/**
+ * The owner's sections, read only once the tender itself answered: the
+ * publication's newest request while it is a draft, the step this person may
+ * decide, and the bids for an opener once there can be any. Which forms is
+ * `ownerOffers`, a copy of construction-service's checks.
+ */
+async function ownerSections(
+  session: WebSession,
+  id: string,
+  tender: TenderDetail,
+  query: Record<string, string | string[] | undefined>,
+  criteria: ReadResult<TenderCriteria> | null,
+): Promise<ReactNode> {
+  const settings = webServerEnv();
+  const caller = ownerCallerOf(session.accessToken);
+  const draft = tender.status === 'DRAFT';
+  const [publication, bids] = await Promise.all([
+    draft ? fetchPublicationRequest(session, id) : null,
+    readsOwnerBids(caller, tender.status, settings) ? fetchOwnerBids(session, id) : null,
+  ]);
+  const decidable =
+    publication?.kind === 'OK' ? decidableStep(caller, publication.data, tender.version) : null;
+  const step = decidable ? await fetchApproval(session, decidable.approvalId) : null;
+  const { offers, notes } = ownerOffers(
+    caller,
+    { tender, publication, step },
+    settings,
+    Date.now(),
+  );
+  const forms = ownerCommandOffers(session, id, offers);
+  const flash = query[FLASH_PARAM];
+  const done = readFlash(session, typeof flash === 'string' ? flash : undefined, id, OWNER_DONE);
+
+  const pageHref = tenderDetailPath(id, 'own');
+  const ownerTag = submissionBinding(session).owner;
+  const pageSubmissionIds = [...forms.publication, ...forms.opening].map(
+    ({ submission }) => submission.id,
+  );
+  const group = (offered: typeof forms.publication, showsRestored: boolean) => (
+    <OwnerCommands
+      tenderId={id}
+      offered={offered}
+      csrfToken={session.csrfToken}
+      owner={ownerTag}
+      pageHref={pageHref}
+      showsRestored={showsRestored}
+      pageSubmissionIds={pageSubmissionIds}
+    />
+  );
+  const openingShown = !draft && tender.status !== 'CANCELLED' && canOpenBids(caller, settings);
+  const labels = new Map(
+    criteria?.kind === 'OK' ? criteria.data.items.map((item) => [item.code, item.label]) : [],
+  );
+
+  return (
+    <>
+      <OwnerFlash done={done} />
+      {draft ? (
+        <PublicationSection
+          request={publication}
+          notes={notes.filter((note) => note !== 'AWAITING_CLOSE')}
+          commands={group(forms.publication, true)}
+        />
+      ) : null}
+      {openingShown ? (
+        <OpeningSection
+          status={tender.status}
+          notes={notes.filter((note) => note === 'AWAITING_CLOSE')}
+          commands={group(forms.opening, true)}
+        />
+      ) : null}
+      {bids ? <OwnerBidsSection bids={bids} criteria={labels} /> : null}
+    </>
   );
 }

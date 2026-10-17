@@ -155,9 +155,11 @@ export interface OwnTenderDetailScreenProps {
   readonly result: ReadResult<TenderDetail>;
   /** `null` when the tender itself could not be read, so criteria were not asked. */
   readonly criteria: ReadResult<TenderCriteria> | null;
+  /** The owner's sections — publication, opening, bids (`OwnerSections`) — when there are any. */
+  readonly owner?: ReactNode;
 }
 
-export function OwnTenderDetailScreen({ result, criteria }: OwnTenderDetailScreenProps) {
+export function OwnTenderDetailScreen({ result, criteria, owner }: OwnTenderDetailScreenProps) {
   if (result.kind !== 'OK') return <Failure result={result} />;
 
   const tender = result.data;
@@ -199,6 +201,8 @@ export function OwnTenderDetailScreen({ result, criteria }: OwnTenderDetailScree
       <ScopeSection scopeOfWork={tender.scopeOfWork} />
 
       {criteria ? <OwnCriteriaSection result={criteria} /> : null}
+
+      {owner}
     </div>
   );
 }
