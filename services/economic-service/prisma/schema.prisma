@@ -548,6 +548,7 @@ model TransactionSourceQuarantine {
 
   transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
+  @@index([organizationId, sourceType, sourceReference], map: "ix_transaction_source_quarantine_key")
   @@map("transaction_source_quarantine")
 }
 

@@ -1893,6 +1893,8 @@ export const EXPECTED = {
       'ix_payment_resolution_org_intent',
       // A person's verified facts in one organization: the breakdown's access path.
       'ix_reward_source_evaluation_subject',
+      // A quarantined key, per tenant, as the row carried it (#334 r3).
+      'ix_transaction_source_quarantine_key',
     ],
     dataRollback: ECONOMIC_DATA_ROLLBACK,
   },

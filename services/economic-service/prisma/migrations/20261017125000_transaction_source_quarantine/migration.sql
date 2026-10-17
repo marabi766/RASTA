@@ -44,6 +44,11 @@ CREATE TABLE "transaction_source_quarantine" (
         CHECK (char_length(btrim("decision")) BETWEEN 10 AND 500)
 );
 
+-- The key as it was, per tenant: what an operator asks ("which row held
+-- ORDER/<id>?") once the transaction no longer carries it.
+CREATE INDEX "ix_transaction_source_quarantine_key"
+    ON "transaction_source_quarantine" ("organization_id", "source_type", "source_reference");
+
 CREATE OR REPLACE FUNCTION reject_transaction_source_quarantine_mutation() RETURNS TRIGGER AS $$
 BEGIN
   RAISE EXCEPTION 'transaction_source_quarantine is append-only: never UPDATE or DELETE'
