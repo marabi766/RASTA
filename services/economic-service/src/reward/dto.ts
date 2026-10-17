@@ -152,9 +152,16 @@ const participationContributionSchema = z
  * (`PARTICIPATION_RULE_CHANGED`); nothing has a default, because the product
  * document gives none of them (docs/24 Q-139). There is no update: the next
  * version replaces this one from the instant it is created.
+ *
+ * `expectedCurrentVersion` is the version the administrator is replacing — `0`
+ * while none exists. The version in force is what scores every organization,
+ * so a request decided against an older one is refused `409
+ * OPTIMISTIC_LOCK_FAILED` rather than silently replacing a version its author
+ * never saw (review of #328, r1).
  */
 export const createParticipationRuleSchema = z
   .object({
+    expectedCurrentVersion: z.number().int().min(0),
     windowDays: z.number().int().positive().max(PARTICIPATION_MAX_WINDOW_DAYS),
     contributions: z
       .array(participationContributionSchema)

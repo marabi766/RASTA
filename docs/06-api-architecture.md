@@ -867,7 +867,7 @@ POST   /v1/rewards/rules                           تعریف قاعده   (SYST
 PATCH  /v1/rewards/rules/{id}                      اصلاح قاعده   (SYSTEM_ADMIN)
 GET    /v1/rewards/me/participation                امتیاز مشارکت خودِ فراخوان با Breakdown — جدا از امتیاز پاداش، قابل خرج نیست (ADR-047، Q-139)
 GET    /v1/rewards/participation-rules             نسخه‌های قاعدهٔ مشارکت، تازه‌ترین اول   (SYSTEM_ADMIN/UNION_ADMIN/ORGANIZATION_ADMIN)
-POST   /v1/rewards/participation-rules             نسخهٔ بعدی قاعدهٔ مشارکت — هرگز ویرایش نمی‌شود   (SYSTEM_ADMIN)
+POST   /v1/rewards/participation-rules             نسخهٔ بعدی قاعدهٔ مشارکت — هرگز ویرایش نمی‌شود؛ expectedCurrentVersion کهنه = 409 OPTIMISTIC_LOCK_FAILED   [K] (SYSTEM_ADMIN)
 
 GET    /v1/payment-intents                         فهرست پرداخت‌ها
 GET    /v1/payment-intents/{id}                    یک پرداخت
