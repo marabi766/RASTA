@@ -24,6 +24,7 @@ describe('PaymentReconciliationSweeper', () => {
     INTERNAL_TOKEN_SECRET: 'a_secret_that_is_at_least_thirty_two_chars',
     MAINTENANCE_SERVICE_URL: 'http://localhost:3105',
     FLEET_SERVICE_URL: 'http://localhost:3104',
+    CONTRACT_SERVICE_URL: 'http://localhost:3111',
   });
 
   const task = (id: string): ClaimedTask => ({

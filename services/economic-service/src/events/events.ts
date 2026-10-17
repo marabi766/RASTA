@@ -54,6 +54,7 @@ export const ECONOMIC_EVENTS = {
   COMMISSION_RULE_CHANGED: 'COMMISSION_RULE_CHANGED',
   REWARD_RULE_CHANGED: 'REWARD_RULE_CHANGED',
   PARTICIPATION_RULE_CHANGED: 'PARTICIPATION_RULE_CHANGED',
+  RECOGNITION_RULE_CHANGED: 'RECOGNITION_RULE_CHANGED',
   TRANSACTION_STATUS_CHANGED: 'TRANSACTION_STATUS_CHANGED',
 } as const;
 
@@ -787,6 +788,43 @@ export const participationRuleChangedPayload = z
     'after is the version following before, and the first version follows none',
   );
 
+/** A levels-and-badges version's terms (COM-012 criterion 2, docs/24 Q-140). */
+const recognitionRuleTerms = z.object({
+  version: z.number().int().positive(),
+  basis: z.enum(['REWARD_POINTS_CUMULATIVE', 'PARTICIPATION_SCORE']),
+  levels: z.array(
+    z.object({
+      rank: z.number().int().positive(),
+      name: z.string(),
+      threshold: z.number().int().nonnegative(),
+    }),
+  ),
+  badges: z.array(
+    z.object({ code: z.string(), name: z.string(), threshold: z.number().int().nonnegative() }),
+  ),
+  label: z.string().nullable(),
+});
+
+/**
+ * A new levels-and-badges version, and who created it — the audit record of
+ * the configuration (AGENTS.md S-06). As for the participation rule, a version
+ * is never edited: `change` is only `CREATED`, and `before` is the version it
+ * replaced, or null for the first.
+ */
+export const recognitionRuleChangedPayload = z
+  .object({
+    ruleId: z.string(),
+    change: z.literal('CREATED'),
+    changedBy: z.string(),
+    changedAt: z.string(),
+    before: recognitionRuleTerms.nullable(),
+    after: recognitionRuleTerms,
+  })
+  .refine(
+    (payload) => payload.after.version === (payload.before ? payload.before.version + 1 : 1),
+    'after is the version following before, and the first version follows none',
+  );
+
 /**
  * The schema each event is published with now — its current version
  * ({@link ECONOMIC_EVENT_VERSIONS}).
@@ -814,6 +852,7 @@ export const ECONOMIC_EVENT_SCHEMAS = {
   [ECONOMIC_EVENTS.COMMISSION_RULE_CHANGED]: commissionRuleChangedPayloadV2,
   [ECONOMIC_EVENTS.REWARD_RULE_CHANGED]: rewardRuleChangedPayload,
   [ECONOMIC_EVENTS.PARTICIPATION_RULE_CHANGED]: participationRuleChangedPayload,
+  [ECONOMIC_EVENTS.RECOGNITION_RULE_CHANGED]: recognitionRuleChangedPayload,
   [ECONOMIC_EVENTS.TRANSACTION_STATUS_CHANGED]: transactionStatusChangedPayload,
 } as const satisfies Record<EconomicEventName, z.ZodTypeAny>;
 

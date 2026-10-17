@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { businessLineSchema } from '@rasta/contracts';
 import {
   EnvValidationError,
   authEnvSchema,
@@ -198,6 +199,26 @@ export const economicEnvSchema = baseEnvSchema
      */
     MAINTENANCE_SERVICE_URL: z.string().url(),
     FLEET_SERVICE_URL: z.string().url(),
+    /** The owner of an approved contract statement (ADR-068 § 6 (2)); required for the same reason. */
+    CONTRACT_SERVICE_URL: z.string().url(),
+
+    /**
+     * The business line a contract statement's obligation is recorded under
+     * (ADR-045 § 1), or none.
+     *
+     * Unset by default, and that default is the temporary decision of docs/24
+     * Q-130 (D-057), not a guess: only a source that knows its line sends one,
+     * and whether a statement is always `CONSTRUCTION` is exactly what Q-130
+     * asks. Unset, a statement is priced by the type-only rules for
+     * `CONSTRUCTION_STATEMENT` and, with none, recorded `NO_ACTIVE_RULE`. The
+     * answer is this setting, not a code change (Q-97 note, CON-003 PR 6b).
+     * Read when an obligation is recorded; the line it was recorded under never
+     * changes afterwards.
+     */
+    ECONOMIC_STATEMENT_BUSINESS_LINE: z.preprocess(
+      (value) => (value === '' ? undefined : value),
+      businessLineSchema.optional(),
+    ),
 
     /** One source read, body included. A timeout is retried, never acted on. */
     ECONOMIC_SOURCE_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
