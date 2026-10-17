@@ -820,6 +820,7 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 | **Consumes**    | همه Topicهای دامنه                                                                                                                           |
 | **مرز امنیتی**  | **تنها سرویسی که `AUDITOR` به آن دسترسی دارد** — و فقط به Endpointهای تجمیعی.                                                                |
 | **CONSTRAINT**  | KPIهای وابسته به خط مبنا تا پر شدن `baseline_metric` وضعیت `INSUFFICIENT_BASELINE` برمی‌گردانند — **نه صفر، نه تخمین.**                      |
+| **ADR**         | [ADR-071](adr/ADR-071-analytics-read-models-and-governed-views.md) — `Proposed`. فقط Kafka؛ Q-141، Q-142                                     |
 
 ---
 
