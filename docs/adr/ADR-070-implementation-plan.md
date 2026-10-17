@@ -74,6 +74,17 @@ procurement در organization-service در PR 11) ولی امتیازی را ع�
 - انتقال توابع خالص `sealBid`/`openBid`، تعهد، زنجیرهٔ رسید و `trustedReceiptsOf` از `construction-service/src/tender/sealing` به یک Package بی‌دامنه
   (Utility رمزنگاری؛ A-03 فقط Business Logic را منع می‌کند)؛ construction همان را import می‌کند؛ آزمون‌های بردار شناخته بی‌تغییر می‌گذرند.
 - **تصمیم مدیر پروژه:** استخراج (پیشنهاد) یا کپی. اگر کپی، این برش حذف و PR 8 بزرگ‌تر می‌شود و دو نسخه باید هم‌زمان نگه داشته شوند.
+- **تصمیم (مدیر پروژه، 2026-10-17): استخراج**، نه کپی — یک پیاده‌سازی، تا اصلاحی در مهر و موم هرگز فقط به یک نسخه نرسد.
+- **پیاده‌سازی:** `packages/sealing` (`@rasta/sealing`). `SealingScheme` با پنج برچسب جداسازی دامنه (`SealingLabels`) این‌ها را دارد:
+  `seal`/`open`، `commitmentOf`، `ciphertextDigest`، `associatedDataOf`، زنجیرهٔ رسید (`genesisReceipt`، `nextReceipt`، `verifyReceiptChain`،
+  `verifyReceipts` ⇒ `VerifiedReceipts`) و `trustedReceiptsOf`. بیرون از آن `canonicalize`، `lengthPrefixed`، AEAD، `generateSealingKeyPair`،
+  `privateKeyFromDer` و `SealingError` هست. نام‌ها بی‌دامنه‌اند: Tender ⇐ **scope**، Bid ⇐ **entry**، سازمان پیشنهاددهنده ⇐ **submitter**
+  (`EnvelopeBinding { scopeId, entryId, submitterId, revision, keyId }`)؛ `sealBid`/`openBid` ⇐ `seal`/`open`، `SealedBid` ⇐ `SealedEnvelope`،
+  `TenderKeyPair` ⇐ `SealingKeyPair`. `construction-service/src/tender/sealing/sealing.ts` نام‌های پیشین را نگه می‌دارد و فقط ترجمه می‌کند؛
+  برچسب‌های `rasta.bid.*` هم همان‌جاست (`BID_SEALING_LABELS`). بایت‌ها با بردارهای پیش از انتقال یکی‌اند (`bid-sealing-vectors.spec.ts`).
+  `open` رسیدی را که زیر Scheme دیگری سنجیده شده نمی‌پذیرد. procurement برچسب‌های خودش را می‌گذارد، پس بایت یک پیشنهاد قیمت هرگز بایت یک
+  Bid نیست. **ماند:** `TenderKeyProvider`/`EnvKekProvider` (پیچیدن کلید با KEK و Digest درخواست) در construction است و فقط AEAD را از
+  Package می‌گیرد. PR 6 برای `PROCUREMENT_RFQ_KEKS` به آن نیاز دارد. تابع `genesisReceipt` در audit-service هم عمداً مستقل است.
 
 ### PR 5 — پورت‌های خواندنی (`S`)
 
