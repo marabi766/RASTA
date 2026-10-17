@@ -34,7 +34,9 @@ export const REFUSAL_REASONS = {
     /**
      * The window it would join already holds `PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS` live demands —
      * a technical limit, so that the window's synchronous close fits the transaction budget (Q-119
-     * note of 2026-10-17). Decided the same way; nothing is written.
+     * note of 2026-10-17). Decided the same way, and the demand is not written; but an EXTEND end
+     * the same request made is committed with its event (PR-327 r3 F2), or a full window that never
+     * reaches its threshold would never move on.
      */
     AGGREGATION_DEMAND_LIMIT_REACHED: 422,
   },

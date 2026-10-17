@@ -69,10 +69,12 @@ export class DemandController {
       'otherwise its snapshot’s policy: EXTEND moves it on and the demand joins it, REFER and ' +
       'CLOSE end it) and the demand joins the window that follows. A demand that would take the ' +
       'total of the window it joins past 2147483647 is 422 AGGREGATION_QUANTITY_LIMIT_EXCEEDED ' +
-      'and writes nothing; so is one that would join a window already holding ' +
-      'PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands (default 200000), 422 ' +
+      'and writes nothing. One that would join a window already holding ' +
+      'PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands (default 200000) is 422 ' +
       'AGGREGATION_DEMAND_LIMIT_REACHED — a technical limit: no window holds more than one close ' +
-      'can digest. productId is opaque and never ' +
+      'can digest — and the demand is not written; but when the window was due to end and its ' +
+      'policy is EXTEND, the extension this request made is committed, with ' +
+      'AGGREGATION_WINDOW_EXTENDED, so a full window still moves on. productId is opaque and never ' +
       'checked against marketplace (Q-105, Q-120). DEMAND_SUBMITTED carries identifiers, the ' +
       `quantity and instants only — never the note. ${BUYER_NOTE} ${COMMAND_NOTE}`,
   })

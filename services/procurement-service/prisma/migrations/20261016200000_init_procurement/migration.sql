@@ -421,6 +421,18 @@ CREATE TRIGGER "tg_demand_request_no_truncate"
 -- those rows return at once instead of each rescanning the window: closing N demands is N
 -- constant checks and no rescan, not N rescans of N demands. Each event keeps the OLD and NEW of
 -- its own row even when deferred, so the skip judges exactly the change that queued it.
+--
+-- The rescan reads the counted demands and nothing else (PR-327 r3 F1). The live-demand limit
+-- bounds what a window counts, not what it ever held: a withdrawal frees a place but its row
+-- stays, so submit-and-withdraw keeps a window small while its history grows without end. The
+-- counted set is read status by status, each one equality range of `ix_demand_request_aggregation`
+-- (organization, window, status). `<> 'WITHDRAWN'` is no range of any index: it was read as the
+-- window's whole range with every withdrawn row filtered out — under the window's lock, twice for
+-- every submit and withdrawal. Nor is `IN (…)` safe: on a table it has no column statistics for,
+-- the planner kept the list out of the index condition and filtered the same whole range. An
+-- equality on all three columns is always the index condition. `ck_demand_request_status` allows
+-- one status more, WITHDRAWN, the one not counted: a status added there that counts must be added
+-- here too.
 CREATE FUNCTION "demand_aggregation_totals_check"() RETURNS trigger AS $$
 DECLARE
   target_org TEXT;
@@ -458,10 +470,18 @@ BEGIN
     FROM "demand_aggregation"
    WHERE "organization_id" = target_org AND "id" = target_id;
 
-  SELECT COALESCE(SUM("quantity"), 0), COUNT(*) INTO actual_total, actual_count
-    FROM "demand_request"
-   WHERE "organization_id" = target_org AND "aggregation_id" = target_id
-     AND "status" <> 'WITHDRAWN';
+  SELECT COALESCE(SUM(counted."quantity"), 0), COUNT(*) INTO actual_total, actual_count
+    FROM (SELECT "quantity" FROM "demand_request"
+           WHERE "organization_id" = target_org AND "aggregation_id" = target_id
+             AND "status" = 'SUBMITTED'
+          UNION ALL
+          SELECT "quantity" FROM "demand_request"
+           WHERE "organization_id" = target_org AND "aggregation_id" = target_id
+             AND "status" = 'REFERRED'
+          UNION ALL
+          SELECT "quantity" FROM "demand_request"
+           WHERE "organization_id" = target_org AND "aggregation_id" = target_id
+             AND "status" = 'LAPSED') AS counted;
 
   IF stated_total IS DISTINCT FROM actual_total OR stated_count IS DISTINCT FROM actual_count THEN
     RAISE EXCEPTION 'ck_demand_aggregation_totals: a window''s total and count are its demands'''
