@@ -5,26 +5,29 @@
 > می‌سازد آزمون جداسازی مستأجر و آزمون رد نقش (به‌ویژه `AUDITOR` روی نماهای مستأجر) دارد، و هر Consumer آزمون Idempotency.
 
 **اندازه:** `S` ≈ تا ۳۰۰ خط تغییر با آزمون؛ `M` ≈ ۳۰۰ تا ۹۰۰؛ `L` ≈ ۹۰۰ تا ۲۰۰۰؛ `XL` بیش از آن (مرجع: Skeleton
-contract-service در #228، ۸٬۳۰۰ خط با سیم‌کشی CI، ACL و نگهبان‌ها). امتیاز برآوردی کنار هر برش است؛ جمع آن (۳۴) از ۲۱ امتیاز
+contract-service در #228، ۸٬۳۰۰ خط با سیم‌کشی CI، ACL و نگهبان‌ها). امتیاز برآوردی کنار هر برش است؛ جمع آن (۳۵؛ پیش از
+بازبینی #335 دور ۱، ۳۴) از ۲۱ امتیاز
 RUN-001 بیشتر است — **بازبرآورد پرسش باز مدیر پروژه و صاحب محصول است** (همان یادداشت ADR-065، ADR-068 و ADR-070)؛ این سند
 `backlog.json` را تغییر نمی‌دهد.
 
 ## نقشه
 
-| PR  | عنوان                                                                                             | اندازه | امتیاز | وابسته به        | معیار RUN-001 |
-| --- | ------------------------------------------------------------------------------------------------- | ------ | ------ | ---------------- | ------------- |
-| 0   | طراحی: ADR-071، Q-141، Q-142 (همین PR)                                                            | S      | ۱      | —                | —             |
-| 1   | Skeleton سرویس + `fact_maintenance` از `MAINTENANCE_COMPLETED` + `GET /v1/dashboards/fleet`       | XL     | ۵      | 0                | (۱)           |
-| 2   | `baseline_metric` + تعریف KPIها + `GET /v1/kpis` (مستأجر) با `INSUFFICIENT_BASELINE`              | M      | ۳      | 1                | (۲)           |
-| 3   | Projection سلسله‌مراتب + نمای حاکمیتی + قاعدهٔ گروه کوچک (`GET /v1/dashboards/governance`)        | L      | ۵      | 2                | (۲)           |
-| 4   | Factهای ناوگان: چرخهٔ عمر نگهداری، `fact_usage`، ترکیب ناوگان                                     | L      | ۵      | 1                | (۱)           |
-| 5   | Factهای بازارگاه و اقتصادی: `fact_order`، `fact_transaction` (`COMMISSION_APPLIED`)؛ داشبورد مالی | L      | ۵      | 1                | (۱)           |
-| 6   | Factهای عمران و قرارداد: `fact_project`؛ داشبورد عمران                                            | M      | ۳      | 1                | (۱)           |
-| 7   | `kpi_snapshot` + Snapshot روزانه + پاک‌کنندهٔ `processed_event`؛ حاکمیتی از Snapshot              | M      | ۴      | 3                | (۲)           |
-| 8   | شاخص کاهش هزینه از رویدادهای procurement                                                          | M      | ۳      | 2، ADR-070 PR 12 | (۲)           |
+| PR  | عنوان                                                                                                                 | اندازه | امتیاز | وابسته به | معیار RUN-001 |
+| --- | --------------------------------------------------------------------------------------------------------------------- | ------ | ------ | --------- | ------------- |
+| 0   | طراحی: ADR-071، Q-141، Q-142 (همین PR)                                                                                | S      | ۱      | —         | —             |
+| 1   | Skeleton سرویس + `fact_maintenance` از `MAINTENANCE_COMPLETED` + `GET /v1/dashboards/fleet`                           | XL     | ۵      | 0         | (۱)           |
+| 2   | `baseline_metric` + تعریف KPIها + `GET /v1/kpis` (مستأجر) با `INSUFFICIENT_BASELINE`                                  | M      | ۳      | 1         | (۲)           |
+| 3   | Projection سلسله‌مراتب + نمای حاکمیتی **بی عدد** (`GET /v1/dashboards/governance`، همه `NOT_RELEASED`)                | M      | ۳      | 2         | (۲)           |
+| 4   | Factهای ناوگان: چرخهٔ عمر نگهداری، `fact_usage`، ترکیب ناوگان با `streamSeq` و جابه‌جایی انتقال (ADR-071 § ۳-الف)     | L      | ۶      | 1         | (۱)           |
+| 5   | Factهای بازارگاه و اقتصادی: `fact_order`، `fact_transaction` (`COMMISSION_APPLIED`)؛ داشبورد مالی                     | L      | ۵      | 1         | (۱)           |
+| 6   | Factهای عمران و قرارداد: `fact_project`؛ داشبورد عمران                                                                | M      | ۳      | 1         | (۱)           |
+| 7   | `kpi_snapshot` + **انتشار حاکمیتی** (دورهٔ بسته، تغییرناپذیر، `LATE`، پنهان‌سازی مکمل) + پاک‌کنندهٔ `processed_event` | L      | ۶      | 3         | (۲)           |
+| 8   | قیمت واحد در برابر خط مبنا **فقط از خرید بازارگاه** (`ORDER_CREATED` `lines[]`؛ ADR-071 § ۳-ب)                        | M      | ۳      | 2، 5      | (۲)           |
 
 برش‌های ۴، ۵ و ۶ فقط به Skeleton وابسته‌اند و می‌توانند موازی بروند. **معیار (۱) RUN-001 با PR 1 نشان داده می‌شود** (نخستین
-Projection رویدادمحور و ایمن) و با ۴ تا ۶ گسترده؛ **معیار (۲) با PR 2 و PR 3**، و PR 7 آن را از دوره‌های ثابت سرو می‌کند.
+Projection رویدادمحور و ایمن) و با ۴ تا ۶ گسترده؛ **معیار (۲) با PR 2، PR 3 و PR 7** — PR 3 نمای حاکمیتی را بی هیچ عدد
+می‌سازد و **نخستین عدد حاکمیتی فقط با انتشار PR 7** می‌آید (ADR-071 § ۵ (۴)). نیمهٔ procurement کاهش هزینه در این برنامه نیست
+(Q-142 (۳)).
 صفحه‌های پورتال (`apps/web`) برای این نماها برش جداگانهٔ مالک پورتال‌اند و این‌جا شمرده نمی‌شوند.
 
 ## برش‌ها
@@ -36,12 +39,14 @@ Projection رویدادمحور و ایمن) و با ۴ تا ۶ گسترده؛ *
 - **بی Outbox و بی Topic اصلی**؛ فقط `rasta.analytics.v1.dlq`. اعلام در `TOPIC_CONSUMERS` (`rasta.maintenance.v1`)، ACLهای
   تولیدشده، Principal بروکر، `topics.txt`. Consumer مثل بقیه پشت پرچم پیکربندی و فقط با بروکر احرازشده روشن می‌شود.
 - Migration `init_analytics`: `processed_event` و `fact_maintenance` (یکتا روی `(organization_id, request_id)`، `type` متن
-  کران‌دار، `completed_at`، `downtime_minutes` قابل Null، `total_cost_minor` bigint، `currency`، `event_id` منبع، `recorded_at`)؛
+  کران‌دار، `completed_at`، `downtime_minutes` قابل Null، `total_cost_minor` bigint، `currency`، `event_id` منبع، `recorded_at` =
+  `clock_timestamp()` درج، ADR-071 § ۲ (۸))؛ `fact_maintenance` Fact رخدادی است و در انتقال دارایی جابه‌جا نمی‌شود (§ ۳-الف)؛
   `down.sql` و آزمون برگشت‌پذیری روی پایگاه دادهٔ ناخالی.
 - Consumer `analytics-service.maintenance-facts`: Zod محلی، مستأجر از Envelope، نشانگر و Fact در یک تراکنش؛ تحویل دوباره بی‌اثر؛
   رویداد تازهٔ یکسان برای همان درخواست بی‌اثر با نشانگر؛ متناقض ← `BUSINESS_RULE_VIOLATION`.
 - `GET /v1/dashboards/fleet?from&to` برای سازمان فعال: به‌ازای هر نوع کار تکمیل‌شده، شمارش، جمع مدت توقف **فقط روی رکوردهایی که
-  مدت توقف دارند** (و تعداد آن‌ها، تا Null صفر شمرده نشود)، و جمع هزینه به‌تفکیک ارز؛ و زمان نخستین Fact. **بی نسبت** (ADR-071 §
+  مدت توقف دارند** (و تعداد آن‌ها، تا Null صفر شمرده نشود)، و جمع هزینه به‌تفکیک ارز — جمع‌ها در SQL با `numeric` و به‌صورت رشتهٔ
+  دهدهی، چون جمع چند مقدار معتبر bigint از bigint بیرون می‌زند؛ و زمان نخستین Fact. **بی نسبت** (ADR-071 §
   «پرسش‌های باز»). نقش‌ها از پیکربندی (پیش‌فرض `ORGANIZATION_ADMIN`، `FLEET_MANAGER`)؛ `AUDITOR` در Boot، Guard و سرویس رد.
 - آزمون‌ها: Unit (Projection، پیکربندی، دسترسی)، یکپارچگی Consumer (تکرار، متناقض، مستأجر غایب/ناهمخوان، Payload نامعتبر)،
   API (نقش‌ها، `AUDITOR`، پنجرهٔ نامعتبر)، **جداسازی مستأجر**، Migration.
@@ -52,24 +57,38 @@ Projection رویدادمحور و ایمن) و با ۴ تا ۶ گسترده؛ *
 - ثبت تعریف شاخص‌ها در کد (کلید، واحد، وابستگی به خط مبنا)؛ `GET /v1/kpis` برای سازمان فعال با وضعیت بستهٔ `AVAILABLE` /
   `INSUFFICIENT_BASELINE`. آزمون: بی ردیف، ردیف محدوده یا دورهٔ دیگر، هر دو `INSUFFICIENT_BASELINE` و `value: null`.
 
-### PR 3 — نمای حاکمیتی (`L`)
+### PR 3 — نمای حاکمیتی بی عدد (`M`)
 
 - Consumer سلسله‌مراتب از `rasta.organization.v1` (الگوی ADR-053 § ۱۰: شناسه‌ها هرگز کوتاه نمی‌شوند) و پرسش زیردرخت روی جدول خود.
-- `GET /v1/dashboards/governance`: فقط `AUDITOR` و `SYSTEM_ADMIN`؛ کل زیردرخت سازمان فعال، بی هیچ شناسهٔ ردیف؛ دو آستانهٔ
-  `ANALYTICS_GOVERNANCE_MIN_ORGANIZATIONS` و `ANALYTICS_GOVERNANCE_MIN_RECORDS` بی پیش‌فرض (تعریف‌نشده ← همه `SUPPRESSED`).
-  آزمون مرز آستانه با Mutation؛ آزمون اینکه پاسخ هیچ شناسهٔ سازمان، دارایی یا درخواست ندارد.
+- `GET /v1/dashboards/governance`: فقط `AUDITOR` و `SYSTEM_ADMIN`؛ کل زیردرخت سازمان فعال، بی هیچ شناسهٔ ردیف؛ **همهٔ خانه‌ها
+  `NOT_RELEASED`** — هیچ مسیر کدی از Fact به عدد حاکمیتی (ADR-071 § ۵ (۴)). آزمون اینکه پاسخ هیچ عدد و هیچ شناسهٔ سازمان،
+  دارایی یا درخواست ندارد.
 
 ### PR 4 تا PR 6 — Factهای دیگر
 
-هر کدام: Consumer با همان قواعد ADR-071 § ۲، ردیف کاتالوگ، Migration برگشت‌پذیر، بخش تازهٔ داشبورد مستأجر، آزمون جداسازی. ترکیب
-ناوگان فقط با `aggregateVersion` دارایی پیش می‌رود (ADR-071 § ۲ (۳)). `COMMISSION_APPLIED` فقط شمرده و جمع می‌شود، هرگز بازمحاسبه.
+هر کدام: Consumer با همان قواعد ADR-071 § ۲، ردیف کاتالوگ، Migration برگشت‌پذیر، بخش تازهٔ داشبورد مستأجر، آزمون جداسازی.
+**ترکیب ناوگان (PR 4)** با `streamSeq` Envelope پیش می‌رود، نه `aggregateVersion` (که asset-service روی این رویدادها نمی‌فرستد)،
+و انتقال ردیف فعلی را از مبدأ به مقصد جابه‌جا می‌کند — `fact_asset_current`، `fact_asset_ownership`، `asset_stream_position` و
+آزمون‌های ADR-071 § ۳-الف. **PR 5** `lines[]` `ORDER_CREATED` را هم نگه می‌دارد (`fact_order_line`: `productId`، `quantity`،
+`unitPriceMinor`، `currency`) تا PR 8 منبع داشته باشد. `COMMISSION_APPLIED` فقط شمرده و جمع می‌شود، هرگز بازمحاسبه.
 
-### PR 7 — Snapshot و نگهداشت (`M`)
+### PR 7 — انتشار حاکمیتی، Snapshot و نگهداشت (`L`)
 
 - تصمیم Temporal (`docs/08` `KpiSnapshotWorkflow`) در برابر جاروکنندهٔ درون‌سرویسی، ثبت در ADR-071 § ۸.
-- `kpi_snapshot` یکتا به‌ازای (شاخص، محدوده، دوره)؛ نمای حاکمیتی فقط از دوره‌های بسته.
+- `kpi_snapshot` یکتا به‌ازای (شاخص، محدوده، دوره)، برای KPI مستأجر.
+- **`governance_release`** (ADR-071 § ۵ (۵)–(۶)): برش دورهٔ بسته پس از `ANALYTICS_GOVERNANCE_RELEASE_DELAY_DAYS`، یک بار، زیر
+  `LOCK TABLE … IN SHARE MODE` با `cut_at = clock_timestamp()`؛ ردیف‌های الحاقی؛ گروه `LATE`؛ دو آستانهٔ
+  `ANALYTICS_GOVERNANCE_MIN_ORGANIZATIONS` (کمتر از ۳ در Boot رد) و `ANALYTICS_GOVERNANCE_MIN_RECORDS` بی پیش‌فرض (تعریف‌نشده ←
+  همه `SUPPRESSED`)؛ پنهان‌سازی اولیه و باقی‌مانده روی سلسله‌مراتب و بُعد خانه تا ثابت شدن. نمای حاکمیتی از این به بعد عدد
+  دارد، و فقط از همین.
+- آزمون‌ها: آزمون‌های Compliance در ADR-071 (مرز آستانه با Mutation، تفاضل شمارشی، مادر = فرزند + یک سازمان، دیررس، درج هم‌زمان
+  با برش با تراکنش نگه‌داشته، تغییرناپذیری).
 - پاک‌کنندهٔ `processed_event` با نگهداشت از پیکربندی (پیش‌فرض ۳۰ روز، `docs/07` § ۷٫۵).
 
-### PR 8 — کاهش هزینه (`M`)
+### PR 8 — قیمت واحد خرید بازارگاه در برابر خط مبنا (`M`)
 
-وابسته به رویدادهای procurement روی `main` (ADR-070 § ۹) و به تعریف شاخص در `docs/24`؛ پیش از آن شروع نمی‌شود.
+- منبع: `fact_order_line` از PR 5 (`ORDER_CREATED` `lines[]`، قیمت سمت سرور)، فقط برای سفارش‌هایی که `ORDER_COMPLETED` گرفته‌اند؛
+  خط مبنا از `baseline_metric` (PR 2) — تا ثبت آن `INSUFFICIENT_BASELINE`. تعریف دقیق شاخص (به‌ازای محصول؟ میانگین وزنی؟) در
+  همان PR در `docs/24` ثبت می‌شود. پاسخ دامنه را `MARKETPLACE_ORDERS` می‌نامد.
+- **بی procurement:** ADR-070 § ۸ مبلغی روی رویدادهای procurement نمی‌گذارد و ادغام PR 12 procurement آن را عوض نمی‌کند. قیمت
+  خرید procurement و «اثر تجمیع تقاضا» بیرون از RUN-001 و منتظر Q-142 (۳)اند.
