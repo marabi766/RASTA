@@ -3,6 +3,7 @@ import {
   corsOrigins,
   loadProcurementEnv,
   MAX_FOLLOW_BATCH_SIZE,
+  DEFAULT_MAX_LIVE_DEMANDS,
   MAX_LIVE_DEMANDS_LIMIT,
 } from './env';
 import { procurementOperationBudgets } from './operation-budgets';
@@ -50,8 +51,8 @@ describe('the provisional defaults (Q-10, Q-119, ADR-070 § 2)', () => {
     expect(env.PROCUREMENT_IDEMPOTENCY_CLAIM_LEASE_SECONDS).toBe(120);
   });
 
-  it('holds a window to 5000 live demands, a technical limit well inside the close budget (Q-119 note of 2026-10-17)', () => {
-    expect(env.PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS).toBe(5_000);
+  it('holds a window to 200,000 live demands, a tenth of what one transaction digests whole (Q-119 note of 2026-10-17, PR-338 r1 F1)', () => {
+    expect(env.PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS).toBe(200_000);
   });
 
   it('names itself, and listens on 3107', () => {
@@ -114,13 +115,14 @@ describe('overrides', () => {
 
   it.each([
     ['one', 1],
-    ['MAX_LIVE_DEMANDS_LIMIT, the window the scale test closes within the budget', 10_000],
+    ['MAX_LIVE_DEMANDS_LIMIT, half of what one transaction digests whole', 1_000_000],
   ])('accepts a live-demand limit of %s', (_label, limit) => {
     expect(
       load({ PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: String(limit) })
         .PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS,
     ).toBe(limit);
-    expect(MAX_LIVE_DEMANDS_LIMIT).toBe(10_000);
+    expect(MAX_LIVE_DEMANDS_LIMIT).toBe(1_000_000);
+    expect(DEFAULT_MAX_LIVE_DEMANDS).toBe(200_000);
   });
 
   it.each([
@@ -142,8 +144,8 @@ describe('overrides', () => {
     ],
     ['a live-demand limit of zero', { PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: '0' }],
     [
-      'a live-demand limit past what one close is proven to fit',
-      { PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: '10001' },
+      'a live-demand limit past half of what one transaction digests whole',
+      { PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: '1000001' },
     ],
     ['a fractional live-demand limit', { PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: '2.5' }],
     ['a zero idempotency lifetime', { PROCUREMENT_IDEMPOTENCY_TTL_HOURS: '0' }],

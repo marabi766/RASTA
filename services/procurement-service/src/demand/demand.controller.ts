@@ -70,9 +70,9 @@ export class DemandController {
       'CLOSE end it) and the demand joins the window that follows. A demand that would take the ' +
       'total of the window it joins past 2147483647 is 422 AGGREGATION_QUANTITY_LIMIT_EXCEEDED ' +
       'and writes nothing; so is one that would join a window already holding ' +
-      'PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands (default 5000), 422 ' +
-      'AGGREGATION_DEMAND_LIMIT_REACHED — a technical limit that keeps the window’s close within ' +
-      'one transaction. productId is opaque and never ' +
+      'PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands (default 200000), 422 ' +
+      'AGGREGATION_DEMAND_LIMIT_REACHED — a technical limit: no window holds more than one close ' +
+      'can digest. productId is opaque and never ' +
       'checked against marketplace (Q-105, Q-120). DEMAND_SUBMITTED carries identifiers, the ' +
       `quantity and instants only — never the note. ${BUYER_NOTE} ${COMMAND_NOTE}`,
   })
@@ -166,7 +166,9 @@ export class AggregationController {
       'PROCUREMENT_WINDOW_SWEEP_INTERVAL_MS, or by the next demand for its product, whichever ' +
       'comes first; until then it reads OPEN here, and no demand joins it. A REFERRED or LAPSED ' +
       'window of more than PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE live demands moves its demands to ' +
-      `its own status in batches, so some may read SUBMITTED for a few sweeps. ${BUYER_NOTE}`,
+      'its own status in batches, so some may read SUBMITTED for a few sweeps; the digest its end ' +
+      'event carries is built in batches of the same size, so the event of such a window follows ' +
+      `its status by as many sweeper steps. ${BUYER_NOTE}`,
   })
   async list(
     @Query(zodPipe(listAggregationsQuerySchema)) query: ListAggregationsQuery,
@@ -199,7 +201,8 @@ export class AggregationController {
       'with it. Only a READY aggregation is cancelled (422 `AGGREGATION_NOT_READY` otherwise: an ' +
       'OPEN window has not ended — the sweeper or the next demand ends it — and every other ' +
       'status is final); `expectedVersion` that is not the current version is 409 ' +
-      'OPTIMISTIC_LOCK_FAILED. The caller holds a role PROCUREMENT_RFQ_ISSUER_ROLES names ' +
+      'OPTIMISTIC_LOCK_FAILED; a READY aggregation whose end is still being recorded (its digest ' +
+      'and DEMAND_AGGREGATED, built in batches) is 409 CONFLICT with Retry-After. The caller holds a role PROCUREMENT_RFQ_ISSUER_ROLES names ' +
       '(default ORGANIZATION_ADMIN) in the buyer’s organization; any other role is 403 ' +
       'INSUFFICIENT_ROLE. The reason is required and stays with the aggregation; ' +
       'AGGREGATION_CANCELLED names the demands by count and digest, never the reason. ' +

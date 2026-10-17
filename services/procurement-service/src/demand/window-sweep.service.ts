@@ -5,16 +5,16 @@ import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.servi
 import { DatabaseClock } from '../shared/clock';
 import { SERVICE_NAME } from '../config/env';
 import type { WindowOutcome } from './demand.state-machine';
-import { WindowEnd, countWindowEnded } from './window-end';
+import { WindowEnd, countWindowEnded, endPending } from './window-end';
 import { WindowSweepRepository } from './window-sweep.repository';
 
 /** What one step of the sweep of one window came to. */
 export type SweepResult =
-  /** The window ended here (READY, EXTEND, REFERRED or LAPSED), with its event. */
+  /** The window ended here (READY, EXTEND, REFERRED or LAPSED): its event once its digest is. */
   | 'ENDED'
-  /** A batch of an ended window's demands followed it. */
+  /** One more batch of an ended window's end: of its digest (then its event), of its demands. */
   | 'FOLLOWED'
-  /** Ended by someone else and nothing left to follow: nothing written, the claim given back. */
+  /** Ended by someone else and nothing left of its end: nothing written, the claim given back. */
   | 'NOOP'
   /** Not past its end on the clock read after the lock (a demand extended it): claim given back. */
   | 'NOT_DUE'
@@ -27,8 +27,8 @@ export interface SweepStep {
   result: SweepResult;
   /** The end, when this step made it. */
   outcome?: WindowOutcome;
-  /** Demands still to follow after this step: another step is due while above 0. */
-  demandsToFollow: number;
+  /** Whether the window's end is still being carried on (`WindowEnd.carryOn`): another step is due. */
+  pending: boolean;
 }
 
 export interface SweepTarget {
@@ -45,17 +45,18 @@ export interface SweepTarget {
  *   lock the window `FOR UPDATE` (the lock a demand's submit and withdrawal take first, so a step
  *   and a demand queue behind one another and each order has one outcome); **verify the fence**
  *   before anything is read or written; read the clock after the lock; then either end the window
- *   (`WindowEnd.end`, the transition and event a late demand makes too) or move the next batch of
- *   an ended window's demands (`WindowEnd.follow`); renew the lease while demands are left to
- *   follow, release it when done.
+ *   (`WindowEnd.end`, the transition a late demand makes too) or carry an ended window's end on by
+ *   one batch (`WindowEnd.carryOn`: its digest, then its event; its demands to follow); renew the
+ *   lease while anything of the end is left, release it when done.
  *
  * ## Idempotent, never two events
  *
- * A window that is no longer OPEN and has nothing to follow is `NOOP`: a second sweeper, a retry
- * after a crash between commit and acknowledgement, a demand that ended it first — all end in one
- * ended window and one event. A claim whose lease lapsed and was re-claimed is `NOT_OWNER`: the
- * fence guards the effect, not only the claim. The window's end and its event commit together or
- * not at all.
+ * A window that is no longer OPEN and has nothing left of its end is `NOOP`: a second sweeper, a
+ * retry after a crash between commit and acknowledgement, a demand that ended it first — all end
+ * in one ended window and one event. A claim whose lease lapsed and was re-claimed is `NOT_OWNER`:
+ * the fence guards the effect, not only the claim. The end's event commits with the batch that
+ * completes the digest, and the digest is written once (`ck_demand_aggregation_digest`): a crash
+ * before that commit loses one batch, which the next step takes again from the stored state.
  */
 @Injectable()
 export class WindowSweepService {
@@ -113,13 +114,13 @@ export class WindowSweepService {
   ): Promise<SweepStep> {
     const { organizationId, aggregationId: id, fence } = target;
     const window = await this.sweeps.lockForSweep(tx, organizationId, id);
-    if (!window) return { result: 'NOT_FOUND', demandsToFollow: 0 };
+    if (!window) return { result: 'NOT_FOUND', pending: false };
 
     // First: nothing below may run for a worker that no longer owns the claim.
-    if (window.sweepFence !== fence) return { result: 'NOT_OWNER', demandsToFollow: 0 };
+    if (window.sweepFence !== fence) return { result: 'NOT_OWNER', pending: false };
 
     const settle = async (step: SweepStep): Promise<SweepStep> => {
-      if (step.demandsToFollow > 0) await this.sweeps.renew(tx, window, fence, leaseSeconds);
+      if (step.pending) await this.sweeps.renew(tx, window, fence, leaseSeconds);
       else await this.sweeps.release(tx, window, fence);
       return step;
     };
@@ -128,22 +129,18 @@ export class WindowSweepService {
       // After the lock: a long wait for it cannot leave the decision before the end.
       const now = await this.clock.now(tx);
       if (now.getTime() < window.closesAt.getTime()) {
-        return settle({ result: 'NOT_DUE', demandsToFollow: 0 });
+        return settle({ result: 'NOT_DUE', pending: false });
       }
       const ended = await this.windowEnd.end(tx, window, now);
-      return settle({
-        result: 'ENDED',
-        outcome: ended.outcome,
-        demandsToFollow: ended.demandsToFollow,
-      });
+      return settle({ result: 'ENDED', outcome: ended.outcome, pending: ended.pending });
     }
 
-    if (window.demandsToFollow > 0) {
+    if (endPending(window)) {
       const now = await this.clock.now(tx);
-      const remaining = await this.windowEnd.follow(tx, window, now);
-      return settle({ result: 'FOLLOWED', demandsToFollow: remaining });
+      const pending = await this.windowEnd.carryOn(tx, window, now);
+      return settle({ result: 'FOLLOWED', pending });
     }
 
-    return settle({ result: 'NOOP', demandsToFollow: 0 });
+    return settle({ result: 'NOOP', pending: false });
   }
 }

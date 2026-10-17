@@ -10,10 +10,7 @@ import { AggregationWindowSweeper } from './aggregation-window.sweeper';
 
 const claim = (id: string): ClaimedWindow => ({ id, organizationId: `ORG_${id}`, fence: 'F1' });
 
-const step = (result: SweepStep['result'], demandsToFollow = 0): SweepStep => ({
-  result,
-  demandsToFollow,
-});
+const step = (result: SweepStep['result'], pending = false): SweepStep => ({ result, pending });
 
 /** Each window answers its steps in order; an `Error` is a failed step. */
 function sweeperWith(claimed: ClaimedWindow[], steps: Record<string, (SweepStep | Error)[]>) {
@@ -68,9 +65,9 @@ describe('AggregationWindowSweeper', () => {
     expect(outcome).toEqual({ ...NONE, claimed: 2, ended: 2 });
   });
 
-  it('keeps stepping one window while demands are left to follow it, then goes on to the next', async () => {
+  it('keeps stepping one window while anything of its end is left (its digest, its demands to follow), then goes on to the next', async () => {
     const { sweeper, step: stepFn } = sweeperWith([claim('A'), claim('B')], {
-      A: [step('ENDED', 5000), step('FOLLOWED', 3000), step('FOLLOWED', 1000), step('FOLLOWED')],
+      A: [step('ENDED', true), step('FOLLOWED', true), step('FOLLOWED', true), step('FOLLOWED')],
     });
 
     const outcome = await sweeper.runOnce();
@@ -118,7 +115,7 @@ describe('AggregationWindowSweeper', () => {
       step: stepFn,
       recordFailure,
     } = sweeperWith([claim('A'), claim('B')], {
-      A: [step('ENDED', 4000), new Error('boom'), step('FOLLOWED')],
+      A: [step('ENDED', true), new Error('boom'), step('FOLLOWED')],
     });
 
     await sweeper.runOnce();
@@ -161,13 +158,13 @@ describe('AggregationWindowSweeper', () => {
     /** A sweep the timer started over two windows, held in the first step of a large one. */
     async function heldInTheFirstStep() {
       const built = sweeperWith([claim('A'), claim('B')], {
-        A: [step('ENDED', 9000), step('FOLLOWED', 7000)],
+        A: [step('ENDED', true), step('FOLLOWED', true)],
       });
       let finish: () => void = () => undefined;
       built.step.mockImplementationOnce(
         () =>
           new Promise<SweepStep>((resolve) => {
-            finish = () => resolve(step('ENDED', 9000));
+            finish = () => resolve(step('ENDED', true));
           }),
       );
       built.sweeper.start();

@@ -151,6 +151,37 @@ describe('cancelling an aggregation', () => {
     expect(await events(organizationId, 'AGGREGATION_CANCELLED')).toEqual([]);
   });
 
+  // PR-338 r1 F3: Zod counted UTF-16 code units, the CHECK counts characters (`char_length`).
+  // Four emoji are eight code units and four characters: they passed `min(8)`, failed the CHECK
+  // and answered a 500. Now a 400, the same one a short reason gets; eight emoji are accepted.
+  it('counts a reason in characters, as the database does: four emoji are a 400 like any short reason, nothing changed; eight are a cancellation', async () => {
+    const { organizationId, as, aggregation, demands } = await readyAggregation();
+    const admin = client(api, actor(organizationId, ['ORGANIZATION_ADMIN']));
+    const short = '\u{1F600}'.repeat(4);
+    expect(short).toHaveLength(8);
+
+    const refused = await admin.cancel(aggregation.id, aggregation.version, short);
+    const shortAscii = await admin.cancel(aggregation.id, aggregation.version, 'abcdefg');
+    expect(refused.status).toBe(400);
+    expect(shortAscii.status).toBe(400);
+    expect(refused.body.code).toBe(shortAscii.body.code);
+    expect(refused.body.details).toEqual(shortAscii.body.details);
+    expect((await admin.aggregation(aggregation.id)).body).toMatchObject({
+      status: 'READY',
+      version: aggregation.version,
+    });
+    expect(await events(organizationId, 'AGGREGATION_CANCELLED')).toEqual([]);
+
+    // A withdrawal's reason is held by the same rule (its CHECK counts the same way).
+    const withdrawn = await as.withdraw(demands[0]!.id as string, 1, short);
+    expect(withdrawn.status).toBe(400);
+
+    const long = '\u{1F600}'.repeat(8);
+    const cancelled = await admin.cancel(aggregation.id, aggregation.version, long);
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.body.cancelReason).toBe(long);
+  });
+
   it.each([
     ['PROCUREMENT_USER (docs/09: rfq:read only)', ['PROCUREMENT_USER'], 403],
     ['AUDITOR', ['AUDITOR'], 403],

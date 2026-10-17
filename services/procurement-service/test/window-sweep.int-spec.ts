@@ -334,7 +334,7 @@ describe('the window sweeper', () => {
         .get(WindowSweepService)
         .step({ organizationId: w.organizationId, aggregationId: w.aggregationId, fence }, 60);
 
-      expect(step).toEqual({ result: 'NOT_DUE', demandsToFollow: 0 });
+      expect(step).toEqual({ result: 'NOT_DUE', pending: false });
       expect(await row(w.organizationId, w.aggregationId)).toMatchObject({
         version: extended.version,
         extensionCount: extended.extensionCount,
@@ -356,7 +356,7 @@ describe('the window sweeper', () => {
         .get(WindowSweepService)
         .step({ organizationId: w.organizationId, aggregationId: w.aggregationId, fence }, 60);
 
-      expect(step).toEqual({ result: 'NOOP', demandsToFollow: 0 });
+      expect(step).toEqual({ result: 'NOOP', pending: false });
       expect((await endEvents(w.organizationId, w.aggregationId)).map((e) => e.name)).toEqual([
         'AGGREGATION_REFERRED',
       ]);
@@ -391,7 +391,7 @@ describe('the window sweeper', () => {
           { organizationId: w.organizationId, aggregationId: w.aggregationId, fence: dead },
           60,
         );
-      expect(step).toEqual({ result: 'NOT_OWNER', demandsToFollow: 0 });
+      expect(step).toEqual({ result: 'NOT_OWNER', pending: false });
       expect(await endEvents(w.organizationId, w.aggregationId)).toHaveLength(1);
     });
 
@@ -466,7 +466,11 @@ describe('the window sweeper', () => {
       expect(await row(organizationId, seeded.aggregationId)).toMatchObject({
         status: 'REFERRED',
         demandsToFollow: DEMANDS - BATCH,
+        endDigestCounted: BATCH,
+        demandIdsSha256: null,
       });
+      // The end digested one batch too: its event waits for the rest of the digest.
+      expect(await endEvents(organizationId, seeded.aggregationId)).toEqual([]);
       expect(await demandStatuses(organizationId, seeded.aggregationId)).toEqual([
         ['REFERRED', BATCH],
         ['SUBMITTED', DEMANDS - BATCH],
@@ -550,6 +554,96 @@ describe('the window sweeper', () => {
         'AGGREGATION_LAPSED',
       ]);
     });
+
+    it('a crash mid-digest loses only the batch in flight: the next sweep resumes from the stored state, and the end has one event, with the digest of every demand', async () => {
+      const { harness } = await api({ min: 0 }, { PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE: '10' });
+      const organizationId = org();
+      const seeded = await seedOpenWindow({
+        organizationId,
+        productId: newProductId(),
+        demands: 45,
+        policy: 'EXTEND',
+        minQuantity: 0,
+        openedAt: PAST(),
+        hours: 1,
+      });
+      const sorted = [...seeded.demandIds].sort();
+      const repository = harness.app.get(DemandRepository);
+      const nextDemandIds = repository.nextDemandIds.bind(repository);
+      const read: string[][] = [];
+      let crashOnCall = 3;
+      const spy = jest.spyOn(repository, 'nextDemandIds').mockImplementation(async (tx, w, n) => {
+        if (w.id !== seeded.aggregationId) return nextDemandIds(tx, w, n);
+        crashOnCall -= 1;
+        // The process dies in the middle of the third batch: its transaction rolls back.
+        if (crashOnCall === 0) throw new Error('crashed mid-digest');
+        const ids = await nextDemandIds(tx, w, n);
+        read.push(ids);
+        return ids;
+      });
+
+      // The end (batch 1) and one step (batch 2) commit; the third step crashes.
+      const first = await harness.sweeper({ retryBackoffBaseSeconds: 1 }).runOnce();
+      expect(first.failed).toBeGreaterThanOrEqual(1);
+      const crashed = await row(organizationId, seeded.aggregationId);
+      expect(crashed).toMatchObject({
+        status: 'READY',
+        demandIdsSha256: null,
+        endDigestCounted: 20,
+        endDigestCursor: sorted[19],
+        sweepAttempts: 1,
+      });
+      expect(crashed.endDigestState).not.toBeNull();
+      // No event before the digest is whole, and nothing moves the window on meanwhile.
+      expect(await endEvents(organizationId, seeded.aggregationId)).toEqual([]);
+      const issuer = client(harness, actor(organizationId, ['ORGANIZATION_ADMIN']));
+      const early = await issuer.cancel(seeded.aggregationId, crashed.version);
+      expect(early.status).toBe(409);
+      expect(early.body.code).toBe('CONFLICT');
+
+      // After its backoff, the next sweeps take it up where the last commit left it.
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      await sweepAll(harness.sweeper());
+      spy.mockRestore();
+
+      // Every id read once, in order: batches 1-2 before the crash, 3-5 after it — none again.
+      expect(read.map((ids) => ids.length)).toEqual([10, 10, 10, 10, 5]);
+      expect(read.flat()).toEqual(sorted);
+      const done = await row(organizationId, seeded.aggregationId);
+      expect(done).toMatchObject({
+        status: 'READY',
+        version: crashed.version,
+        demandIdsSha256: demandIdsDigest(seeded.demandIds),
+        endDigestState: null,
+        endDigestCursor: null,
+        endDigestCounted: 45,
+        sweepFence: null,
+        sweepAttempts: 0,
+      });
+      expect(await endEvents(organizationId, seeded.aggregationId)).toEqual([
+        {
+          name: 'DEMAND_AGGREGATED',
+          payload: expect.objectContaining({
+            demandCount: 45,
+            demandIdsSha256: demandIdsDigest(seeded.demandIds),
+            closedAt: done.closedAt!.toISOString(),
+          }),
+        },
+      ]);
+
+      // A sweep after it has nothing to claim; the cancellation now carries the stored digest.
+      await harness.sweeper().runOnce();
+      const cancelled = await issuer.cancel(seeded.aggregationId, done.version);
+      expect(cancelled.status).toBe(200);
+      expect((await endEvents(organizationId, seeded.aggregationId)).map((e) => e.name)).toEqual([
+        'DEMAND_AGGREGATED',
+        'AGGREGATION_CANCELLED',
+      ]);
+      expect((await endEvents(organizationId, seeded.aggregationId))[1]?.payload).toMatchObject({
+        demandCount: 45,
+        demandIdsSha256: demandIdsDigest(seeded.demandIds),
+      });
+    });
   });
 
   describe('tenant isolation', () => {
@@ -584,7 +678,7 @@ describe('the window sweeper', () => {
         .get(WindowSweepService)
         .step({ organizationId: org(), aggregationId: w.aggregationId, fence }, 60);
 
-      expect(step).toEqual({ result: 'NOT_FOUND', demandsToFollow: 0 });
+      expect(step).toEqual({ result: 'NOT_FOUND', pending: false });
       expect((await row(w.organizationId, w.aggregationId)).status).toBe('OPEN');
       await harness.app
         .get(WindowSweepService)

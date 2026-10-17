@@ -42,8 +42,24 @@ const PLATFORM_ROLE = 'SYSTEM_ADMIN';
  */
 export const MAX_FOLLOW_BATCH_SIZE = 10_000;
 
-/** The largest `PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS`: the window the scale test closes in budget. */
-export const MAX_LIVE_DEMANDS_LIMIT = 10_000;
+/**
+ * The window one close could digest whole in a single transaction, measured: the digest of every
+ * id of a window in one statement (`string_agg` + SHA-256, the most a close could ever do at once)
+ * took 2.43–2.52 s for 1,000,000 demands on rasta-dev (2026-10-17, cold cache after the seed) —
+ * ~2.5 µs a demand, so ~2,000,000 in the 5 s budget. The close never does it at once: it digests
+ * in batches (`WindowEnd`), which is what keeps every transaction bounded.
+ */
+const DIGEST_DEMANDS_PER_BUDGET = 2_000_000;
+
+/**
+ * The default `PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS`: a tenth of that (safety factor 10, for a
+ * slower host and a loaded database), and the window `test/window-close-scale.int-spec.ts` closes
+ * through the API on CI.
+ */
+export const DEFAULT_MAX_LIVE_DEMANDS = DIGEST_DEMANDS_PER_BUDGET / 10;
+
+/** The largest `PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS`: half of it (safety factor 2). */
+export const MAX_LIVE_DEMANDS_LIMIT = DIGEST_DEMANDS_PER_BUDGET / 2;
 
 /** A comma-separated list, trimmed, with empty elements dropped. */
 function commaList() {
@@ -102,8 +118,9 @@ function roleList(name: string, options: { min: number }) {
  *   PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS
  *                                      Not a domain setting: a technical limit (Q-119 note of
  *                                      2026-10-17). The most live demands a window holds, so that
- *                                      its synchronous close fits the transaction budget: default
- *                                      5000, at most 10000. One more is 422
+ *                                      no window holds more than one close can digest: default
+ *                                      200000, at most 1000000 (derived from a measured digest
+ *                                      time, below). One more is 422
  *                                      AGGREGATION_DEMAND_LIMIT_REACHED. Read at each submit, never
  *                                      snapshotted.
  *   PROCUREMENT_IDEMPOTENCY_TTL_HOURS / _CLAIM_LEASE_SECONDS
@@ -161,21 +178,22 @@ export const procurementEnvSchema = baseEnvSchema
       .pipe(roleList('PROCUREMENT_RFQ_ISSUER_ROLES', { min: 1 })),
 
     /**
-     * A technical limit, not a business rule (PR-327 r2 F1, Q-119 note of 2026-10-17): the most
-     * live demands one window holds. A window ending under REFER or CLOSE moves every one of them
-     * in the transaction of the demand that ends it, which must fit the service's transaction
-     * budget (Prisma's default, 5 s) — or that submit, and every later one for the product, fails
-     * and rolls back with the window still OPEN. Measured on rasta-dev the close costs about
-     * 0.13 ms a demand (about 35,000 within 5 s); the default is a seventh of that, and the maximum
-     * is what `test/window-close-scale.int-spec.ts` proves within the budget, on CI too. PR 2's
-     * batched sweeper ends a window in bounded steps and lifts this dependency.
+     * A technical limit, not a business rule (PR-327 r2 F1, PR-338 r1 F1, Q-119 note of
+     * 2026-10-17): the most live demands one window holds, so that a window can never hold more
+     * than one close can digest. The close itself is bounded whatever the window holds — it moves
+     * and digests `PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE` demands a transaction (`WindowEnd`) — so
+     * this bounds how many transactions, and how long, a window's end takes, and keeps a margin
+     * should a whole-window digest ever run at once: default `DEFAULT_MAX_LIVE_DEMANDS` (200,000,
+     * a tenth of what one 5 s transaction digests on rasta-dev), at most `MAX_LIVE_DEMANDS_LIMIT`
+     * (1,000,000, half of it). PR 1 alone, which closes a window in one transaction, keeps 5000
+     * and 10,000.
      */
     PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(MAX_LIVE_DEMANDS_LIMIT)
-      .default(5_000),
+      .default(DEFAULT_MAX_LIVE_DEMANDS),
 
     PROCUREMENT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
     PROCUREMENT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce
@@ -217,12 +235,13 @@ export const procurementEnvSchema = baseEnvSchema
       .default(900),
 
     /**
-     * The most live demands one transaction moves to REFERRED or LAPSED with their window's end
-     * (`MAX_FOLLOW_BATCH_SIZE`): the end moves this many in its own transaction — a demand's
-     * submit included — and the sweeper the rest, this many per transaction. So no window, however
-     * large, makes its end outrun the transaction budget (PR-327 r1 F1: one UPDATE of every demand
-     * is ~0.13 ms each, over the 5 s budget past ~35k demands). A window up to this size ends whole
-     * in one transaction, as in PR 1.
+     * The batch of a window's end (`MAX_FOLLOW_BATCH_SIZE`): the most live demands one transaction
+     * moves to REFERRED or LAPSED with it, and the most ids one transaction adds to its digest. The
+     * end does one batch in its own transaction — a demand's submit included — and the sweeper the
+     * rest, one per transaction. So no window, however large, makes any transaction of its end
+     * outrun the budget (PR-327 r1 F1: one UPDATE of every demand is ~0.13 ms each, over the 5 s
+     * budget past ~35k demands; PR-338 r1 F1: the digest of every id at once grows with the window
+     * too). A window up to this size ends whole, with its event, in one transaction, as in PR 1.
      */
     PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE: z.coerce
       .number()

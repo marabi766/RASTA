@@ -1,6 +1,7 @@
 import { PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS } from '@rasta/config';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { demandIdsDigest } from '../src/events/events';
+import { DemandRepository } from '../src/demand/demand.repository';
 import { WindowSweepService } from '../src/demand/window-sweep.service';
 import { PrismaClient } from '../src/generated/prisma';
 import { buyer, client, startApi, TestClock, type ApiHarness } from './api-helpers';
@@ -14,23 +15,24 @@ import {
 } from './helpers';
 
 /**
- * Ending a large window is bounded (PR-327 r1 F1; ADR-070 plan PR 2).
+ * Ending a large window is bounded (PR-327 r1 F1, PR-338 r1 F1; ADR-070 plan PR 2).
  *
  * PR 1 moved every live demand of a window that ended under REFER or CLOSE in one UPDATE, inside
  * the transaction that ended it — a demand's own submit, which must fit its 5 s budget. That is
  * ~0.13 ms a demand: past ~35,000 demands the submit outran its transaction and the window could
- * never end. Now the end moves at most PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE demands (2000 by
- * default) and the sweeper moves the rest, that many per transaction. What still grows with the
- * window inside the end is one count and digest of its live demands in the database: on rasta-dev
- * the whole late submit took 0.84 s at 200,000 demands and 2.85 s at 1,000,000 (a one-off run of
- * this test), ~2.5 µs a demand — so the end's own limit is ~1.8 million live demands, not 35,000.
+ * never end. PR 2's first round moved at most PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE demands (2000 by
+ * default) in the end and the rest by the sweeper, but still counted and digested every demand of
+ * the window in the end's transaction — the same cliff, further out (~2.5 µs a demand). Now nothing
+ * in any transaction grows with the window: the end decides on the window's own row, and it and
+ * every sweeper step move and digest one batch each (the digest's state stored between them); the
+ * transaction that digests the last batch writes the end's one event.
  *
- * This proves it at 200,000 demands — over five times PR 1's limit: the submit that ends the window
- * stays within the budget, the sweeper's every transaction does too, every demand follows, and one
- * event names them all. The window is seeded through the owner connection (`seedOpenWindow`);
- * everything after the seed is the real API and the real sweeper. The seed is twenty times what
- * PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS lets the API admit (PR 1's technical limit, PR-327 r2 F1):
- * the end no longer depends on that limit, which stays as PR 1 set it.
+ * This proves it at 200,000 demands — PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS's default, the most one
+ * window admits: the submit that ends the window stays within the budget, the sweeper's every
+ * transaction does too, every demand follows, and one event names them all. The window is seeded
+ * through the owner connection (`seedOpenWindow`); everything after the seed is the real API and
+ * the real sweeper. Then, scaled down so that it does not depend on the machine, a close at the
+ * limit within a reduced budget that the same close done at once would outrun.
  */
 const HOUR = 3_600_000;
 const MAX_QUANTITY = 2_147_483_647;
@@ -45,15 +47,19 @@ const BATCH = 2_000;
 const BOUND_MS = PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS;
 
 /**
- * The limit against the budget, scaled down so that it is quick and does not depend on the
- * machine: a test-only trigger makes moving each demand of one organization take at least
- * `SLOW_DEMAND_MS`, and the submit's transaction gets `REDUCED_BUDGET_MS`. At the limit the close
- * takes a quarter of the budget; the demands offered beyond it would take twice the budget.
+ * A close at the limit against a reduced budget, scaled down so that it is quick and does not
+ * depend on the machine: digesting each id of one organization's window takes at least
+ * `SLOW_DIGEST_MS` (the application's read is slowed) and moving each of its demands at least
+ * `SLOW_MOVE_MS` (a test-only trigger), and every transaction of the service gets
+ * `REDUCED_BUDGET_MS`. One batch of `REDUCED_BATCH` is half the budget; the whole window at
+ * `REDUCED_LIMIT`, done in one transaction, would be 1.3 times it.
  */
-const SLOW_DEMAND_MS = 10;
+const SLOW_DIGEST_MS = 20;
+const SLOW_MOVE_MS = 5;
 const REDUCED_BUDGET_MS = 1_000;
-const REDUCED_LIMIT = 25;
-const OFFERED = 200;
+const REDUCED_LIMIT = 60;
+const REDUCED_BATCH = 20;
+const OFFERED = 100;
 
 jest.setTimeout(900_000);
 
@@ -111,8 +117,22 @@ describe('ending a large window', () => {
         totalQuantity: DEMANDS,
         demandCount: DEMANDS,
       });
+      // The end digested one batch, not the window: its event waits for the rest.
+      const peek = runtimeClient();
+      try {
+        expect(
+          await peek.demandAggregation.findFirst({
+            where: { organizationId, id: seeded.aggregationId },
+          }),
+        ).toMatchObject({ endDigestCounted: BATCH, demandIdsSha256: null });
+      } finally {
+        await peek.$disconnect();
+      }
+      expect(
+        await harness.prisma.client.outboxMessage.count({ where: { organizationId, eventName } }),
+      ).toBe(0);
 
-      // The sweeper moves the rest, one bounded transaction a step.
+      // The sweeper does the rest, one bounded transaction a step.
       const service = harness.app.get(WindowSweepService);
       const step = service.step.bind(service);
       const stepMs: number[] = [];
@@ -141,7 +161,12 @@ describe('ending a large window', () => {
         const window = await raw.demandAggregation.findFirst({
           where: { organizationId, id: seeded.aggregationId },
         });
-        expect(window).toMatchObject({ demandsToFollow: 0, sweepFence: null });
+        expect(window).toMatchObject({
+          demandsToFollow: 0,
+          sweepFence: null,
+          endDigestState: null,
+          demandIdsSha256: demandIdsDigest(seeded.demandIds),
+        });
       } finally {
         await raw.$disconnect();
       }
@@ -163,7 +188,7 @@ describe('ending a large window', () => {
     },
   );
 
-  it(`the limit keeps the close inside the budget: ${REDUCED_LIMIT} demands of ${SLOW_DEMAND_MS} ms each close within ${REDUCED_BUDGET_MS} ms; the ${OFFERED - REDUCED_LIMIT} offered beyond them are refused`, async () => {
+  it(`a close at the limit inside a reduced budget: ${REDUCED_LIMIT} demands, ${REDUCED_BATCH} a transaction, each within ${REDUCED_BUDGET_MS} ms — at once they would not fit; the ${OFFERED - REDUCED_LIMIT} offered beyond the limit are refused`, async () => {
     const organizationId = newOrganizationId();
     organizations.push(organizationId);
     const productId = newProductId();
@@ -171,11 +196,11 @@ describe('ending a large window', () => {
     const slow = `scale_slow_close_${organizationId.slice(4).toLowerCase()}`;
     const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
     try {
-      // Test-only: moving one of this organization's demands takes SLOW_DEMAND_MS. Nothing else
+      // Test-only: moving one of this organization's demands takes SLOW_MOVE_MS. Nothing else
       // updates its demands, and no other organization's row fires it.
       await owner.$executeRawUnsafe(
         `CREATE FUNCTION "${slow}"() RETURNS trigger LANGUAGE plpgsql AS ` +
-          `$fn$ BEGIN PERFORM pg_sleep(${SLOW_DEMAND_MS / 1000}); RETURN NEW; END $fn$`,
+          `$fn$ BEGIN PERFORM pg_sleep(${SLOW_MOVE_MS / 1000}); RETURN NEW; END $fn$`,
       );
       await owner.$executeRawUnsafe(
         `CREATE TRIGGER "${slow}" BEFORE UPDATE ON "demand_request" FOR EACH ROW ` +
@@ -189,27 +214,48 @@ describe('ending a large window', () => {
           PROCUREMENT_AGGREGATION_MIN_QUANTITY: String(MAX_QUANTITY),
           PROCUREMENT_AGGREGATION_SHORTFALL_POLICY: 'REFER',
           PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: String(REDUCED_LIMIT),
+          PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE: String(REDUCED_BATCH),
         },
         { clock },
       );
       harnesses.push(harness);
-      // Every transaction that names no budget of its own — the submit's — gets the reduced one.
+      // Every transaction that names no budget of its own — the submit's, the sweeper's — gets
+      // the reduced one: past it Prisma rolls the transaction back.
       const transaction = harness.prisma.transaction.bind(harness.prisma);
       jest.spyOn(harness.prisma, 'transaction').mockImplementation(((fn, options) =>
         transaction(fn, {
           ...options,
           timeoutMs: options?.timeoutMs ?? REDUCED_BUDGET_MS,
         })) as typeof harness.prisma.transaction);
+      // Digesting each id of this organization's windows takes SLOW_DIGEST_MS, inside the
+      // transaction that reads it.
+      const repository = harness.app.get(DemandRepository);
+      const nextDemandIds = repository.nextDemandIds.bind(repository);
+      const read: number[] = [];
+      jest.spyOn(repository, 'nextDemandIds').mockImplementation(async (tx, window, limit) => {
+        const ids = await nextDemandIds(tx, window, limit);
+        if (window.organizationId === organizationId) {
+          read.push(ids.length);
+          await new Promise((resolve) => setTimeout(resolve, ids.length * SLOW_DIGEST_MS));
+        }
+        return ids;
+      });
       const as = client(harness, buyer(organizationId));
 
       clock.set(T0);
       const offered: number[] = [];
+      const admitted: string[] = [];
       for (let n = 0; n < OFFERED; n += 1) {
-        offered.push((await as.submit({ productId, quantity: 1 })).status);
+        const submitted = await as.submit({ productId, quantity: 1 });
+        offered.push(submitted.status);
+        if (submitted.status === 201) admitted.push(submitted.body.id as string);
       }
+      expect(offered.filter((status) => status === 201)).toHaveLength(REDUCED_LIMIT);
+      expect(offered.filter((status) => status === 422)).toHaveLength(OFFERED - REDUCED_LIMIT);
+      const aggregationId = (await as.demand(admitted[0]!)).body.aggregationId as string;
 
-      // Without the limit this window would hold OFFERED demands: its close would take twice the
-      // budget, roll back with a 500 and leave the window OPEN for every later submit to repeat.
+      // The late demand ends the full window: one batch moved and digested in its own
+      // transaction, inside the reduced budget.
       clock.set(new Date(T0.getTime() + 10 * HOUR));
       const started = performance.now();
       const late = await as.submit({ productId, quantity: 1 });
@@ -220,20 +266,61 @@ describe('ending a large window', () => {
         elapsed: expect.any(Number),
       });
 
+      // The sweeper does the rest, a batch a transaction: none fails, none outruns the budget.
+      const service = harness.app.get(WindowSweepService);
+      const step = service.step.bind(service);
+      const steps: { result: string; ms: number }[] = [];
+      jest.spyOn(service, 'step').mockImplementation(async (target, lease) => {
+        const begun = performance.now();
+        try {
+          const done = await step(target, lease);
+          if (target.aggregationId === aggregationId) {
+            steps.push({ result: done.result, ms: performance.now() - begun });
+          }
+          return done;
+        } catch (error) {
+          if (target.aggregationId === aggregationId) steps.push({ result: 'FAILED', ms: 0 });
+          throw error;
+        }
+      });
+      const sweeper = harness.sweeper({ batchSize: 500 });
+      for (let round = 0; round < 20; round += 1) {
+        if ((await sweeper.runOnce()).claimed === 0) break;
+      }
+
+      const batches = REDUCED_LIMIT / REDUCED_BATCH;
+      expect(steps.map((s) => s.result)).toEqual(Array(batches - 1).fill('FOLLOWED'));
+      expect(Math.max(...steps.map((s) => s.ms))).toBeLessThan(REDUCED_BUDGET_MS);
+      // Every transaction read at most one batch; together, every demand once.
+      expect(read).toEqual(Array(batches).fill(REDUCED_BATCH));
+
       const raw = runtimeClient();
       try {
-        const windows = await raw.$queryRaw<{ status: string; demand_count: number }[]>`
-          SELECT status, demand_count FROM demand_aggregation
+        const windows = await raw.$queryRaw<
+          { status: string; demand_count: number; demand_ids_sha256: string | null }[]
+        >`
+          SELECT status, demand_count, demand_ids_sha256 FROM demand_aggregation
            WHERE organization_id = ${organizationId} ORDER BY opened_at`;
         expect(windows).toEqual([
-          { status: 'REFERRED', demand_count: REDUCED_LIMIT },
-          { status: 'OPEN', demand_count: 1 },
+          {
+            status: 'REFERRED',
+            demand_count: REDUCED_LIMIT,
+            demand_ids_sha256: demandIdsDigest(admitted),
+          },
+          { status: 'OPEN', demand_count: 1, demand_ids_sha256: null },
         ]);
       } finally {
         await raw.$disconnect();
       }
-      expect(offered.filter((status) => status === 201)).toHaveLength(REDUCED_LIMIT);
-      expect(offered.filter((status) => status === 422)).toHaveLength(OFFERED - REDUCED_LIMIT);
+      const events = await harness.prisma.client.outboxMessage.findMany({
+        where: { organizationId, eventName: 'AGGREGATION_REFERRED' },
+      });
+      expect(events).toHaveLength(1);
+      expect(eventEnvelopeSchema.parse(events[0]?.payload).payload).toMatchObject({
+        aggregationId,
+        demandCount: REDUCED_LIMIT,
+        demandIdsSha256: demandIdsDigest(admitted),
+      });
     } finally {
       await owner.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${slow}" ON "demand_request"`);
       await owner.$executeRawUnsafe(`DROP FUNCTION IF EXISTS "${slow}"()`);

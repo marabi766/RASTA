@@ -93,11 +93,11 @@ export class DemandService {
           { aggregationId: window.id },
         );
       }
-      // A technical limit (Q-119 note of 2026-10-17), set by PR 1, whose synchronous close moved
-      // every live demand in one transaction. The end here moves at most
-      // PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE and the sweeper the rest, so the limit no longer guards
-      // the budget; it stays as configured (widening it is a separate decision). `demandCount`
-      // counts the live demands (the totals check holds it), read under the same lock.
+      // A technical limit (Q-119 note of 2026-10-17): no window holds more than one close can
+      // digest (`DEFAULT_MAX_LIVE_DEMANDS`, from a measured digest time). Every transaction of the
+      // close is bounded anyway — the end and each sweeper step move and digest one batch — so
+      // this bounds how long a window's end takes. `demandCount` counts the live demands (the
+      // totals check holds it), read under the same lock.
       if (window.demandCount >= this.env.PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS) {
         const refusal = ruleRefusal(
           'The window this demand would join holds as many demands as it can take',
@@ -262,9 +262,19 @@ export class DemandService {
       if (window.version !== dto.expectedVersion) {
         throw RastaError.optimisticLockFailed('DemandAggregation', id);
       }
+      // The window's end is still being carried on: its digest, and so its DEMAND_AGGREGATED, are
+      // not out yet, and nothing moves a window on before its end's event (WindowEnd). The next
+      // sweeper steps finish it, a batch a transaction.
+      const digest = window.demandIdsSha256;
+      if (digest === null) {
+        throw new RastaError(
+          'CONFLICT',
+          'The end of this aggregation is still being recorded; retry',
+          { retryAfterSeconds: 1 },
+        );
+      }
 
       const now = await this.clock.now(tx);
-      const live = await this.repository.liveDemands(tx, window);
       await this.repository.cancelWindow(tx, window, {
         by: actor.userId,
         reason: dto.reason,
@@ -280,8 +290,8 @@ export class DemandService {
           organizationId: window.organizationId,
           productId: window.productId,
           totalQuantity: Number(window.totalQuantity),
-          demandCount: live.count,
-          demandIdsSha256: live.digest,
+          demandCount: window.demandCount,
+          demandIdsSha256: digest,
           cancelledBy: actor.userId,
           cancelledAt: now.toISOString(),
         },

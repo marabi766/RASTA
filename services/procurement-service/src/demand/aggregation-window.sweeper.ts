@@ -22,9 +22,9 @@ export interface WindowSweepOutcome {
   claimed: number;
   /** Windows this sweep ended. */
   ended: number;
-  /** Batches of an ended window's demands moved. */
+  /** Batches of an ended window's end carried on: its digest, its demands to follow. */
   followed: number;
-  /** Ended by someone else, nothing to follow. */
+  /** Ended by someone else, nothing left of its end. */
   noop: number;
   /** Moved on after the claim (a demand extended it): given back, still OPEN. */
   notDue: number;
@@ -58,9 +58,9 @@ const METRIC_RESULT: Record<SweepResult, string> = {
  * construction's `TenderCloseSweeper` (ADR-065 § 3). Each sweep claims a bounded batch of windows
  * in one statement (`FOR UPDATE SKIP LOCKED`, a lease and a fencing token), so any number of
  * instances may run, and sweeps each in short transactions of its own, in the window's own tenant,
- * via `WindowSweepService`: the end, then — for a REFERRED or LAPSED window of more live demands
- * than one transaction moves — one transaction per further batch, renewing the lease each time,
- * until every demand followed it or this process stops.
+ * via `WindowSweepService`: the end, then — for a window of more demands than one batch — one
+ * transaction per further batch of its digest and of its demands to follow, renewing the lease
+ * each time, until the end's event is out and every demand followed it, or this process stops.
  *
  * Bounded by configuration: windows per sweep, demands per transaction, the interval. One window
  * failing never stalls the batch, and never starves the queue: its attempts are counted and it is
@@ -159,7 +159,7 @@ export class AggregationWindowSweeper {
         aggregationId: window.id,
         fence: window.fence,
       };
-      // One window: its end, then a step per batch of demands still to follow it.
+      // One window: its end, then a step per batch of what is left of it.
       for (;;) {
         // Stopping: the window keeps its claim until the lease runs out, then any sweep takes it.
         if (this.stopped) break;
@@ -167,7 +167,7 @@ export class AggregationWindowSweeper {
           const step = await this.service.step(target, this.options.leaseSeconds);
           outcome[COUNTED[step.result]] += 1;
           windowSweepTotal.inc({ service: SERVICE_NAME, result: METRIC_RESULT[step.result] });
-          if (step.demandsToFollow === 0) break;
+          if (!step.pending) break;
         } catch (error) {
           outcome.failed += 1;
           windowSweepTotal.inc({ service: SERVICE_NAME, result: 'failed' });

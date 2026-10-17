@@ -73,6 +73,16 @@ model DemandAggregation {
   /// bounded batch, the sweeper the rest (CHECK ck_demand_aggregation_follow).
   demandsToFollow Int @default(0) @map("demands_to_follow")
 
+  /// The digest of the demands the window ended with (`demandIdsDigest`, its end event's
+  /// `demandIdsSha256`); null while OPEN and while it is being built. Built in bounded batches
+  /// (PR-338 r1 F1): the resumable SHA-256 state, the last id taken (byte order) and how many were
+  /// taken; the state is cleared when the digest is written (CHECK ck_demand_aggregation_digest).
+  /// Bookkeeping: changing it moves no version.
+  demandIdsSha256  String? @map("demand_ids_sha256")
+  endDigestState   Bytes?  @map("end_digest_state")
+  endDigestCursor  String? @map("end_digest_cursor")
+  endDigestCounted Int     @default(0) @map("end_digest_counted")
+
   /// The window sweeper's claim (lease + fence) and its failed attempts with their backoff
   /// (ADR-070 § 2, the pattern of ADR-065 § 3). Bookkeeping: changing it moves no version.
   sweepLeaseUntil    DateTime? @map("sweep_lease_until") @db.Timestamptz(3)

@@ -27,6 +27,30 @@ export const MAX_NOTE_LENGTH = 500;
 export const MIN_REASON_LENGTH = 8;
 export const MAX_REASON_LENGTH = 500;
 
+/**
+ * A reason, trimmed, of MIN_REASON_LENGTH to MAX_REASON_LENGTH characters as PostgreSQL's CHECK
+ * counts them (`char_length`: code points). Zod's `min` counts UTF-16 code units, so a character
+ * outside the BMP counts twice there: "😀😀😀😀" passed `min(8)` and failed the CHECK, a 500
+ * (PR-338 r1 F3). The extra check answers the same 400 a short reason gets. `max` in code units
+ * stays: never more code points than code units, so nothing it admits is over the CHECK's bound.
+ */
+function reasonText() {
+  return plainText()
+    .min(MIN_REASON_LENGTH)
+    .max(MAX_REASON_LENGTH)
+    .superRefine((value, context) => {
+      // Only where `min` passed: a reason short in code units already has its one issue.
+      if (value.length >= MIN_REASON_LENGTH && [...value].length < MIN_REASON_LENGTH) {
+        context.addIssue({
+          code: z.ZodIssueCode.too_small,
+          minimum: MIN_REASON_LENGTH,
+          type: 'string',
+          inclusive: true,
+        });
+      }
+    });
+}
+
 /** `POST /v1/demand-requests`: a need of the caller's organization. */
 export const submitDemandSchema = z
   .object({
@@ -66,13 +90,10 @@ export const withdrawDemandSchema = z
         'The `version` the caller read: the withdrawal applies only to that version ' +
           '(409 OPTIMISTIC_LOCK_FAILED otherwise).',
       ),
-    reason: plainText()
-      .min(MIN_REASON_LENGTH)
-      .max(MAX_REASON_LENGTH)
-      .describe(
-        'Why, 8 to 500 characters, trimmed, without bidirectional control characters. Kept with ' +
-          'the demand and read through this API; never on an event.',
-      ),
+    reason: reasonText().describe(
+      'Why, 8 to 500 characters, trimmed, without bidirectional control characters. Kept with ' +
+        'the demand and read through this API; never on an event.',
+    ),
   })
   .strict();
 export type WithdrawDemandDto = z.infer<typeof withdrawDemandSchema>;
@@ -88,13 +109,10 @@ export const cancelAggregationSchema = z
         'The `version` of the aggregation the caller read: the cancellation applies only to that ' +
           'version (409 OPTIMISTIC_LOCK_FAILED otherwise).',
       ),
-    reason: plainText()
-      .min(MIN_REASON_LENGTH)
-      .max(MAX_REASON_LENGTH)
-      .describe(
-        'Why, 8 to 500 characters, trimmed, without bidirectional control characters. Kept with ' +
-          'the aggregation and read through this API; never on an event.',
-      ),
+    reason: reasonText().describe(
+      'Why, 8 to 500 characters, trimmed, without bidirectional control characters. Kept with ' +
+        'the aggregation and read through this API; never on an event.',
+    ),
   })
   .strict();
 export type CancelAggregationDto = z.infer<typeof cancelAggregationSchema>;

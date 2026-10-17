@@ -16,6 +16,8 @@ import { cleanup, newOrganizationId, newProductId, runtimeClient } from './helpe
  */
 const T0 = new Date('2031-05-01T08:00:00.000Z');
 const HOUR = 3_600_000;
+/** A finished digest: an ended window holds its digest or the state of the one being built. */
+const DIGEST = '0'.repeat(64);
 
 describe('the database keeps the demand and aggregation invariants', () => {
   let db: PrismaClient;
@@ -120,7 +122,7 @@ describe('the database keeps the demand and aggregation invariants', () => {
     const agg = await window(a);
     const demand = await join(a, agg, T0);
     await db.$executeRaw`
-      UPDATE demand_aggregation SET status = 'READY', closed_at = ${T0}, version = version + 1
+      UPDATE demand_aggregation SET status = 'READY', closed_at = ${T0}, demand_ids_sha256 = ${DIGEST}, version = version + 1
        WHERE id = ${agg.id}`;
     await refusedWith(
       join(a, agg, T0),
@@ -208,7 +210,7 @@ describe('the database keeps the demand and aggregation invariants', () => {
     const end = new Date(T0.getTime() + 10 * HOUR);
     // The window's end moves statuses only: counted before and after, its totals still hold.
     await db.$transaction([
-      db.$executeRaw`UPDATE demand_aggregation SET status = 'REFERRED', closed_at = ${end},
+      db.$executeRaw`UPDATE demand_aggregation SET status = 'REFERRED', closed_at = ${end}, demand_ids_sha256 = ${DIGEST},
                        updated_at = ${end}, version = version + 1 WHERE id = ${agg.id}`,
       db.$executeRaw`UPDATE demand_request SET status = 'REFERRED', closed_at = ${end},
                        updated_at = ${end}, version = version + 1 WHERE id = ${demand}`,
@@ -274,7 +276,7 @@ describe('the database keeps the demand and aggregation invariants', () => {
       await join(a, agg, T0);
       await join(a, agg, T0);
       await db.$executeRaw`
-        UPDATE demand_aggregation SET status = 'REFERRED', closed_at = ${T0}, demands_to_follow = 1,
+        UPDATE demand_aggregation SET status = 'REFERRED', closed_at = ${T0}, demands_to_follow = 1, demand_ids_sha256 = ${DIGEST},
                version = version + 1 WHERE id = ${agg.id}`;
       return agg;
     }
@@ -337,7 +339,7 @@ describe('the database keeps the demand and aggregation invariants', () => {
       );
       const ready = await window(a);
       await join(a, ready, T0);
-      await db.$executeRaw`UPDATE demand_aggregation SET status = 'READY', closed_at = ${T0},
+      await db.$executeRaw`UPDATE demand_aggregation SET status = 'READY', closed_at = ${T0}, demand_ids_sha256 = ${DIGEST},
                              version = version + 1 WHERE id = ${ready.id}`;
       await refusedWith(
         db.$executeRaw`UPDATE demand_aggregation SET status = 'CANCELLED',
@@ -361,7 +363,7 @@ describe('the database keeps the demand and aggregation invariants', () => {
                         WHERE id = ${open.id}`,
         /ck_demand_aggregation_transition/,
       );
-      await db.$executeRaw`UPDATE demand_aggregation SET status = 'READY', closed_at = ${T0},
+      await db.$executeRaw`UPDATE demand_aggregation SET status = 'READY', closed_at = ${T0}, demand_ids_sha256 = ${DIGEST},
                              version = version + 1 WHERE id = ${open.id}`;
       await refusedWith(
         db.$executeRaw`UPDATE demand_aggregation SET status = 'CANCELLED', version = version + 1
@@ -383,6 +385,124 @@ describe('the database keeps the demand and aggregation invariants', () => {
                          version = version + 1 WHERE id = ${open.id}`,
         /ck_demand_aggregation_transition/,
       );
+    });
+
+    describe('the digest of the demands a window ended with (PR-338 r1 F1)', () => {
+      const STATE = Buffer.alloc(40);
+      const MORE = Buffer.alloc(41);
+
+      /** An OPEN window of one demand, ended READY with its digest begun, as `WindowEnd` ends it. */
+      async function ending(a: string) {
+        const agg = await window(a);
+        await join(a, agg, T0);
+        await db.$executeRaw`
+          UPDATE demand_aggregation SET status = 'READY', closed_at = ${T0},
+                 end_digest_state = ${STATE}, version = version + 1 WHERE id = ${agg.id}`;
+        return agg;
+      }
+
+      it('an OPEN window has none; an ended one has its digest or one being built, never neither or both', async () => {
+        const a = org();
+        const open = await window(a);
+        await refusedWith(
+          db.$executeRaw`UPDATE demand_aggregation SET demand_ids_sha256 = ${DIGEST}
+                          WHERE id = ${open.id}`,
+          /ck_demand_aggregation_digest/,
+        );
+        await join(a, open, T0);
+        await refusedWith(
+          db.$executeRaw`UPDATE demand_aggregation SET status = 'READY', closed_at = ${T0},
+                           version = version + 1 WHERE id = ${open.id}`,
+          /ck_demand_aggregation_digest/,
+        );
+        const agg = await ending(a);
+        await refusedWith(
+          db.$executeRaw`UPDATE demand_aggregation SET demand_ids_sha256 = ${DIGEST}
+                          WHERE id = ${agg.id}`,
+          /ck_demand_aggregation_digest/,
+        );
+        await refusedWith(
+          db.$executeRaw`UPDATE demand_aggregation SET end_digest_state = NULL WHERE id = ${agg.id}`,
+          /ck_demand_aggregation_digest/,
+        );
+        await refusedWith(
+          db.$executeRaw`UPDATE demand_aggregation SET demand_ids_sha256 = 'ABC',
+                           end_digest_state = NULL WHERE id = ${agg.id}`,
+          /ck_demand_aggregation_digest/,
+        );
+      });
+
+      it('is begun only by the end, only moves forward — more ids, past the last one — and is written once', async () => {
+        const a = org();
+        const agg = await ending(a);
+        // Bookkeeping: no version moves.
+        await db.$executeRaw`
+          UPDATE demand_aggregation SET end_digest_state = ${MORE}, end_digest_cursor = 'DMD_B',
+                 end_digest_counted = 1 WHERE id = ${agg.id}`;
+        // Not again from the start, not back, not without taking an id.
+        await refusedWith(
+          db.$executeRaw`UPDATE demand_aggregation SET end_digest_state = ${STATE},
+                           end_digest_cursor = NULL, end_digest_counted = 0 WHERE id = ${agg.id}`,
+          /ck_demand_aggregation_digest: a digest only moves forward/,
+        );
+        await refusedWith(
+          db.$executeRaw`UPDATE demand_aggregation SET end_digest_state = ${STATE},
+                           end_digest_cursor = 'DMD_A', end_digest_counted = 2 WHERE id = ${agg.id}`,
+          /ck_demand_aggregation_digest: a digest only moves forward/,
+        );
+        await refusedWith(
+          db.$executeRaw`UPDATE demand_aggregation SET end_digest_state = ${STATE}
+                          WHERE id = ${agg.id}`,
+          /ck_demand_aggregation_digest: a digest only moves forward/,
+        );
+        // A claim beside it is still bookkeeping.
+        await db.$executeRaw`UPDATE demand_aggregation SET sweep_lease_until = ${T0},
+                               sweep_fence = 'F1' WHERE id = ${agg.id}`;
+        const [{ version }] = await db.$queryRaw<{ version: number }[]>`
+          SELECT version FROM demand_aggregation WHERE id = ${agg.id}`;
+        await db.$executeRaw`
+          UPDATE demand_aggregation SET demand_ids_sha256 = ${DIGEST}, end_digest_state = NULL,
+                 end_digest_cursor = NULL, end_digest_counted = 1 WHERE id = ${agg.id}`;
+        const [after] = await db.$queryRaw<{ version: number }[]>`
+          SELECT version FROM demand_aggregation WHERE id = ${agg.id}`;
+        expect(after).toEqual({ version });
+        // Written once: neither changed nor begun again.
+        await refusedWith(
+          db.$executeRaw`UPDATE demand_aggregation SET demand_ids_sha256 = ${'1'.repeat(64)}
+                          WHERE id = ${agg.id}`,
+          /ck_demand_aggregation_digest: the digest of a window's demands is written once/,
+        );
+        await refusedWith(
+          db.$executeRaw`UPDATE demand_aggregation SET demand_ids_sha256 = NULL,
+                           end_digest_state = ${STATE} WHERE id = ${agg.id}`,
+          /ck_demand_aggregation_digest: the digest of a window's demands is written once/,
+        );
+        // On a window that ended without one, only the end begins it.
+        const b = org();
+        const other = await window(b);
+        await join(b, other, T0);
+        await db.$executeRaw`UPDATE demand_aggregation SET status = 'READY', closed_at = ${T0},
+                               demand_ids_sha256 = ${DIGEST}, version = version + 1
+                              WHERE id = ${other.id}`;
+        const open = await window(b);
+        await refusedWith(
+          db.$executeRaw`UPDATE demand_aggregation SET end_digest_state = ${STATE}
+                          WHERE id = ${open.id}`,
+          /ck_demand_aggregation_digest: a digest is begun only by the window's end/,
+        );
+      });
+
+      it('nothing moves a window on before its end’s event: no cancellation while its digest is built', async () => {
+        const a = org();
+        const agg = await ending(a);
+        await refusedWith(
+          db.$executeRaw`UPDATE demand_aggregation SET status = 'CANCELLED',
+                           cancelled_at = ${T0}, cancelled_by = 'USR_1',
+                           cancel_reason = 'the need went away', version = version + 1
+                          WHERE id = ${agg.id}`,
+          /ck_demand_aggregation_digest/,
+        );
+      });
     });
   });
 });

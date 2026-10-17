@@ -34,7 +34,7 @@ groups:
           severity: warning
         annotations:
           summary: 'An aggregation window cannot be swept ({{ $value }} failed attempts)'
-          description: 'At least one aggregation window past its end, or ended with demands still to follow it, has failed more than 5 sweep attempts. No demand joins it, but it stays OPEN (not READY, so no RFQ can be issued from it) or its demands keep reading SUBMITTED. The sweeper keeps retrying with a growing backoff; the procurement-service log names the window and the closed error code. This alert deliberately carries neither.'
+          description: 'At least one aggregation window past its end, or ended with its digest (and so its end event) or demands still to follow it, has failed more than 5 sweep attempts. No demand joins it, but it stays OPEN (not READY, so no RFQ can be issued from it), its end event is not out, or its demands keep reading SUBMITTED. The sweeper keeps retrying with a growing backoff; the procurement-service log names the window and the closed error code. This alert deliberately carries neither.'
           runbook: docs/runbooks/aggregation-window-sweep-stuck.md
 
       # A window past its end for more than 15 minutes: at the default interval (5 s) the
@@ -48,4 +48,27 @@ groups:
         annotations:
           summary: 'An aggregation window has been past its end for {{ $value | humanizeDuration }} without being ended'
           description: 'The oldest OPEN aggregation window past its closesAt has not been ended for more than 15 minutes. Demands are already kept out of it by the database clock, but it is not READY, REFERRED or LAPSED until it is swept or another demand for its product arrives. Either the window sweeper is not running in any procurement-service instance or every attempt fails. The procurement-service log says which; this alert deliberately carries no window or tenant.'
+          runbook: docs/runbooks/aggregation-window-sweep-stuck.md
+
+      # The two rules above read only gauges scraped from procurement-service
+      # (the `procurement-service` job in prometheus.yml), so they go quiet when it
+      # is not scraped. That loss is made explicit here, with the shape of
+      # RastaAuditServiceMetricsUnavailable: the dedicated job is the selector,
+      # `instance` never is.
+      #
+      # - `min by (job) (...) == 0`: any configured procurement-service target
+      #   failing its scrape. `min`, not `max`: every instance samples the same
+      #   database, but one that is not scraped may be the only one running its
+      #   sweeper.
+      # - `absent(up{job="procurement-service"})`: the target is not configured
+      #   or was never loaded, where `== 0` alone would be empty. It carries the
+      #   same single `job` label.
+      - alert: RastaProcurementServiceMetricsUnavailable
+        expr: min by (job) (up{job="procurement-service"}) == 0 or absent(up{job="procurement-service"})
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Prometheus has not scraped procurement-service for 2 minutes'
+          description: 'The {{ $labels.job }} scrape target has been down or missing for at least 2 minutes. RastaProcurementWindowSweepRetriesHigh and RastaProcurementWindowSweepOverdue have no input while this fires: their silence is not evidence that aggregation windows are being swept.'
           runbook: docs/runbooks/aggregation-window-sweep-stuck.md

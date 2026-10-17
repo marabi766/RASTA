@@ -47,7 +47,8 @@ export class WindowSweepRepository {
 
   /**
    * Claims up to `limit` windows in one statement: OPEN and past `closes_at` on the database's
-   * clock, or ended with demands still to follow; not under a live lease, not in a failed
+   * clock, or ended with demands still to follow or its digest (and so its event) still being
+   * built; not under a live lease, not in a failed
    * attempt's backoff; the earliest end first. `FOR UPDATE SKIP LOCKED` keeps two sweepers from
    * queueing on the same rows — and skips a window a demand holds locked at this instant (it is
    * claimed on the next sweep, if that demand did not end it). The fence is what the window's own
@@ -67,7 +68,7 @@ export class WindowSweepRepository {
             WHERE "id" IN (
                   SELECT "id" FROM "demand_aggregation"
                    WHERE (("status" = 'OPEN' AND "closes_at" <= clock_timestamp())
-                          OR "demands_to_follow" > 0)
+                          OR "demands_to_follow" > 0 OR "end_digest_state" IS NOT NULL)
                      AND ("sweep_lease_until" IS NULL OR "sweep_lease_until" <= clock_timestamp())
                      AND ("sweep_next_attempt_at" IS NULL OR "sweep_next_attempt_at" <= clock_timestamp())
                    ORDER BY "closes_at", "id"
@@ -174,10 +175,11 @@ export class WindowSweepRepository {
                   sum("demands_to_follow") AS following,
                   max("sweep_attempts")
                     FILTER (WHERE ("status" = 'OPEN' AND "closes_at" <= clock_timestamp())
-                                  OR "demands_to_follow" > 0) AS attempts,
+                                  OR "demands_to_follow" > 0
+                                  OR "end_digest_state" IS NOT NULL) AS attempts,
                   max("extension_count") FILTER (WHERE "status" = 'OPEN') AS extensions
              FROM "demand_aggregation"
-            WHERE "status" = 'OPEN' OR "demands_to_follow" > 0`,
+            WHERE "status" = 'OPEN' OR "demands_to_follow" > 0 OR "end_digest_state" IS NOT NULL`,
         ),
     );
     const row = rows[0];

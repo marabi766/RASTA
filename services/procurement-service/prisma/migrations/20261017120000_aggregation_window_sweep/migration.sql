@@ -13,9 +13,18 @@
 --    one bounded batch per transaction, and the count comes down to 0.
 -- 3. READY → CANCELLED: who, when and why, all three and only on a cancelled
 --    aggregation (the reason stays here; the event never carries it).
--- 4. `demand_aggregation_guard` admits the two new kinds of change and keeps every
+-- 4. The digest of the demands a window ended with (`demand_ids_sha256`, the
+--    value its end event carries), built in bounded batches (PR-338 r1 F1): the end
+--    leaves OPEN at once and stores a resumable SHA-256 state; each later batch
+--    feeds the next ids in byte order (`end_digest_cursor`) and stores the state
+--    again; the transaction that feeds the last one writes the digest, clears the
+--    state and enqueues the end's one event. The demand set is frozen from the end
+--    on, so the batches read one set. `ix_demand_request_window_ids` keeps each
+--    batch an index range, whatever the window holds.
+-- 5. `demand_aggregation_guard` admits the new kinds of change and keeps every
 --    old rule: the bookkeeping alone may change without a version, the count of
---    demands to follow is set only by the end and only ever comes down, and the
+--    demands to follow is set only by the end and only ever comes down, the digest
+--    is begun only by the end, only moves forward and is written once, and the
 --    cancellation is written only by READY → CANCELLED.
 -- =============================================================================
 
@@ -27,7 +36,11 @@ ALTER TABLE "demand_aggregation"
   ADD COLUMN "sweep_next_attempt_at" TIMESTAMPTZ(3),
   ADD COLUMN "cancelled_at" TIMESTAMPTZ(3),
   ADD COLUMN "cancelled_by" TEXT,
-  ADD COLUMN "cancel_reason" TEXT;
+  ADD COLUMN "cancel_reason" TEXT,
+  ADD COLUMN "demand_ids_sha256" TEXT,
+  ADD COLUMN "end_digest_state" BYTEA,
+  ADD COLUMN "end_digest_cursor" TEXT,
+  ADD COLUMN "end_digest_counted" INTEGER NOT NULL DEFAULT 0;
 
 -- Only a window that ended REFERRED or LAPSED has demands still to follow it, and never more than
 -- it holds.
@@ -58,7 +71,12 @@ CREATE INDEX "ix_demand_aggregation_sweep_open"
 
 CREATE INDEX "ix_demand_aggregation_sweep_follow"
     ON "demand_aggregation" ("closes_at", "id")
- WHERE "demands_to_follow" > 0;
+ WHERE "demands_to_follow" > 0 OR "end_digest_state" IS NOT NULL;
+
+-- A window's demands that count, in byte order: one batch of the end's digest is one range of it.
+CREATE INDEX "ix_demand_request_window_ids"
+    ON "demand_request" ("organization_id", "aggregation_id", "id" COLLATE "C")
+ WHERE "status" <> 'WITHDRAWN';
 
 CREATE OR REPLACE FUNCTION "demand_aggregation_guard"() RETURNS trigger AS $$
 BEGIN
@@ -73,12 +91,43 @@ BEGIN
       RAISE EXCEPTION 'ck_demand_aggregation_follow: the demands to follow a window are set by its end and only ever fewer'
         USING ERRCODE = 'check_violation';
     END IF;
+    -- The digest of the demands a window ended with: written once, never changed after.
+    IF OLD."demand_ids_sha256" IS NOT NULL
+       AND (NEW."demand_ids_sha256" IS DISTINCT FROM OLD."demand_ids_sha256"
+            OR NEW."end_digest_state" IS NOT NULL)
+    THEN
+      RAISE EXCEPTION 'ck_demand_aggregation_digest: the digest of a window''s demands is written once'
+        USING ERRCODE = 'check_violation';
+    END IF;
+    -- Begun by the end itself (OPEN → READY, REFERRED or LAPSED), and by nothing else.
+    IF OLD."end_digest_state" IS NULL AND NEW."end_digest_state" IS NOT NULL
+       AND NOT (OLD."status" = 'OPEN' AND NEW."status" IN ('READY', 'REFERRED', 'LAPSED'))
+    THEN
+      RAISE EXCEPTION 'ck_demand_aggregation_digest: a digest is begun only by the window''s end'
+        USING ERRCODE = 'check_violation';
+    END IF;
+    -- Each batch takes more ids, past the last one taken: a digest never starts over or goes back.
+    IF OLD."end_digest_state" IS NOT NULL AND NEW."end_digest_state" IS NOT NULL
+       AND (NEW."end_digest_state" IS DISTINCT FROM OLD."end_digest_state"
+            OR NEW."end_digest_cursor" IS DISTINCT FROM OLD."end_digest_cursor"
+            OR NEW."end_digest_counted" <> OLD."end_digest_counted")
+       AND NOT (NEW."end_digest_counted" > OLD."end_digest_counted"
+                AND NEW."end_digest_cursor" IS NOT NULL
+                AND (OLD."end_digest_cursor" IS NULL
+                     OR NEW."end_digest_cursor" COLLATE "C" > OLD."end_digest_cursor" COLLATE "C"))
+    THEN
+      RAISE EXCEPTION 'ck_demand_aggregation_digest: a digest only moves forward'
+        USING ERRCODE = 'check_violation';
+    END IF;
     -- The sweeper's bookkeeping alone — a claim, its release, a failed attempt, a batch of
-    -- demands that followed — is not a change of the aggregation: no version, no updated_at.
+    -- demands that followed, a batch of the digest — is not a change of the aggregation: no
+    -- version, no updated_at.
     IF (to_jsonb(NEW) - ARRAY['demands_to_follow', 'sweep_lease_until', 'sweep_fence',
-                              'sweep_attempts', 'sweep_next_attempt_at'])
+                              'sweep_attempts', 'sweep_next_attempt_at', 'demand_ids_sha256',
+                              'end_digest_state', 'end_digest_cursor', 'end_digest_counted'])
        = (to_jsonb(OLD) - ARRAY['demands_to_follow', 'sweep_lease_until', 'sweep_fence',
-                                'sweep_attempts', 'sweep_next_attempt_at'])
+                                'sweep_attempts', 'sweep_next_attempt_at', 'demand_ids_sha256',
+                                'end_digest_state', 'end_digest_cursor', 'end_digest_counted'])
     THEN
       RETURN NEW;
     END IF;
@@ -146,3 +195,30 @@ BEGIN
     USING ERRCODE = 'check_violation';
 END;
 $$ LANGUAGE plpgsql;
+
+-- A window that ended under PR 1 had its end's event written with this same digest, in one
+-- statement (PR 1 holds a window to at most 10,000 live demands): it is stored with the window.
+UPDATE "demand_aggregation" AS a
+   SET "demand_ids_sha256" = (
+         SELECT encode(sha256(convert_to(
+                  coalesce(string_agg(d."id", E'\n' ORDER BY d."id" COLLATE "C"), ''), 'UTF8')), 'hex')
+           FROM "demand_request" AS d
+          WHERE d."organization_id" = a."organization_id" AND d."aggregation_id" = a."id"
+            AND d."status" <> 'WITHDRAWN'),
+       "end_digest_counted" = a."demand_count"
+ WHERE a."status" <> 'OPEN';
+
+-- An OPEN window has no digest. An ended one has its digest, or the state of the one being built
+-- (READY, REFERRED or LAPSED only: nothing moves a window on before its end's event is out) —
+-- one or the other, never both.
+ALTER TABLE "demand_aggregation" ADD CONSTRAINT "ck_demand_aggregation_digest"
+  CHECK (("demand_ids_sha256" IS NULL OR "demand_ids_sha256" ~ '^[0-9a-f]{64}$')
+         AND (CASE WHEN "status" = 'OPEN'
+                   THEN "demand_ids_sha256" IS NULL AND "end_digest_state" IS NULL
+                   WHEN "status" IN ('READY', 'REFERRED', 'LAPSED', 'RFQ_ISSUED', 'CANCELLED')
+                   THEN ("demand_ids_sha256" IS NULL) <> ("end_digest_state" IS NULL)
+                   -- Any other status is ck_demand_aggregation_status's to refuse.
+                   ELSE TRUE END)
+         AND ("end_digest_state" IS NULL OR "status" IN ('READY', 'REFERRED', 'LAPSED'))
+         AND ("end_digest_state" IS NOT NULL OR "end_digest_cursor" IS NULL)
+         AND "end_digest_counted" BETWEEN 0 AND "demand_count");

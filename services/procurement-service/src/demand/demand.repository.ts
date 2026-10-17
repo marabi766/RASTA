@@ -114,17 +114,23 @@ export class DemandRepository {
 
   /**
    * The end of a window that leaves OPEN: READY, REFERRED or LAPSED, at `at`. `demandsToFollow` is
-   * how many of its live demands this transaction leaves for the sweeper to move (REFERRED and
-   * LAPSED only; 0 for a window that ends whole).
+   * how many of its live demands are still to move to its status (all of a REFERRED or LAPSED
+   * window's; 0 for READY), `digestState` the empty digest of the demands it ended with: both are
+   * carried on in bounded batches (`WindowEnd.carryOn`).
    */
   async endWindow(
     tx: ExtendedPrismaClient,
     window: DemandAggregation,
     to: Extract<AggregationStateName, 'READY' | 'REFERRED' | 'LAPSED'>,
     at: Date,
-    demandsToFollow = 0,
+    end: { demandsToFollow: number; digestState: Uint8Array<ArrayBuffer> },
   ): Promise<void> {
-    await this.moveWindow(tx, window, to, { closedAt: at, updatedAt: at, demandsToFollow });
+    await this.moveWindow(tx, window, to, {
+      closedAt: at,
+      updatedAt: at,
+      demandsToFollow: end.demandsToFollow,
+      endDigestState: end.digestState,
+    });
   }
 
   /** READY → CANCELLED with who, when and why (ADR-070 § 2). */
@@ -157,26 +163,80 @@ export class DemandRepository {
   }
 
   /**
-   * The demands still SUBMITTED in a window, by count and digest (`demandIdsDigest`): computed in
-   * the database, so the ids never travel and the cost is one index scan and a sort — ~1.5 µs a
-   * demand on rasta-dev (1,000,000 in 1.5 s), against 0.13 ms to move one. `COLLATE "C"` orders
-   * by bytes, as JavaScript's default sort orders these ASCII ids; an empty set digests the empty
-   * string, as `demandIdsDigest([])` does.
+   * The next ids, at most `limit`, of the demands an ended window holds — every one not withdrawn,
+   * whether it still reads SUBMITTED or already followed the window — after the last one its
+   * digest took, in byte order (`COLLATE "C"`, as JavaScript's default sort orders these ASCII
+   * ids, so the digest is `demandIdsDigest`'s). One range of `ix_demand_request_window_ids`: the
+   * cost is the batch's, whatever the window holds.
+   *
+   * Sorting is off for this one statement, so that range is the only plan. On a table it has no
+   * statistics for yet, the planner believed a 1,000,000-demand window held one row, scanned
+   * `ix_demand_request_aggregation` instead and sorted the whole window for every batch: 1.3 s a
+   * batch on rasta-dev, against 3.7 ms for the range (2000 ids). The setting is put back as it
+   * was before the next statement of the transaction.
    */
-  async liveDemands(
+  async nextDemandIds(
+    tx: ExtendedPrismaClient,
+    window: { organizationId: string; id: string; endDigestCursor: string | null },
+    limit: number,
+  ): Promise<string[]> {
+    const cursor = window.endDigestCursor;
+    const before = await tx.$queryRaw<{ was: string }[]>`
+      SELECT current_setting('enable_sort') AS was`;
+    const was = before[0]?.was ?? 'on';
+    await tx.$queryRaw`SELECT set_config('enable_sort', 'off', true) AS now`;
+    try {
+      const rows =
+        cursor === null
+          ? await tx.$queryRaw<{ id: string }[]>`
+              SELECT id FROM demand_request
+               WHERE organization_id = ${window.organizationId} AND aggregation_id = ${window.id}
+                 AND status <> 'WITHDRAWN'
+               ORDER BY id COLLATE "C" LIMIT ${limit}`
+          : await tx.$queryRaw<{ id: string }[]>`
+              SELECT id FROM demand_request
+               WHERE organization_id = ${window.organizationId} AND aggregation_id = ${window.id}
+                 AND status <> 'WITHDRAWN' AND id COLLATE "C" > ${cursor}
+               ORDER BY id COLLATE "C" LIMIT ${limit}`;
+      return rows.map((row) => row.id);
+    } finally {
+      await tx.$queryRaw`SELECT set_config('enable_sort', ${was}, true) AS now`;
+    }
+  }
+
+  /**
+   * A batch of the digest was taken: its state, the last id taken and how many, by compare-and-set
+   * on what was read under the lock (bookkeeping: no version).
+   */
+  async digestTaken(
     tx: ExtendedPrismaClient,
     window: DemandAggregation,
-  ): Promise<{ count: number; digest: string }> {
-    const rows = await tx.$queryRaw<{ count: bigint; digest: string }[]>`
-      SELECT count(*) AS count,
-             encode(sha256(convert_to(
-               coalesce(string_agg(id, E'\n' ORDER BY id COLLATE "C"), ''), 'UTF8')), 'hex') AS digest
-        FROM demand_request
-       WHERE organization_id = ${window.organizationId} AND aggregation_id = ${window.id}
-         AND status = 'SUBMITTED'`;
-    const row = rows[0];
-    if (!row) throw new Error(`counting the live demands of window ${window.id} answered no row`);
-    return { count: Number(row.count), digest: row.digest };
+    taken: { state: Uint8Array; cursor: string; counted: number },
+  ): Promise<void> {
+    const changed = await tx.$executeRaw`
+      UPDATE demand_aggregation
+         SET end_digest_state = ${Buffer.from(taken.state)}, end_digest_cursor = ${taken.cursor},
+             end_digest_counted = ${taken.counted}
+       WHERE organization_id = ${window.organizationId} AND id = ${window.id}
+         AND status = ${window.status} AND end_digest_state IS NOT NULL
+         AND end_digest_counted = ${window.endDigestCounted}`;
+    if (changed !== 1) throw RastaError.optimisticLockFailed('DemandAggregation', window.id);
+  }
+
+  /** The digest is complete: written once, the state cleared (bookkeeping: no version). */
+  async digestWritten(
+    tx: ExtendedPrismaClient,
+    window: DemandAggregation,
+    digest: string,
+  ): Promise<void> {
+    const changed = await tx.$executeRaw`
+      UPDATE demand_aggregation
+         SET demand_ids_sha256 = ${digest}, end_digest_state = NULL, end_digest_cursor = NULL,
+             end_digest_counted = demand_count
+       WHERE organization_id = ${window.organizationId} AND id = ${window.id}
+         AND status = ${window.status} AND end_digest_state IS NOT NULL
+         AND end_digest_counted = ${window.endDigestCounted}`;
+    if (changed !== 1) throw RastaError.optimisticLockFailed('DemandAggregation', window.id);
   }
 
   /**
@@ -360,6 +420,7 @@ export class DemandRepository {
       extensionCount?: number;
       closedAt?: Date;
       demandsToFollow?: number;
+      endDigestState?: Uint8Array<ArrayBuffer>;
       cancelledAt?: Date;
       cancelledBy?: string;
       cancelReason?: string;
