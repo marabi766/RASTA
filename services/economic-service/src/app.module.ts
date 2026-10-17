@@ -48,6 +48,8 @@ import { LedgerBalanceAudit } from './wallet/balance-audit';
 import { TransactionRepository } from './transaction/transaction.repository';
 import { TransactionService } from './transaction/transaction.service';
 import { TransactionController } from './transaction/transaction.controller';
+import { InternalObligationController } from './transaction/internal-obligation.controller';
+import { StatementObligationService } from './transaction/statement-obligation';
 import { CommissionService } from './commission/commission.service';
 import { CommissionController } from './commission/commission.controller';
 import { RewardService } from './reward/reward.service';
@@ -119,6 +121,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
     WalletController,
     LedgerController,
     TransactionController,
+    InternalObligationController,
     SettlementController,
     CommissionController,
     RewardController,
@@ -170,6 +173,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
     WalletService,
     TransactionRepository,
     TransactionService,
+    StatementObligationService,
     CommissionService,
     RewardService,
     PaymentService,

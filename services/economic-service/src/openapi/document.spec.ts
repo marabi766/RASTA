@@ -1,4 +1,4 @@
-import { enrichOpenApiDocument } from './document';
+import { enrichOpenApiDocument, INTERNAL_TOKEN_SCHEME } from './document';
 import { INVALID_CURSOR_MESSAGE } from '../shared/cursor';
 import type { OpenAPIObject } from '@nestjs/swagger';
 
@@ -221,6 +221,50 @@ describe('enrichOpenApiDocument', () => {
     const cursor = operation.parameters.find((parameter) => parameter.name === 'cursor');
     expect(cursor?.description).toContain(INVALID_CURSOR_MESSAGE);
     expect(cursor?.description).toContain('400 VALIDATION_FAILED');
+  });
+
+  describe('internal routes (ADR-061 § 4)', () => {
+    const INTERNAL = '/v1/internal/obligations/by-source/STATEMENT/{statementId}';
+
+    const enrichedWith = (path: string) => {
+      const document = emptyDocument();
+      document.paths = { [path]: { get: { responses: {} } } } as never;
+      const enriched = enrichOpenApiDocument(document);
+      return {
+        enriched,
+        operation: (enriched.paths[path] as Record<string, never>).get as unknown as {
+          security?: unknown;
+          responses: Record<string, { description: string }>;
+        },
+      };
+    };
+
+    it('declares the internal token as an apiKey in X-Internal-Token, not a bearer token', () => {
+      const { enriched } = enrichedWith(INTERNAL);
+
+      expect(enriched.components?.securitySchemes?.[INTERNAL_TOKEN_SCHEME]).toMatchObject({
+        type: 'apiKey',
+        in: 'header',
+        name: 'X-Internal-Token',
+      });
+    });
+
+    it('requires that scheme alone on an internal route, with its own 403 and 404', () => {
+      const { operation } = enrichedWith(INTERNAL);
+
+      expect(operation.security).toEqual([{ [INTERNAL_TOKEN_SCHEME]: [] }]);
+      expect(Object.keys(operation.responses).sort()).toEqual(['200', '401', '403', '404', '500']);
+      expect(operation.responses['403']?.description).toContain('user token');
+      expect(operation.responses['403']?.description).toContain('signed for no organization');
+      expect(operation.responses['404']?.description).toContain('internal token is signed for');
+    });
+
+    it('gives a public route neither the internal scheme nor the internal wording', () => {
+      const { operation } = enrichedWith('/v1/transactions/{id}');
+
+      expect(operation.security).toBeUndefined();
+      expect(operation.responses['403']?.description).toContain('AUDITOR');
+    });
   });
 
   it('leaves a route it knows nothing about with a success response and no body', () => {
