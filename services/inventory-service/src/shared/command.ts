@@ -67,6 +67,8 @@ const COMMAND_KEYS = new Set([
   'ux_stock_reservation_command',
   'ux_shipment_command',
   'ux_tracking_event_command',
+  'ux_return_shipment_command',
+  'ux_return_tracking_event_command',
 ]);
 
 /**
@@ -90,6 +92,13 @@ function isCommandKey(error: unknown, constraint: string | undefined): boolean {
   return (
     typeof message === 'string' && COMMAND_KEY_COLUMNS.some((columns) => message.includes(columns))
   );
+}
+
+/** Whether a unique violation is `ux_return_shipment_request`: one return shipment per return request. */
+function isReturnRequestKey(error: unknown, constraint: string | undefined): boolean {
+  if (constraint === 'ux_return_shipment_request') return true;
+  const message = (error as { message?: unknown } | null)?.message;
+  return typeof message === 'string' && message.includes('(organization_id, return_request_id)');
 }
 
 /**
@@ -121,6 +130,15 @@ export function translateCommandError(
   const constraint = violatedConstraint(error);
   if (isUniqueViolation(error) && isCommandKey(error, constraint)) {
     return RastaError.idempotencyKeyReused();
+  }
+  // Two operators dispatching the same return under two keys at once: the loser meets the unique
+  // index, and is told what the winner already recorded (a raw query's failure names the columns).
+  if (isUniqueViolation(error) && isReturnRequestKey(error, constraint)) {
+    return refusal(
+      'returnShipment',
+      'RETURN_ALREADY_DISPATCHED',
+      'This return request already has a return shipment',
+    );
   }
   if (
     overdrawn !== null &&

@@ -20,6 +20,12 @@ import {
   type UnresolvedOrder,
 } from '@/lib/unresolved-order';
 import type { Offer } from '@/server/marketplace';
+import {
+  isRedirect,
+  isSessionRefusal,
+  sessionHasEnded,
+  SESSION_REFUSAL_MESSAGES,
+} from '@/lib/session-refusal';
 
 import { submitPlaceOrder } from './place-order-actions';
 import {
@@ -115,12 +121,6 @@ function pendingFrom(form: FormData): Omit<UnresolvedOrder, 'savedAt'> | null {
   return { submissionId, values: { offerId: offer, quantity: canonical }, correlationId: null };
 }
 
-/** A redirect from a server action reaches the client as a rejection whose digest says so. */
-function isRedirect(error: unknown): boolean {
-  const digest = (error as { digest?: unknown } | null)?.digest;
-  return typeof digest === 'string' && digest.startsWith('NEXT_REDIRECT');
-}
-
 function OrderForm({
   offers,
   csrfToken,
@@ -154,9 +154,22 @@ function OrderForm({
         // The call itself failed — a lost response after the order may have
         // committed, or the portal's own gate answering 401 JSON to an action POST
         // whose session has ended, which Next rejects as an "unexpected response".
-        // Either way the doubt is still there, and so is the stored entry.
-        if (!firstSend) return withRetryNote(previous as UnconfirmedPlaceOrder, 'sessionEnded');
-        if (unsent) return { kind: 'UNCONFIRMED', ...unsent };
+        // Either way the doubt is still there, and so is the stored entry. Only
+        // `/auth/session` answering 401 says the session ended; anything else —
+        // its 503 for a refresh unavailable for now among them — keeps the retry
+        // (same key, same body).
+        const ended = await sessionHasEnded();
+        if (!firstSend) {
+          return withRetryNote(
+            previous as UnconfirmedPlaceOrder,
+            ended ? 'sessionEnded' : 'retryUnknown',
+          );
+        }
+        if (unsent) {
+          return ended
+            ? { kind: 'UNCONFIRMED', ...unsent, sessionEnded: true }
+            : { kind: 'UNCONFIRMED', ...unsent };
+        }
         throw error;
       }
       if (firstSend) {
@@ -258,8 +271,8 @@ function FormBanner({ state }: { state: PlaceOrderFormState }) {
   if (state.kind === 'REFUSED') {
     return (
       <Alert tone="danger">
-        {state.reason === 'NO_SESSION'
-          ? 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.'
+        {isSessionRefusal(state.reason)
+          ? SESSION_REFUSAL_MESSAGES[state.reason]
           : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.'}
       </Alert>
     );

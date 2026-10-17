@@ -49,9 +49,14 @@ export const standingSnapshotPageSchema = z
 
 export type StandingSnapshotPage = z.infer<typeof standingSnapshotPageSchema>;
 
-/** One contractor's standing now: a snapshot item and the instant it was read at. */
+/**
+ * One contractor's standing now: a snapshot item and the instant it was read at.
+ * `goodsSupplyApprovedAt` is procurement-service's field on the same answer (ADR-070
+ * § 7): declared so the strict parse accepts it, optional so an older supplier-service
+ * still parses, and never read here.
+ */
 export const standingOfOrganizationSchema = standingSnapshotPageSchema.shape.items.element
-  .extend({ asOf: instant })
+  .extend({ goodsSupplyApprovedAt: instant.nullable().optional(), asOf: instant })
   .strict();
 
 export type StandingOfOrganization = z.infer<typeof standingOfOrganizationSchema>;

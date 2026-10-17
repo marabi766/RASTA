@@ -1,6 +1,6 @@
 import { withUtcSession } from '@rasta/config';
 import { ulid } from 'ulid';
-import { runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
+import { RastaError, runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { PrismaClient } from '../src/generated/prisma';
 import { LedgerRepository } from '../src/ledger/ledger.repository';
@@ -14,6 +14,10 @@ import { RewardService } from '../src/reward/reward.service';
 import { SettlementService } from '../src/settlement/settlement.service';
 import { PaymentReconciliationRepository } from '../src/payment/payment-reconciliation.repository';
 import { loadEconomicEnv, type EconomicEnv } from '../src/config/env';
+import type {
+  HierarchyQuestion,
+  OrganizationHierarchy,
+} from '../src/organization/organization-hierarchy';
 import type { Logger } from '@rasta/logging';
 
 /**
@@ -153,6 +157,10 @@ export const silentLogger = {
   child: () => silentLogger,
 } as unknown as Logger;
 
+const unreachableHierarchy: HierarchyQuestion = {
+  withinVersion: () => Promise.reject(RastaError.upstreamUnavailable('organization-service')),
+};
+
 export interface Wiring {
   prisma: PrismaService;
   ledgerRepository: LedgerRepository;
@@ -181,6 +189,10 @@ export function wire(prisma: PrismaService): Wiring {
   const walletRepository = new WalletRepository(prisma);
   const wallets = new WalletService(walletRepository, ledger, prisma);
   const transactionRepository = new TransactionRepository(prisma);
+  // No suite built here asks the hierarchy: a union administrator acting for
+  // another organization is `union-admin-financial-authority.int-spec.ts`'s,
+  // over HTTP. Asked anyway, it fails closed as an unreachable owner would.
+  const hierarchy = unreachableHierarchy as unknown as OrganizationHierarchy;
   const commissions = new CommissionService(prisma, ledger);
   const transactions = new TransactionService(
     prisma,
@@ -190,6 +202,7 @@ export function wire(prisma: PrismaService): Wiring {
     env,
     ledger,
     commissions,
+    hierarchy,
   );
   const rewards = new RewardService(prisma, ledger, wallets, env);
   const settlements = new SettlementService(
@@ -199,6 +212,7 @@ export function wire(prisma: PrismaService): Wiring {
     walletRepository,
     transactionRepository,
     commissions,
+    hierarchy,
   );
 
   const paymentReconciliation = new PaymentReconciliationRepository(prisma, env);

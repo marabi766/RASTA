@@ -1,3 +1,4 @@
+import type { SessionRefusal } from '@/lib/session-refusal';
 import type {
   DisputeCommand,
   DisputeField,
@@ -39,8 +40,7 @@ export type DisputeFormState =
        * passed or its stamp is not this form's (`server/dispute-replay.ts`).
        * Nothing was sent in any of them.
        */
-      readonly reason:
-        'NO_SESSION' | 'SESSION_UNAVAILABLE' | 'CSRF' | 'SUBMISSION' | 'REPLAY' | 'COMMAND';
+      readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION' | 'REPLAY' | 'COMMAND';
     }
   /**
    * Not sent: the submission could not be remembered in this browser, and a

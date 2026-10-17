@@ -67,6 +67,16 @@ describe('TopUpForm', () => {
     expect(tampered.getByText(/این درخواست معتبر شناخته نشد/)).toBeInTheDocument();
   });
 
+  it('a session only unavailable: says so, not "ended", with no accessibility violations', async () => {
+    const { container, getByText, queryByText } = renderForm({
+      kind: 'REFUSED',
+      reason: 'SESSION_UNAVAILABLE',
+    });
+    expect(getByText(/همین حالا در دسترس نیست/)).toBeInTheDocument();
+    expect(queryByText(/پایان یافته/)).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it('shows the correlation id on a forbidden or failed attempt', () => {
     const forbidden = renderForm({ kind: 'FORBIDDEN', correlationId: 'COR_1' });
     expect(forbidden.getByText(/COR_1/)).toBeInTheDocument();
