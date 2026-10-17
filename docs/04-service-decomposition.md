@@ -661,7 +661,8 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 >
 > **مصرف رویداد، واقعی در برابر مستند (ADR-032).** فقط سه رویداد مصرف می‌شوند —
 > `MAINTENANCE_APPROVED`، `USAGE_RECORDED` و `MAINTENANCE_COMPLETED` — چون فقط
-> قرارداد این سه واقعاً تعریف شده است. `ORDER_*`، `STATEMENT_APPROVED`،
+> قرارداد این سه واقعاً تعریف شده است (و از CON-003 PR 6b، `STATEMENT_APPROVED` —
+> فقط محرک؛ صورت‌وضعیت و مبلغش از contract-service خوانده می‌شود، ADR-068 § ۶). `ORDER_*`،
 > `PURCHASE_ORDER_ISSUED` و `GOODS_RECEIVED` **موکول**اند: نبودِ تولیدکننده
 > به‌تنهایی مانع نیست، اما نوشتن آن Handler‌ها یعنی این سرویس شکل Payload سرویس
 > دیگری را اختراع کند. **هیچ Handler خالی‌ای برایشان وجود ندارد** — یک
@@ -686,7 +687,7 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 | **Queries**      | `GetWallet` · `GetBalance` · `ListTransactions` · `GetJournal` · `GetLedgerEntries` · `GetTrialBalance` · `GetCommissionRevenue` · `GetRewardBalance`                                                                                                                                                  |
 | **REST**         | `GET /wallets/me` · `POST /wallets/{id}/top-up` **(Idempotency-Key)** · `POST /transactions` **(Idempotency-Key)** · `GET /transactions/{id}` · `GET /transactions` · `GET /ledger/accounts/{id}/entries` · `GET /ledger/trial-balance` · `GET /commissions` · `GET /rewards/me` · `POST /settlements` |
 | **Publishes**    | `WALLET_OPENED` · `FUNDS_HELD` · `FUNDS_RELEASED` · `PAYMENT_AUTHORIZED` · `PAYMENT_COMPLETED` · `PAYMENT_FAILED` · `COMMISSION_APPLIED` · `REWARD_GRANTED` · `REWARD_LEVEL_CHANGED` · `SETTLEMENT_COMPLETED` · `JOURNAL_POSTED`                                                                       |
-| **Consumes**     | **واقعی:** `MAINTENANCE_APPROVED` · `USAGE_RECORDED` · `MAINTENANCE_COMPLETED`. **برنامه‌ریزی‌شده:** `STATEMENT_APPROVED` پس از تعریف Producer. اثرهای مالی سفارش با فرمان احراز‌شده از Temporal می‌آیند، نه Consumer رویداد (ADR-040).                                                                |
+| **Consumes**     | **واقعی:** `MAINTENANCE_APPROVED` · `USAGE_RECORDED` · `MAINTENANCE_COMPLETED` · `STATEMENT_APPROVED` (مبلغ از API، ADR-068 § ۶). اثرهای مالی سفارش با فرمان احراز‌شده از Temporal می‌آیند، نه Consumer رویداد (ADR-040).                                                                              |
 | **Dependencies** | PostgreSQL · Kafka · Redis (قفل کیف پول) · Temporal (Saga تسویه)                                                                                                                                                                                                                                       |
 | **مرز امنیتی**   | **بالاترین.** هر عمل نیازمند Idempotency-Key. هر تغییر در Audit. **استانداری (`AUDITOR`) دسترسی ندارد** — فقط تجمیع در `analytics`.                                                                                                                                                                    |
 | **Scale**        | نوشتن‌سنگین در `ledger_entry` → پارتیشن ماهانه، فقط الحاقی.                                                                                                                                                                                                                                            |
