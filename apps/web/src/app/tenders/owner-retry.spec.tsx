@@ -1,7 +1,11 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
-import { REASON_FIELD, type OwnerCommand } from '@/lib/tender-owner-fields';
+import {
+  REASON_FIELD,
+  UNREPEATABLE_OWNER_COMMANDS,
+  type OwnerCommand,
+} from '@/lib/tender-owner-fields';
 import {
   clearUnresolvedOwnerCommand,
   markOwnerCommandsOpen,
@@ -106,8 +110,8 @@ it('a rejection is remembered before it leaves — that it was sent, never its r
   expect(await axe(container)).toHaveNoViolations();
 });
 
-it('a proposal or its withdrawal whose call was lost is remembered, view-only, never sent again', async () => {
-  for (const command of ['PROPOSE_OPENING', 'WITHDRAW_PROPOSAL'] as const) {
+it('every command the service keeps no result for, its call lost, is remembered, view-only, never sent again', async () => {
+  for (const command of UNREPEATABLE_OWNER_COMMANDS) {
     action.mockReset();
     window.sessionStorage.clear();
     action.mockRejectedValueOnce(new Error('An unexpected response was received from the server.'));
@@ -143,11 +147,47 @@ it('a reason the action would refuse unsent is not remembered', async () => {
 it('a definite answer drops the record; a lost call is "session ended" only on a 401', async () => {
   action.mockRejectedValueOnce(new Error('An unexpected response was received from the server.'));
   sessionProbe.mockResolvedValue({ status: 503 });
-  const { container } = renderForm('OPEN_BIDS');
+  const { container } = renderForm('GRANT');
   await submit(container);
   expect(screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeInTheDocument();
   expect(screen.queryByText(/نشست شما پایان یافته است/)).toBeNull();
-  expect(stored()).toMatchObject({ command: 'OPEN_BIDS' });
+  expect(stored()).toMatchObject({ command: 'GRANT' });
+});
+
+it('a publication whose answer was lost — then rejected — offers no retry, and the page no fresh form until set aside', async () => {
+  action.mockResolvedValueOnce({
+    kind: 'UNCONFIRMED',
+    command: 'PUBLISH',
+    correlationId: 'COR_LOST',
+    submissionId: KEY,
+    reason: null,
+    replay: null,
+    viewOnly: true,
+    unrepeatable: true,
+  });
+  const { container, unmount } = renderForm('PUBLISH');
+  await submit(container);
+  expect(screen.queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
+  await submit(container);
+  expect(action).toHaveBeenCalledTimes(1);
+  unmount();
+  // The request was rejected meanwhile; the page is drawn again with a fresh request form.
+  const page = render(
+    <OwnerCommands
+      tenderId={TENDER_ID}
+      offered={[{ command: 'PUBLISH', submission: { id: FRESH, replay: STAMP } }]}
+      csrfToken="csrf"
+      owner={OWNER}
+      pageHref={PAGE}
+      showsRestored
+    />,
+  );
+  // The lost send holds the slot: no fresh publication is offered beside it, nothing is re-sent.
+  expect(page.container.querySelector(`input[name="submission"][value="${FRESH}"]`)).toBeNull();
+  expect(page.queryByRole('button', { name: 'درخواست انتشار' })).toBeNull();
+  expect(page.queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
+  expect(page.getByRole('link', { name: /کنار بگذار/ })).toBeInTheDocument();
+  expect(action).toHaveBeenCalledTimes(1);
 });
 
 it('after a reload the record is view-only instead of any fresh form, until set aside', async () => {

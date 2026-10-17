@@ -58,6 +58,7 @@ const CRITERIA_REQUIRED = 'معیار ارزیابی‌ای برای مناقص�
 const SECOND_PERSON_REQUIRED =
   'تفکیک وظایف: گشایش را شخصی جز پیشنهاددهنده انجام می‌دهد؛ چیزی گشوده نشد.';
 const UNCONFIRMED = 'نتوانستیم تأیید کنیم که';
+const SET_ASIDE = 'وضعیت مناقصه را دیدم؛ این درخواست را کنار بگذار';
 
 async function expectAccessible(page: Page): Promise<void> {
   const { violations } = await new AxeBuilder({ page }).withTags(WCAG_2_1_AA).analyze();
@@ -231,25 +232,34 @@ test.describe('the owner’s side of a tender, live (EXP-004)', () => {
       expect((await held(cast, tender.id)).status).toBe('CLOSED');
 
       // The second person. audit-service may still be catching up with the
-      // receipt: the page cannot confirm, and the same request is sent again
-      // under its key until it can.
+      // receipt, so the page may not be able to confirm the opening. An opening
+      // whose answer is lost is never sent again (the service keeps no result
+      // under its key): the person looks, sets it aside, and opens anew from a
+      // fresh form.
       const other = approver.page;
+      const OPEN = 'گشایش پیشنهادها (نفر دوم)';
       await other.goto(ownPage(tender.id));
-      await send(other, 'گشایش پیشنهادها (نفر دوم)');
-      const done = other.getByText('پیشنهادها گشوده شدند و مناقصه در حال ارزیابی است.');
+      await send(other, OPEN);
       await expect
         .poll(
           async () => {
-            if (await done.isVisible()) return true;
-            const retry = other.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' });
+            if ((await held(cast, tender.id)).status === 'EVALUATING') return true;
             if (await other.getByText(UNCONFIRMED).isVisible()) {
-              if (await retry.isEnabled()) await retry.click();
+              await expect(
+                other.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' }),
+              ).toHaveCount(0);
+              await other.getByRole('link', { name: SET_ASIDE }).click();
+              await other.waitForLoadState();
+              // The lost one may have opened them after all: then there is no form to send.
+              if ((await held(cast, tender.id)).status === 'EVALUATING') return true;
+              await send(other, OPEN);
             }
             return false;
           },
           { timeout: 90_000, intervals: [3000] },
         )
         .toBe(true);
+      await other.goto(ownPage(tender.id));
       expect((await held(cast, tender.id)).status).toBe('EVALUATING');
       const opened = other.getByRole('region', { name: 'پیشنهادهای رسیده' });
       await expect(opened).toContainText('۴٬۲۰۰٬۰۰۰٬۰۰۰');

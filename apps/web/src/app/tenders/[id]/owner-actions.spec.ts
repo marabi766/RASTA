@@ -7,7 +7,14 @@ import type { WebSession } from '@/server/session';
 import { readFlash } from '@/server/flash';
 import { mintOwnerStamp, type OwnerTarget } from '@/server/tender-owner-replay';
 import { REPLAY_FIELD } from '@/lib/form-fields';
-import { OPENING_REFUSAL_TEXT, OWNER_CODE_TEXT, REASON_FIELD } from '@/lib/tender-owner-fields';
+import {
+  OPENING_REFUSAL_TEXT,
+  OWNER_CODE_TEXT,
+  REASON_FIELD,
+  REPEATABLE_OWNER_COMMANDS,
+  UNREPEATABLE_OWNER_COMMANDS,
+  type OwnerCommand,
+} from '@/lib/tender-owner-fields';
 import { APPROVAL_ID, OWNER, PENDING_REQUEST, TENDER_ID } from '@/test/owner-fixtures';
 
 import {
@@ -266,11 +273,25 @@ describe('unconfirmed', () => {
     });
   });
 
-  it('a proposal or its withdrawal, unconfirmed, is view-only from the start and never sent again', async () => {
-    for (const command of ['PROPOSE_OPENING', 'WITHDRAW_PROPOSAL'] as const) {
+  it('every command the service keeps no result for, unconfirmed, is view-only from the start and never sent again', async () => {
+    const targets: Record<OwnerCommand, OwnerTarget> = {
+      PUBLISH,
+      PROPOSE_OPENING: { ...OPEN, command: 'PROPOSE_OPENING' },
+      OPEN_BIDS: OPEN,
+      WITHDRAW_PROPOSAL: { ...OPEN, command: 'WITHDRAW_PROPOSAL' },
+      GRANT: { ...REJECT, command: 'GRANT' },
+      REJECT,
+    };
+    expect([...UNREPEATABLE_OWNER_COMMANDS]).toEqual([
+      'PUBLISH',
+      'PROPOSE_OPENING',
+      'OPEN_BIDS',
+      'WITHDRAW_PROPOSAL',
+    ]);
+    for (const command of UNREPEATABLE_OWNER_COMMANDS) {
       sent = [];
       answer = () => problem(504, 'UPSTREAM_TIMEOUT');
-      const data = form({}, { ...OPEN, command });
+      const data = form({}, targets[command]);
       const first = (await send(data)) as UnconfirmedOwnerCommand;
       expect(first).toMatchObject({
         kind: 'UNCONFIRMED',
@@ -286,9 +307,22 @@ describe('unconfirmed', () => {
     }
   });
 
-  it('the opening itself, unconfirmed, may be sent again: it is done once', async () => {
+  it('a lost publication rejected meanwhile is never sent again: no second approval round', async () => {
+    // The first send's answer is lost; the request it opened is then rejected.
     answer = () => problem(504, 'UPSTREAM_TIMEOUT');
-    const data = form({}, OPEN);
+    const data = form({}, PUBLISH);
+    const lost = (await send(data)) as UnconfirmedOwnerCommand;
+    expect(lost).toMatchObject({ command: 'PUBLISH', viewOnly: true, replay: null });
+    // Were it sent again, the same key and version would open a new round (202).
+    answer = () => json(202, { ...PENDING_REQUEST, id: 'TAR_2', round: 2 });
+    expect(await send(data, lost)).toEqual(lost);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('a decision, unconfirmed, may be sent again: a compare-and-set on its very step', async () => {
+    expect([...REPEATABLE_OWNER_COMMANDS]).toEqual(['GRANT', 'REJECT']);
+    answer = () => problem(504, 'UPSTREAM_TIMEOUT');
+    const data = form({}, { ...REJECT, command: 'GRANT' });
     const first = (await send(data)) as UnconfirmedOwnerCommand;
     expect(first.viewOnly).toBeUndefined();
     await send(data, first);

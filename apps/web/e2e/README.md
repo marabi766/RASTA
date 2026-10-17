@@ -149,9 +149,10 @@ and is offered no grant (only the rejection, being the step's authority too); th
 draft without criteria is refused with every reason in fixed words and no approval round opens.
 A tender published with a one-minute window gets a contractor's bid through the gateway; once
 construction-service closes it at the deadline (the test polls its status), the author proposes
-the opening, is refused opening it alone (`SECOND_PERSON_REQUIRED`), and the approver opens it —
-resending the same request while audit-service catches up with the receipt — after which the
-bid's price is shown. ORG-DEH-0002's administrator sees the owner's tender as a missing id, in
+the opening, is refused opening it alone (`SECOND_PERSON_REQUIRED`), and the approver opens it — an
+opening whose answer is lost (audit-service still catching up) is never re-sent, so the test sets
+it aside and opens again from a fresh form — after which the bid's price is shown.
+ORG-DEH-0002's administrator sees the owner's tender as a missing id, in
 the page and on every owner route through the gateway.
 
 - It needs `WEB_LIVE_STACK_E2E_TENDERS=true` and, besides what the bid scenarios need,

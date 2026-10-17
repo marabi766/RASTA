@@ -9,6 +9,8 @@ import {
   PUBLICATION_REFUSAL_TEXT,
   REJECT_REASON_MAX,
   REJECT_REASON_MIN,
+  REPEATABLE_OWNER_COMMANDS,
+  UNREPEATABLE_OWNER_COMMANDS,
   requestStatusLabel,
   stepStatusLabel,
 } from '@/lib/tender-owner-fields';
@@ -290,6 +292,39 @@ describe('an opener who may not read the tender', () => {
     for (const body of [listBids, guarded, method(openServiceTree, 'proposeOpening')]) {
       expect(body).not.toContain('assertCanRead');
     }
+  });
+});
+
+describe('which commands may be sent again after a lost answer (PR 345 reviews 1 and 2)', () => {
+  it('none of the owner’s commands keeps its result under its Idempotency-Key — the gateway only requires the header', () => {
+    for (const source of [publicationService, squash(openService)!, tenderApprovals]) {
+      expect(source).not.toContain('IdempotencyStore');
+      expect(source).not.toContain('idempotency.run(');
+    }
+    for (const controller of [publication, opening, approvals]) {
+      expect(squash(controller.getText())).not.toContain("@Headers('idempotency-key')");
+    }
+    // The publication a re-send would make: a rejected round is ended, so the same version asks anew.
+    expect(approvalGate).toContain(
+      "kind:'REQUESTED',request:awaitthis.open(tx,input),created:true,",
+    );
+    expect([...UNREPEATABLE_OWNER_COMMANDS]).toEqual([
+      'PUBLISH',
+      'PROPOSE_OPENING',
+      'OPEN_BIDS',
+      'WITHDRAW_PROPOSAL',
+    ]);
+  });
+
+  it('a decision is a compare-and-set on its very step, so its re-send acts only on the step as its sender saw it', () => {
+    expect(tenderApprovals).toContain(
+      "if(approval.version!==dto.expectedVersion)throwthis.conflict('Approval',step.id);",
+    );
+    expect(tenderApprovals).toContain(
+      "constmatched=awaitthis.approvals.transitionApproval(tx,{organizationId,approvalId:step.id,from:'PENDING',expectedVersion:dto.expectedVersion,",
+    );
+    expect(tenderApprovals).toContain("if(matched===0)throwthis.conflict('Approval',step.id);");
+    expect([...REPEATABLE_OWNER_COMMANDS]).toEqual(['GRANT', 'REJECT']);
   });
 });
 

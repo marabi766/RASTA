@@ -26,18 +26,38 @@ export function isOwnerCommand(value: unknown): value is OwnerCommand {
 }
 
 /**
- * The commands whose unconfirmed outcome is never sent again (PR 345 review
- * 1, finding 1). Neither names the proposal it acts on: a withdrawal sent again
- * clears whatever proposal stands when it arrives — a newer one made in
- * another tab included — and a proposal sent again may stand up one its author
- * has since withdrawn. Until construction-service binds the withdrawal to a
- * proposal, an unknown outcome is view-only. Publishing and deciding carry a
- * version; the opening is done once (`alreadyOpened`): those stay retryable.
+ * The commands whose unconfirmed outcome is never sent again (PR 345 reviews 1
+ * and 2). construction-service keeps no result under the `Idempotency-Key` of
+ * any of them (`IdempotencyStore.run` is not on their path; the gateway only
+ * requires the header), so a re-send is a new request against the tender as it
+ * is when it arrives:
+ *
+ * - **publish** — if the lost request was rejected meanwhile, the same version
+ *   opens a new approval round (`TenderApprovalGate.resolve`);
+ * - **propose / withdraw the proposal** — neither names the proposal: a
+ *   withdrawal clears whatever proposal stands, a newer one included, and a
+ *   proposal may stand up one its author has since withdrawn;
+ * - **open** — approves whichever proposal stands when it arrives, not
+ *   necessarily the one its sender saw.
+ *
+ * Until the backend keeps command results by key, an unknown outcome of these
+ * is view-only. A **decision** stays retryable: it is a compare-and-set on the
+ * very step it decides (`expectedVersion` checked and the transition
+ * conditioned on it), so a re-send takes effect only on the step exactly as
+ * its sender saw it, and is refused once anything — the first send included —
+ * has moved it.
  */
 export const UNREPEATABLE_OWNER_COMMANDS: readonly OwnerCommand[] = [
+  'PUBLISH',
   'PROPOSE_OPENING',
+  'OPEN_BIDS',
   'WITHDRAW_PROPOSAL',
 ];
+
+/** The commands a lost answer may be sent again for, under the same key: the rest. */
+export const REPEATABLE_OWNER_COMMANDS: readonly OwnerCommand[] = OWNER_COMMANDS.filter(
+  (command) => !UNREPEATABLE_OWNER_COMMANDS.includes(command),
+);
 
 export const OWNER_COMMAND_LABELS: Readonly<Record<OwnerCommand, string>> = {
   PUBLISH: 'انتشار مناقصه',
