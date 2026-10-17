@@ -211,6 +211,31 @@ const schema = z.object({
     .max(30 * 60)
     .default(10 * 60),
 
+  /**
+   * How long contract-service keeps an idempotency record, in hours — the
+   * window in which a statement command re-sent under its original key is a
+   * replay rather than a new command (`server/statement-replay.ts`). A draft
+   * run again under a fresh record is a **second statement**, so past this
+   * window the portal never re-sends one.
+   *
+   * This **mirrors** contract-service's `CONTRACT_IDEMPOTENCY_TTL_HOURS`
+   * (same bounds, 1..168) and must be changed together with it, or set lower.
+   * The default is that setting's floor, as for economic-service's above.
+   */
+  WEB_CONTRACT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+
+  /**
+   * How much earlier than that retention the portal stops re-sending a
+   * statement command, in seconds: room for the request to reach
+   * contract-service. Same bounds as the dispute margin.
+   */
+  WEB_CONTRACT_REPLAY_MARGIN_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .max(30 * 60)
+    .default(10 * 60),
+
   WEB_COOKIE_SECURE: z
     .enum(['true', 'false'])
     .default('true')

@@ -149,3 +149,36 @@ export function tokenWriteRoles(accessToken: string): readonly string[] | null {
   const authority = tokenAuthority(accessToken);
   return authority?.organizationId ? authority.roles : null;
 }
+
+/**
+ * What else a command's separation-of-duties checks read from the token, as
+ * the platform's `AuthGuard` puts it in the request context: the
+ * organizations the person is a member of (`org_ids`, deduplicated, blanks
+ * dropped — `organizationIds`), and whether it names a platform user
+ * (`rasta_uid`), which a route marked `@RequirePlatformUserId` demands.
+ * Not verified here; it only chooses what to draw. Null when the token cannot
+ * be read.
+ */
+export interface TokenPerson {
+  readonly memberships: readonly string[];
+  readonly platformUser: boolean;
+}
+
+export function tokenPerson(accessToken: string): TokenPerson | null {
+  const payload = accessToken.split('.')[1];
+  if (!payload) return null;
+  let claims: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    claims = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const listed = Array.isArray(claims['org_ids']) ? (claims['org_ids'] as unknown[]) : [];
+  const memberships = [
+    ...new Set(listed.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)),
+  ];
+  const uid = claims['rasta_uid'];
+  return { memberships, platformUser: typeof uid === 'string' && uid.length > 0 };
+}
