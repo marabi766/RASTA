@@ -137,7 +137,15 @@ export class DemandRepository {
     });
   }
 
-  /** The demands still SUBMITTED in a window, in id order. */
+  /**
+   * The demands still SUBMITTED in a window, in no particular order (`demandIdsDigest` sorts).
+   *
+   * Unordered on purpose (PR-327 r3 F1): asked for id order, the planner met it with
+   * `ux_demand_request_org_id` (organization, id) and filtered the window and the status — reading
+   * every demand the organization ever registered, withdrawn and ended ones too, under the window's
+   * lock. Without an order, the equality on all three columns of `ix_demand_request_aggregation`
+   * is the cheapest range: as many entries as the window holds live.
+   */
   async liveDemandIds(tx: ExtendedPrismaClient, window: DemandAggregation): Promise<string[]> {
     const rows = await tx.demandRequest.findMany({
       where: {
@@ -146,7 +154,6 @@ export class DemandRepository {
         status: 'SUBMITTED',
       },
       select: { id: true },
-      orderBy: { id: 'asc' },
     });
     return rows.map((row) => row.id);
   }
