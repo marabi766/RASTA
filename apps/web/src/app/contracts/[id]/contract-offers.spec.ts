@@ -15,6 +15,8 @@ import {
   MILESTONE_ID,
   PROPOSED,
   SIGNED,
+  SIGNING_POLICY,
+  STRANGER,
   policyView,
   tokenFor,
 } from '@/test/contract-command-fixtures';
@@ -66,7 +68,7 @@ const milestones = (items = [MILESTONE]): ReadResult<MilestonePage> =>
   ok({ items, nextCursor: null, hasMore: false });
 
 let policyReads = 0;
-let policyAnswer: () => Response;
+let policyAnswer: (url: string) => Response;
 
 beforeEach(() => {
   policyReads = 0;
@@ -75,9 +77,9 @@ beforeEach(() => {
       status: 200,
       headers: { 'content-type': 'application/json', 'x-correlation-id': 'corr' },
     });
-  jest.spyOn(globalThis, 'fetch').mockImplementation((async () => {
+  jest.spyOn(globalThis, 'fetch').mockImplementation((async (url: string) => {
     policyReads += 1;
-    return policyAnswer();
+    return policyAnswer(url);
   }) as unknown as typeof fetch);
 });
 
@@ -144,6 +146,36 @@ describe('a draft', () => {
     const { offers } = await offersFor(tokenFor(EMPLOYER, ['ORGANIZATION_ADMIN']));
     expect(commandsOf(offers.contract)).toEqual(['CANCEL']);
     expect(offers.signingNote).toBe('UNREAD');
+  });
+
+  it('the governing policy beyond the first page still offers the signature (review r1, 1)', async () => {
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json', 'x-correlation-id': 'corr' },
+      });
+    const written = policyView({ ...SIGNING_POLICY, id: 'POL_WRITTEN', organizationId: STRANGER });
+    policyAnswer = (url) =>
+      new URL(url).searchParams.get('cursor') === 'page-2'
+        ? json({ items: [policyView()], nextCursor: null, hasMore: false })
+        : json({ items: [written], nextCursor: 'page-2', hasMore: true });
+    const { offers } = await offersFor(tokenFor(EMPLOYER, ['ORGANIZATION_ADMIN']));
+    expect(commandsOf(offers.contract)).toEqual(['SIGN', 'CANCEL']);
+    expect(offers.signingNote).toBeNull();
+    expect(policyReads).toBe(2);
+  });
+
+  it('a list too long to read whole is no signature, and says so — never a silently missing form', async () => {
+    policyAnswer = (url) => {
+      const n = Number(new URL(url).searchParams.get('cursor') ?? '0');
+      return new Response(JSON.stringify({ items: [], nextCursor: String(n + 1), hasMore: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json', 'x-correlation-id': 'c' },
+      });
+    };
+    const { offers } = await offersFor(tokenFor(EMPLOYER, ['ORGANIZATION_ADMIN']));
+    expect(commandsOf(offers.contract)).toEqual(['CANCEL']);
+    expect(offers.signingNote).toBe('INCOMPLETE');
   });
 
   it('the contractor: its signature only, and the policy is never read', async () => {

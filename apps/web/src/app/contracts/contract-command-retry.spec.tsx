@@ -36,6 +36,10 @@ import type { ContractFormState } from './[id]/contract-form-state';
  *   another person's page removes it.
  */
 
+// Some tests here render forms and run jest-axe; give each room on a loaded runner, as
+// `statements.spec.tsx` does (#341).
+jest.setTimeout(20_000);
+
 const action = jest.fn<Promise<ContractFormState>, [ContractScope, ContractFormState, FormData]>();
 jest.mock('./[id]/contract-actions', () => ({
   submitContractCommand: (s: ContractScope, p: ContractFormState, f: FormData) => action(s, p, f),

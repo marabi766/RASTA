@@ -150,6 +150,7 @@ describe('which forms are drawn', () => {
   it.each<[Exclude<SigningNote, null>, RegExp]>([
     ['NO_POLICY', /هیچ‌کس از سوی کارفرما امضا نمی‌کند/],
     ['UNREAD', /سیاست امضای کارفرما خوانده نشد/],
+    ['INCOMPLETE', /فهرست سیاست‌های امضای این سازمان کامل خوانده نشد/],
   ])(
     'an employer nobody may sign for yet is told why, and offered no signature (%s)',
     async (note, text) => {

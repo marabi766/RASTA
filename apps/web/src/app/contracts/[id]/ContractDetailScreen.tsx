@@ -432,11 +432,13 @@ export interface ContractDetailScreenProps {
   readonly notice?: ContractCommand | null;
 }
 
-const SIGNING_NOTES: Readonly<Record<'NO_POLICY' | 'UNREAD', string>> = {
+const SIGNING_NOTES: Readonly<Record<'NO_POLICY' | 'UNREAD' | 'INCOMPLETE', string>> = {
   NO_POLICY:
     'برای کارفرما سیاست امضای برقراری نیست؛ تا وقتی سیاستی برقرار نشود، هیچ‌کس از سوی کارفرما امضا نمی‌کند. سامانه هرگز پیش‌فرض اختیار نمی‌دهد.',
   UNREAD:
     'سیاست امضای کارفرما خوانده نشد، پس فرم امضا عرضه نمی‌شود. کمی بعد صفحه را دوباره باز کنید.',
+  INCOMPLETE:
+    'فهرست سیاست‌های امضای این سازمان کامل خوانده نشد، پس معلوم نیست چه کسی از سوی کارفرما امضا می‌کند و فرم امضا عرضه نمی‌شود.',
 };
 
 export function ContractDetailScreen({

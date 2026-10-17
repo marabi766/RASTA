@@ -31,6 +31,7 @@ import {
   canProposeAmendment,
   commandRequest,
   contractCallerOf,
+  MAX_POLICY_PAGES,
   fetchSigningPolicy,
   issueContractCommand,
   mightSignAsEmployer,
@@ -365,7 +366,7 @@ const SESSION = {
 } satisfies WebSession;
 
 let calls: { url: string; method: string; body: unknown }[] = [];
-let reply: () => Response;
+let reply: (url: string) => Response;
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -391,7 +392,7 @@ beforeEach(() => {
       method: init.method ?? 'GET',
       body: init.body ? JSON.parse(String(init.body)) : null,
     });
-    return reply();
+    return reply(url);
   }) as unknown as typeof fetch);
 });
 
@@ -414,11 +415,61 @@ describe('the signing policy in force', () => {
     );
   });
 
-  it('none in force is an answer; one not on a page that has more is not', async () => {
+  it('none in force is an answer only once the last page is read', async () => {
     reply = () => page([]);
     expect(await fetchSigningPolicy(SESSION, EMPLOYER)).toEqual({ kind: 'OK', data: null });
-    reply = () => page([policyView({ ...SIGNING_POLICY, organizationId: STRANGER })], true);
-    expect((await fetchSigningPolicy(SESSION, EMPLOYER)).kind).toBe('MALFORMED');
+  });
+
+  /** Page n (from 1) of a list whose governing policy, if any, is on page `governingOn`. */
+  const pages =
+    (count: number, governingOn: number | null) =>
+    (url: string): Response => {
+      const cursor = new URL(url).searchParams.get('cursor');
+      const n = cursor === null ? 1 : Number(cursor.replace('page-', ''));
+      const written = Array.from({ length: 3 }, (_, i) =>
+        policyView({ ...SIGNING_POLICY, id: `POL_W_${n}_${i}`, organizationId: STRANGER }),
+      );
+      const items = n === governingOn ? [...written, policyView()] : written;
+      const more = n < count;
+      return json(200, { items, nextCursor: more ? `page-${n + 1}` : null, hasMore: more });
+    };
+
+  it('follows the pages to the policy that governs the employer, beyond the first (review r1, 1)', async () => {
+    reply = pages(5, 3);
+    expect(await fetchSigningPolicy(SESSION, EMPLOYER)).toEqual({
+      kind: 'OK',
+      data: SIGNING_POLICY,
+    });
+    expect(calls.map((call) => new URL(call.url).searchParams.get('cursor'))).toEqual([
+      null,
+      'page-2',
+      'page-3',
+    ]);
+  });
+
+  it('says none only after every page; a list longer than the bound is incomplete, never none', async () => {
+    reply = pages(4, null);
+    expect(await fetchSigningPolicy(SESSION, EMPLOYER)).toEqual({ kind: 'OK', data: null });
+    expect(calls).toHaveLength(4);
+    calls = [];
+    reply = pages(MAX_POLICY_PAGES + 1, MAX_POLICY_PAGES + 1);
+    expect((await fetchSigningPolicy(SESSION, EMPLOYER)).kind).toBe('INCOMPLETE');
+    expect(calls).toHaveLength(MAX_POLICY_PAGES);
+  });
+
+  it('more with no cursor, or a cursor back to a page already read, is incomplete', async () => {
+    reply = () => json(200, { items: [], nextCursor: null, hasMore: true });
+    expect((await fetchSigningPolicy(SESSION, EMPLOYER)).kind).toBe('INCOMPLETE');
+    reply = () => json(200, { items: [], nextCursor: 'same', hasMore: true });
+    expect((await fetchSigningPolicy(SESSION, EMPLOYER)).kind).toBe('INCOMPLETE');
+  });
+
+  it('a later page that fails fails the read', async () => {
+    reply = (url) =>
+      new URL(url).searchParams.get('cursor') === null
+        ? json(200, { items: [], nextCursor: 'page-2', hasMore: true })
+        : refusal(503, 'SERVICE_UNAVAILABLE');
+    expect((await fetchSigningPolicy(SESSION, EMPLOYER)).kind).toBe('UNAVAILABLE');
   });
 
   it('a refusal or a failure is not an answer', async () => {

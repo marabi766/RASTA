@@ -45,7 +45,7 @@ import type { ContractFormContext, OfferedContractCommand } from './ContractComm
  */
 
 /** Why the employer is offered no signature, when the page can say. */
-export type SigningNote = 'NO_POLICY' | 'UNREAD' | null;
+export type SigningNote = 'NO_POLICY' | 'UNREAD' | 'INCOMPLETE' | null;
 
 export interface ContractCommandOffers {
   readonly context: ContractFormContext;
@@ -123,7 +123,14 @@ export async function contractCommandOffers(
   if (employerMaySignSomething(caller, contract, amendments)) {
     const read = await fetchSigningPolicy(session, contract.organizationId);
     authority = read.kind === 'OK' ? { policy: read.data } : 'UNREAD';
-    signingNote = read.kind !== 'OK' ? 'UNREAD' : read.data === null ? 'NO_POLICY' : null;
+    signingNote =
+      read.kind === 'INCOMPLETE'
+        ? 'INCOMPLETE'
+        : read.kind !== 'OK'
+          ? 'UNREAD'
+          : read.data === null
+            ? 'NO_POLICY'
+            : null;
   }
 
   const contractOffers: OfferedContractCommand[] = [];

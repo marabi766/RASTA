@@ -112,43 +112,74 @@ const policyPageSchema = z.object({
   hasMore: z.boolean(),
 });
 
-/** The service's page ceiling (`MAX_PAGE_SIZE`): one page holds every policy of a slot. */
+/** The service's page ceiling (`MAX_PAGE_SIZE`). */
 const POLICIES_PER_PAGE = 200;
+
+/**
+ * How many pages the read follows before it gives up: the list also holds
+ * every policy the organization **wrote** for others (a union writes for the
+ * organizations beneath it), so the one that governs it can be on any page.
+ * Ten pages are two thousand active signing policies; past that the read is
+ * incomplete, and an incomplete read is unknown, never "none".
+ */
+export const MAX_POLICY_PAGES = 10;
+
+/**
+ * What the page knows of the signing policy: a `ReadResult`, or `INCOMPLETE`
+ * — the pages ran past {@link MAX_POLICY_PAGES}, or a page's cursor led back
+ * to one already read, before the governing policy or the last page.
+ */
+export type SigningPolicyRead =
+  | ReadResult<SigningPolicy | null>
+  | { readonly kind: 'INCOMPLETE'; readonly correlationId: string };
 
 /**
  * The `contract.signature` policy in force for `employerId`: `OK` with it, or
  * with `null` when none is in force — then nobody signs for the employer
- * (`SIGNATURE_POLICY_REQUIRED`). The list also returns policies the
- * organization **wrote** for others, so it is filtered to the one that governs
- * it. Anything but a clean answer is not an answer: no form is drawn on it.
+ * (`SIGNATURE_POLICY_REQUIRED`). The list is followed page by page
+ * (`nextCursor`) until the policy that governs the employer is found or the
+ * last page is read: `null` is said only once every page has been seen.
+ * Anything but a clean, complete answer is not an answer, and no form is drawn
+ * on it.
  */
 export async function fetchSigningPolicy(
   session: WebSession,
   employerId: string,
-): Promise<ReadResult<SigningPolicy | null>> {
-  const search = new URLSearchParams({
-    workflowKey: SIGNATURE_WORKFLOW,
-    status: 'ACTIVE',
-    limit: String(POLICIES_PER_PAGE),
-  });
+): Promise<SigningPolicyRead> {
+  const seen = new Set<string>();
+  let cursor: string | null = null;
+  let correlationId = '';
   try {
-    const response = await callGateway<unknown>({
-      baseUrl: webServerEnv().API_GATEWAY_URL,
-      path: `/v1/contract-approval-policies?${search.toString()}`,
-      accessToken: session.accessToken,
-    });
-    const parsed = policyPageSchema.safeParse(response.data);
-    if (!parsed.success) return { kind: 'MALFORMED', correlationId: response.correlationId };
-    const governing = parsed.data.items.find(
-      (policy) =>
-        policy.organizationId === employerId &&
-        policy.workflowKey === SIGNATURE_WORKFLOW &&
-        policy.status === 'ACTIVE',
-    );
-    if (governing) return { kind: 'OK', data: governing };
-    // Not on a page that has more: unknown, not absent.
-    if (parsed.data.hasMore) return { kind: 'MALFORMED', correlationId: response.correlationId };
-    return { kind: 'OK', data: null };
+    for (let page = 0; page < MAX_POLICY_PAGES; page += 1) {
+      const search = new URLSearchParams({
+        workflowKey: SIGNATURE_WORKFLOW,
+        status: 'ACTIVE',
+        limit: String(POLICIES_PER_PAGE),
+      });
+      if (cursor !== null) search.set('cursor', cursor);
+      const response = await callGateway<unknown>({
+        baseUrl: webServerEnv().API_GATEWAY_URL,
+        path: `/v1/contract-approval-policies?${search.toString()}`,
+        accessToken: session.accessToken,
+      });
+      correlationId = response.correlationId;
+      const parsed = policyPageSchema.safeParse(response.data);
+      if (!parsed.success) return { kind: 'MALFORMED', correlationId };
+      const governing = parsed.data.items.find(
+        (policy) =>
+          policy.organizationId === employerId &&
+          policy.workflowKey === SIGNATURE_WORKFLOW &&
+          policy.status === 'ACTIVE',
+      );
+      if (governing) return { kind: 'OK', data: governing };
+      if (!parsed.data.hasMore) return { kind: 'OK', data: null };
+      const next = parsed.data.nextCursor;
+      // More, but no way to it — or back to a page already read: unknown.
+      if (next === null || seen.has(next)) return { kind: 'INCOMPLETE', correlationId };
+      seen.add(next);
+      cursor = next;
+    }
+    return { kind: 'INCOMPLETE', correlationId };
   } catch (error) {
     if (error instanceof GatewayRequestError) {
       if (error.status === 403) return { kind: 'FORBIDDEN' };

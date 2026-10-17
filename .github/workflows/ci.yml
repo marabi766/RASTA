@@ -580,21 +580,19 @@ jobs:
           DATABASE_URL_CONTRACT: postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
 
-      - name: Load the contracts the statement and contract command scenarios act on
+      - name: Load the signed contract the statement scenarios act on
         # contract-service has no route that creates a contract (one is drafted
-        # only from TENDER_AWARDED, ADR-068 § 3), so the statement scenarios
-        # start from a SIGNED contract and the two statement chains in force, and
-        # the contract command scenarios from drafts nobody has signed (signing,
-        # cancelling, amending and planning are then done in the browser) —
-        # written as contract-service's own runtime role through every guard its
-        # database keeps. Each file says why, and what each row is; the second
-        # signs under the first's signing policy.
+        # only from TENDER_AWARDED, ADR-068 § 3), so the scenarios start from a
+        # SIGNED contract and the two statement chains in force, written as
+        # contract-service's own runtime role through every guard its database
+        # keeps. The file says why, and what each row is. The contract command
+        # scenarios write a fresh contract per test the same way
+        # (`e2e/contract-fixture.ts`), signing under this file's policy.
         env:
           PGPASSWORD: rasta_contract_dev_password
         run: >-
           psql -v ON_ERROR_STOP=1 -h localhost -U rasta_contract -d rasta_contract
           -f apps/web/e2e/fixtures/contract-statements.sql
-          -f apps/web/e2e/fixtures/contract-commands.sql
 
       - name: Seed the live users and both tenants' machines, drivers and schedules
         # operator.one is the same platform user in identity, Keycloak and
@@ -990,6 +988,10 @@ jobs:
           # identity-service and give each a password through Keycloak's admin
           # API, with this run's KEYCLOAK_ADMIN_PASSWORD (job environment).
           WEB_LIVE_STACK_E2E_CONTRACTS: 'true'
+          # The contract command scenarios write their own contract per test, as
+          # contract-service's runtime role (`e2e/contract-fixture.ts`), so a
+          # retry runs against new state (PR 342 review 1, finding 2).
+          WEB_E2E_CONTRACT_DATABASE_URL: postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract
           WEB_E2E_FLEET_URL: http://localhost:3104
           WEB_E2E_MAINTENANCE_URL: http://localhost:3105
           API_GATEWAY_URL: http://localhost:3000

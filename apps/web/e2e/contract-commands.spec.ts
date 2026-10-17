@@ -10,6 +10,7 @@ import {
   type LivePersona,
   type ProvisionedPerson,
 } from './live-session';
+import { draftContract, signedContract } from './contract-fixture';
 import { provisionPerson } from './provisioned-people';
 
 /**
@@ -18,13 +19,15 @@ import { provisionPerson } from './provisioned-people';
  *
  * ## The data
  *
- * Three **drafts nobody has signed** (`e2e/fixtures/contract-commands.sql`,
- * which says why they are rows): CTR_E2E_SIGNING and CTR_E2E_CANCEL, where
- * ORG-DEH-0001 employs ORG-E2E-CONTRACTOR, and CTR_E2E_UNGOVERNED, where
- * ORG-DEH-0002 does. The employer ORG-DEH-0001 signs under the
- * `contract.signature` policy of `contract-statements.sql` (its
- * ORGANIZATION_ADMIN); ORG-DEH-0002 has none in force. Everything else is done
- * here, **in the browser**, through the portal's own forms.
+ * Every test writes **its own contract** first (`contract-fixture.ts`, which
+ * says why they are rows): a draft nobody has signed, or — for the amendment and
+ * milestone scenarios — one both sides have signed, with ids chosen for that
+ * attempt. A retry therefore runs against new state, never against what an
+ * earlier attempt signed or cancelled (PR 342 review 1, finding 2). ORG-DEH-0001
+ * employs ORG-E2E-CONTRACTOR and signs under the `contract.signature` policy of
+ * `contract-statements.sql` (its ORGANIZATION_ADMIN); ORG-DEH-0002 has none in
+ * force. Everything after the contract is written is done **in the browser**,
+ * through the portal's own forms.
  *
  * ## Who does what
  *
@@ -40,20 +43,23 @@ import { provisionPerson } from './provisioned-people';
  *   for its organization (no policy in force), and the page says so; the
  *   other organization's contract is the same absence as an id that does not
  *   exist.
- *
- * The contracts are fixed rows, so the scenario runs once per database (the CI
- * job's is fresh); a second local run finds them already signed.
  */
 
-const SIGNING = 'CTR_E2E_SIGNING';
-const CANCELLING = 'CTR_E2E_CANCEL';
-const UNGOVERNED = 'CTR_E2E_UNGOVERNED';
+const EMPLOYER = 'ORG-DEH-0001';
+const OTHER_EMPLOYER = 'ORG-DEH-0002';
 const CONTRACTOR_ORGANIZATION = 'ORG-E2E-CONTRACTOR';
 const MISSING = 'CTR_E2E_COMMANDS_MISSING';
 const RUN = randomUUID().slice(0, 8);
 const REASON = `افزایش محدودهٔ کار — آزمون ${RUN}`;
 const MILESTONE = `تحویل فاز یک — ${RUN}`;
 const MILESTONE_CHANGED = `تحویل فاز یک، بازبینی‌شده — ${RUN}`;
+
+/** Ours: ORG-DEH-0001 employing the e2e contractor, for 500,000,000 rials. */
+const OURS = {
+  employer: EMPLOYER,
+  contractor: CONTRACTOR_ORGANIZATION,
+  amountMinor: '500000000',
+} as const;
 
 const WCAG_2_1_AA = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'];
 
@@ -94,12 +100,13 @@ if (process.env.CI && process.env.WEB_LIVE_STACK_E2E_CONTRACTS !== 'true') {
   });
 }
 
-test.describe.serial('a contract’s own commands, live (EXP-004)', () => {
+test.describe('a contract’s own commands, live (EXP-004)', () => {
   test.skip(
     process.env.WEB_LIVE_STACK_E2E_CONTRACTS !== 'true',
-    'needs contract-service with e2e/fixtures/contract-statements.sql and contract-commands.sql ' +
-      'loaded, alongside the usual live stack — set WEB_LIVE_STACK_E2E_CONTRACTS=true locally ' +
-      'after starting it (the "Portal in a browser" CI job always does)',
+    'needs contract-service with e2e/fixtures/contract-statements.sql loaded and ' +
+      'WEB_E2E_CONTRACT_DATABASE_URL set, alongside the usual live stack — set ' +
+      'WEB_LIVE_STACK_E2E_CONTRACTS=true locally after starting it (the "Portal in a browser" ' +
+      'CI job always does)',
   );
   test.setTimeout(120_000);
 
@@ -110,7 +117,9 @@ test.describe.serial('a contract’s own commands, live (EXP-004)', () => {
     const systemAdmin = await liveAccessToken('systemAdmin');
     contractor = await provisionPerson(
       systemAdmin,
-      `e2e.commands.${RUN}.contractor`,
+      // Unique per hook run, not per worker: in a parallel file the hook can run
+      // again in the same worker (a retry, a repeat), and a username is taken once.
+      `e2e.commands.${RUN}.${randomUUID().slice(0, 8)}.contractor`,
       CONTRACTOR_ORGANIZATION,
       ['CONTRACTOR'],
     );
@@ -119,16 +128,18 @@ test.describe.serial('a contract’s own commands, live (EXP-004)', () => {
   test('another employer: its own draft offers no signature and says why; ours is absent', async ({
     browser,
   }) => {
+    const ungoverned = draftContract({ ...OURS, employer: OTHER_EMPLOYER });
+    const ours = draftContract(OURS);
     const { page, close } = await as(browser, 'orgAdminB');
     try {
-      await page.goto(`/contracts/${UNGOVERNED}`);
+      await page.goto(`/contracts/${ungoverned}`);
       await expect(page.getByText(NO_POLICY)).toBeVisible();
       await expect(page.getByRole('form', { name: /امضای قرارداد/ })).toHaveCount(0);
       // Cancelling is not a signature: its administrator may still end the draft.
       await expect(page.getByRole('form', { name: 'لغو پیش‌نویس قرارداد' })).toBeVisible();
       await expectAccessible(page);
 
-      await page.goto(`/contracts/${SIGNING}`);
+      await page.goto(`/contracts/${ours}`);
       await expect(page.getByText('این قرارداد پیدا نشد')).toBeVisible();
       const theirs = await mainText(page);
       await page.goto(`/contracts/${MISSING}`);
@@ -141,14 +152,15 @@ test.describe.serial('a contract’s own commands, live (EXP-004)', () => {
   test('a cancel form drawn before the contractor signed is refused once it has, in fixed words', async ({
     browser,
   }) => {
+    const contract = draftContract(OURS);
     const employer = await as(browser, 'orgAdmin');
     const theContractor = await as(browser, contractor);
     try {
-      await employer.page.goto(`/contracts/${CANCELLING}`);
+      await employer.page.goto(`/contracts/${contract}`);
       const cancel = employer.page.getByRole('form', { name: 'لغو پیش‌نویس قرارداد' });
       await expect(cancel).toBeVisible();
 
-      await theContractor.page.goto(`/contracts/${CANCELLING}`);
+      await theContractor.page.goto(`/contracts/${contract}`);
       await expect(
         theContractor.page.getByRole('form', { name: 'لغو پیش‌نویس قرارداد' }),
       ).toHaveCount(0);
@@ -177,9 +189,10 @@ test.describe.serial('a contract’s own commands, live (EXP-004)', () => {
   test('both sides accept the draft — the contractor, then the employer — and it is signed', async ({
     browser,
   }) => {
+    const contract = draftContract(OURS);
     const theContractor = await as(browser, contractor);
     try {
-      await theContractor.page.goto(`/contracts/${SIGNING}`);
+      await theContractor.page.goto(`/contracts/${contract}`);
       await theContractor.page
         .getByRole('form', { name: 'امضای قرارداد — از سوی پیمانکار' })
         .getByRole('button', { name: 'امضای قرارداد' })
@@ -192,7 +205,7 @@ test.describe.serial('a contract’s own commands, live (EXP-004)', () => {
 
     const { page, close } = await as(browser, 'orgAdmin');
     try {
-      await page.goto(`/contracts/${SIGNING}`);
+      await page.goto(`/contracts/${contract}`);
       const sign = page.getByRole('form', { name: 'امضای قرارداد — از سوی کارفرما' });
       await expect(sign).toBeVisible();
       // One side has signed: by default the draft is no longer withdrawn.
@@ -209,9 +222,10 @@ test.describe.serial('a contract’s own commands, live (EXP-004)', () => {
   test('the employer proposes an amendment, both sides sign it, and the price moves', async ({
     browser,
   }) => {
+    const contract = signedContract(OURS);
     const employer = await as(browser, 'orgAdmin');
     try {
-      await employer.page.goto(`/contracts/${SIGNING}`);
+      await employer.page.goto(`/contracts/${contract}`);
       const propose = employer.page.getByRole('form', { name: 'پیشنهاد الحاقیه' });
       await propose.getByLabel(/مبلغ الحاقیه/).fill('۲٬۰۰۰٬۰۰۰');
       await propose.getByRole('combobox', { name: 'دلیل' }).selectOption('SCOPE_CHANGE');
@@ -231,7 +245,7 @@ test.describe.serial('a contract’s own commands, live (EXP-004)', () => {
 
     const { page, close } = await as(browser, contractor);
     try {
-      await page.goto(`/contracts/${SIGNING}`);
+      await page.goto(`/contracts/${contract}`);
       await expect(page.getByRole('form', { name: 'پیشنهاد الحاقیه' })).toHaveCount(0);
       await expect(page.getByRole('form', { name: 'برنامه‌ریزی Milestone' })).toHaveCount(0);
       await page
@@ -248,9 +262,10 @@ test.describe.serial('a contract’s own commands, live (EXP-004)', () => {
   });
 
   test('the employer plans a milestone and changes it', async ({ browser }) => {
+    const contract = signedContract(OURS);
     const { page, close } = await as(browser, 'orgAdmin');
     try {
-      await page.goto(`/contracts/${SIGNING}`);
+      await page.goto(`/contracts/${contract}`);
       const plan = page.getByRole('form', { name: 'برنامه‌ریزی Milestone' });
       await plan.getByLabel(/^عنوان/).fill(MILESTONE);
       await plan.getByLabel(/روز برنامه‌ریزی‌شده/).fill('2026-12-20');
