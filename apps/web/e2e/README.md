@@ -76,8 +76,10 @@ hundred days ago. The job starts marketplace-service with
 Everything after that is done **in the browser**: the buyer asks, the old order
 is refused in fixed words, the supplier authorizes, the buyer withdraws a
 second request. The goods' side — inventory-service's commands, which the
-portal does not offer — is recorded through its API as the supplier, and read
-on the request's page.
+portal does not offer — is recorded through its API: first a shipment the third
+organization forges into its own warehouse naming the buyer and the request
+(shown to the buyer only as not borne out), then the supplier's own (shown as
+progress, and from then on the withdrawal is withheld).
 
 - It needs `WEB_LIVE_STACK_E2E_RETURNS=true` (the fixture loaded, the window
   set), and under `CI` a skip fails the job.

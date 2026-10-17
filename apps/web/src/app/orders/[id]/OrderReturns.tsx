@@ -2,10 +2,14 @@ import Link from 'next/link';
 
 import { Alert, Identifier, StatusBadge } from '@/ui';
 import { formatJalaliDateLong, toPersianDigits } from '@/lib/format';
-import { RETURN_ORDER_NOT_COMPLETED_NOTE, returnStatusLabel } from '@/lib/return-fields';
+import {
+  RETURN_ORDER_NOT_COMPLETED_NOTE,
+  RETURN_REMAINING_UNKNOWN_NOTE,
+  returnStatusLabel,
+} from '@/lib/return-fields';
 import type { Binding } from '@/lib/unresolved-order';
 import type { ReadResult } from '@/server/assets';
-import type { ReturnPage } from '@/server/returns';
+import type { OrderReturnRequests } from '@/server/returns';
 
 import type { ReturnFormLine } from '@/app/returns/ReturnCommandForm';
 import { ReturnCommands, type OfferedReturnCommand } from '@/app/returns/ReturnCommands';
@@ -25,7 +29,12 @@ import { ReturnCommands, type OfferedReturnCommand } from '@/app/returns/ReturnC
 export interface OrderReturnsProps {
   readonly orderId: string;
   /** This order's requests on the viewer's side; null when the viewer is neither party. */
-  readonly requests: ReadResult<ReturnPage> | null;
+  readonly requests: ReadResult<OrderReturnRequests> | null;
+  /**
+   * The buyer may ask, but what each line still allows could not be counted —
+   * not every request of the order was read — so the form is not drawn.
+   */
+  readonly remainingUnknown?: boolean;
   /** The request form, when the service would take one from this viewer. */
   readonly offered: readonly OfferedReturnCommand[];
   readonly lines: readonly ReturnFormLine[];
@@ -37,7 +46,7 @@ export interface OrderReturnsProps {
   readonly pageHref: string;
 }
 
-function Requests({ requests }: { requests: ReadResult<ReturnPage> }) {
+function Requests({ requests }: { requests: ReadResult<OrderReturnRequests> }) {
   if (requests.kind === 'UNAVAILABLE' || requests.kind === 'MALFORMED') {
     return (
       <Alert tone="warning">
@@ -85,6 +94,7 @@ export function OrderReturns({
   offered,
   lines,
   notCompleted,
+  remainingUnknown = false,
   csrfToken,
   binding,
   sessionMaxAgeSeconds,
@@ -96,6 +106,7 @@ export function OrderReturns({
       {notCompleted ? (
         <p className="text-sm text-content-muted">{RETURN_ORDER_NOT_COMPLETED_NOTE}</p>
       ) : null}
+      {remainingUnknown ? <Alert tone="warning">{RETURN_REMAINING_UNKNOWN_NOTE}</Alert> : null}
       <ReturnCommands
         scope={{ kind: 'ORDER', orderId }}
         offered={offered}

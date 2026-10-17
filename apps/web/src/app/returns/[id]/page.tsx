@@ -9,8 +9,11 @@ import { readFlash } from '@/server/flash';
 import { fetchOrder } from '@/server/orders';
 import { mintReturnSubmission } from '@/server/return-replay';
 import {
+  assessShipments,
+  cancelWithheldFor,
   fetchReturn,
   fetchReturnShipments,
+  goodsStateOf,
   returnCallerOf,
   returnCommandsFor,
 } from '@/server/returns';
@@ -32,7 +35,8 @@ import { ReturnDetailScreen } from './ReturnDetailScreen';
  * request.
  *
  * Which forms are drawn is `returnCommandsFor`: a copy of the service's own
- * checks, from the roles **the access token** carries. Each form's stamp binds
+ * checks, from the roles **the access token** carries — and the withdrawal only
+ * while no goods of the request are known to be moving (`goodsStateOf`). Each form's stamp binds
  * the request and the command (`server/return-replay.ts`). UX only; the
  * service decides again.
  */
@@ -59,13 +63,19 @@ export default async function ReturnPage({
   );
 
   const result = await fetchReturn(session, id);
-  const [order, shipments] =
+  const [order, listed] =
     result.kind === 'OK'
       ? await Promise.all([
           fetchOrder(session, result.data.orderId),
           fetchReturnShipments(session, id),
         ])
       : [null, null];
+  // What inventory lists is a claim; only shipments borne out by this request
+  // are its goods (`isShipmentOfRequest`, PR 336 review 1, finding 1).
+  const shipments = result.kind === 'OK' && listed ? assessShipments(result.data, listed) : null;
+  const goods =
+    result.kind === 'OK' && shipments ? goodsStateOf(result.data, shipments) : 'UNKNOWN';
+  const caller = returnCallerOf(session.accessToken);
 
   const productNames =
     order?.kind === 'OK'
@@ -78,7 +88,7 @@ export default async function ReturnPage({
 
   const offered: OfferedReturnCommand[] =
     result.kind === 'OK'
-      ? returnCommandsFor(returnCallerOf(session.accessToken), result.data).map((command) => ({
+      ? returnCommandsFor(caller, result.data, goods).map((command) => ({
           command,
           submission: mintReturnSubmission(session, { command, returnId: id }),
         }))
@@ -112,6 +122,9 @@ export default async function ReturnPage({
           result={result}
           productNames={productNames}
           shipments={shipments}
+          cancelWithheld={
+            result.kind === 'OK' ? cancelWithheldFor(caller, result.data, goods) : null
+          }
           offered={offered}
           csrfToken={session.csrfToken}
           binding={submissionBinding(session)}

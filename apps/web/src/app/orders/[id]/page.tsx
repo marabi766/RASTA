@@ -58,10 +58,15 @@ export default async function OrderPage({
     const side = sideOf(caller, order);
     if (side !== null) {
       const requests = await fetchReturnsOfOrder(session, order.id, side);
-      const offerable = side === 'BUYER' && canRequestReturn(caller, order);
-      const available = returnableLines(order, requests.kind === 'OK' ? requests.data.items : null);
+      const mayRequest = side === 'BUYER' && canRequestReturn(caller, order);
+      const available = returnableLines(order, requests.kind === 'OK' ? requests.data : null);
+      // What each line allows must be known — every request of the order read —
+      // before the form is offered (PR 336 review 1, finding 3).
+      const remainingKnown = available.every((line) => line.available !== null);
+      const offerable = mayRequest && remainingKnown;
       returns = {
         requests,
+        remainingUnknown: mayRequest && !remainingKnown,
         offered: offerable
           ? [
               {

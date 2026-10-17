@@ -11,7 +11,9 @@ import {
 } from '@/ui';
 import { formatJalaliDateLong, formatJalaliDateTime, toPersianDigits } from '@/lib/format';
 import {
+  RETURN_CANCEL_WITHHELD,
   RETURN_DONE_MESSAGES,
+  RETURN_SHIPMENT_UNVERIFIED,
   returnDispositionLabel,
   returnShipmentStatusLabel,
   returnStatusLabel,
@@ -19,7 +21,7 @@ import {
 } from '@/lib/return-fields';
 import type { Binding } from '@/lib/unresolved-order';
 import type { ReadResult } from '@/server/assets';
-import type { ReturnRequest, ReturnShipment } from '@/server/returns';
+import type { ReturnRequest, ReturnShipment, ShipmentAssessment } from '@/server/returns';
 
 import { ReturnCommands, type OfferedReturnCommand } from '../ReturnCommands';
 
@@ -38,8 +40,13 @@ export interface ReturnDetailScreenProps {
   readonly result: ReadResult<ReturnRequest>;
   /** Each order line's product name, from the order, when it could be read. */
   readonly productNames: ReadonlyMap<string, string> | null;
-  /** inventory-service's account of the goods; null when the request itself was not read. */
-  readonly shipments: ReadResult<readonly ReturnShipment[]> | null;
+  /**
+   * inventory-service's account of the goods, each shipment checked against
+   * this request (`assessShipments`); null when the request itself was not read.
+   */
+  readonly shipments: ShipmentAssessment | null;
+  /** Why the buyer is not offered the withdrawal now (`cancelWithheldFor`), if it is not. */
+  readonly cancelWithheld?: keyof typeof RETURN_CANCEL_WITHHELD | null;
   readonly offered: readonly OfferedReturnCommand[];
   readonly csrfToken: string;
   readonly binding: Binding;
@@ -66,6 +73,12 @@ function historyOf(request: ReturnRequest): Step[] {
   if (request.cancelledAt) {
     steps.push({ label: 'خریدار درخواست را لغو کرد', at: request.cancelledAt });
   }
+  // The physical steps marketplace-service mirrored, each checked against this
+  // request before it moved it (RUN-005 PR 3).
+  if (request.inTransitAt) steps.push({ label: 'کالا در راه بازگشت است', at: request.inTransitAt });
+  if (request.receivedAt) steps.push({ label: 'کالا دریافت شد', at: request.receivedAt });
+  if (request.inspectedAt) steps.push({ label: 'کالا بازرسی شد', at: request.inspectedAt });
+  if (request.resolvedAt) steps.push({ label: 'تکلیف کالا تعیین شد', at: request.resolvedAt });
   return steps;
 }
 
@@ -216,36 +229,42 @@ function Goods({
   shipments,
   productNames,
 }: {
-  shipments: ReadResult<readonly ReturnShipment[]>;
+  shipments: ShipmentAssessment;
   productNames: ReadonlyMap<string, string> | null;
 }) {
-  if (shipments.kind === 'FORBIDDEN' || shipments.kind === 'NOT_FOUND') {
-    // inventory-service opens a return shipment only to configured roles of
-    // its two organizations; this is about the goods' side, not the request.
-    return (
-      <p className="text-sm text-content-muted">
-        وضعیت جابه‌جایی کالا به نقش شما نشان داده نمی‌شود.
-      </p>
-    );
-  }
-  if (shipments.kind === 'UNAVAILABLE' || shipments.kind === 'MALFORMED') {
+  if (shipments.kind === 'UNKNOWN') {
+    if (shipments.reason === 'FORBIDDEN') {
+      // inventory-service opens a return shipment only to configured roles of
+      // its two organizations; this is about the goods' side, not the request.
+      return (
+        <p className="text-sm text-content-muted">
+          وضعیت جابه‌جایی کالا به نقش شما نشان داده نمی‌شود.
+        </p>
+      );
+    }
     return (
       <Alert tone="warning">
-        وضعیت جابه‌جایی کالا اکنون خوانده نشد؛ کمی بعد دوباره ببینید. کد پیگیری:{' '}
-        {shipments.correlationId}
+        {shipments.reason === 'INCOMPLETE'
+          ? 'محموله‌های ثبت‌شده برای این بازگشت به‌طور کامل خوانده نشد؛ کمی بعد دوباره ببینید.'
+          : 'وضعیت جابه‌جایی کالا اکنون خوانده نشد؛ کمی بعد دوباره ببینید.'}
+        {shipments.correlationId ? ` کد پیگیری: ${shipments.correlationId}` : ''}
       </Alert>
-    );
-  }
-  if (shipments.data.length === 0) {
-    return (
-      <p className="text-sm text-content-muted">هنوز محموله‌ای برای این بازگشت ثبت نشده است.</p>
     );
   }
   return (
     <div className="flex flex-col gap-4">
-      {shipments.data.map((shipment) => (
-        <Shipment key={shipment.id} shipment={shipment} productNames={productNames} />
-      ))}
+      {shipments.verified.length === 0 ? (
+        <p className="text-sm text-content-muted">هنوز محموله‌ای برای این بازگشت ثبت نشده است.</p>
+      ) : (
+        shipments.verified.map((shipment) => (
+          <Shipment key={shipment.id} shipment={shipment} productNames={productNames} />
+        ))
+      )}
+      {shipments.unverified > 0 ? (
+        // A claim this request does not bear out — never its progress, and
+        // nothing of it (carrier, dates, notes) is shown.
+        <Alert tone="warning">{RETURN_SHIPMENT_UNVERIFIED}</Alert>
+      ) : null}
     </div>
   );
 }
@@ -254,6 +273,7 @@ export function ReturnDetailScreen({
   result,
   productNames,
   shipments,
+  cancelWithheld = null,
   offered,
   csrfToken,
   binding,
@@ -312,6 +332,11 @@ export function ReturnDetailScreen({
       </Section>
 
       <Section headingId="return-next" title="اقدام بعدی شما">
+        {cancelWithheld ? (
+          <Alert tone="info" className="mb-3">
+            {RETURN_CANCEL_WITHHELD[cancelWithheld]}
+          </Alert>
+        ) : null}
         <ReturnCommands
           scope={{ kind: 'RETURN', returnId: request.id }}
           offered={offered}
@@ -319,7 +344,7 @@ export function ReturnDetailScreen({
           binding={binding}
           sessionMaxAgeSeconds={sessionMaxAgeSeconds}
           pageHref={pageHref}
-          emptyNote="در این مرحله اقدامی از سوی شما لازم نیست."
+          {...(cancelWithheld ? {} : { emptyNote: 'در این مرحله اقدامی از سوی شما لازم نیست.' })}
         />
       </Section>
 

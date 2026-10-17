@@ -7,6 +7,7 @@ import {
   MAX_RETURN_LINES,
   MAX_RETURN_QUANTITY,
   ORDER_LINE_ID_MAX,
+  PHYSICAL_RETURN_STATUSES,
   RETURN_DISPOSITIONS,
   RETURN_LIST_SIDES,
   RETURN_REASON_MAX,
@@ -318,5 +319,102 @@ describe('the goods’ side (inventory-service), read only', () => {
   it('lists by return request', () => {
     const list = squash(topLevelConst(shipmentDto, 'listReturnShipmentsQuerySchema').getText());
     expect(list).toContain('returnRequestId:');
+  });
+});
+
+/**
+ * PR 336 review 1: the copies round 2 added — which shipment is a request's
+ * goods (finding 1), when goods are moving (finding 2), which requests hold
+ * units (finding 3) — pinned to the mirror and the state machine they copy.
+ */
+describe('what the goods did, as marketplace-service judges it (#323)', () => {
+  const mirrorText = readSource(...RETURNS, 'return-mirror.ts');
+  const decide = squash(
+    collect(parseSource(mirrorText), ts.isFunctionDeclaration)
+      .find((node) => node.name?.text === 'decideMirror')
+      ?.getText(),
+  );
+  const viewsText = readSource(
+    'services',
+    'inventory-service',
+    'src',
+    'return-shipment',
+    'views.ts',
+  );
+
+  it('has the statuses the portal labels, physical ones included, in order', () => {
+    expect(literalsOf(topLevelConst(machine, 'RETURN_STATUSES').getText())).toEqual([
+      ...RETURN_STATUSES,
+    ]);
+    expect(literalsOf(topLevelConst(machine, 'PHYSICAL_RETURN_STATUSES').getText())).toEqual([
+      ...PHYSICAL_RETURN_STATUSES,
+    ]);
+  });
+
+  it('counts every request but a refused or withdrawn one as holding its units', () => {
+    expect(squash(topLevelConst(machine, 'RETURN_STATUSES_HOLDING_UNITS').getText())).toBe(
+      "RETURN_STATUSES.filter((status)=>status!=='REJECTED'&&status!=='CANCELLED',)",
+    );
+    expect(serviceText).toContain(
+      'returnRequest: { status: { in: [...RETURN_STATUSES_HOLDING_UNITS] } }',
+    );
+  });
+
+  it('moves a request only for a shipment of its supplier, buyer and order, once authorized, and only the one already on it', () => {
+    expect(decide).toContain(
+      'request.supplierOrganizationId!==envelope.tenantId||request.organizationId!==payload.buyerOrganizationId||request.orderId!==payload.orderId',
+    );
+    expect(decide).toContain("request.status!=='AUTHORIZED'&&!PHYSICAL.includes(request.status)");
+    expect(decide).toContain(
+      'request.returnShipmentId!==null&&request.returnShipmentId!==payload.returnShipmentId',
+    );
+    // The envelope's tenant is the payload's organization: the warehouse owner.
+    expect(squash(mirrorText)).toContain('envelope.tenantId!==payload.organizationId');
+  });
+
+  it('checks lines as the portal does: of the request, its product, at most authorized; exact unless partial dispatch is allowed', () => {
+    const lines = squash(
+      collect(parseSource(mirrorText), ts.isFunctionDeclaration)
+        .find((node) => node.name?.text === 'assertLinesOfRequest')
+        ?.getText(),
+    );
+    expect(lines).toContain('if(!own||own.productId!==line.productId)thrownotOfRequest');
+    expect(lines).toContain('if(line.expectedQuantity>own.quantity)');
+    expect(lines).toContain('!rules.partialDispatchAllowed&&line.expectedQuantity!==own.quantity');
+    expect(lines).toContain('if(quantity>requested.get(orderLineId)!.quantity)');
+    // The portal cannot know this setting, so it holds a shipment nothing has
+    // mirrored to the strict rule; its default is that rule.
+    expect(squash(marketplaceEnv)).toContain(
+      'MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED:booleanEnv(false)',
+    );
+    expect(squash(marketplaceEnv)).toContain(
+      'MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED:booleanEnv(false)',
+    );
+  });
+
+  it('shows on the request the shipment and the steps it mirrored', () => {
+    const view = readSource(...RETURNS, 'views.ts');
+    for (const field of [
+      'returnShipmentId',
+      'inTransitAt',
+      'receivedAt',
+      'inspectedAt',
+      'resolvedAt',
+    ]) {
+      expect([field, view.includes(`${field}:`)]).toEqual([field, true]);
+    }
+  });
+
+  it('lists a shipment with the facts the portal checks it by', () => {
+    for (const field of [
+      'organizationId: row.organizationId',
+      'buyerOrganizationId: row.buyerOrganizationId',
+      'returnRequestId: row.returnRequestId',
+      'orderId: row.orderId',
+      'expectedQuantity: line.expectedQuantity',
+      'receivedQuantity: line.receivedQuantity',
+    ]) {
+      expect([field, viewsText.includes(field)]).toEqual([field, true]);
+    }
   });
 });

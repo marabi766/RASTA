@@ -13,9 +13,31 @@
 // The request's lifecycle (marketplace-service `returns/state-machine.ts`)
 // ---------------------------------------------------------------------------
 
-/** `RETURN_STATUSES` — the commercial half; the physical states are inventory-service's. */
-export const RETURN_STATUSES = ['REQUESTED', 'AUTHORIZED', 'REJECTED', 'CANCELLED'] as const;
+/**
+ * `RETURN_STATUSES` — the commercial half, decided by the parties, then the
+ * physical half: inventory-service's shipment events, checked against the
+ * request and mirrored onto it by marketplace-service (RUN-005 PR 3). The mirror is off
+ * by default, so an AUTHORIZED request may well have goods on the road.
+ */
+export const RETURN_STATUSES = [
+  'REQUESTED',
+  'AUTHORIZED',
+  'REJECTED',
+  'CANCELLED',
+  'IN_TRANSIT',
+  'RECEIVED',
+  'INSPECTED',
+  'RESOLVED',
+] as const;
 export type ReturnStatus = (typeof RETURN_STATUSES)[number];
+
+/** The physical states, in order (`PHYSICAL_RETURN_STATUSES`). */
+export const PHYSICAL_RETURN_STATUSES: readonly ReturnStatus[] = [
+  'IN_TRANSIT',
+  'RECEIVED',
+  'INSPECTED',
+  'RESOLVED',
+];
 
 export function isReturnStatus(value: unknown): value is ReturnStatus {
   return typeof value === 'string' && (RETURN_STATUSES as readonly string[]).includes(value);
@@ -26,6 +48,10 @@ const RETURN_STATUS_LABELS: Readonly<Record<ReturnStatus, string>> = {
   AUTHORIZED: 'پذیرفته‌شده، در انتظار ارسال کالا',
   REJECTED: 'ردشده',
   CANCELLED: 'لغوشده',
+  IN_TRANSIT: 'کالا در راه بازگشت',
+  RECEIVED: 'کالا دریافت شد، در انتظار بازرسی',
+  INSPECTED: 'کالا بازرسی شد، در انتظار تعیین تکلیف',
+  RESOLVED: 'تکلیف کالا تعیین شد',
 };
 
 /** A status this portal does not know is shown as it arrived, never guessed (`lib/labels.ts`). */
@@ -142,6 +168,30 @@ export const RETURN_REFUSAL_TEXT = {
   VALIDATION: 'اطلاعات واردشده پذیرفته نشد؛ دلیل و تعدادها را بررسی کنید. درخواستی ثبت نشد.',
   FALLBACK: 'این درخواست پذیرفته نشد و ثبت نشد. صفحه را تازه کنید و دوباره بسنجید.',
 } as const;
+
+/**
+ * Said in place of the request form when what each line still allows could not
+ * be counted in full: every request of the order is needed for that, and a
+ * partial count would offer units another request already took.
+ */
+export const RETURN_REMAINING_UNKNOWN_NOTE =
+  'اکنون نمی‌توان همهٔ درخواست‌های بازگشت این سفارش را خواند، پس مقدار قابل بازگشت هر ردیف روشن نیست و فرم درخواست نشان داده نمی‌شود. کمی بعد صفحه را تازه کنید.';
+
+/**
+ * Why the buyer is not offered the withdrawal of an AUTHORIZED request: goods
+ * of it are recorded on their way (or further), or whether they are cannot be
+ * told now. Withdrawing then would release units that are already coming back.
+ */
+export const RETURN_CANCEL_WITHHELD = {
+  MOVING:
+    'لغو این درخواست عرضه نمی‌شود: کالای آن ثبت شده و در راه بازگشت است یا رسیده است. پس از جابه‌جایی کالا، درخواست دیگر پس گرفته نمی‌شود.',
+  UNKNOWN:
+    'لغو این درخواست اکنون عرضه نمی‌شود: روشن نیست که کالای آن جابه‌جا شده است یا نه (وضعیت محموله خوانده نشد یا به نقش شما نشان داده نمی‌شود). کمی بعد صفحه را تازه کنید.',
+} as const;
+
+/** A shipment recorded for this request whose facts do not match it — never shown as progress. */
+export const RETURN_SHIPMENT_UNVERIFIED =
+  'برای این درخواست محموله‌ای ثبت شده که سازمان‌ها، سفارش یا ردیف‌هایش با این درخواست جور نیست؛ به‌عنوان پیشرفت بازگشت نشان داده نمی‌شود.';
 
 /** Said to the buyer of an order that is not completed yet, in place of the form. */
 export const RETURN_ORDER_NOT_COMPLETED_NOTE =

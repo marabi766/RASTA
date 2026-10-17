@@ -43,6 +43,7 @@
         "$TURBO_ROOT$/services/fleet-service/src/fleet/fleet.controller.ts",
         "$TURBO_ROOT$/services/fleet-service/src/fleet/transfer-clearance.ts",
         "$TURBO_ROOT$/services/inventory-service/src/return-shipment/dto.ts",
+        "$TURBO_ROOT$/services/inventory-service/src/return-shipment/views.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/dto.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/lifecycle.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/repair-order.controller.ts",
@@ -59,9 +60,11 @@
         "$TURBO_ROOT$/services/marketplace-service/src/order/pricing.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/returns/dto.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/returns/return-access.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/return-mirror.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/returns/return.controller.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/returns/return.service.ts",
-        "$TURBO_ROOT$/services/marketplace-service/src/returns/state-machine.ts"
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/state-machine.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/views.ts"
       ]
     },
     "test:unit": {
@@ -96,6 +99,7 @@
         "$TURBO_ROOT$/services/fleet-service/src/fleet/fleet.controller.ts",
         "$TURBO_ROOT$/services/fleet-service/src/fleet/transfer-clearance.ts",
         "$TURBO_ROOT$/services/inventory-service/src/return-shipment/dto.ts",
+        "$TURBO_ROOT$/services/inventory-service/src/return-shipment/views.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/dto.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/lifecycle.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/repair-order.controller.ts",
@@ -112,9 +116,11 @@
         "$TURBO_ROOT$/services/marketplace-service/src/order/pricing.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/returns/dto.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/returns/return-access.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/return-mirror.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/returns/return.controller.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/returns/return.service.ts",
-        "$TURBO_ROOT$/services/marketplace-service/src/returns/state-machine.ts"
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/state-machine.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/views.ts"
       ]
     }
   }

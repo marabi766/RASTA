@@ -74,6 +74,12 @@ export const REQUESTED: ReturnRequest = {
   rejectedAt: null,
   cancelledAt: null,
   cancelledFrom: null,
+  // The mirror is off by default: nothing physical is on the request itself.
+  returnShipmentId: null,
+  inTransitAt: null,
+  receivedAt: null,
+  inspectedAt: null,
+  resolvedAt: null,
 };
 
 export const AUTHORIZED: ReturnRequest = {
@@ -98,11 +104,15 @@ export const CANCELLED: ReturnRequest = {
   cancelledFrom: 'AUTHORIZED',
 };
 
-/** The goods of {@link AUTHORIZED}, received and inspected. */
+/** The goods of {@link AUTHORIZED} — every line, as authorized — received and inspected. */
 export const INSPECTED_SHIPMENT: ReturnShipment = {
   id: 'RSP_01JSHIPMENTAAAAAAAAAAAAAA',
   status: 'INSPECTED',
+  // Recorded by the request's supplier, from its buyer, for its order.
+  organizationId: SUPPLIER,
+  buyerOrganizationId: BUYER,
   returnRequestId: RETURN_ID,
+  orderId: ORDER_ID,
   lines: [{ orderLineId: LINE_A, productId: 'PRD_A', expectedQuantity: 3, receivedQuantity: 3 }],
   carrierName: 'باربری یزد',
   carrierReference: 'YZD-123',

@@ -4,7 +4,11 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Browser, type Locator, type Page } from '@playwright/test';
 
 import { toLatinDigits, toPersianDigits } from '../src/lib/format';
-import { RETURN_REFUSAL_TEXT } from '../src/lib/return-fields';
+import {
+  RETURN_CANCEL_WITHHELD,
+  RETURN_REFUSAL_TEXT,
+  RETURN_SHIPMENT_UNVERIFIED,
+} from '../src/lib/return-fields';
 import {
   installLiveSession,
   installProvisionedSession,
@@ -38,8 +42,15 @@ import { provisionPerson } from './provisioned-people';
  * - **the supplier** — `dehyari.admin.b` (ORG-DEH-0002): sees the request on
  *   its side and authorizes it; records the goods on their way and received.
  * - **a third organization** — provisioned with ORGANIZATION_ADMIN into an
- *   organization of its own: the request and the order are the same absence as
+ *   organization of its own: records a shipment into its own warehouse naming
+ *   the buyer and the request (inventory-service takes the references on
+ *   trust), which the buyer is shown only as "not borne out", never as
+ *   progress; and the request and the order are, to it, the same absence as
  *   an id that does not exist.
+ *
+ * Once the supplier's own shipment is on its way, the buyer is no longer
+ * offered the withdrawal, although marketplace-service — whose mirror this
+ * stack does not run — still says AUTHORIZED.
  *
  * No money moves and none is claimed to: a return is not a refund (Q-76).
  */
@@ -97,13 +108,35 @@ function gatewayUrl(path: string): string {
   return `${base.replace(/\/+$/, '')}${path}`;
 }
 
-/** One inventory-service command as the supplier, through the gateway. */
-async function asSupplier(path: string, body: unknown): Promise<{ id: string; version: number }> {
-  const token = await liveAccessToken('orgAdminB');
+/** A provisioned person's access token, by the realm's password grant, for its own API calls. */
+async function tokenOf(person: ProvisionedPerson): Promise<string> {
+  const issuer = (process.env.OIDC_ISSUER_URL ?? '').replace(/\/+$/, '');
+  const response = await fetch(`${issuer}/protocol/openid-connect/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'password',
+      client_id: process.env.OIDC_CLIENT_ID ?? '',
+      username: person.username,
+      password: person.password,
+      scope: 'openid',
+    }),
+  });
+  if (!response.ok) throw new Error(`no token for ${person.username} (${response.status})`);
+  return ((await response.json()) as { access_token: string }).access_token;
+}
+
+/** One inventory-service command, through the gateway — as the supplier unless told otherwise. */
+async function asSupplier(
+  path: string,
+  body: unknown,
+  token?: string,
+): Promise<{ id: string; version: number }> {
+  const bearer = token ?? (await liveAccessToken('orgAdminB'));
   const response = await fetch(gatewayUrl(path), {
     method: 'POST',
     headers: {
-      authorization: `Bearer ${token}`,
+      authorization: `Bearer ${bearer}`,
       'content-type': 'application/json',
       'idempotency-key': `e2e-returns-${randomUUID()}`,
     },
@@ -237,7 +270,51 @@ test.describe.serial('returns, live (EXP-003)', () => {
     }
   });
 
-  test('the goods come back: both parties see them on their way, then received', async ({
+  test('a third organization’s shipment naming the buyer and this request is never shown as its progress', async ({
+    browser,
+  }) => {
+    expect(returnPath).not.toBe('');
+    const returnId = returnPath.split('/').pop()!;
+    // inventory-service never resolves the marketplace references it is given
+    // (PR 336 review 1, finding 1): any operator can record such a shipment
+    // into its own warehouse, and the named buyer can read it as its sender.
+    const outsiderToken = await tokenOf(outsider);
+    const theirs = await asSupplier(
+      '/v1/warehouses',
+      { name: `انبار بیگانه ${RUN}` },
+      outsiderToken,
+    );
+    await asSupplier(
+      '/v1/return-shipments',
+      {
+        returnRequestId: returnId,
+        orderId: RECENT_ORDER,
+        buyerOrganizationId: BUYER,
+        destinationWarehouseId: theirs.id,
+        lines: [
+          { orderLineId: LINE_AGGREGATE, productId: 'PRD_01JE2ERETVRNS00000000000P1', quantity: 3 },
+        ],
+        carrierName: 'باربری جعلی',
+      },
+      outsiderToken,
+    );
+
+    const buyer = await as(browser, 'orgAdmin');
+    try {
+      await buyer.page.goto(returnPath);
+      const goods = buyer.page.getByRole('region', { name: 'جابه‌جایی و بازرسی کالا' });
+      await expect(goods).toContainText(RETURN_SHIPMENT_UNVERIFIED);
+      await expect(goods).toContainText('هنوز محموله‌ای');
+      expect(await goods.innerText()).not.toContain('باربری جعلی');
+      // Nothing of this request is moving, so the buyer may still withdraw it.
+      await expect(buyer.page.getByRole('form', { name: 'لغو درخواست بازگشت' })).toBeVisible();
+      await expectAccessible(buyer.page);
+    } finally {
+      await buyer.close();
+    }
+  });
+
+  test('the goods come back: both parties see them on their way, then received; the withdrawal is withheld', async ({
     browser,
   }) => {
     expect(returnPath).not.toBe('');
@@ -260,6 +337,14 @@ test.describe.serial('returns, live (EXP-003)', () => {
       const goods = buyer.page.getByRole('region', { name: 'جابه‌جایی و بازرسی کالا' });
       await expect(goods).toContainText('در راه بازگشت');
       await expect(goods).toContainText('باربری آزمون');
+      // marketplace-service still says AUTHORIZED (its mirror is off here), yet
+      // the goods left: withdrawing now would release units already coming
+      // back (PR 336 review 1, finding 2).
+      await expect(buyer.page.getByText('پذیرفته‌شده، در انتظار ارسال کالا').first()).toBeVisible();
+      await expect(buyer.page.getByRole('form', { name: 'لغو درخواست بازگشت' })).toHaveCount(0);
+      await expect(buyer.page.getByRole('region', { name: 'اقدام بعدی شما' })).toContainText(
+        RETURN_CANCEL_WITHHELD.MOVING,
+      );
       await expectAccessible(buyer.page);
     } finally {
       await buyer.close();

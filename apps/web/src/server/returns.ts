@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import {
+  PHYSICAL_RETURN_STATUSES,
   RETURN_REFUSAL_TEXT as TEXT,
   REASON_FIELD,
   quantityField,
@@ -86,6 +87,16 @@ const returnRequestSchema = z.object({
   rejectedAt: nullableDate,
   cancelledAt: nullableDate,
   cancelledFrom: z.string().nullable().default(null),
+  /**
+   * The physical half as marketplace-service mirrored it (#323): the shipment
+   * it checked against this request, and when each step happened. Null while
+   * the mirror is off — which it is by default — whatever the goods did.
+   */
+  returnShipmentId: z.string().min(1).nullable().default(null),
+  inTransitAt: nullableDate,
+  receivedAt: nullableDate,
+  inspectedAt: nullableDate,
+  resolvedAt: nullableDate,
 });
 
 /**
@@ -104,8 +115,15 @@ export type ReturnPage = z.infer<typeof returnPageSchema>;
 
 export const RETURNS_PER_PAGE = 20;
 
-/** An order's own requests, on one page: an order has at most fifty lines to return. */
-const RETURNS_OF_ORDER = 100;
+/** A page of an order's own requests: the most `listReturnsQuerySchema` allows. */
+const RETURNS_OF_ORDER_PAGE = 100;
+
+/**
+ * How many pages of an order's requests are followed before the count is
+ * called incomplete: ten thousand requests, far past any real order, and a
+ * bound on what one page view may ask of the service.
+ */
+const MAX_RETURN_PAGES = 100;
 
 export interface ReturnListQuery {
   readonly side: ReturnListSide;
@@ -156,13 +174,57 @@ export function fetchReturns(
   return read(session, `/v1/returns?${search.toString()}`, returnPageSchema);
 }
 
-/** The requests of one order, on the side this viewer has in it. */
+/**
+ * Every page of a cursor-paged read, followed to its end — or `complete:
+ * false` past `maxPages`. The first refusal or failure is the whole answer: a
+ * count of part of the pages is not a count.
+ */
+async function readAllPages<T>(
+  readPage: (
+    cursor: string | undefined,
+  ) => Promise<ReadResult<{ items: T[]; nextCursor: string | null }>>,
+  maxPages: number,
+): Promise<ReadResult<{ items: T[]; complete: boolean }>> {
+  const items: T[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < maxPages; page += 1) {
+    const result = await readPage(cursor);
+    if (result.kind !== 'OK') return result;
+    items.push(...result.data.items);
+    if (result.data.nextCursor === null) return { kind: 'OK', data: { items, complete: true } };
+    cursor = result.data.nextCursor;
+  }
+  return { kind: 'OK', data: { items, complete: false } };
+}
+
+/** All the requests of one order this viewer's side lists, and whether that is all of them. */
+export interface OrderReturnRequests {
+  readonly items: ReturnRequest[];
+  /** False when the pages were not followed to their end (`MAX_RETURN_PAGES`). */
+  readonly complete: boolean;
+}
+
+/**
+ * The requests of one order, on the side this viewer has in it — every page
+ * (PR 336 review 1, finding 3): what a line still allows is sold less what
+ * **every** open request takes, so the pages are followed to their end.
+ */
 export function fetchReturnsOfOrder(
   session: WebSession,
   orderId: string,
   side: ReturnListSide,
-): Promise<ReadResult<ReturnPage>> {
-  return fetchReturns(session, { side, orderId, limit: RETURNS_OF_ORDER });
+  maxPages: number = MAX_RETURN_PAGES,
+): Promise<ReadResult<OrderReturnRequests>> {
+  return readAllPages(
+    (cursor) =>
+      fetchReturns(session, {
+        side,
+        orderId,
+        limit: RETURNS_OF_ORDER_PAGE,
+        ...(cursor ? { cursor } : {}),
+      }),
+    maxPages,
+  );
 }
 
 export function fetchReturn(
@@ -177,7 +239,13 @@ export function fetchReturn(
 const returnShipmentSchema = z.object({
   id: z.string().min(1),
   status: z.string().min(1),
+  /** The owner of the destination warehouse: who recorded it. */
+  organizationId: z.string().min(1),
+  /** The organization the goods come from, as the recorder said — never checked by inventory. */
+  buyerOrganizationId: z.string().min(1),
+  /** The marketplace references, as the recorder said — opaque to inventory. */
   returnRequestId: z.string().min(1),
+  orderId: z.string().min(1),
   lines: z
     .array(
       z.object({
@@ -207,9 +275,8 @@ const returnShipmentSchema = z.object({
 });
 
 /**
- * `organizationId`, `destinationWarehouseId`, `buyerOrganizationId` and
- * `inspectionReportDocumentId` are not declared: the screen does not show a
- * warehouse or open a document.
+ * `destinationWarehouseId` and `inspectionReportDocumentId` are not declared:
+ * the screen does not show a warehouse or open a document.
  */
 export type ReturnShipment = z.infer<typeof returnShipmentSchema>;
 
@@ -218,24 +285,164 @@ const returnShipmentPageSchema = z.object({
   nextCursor: z.string().nullable().default(null),
 });
 
+/** A page of return shipments; inventory-service caps a page at 100. */
+const SHIPMENTS_PAGE = 50;
+const MAX_SHIPMENT_PAGES = 20;
+
 /**
- * The return shipments inventory-service records for one return request — at
- * most one (Q-133) — as far as this caller's roles open a side of it
- * (`INVENTORY_*_ROLES`, ORGANIZATION_ADMIN by default). A refusal (`403`) is
- * not the return's: it only means this person is not shown the goods' side.
+ * Every return shipment inventory-service lists under one return request id,
+ * as far as this caller's roles open a side of it (`INVENTORY_*_ROLES`,
+ * ORGANIZATION_ADMIN by default) — every page. A refusal (`403`) is not the
+ * return's: it only means this person is not shown the goods' side.
+ *
+ * **Listed is not verified** (PR 336 review 1, finding 1). inventory-service
+ * never resolves the marketplace references a shipment carries: any
+ * organization's operator can record a shipment into its own warehouse naming
+ * any buyer and any return id, and the named buyer can read it as its sender.
+ * What this returns is only a claim; `assessShipments` decides which of them
+ * are this request's goods.
  */
 export function fetchReturnShipments(
   session: WebSession,
   returnId: string,
-): Promise<ReadResult<readonly ReturnShipment[]>> {
-  const search = new URLSearchParams({ returnRequestId: returnId, limit: '5' });
-  return read(
-    session,
-    `/v1/return-shipments?${search.toString()}`,
-    returnShipmentPageSchema.transform((page) =>
-      page.items.filter((shipment) => shipment.returnRequestId === returnId),
-    ),
+  maxPages: number = MAX_SHIPMENT_PAGES,
+): Promise<ReadResult<{ items: ReturnShipment[]; complete: boolean }>> {
+  return readAllPages((cursor) => {
+    const search = new URLSearchParams({
+      returnRequestId: returnId,
+      limit: String(SHIPMENTS_PAGE),
+    });
+    if (cursor) search.set('cursor', cursor);
+    return read(session, `/v1/return-shipments?${search.toString()}`, returnShipmentPageSchema);
+  }, maxPages);
+}
+
+/** The request's statuses a shipment may be this request's progress in (`decideMirror`). */
+const SHIPPABLE_STATUSES: readonly string[] = ['AUTHORIZED', ...PHYSICAL_RETURN_STATUSES];
+
+/**
+ * Whether a listed shipment is this request's goods — the checks
+ * marketplace-service's mirror makes before it moves a request
+ * (`return-mirror.ts`, `decideMirror`), made again here on what inventory lists:
+ *
+ * - its marketplace references are this request's and this order's;
+ * - it was recorded by **the request's supplier** (the warehouse's owner, Q-133)
+ *   and names **the request's buyer** as the sender;
+ * - the request was authorized and not withdrawn or refused;
+ * - once marketplace-service has mirrored a shipment, it is that one — and its
+ *   lines are lines of the request, of their product, at most what was
+ *   authorized (the mirror checked them under its own dispatch rule);
+ * - while nothing is mirrored (the mirror is off by default), its lines are
+ *   **exactly** the request's — every line once, its product, the quantity
+ *   authorized — the strict rule, because the portal cannot know whether
+ *   partial dispatch is allowed (`MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED`);
+ *   a legitimate partial dispatch is then shown as unverified, never the reverse;
+ * - what was received is at most what was dispatched, and every disposition is
+ *   of a line of the shipment, within what was received.
+ *
+ * Anything else is a claim about this request that it does not bear out.
+ */
+export function isShipmentOfRequest(shipment: ReturnShipment, request: ReturnRequest): boolean {
+  if (
+    shipment.returnRequestId !== request.id ||
+    shipment.orderId !== request.orderId ||
+    shipment.organizationId !== request.supplierOrganizationId ||
+    shipment.buyerOrganizationId !== request.buyerOrganizationId ||
+    !SHIPPABLE_STATUSES.includes(request.status)
+  ) {
+    return false;
+  }
+  if (request.returnShipmentId !== null && request.returnShipmentId !== shipment.id) return false;
+
+  const requested = new Map(request.lines.map((line) => [line.orderLineId, line]));
+  const seen = new Set<string>();
+  for (const line of shipment.lines) {
+    const own = requested.get(line.orderLineId);
+    if (!own || own.productId !== line.productId || seen.has(line.orderLineId)) return false;
+    seen.add(line.orderLineId);
+    if (line.expectedQuantity < 1 || line.expectedQuantity > own.quantity) return false;
+    if (request.returnShipmentId === null && line.expectedQuantity !== own.quantity) return false;
+    if (
+      line.receivedQuantity !== null &&
+      (line.receivedQuantity < 0 || line.receivedQuantity > line.expectedQuantity)
+    ) {
+      return false;
+    }
+  }
+  if (shipment.lines.length === 0) return false;
+  if (request.returnShipmentId === null && seen.size !== requested.size) return false;
+
+  const received = new Map(
+    shipment.lines.map((line) => [line.orderLineId, line.receivedQuantity ?? 0]),
   );
+  const disposed = new Map<string, number>();
+  for (const row of shipment.dispositions) {
+    if (!received.has(row.orderLineId) || row.quantity < 1) return false;
+    disposed.set(row.orderLineId, (disposed.get(row.orderLineId) ?? 0) + row.quantity);
+  }
+  for (const [orderLineId, quantity] of disposed) {
+    if (quantity > received.get(orderLineId)!) return false;
+  }
+  return true;
+}
+
+/** What the portal can say about a request's goods, from what inventory listed. */
+export type ShipmentAssessment =
+  | {
+      readonly kind: 'KNOWN';
+      /** The shipments that are this request's goods (`isShipmentOfRequest`). */
+      readonly verified: readonly ReturnShipment[];
+      /** How many listed shipments claim this request and are not borne out — shown as a count, never as progress. */
+      readonly unverified: number;
+    }
+  /** Not shown to this role, not read, or not read in full: nothing can be concluded. */
+  | {
+      readonly kind: 'UNKNOWN';
+      readonly reason: 'FORBIDDEN' | 'UNAVAILABLE' | 'INCOMPLETE';
+      readonly correlationId?: string;
+    };
+
+export function assessShipments(
+  request: ReturnRequest,
+  listed: ReadResult<{ items: readonly ReturnShipment[]; complete: boolean }>,
+): ShipmentAssessment {
+  if (listed.kind === 'FORBIDDEN' || listed.kind === 'NOT_FOUND') {
+    return { kind: 'UNKNOWN', reason: 'FORBIDDEN' };
+  }
+  if (listed.kind === 'UNAVAILABLE' || listed.kind === 'MALFORMED') {
+    return { kind: 'UNKNOWN', reason: 'UNAVAILABLE', correlationId: listed.correlationId };
+  }
+  // A shipment that never named this request is not counted at all.
+  const claims = listed.data.items.filter((shipment) => shipment.returnRequestId === request.id);
+  // Pages not followed to their end may hold the shipment that is the request's.
+  if (!listed.data.complete) return { kind: 'UNKNOWN', reason: 'INCOMPLETE' };
+  const verified = claims.filter((shipment) => isShipmentOfRequest(shipment, request));
+  return { kind: 'KNOWN', verified, unverified: claims.length - verified.length };
+}
+
+/**
+ * Whether goods of the request are on their way or further:
+ *
+ * - `MOVING` — marketplace-service mirrored a shipment or a physical step, or a
+ *   verified shipment is listed;
+ * - `NONE` — the request is not authorized (no shipment can be its progress),
+ *   or inventory's answer was read in full and none of it is this request's;
+ * - `UNKNOWN` — for an authorized request whose goods' side was not shown to
+ *   this person, could not be read, or not read in full.
+ */
+export type GoodsState = 'NONE' | 'MOVING' | 'UNKNOWN';
+
+export function goodsStateOf(request: ReturnRequest, shipments: ShipmentAssessment): GoodsState {
+  if (
+    request.returnShipmentId !== null ||
+    request.inTransitAt !== null ||
+    PHYSICAL_RETURN_STATUSES.includes(request.status as ReturnStatus)
+  ) {
+    return 'MOVING';
+  }
+  if (request.status !== 'AUTHORIZED') return 'NONE';
+  if (shipments.kind === 'UNKNOWN') return 'UNKNOWN';
+  return shipments.verified.length > 0 ? 'MOVING' : 'NONE';
 }
 
 // ---------------------------------------------------------------------------
@@ -302,8 +509,14 @@ export const RETURN_COMMAND_FROM: Readonly<Record<ReturnDecisionCommand, readonl
     CANCEL: ['REQUESTED', 'AUTHORIZED'],
   };
 
-/** The statuses whose lines still take units of the order (`openQuantities`). */
-const OPEN_STATUSES: readonly string[] = ['REQUESTED', 'AUTHORIZED'];
+/**
+ * The statuses whose lines no longer take units of the order
+ * (`RETURN_STATUSES_HOLDING_UNITS` is every other one): a request refused or
+ * withdrawn. Goods on the road, received or resolved were returned and are not
+ * returnable again — and a status this portal does not know is counted as
+ * taking its units, never as freeing them.
+ */
+const RELEASING_STATUSES: readonly string[] = ['REJECTED', 'CANCELLED'];
 
 /** Who is asking, from the access token: the organization it acts for and its roles there. */
 export interface ReturnCaller {
@@ -353,10 +566,33 @@ export function canRequestReturn(caller: ReturnCaller, order: Order): boolean {
   );
 }
 
-/** The commands on `request` marketplace-service would take from this caller now. */
+/**
+ * Whether this caller is the request's buyer in a role that may withdraw it —
+ * `@Roles` of the cancellation, then `assertBuyer`.
+ */
+function mayWithdraw(caller: ReturnCaller, request: ReturnRequest): boolean {
+  return (
+    caller.organizationId !== null &&
+    rolesGuardAdmits(caller.roles, RETURN_CANCEL_ROLES) &&
+    holdsAny(caller.roles, BUYER_ROLES) &&
+    caller.organizationId === request.buyerOrganizationId
+  );
+}
+
+/**
+ * The commands on `request` marketplace-service would take from this caller
+ * now — **and**, for the withdrawal, only while no goods of it are known to be
+ * moving (PR 336 review 1, finding 2). marketplace-service still says
+ * AUTHORIZED after a dispatch while its mirror is off, and a withdrawal then
+ * releases units that are on their way back, so the buyer could ask for the
+ * same units again. The portal withholds it whenever goods are `MOVING` or
+ * their state is `UNKNOWN` (`goodsStateOf`); `cancelWithheldFor` says why.
+ * The service's own guard is separate backend work.
+ */
 export function returnCommandsFor(
   caller: ReturnCaller,
   request: ReturnRequest,
+  goods: GoodsState,
 ): ReturnDecisionCommand[] {
   if (caller.organizationId === null) return [];
   const status = request.status as ReturnStatus;
@@ -370,26 +606,47 @@ export function returnCommandsFor(
       if (RETURN_COMMAND_FROM[command].includes(status)) commands.push(command);
     }
   }
-  const buyer =
-    rolesGuardAdmits(caller.roles, RETURN_CANCEL_ROLES) &&
-    holdsAny(caller.roles, BUYER_ROLES) &&
-    caller.organizationId === request.buyerOrganizationId;
-  if (buyer && RETURN_COMMAND_FROM.CANCEL.includes(status)) commands.push('CANCEL');
+  if (
+    mayWithdraw(caller, request) &&
+    RETURN_COMMAND_FROM.CANCEL.includes(status) &&
+    goods === 'NONE'
+  ) {
+    commands.push('CANCEL');
+  }
   return commands;
 }
 
 /**
- * What each line of the order still allows: sold, less what open requests
- * already take (`openQuantities`). `null` for every line when the order's
- * requests could not be read — the service makes the check either way.
+ * Why the buyer, who could otherwise withdraw this request, is not offered it:
+ * the goods' state — said in fixed words (`RETURN_CANCEL_WITHHELD`) — or null.
+ */
+export function cancelWithheldFor(
+  caller: ReturnCaller,
+  request: ReturnRequest,
+  goods: GoodsState,
+): Exclude<GoodsState, 'NONE'> | null {
+  if (goods === 'NONE' || !mayWithdraw(caller, request)) return null;
+  return RETURN_COMMAND_FROM.CANCEL.includes(request.status as ReturnStatus) ||
+    PHYSICAL_RETURN_STATUSES.includes(request.status as ReturnStatus)
+    ? goods
+    : null;
+}
+
+/**
+ * What each line of the order still allows: sold, less what every request
+ * still holding units takes (`openQuantities`). `null` for every line unless
+ * **all** the order's requests were read (`OrderReturnRequests.complete`): a count of
+ * part of them would offer units another request already took (PR 336 review
+ * 1, finding 3), and the request form is then not offered.
  */
 export function returnableLines(
   order: Order,
-  requests: readonly ReturnRequest[] | null,
+  requests: OrderReturnRequests | null,
 ): ReturnableLine[] {
+  const known = requests !== null && requests.complete;
   const taken = new Map<string, number>();
-  for (const request of requests ?? []) {
-    if (!OPEN_STATUSES.includes(request.status)) continue;
+  for (const request of known ? requests.items : []) {
+    if (RELEASING_STATUSES.includes(request.status)) continue;
     for (const line of request.lines) {
       taken.set(line.orderLineId, (taken.get(line.orderLineId) ?? 0) + line.quantity);
     }
@@ -400,8 +657,7 @@ export function returnableLines(
       : [
           {
             orderLineId: line.id,
-            available:
-              requests === null ? null : Math.max(0, line.quantity - (taken.get(line.id) ?? 0)),
+            available: known ? Math.max(0, line.quantity - (taken.get(line.id) ?? 0)) : null,
           },
         ],
   );

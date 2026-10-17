@@ -1,9 +1,20 @@
 import { render, screen, within } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
-import { RETURN_DONE_MESSAGES, RETURN_ORDER_NOT_COMPLETED_NOTE } from '@/lib/return-fields';
+import {
+  RETURN_CANCEL_WITHHELD,
+  RETURN_DONE_MESSAGES,
+  RETURN_ORDER_NOT_COMPLETED_NOTE,
+  RETURN_REMAINING_UNKNOWN_NOTE,
+  RETURN_SHIPMENT_UNVERIFIED,
+} from '@/lib/return-fields';
 import type { ReadResult } from '@/server/assets';
-import type { ReturnPage, ReturnRequest, ReturnShipment } from '@/server/returns';
+import type {
+  OrderReturnRequests,
+  ReturnPage,
+  ReturnRequest,
+  ShipmentAssessment,
+} from '@/server/returns';
 import {
   AUTHORIZED,
   CANCELLED,
@@ -39,6 +50,10 @@ const NAMES = new Map([
   [LINE_A, 'شن و ماسه'],
   [LINE_B, 'سیمان'],
 ]);
+const all = (items: ReturnRequest[]): ReadResult<OrderReturnRequests> => ({
+  kind: 'OK',
+  data: { items, complete: true },
+});
 const page = (items: ReturnRequest[]): ReadResult<ReturnPage> => ({
   kind: 'OK',
   data: { items, nextCursor: null },
@@ -96,7 +111,7 @@ function renderDetail(overrides: Partial<Parameters<typeof ReturnDetailScreen>[0
     <ReturnDetailScreen
       result={{ kind: 'OK', data: REQUESTED }}
       productNames={NAMES}
-      shipments={{ kind: 'OK', data: [] }}
+      shipments={{ kind: 'KNOWN', verified: [], unverified: 0 }}
       offered={[]}
       csrfToken="csrf"
       binding={BINDING}
@@ -120,15 +135,28 @@ describe('one request', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  it('the buyer of an authorized request, offered the withdrawal, with the goods on their way', async () => {
+  it('the buyer of an authorized request with nothing moving, offered the withdrawal', async () => {
     const { container } = renderDetail({
       result: { kind: 'OK', data: AUTHORIZED },
-      shipments: { kind: 'OK', data: [INSPECTED_SHIPMENT] },
       offered: [
         { command: 'CANCEL', submission: { id: 'sub_CANCELCANCELCANCELC', replay: STAMP } },
       ],
     });
     expect(await screen.findByRole('form', { name: 'لغو درخواست بازگشت' })).toBeInTheDocument();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('the buyer of an authorized request whose goods are on their way: no withdrawal, and why', async () => {
+    const { container } = renderDetail({
+      result: { kind: 'OK', data: AUTHORIZED },
+      shipments: { kind: 'KNOWN', verified: [INSPECTED_SHIPMENT], unverified: 0 },
+      cancelWithheld: 'MOVING',
+    });
+    expect(screen.queryByRole('form', { name: 'لغو درخواست بازگشت' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'اقدام بعدی شما' })).toHaveTextContent(
+      RETURN_CANCEL_WITHHELD.MOVING,
+    );
+    expect(screen.queryByText(/اقدامی از سوی شما لازم نیست/)).toBeNull();
     const goods = screen.getByRole('region', { name: 'جابه‌جایی و بازرسی کالا' });
     expect(goods).toHaveTextContent('بازرسی‌شده، در انتظار تعیین تکلیف');
     expect(goods).toHaveTextContent('هر سه کیسه نم کشیده بود.');
@@ -167,13 +195,66 @@ describe('one request', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
+  it('the goods’ side unknown: no withdrawal, and why', async () => {
+    const { container } = renderDetail({
+      result: { kind: 'OK', data: AUTHORIZED },
+      shipments: { kind: 'UNKNOWN', reason: 'FORBIDDEN' },
+      cancelWithheld: 'UNKNOWN',
+    });
+    expect(screen.getByRole('region', { name: 'اقدام بعدی شما' })).toHaveTextContent(
+      RETURN_CANCEL_WITHHELD.UNKNOWN,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('a shipment the request does not bear out: a notice, and nothing of it shown as progress', async () => {
+    const { container } = renderDetail({
+      result: { kind: 'OK', data: AUTHORIZED },
+      shipments: { kind: 'KNOWN', verified: [], unverified: 1 },
+    });
+    const goods = screen.getByRole('region', { name: 'جابه‌جایی و بازرسی کالا' });
+    expect(goods).toHaveTextContent('هنوز محموله‌ای');
+    expect(goods).toHaveTextContent(RETURN_SHIPMENT_UNVERIFIED);
+    expect(within(goods).queryByRole('list', { name: 'مراحل محمولهٔ بازگشت' })).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('the physical steps marketplace mirrored, in the history', () => {
+    renderDetail({
+      result: {
+        kind: 'OK',
+        data: {
+          ...AUTHORIZED,
+          status: 'RECEIVED',
+          returnShipmentId: INSPECTED_SHIPMENT.id,
+          inTransitAt: '2026-10-08T08:00:00.000Z',
+          receivedAt: '2026-10-09T08:00:00.000Z',
+        },
+      },
+    });
+    expect(screen.getByText('کالا دریافت شد، در انتظار بازرسی')).toBeInTheDocument();
+    const steps = within(screen.getByRole('list', { name: 'سابقهٔ درخواست بازگشت' }))
+      .getAllByRole('listitem')
+      .map((item) => (item.textContent ?? '').split(' — ')[0]);
+    expect(steps.slice(-2)).toEqual(['کالا در راه بازگشت است', 'کالا دریافت شد']);
+  });
+
   it.each([
-    ['no shipment yet', { kind: 'OK', data: [] }, 'هنوز محموله‌ای'],
-    ['the goods’ side not shown to this role', { kind: 'FORBIDDEN' }, 'نشان داده نمی‌شود'],
-    ['the goods’ side unavailable', UNAVAILABLE, 'اکنون خوانده نشد'],
+    ['no shipment yet', { kind: 'KNOWN', verified: [], unverified: 0 }, 'هنوز محموله‌ای'],
+    [
+      'the goods’ side not shown to this role',
+      { kind: 'UNKNOWN', reason: 'FORBIDDEN' },
+      'نشان داده نمی‌شود',
+    ],
+    [
+      'the goods’ side unavailable',
+      { kind: 'UNKNOWN', reason: 'UNAVAILABLE', correlationId: 'COR-1' },
+      'اکنون خوانده نشد',
+    ],
+    ['the goods’ side not read in full', { kind: 'UNKNOWN', reason: 'INCOMPLETE' }, 'به‌طور کامل'],
   ] as const)('%s', async (_name, shipments, text) => {
     const { container } = renderDetail({
-      shipments: shipments as ReadResult<readonly ReturnShipment[]>,
+      shipments: shipments as ShipmentAssessment,
     });
     expect(screen.getByRole('region', { name: 'جابه‌جایی و بازرسی کالا' })).toHaveTextContent(text);
     expect(await axe(container)).toHaveNoViolations();
@@ -223,7 +304,7 @@ describe('the returns part of an order', () => {
     const { container } = render(
       <OrderReturns
         {...props}
-        requests={page([REQUESTED])}
+        requests={all([REQUESTED])}
         offered={[
           { command: 'REQUEST', submission: { id: 'sub_REQUESTREQUESTREQUE', replay: STAMP } },
         ]}
@@ -239,10 +320,18 @@ describe('the returns part of an order', () => {
   it.each([
     [
       'the buyer of an order not completed',
-      { notCompleted: true, requests: page([]) },
+      { notCompleted: true, requests: all([]) },
       RETURN_ORDER_NOT_COMPLETED_NOTE,
     ],
-    ['the supplier, none asked', { requests: page([]) }, 'درخواست بازگشتی ثبت نشده'],
+    ['the supplier, none asked', { requests: all([]) }, 'درخواست بازگشتی ثبت نشده'],
+    [
+      'the buyer, when not every request of the order could be read',
+      {
+        requests: { kind: 'OK', data: { items: [REQUESTED], complete: false } },
+        remainingUnknown: true,
+      },
+      RETURN_REMAINING_UNKNOWN_NOTE,
+    ],
     ['the requests unavailable', { requests: UNAVAILABLE }, 'اکنون خوانده نشد'],
     ['the requests refused to this role', { requests: { kind: 'FORBIDDEN' } }, 'نشان داده نمی‌شود'],
   ] as const)('%s', async (_name, overrides, text) => {
@@ -251,7 +340,7 @@ describe('the returns part of an order', () => {
         {...props}
         offered={[]}
         {...(overrides as Partial<Parameters<typeof OrderReturns>[0]>)}
-        requests={overrides.requests as ReadResult<ReturnPage>}
+        requests={overrides.requests as ReadResult<OrderReturnRequests>}
       />,
     );
     expect(container).toHaveTextContent(text);
