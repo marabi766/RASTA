@@ -21,10 +21,11 @@ import {
   UNOPENED_BIDS,
 } from '@/test/owner-fixtures';
 
-import { OwnerCommandForm } from './[id]/OwnerCommandForm';
+import { OwnerCommandForm, UNREPEATABLE_OWNER_TEXT } from './[id]/OwnerCommandForm';
 import { OwnerCommands, type OfferedOwnerCommand } from './[id]/OwnerCommands';
 import type { OwnerFormState } from './[id]/owner-form-state';
 import {
+  OpeningOnlyScreen,
   OpeningSection,
   OwnerBidsSection,
   OwnerFlash,
@@ -124,7 +125,7 @@ describe('the publication', () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole('form', { name: 'درخواست انتشار' })).toHaveTextContent(
-      /نه کسی که درخواست داده است/,
+      /کسی که درخواست داده با آن موافقت نمی‌کند/,
     );
     expect(await axe(container)).toHaveNoViolations();
   });
@@ -147,12 +148,19 @@ describe('the publication', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  it('pending, to the person who asked: told it waits on someone else — separation of duties', async () => {
-    const { container } = draftPage({ kind: 'OK', data: PENDING_REQUEST }, ['OWN_REQUEST'], []);
-    expect(region('انتشار و موافقت')).toHaveTextContent(
-      /تفکیک وظایف: کسی که درخواست داده خودش آن را تأیید نمی‌کند/,
+  it('pending, to the person who asked: told it waits — separation of duties — and offered the rejection only', async () => {
+    const { container } = draftPage(
+      { kind: 'OK', data: PENDING_REQUEST },
+      ['OWN_REQUEST'],
+      [offer('REJECT')],
     );
-    expect(screen.queryByRole('form')).toBeNull();
+    expect(region('انتشار و موافقت')).toHaveTextContent(
+      /تفکیک وظایف: کسی که درخواست داده خودش با آن موافقت نمی‌کند؛ اگر مرجع همین مرحله باشید، رد آن با شماست/,
+    );
+    expect(screen.queryByRole('form', { name: 'موافقت با انتشار' })).toBeNull();
+    expect(screen.getByRole('form', { name: 'رد درخواست انتشار' })).toHaveTextContent(
+      /از کسی که درخواست داده هم پذیرفته می‌شود/,
+    );
     expect(await axe(container)).toHaveNoViolations();
   });
 
@@ -365,6 +373,62 @@ describe('an owner form, in every state its action can put it in', () => {
       />,
     );
     expect(screen.queryByRole('button')).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe('an unknown outcome that is never sent again', () => {
+  it.each(['PROPOSE_OPENING', 'WITHDRAW_PROPOSAL'] as const)(
+    '%s: says why, offers no retry, lets the person set it aside once they have looked',
+    async (command) => {
+      formState = {
+        kind: 'UNCONFIRMED',
+        command,
+        correlationId: 'COR_1',
+        submissionId: 'sub_AAAAAAAAAAAAAAAAAAAA',
+        reason: null,
+        replay: null,
+        viewOnly: true,
+        unrepeatable: true,
+      };
+      const { container } = render(
+        <OwnerCommandForm
+          tenderId={TENDER_ID}
+          command={command}
+          csrfToken={CSRF}
+          submissionId="sub_AAAAAAAAAAAAAAAAAAAA"
+          replay={STAMP}
+          owner={OWNER_TAG}
+          pageHref={PAGE}
+        />,
+      );
+      expect(screen.getByText(UNREPEATABLE_OWNER_TEXT)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
+      expect(
+        screen.getByRole('link', { name: 'وضعیت مناقصه را دیدم؛ این درخواست را کنار بگذار' }),
+      ).toBeInTheDocument();
+      expect(await axe(container)).toHaveNoViolations();
+    },
+  );
+});
+
+describe('an opener who may not read the tender', () => {
+  it('sees the tender’s id, why nothing else of it is shown, the opening and the count', async () => {
+    const { container } = render(
+      <OpeningOnlyScreen tenderId={TENDER_ID}>
+        <OpeningSection
+          status={null}
+          opened={false}
+          notes={[]}
+          commands={group([offer('PROPOSE_OPENING'), offer('OPEN_BIDS')])}
+        />
+        <OwnerBidsSection bids={{ kind: 'OK', data: UNOPENED_BIDS }} criteria={new Map()} />
+      </OpeningOnlyScreen>,
+    );
+    expect(region('گشایش پیشنهادهای مناقصه')).toHaveTextContent(TENDER_ID);
+    expect(region('گشایش پیشنهادهای مناقصه')).toHaveTextContent(/مشخصات مناقصه را نمی‌خواند/);
+    expect(region('گشایش پیشنهادها')).toHaveTextContent(/نقش شما وضعیت مناقصه را نمی‌خواند/);
+    expect(screen.getByRole('form', { name: 'پیشنهاد گشایش پیشنهادها' })).toBeInTheDocument();
     expect(await axe(container)).toHaveNoViolations();
   });
 });

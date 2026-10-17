@@ -265,4 +265,34 @@ describe('unconfirmed', () => {
       retryRefused: true,
     });
   });
+
+  it('a proposal or its withdrawal, unconfirmed, is view-only from the start and never sent again', async () => {
+    for (const command of ['PROPOSE_OPENING', 'WITHDRAW_PROPOSAL'] as const) {
+      sent = [];
+      answer = () => problem(504, 'UPSTREAM_TIMEOUT');
+      const data = form({}, { ...OPEN, command });
+      const first = (await send(data)) as UnconfirmedOwnerCommand;
+      expect(first).toMatchObject({
+        kind: 'UNCONFIRMED',
+        command,
+        submissionId: data.get(SUBMISSION_FIELD),
+        replay: null,
+        viewOnly: true,
+        unrepeatable: true,
+      });
+      // Whatever the form posts again — the same key, a valid stamp — nothing is sent.
+      expect(await send(data, first)).toEqual(first);
+      expect(sent).toHaveLength(1);
+    }
+  });
+
+  it('the opening itself, unconfirmed, may be sent again: it is done once', async () => {
+    answer = () => problem(504, 'UPSTREAM_TIMEOUT');
+    const data = form({}, OPEN);
+    const first = (await send(data)) as UnconfirmedOwnerCommand;
+    expect(first.viewOnly).toBeUndefined();
+    await send(data, first);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toEqual(sent[0]);
+  });
 });

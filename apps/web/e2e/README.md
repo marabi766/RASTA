@@ -145,7 +145,7 @@ about 45 s); the other tenant's contractor shown the restricted tender as a miss
 
 The same cast as the bid scenarios (`tender-cast.ts`, once per run), and **every test drafts its
 own tender** (`draftTender`). In the browser: the author asks for publication, is told it waits
-and is offered no decision; the approver grants; the author executes it on the same version. A
+and is offered no grant (only the rejection, being the step's authority too); the approver grants; the author executes it on the same version. A
 draft without criteria is refused with every reason in fixed words and no approval round opens.
 A tender published with a one-minute window gets a contractor's bid through the gateway; once
 construction-service closes it at the deadline (the test polls its status), the author proposes

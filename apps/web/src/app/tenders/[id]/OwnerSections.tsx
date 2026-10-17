@@ -32,7 +32,9 @@ const NOTES: Readonly<Record<Exclude<OwnerNote, null>, string>> = {
   PUBLICATION_PENDING:
     'درخواست انتشار در انتظار تصمیم مرجعی است که سیاست موافقت نام برده؛ تا آن تصمیم، انتشار عرضه نمی‌شود.',
   OWN_REQUEST:
-    'درخواست انتشار را شما داده‌اید و در انتظار تصمیم مرجع است. تفکیک وظایف: کسی که درخواست داده خودش آن را تأیید نمی‌کند.',
+    'درخواست انتشار را شما داده‌اید و در انتظار تصمیم مرجع است. تفکیک وظایف: کسی که درخواست داده خودش با آن موافقت نمی‌کند؛ اگر مرجع همین مرحله باشید، رد آن با شماست.',
+  REQUEST_BEHIND:
+    'آخرین درخواست انتشار برای نسخهٔ پیشینِ مناقصه داده شده است و برای این نسخه معتبر نیست. درخواست تازه آن را پایان می‌دهد و از نو موافقت می‌خواهد.',
   REQUESTS_UNREAD:
     'درخواست‌های موافقت انتشار خوانده نشد، پس معلوم نیست چه کاری در انتظار است و فرمی عرضه نمی‌شود. کمی بعد صفحه را تازه کنید.',
   STEP_UNREAD:
@@ -143,13 +145,16 @@ function RequestView({ request }: { readonly request: ReadResult<ApprovalRequest
 }
 
 export interface OpeningSectionProps {
-  readonly status: string;
+  /** The tender's status; null for a caller who may not read the tender (`isOpeningOnly`). */
+  readonly status: string | null;
+  /** Whether the bids are opened, when the status is not known. */
+  readonly opened?: boolean;
   readonly notes: readonly OwnerNote[];
   readonly commands?: ReactNode;
 }
 
 /** The two-person opening of a closed tender's bids. */
-export function OpeningSection({ status, notes, commands }: OpeningSectionProps) {
+export function OpeningSection({ status, opened = false, notes, commands }: OpeningSectionProps) {
   return (
     <Section headingId="tender-opening" title="گشایش پیشنهادها">
       <div className="flex flex-col gap-4">
@@ -162,13 +167,42 @@ export function OpeningSection({ status, notes, commands }: OpeningSectionProps)
           <p>
             {status === 'PUBLISHED'
               ? 'پیشنهادها پس از بسته‌شدن مناقصه گشوده می‌شوند.'
-              : 'پیشنهادهای این مناقصه گشوده شده‌اند.'}
+              : status === null && !opened
+                ? 'پیشنهادها فقط پس از بسته‌شدن مناقصه در پایان مهلت گشوده می‌شوند. نقش شما وضعیت مناقصه را نمی‌خواند؛ اگر هنوز بسته نشده باشد، سرویس گشایش را با دلیلش رد می‌کند.'
+                : 'پیشنهادهای این مناقصه گشوده شده‌اند.'}
           </p>
         )}
         <Notes notes={notes} />
         {commands}
       </div>
     </Section>
+  );
+}
+
+/**
+ * The page of an opener who may not read the tender itself (`isOpeningOnly`):
+ * its id, why nothing else of it is shown, then the opening and the bids.
+ */
+export function OpeningOnlyScreen({
+  tenderId,
+  children,
+}: {
+  readonly tenderId: string;
+  readonly children: ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-6">
+      <Section headingId="tender-summary" title="گشایش پیشنهادهای مناقصه">
+        <p className="text-sm text-content-muted">
+          شناسه <Identifier>{tenderId}</Identifier>
+        </p>
+        <p className="mt-2 text-sm">
+          نقش شما گشایش پیشنهادهای مناقصه‌های سازمان است و مشخصات مناقصه را نمی‌خواند؛ این صفحه فقط
+          گشایش و پیشنهادها را، آن‌طور که سرویس به گشاینده نشان می‌دهد، نشان می‌دهد.
+        </p>
+      </Section>
+      {children}
+    </div>
   );
 }
 

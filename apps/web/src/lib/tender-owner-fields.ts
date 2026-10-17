@@ -25,6 +25,20 @@ export function isOwnerCommand(value: unknown): value is OwnerCommand {
   return typeof value === 'string' && (OWNER_COMMANDS as readonly string[]).includes(value);
 }
 
+/**
+ * The commands whose unconfirmed outcome is never sent again (PR 345 review
+ * 1, finding 1). Neither names the proposal it acts on: a withdrawal sent again
+ * clears whatever proposal stands when it arrives — a newer one made in
+ * another tab included — and a proposal sent again may stand up one its author
+ * has since withdrawn. Until construction-service binds the withdrawal to a
+ * proposal, an unknown outcome is view-only. Publishing and deciding carry a
+ * version; the opening is done once (`alreadyOpened`): those stay retryable.
+ */
+export const UNREPEATABLE_OWNER_COMMANDS: readonly OwnerCommand[] = [
+  'PROPOSE_OPENING',
+  'WITHDRAW_PROPOSAL',
+];
+
 export const OWNER_COMMAND_LABELS: Readonly<Record<OwnerCommand, string>> = {
   PUBLISH: 'انتشار مناقصه',
   GRANT: 'موافقت با انتشار',
@@ -37,11 +51,11 @@ export const OWNER_COMMAND_LABELS: Readonly<Record<OwnerCommand, string>> = {
 /** What each command does, said before it is sent. */
 export const OWNER_COMMAND_CONSEQUENCES: Readonly<Record<OwnerCommand, string>> = {
   PUBLISH:
-    'اگر موافقت با انتشار هنوز گرفته نشده باشد، درخواست موافقت برای همین نسخهٔ مناقصه ثبت می‌شود و مرجعی که سیاست نام برده آن را بررسی می‌کند — نه کسی که درخواست داده است. پس از موافقت، همین فرمان مناقصه را منتشر می‌کند و معیارها منجمد می‌شوند.',
+    'اگر موافقت با انتشار هنوز گرفته نشده باشد، درخواست موافقت برای همین نسخهٔ مناقصه ثبت می‌شود و مرجعی که سیاست نام برده آن را بررسی می‌کند؛ کسی که درخواست داده با آن موافقت نمی‌کند. پس از موافقت، همین فرمان مناقصه را منتشر می‌کند و معیارها منجمد می‌شوند.',
   GRANT:
     'موافقت شما با انتشار همین نسخهٔ مناقصه ثبت می‌شود. کسی که درخواست انتشار را داده خودش آن را تأیید نمی‌کند.',
   REJECT:
-    'درخواست انتشار رد می‌شود و دور موافقت پایان می‌یابد؛ برای انتشار باید دوباره درخواست داد. دلیل رد لازم است.',
+    'درخواست انتشار رد می‌شود و دور موافقت پایان می‌یابد؛ برای انتشار باید دوباره درخواست داد. دلیل رد لازم است. ردکردن، برخلاف موافقت، از کسی که درخواست داده هم پذیرفته می‌شود.',
   PROPOSE_OPENING:
     'گشایش دو نفره است: شما گشایش را پیشنهاد می‌دهید و نفر دومی که مجاز است آن را انجام می‌دهد. با پیشنهاد هیچ پیشنهادی خوانده یا گشوده نمی‌شود.',
   OPEN_BIDS:

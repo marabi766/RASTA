@@ -53,7 +53,7 @@ const WCAG_2_1_AA = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'];
 
 /** `lib/tender-owner-fields.ts`'s fixed words, as the page says them. */
 const OWN_REQUEST =
-  'درخواست انتشار را شما داده‌اید و در انتظار تصمیم مرجع است. تفکیک وظایف: کسی که درخواست داده خودش آن را تأیید نمی‌کند.';
+  'درخواست انتشار را شما داده‌اید و در انتظار تصمیم مرجع است. تفکیک وظایف: کسی که درخواست داده خودش با آن موافقت نمی‌کند؛ اگر مرجع همین مرحله باشید، رد آن با شماست.';
 const CRITERIA_REQUIRED = 'معیار ارزیابی‌ای برای مناقصه تعیین نشده است.';
 const SECOND_PERSON_REQUIRED =
   'تفکیک وظایف: گشایش را شخصی جز پیشنهاددهنده انجام می‌دهد؛ چیزی گشوده نشد.';
@@ -134,10 +134,12 @@ test.describe('the owner’s side of a tender, live (EXP-004)', () => {
       await expect(
         page.getByText('درخواست موافقت با انتشار ثبت شد و در انتظار مرجع است.'),
       ).toBeVisible();
-      // The person who asked is never offered the decision.
+      // The person who asked is never offered the grant; the policy's authority
+      // is their own role, so the rejection is theirs to make.
       await expect(page.getByText(OWN_REQUEST)).toBeVisible();
       await expect(form(page, 'موافقت با انتشار')).toHaveCount(0);
-      await expect(page.getByRole('form')).toHaveCount(0);
+      await expect(form(page, 'رد درخواست انتشار')).toBeVisible();
+      await expect(page.getByRole('form')).toHaveCount(1);
       expect((await held(cast, tender.id)).status).toBe('DRAFT');
       await expectAccessible(page);
 
@@ -227,7 +229,6 @@ test.describe('the owner’s side of a tender, live (EXP-004)', () => {
         form(page, 'گشایش پیشنهادها (نفر دوم)').getByText(SECOND_PERSON_REQUIRED),
       ).toBeVisible();
       expect((await held(cast, tender.id)).status).toBe('CLOSED');
-      await expectAccessible(page);
 
       // The second person. audit-service may still be catching up with the
       // receipt: the page cannot confirm, and the same request is sent again

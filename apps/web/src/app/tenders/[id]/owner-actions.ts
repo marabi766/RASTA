@@ -4,7 +4,7 @@ import { redirect } from 'next/navigation';
 
 import { FLASH_PARAM, REPLAY_FIELD } from '@/lib/form-fields';
 import { parseRejectReason } from '@/lib/tender-owner-input';
-import { REASON_FIELD } from '@/lib/tender-owner-fields';
+import { REASON_FIELD, UNREPEATABLE_OWNER_COMMANDS } from '@/lib/tender-owner-fields';
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
 import { mintFlash } from '@/server/flash';
@@ -33,6 +33,8 @@ export async function submitOwnerCommand(
   previous: OwnerFormState,
   form: FormData,
 ): Promise<OwnerFormState> {
+  // A view-only record is never sent again, whatever the form posts.
+  if (previous.kind === 'UNCONFIRMED' && previous.viewOnly) return previous;
   const state = await attempt(tenderId, form);
   return previous.kind === 'UNCONFIRMED' ? afterRetry(previous, state) : state;
 }
@@ -97,6 +99,18 @@ async function attempt(tenderId: string, form: FormData): Promise<OwnerFormState
       return { kind: 'NOT_FOUND' };
     case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
+      if (UNREPEATABLE_OWNER_COMMANDS.includes(command)) {
+        return {
+          kind: 'UNCONFIRMED',
+          command,
+          correlationId: result.correlationId,
+          submissionId,
+          reason: null,
+          replay: null,
+          viewOnly: true,
+          unrepeatable: true,
+        };
+      }
       return {
         kind: 'UNCONFIRMED',
         command,

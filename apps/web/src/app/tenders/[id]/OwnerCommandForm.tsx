@@ -13,6 +13,7 @@ import {
   OWNER_FORBIDDEN_TEXT,
   REASON_FIELD,
   REJECT_REASON_MAX,
+  UNREPEATABLE_OWNER_COMMANDS,
   type OwnerCommand,
 } from '@/lib/tender-owner-fields';
 import { parseRejectReason } from '@/lib/tender-owner-input';
@@ -139,15 +140,27 @@ export function OwnerCommandForm({
         const ended = await sessionHasEnded();
         if (!firstSend) return withRetryNote(previous, ended ? 'sessionEnded' : 'retryUnknown');
         if (sendable) {
-          return {
-            kind: 'UNCONFIRMED',
-            command,
-            correlationId: null,
-            submissionId: sentId,
-            reason: reason ?? null,
-            replay,
-            ...(ended ? { sessionEnded: true as const } : {}),
-          };
+          return UNREPEATABLE_OWNER_COMMANDS.includes(command)
+            ? {
+                kind: 'UNCONFIRMED',
+                command,
+                correlationId: null,
+                submissionId: sentId,
+                reason: null,
+                replay: null,
+                viewOnly: true,
+                unrepeatable: true,
+                ...(ended ? { sessionEnded: true as const } : {}),
+              }
+            : {
+                kind: 'UNCONFIRMED',
+                command,
+                correlationId: null,
+                submissionId: sentId,
+                reason: reason ?? null,
+                replay,
+                ...(ended ? { sessionEnded: true as const } : {}),
+              };
         }
         throw error;
       }
@@ -274,6 +287,13 @@ export function forbiddenText(command: OwnerCommand, reasons: readonly string[])
   return OWNER_FORBIDDEN_TEXT[command];
 }
 
+/**
+ * Why a proposal or its withdrawal whose outcome is unknown is not sent again
+ * (`UNREPEATABLE_OWNER_COMMANDS`).
+ */
+export const UNREPEATABLE_OWNER_TEXT =
+  'پیشنهاد گشایش و پس‌گرفتن آن، وقتی نتیجه‌شان معلوم نیست، دوباره فرستاده نمی‌شوند: هیچ‌کدام به پیشنهاد گشایش مشخصی بسته نیست و ارسال دوباره روی هر پیشنهادی عمل می‌کند که در آن لحظه برقرار است — شاید پیشنهادی تازه‌تر از صفحهٔ دیگری. وضعیت را با تازه‌کردن صفحه ببینید و اگر لازم بود از نو اقدام کنید.';
+
 const HELD_MESSAGE =
   'درخواست دیگری روی همین مناقصه فرستاده شده و نتیجه‌اش هنوز معلوم نیست؛ ممکن است انجام شده باشد. تا روشن‌شدن نتیجهٔ آن، این فرم فرستاده نمی‌شود. وضعیت را با تازه‌کردن صفحه ببینید.';
 
@@ -377,7 +397,9 @@ function UnconfirmedCommand({
           ممکن است درخواست انجام شده باشد.
         </Alert>
       ) : null}
-      {state.restored ? (
+      {state.unrepeatable ? (
+        <Alert tone="warning">{UNREPEATABLE_OWNER_TEXT}</Alert>
+      ) : state.restored ? (
         <Alert tone="warning">
           این درخواست پیش از تازه‌شدن صفحه فرستاده شد و نتیجه‌اش تأیید نشد. محتوای آن در این مرورگر
           نگه داشته نمی‌شود و همان درخواست دوباره فرستاده نمی‌شود؛ آنچه سرویس اکنون از مناقصه نگه

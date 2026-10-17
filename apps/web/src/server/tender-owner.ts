@@ -13,6 +13,7 @@ import {
 import { callGateway, GatewayRequestError } from './gateway';
 import { webServerEnv, type WebServerEnv } from './env';
 import { utcInstant } from './instant';
+import { canReadProjects } from './portal-nav';
 import { tokenAuthority, tokenPerson } from './realm-roles';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
@@ -254,7 +255,10 @@ export function ownerCallerOf(accessToken: string): OwnerCaller {
   };
 }
 
-type RoleSettings = Pick<WebServerEnv, 'WEB_PROJECT_ROLES' | 'WEB_TENDER_OPEN_ROLES'>;
+type RoleSettings = Pick<
+  WebServerEnv,
+  'WEB_PROJECT_ROLES' | 'WEB_PROJECT_READER_ROLES' | 'WEB_TENDER_OPEN_ROLES'
+>;
 
 /**
  * `assertCanWrite` (`assert(writers)`: not `AUDITOR`, one of `SYSTEM_ADMIN` and
@@ -289,27 +293,39 @@ export function canOpenBids(caller: OwnerCaller, settings: RoleSettings): boolea
 }
 
 /**
- * The step of the publication request this caller may decide, or null —
- * `assertIsAuthority` and `TenderApprovalService.decide`, as far as the views
- * show: a request still `PENDING`, its `PENDING` step, the caller acting for
- * the step's organization with its exact role (no override; `SYSTEM_ADMIN` only
- * if the policy named it), not `AUDITOR`, and not the person who made the
- * request (a grant by them is refused, separation of duties). Live membership
- * is identity-service's to say.
+ * The step of the publication request this caller is the authority of, or
+ * null — `assertIsAuthority` and `TenderApprovalService.decide`, as far as the
+ * views show: a request still `PENDING` and asked on the tender's version now
+ * (a request the tender has moved past is ended `STALE` by any decision), its
+ * `PENDING` step, the caller acting for the step's organization with its exact
+ * role (no override; `SYSTEM_ADMIN` only if the policy named it), not
+ * `AUDITOR`. Who made the request does not matter here: only a grant is
+ * refused to them (`mayGrant`). Live membership is identity-service's to say.
  */
 export function decidableStep(
   caller: OwnerCaller,
   request: ApprovalRequest | null,
+  tenderVersion: number,
 ): ApprovalStep | null {
-  const { roles, organizationId, actorId } = caller;
+  const { roles, organizationId } = caller;
   if (request === null || request.status !== 'PENDING') return null;
-  if (roles === null || organizationId === null || actorId === null) return null;
+  if (request.tenderVersion !== tenderVersion) return null;
+  if (roles === null || organizationId === null) return null;
   if (roles.includes(OVERSIGHT_ROLE)) return null;
-  if (request.requestedBy === actorId) return null;
   const step = request.steps.find((candidate) => candidate.status === 'PENDING');
   if (!step) return null;
   if (step.authorityOrganizationId !== organizationId) return null;
   return roles.includes(step.authorityRole) ? step : null;
+}
+
+/**
+ * Whether the authority may also grant: `assertDistinctActors`, applied by the
+ * service to a `GRANT` only — the person who made the request never approves
+ * it, and may still reject it. A caller whose identity the token does not name
+ * cannot be told apart from the requester, so is not offered the grant.
+ */
+export function mayGrant(caller: OwnerCaller, request: ApprovalRequest): boolean {
+  return caller.actorId !== null && request.requestedBy !== caller.actorId;
 }
 
 /** What the page may draw for the owner, and why nothing when it has a reason to say. */
@@ -325,8 +341,10 @@ export type OwnerOffer =
 export type OwnerNote =
   /** A request is being decided, and not by this person. */
   | 'PUBLICATION_PENDING'
-  /** The step is this person's role, but they made the request. */
+  /** This person made the request: the grant is someone else's, a rejection may be theirs. */
   | 'OWN_REQUEST'
+  /** The newest request was asked on an earlier version: a new request ends it and asks again. */
+  | 'REQUEST_BEHIND'
   /** The publication's requests could not be read: what to offer is unknown. */
   | 'REQUESTS_UNREAD'
   /** The decidable step could not be read for its version. */
@@ -346,9 +364,13 @@ export interface OwnerState {
  * The owner's offers, the checks in the services' order:
  *
  * - **publish** a `DRAFT` (`assertTenderTransition` to `PUBLISHED`), unless its
- *   newest request is still `PENDING` — sending it again would only find that
- *   request. Approved on this very version, the same command executes;
- * - **decide** the pending step the caller is the authority of;
+ *   newest request is still `PENDING` on the tender's version now — sending it
+ *   again would only find that request. A pending request on an earlier version
+ *   does not hold it back: the gate ends that request and opens a new one
+ *   (`TenderApprovalGate.resolve`). Approved on this very version, the same
+ *   command executes;
+ * - **decide** the pending step the caller is the authority of: reject always,
+ *   grant only if they did not make the request;
  * - **open**, in two persons, a `CLOSED` tender: propose, open, withdraw one's
  *   own proposal. Which of the three applies the views do not say (whether a
  *   proposal stands, and whose), so all three are drawn and the service refuses
@@ -369,9 +391,10 @@ export function ownerOffers(
       notes.push('REQUESTS_UNREAD');
     } else {
       const latest = publication.data;
-      if (latest?.status === 'PENDING') {
+      if (latest?.status === 'PENDING' && latest.tenderVersion === tender.version) {
         notes.push(latest.requestedBy === caller.actorId ? 'OWN_REQUEST' : 'PUBLICATION_PENDING');
       } else {
+        if (latest?.status === 'PENDING') notes.push('REQUEST_BEHIND');
         offers.push({
           command: 'PUBLISH',
           expectedVersion: tender.version,
@@ -382,10 +405,14 @@ export function ownerOffers(
   }
 
   if (tender.status === 'DRAFT' && publication?.kind === 'OK') {
-    const decidable = decidableStep(caller, publication.data);
-    if (decidable) {
+    const request = publication.data;
+    const decidable = decidableStep(caller, request, tender.version);
+    if (request !== null && decidable) {
       if (step?.kind === 'OK' && step.data.id === decidable.approvalId) {
-        for (const command of ['GRANT', 'REJECT'] as const) {
+        const commands = mayGrant(caller, request)
+          ? (['GRANT', 'REJECT'] as const)
+          : (['REJECT'] as const);
+        for (const command of commands) {
           offers.push({
             command,
             approvalId: decidable.approvalId,
@@ -409,6 +436,40 @@ export function ownerOffers(
   }
 
   return { offers, notes };
+}
+
+/**
+ * An opener who may not read the tender itself (PR 345 review 1, finding 4):
+ * `GET /v1/tenders/:id` is `assertCanRead` (the project roles, the project
+ * reader roles, `SYSTEM_ADMIN`), while the opening and `GET …/bids` are
+ * `assertCanOpenBids` alone — so a configured opening role (say
+ * `FLEET_MANAGER` in `CONSTRUCTION_TENDER_OPEN_ROLES`) opens bids on a tender
+ * whose details it is refused. Such a caller's page reads only the bids.
+ */
+export function isOpeningOnly(caller: OwnerCaller, settings: RoleSettings): boolean {
+  return (
+    caller.roles !== null &&
+    canOpenBids(caller, settings) &&
+    !canReadProjects(caller.roles, settings)
+  );
+}
+
+/**
+ * The opening-only caller's offers: the opening's three while the bids are not
+ * opened. Whether the tender is closed yet is not something it may read — the
+ * service refuses the opening of one that is not (`NOT_CLOSED`) in fixed words.
+ */
+export function openingOnlyOffers(
+  caller: OwnerCaller,
+  bids: ReadResult<OwnerBids>,
+  settings: RoleSettings,
+): readonly OwnerOffer[] {
+  if (!canOpenBids(caller, settings) || bids.kind !== 'OK' || bids.data.opened) return [];
+  return [
+    { command: 'PROPOSE_OPENING' },
+    { command: 'OPEN_BIDS' },
+    { command: 'WITHDRAW_PROPOSAL' },
+  ];
 }
 
 /** Whether the owner's bids view is asked for: an opener, on a tender that has had bids. */

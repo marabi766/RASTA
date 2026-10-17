@@ -58,6 +58,8 @@ const openService = readSource(...SERVICE, 'tender', 'tender-open.service.ts');
 const openServiceTree = parseSource(openService);
 const approvalErrors = parseSource(readSource(...SERVICE, 'tender', 'tender-approval.errors.ts'));
 const tenderApprovals = squash(readSource(...SERVICE, 'tender', 'tender-approval.service.ts'))!;
+const approvalGate = squash(readSource(...SERVICE, 'tender', 'tender-approval.gate.ts'))!;
+const tenderService = parseSource(readSource(...SERVICE, 'tender', 'tender.service.ts'));
 const access = squash(readSource(...SERVICE, 'access', 'access.ts'))!;
 const constructionEnv = squash(readSource(...SERVICE, 'config', 'env.ts'))!;
 const gatewayRoutes = squash(readSource('services', 'api-gateway', 'src', 'config', 'routes.ts'))!;
@@ -240,13 +242,54 @@ describe('who may decide — `assertIsAuthority` and `TenderApprovalService.deci
     );
   });
 
-  it('never the person who made the request; and the person as identity-service says now', () => {
+  it('a GRANT never by the person who made the request — a REJECT may be; and the person as identity-service says now', () => {
+    // Separation of duties is applied to a grant alone: the requester may reject their own request.
     expect(tenderApprovals).toContain(
       "if(dto.decision==='GRANT'){assertDistinctActors(storedActor(request.requestedBy,request.requestedByIssuer,request.requestedBySubject),currentActor(),",
     );
+    expect(tenderApprovals.match(/assertDistinctActors\(/g)).toHaveLength(1);
     expect(tenderApprovals).toContain('constlive=awaitthis.identity.fetchMemberships(actor);');
     // `requestedBy` is the actor the guard recorded: `rasta_uid`, else the subject.
     expect(authGuard).toContain('constuserId=claims.rastaUserId??claims.sub;');
+  });
+});
+
+describe('a request the tender has moved past', () => {
+  it('any decision on it ends it STALE, so none is offered', () => {
+    expect(tenderApprovals).toContain(
+      "if(request.tenderVersion!==locked.version){awaitthis.endStale(tx,request,locked,act.actorUserId,act.actorOrganizationId,at);return'STALE';}",
+    );
+  });
+
+  it('a publication ends a pending one and asks anew, so a pending request on an older version holds nothing back', () => {
+    const start = approvalGate.indexOf('asyncresolve(');
+    const body = approvalGate.slice(start, approvalGate.indexOf('asyncendIfBehind(', start));
+    expect(body).toContain(
+      "if(this.covers(live,tender.version,binding)){returnapproved?{kind:'APPROVED',request:live}:{kind:'REQUESTED',request:live,created:false};}awaitthis.decisions.endStale(tx,live,tender,caller.userId,caller.organizationId,at);if(approved)return{kind:'STALE',request:live};",
+    );
+    expect(body).toContain("kind:'REQUESTED',request:awaitthis.open(tx,input),created:true,");
+  });
+});
+
+describe('an opener who may not read the tender', () => {
+  it('the tender read is `assertCanRead` — the writers and the project readers — while the bids and the opening are `assertCanOpenBids` alone', () => {
+    expect(method(tenderService, 'get')).toContain(
+      'const{organizationId}=this.access.assertCanRead();',
+    );
+    expect(access).toContain(
+      'this.readers=[...this.writers,...env.CONSTRUCTION_PROJECT_READER_ROLES];',
+    );
+    expect(access).toContain(
+      "assertCanRead():{organizationId:string}{const{organizationId}=this.assert(this.readers,'readconstructionprojects');",
+    );
+    const listBids = method(openServiceTree, 'listBids');
+    expect(listBids).toContain("returnthis.guarded(tenderId,'LIST_BIDS',");
+    const guarded = method(openServiceTree, 'guarded');
+    expect(guarded).toContain('constfound=awaitthis.ownedByCaller(tenderId,purpose);');
+    expect(guarded).toContain('caller=this.access.assertCanOpenBids();');
+    for (const body of [listBids, guarded, method(openServiceTree, 'proposeOpening')]) {
+      expect(body).not.toContain('assertCanRead');
+    }
   });
 });
 

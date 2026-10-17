@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
-import { REASON_FIELD } from '@/lib/tender-owner-fields';
+import { REASON_FIELD, type OwnerCommand } from '@/lib/tender-owner-fields';
 import {
   clearUnresolvedOwnerCommand,
   markOwnerCommandsOpen,
@@ -40,7 +40,7 @@ const STAMP: ReplayStamp = { token: 'signed-replay-stamp', until: Date.now() + 5
 const PAGE = `/tenders/${TENDER_ID}?view=own`;
 const REASON = 'معیارها کامل نیست';
 
-function renderForm(command: 'REJECT' | 'OPEN_BIDS' | 'PUBLISH' = 'REJECT') {
+function renderForm(command: OwnerCommand = 'REJECT') {
   return render(
     <OwnerCommandForm
       tenderId={TENDER_ID}
@@ -104,6 +104,23 @@ it('a rejection is remembered before it leaves — that it was sent, never its r
   expect(second!.get('submission')).toBe(KEY);
   expect(second!.get(REASON_FIELD)).toBe(first!.get(REASON_FIELD));
   expect(await axe(container)).toHaveNoViolations();
+});
+
+it('a proposal or its withdrawal whose call was lost is remembered, view-only, never sent again', async () => {
+  for (const command of ['PROPOSE_OPENING', 'WITHDRAW_PROPOSAL'] as const) {
+    action.mockReset();
+    window.sessionStorage.clear();
+    action.mockRejectedValueOnce(new Error('An unexpected response was received from the server.'));
+    sessionProbe.mockResolvedValue({ status: 503 });
+    const { container, unmount } = renderForm(command);
+    await submit(container);
+    expect(stored()).toMatchObject({ command, submissionId: KEY });
+    expect(screen.queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
+    expect(screen.getByRole('link', { name: /کنار بگذار/ })).toBeInTheDocument();
+    await submit(container);
+    expect(action).toHaveBeenCalledTimes(1);
+    unmount();
+  }
 });
 
 it('a reason the action would refuse unsent is not remembered', async () => {

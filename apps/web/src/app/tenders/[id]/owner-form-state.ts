@@ -53,6 +53,8 @@ export type OwnerFormState =
       readonly viewOnly?: true;
       readonly replayExpired?: true;
       readonly restored?: true;
+      /** View-only from the start: a command of this kind is never sent again (`UNREPEATABLE_*_COMMANDS`). */
+      readonly unrepeatable?: true;
     };
 
 export type UnconfirmedOwnerCommand = Extract<OwnerFormState, { kind: 'UNCONFIRMED' }>;
@@ -69,6 +71,7 @@ function original(unconfirmed: UnconfirmedOwnerCommand): UnconfirmedOwnerCommand
     replay: unconfirmed.replay,
     ...(unconfirmed.viewOnly ? { viewOnly: true as const } : {}),
     ...(unconfirmed.restored ? { restored: true as const } : {}),
+    ...(unconfirmed.unrepeatable ? { unrepeatable: true as const } : {}),
   };
 }
 

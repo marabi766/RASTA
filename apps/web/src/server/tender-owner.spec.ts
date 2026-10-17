@@ -16,6 +16,7 @@ import {
   OWNER,
   PENDING_REQUEST,
   TENDER_ID,
+  UNOPENED_BIDS,
   jwt,
 } from '@/test/owner-fixtures';
 
@@ -23,6 +24,9 @@ import {
   canOpenBids,
   canPublish,
   decidableStep,
+  isOpeningOnly,
+  mayGrant,
+  openingOnlyOffers,
   fetchOwnerBids,
   fetchPublicationRequest,
   issueOwnerCommand,
@@ -54,6 +58,7 @@ const SESSION = { accessToken: 'access-token-value' } as WebSession;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const SETTINGS = {
   WEB_PROJECT_ROLES: ['ORGANIZATION_ADMIN'],
+  WEB_PROJECT_READER_ROLES: [] as string[],
   WEB_TENDER_OPEN_ROLES: [] as string[],
 };
 const NOW = Date.parse('2026-10-18T12:00:00.000Z');
@@ -192,32 +197,68 @@ describe('who may open — assertCanOpenBids', () => {
   });
 });
 
-describe('who decides the publication — assertIsAuthority, never the requester', () => {
-  it('the step’s organization and its exact role, on a pending request', () => {
-    expect(decidableStep(ADMIN, PENDING_REQUEST)?.approvalId).toBe(APPROVAL_ID);
+describe('an opener who may not read the tender — `assertCanOpenBids` without `assertCanRead`', () => {
+  const OPENING_ONLY = { ...SETTINGS, WEB_TENDER_OPEN_ROLES: ['FLEET_MANAGER'] };
+  const fleet = person(['FLEET_MANAGER']);
+
+  it('is told apart from an owner who reads the tender, and from a reader who does not open', () => {
+    expect(isOpeningOnly(fleet, OPENING_ONLY)).toBe(true);
+    expect(isOpeningOnly(person(['ORGANIZATION_ADMIN']), OPENING_ONLY)).toBe(false);
+    expect(
+      isOpeningOnly(fleet, { ...OPENING_ONLY, WEB_PROJECT_READER_ROLES: ['FLEET_MANAGER'] }),
+    ).toBe(false);
+    expect(isOpeningOnly(fleet, SETTINGS)).toBe(false);
+    expect(isOpeningOnly(person(['FLEET_MANAGER', 'AUDITOR']), OPENING_ONLY)).toBe(false);
   });
 
-  it('not the person who asked; not another organization; not another role; not AUDITOR', () => {
-    expect(decidableStep(person(['ORGANIZATION_ADMIN'], AUTHOR), PENDING_REQUEST)).toBeNull();
+  it('is offered the opening’s three while the bids are not opened, and nothing after', () => {
+    expect(openingOnlyOffers(fleet, { kind: 'OK', data: UNOPENED_BIDS }, OPENING_ONLY)).toEqual([
+      { command: 'PROPOSE_OPENING' },
+      { command: 'OPEN_BIDS' },
+      { command: 'WITHDRAW_PROPOSAL' },
+    ]);
+    expect(openingOnlyOffers(fleet, { kind: 'OK', data: OPENED_BIDS }, OPENING_ONLY)).toEqual([]);
+    expect(openingOnlyOffers(fleet, { kind: 'NOT_FOUND' }, OPENING_ONLY)).toEqual([]);
+    expect(openingOnlyOffers(fleet, { kind: 'OK', data: UNOPENED_BIDS }, SETTINGS)).toEqual([]);
+  });
+});
+
+describe('who decides the publication — assertIsAuthority; the grant never the requester’s', () => {
+  it('the step’s organization and its exact role, on a pending request of this version', () => {
+    expect(decidableStep(ADMIN, PENDING_REQUEST, 4)?.approvalId).toBe(APPROVAL_ID);
+  });
+
+  it('not another organization; not another role; not AUDITOR', () => {
     expect(
-      decidableStep(person(['ORGANIZATION_ADMIN'], 'U', 'ORG-DEH-0002'), PENDING_REQUEST),
+      decidableStep(person(['ORGANIZATION_ADMIN'], 'U', 'ORG-DEH-0002'), PENDING_REQUEST, 4),
     ).toBeNull();
-    expect(decidableStep(person(['FLEET_MANAGER']), PENDING_REQUEST)).toBeNull();
-    expect(decidableStep(person(['ORGANIZATION_ADMIN', 'AUDITOR']), PENDING_REQUEST)).toBeNull();
+    expect(decidableStep(person(['FLEET_MANAGER']), PENDING_REQUEST, 4)).toBeNull();
+    expect(decidableStep(person(['ORGANIZATION_ADMIN', 'AUDITOR']), PENDING_REQUEST, 4)).toBeNull();
+  });
+
+  it('the requester is still the authority — a rejection is theirs — but never grants', () => {
+    const author = person(['ORGANIZATION_ADMIN'], AUTHOR);
+    expect(decidableStep(author, PENDING_REQUEST, 4)?.approvalId).toBe(APPROVAL_ID);
+    expect(mayGrant(author, PENDING_REQUEST)).toBe(false);
+    expect(mayGrant(ADMIN, PENDING_REQUEST)).toBe(true);
   });
 
   it('the requester recognised by the subject when the token names no platform user', () => {
     const bySubject = { ...PENDING_REQUEST, requestedBy: 'kc-subject' };
-    expect(decidableStep(person(['ORGANIZATION_ADMIN'], null), bySubject)).toBeNull();
+    expect(mayGrant(person(['ORGANIZATION_ADMIN'], null), bySubject)).toBe(false);
   });
 
-  it('nobody whose identity the token does not name: the requester cannot be ruled out', () => {
-    expect(decidableStep({ ...ADMIN, actorId: null }, PENDING_REQUEST)).toBeNull();
+  it('nobody whose identity the token does not name grants: the requester cannot be ruled out', () => {
+    expect(mayGrant({ ...ADMIN, actorId: null }, PENDING_REQUEST)).toBe(false);
+  });
+
+  it('nothing on a request the tender has moved past: any decision would end it stale', () => {
+    expect(decidableStep(ADMIN, PENDING_REQUEST, 5)).toBeNull();
   });
 
   it('nothing once the request is approved, rejected or used', () => {
-    expect(decidableStep(ADMIN, APPROVED_REQUEST)).toBeNull();
-    expect(decidableStep(ADMIN, null)).toBeNull();
+    expect(decidableStep(ADMIN, APPROVED_REQUEST, 4)).toBeNull();
+    expect(decidableStep(ADMIN, null, 4)).toBeNull();
   });
 });
 
@@ -283,17 +324,33 @@ describe('which forms are offered', () => {
       ],
       notes: ['PUBLICATION_PENDING'],
     });
+    // The requester, the authority of the step too: told it waits, offered the rejection only.
     const author = person(['ORGANIZATION_ADMIN'], AUTHOR);
     expect(
       ownerOffers(
         author,
-        state({ publication: { kind: 'OK', data: PENDING_REQUEST } }),
+        state({ publication: { kind: 'OK', data: PENDING_REQUEST }, step }),
         SETTINGS,
         NOW,
       ),
     ).toEqual({
-      offers: [],
+      offers: [{ command: 'REJECT', approvalId: APPROVAL_ID, expectedVersion: 7 }],
       notes: ['OWN_REQUEST'],
+    });
+  });
+
+  it('pending on an earlier version: a fresh request is offered, and no decision', () => {
+    const moved = { ...DRAFT_TENDER, version: 5 };
+    expect(
+      ownerOffers(
+        ADMIN,
+        state({ tender: moved, publication: { kind: 'OK', data: PENDING_REQUEST } }),
+        SETTINGS,
+        NOW,
+      ),
+    ).toEqual({
+      offers: [{ command: 'PUBLISH', expectedVersion: 5, execute: false }],
+      notes: ['REQUEST_BEHIND'],
     });
   });
 
