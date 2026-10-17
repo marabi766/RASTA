@@ -174,6 +174,17 @@ const schema = z.object({
   WEB_PROJECT_READER_ROLES: roleList('WEB_PROJECT_READER_ROLES', ''),
 
   /**
+   * Who may open a tender's bids and read them afterwards
+   * (`server/tender-owner.ts`). This **mirrors** construction-service's
+   * `CONSTRUCTION_TENDER_OPEN_ROLES` and must be changed together with it:
+   * empty (the default) means the owner's own role set, `WEB_PROJECT_ROLES`,
+   * as there. `SYSTEM_ADMIN` and `CONTRACTOR` are refused here as they are
+   * there — neither opens or reads a bid (ADR-066 § 4). It decides only which
+   * forms are drawn; the service decides again.
+   */
+  WEB_TENDER_OPEN_ROLES: roleList('WEB_TENDER_OPEN_ROLES', '', ['SYSTEM_ADMIN', 'CONTRACTOR']),
+
+  /**
    * Which roles are shown the Inventory link (`server/portal-nav.ts`).
    *
    * These **mirror** inventory-service's `INVENTORY_OPERATOR_ROLES` and

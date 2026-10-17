@@ -141,6 +141,23 @@ about 45 s); the other tenant's contractor shown the restricted tender as a miss
 - It reruns locally against the same stack: every run makes new organizations, people and
   tenders, and cleans up nothing, as for settlements.
 
+## The owner's side (`tender-owner.spec.ts`) — publish, open, a fresh tender per test
+
+The same cast as the bid scenarios (`tender-cast.ts`, once per run), and **every test drafts its
+own tender** (`draftTender`). In the browser: the author asks for publication, is told it waits
+and is offered no decision; the approver grants; the author executes it on the same version. A
+draft without criteria is refused with every reason in fixed words and no approval round opens.
+A tender published with a one-minute window gets a contractor's bid through the gateway; once
+construction-service closes it at the deadline (the test polls its status), the author proposes
+the opening, is refused opening it alone (`SECOND_PERSON_REQUIRED`), and the approver opens it —
+resending the same request while audit-service catches up with the receipt — after which the
+bid's price is shown. ORG-DEH-0002's administrator sees the owner's tender as a missing id, in
+the page and on every owner route through the gateway.
+
+- It needs `WEB_LIVE_STACK_E2E_TENDERS=true` and, besides what the bid scenarios need,
+  audit-service up (the opening is checked against its receipts). Under `CI` a skip fails the job.
+- It reruns locally against the same stack, as the bid scenarios do.
+
 ## Adding a live scenario
 
 - Record the id of everything the scenario creates and clean up by id, not by

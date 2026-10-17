@@ -1,0 +1,295 @@
+import type { ReactNode } from 'react';
+
+import {
+  Alert,
+  EmptyState,
+  ErrorState,
+  Identifier,
+  IsolatedText,
+  NoAccessState,
+  Section,
+  StatusBadge,
+} from '@/ui';
+import { formatJalaliDateTime, formatMoney, toPersianDigits } from '@/lib/format';
+import { bidStatusLabel } from '@/lib/bid-fields';
+import {
+  OWNER_COMMAND_DONE,
+  requestStatusLabel,
+  stepStatusLabel,
+  type OwnerDone,
+} from '@/lib/tender-owner-fields';
+import type { ReadResult } from '@/server/assets';
+import type { ApprovalRequest, OwnerBids, OwnerNote } from '@/server/tender-owner';
+
+/**
+ * The owner's sections of `/tenders/[id]` (EXP-004): the publication and its
+ * approval, the two-person opening, and the bids as the service shows them to
+ * an opener — a count and times before the opening, the opened bids after it.
+ * Server components; the forms inside are `OwnerCommands`.
+ */
+
+const NOTES: Readonly<Record<Exclude<OwnerNote, null>, string>> = {
+  PUBLICATION_PENDING:
+    'درخواست انتشار در انتظار تصمیم مرجعی است که سیاست موافقت نام برده؛ تا آن تصمیم، انتشار عرضه نمی‌شود.',
+  OWN_REQUEST:
+    'درخواست انتشار را شما داده‌اید و در انتظار تصمیم مرجع است. تفکیک وظایف: کسی که درخواست داده خودش آن را تأیید نمی‌کند.',
+  REQUESTS_UNREAD:
+    'درخواست‌های موافقت انتشار خوانده نشد، پس معلوم نیست چه کاری در انتظار است و فرمی عرضه نمی‌شود. کمی بعد صفحه را تازه کنید.',
+  STEP_UNREAD:
+    'مرحلهٔ موافقتی که بررسی آن با شماست خوانده نشد، پس فرم تصمیم عرضه نمی‌شود. کمی بعد صفحه را تازه کنید.',
+  AWAITING_CLOSE:
+    'مهلت پذیرش پیشنهاد گذشته است. مناقصه را سامانه خودش در پایان مهلت می‌بندد و کسی آن را دستی نمی‌بندد؛ پس از بسته‌شدن، گشایش پیشنهادها عرضه می‌شود.',
+};
+
+export function OwnerFlash({ done }: { readonly done?: OwnerDone }) {
+  if (!done) return null;
+  return (
+    <Alert tone="success" title="انجام شد">
+      {OWNER_COMMAND_DONE[done]}
+    </Alert>
+  );
+}
+
+function Notes({ notes }: { readonly notes: readonly OwnerNote[] }) {
+  const shown = notes.filter((note): note is Exclude<OwnerNote, null> => note !== null);
+  if (shown.length === 0) return null;
+  return (
+    <>
+      {shown.map((note) => (
+        <Alert key={note} tone="info">
+          {NOTES[note]}
+        </Alert>
+      ))}
+    </>
+  );
+}
+
+export interface PublicationSectionProps {
+  /** The newest publication request; null when not read (the tender is past its draft). */
+  readonly request: ReadResult<ApprovalRequest | null> | null;
+  readonly notes: readonly OwnerNote[];
+  readonly commands?: ReactNode;
+}
+
+/** The publication and its approval round: who decides, and where each step stands. */
+export function PublicationSection({ request, notes, commands }: PublicationSectionProps) {
+  return (
+    <Section headingId="tender-publication" title="انتشار و موافقت">
+      <div className="flex flex-col gap-4">
+        <RequestView request={request} />
+        <Notes notes={notes} />
+        {commands}
+      </div>
+    </Section>
+  );
+}
+
+function RequestView({ request }: { readonly request: ReadResult<ApprovalRequest | null> | null }) {
+  if (request === null) return null;
+  if (request.kind === 'FORBIDDEN' || request.kind === 'NOT_FOUND') {
+    return <NoAccessState description="درخواست‌های موافقت این مناقصه در اختیار شما نیست." />;
+  }
+  if (request.kind !== 'OK') {
+    return (
+      <ErrorState
+        description="درخواست‌های موافقت انتشار خوانده نشد. کمی بعد دوباره تلاش کنید."
+        correlationId={request.correlationId}
+      />
+    );
+  }
+  const latest = request.data;
+  if (latest === null) {
+    return <p>هنوز درخواست انتشاری برای این مناقصه ثبت نشده است.</p>;
+  }
+  return (
+    <div className="flex flex-col gap-3">
+      <dl className="grid gap-3 sm:grid-cols-3">
+        <div>
+          <dt className="text-sm text-content-muted">آخرین درخواست انتشار</dt>
+          <dd>
+            <StatusBadge status={latest.status} label={requestStatusLabel(latest.status)} />
+          </dd>
+        </div>
+        <div>
+          <dt className="text-sm text-content-muted">دور</dt>
+          <dd>{toPersianDigits(String(latest.round))}</dd>
+        </div>
+        <div>
+          <dt className="text-sm text-content-muted">ثبت در</dt>
+          <dd>{formatJalaliDateTime(latest.requestedAt)}</dd>
+        </div>
+      </dl>
+      <ol className="flex flex-col gap-2" aria-label="مراحل موافقت">
+        {latest.steps.map((step) => (
+          <li
+            key={step.approvalId}
+            className="rounded-md border border-border bg-surface-raised p-3 text-sm"
+          >
+            <span className="font-medium">
+              مرحلهٔ {toPersianDigits(String(step.stepOrder))}:{' '}
+              <IsolatedText>{step.authorityLabel}</IsolatedText>
+            </span>
+            <span className="text-content-muted">
+              {' '}
+              · سازمان <Identifier>{step.authorityOrganizationId}</Identifier> · نقش{' '}
+              <Identifier>{step.authorityRole}</Identifier> · {stepStatusLabel(step.status)}
+              {step.decidedAt ? ` · ${formatJalaliDateTime(step.decidedAt)}` : ''}
+            </span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+export interface OpeningSectionProps {
+  readonly status: string;
+  readonly notes: readonly OwnerNote[];
+  readonly commands?: ReactNode;
+}
+
+/** The two-person opening of a closed tender's bids. */
+export function OpeningSection({ status, notes, commands }: OpeningSectionProps) {
+  return (
+    <Section headingId="tender-opening" title="گشایش پیشنهادها">
+      <div className="flex flex-col gap-4">
+        <p className="text-sm text-content-muted">
+          گشایش دو نفره است: یک نفر آن را پیشنهاد می‌دهد و نفر مجاز دیگری انجامش می‌دهد. هیچ‌کدام
+          عضو سازمانی نیستند که در مناقصه پیشنهاد داده است. این صفحه نمی‌داند پیشنهاد گشایشی ثبت شده
+          یا نه، پس هر سه کار را عرضه می‌کند و سرویس کار نابجا را با دلیلش رد می‌کند.
+        </p>
+        {status === 'CLOSED' ? null : (
+          <p>
+            {status === 'PUBLISHED'
+              ? 'پیشنهادها پس از بسته‌شدن مناقصه گشوده می‌شوند.'
+              : 'پیشنهادهای این مناقصه گشوده شده‌اند.'}
+          </p>
+        )}
+        <Notes notes={notes} />
+        {commands}
+      </div>
+    </Section>
+  );
+}
+
+export interface OwnerBidsSectionProps {
+  readonly bids: ReadResult<OwnerBids>;
+  /** The tender's criteria, for an answer's label. */
+  readonly criteria: ReadonlyMap<string, string>;
+}
+
+/**
+ * The bids as construction-service shows them to an opener: before the opening
+ * only how many and when, never who or what; after it, each bid with what it
+ * says. Every read is audited by the service.
+ */
+export function OwnerBidsSection({ bids, criteria }: OwnerBidsSectionProps) {
+  return (
+    <Section headingId="tender-owner-bids" title="پیشنهادهای رسیده">
+      <div className="flex flex-col gap-4">
+        <p className="text-sm text-content-muted">
+          هر بار که این بخش خوانده می‌شود، سرویس آن را در دفتر دسترسی به پیشنهادها ثبت می‌کند.
+        </p>
+        <OwnerBids bids={bids} criteria={criteria} />
+      </div>
+    </Section>
+  );
+}
+
+function OwnerBids({ bids, criteria }: OwnerBidsSectionProps) {
+  if (bids.kind === 'FORBIDDEN' || bids.kind === 'NOT_FOUND') {
+    return (
+      <NoAccessState description="پیشنهادهای این مناقصه برای شما خوانده نمی‌شوند: یا نقش گشایش را ندارید، یا عضو سازمانی هستید که پیشنهاد داده است." />
+    );
+  }
+  if (bids.kind !== 'OK') {
+    return (
+      <ErrorState
+        description="پیشنهادهای این مناقصه خوانده نشد. کمی بعد دوباره تلاش کنید."
+        correlationId={bids.correlationId}
+      />
+    );
+  }
+  const view = bids.data;
+  if (!view.opened) {
+    if (view.bidCount === 0) {
+      return (
+        <EmptyState
+          title="پیشنهادی نرسیده"
+          description="تاکنون پیشنهادی برای این مناقصه نرسیده است."
+        />
+      );
+    }
+    return (
+      <div className="flex flex-col gap-2">
+        <p>
+          {toPersianDigits(String(view.bidCount))} پیشنهاد رسیده است. پیش از گشایش نه پیشنهاددهنده
+          نشان داده می‌شود و نه محتوا.
+        </p>
+        <ul className="flex flex-col gap-1 text-sm" aria-label="زمان دریافت پیشنهادها">
+          {view.receivedAt.map((at, index) => (
+            <li key={`${at}-${index}`}>{formatJalaliDateTime(at)}</li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+  if (view.bids.length === 0) {
+    return (
+      <EmptyState title="پیشنهادی گشوده نشد" description="این مناقصه پیشنهاد پابرجایی نداشت." />
+    );
+  }
+  return (
+    <ul className="flex flex-col gap-3">
+      {view.bids.map((bid) => (
+        <li key={bid.bidId} className="rounded-md border border-border bg-surface-raised p-3">
+          <dl className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <dt className="text-sm text-content-muted">پیشنهاددهنده</dt>
+              <dd>
+                <Identifier>{bid.bidderOrganizationId}</Identifier>
+              </dd>
+            </div>
+            <div>
+              <dt className="text-sm text-content-muted">مبلغ پیشنهاد</dt>
+              <dd>{formatMoney(bid.content.priceMinor)}</dd>
+            </div>
+            <div>
+              <dt className="text-sm text-content-muted">وضعیت</dt>
+              <dd>
+                <StatusBadge status={bid.status} label={bidStatusLabel(bid.status)} />
+              </dd>
+            </div>
+            <div>
+              <dt className="text-sm text-content-muted">نسخه و زمان دریافت</dt>
+              <dd>
+                {toPersianDigits(String(bid.revision))} · {formatJalaliDateTime(bid.receivedAt)}
+              </dd>
+            </div>
+          </dl>
+          {bid.content.answers.length > 0 ? (
+            <dl className="mt-3 flex flex-col gap-2">
+              {bid.content.answers.map((answer) => (
+                <div key={answer.criterionCode}>
+                  <dt className="text-sm text-content-muted">
+                    <IsolatedText>
+                      {criteria.get(answer.criterionCode) ?? answer.criterionCode}
+                    </IsolatedText>
+                  </dt>
+                  <dd className="whitespace-pre-line">
+                    <IsolatedText>{answer.response}</IsolatedText>
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          ) : null}
+          {bid.content.note ? (
+            <p className="mt-3 whitespace-pre-line text-sm">
+              یادداشت: <IsolatedText>{bid.content.note}</IsolatedText>
+            </p>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  );
+}

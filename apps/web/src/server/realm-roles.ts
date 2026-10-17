@@ -162,6 +162,13 @@ export function tokenWriteRoles(accessToken: string): readonly string[] | null {
 export interface TokenPerson {
   readonly memberships: readonly string[];
   readonly platformUser: boolean;
+  /**
+   * The actor a service records for this person: `rasta_uid`, else the
+   * subject — `AuthGuard`'s `userId` — so a page can tell "the person who made
+   * this request" from someone else, as a separation-of-duties check does.
+   * Null when the token names neither.
+   */
+  readonly actorId: string | null;
 }
 
 export function tokenPerson(accessToken: string): TokenPerson | null {
@@ -180,5 +187,12 @@ export function tokenPerson(accessToken: string): TokenPerson | null {
     ...new Set(listed.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)),
   ];
   const uid = claims['rasta_uid'];
-  return { memberships, platformUser: typeof uid === 'string' && uid.length > 0 };
+  const sub = claims['sub'];
+  const platformUser = typeof uid === 'string' && uid.length > 0;
+  const actorId = platformUser
+    ? (uid as string)
+    : typeof sub === 'string' && sub.length > 0
+      ? sub
+      : null;
+  return { memberships, platformUser, actorId };
 }

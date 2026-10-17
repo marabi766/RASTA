@@ -34,7 +34,7 @@ import { castForRun, gateway, publishedTender, type TenderCast } from './tender-
  * - **another tenant's contractor** — the restricted tender is the same
  *   absence as an id that does not exist, and no bid of its own is shown.
  *
- * The owner's side — closing, opening, evaluation, award — is not this slice.
+ * The owner's side — publication, opening — is `tender-owner.spec.ts`; evaluation and award are not yet.
  */
 
 const RUN = randomUUID().replace(/-/g, '').slice(0, 8);
