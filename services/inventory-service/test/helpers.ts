@@ -59,6 +59,8 @@ export function ownerDatabaseUrl(): string {
 export const newOrganizationId = (): string => `ORG_${ulid()}`;
 export const newProductId = (): string => `PRD_${ulid()}`;
 export const newOrderReference = (): string => `ORD_${ulid()}`;
+export const newReturnRequestId = (): string => `RET_${ulid()}`;
+export const newOrderLineId = (): string => `OLN_${ulid()}`;
 
 /** A raw client as the **runtime** role — what the service connects as. */
 export function runtimeClient(): PrismaClient {
@@ -153,6 +155,9 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
   try {
     await owner.$transaction(async (tx) => {
       for (const [table, triggers] of [
+        ['return_tracking_event', ['tg_return_tracking_event_guard']],
+        ['return_shipment_line', ['tg_return_shipment_line_guard']],
+        ['return_shipment', ['tg_return_shipment_guard']],
         ['tracking_event', ['tg_tracking_event_guard']],
         ['shipment_leg', ['tg_shipment_leg_guard']],
         ['shipment', ['tg_shipment_guard']],

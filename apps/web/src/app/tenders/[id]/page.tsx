@@ -4,19 +4,14 @@ import type { ReactNode } from 'react';
 import { AppShell, Button, ButtonLink, PageHeader, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { webServerEnv } from '@/server/env';
-import { fetchCurrentUser } from '@/server/identity';
 import { safeReturnTo } from '@/server/login-attempt';
 import { tenderDoorsFor } from '@/server/portal-nav';
-import { requestRoles } from '@/server/realm-roles';
+import { tokenRoles } from '@/server/realm-roles';
 import { fetchOpenTender, fetchTender, fetchTenderCriteria } from '@/server/tenders';
 import { tenderDetailPath } from '@/lib/tender-fields';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
-import {
-  IdentityUnavailableDetailScreen,
-  OpenTenderDetailScreen,
-  OwnTenderDetailScreen,
-} from './TenderDetailScreen';
+import { OpenTenderDetailScreen, OwnTenderDetailScreen } from './TenderDetailScreen';
 
 /**
  * The `/tenders/[id]` route — جزئیات مناقصه (docs/16 § ۱۶٫۶). Read-only.
@@ -25,8 +20,8 @@ import {
  * (`/v1/tenders/{id}`) and the bidder's (`/v1/open-tenders/{id}`) — and the
  * address says which one a link meant (`?view=open` from the bidder's list). A
  * bare address takes the owner's door, or the bidder's for somebody who is only
- * a bidder. When the roles cannot be read no door is chosen and the person is
- * told so. Whether this caller may see the tender is construction-service's
+ * a bidder — by the access token's own roles (`tokenRoles`); a token whose
+ * roles cannot be read is no bidder, so takes the owner's door. Whether this caller may see the tender is construction-service's
  * answer, against the record: one it will not show is `404` and is rendered as
  * absent. Bids are never asked for.
  */
@@ -48,22 +43,12 @@ export default async function TenderPage({
     );
   }
 
-  const current = await fetchCurrentUser(session);
-  const doors =
-    current.kind === 'USER'
-      ? tenderDoorsFor(
-          requestRoles(current.user.effectiveRoles, session.accessToken),
-          webServerEnv(),
-        )
-      : null;
-  const open = requested === 'open' || (requested !== 'own' && doors !== null && !doors.own);
+  // From the token's own roles, the set construction-service decides on.
+  const doors = tenderDoorsFor(tokenRoles(session.accessToken) ?? [], webServerEnv());
+  const open = requested === 'open' || (requested !== 'own' && !doors.own);
 
   let body: ReactNode;
-  if (current.kind !== 'USER') {
-    // Without the roles there is no telling which door a bare address means,
-    // and asking the wrong one would show the wrong answer; nothing is asked.
-    body = <IdentityUnavailableDetailScreen correlationId={current.correlationId} />;
-  } else if (open) {
+  if (open) {
     body = <OpenTenderDetailScreen result={await fetchOpenTender(session, id)} />;
   } else {
     const result = await fetchTender(session, id);
@@ -83,7 +68,7 @@ export default async function TenderPage({
           </form>
         </TopBar>
       }
-      sidebar={<PortalSidebar session={session} currentHref="/tenders" current={current} />}
+      sidebar={<PortalSidebar session={session} currentHref="/tenders" />}
     >
       <PageHeader
         title="جزئیات مناقصه"

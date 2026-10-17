@@ -1,3 +1,4 @@
+import type { SessionRefusal } from '@/lib/session-refusal';
 import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type {
   AssignDriverField,
@@ -26,7 +27,7 @@ import type {
 /** The refusals every write on this page can hit, in the same shape. */
 export type WriteRefusal = {
   readonly kind: 'REFUSED';
-  readonly reason: 'NO_SESSION' | 'CSRF' | 'SUBMISSION';
+  readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION';
 };
 
 export type UpdateDriverFormState =

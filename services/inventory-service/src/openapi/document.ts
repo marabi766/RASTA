@@ -41,6 +41,15 @@ import {
   shipmentViewSchema,
   trackingViewSchema,
 } from '../shipment/dto';
+import { ReturnShipmentController } from '../return-shipment/return-shipment.controller';
+import { ReturnShipmentService } from '../return-shipment/return-shipment.service';
+import {
+  createReturnShipmentSchema,
+  listReturnShipmentsQuerySchema,
+  receiveReturnShipmentSchema,
+  returnShipmentViewSchema,
+  returnTrackingViewSchema,
+} from '../return-shipment/dto';
 import { IdempotencyStore } from '../shared/idempotency';
 import { REFUSAL_REASONS, type RefusalArea } from '../shared/refusal';
 
@@ -106,6 +115,11 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'POST /v1/shipments': { status: '201', schema: shipmentViewSchema },
   'POST /v1/shipments/{id}/dispatch': { status: '200', schema: shipmentViewSchema },
   'POST /v1/shipments/{id}/deliver': { status: '200', schema: shipmentViewSchema },
+  'GET /v1/return-shipments': { status: '200', schema: cursorPageOf(returnShipmentViewSchema) },
+  'GET /v1/return-shipments/{id}': { status: '200', schema: returnShipmentViewSchema },
+  'GET /v1/return-shipments/{id}/tracking': { status: '200', schema: returnTrackingViewSchema },
+  'POST /v1/return-shipments': { status: '201', schema: returnShipmentViewSchema },
+  'POST /v1/return-shipments/{id}/receive': { status: '200', schema: returnShipmentViewSchema },
 };
 
 /** Every command takes a strict body, and every command requires an Idempotency-Key. */
@@ -119,6 +133,8 @@ const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'POST /v1/shipments': createShipmentSchema,
   'POST /v1/shipments/{id}/dispatch': moveShipmentSchema,
   'POST /v1/shipments/{id}/deliver': moveShipmentSchema,
+  'POST /v1/return-shipments': createReturnShipmentSchema,
+  'POST /v1/return-shipments/{id}/receive': receiveReturnShipmentSchema,
 };
 
 /** The area whose closed reasons a command's refusals carry in `details[].code` (docs/06 § 6.7). */
@@ -130,17 +146,26 @@ const REFUSAL_AREA_OF: Record<string, RefusalArea> = {
   'POST /v1/stock/reservations/{id}/issue': 'reservation',
   'POST /v1/shipments/{id}/dispatch': 'shipment',
   'POST /v1/shipments/{id}/deliver': 'shipment',
+  'POST /v1/return-shipments': 'returnShipment',
+  'POST /v1/return-shipments/{id}/receive': 'returnShipment',
 };
 
 /** The stock commands: they lock stock items and may break a stock rule (422). */
 const STOCK_COMMANDS: ReadonlySet<string> = new Set(
   Object.entries(REFUSAL_AREA_OF)
-    .filter(([, area]) => area !== 'shipment')
+    .filter(([, area]) => area !== 'shipment' && area !== 'returnShipment')
     .map(([key]) => key),
 );
 
+/** The one non-stock command with a rule to break (422): a receipt must match what was dispatched. */
+const RECEIPT_COMMANDS: ReadonlySet<string> = new Set(['POST /v1/return-shipments/{id}/receive']);
+
 /** Commands whose **body** names an existing row of the caller's — another's is 404. */
-const BODY_NAMES_A_ROW: ReadonlySet<string> = new Set([...STOCK_COMMANDS, 'POST /v1/shipments']);
+const BODY_NAMES_A_ROW: ReadonlySet<string> = new Set([
+  ...STOCK_COMMANDS,
+  'POST /v1/shipments',
+  'POST /v1/return-shipments',
+]);
 
 const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/warehouses': listWarehousesQuerySchema,
@@ -148,6 +173,7 @@ const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/stock/movements': listMovementsQuerySchema,
   'GET /v1/stock/reservations': listReservationsQuerySchema,
   'GET /v1/shipments': listShipmentsQuerySchema,
+  'GET /v1/return-shipments': listReturnShipmentsQuerySchema,
 };
 
 /** `Retry-After` on a command's 409 CONFLICT: optional, only that 409 carries it. */
@@ -185,7 +211,7 @@ function refusalErrorSchema(area: RefusalArea, status: number): z.ZodTypeAny | u
 
 const REFUSAL_DETAILS_NOTE =
   ' When refused for a closed reason, `details` names it: one entry, `path` the area (stock, ' +
-  'reservation, shipment) and `code` the reason, one of those listed here. Branch on `code` and ' +
+  'reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and ' +
   '`details[].code`, never on `message`.';
 
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
@@ -233,12 +259,19 @@ export function buildInventoryOpenApiDocument(app: INestApplication): OpenAPIObj
  * and produces the same bytes on every machine. The controllers in `AppModule`'s order.
  */
 @Module({
-  controllers: [WarehouseController, ReservationController, StockController, ShipmentController],
+  controllers: [
+    WarehouseController,
+    ReservationController,
+    StockController,
+    ShipmentController,
+    ReturnShipmentController,
+  ],
   providers: [
     { provide: WarehouseService, useValue: {} },
     { provide: StockService, useValue: {} },
     { provide: ReservationService, useValue: {} },
     { provide: ShipmentService, useValue: {} },
+    { provide: ReturnShipmentService, useValue: {} },
     { provide: IdempotencyStore, useValue: {} },
   ],
 })
@@ -312,7 +345,7 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         // 409 is a command's; 422 a stock command's — creating a warehouse or moving a shipment
         // has no rule to break, only a state to be in (409).
         if (status === '409' && !body) continue;
-        if (status === '422' && !STOCK_COMMANDS.has(key)) continue;
+        if (status === '422' && !STOCK_COMMANDS.has(key) && !RECEIPT_COMMANDS.has(key)) continue;
         operation.responses[status] ??= {
           description,
           ...(status === '409' && body ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } } : {}),
@@ -326,7 +359,11 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         for (const status of [409, 422]) {
           const typed = refusalErrorSchema(area, status);
           if (!typed) continue;
-          const existing = operation.responses[String(status)] as { description?: string };
+          const existing = operation.responses[String(status)] as
+            { description?: string } | undefined;
+          // A command that cannot answer this status (creating a return shipment breaks no 422
+          // rule; its area's 422 is the receipt's) has nothing to type.
+          if (!existing) continue;
           const listed = Object.entries(REFUSAL_REASONS[area])
             .filter(([, answered]) => answered === status)
             .map(([code]) => code)
