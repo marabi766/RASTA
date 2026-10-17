@@ -351,3 +351,42 @@ describe('ListQualifiedFor', () => {
     expect(JSON.stringify(page.items)).not.toContain('DOC_PRIVATE');
   });
 });
+
+describe('the standing reads check their caller in the service too, not only in @AllowService', () => {
+  const asService = <T>(callerService: string, fn: () => Promise<T>, organizationId?: string) =>
+    runWithContext(
+      {
+        requestId: 'req-1',
+        correlationId: 'corr-1',
+        authType: 'SERVICE',
+        callerService,
+        roles: [],
+        startedAt: 0,
+        ...(organizationId ? { organizationId } : {}),
+      } as unknown as RequestContext,
+      fn,
+    );
+
+  it('refuses procurement-service the paged snapshot, before anything is read', async () => {
+    const h = harness();
+    expect(
+      await codeOf(() =>
+        asService('procurement-service', () => h.service.standingSnapshot({ limit: 10 })),
+      ),
+    ).toBe('FORBIDDEN');
+  });
+
+  it('refuses a tenant-signed procurement-service token, and another service, on one organization', async () => {
+    const h = harness();
+    expect(
+      await codeOf(() =>
+        asService('procurement-service', () => h.service.standingOf(SUPPLIER_ORG), OTHER_ORG),
+      ),
+    ).toBe('FORBIDDEN');
+    expect(
+      await codeOf(() =>
+        asService('marketplace-service', () => h.service.standingOf(SUPPLIER_ORG)),
+      ),
+    ).toBe('FORBIDDEN');
+  });
+});
