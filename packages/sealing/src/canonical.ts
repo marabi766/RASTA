@@ -1,16 +1,16 @@
 import { SealingError } from './errors';
 
 /**
- * The one byte-exact way a bid's content is written down (ADR-066 § 3).
+ * The one byte-exact way sealed content is written down (ADR-066 § 3).
  *
  * A commitment is only worth something if the same content always yields the
- * same bytes, on every machine and every version of this service. So:
+ * same bytes, on every machine and every version of every consumer. So:
  *
  *   - object keys are sorted (by UTF-16 code unit, as `Array.prototype.sort`
  *     does), recursively;
  *   - there is no whitespace;
  *   - strings are JSON-escaped exactly as `JSON.stringify` does;
- *   - numbers must be safe integers. A price is a decimal **string** in rial
+ *   - numbers must be safe integers. An amount is a decimal **string** in rial
  *     minor units (AGENTS.md § 3): a float, a `bigint`, `NaN` and `Infinity` are
  *     refused rather than rounded, so an amount can never be silently altered
  *     on its way into a commitment;

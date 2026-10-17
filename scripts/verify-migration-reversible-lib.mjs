@@ -944,6 +944,126 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
   },
 ];
 
+const PARTICIPATION_RULE = '20261016190000_participation_rule';
+
+/** A reward evaluation row; `subject` adds the two columns this migration brings. */
+const EVALUATION_MIGCHECK = (sourceReference, outcome, subject) => `
+INSERT INTO "reward_source_evaluation"
+  ("organization_id", "trigger_event", "source_reference", "origin", "event_id", "outcome"${subject ? ', "subject_user_id", "occurred_at"' : ''})
+VALUES ('ORG-MIGCHECK', 'USAGE_RECORDED', '${sourceReference}', 'EVENT', 'EVT-${sourceReference}', '${outcome}'${subject ? `, '${subject}', now()` : ''});`;
+
+const PARTICIPATION_RULE_MIGCHECK = (id, version) => `
+INSERT INTO "participation_rule" ("id", "version", "window_days", "contributions", "created_by")
+VALUES ('${id}', ${version}, 30, '[{"triggerEvent":"USAGE_RECORDED","weight":1,"maxPerWindow":null}]', 'USR-MIGCHECK');`;
+
+/**
+ * The participation score (ADR-047, docs/24 Q-139), rolled back and re-applied
+ * over rows. Evaluations written before it keep no subject and count for
+ * nobody; the rule's versions are append-only, and the rollback refuses while
+ * one exists rather than erase the record of what was in force. Once none
+ * does, it drops the two columns and keeps every evaluation row.
+ */
+const PARTICIPATION_RULE_STEPS = [
+  {
+    label: 'participation: down to the schema before it (empty)',
+    runDownScript: [PARTICIPATION_RULE],
+  },
+  {
+    label: 'participation: an evaluation as the previous release wrote it',
+    sql: EVALUATION_MIGCHECK('USG_MIGCHECK_OLD', 'NO_RULE'),
+  },
+  { label: 'participation: up again over it', reapply: true },
+  {
+    label: 'participation: the old evaluation names nobody; a new one names its subject',
+    sql: `${EVALUATION_MIGCHECK('USG_MIGCHECK_NEW', 'NO_RULE', 'USR-MIGCHECK-SUBJECT')}
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "reward_source_evaluation"
+         WHERE source_reference = 'USG_MIGCHECK_OLD' AND subject_user_id IS NULL AND occurred_at IS NULL;
+        IF found <> 1 THEN RAISE EXCEPTION 'the old evaluation was given a subject'; END IF;
+      END $$;`,
+  },
+  {
+    label: 'participation: a subject without an instant is refused',
+    sql: `UPDATE "reward_source_evaluation" SET occurred_at = NULL WHERE source_reference = 'USG_MIGCHECK_NEW';`,
+    mustFail: 'ck_reward_source_evaluation_subject',
+  },
+  {
+    label: 'participation: a fact recorded by nobody names no subject',
+    sql: EVALUATION_MIGCHECK('USG_MIGCHECK_NOBODY', 'NO_SUBJECT', 'USR-MIGCHECK-SUBJECT'),
+    mustFail: 'ck_reward_source_evaluation_subject',
+  },
+  {
+    label: 'participation: a version that counts nothing is refused',
+    sql: `INSERT INTO "participation_rule" ("id", "version", "window_days", "contributions", "created_by")
+          VALUES ('PRL_MIGCHECK_EMPTY', 1, 30, '[]', 'USR-MIGCHECK');`,
+    mustFail: 'ck_participation_rule_contributions',
+  },
+  {
+    label: 'participation: a first version',
+    sql: PARTICIPATION_RULE_MIGCHECK('PRL_MIGCHECK_1', 1),
+  },
+  {
+    label: 'participation: a version is never edited',
+    sql: `UPDATE "participation_rule" SET window_days = 1 WHERE id = 'PRL_MIGCHECK_1';`,
+    mustFail: 'append-only',
+  },
+  {
+    label: 'participation: a version is never deleted',
+    sql: `DELETE FROM "participation_rule" WHERE id = 'PRL_MIGCHECK_1';`,
+    mustFail: 'append-only',
+  },
+  {
+    label: 'participation: the rollback refuses while a version exists',
+    runDownScript: [PARTICIPATION_RULE],
+    mustFail: 'refusing to drop the record of what was in force',
+  },
+  {
+    label: 'participation: …and changed nothing',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "participation_rule" WHERE id = 'PRL_MIGCHECK_1';
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback dropped the version'; END IF;
+        SELECT count(*) INTO found FROM "reward_source_evaluation"
+         WHERE source_reference = 'USG_MIGCHECK_NEW' AND subject_user_id = 'USR-MIGCHECK-SUBJECT';
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback dropped the subject'; END IF;
+      END $$;`,
+  },
+  {
+    label: 'participation: the owner removes the probe version (guard lifted in this script only)',
+    sql: `ALTER TABLE "participation_rule" DISABLE TRIGGER "trg_participation_rule_append_only";
+          DELETE FROM "participation_rule" WHERE id LIKE 'PRL_MIGCHECK_%';
+          ALTER TABLE "participation_rule" ENABLE TRIGGER "trg_participation_rule_append_only";`,
+  },
+  {
+    label: 'participation: down succeeds with no version, and keeps every evaluation',
+    runDownScript: [PARTICIPATION_RULE],
+  },
+  {
+    label: 'participation: both evaluations still there, the subject columns gone',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "reward_source_evaluation"
+         WHERE source_reference IN ('USG_MIGCHECK_OLD', 'USG_MIGCHECK_NEW');
+        IF found <> 2 THEN RAISE EXCEPTION 'the rollback lost an evaluation (found %)', found; END IF;
+        SELECT count(*) INTO found FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'reward_source_evaluation'
+           AND column_name IN ('subject_user_id', 'occurred_at');
+        IF found <> 0 THEN RAISE EXCEPTION 'the rollback left a subject column'; END IF;
+      END $$;`,
+  },
+  { label: 'participation: up again', reapply: true },
+  {
+    label: 'participation: clean up the probe rows',
+    sql: `DELETE FROM "reward_source_evaluation" WHERE organization_id = 'ORG-MIGCHECK';`,
+  },
+];
+
 export const ECONOMIC_DATA_ROLLBACK = {
   migration: '20260930200000_payment_reconciliation_task',
   label:
@@ -1089,6 +1209,7 @@ export const ECONOMIC_DATA_ROLLBACK = {
         END
         $$;`,
     },
+    ...PARTICIPATION_RULE_STEPS,
     {
       label: 'cleanup: the probe rows are removed before the chain reversal',
       // The append-only trigger is lifted for the probe's own row only, in this
@@ -1557,6 +1678,8 @@ export const EXPECTED = {
       'payment_refund_decline',
       // The instant line rules began to price (docs/23 D-057).
       'commission_pricing_cutover',
+      // The participation rule's versions (ADR-047, docs/24 Q-139).
+      'participation_rule',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -1571,6 +1694,9 @@ export const EXPECTED = {
       'trg_commission_rule_effective_dated',
       'trg_commission_pricing_cutover_fixed',
       'trg_transaction_pricing_fixed',
+      // A participation rule version is never edited: the next one replaces it.
+      'trg_participation_rule_append_only',
+      'trg_participation_rule_no_truncate',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: ['BusinessLine', 'CommissionOutcome'],
@@ -1583,6 +1709,7 @@ export const EXPECTED = {
       'commission_pricing_scope_lock',
       'reject_commission_pricing_cutover_mutation',
       'reject_transaction_repricing',
+      'reject_participation_rule_mutation',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
@@ -1605,6 +1732,10 @@ export const EXPECTED = {
       'ck_payment_resolution_four_eyes',
       // The creator's stable identity: both or neither (ADR-064 § 6).
       'ck_payment_intent_creator_identity',
+      // A participation subject is a person with an instant; versions are numbered once.
+      'ck_reward_source_evaluation_subject',
+      'ck_participation_rule_contributions',
+      'ux_participation_rule_version',
     ],
     // One obligation per business fact per payer. A down script that dropped
     // it without the forward migration restoring it would bring back the
@@ -1615,6 +1746,8 @@ export const EXPECTED = {
       'ux_payment_resolution_pending',
       // The operator view's tenant-leading access path (#218 r1).
       'ix_payment_resolution_org_intent',
+      // A person's verified facts in one organization: the breakdown's access path.
+      'ix_reward_source_evaluation_subject',
     ],
     dataRollback: ECONOMIC_DATA_ROLLBACK,
   },
@@ -1697,6 +1830,9 @@ export const EXPECTED = {
       'ck_return_request_parties',
       'ck_return_line_quantity_positive',
       'ck_return_history_status',
+      // 20261016140000_return_request_physical (RUN-005 PR 3): which shipment, and its report.
+      'ck_return_request_shipment_id',
+      'ck_return_request_report_document_id',
       'ck_saga_step_key_not_blank',
       'ck_order_settled_after_receipt',
       'ck_order_completed_has_settlement',
@@ -1720,6 +1856,7 @@ export const EXPECTED = {
       'ux_return_history_command',
       'ux_return_history_version',
       'ux_return_line_order_line',
+      'ux_return_request_shipment',
     ],
     types: ['ResponsibilityAttribution'],
     dataRollback: MARKETPLACE_DATA_ROLLBACK,
