@@ -1,3 +1,4 @@
+import type { SessionRefusal } from '@/lib/session-refusal';
 import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type { UpdateAssetField, UpdateAssetFormValues } from '@/lib/asset-form-fields';
 
@@ -17,7 +18,10 @@ export type UpdateAssetFormState =
       readonly fieldErrors: Partial<Record<UpdateAssetField, string>>;
       readonly message: string | null;
     }
-  | { readonly kind: 'REFUSED'; readonly reason: 'NO_SESSION' | 'CSRF' | 'SUBMISSION' | 'BASELINE' }
+  | {
+      readonly kind: 'REFUSED';
+      readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION' | 'BASELINE';
+    }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   /**
    * The machine is no longer visible to this person: it was another

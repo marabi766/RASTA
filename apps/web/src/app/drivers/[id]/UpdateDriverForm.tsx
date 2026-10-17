@@ -6,6 +6,7 @@ import { Alert, Button, Field, controlClassName } from '@/ui';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import type { UpdateDriverField, UpdateDriverFormValues } from '@/lib/driver-fields';
+import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
 import { submitUpdateDriver } from './actions';
 import { IDLE_UPDATE_DRIVER_FORM, type UpdateDriverFormState } from './form-state';
@@ -146,8 +147,8 @@ function FormBanner({ state }: { state: UpdateDriverFormState }) {
   if (state.kind === 'REFUSED') {
     return (
       <Alert tone="danger">
-        {state.reason === 'NO_SESSION'
-          ? 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.'
+        {isSessionRefusal(state.reason)
+          ? SESSION_REFUSAL_MESSAGES[state.reason]
           : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.'}
       </Alert>
     );

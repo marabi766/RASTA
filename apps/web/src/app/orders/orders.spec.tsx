@@ -197,6 +197,14 @@ describe('the command forms', () => {
     }
   });
 
+  it('a session only unavailable: says so, not "ended", with no accessibility violations', async () => {
+    currentState = { kind: 'REFUSED', reason: 'SESSION_UNAVAILABLE' };
+    const { container } = renderDetail({ ...ORDER, availableActions: ['CONFIRM_RECEIPT'] });
+    expect(screen.getByText(/همین حالا در دسترس نیست/)).toBeInTheDocument();
+    expect(screen.queryByText(/پایان یافته/)).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it('renders a refusal with its correlation id', () => {
     currentState = { kind: 'FORBIDDEN', correlationId: 'corr-7' };
     renderDetail({ ...ORDER, availableActions: ['CONFIRM_RECEIPT'] });

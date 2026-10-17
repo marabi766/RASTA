@@ -191,15 +191,6 @@ export function OwnTenderDetailScreen({ result, criteria }: OwnTenderDetailScree
 }
 
 /** The person's roles could not be read, so which door to knock on is unknown: none is. */
-export function IdentityUnavailableDetailScreen({ correlationId }: { correlationId: string }) {
-  return (
-    <ErrorState
-      description="نقش شما در این سازمان خوانده نشد، پس جزئیات مناقصه نشان داده نمی‌شود. کمی بعد دوباره تلاش کنید."
-      correlationId={correlationId}
-    />
-  );
-}
-
 export interface OpenTenderDetailScreenProps {
   readonly result: ReadResult<OpenTenderDetail>;
 }
