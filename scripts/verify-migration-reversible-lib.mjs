@@ -1799,6 +1799,8 @@ export const EXPECTED = {
       'participation_rule',
       // The levels-and-badges versions (COM-012, docs/24 Q-140).
       'recognition_rule',
+      // A source key taken off a transaction, kept with its decision (#334 r3).
+      'transaction_source_quarantine',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -1821,6 +1823,9 @@ export const EXPECTED = {
       // Nor is a levels-and-badges version.
       'trg_recognition_rule_append_only',
       'trg_recognition_rule_no_truncate',
+      // A quarantined source key is never changed nor deleted.
+      'trg_transaction_source_quarantine_append_only',
+      'trg_transaction_source_quarantine_no_truncate',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: ['BusinessLine', 'CommissionOutcome'],
@@ -1836,6 +1841,9 @@ export const EXPECTED = {
       'reject_statement_obligation_change',
       'reject_participation_rule_mutation',
       'reject_recognition_rule_mutation',
+      'reject_transaction_source_quarantine_mutation',
+      // The correction 20261017130000's preflight names (an operator's tool).
+      'quarantine_transaction_source',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
@@ -1855,6 +1863,7 @@ export const EXPECTED = {
       'ck_transaction_recorded_source',
       // ORDER is recorded by a service over the API, never by a person (recorded-sources.ts).
       'ck_transaction_order_source',
+      'ck_transaction_source_quarantine_decision',
       'ck_commission_pricing_cutover_single',
       'ck_payment_reconciliation_done_complete',
       'ck_payment_reconciliation_lease_pair',

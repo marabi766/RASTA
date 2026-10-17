@@ -1043,6 +1043,83 @@ describe('the order saga', () => {
       expect(calls).not.toContain('markCancelled');
     });
 
+    // Review of #334 round 2, F1: the hold committed, its answer was lost, and
+    // the obligation — on exactly the order's terms — was moved on before the
+    // saga looked. Recording it as held published ORDER_FUNDS_HELD for money
+    // back with the buyer.
+    it.each<[string, string]>([
+      ['REFUNDED', 'RETURNED'],
+      ['CANCELLED', 'NEVER_HELD'],
+      ['CREATED', 'NEVER_HELD'],
+      ['FAILED', 'NEVER_HELD'],
+      ['SETTLED', 'PAID_OUT'],
+      ['PENDING_SETTLEMENT', 'UNPROVEN'],
+      ['DISPUTED', 'UNPROVEN'],
+    ])(
+      'stops, recording nothing, when the order’s own obligation is %s (funds %s)',
+      async (obligationStatus, funds) => {
+        const order = new FakeOrder();
+        const { calls, activities } = recordingActivities(order, {
+          createObligation: async () => {
+            throw ApplicationFailure.retryable('economic-service timed out', 'UPSTREAM_TIMEOUT');
+          },
+          findObligation: async () => ({
+            notHeld: true,
+            transactionId: 'TXN_OWN',
+            status: obligationStatus,
+            funds: funds as never,
+          }),
+        });
+
+        const failure = await run(order, activities, async () => undefined).catch(
+          (error: unknown) => error,
+        );
+
+        expect(failure).toMatchObject({ cause: { type: 'OBLIGATION_NOT_HELD' } });
+        const cause = (failure as { cause: ApplicationFailure }).cause;
+        expect(cause.message).toContain(obligationStatus);
+        expect(cause.message).toContain(funds);
+        expect(cause.details).toEqual([
+          { transactionId: 'TXN_OWN', status: obligationStatus, funds },
+        ]);
+
+        expect(order.status).toBe('PENDING');
+        expect(order.economicTransactionId).toBeNull();
+        for (const step of [
+          'markFundsHeld',
+          'markFailed',
+          'authoriseSettlement',
+          'settle',
+          'compensate',
+          'markCancelled',
+        ]) {
+          expect(calls).not.toContain(step);
+        }
+      },
+    );
+
+    it('stops, refunding nothing, when a cancelled order’s lookup finds its obligation refunded', async () => {
+      const order = new FakeOrder();
+      let lookups = 0;
+      const { calls, activities } = recordingActivities(order, {
+        createObligation: async () => {
+          order.cancel('found a cheaper supplier');
+          throw ApplicationFailure.nonRetryable('economic-service timed out', 'UPSTREAM_TIMEOUT');
+        },
+        findObligation: async () =>
+          (lookups += 1) === 1
+            ? null
+            : { notHeld: true, transactionId: 'TXN_OWN', status: 'REFUNDED', funds: 'RETURNED' },
+      });
+
+      await expect(run(order, activities, async () => undefined)).rejects.toMatchObject({
+        cause: { type: 'OBLIGATION_NOT_HELD' },
+      });
+      expect(lookups).toBe(2);
+      expect(calls).not.toContain('compensate');
+      expect(calls).not.toContain('markCancelled');
+    });
+
     it('closes as cancelled, with nothing to refund, when the buyer cancelled and the hold was refused', async () => {
       const order = new FakeOrder();
       const { calls, activities } = recordingActivities(order, {

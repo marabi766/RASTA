@@ -53,8 +53,16 @@
 -- refused loudly, with nothing changed; the HINT names the correction that
 -- works. Cancelling or refunding such a row is the financial decision about
 -- it, but it does not free the key — the row keeps its source fields — so the
--- correction also takes it off the reserved type, to <type>_UNCONFIRMED, with
--- every financial fact on it kept as it is.
+-- correction also takes the key off the row:
+-- quarantine_transaction_source(id, decision), from
+-- 20261017125000_transaction_source_quarantine, which is applied by then.
+-- It keeps the key in transaction_source_quarantine and clears it on the
+-- row, every financial fact kept as it is. Not a rename to another type: any
+-- such type is one a caller could already hold under the same reference, and
+-- the rename then collides under ux_transaction_source_fact (review of #334
+-- round 2, F3). Then mark this migration rolled back
+-- (`prisma migrate resolve --rolled-back 20261017130000_transaction_recorded_source`)
+-- and deploy again.
 DO $$
 DECLARE
   offending integer;
@@ -91,7 +99,7 @@ BEGIN
     RAISE EXCEPTION
       'transaction: % row(s) claim source_type MAINTENANCE_REQUEST, PAYMENT_INTENT or ORDER without being recorded by its owner; refusing to reserve them',
       offending
-      USING HINT = 'List them with: SELECT id, organization_id, source_type, source_reference, transaction_type, status, gross_amount_minor, counterparty_organization_id, created_by, idempotency_key, causation_id FROM "transaction" t WHERE (t.source_type = ''MAINTENANCE_REQUEST'' AND NOT (t.transaction_type = ''MAINTENANCE_SERVICE'' AND t.source_reference IS NOT NULL AND t.counterparty_organization_id IS NOT NULL AND t.idempotency_key IS NULL AND t.causation_id IS NOT NULL AND t.created_by = ''economic-service'' AND EXISTS (SELECT 1 FROM processed_event p WHERE p.event_id = t.causation_id AND p.consumer_name = ''economic-service.settlement-authority''))) OR (t.source_type = ''PAYMENT_INTENT'' AND NOT (t.transaction_type = ''WALLET_TOP_UP'' AND t.source_reference IS NOT NULL AND t.counterparty_organization_id IS NULL AND t.idempotency_key IS NULL AND EXISTS (SELECT 1 FROM payment_intent i WHERE i.id = t.source_reference AND i.organization_id = t.organization_id AND i.transaction_id = t.id))) OR (t.source_type = ''ORDER'' AND NOT (t.transaction_type = ''MARKETPLACE_ORDER'' AND t.source_reference IS NOT NULL AND t.counterparty_organization_id IS NOT NULL AND t.idempotency_key IS NOT NULL AND t.created_by = ''economic-service'')); none is its owner''s fact. For each, record the financial decision on it under the release now running (cancel or refund it if nobody owes it), then take it off the reserved type by a reviewed data correction recorded with that decision: UPDATE "transaction" SET source_type = source_type || ''_UNCONFIRMED'' WHERE id = <id>. Never DELETE it.';
+      USING HINT = 'List them with: SELECT id, organization_id, source_type, source_reference, transaction_type, status, gross_amount_minor, counterparty_organization_id, created_by, idempotency_key, causation_id FROM "transaction" t WHERE (t.source_type = ''MAINTENANCE_REQUEST'' AND NOT (t.transaction_type = ''MAINTENANCE_SERVICE'' AND t.source_reference IS NOT NULL AND t.counterparty_organization_id IS NOT NULL AND t.idempotency_key IS NULL AND t.causation_id IS NOT NULL AND t.created_by = ''economic-service'' AND EXISTS (SELECT 1 FROM processed_event p WHERE p.event_id = t.causation_id AND p.consumer_name = ''economic-service.settlement-authority''))) OR (t.source_type = ''PAYMENT_INTENT'' AND NOT (t.transaction_type = ''WALLET_TOP_UP'' AND t.source_reference IS NOT NULL AND t.counterparty_organization_id IS NULL AND t.idempotency_key IS NULL AND EXISTS (SELECT 1 FROM payment_intent i WHERE i.id = t.source_reference AND i.organization_id = t.organization_id AND i.transaction_id = t.id))) OR (t.source_type = ''ORDER'' AND NOT (t.transaction_type = ''MARKETPLACE_ORDER'' AND t.source_reference IS NOT NULL AND t.counterparty_organization_id IS NOT NULL AND t.idempotency_key IS NOT NULL AND t.created_by = ''economic-service'')); none is its owner''s fact. For each, record the financial decision on it under the release now running (cancel or refund it if nobody owes it), then, as the migrator, take its source key off it, naming that decision: SELECT quarantine_transaction_source(''<id>'', ''<decision reference>''); — the key is kept in transaction_source_quarantine, the row keeps everything else. Never DELETE it, and never rename its source_type: the new key may already be held. Then: prisma migrate resolve --rolled-back 20261017130000_transaction_recorded_source, and deploy again.';
   END IF;
 END $$;
 

@@ -354,9 +354,25 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
    * nothing on the order, authorises, settles and refunds nothing, and
    * whatever is held stays held for a person — failing the order or
    * refunding instead would be deciding about money it cannot account for.
+   *
+   * The order's own obligation in any status but HELD is not adopted either
+   * (review of #334 round 2, F1): the saga stops the same way, naming the
+   * status and what it says of the funds — returned, paid out, never held,
+   * or not proven held — so a person decides from that, not from a
+   * FUNDS_HELD the order would otherwise have recorded.
    */
   async function findOwnObligation(): Promise<string | null> {
     const found = await findObligation(orderId);
+    if (found && 'notHeld' in found) {
+      status.phase = 'OBLIGATION_NOT_HELD';
+      throw ApplicationFailure.nonRetryable(
+        `economic-service holds order ${orderId}'s obligation as ${found.status}, which does not ` +
+          `prove its funds are held (funds ${found.funds}); it is not adopted, and nothing is ` +
+          'recorded on the order',
+        'OBLIGATION_NOT_HELD',
+        { transactionId: found.transactionId, status: found.status, funds: found.funds },
+      );
+    }
     if (found && 'mismatch' in found) {
       status.phase = 'OBLIGATION_MISMATCH';
       throw ApplicationFailure.nonRetryable(

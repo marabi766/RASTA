@@ -84,7 +84,7 @@ export class TransactionController {
     summary: 'List transactions, newest first',
     description:
       'By default the transactions this organization owes. Set `includeIncoming=true` for the ' +
-      'payee view — what it is owed. Filter by status, type, source reference and an ' +
+      'payee view — what it is owed. Filter by status, type, source type, source reference and an ' +
       '`occurredAt` window. Cursor-paginated.',
   })
   async list(@Query(zodPipe(listTransactionsQuerySchema)) query: ListTransactionsQuery) {

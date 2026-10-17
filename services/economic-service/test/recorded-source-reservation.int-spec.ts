@@ -509,16 +509,23 @@ describe('source types economic-service records itself — no caller pre-empts o
     const preRecord = (caller: [string, string], orderId: string) =>
       claim(caller, 'ORDER', orderId, { transactionType: 'MARKETPLACE_ORDER', holdFunds: true });
 
-    /** What the saga's recovery reads (`EconomicClient.findObligations`). */
+    /**
+     * What the saga's recovery reads (`EconomicClient.findObligations`): the
+     * exact source key, the largest page. One page here: the key has at most
+     * one row, and `hasMore` says so.
+     */
     const sagaFinds = async (orderId: string) => {
       const query = new URLSearchParams({
-        sourceReference: orderId,
         transactionType: 'MARKETPLACE_ORDER',
+        sourceType: 'ORDER',
+        sourceReference: orderId,
+        limit: '100',
       });
       const page = await request(http)
         .get(`/v1/transactions?${query.toString()}`)
         .set(...(await asSaga()))
         .expect(200);
+      expect(page.body.hasMore).toBe(false);
       return page.body.items as Record<string, unknown>[];
     };
 
@@ -646,6 +653,88 @@ describe('source types economic-service records itself — no caller pre-empts o
 
       expect((await sagaCreates(orderId)).status).toBe(201);
       expect(await sagaFinds(orderId)).toHaveLength(1);
+    });
+
+    // Review of #334 round 2, F2: the lookup asked by reference and type only,
+    // and read one page — 25 rows, newest first.
+    it('finds the genuine obligation behind 30 newer rows naming the order under other source types', async () => {
+      const orderId = `ORD_${ulid()}`;
+      const created = await sagaCreates(orderId);
+      expect(created.status).toBe(201);
+
+      // Any administrator of the buyer may record these: none is a reserved type.
+      const decoyTypes = [
+        'ORDER_UNCONFIRMED',
+        'order',
+        ...Array.from({ length: 28 }, (_, n) => `DECOY-${n}`),
+      ];
+      for (const sourceType of decoyTypes) {
+        await claim(['authorization', `Bearer ${admin(payer)}`], sourceType, orderId, {
+          transactionType: 'MARKETPLACE_ORDER',
+          occurredAt: new Date(Date.now() + 60_000).toISOString(),
+        }).expect(201);
+      }
+
+      // Before: the round-2 query's one page is all decoys.
+      const before = await request(http)
+        .get(
+          `/v1/transactions?${new URLSearchParams({ sourceReference: orderId, transactionType: 'MARKETPLACE_ORDER' }).toString()}`,
+        )
+        .set(...(await asSaga()))
+        .expect(200);
+      expect(before.body.items).toHaveLength(25);
+      expect(before.body.hasMore).toBe(true);
+      expect(before.body.items.map((item: { id: string }) => item.id)).not.toContain(
+        created.body.id,
+      );
+
+      // Now: the exact key answers with the genuine obligation alone.
+      const found = await sagaFinds(orderId);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({
+        id: created.body.id,
+        sourceType: 'ORDER',
+        status: 'HELD',
+      });
+    });
+
+    it('the source-type filter is exact: no prefix, no case folding', async () => {
+      const reference = `ORD_${ulid()}`;
+      for (const sourceType of ['ORDER_UNCONFIRMED', 'order']) {
+        await claim(['authorization', `Bearer ${admin(payer)}`], sourceType, reference, {
+          transactionType: 'MARKETPLACE_ORDER',
+        }).expect(201);
+      }
+      expect(await sagaFinds(reference)).toEqual([]);
+    });
+
+    // Review of #334 round 2, F1: what the lookup reads once the supplier's
+    // administrator has refunded the obligation — every term still equal.
+    it('the lookup reads a refunded obligation as REFUNDED, on its unchanged terms', async () => {
+      const orderId = `ORD_${ulid()}`;
+      const created = await sagaCreates(orderId);
+      expect(created.status).toBe(201);
+
+      await request(http)
+        .post(`/v1/transactions/${created.body.id}/refund`)
+        .set('authorization', `Bearer ${admin(workshop)}`)
+        .set('idempotency-key', id('rsv-order-payee-refund'))
+        .send({ reason: 'refunded by the supplier before the saga looked' })
+        .expect(200);
+
+      const found = await sagaFinds(orderId);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({
+        id: created.body.id,
+        status: 'REFUNDED',
+        organizationId: payer,
+        counterpartyOrganizationId: workshop,
+        grossAmountMinor: ORDER_TOTAL,
+        currency: 'IRR',
+        transactionType: 'MARKETPLACE_ORDER',
+        sourceType: 'ORDER',
+        sourceReference: orderId,
+      });
     });
   });
 

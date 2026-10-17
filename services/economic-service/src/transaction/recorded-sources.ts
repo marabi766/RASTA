@@ -41,9 +41,9 @@ export const ECONOMIC_RECORDED_SOURCE_TYPES = {
   PAYMENT_INTENT: 'PAYMENT_INTENT',
   /**
    * An approved contract statement (ADR-068 § 6 (2)). Written only by the
-   * `STATEMENT_APPROVED` consumer, from contract-service's answer (CON-003 PR
-   * 6b, which also adds its own database guard). Reserved here already, so no
-   * row can claim a statement before that consumer runs.
+   * `STATEMENT_APPROVED` consumer (`StatementSettlementConsumer`), from
+   * contract-service's answer; its database guard is
+   * `ck_transaction_statement_obligation`.
    */
   STATEMENT: 'STATEMENT',
 } as const;

@@ -11,9 +11,12 @@ import type { OrderService } from '../order/order.service';
 import type { SagaActivity, SagaStep } from '../order/order.repository';
 import type { OrderStatus } from '../generated/prisma';
 import {
+  fundsOf,
   idempotencyKeyFor,
+  ObligationLookupIncomplete,
   termsDiffer,
   type EconomicClient,
+  type ObligationFunds,
   type ObligationTerms,
   type TransactionDetailView,
 } from '../economic/economic.client';
@@ -97,6 +100,20 @@ export interface ObligationMismatch {
   transactionIds: string[];
   /** Which terms differ, by name — never their values. */
   differ: string[];
+}
+
+/**
+ * economic-service holds the order's obligation, on exactly its terms, in a
+ * status that does not prove its funds are held now (`fundsOf`). Not adopted:
+ * recording it as held would publish `ORDER_FUNDS_HELD` for money that is
+ * back with the buyer, paid out or never was in escrow. The saga stops
+ * (`OBLIGATION_NOT_HELD`), naming the status and what it says of the funds.
+ */
+export interface ObligationNotHeld {
+  notHeld: true;
+  transactionId: string;
+  status: string;
+  funds: Exclude<ObligationFunds, 'HELD'>;
 }
 
 /** What `readOrder` returns: the fields the saga's decisions depend on. */
@@ -273,8 +290,18 @@ export function createActivities(deps: ActivityDependencies) {
      * nothing, authorises and settles nothing, and leaves what is held for a
      * person to decide. economic-service now refuses such a row to anyone but
      * this service; this check does not rely on it.
+     *
+     * And adopted only while it is HELD. Equal terms say whose obligation it
+     * is, not where the money is: the hold committed, its answer was lost,
+     * and the supplier's administrator refunded it before this read — every
+     * term still equal, the status REFUNDED. Adopting it recorded FUNDS_HELD
+     * and published ORDER_FUNDS_HELD for money back with the buyer (review of
+     * #334 round 2, F1). Any other status is answered as `ObligationNotHeld`,
+     * and the saga stops on it.
      */
-    async findObligation(orderId: string): Promise<HeldResult | ObligationMismatch | null> {
+    async findObligation(
+      orderId: string,
+    ): Promise<HeldResult | ObligationMismatch | ObligationNotHeld | null> {
       return asSystemFor(orderId, async (order) => {
         try {
           const found = await deps.economic.findObligations({
@@ -285,7 +312,15 @@ export function createActivities(deps: ActivityDependencies) {
           if (found.length === 0) return null;
           const terms = obligationTermsOf(order);
           const own = found.find((transaction) => termsDiffer(terms, transaction).length === 0);
-          if (own) return { transactionId: own.id };
+          if (own) {
+            const funds = fundsOf(own.status);
+            if (funds === 'HELD') return { transactionId: own.id };
+            logger.error(
+              `Order ${order.id}: economic-service holds its obligation ${own.id} as ${own.status} ` +
+                `(funds ${funds}), which does not prove the funds are held; it is not adopted`,
+            );
+            return { notHeld: true, transactionId: own.id, status: own.status, funds };
+          }
           const differ = [
             ...new Set(found.flatMap((transaction) => termsDiffer(terms, transaction))),
           ];
@@ -299,6 +334,10 @@ export function createActivities(deps: ActivityDependencies) {
             differ,
           };
         } catch (error) {
+          // Not retried: the same answer would end the same way.
+          if (error instanceof ObligationLookupIncomplete) {
+            throw ApplicationFailure.nonRetryable(error.message, 'OBLIGATION_LOOKUP_INCOMPLETE');
+          }
           throw asTemporalFailure(error);
         }
       });

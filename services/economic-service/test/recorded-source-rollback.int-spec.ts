@@ -23,7 +23,11 @@ import { FakeSourceFacts } from './source-facts.fake';
  * owner's — and still refuse, changing nothing, a row the previous release let
  * a caller write under a reserved key. And the correction its HINT names must
  * be one that lets it apply: cancelling such a row (round 1's HINT) does not,
- * because a cancelled row keeps its source fields and so the key.
+ * because a cancelled row keeps its source fields and so the key; renaming its
+ * source type to `<type>_UNCONFIRMED` (round 2's) does not either once that
+ * key is held too (review of #334 round 2, F3). The quarantine
+ * (`20261017125000_transaction_source_quarantine`) takes the key off the row
+ * and keeps it apart, so it collides with nothing.
  *
  * Every step is the real one, in a scratch schema built by the real
  * migrations as the database's owner and dropped at the end: `migrate deploy`,
@@ -73,21 +77,36 @@ const resolveRolledBack = (url: string) =>
     url,
   });
 
-const runDown = (url: string) =>
-  mustRun(['db', 'execute', '--schema', 'prisma/schema.prisma', '--stdin'], {
+/** A migration's whole `down.sql`, as the rollback runbook runs it. */
+const downOf = (url: string, migration: string) =>
+  prismaCli(['db', 'execute', '--schema', 'prisma/schema.prisma', '--stdin'], {
     url,
-    stdin: readFileSync(join(MIGRATION_DIR, 'down.sql'), 'utf8'),
+    stdin: readFileSync(join(SERVICE_DIR, 'prisma', 'migrations', migration, 'down.sql'), 'utf8'),
   });
 
-/** The HINT's SQL, as the operator reads it out of the error: its quotes undoubled. */
-function hint(): { list: string; correction: string } {
+const runDown = (url: string) => {
+  const result = downOf(url, MIGRATION);
+  if (!result.ok) throw new Error(`down.sql failed:\n${result.output.slice(0, 1200)}`);
+};
+
+/** The migration the HINT's correction comes from, applied before MIGRATION. */
+const QUARANTINE = '20261017125000_transaction_source_quarantine';
+
+/**
+ * The HINT's SQL, as the operator reads it out of the error: its quotes
+ * undoubled. The correction is a call naming the transaction and the decision.
+ */
+function hint(): { list: string; quarantine: string } {
   const sql = readFileSync(join(MIGRATION_DIR, 'migration.sql'), 'utf8');
   const text = /USING HINT = '((?:[^']|'')*)';/.exec(sql)![1]!.replace(/''/g, "'");
   return {
     list: /List them with: (SELECT [\s\S]*?); none is/.exec(text)![1]!,
-    correction: /(UPDATE "transaction" SET [^<]*)<id>/.exec(text)![1]!,
+    quarantine: /SELECT (\w+)\('<id>', '<decision reference>'\);/.exec(text)![1]!,
   };
 }
+
+/** Round 2's correction, which the HINT named before: a rename within the source key. */
+const RENAME = `UPDATE "transaction" SET source_type = source_type || '_UNCONFIRMED' WHERE id = $1`;
 
 describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => {
   jest.setTimeout(240_000);
@@ -210,6 +229,7 @@ describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => 
     async function personRecords(
       sourceType: string,
       transactionType: 'MARKETPLACE_ORDER' | 'MAINTENANCE_SERVICE',
+      sourceReference = `REF_${ulid()}`,
     ): Promise<string> {
       const created = await asActor({ organizationId: BUYER }, () =>
         wiring.transactions.create({
@@ -218,7 +238,7 @@ describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => 
           grossAmountMinor: '1',
           currency: 'IRR',
           sourceType,
-          sourceReference: `REF_${ulid()}`,
+          sourceReference,
           holdFunds: false,
           idempotencyKey: id('rsv-rollback-http'),
         }),
@@ -239,6 +259,10 @@ describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => 
           WHERE s.nspname = current_schema() AND c.conname = $1`,
         name,
       );
+    const json = async (sql: string) =>
+      (await db.$queryRawUnsafe<{ row: string }[]>(sql)).map(
+        ({ row }) => JSON.parse(row) as Record<string, unknown>,
+      );
     return {
       recordedSource: await constraint('ck_transaction_recorded_source'),
       orderSource: await constraint('ck_transaction_order_source'),
@@ -247,13 +271,16 @@ describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => 
           WHERE "migration_name" = $1 AND "finished_at" IS NOT NULL AND "rolled_back_at" IS NULL`,
         MIGRATION,
       ),
-      rows: (
-        await db.$queryRawUnsafe<{ row: string }[]>(
-          `SELECT to_jsonb(t)::text AS row FROM "transaction" t
-            WHERE source_type LIKE ANY (ARRAY['MAINTENANCE_REQUEST%', 'PAYMENT_INTENT%', 'ORDER%'])
-            ORDER BY id`,
-        )
-      ).map(({ row }) => JSON.parse(row) as Record<string, unknown>),
+      // Every row under (or once under) a reserved type, its look-alikes included.
+      rows: await json(
+        `SELECT to_jsonb(t)::text AS row FROM "transaction" t
+          WHERE source_type LIKE ANY (ARRAY['MAINTENANCE_REQUEST%', 'PAYMENT_INTENT%', 'ORDER%'])
+             OR id IN (SELECT transaction_id FROM transaction_source_quarantine)
+          ORDER BY id`,
+      ),
+      quarantined: await json(
+        `SELECT to_jsonb(q)::text AS row FROM transaction_source_quarantine q ORDER BY transaction_id`,
+      ),
     };
   }
 
@@ -286,7 +313,7 @@ describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => 
 
     // down: the guards and the ledger row go; every row stays exactly.
     runDown(url);
-    expect(await shape(db)).toEqual({ ...UNGUARDED, rows: recorded.rows });
+    expect(await shape(db)).toEqual({ ...UNGUARDED, rows: recorded.rows, quarantined: [] });
 
     // The owners keep recording while the previous release runs.
     await approveRepair();
@@ -300,7 +327,7 @@ describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => 
     expect(again.output).not.toMatch(REFUSAL);
     expect(again.ok).toBe(true);
     expect(again.output).toContain(MIGRATION);
-    expect(await shape(db)).toEqual({ ...GUARDED, rows: meanwhile.rows });
+    expect(await shape(db)).toEqual({ ...GUARDED, rows: meanwhile.rows, quarantined: [] });
 
     // The CHECKs hold again: a person's row under a reserved type is refused.
     await expect(personRecords('ORDER', 'MARKETPLACE_ORDER')).rejects.toThrow(
@@ -311,20 +338,31 @@ describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => 
     );
   });
 
-  it('refuses, changing nothing, rows a caller wrote during the rollback — cancelling one does not unblock it, and the HINT’s correction does', async () => {
-    const { url, db, wiring, approveRepair, topUp, sagaRecordsOrder, personRecords } =
-      await scratch();
-    await approveRepair();
-    await topUp();
-    await sagaRecordsOrder();
-    runDown(url);
-
-    // The previous release, running: POST /v1/transactions reserves nothing,
-    // so the buyer's administrator records under each type...
-    const personOrder = await personRecords('ORDER', 'MARKETPLACE_ORDER');
-    const personRepair = await personRecords('MAINTENANCE_REQUEST', 'MAINTENANCE_SERVICE');
-    // ...and rows shaped exactly like the owners' that are not theirs: a
-    // repair whose causation another consumer — not this one — marked
+  /**
+   * The previous release, running after `down.sql`: POST /v1/transactions
+   * reserves nothing, so the buyer's administrator records under each type,
+   * and rows shaped exactly like the owners' that are not theirs exist too.
+   * Each one's `<type>_UNCONFIRMED` key under the same reference is already
+   * held as well — by the same administrator, which the previous release (and
+   * this one) allows (review of #334 round 2, F3).
+   */
+  async function untrustedRows(
+    db: PrismaClient,
+    personRecords: Awaited<ReturnType<typeof scratch>>['personRecords'],
+  ) {
+    const keys = {
+      order: `ORD_${ulid()}`,
+      repair: `MNT_${ulid()}`,
+      forgedRepair: `MNT_${ulid()}`,
+      forgedTopUp: `PAY_${ulid()}`,
+    };
+    const personOrder = await personRecords('ORDER', 'MARKETPLACE_ORDER', keys.order);
+    const personRepair = await personRecords(
+      'MAINTENANCE_REQUEST',
+      'MAINTENANCE_SERVICE',
+      keys.repair,
+    );
+    // A repair whose causation another consumer — not this one — marked
     // processed, and a top-up no payment intent records as its own.
     const elsewhere = ulid();
     await db.processedEvent.create({
@@ -340,7 +378,7 @@ describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => 
       forgedRepair,
       BUYER,
       ACCOMPLICE,
-      `MNT_${ulid()}`,
+      keys.forgedRepair,
       elsewhere,
     );
     const forgedTopUp = id('TXN');
@@ -352,17 +390,44 @@ describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => 
          'PAYMENT_INTENT', $3, 'corr-forged', 'economic-service', now())`,
       forgedTopUp,
       BUYER,
-      `PAY_${ulid()}`,
+      keys.forgedTopUp,
     );
-    const untrusted = [personOrder, personRepair, forgedRepair, forgedTopUp].sort();
+
+    // The quarantine keys round 2's rename would have taken, each held already.
+    const occupied = [
+      await personRecords('ORDER_UNCONFIRMED', 'MARKETPLACE_ORDER', keys.order),
+      await personRecords('MAINTENANCE_REQUEST_UNCONFIRMED', 'MAINTENANCE_SERVICE', keys.repair),
+      await personRecords(
+        'MAINTENANCE_REQUEST_UNCONFIRMED',
+        'MAINTENANCE_SERVICE',
+        keys.forgedRepair,
+      ),
+      await personRecords('PAYMENT_INTENT_UNCONFIRMED', 'MAINTENANCE_SERVICE', keys.forgedTopUp),
+    ];
+    return {
+      personOrder,
+      untrusted: [personOrder, personRepair, forgedRepair, forgedTopUp].sort(),
+      occupied,
+    };
+  }
+
+  it('refuses, changing nothing, rows a caller wrote during the rollback; with their quarantine keys held, the rename collides and the HINT’s quarantine applies', async () => {
+    const { url, db, wiring, approveRepair, topUp, sagaRecordsOrder, personRecords } =
+      await scratch();
+    await approveRepair();
+    await topUp();
+    await sagaRecordsOrder();
+    runDown(url);
+
+    const { personOrder, untrusted, occupied } = await untrustedRows(db, personRecords);
 
     const before = await shape(db);
-    expect(before.rows).toHaveLength(7);
+    expect(before.rows).toHaveLength(11);
 
     const refused = deploy(url);
     expect(refused.ok).toBe(false);
     expect(REFUSAL.exec(refused.output)?.[1]).toBe('4');
-    expect(await shape(db)).toEqual({ ...UNGUARDED, rows: before.rows });
+    expect(await shape(db)).toEqual({ ...UNGUARDED, rows: before.rows, quarantined: [] });
     resolveRolledBack(url);
 
     // Round 1's HINT: cancel it. The financial decision is recorded — and the
@@ -377,13 +442,26 @@ describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => 
     expect(REFUSAL.exec(stillRefused.output)?.[1]).toBe('4');
     resolveRolledBack(url);
 
-    // The HINT now: its list — exactly the four — each taken off the reserved
-    // type as it says, then deploy again.
-    const { list, correction } = hint();
+    // Round 2's HINT: rename to <type>_UNCONFIRMED. Each new key is held, so
+    // each rename is refused by the unique index, and nothing changes.
+    for (const transactionId of untrusted) {
+      await expect(db.$executeRawUnsafe(RENAME, transactionId)).rejects.toThrow(
+        /Code: `23505`[\s\S]*\(organization_id, source_type, source_reference\)=[\s\S]*already exists/,
+      );
+    }
+    expect(await shape(db)).toEqual(cancelled);
+
+    // The HINT now: its list — exactly the four — each quarantined, naming the
+    // decision, then deploy again.
+    const { list, quarantine } = hint();
     const listed = await db.$queryRawUnsafe<{ id: string }[]>(list);
     expect(listed.map((r) => r.id).sort()).toEqual(untrusted);
     for (const { id: transactionId } of listed) {
-      await db.$executeRawUnsafe(`${correction}$1`, transactionId);
+      await db.$executeRawUnsafe(
+        `SELECT ${quarantine}($1, $2)`,
+        transactionId,
+        `DEC-${transactionId}: not its owner's fact`,
+      );
     }
 
     const applied = deploy(url);
@@ -392,19 +470,104 @@ describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => 
     const after = await shape(db);
     expect(after).toMatchObject(GUARDED);
 
-    // The owners' rows are untouched; the callers' rows keep every financial
-    // fact and only leave the reserved key.
+    // The owners' rows and the occupied keys' rows are untouched.
     expect(after.rows.filter((r) => !untrusted.includes(r.id as string))).toEqual(
       cancelled.rows.filter((r) => !untrusted.includes(r.id as string)),
     );
+    expect(occupied.every((held) => after.rows.some((r) => r.id === held))).toBe(true);
+
+    // The callers' rows keep every fact but the key; the key is kept apart,
+    // exactly as the row carried it, with the decision and who took it.
+    const migrator = decodeURIComponent(new URL(ownerDatabaseUrl()).username);
     for (const transactionId of untrusted) {
       const was = cancelled.rows.find((r) => r.id === transactionId)!;
       const now = after.rows.find((r) => r.id === transactionId)!;
-      expect(now).toEqual({
-        ...was,
-        source_type: `${String(was.source_type)}_UNCONFIRMED`,
-        updated_at: now.updated_at,
+      expect(now).toEqual({ ...was, source_type: null, source_reference: null });
+      expect(after.quarantined.find((q) => q.transaction_id === transactionId)).toEqual({
+        transaction_id: transactionId,
+        organization_id: was.organization_id,
+        source_type: was.source_type,
+        source_reference: was.source_reference,
+        decision: `DEC-${transactionId}: not its owner's fact`,
+        quarantined_by: migrator,
+        quarantined_at: expect.any(String),
       });
     }
+    expect(after.quarantined).toHaveLength(4);
+  });
+
+  it('the quarantine refuses what it cannot keep, and what it keeps is never changed', async () => {
+    const { db, personRecords } = await scratch();
+    const call = (transactionId: string, decision: string) =>
+      db.$executeRawUnsafe(`SELECT quarantine_transaction_source($1, $2)`, transactionId, decision);
+
+    const keyed = await personRecords('E2E', 'MARKETPLACE_ORDER');
+    await expect(call(id('TXN'), 'DEC-1: no such row')).rejects.toThrow(/no such transaction/);
+    await expect(call(keyed, '   short ')).rejects.toThrow(
+      /ck_transaction_source_quarantine_decision/,
+    );
+    await call(keyed, 'DEC-2: taken off for the test');
+    // Taken once: the row holds no key any more.
+    await expect(call(keyed, 'DEC-3: a second time')).rejects.toThrow(/holds no source key/);
+
+    // Append-only, and the transaction it keeps a key for cannot go.
+    await expect(
+      db.$executeRawUnsafe(
+        `UPDATE transaction_source_quarantine SET source_type = 'X' WHERE transaction_id = $1`,
+        keyed,
+      ),
+    ).rejects.toThrow(/append-only/);
+    await expect(
+      db.$executeRawUnsafe(
+        `DELETE FROM transaction_source_quarantine WHERE transaction_id = $1`,
+        keyed,
+      ),
+    ).rejects.toThrow(/append-only/);
+    // ISOLATION-ALLOW-UNBOUNDED: TRUNCATE cannot carry a WHERE; this is a scratch schema.
+    await expect(db.$executeRawUnsafe(`TRUNCATE transaction_source_quarantine`)).rejects.toThrow(
+      /append-only/,
+    );
+
+    // An operator's tool: nobody but its owner may run it.
+    const publicGrants = await db.$queryRawUnsafe<{ n: bigint }[]>(
+      `SELECT count(*) AS n
+         FROM pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+        WHERE p.proname = 'quarantine_transaction_source'
+          AND p.pronamespace = current_schema()::regnamespace
+          AND a.grantee = 0`,
+    );
+    expect(Number(publicGrants[0]!.n)).toBe(0);
+  });
+
+  it(`${QUARANTINE}'s down refuses while a key is quarantined, and goes cleanly when none is`, async () => {
+    const used = await scratch();
+    const keyed = await used.personRecords('E2E', 'MARKETPLACE_ORDER');
+    await used.db.$executeRawUnsafe(
+      `SELECT quarantine_transaction_source($1, $2)`,
+      keyed,
+      'DEC-4: taken off for the test',
+    );
+    runDown(used.url);
+    const refused = downOf(used.url, QUARANTINE);
+    expect(refused.ok).toBe(false);
+    expect(refused.output).toMatch(
+      /transaction_source_quarantine holds 1 row\(s\); refusing to drop the source keys they keep/,
+    );
+    expect((await shape(used.db)).quarantined).toHaveLength(1);
+
+    const unused = await scratch();
+    runDown(unused.url);
+    expect(downOf(unused.url, QUARANTINE).ok).toBe(true);
+    const gone = await unused.db.$queryRawUnsafe<{ t: string | null; f: string | null }[]>(
+      `SELECT to_regclass('transaction_source_quarantine')::text AS t,
+              to_regprocedure('quarantine_transaction_source(text, text)')::text AS f`,
+    );
+    expect(gone).toEqual([{ t: null, f: null }]);
+
+    // Both forward again, in order.
+    const again = deploy(unused.url);
+    expect(again.ok).toBe(true);
+    expect(again.output).toContain(QUARANTINE);
+    expect(again.output).toContain(MIGRATION);
   });
 });
