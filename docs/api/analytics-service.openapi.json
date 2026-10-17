@@ -1,0 +1,218 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/v1/dashboards/fleet": {
+      "get": {
+        "description": "Completed maintenance in [from, to), by type: how many, the downtime of those whose downtime is known (the rest are not counted as zero), and the cost per currency in minor units as decimal strings. No ratio is computed. `earliestCompletionAt` says from when this service holds facts at all. Closed by default (S-02). Read for the organization the request acts for — the roles of ANALYTICS_FLEET_DASHBOARD_ROLES (default ORGANIZATION_ADMIN, FLEET_MANAGER), and SYSTEM_ADMIN acting for an organization it selected with X-Organization-Id. AUDITOR is refused: it reads aggregate governance views only, and one organization’s dashboard is that organization’s detail. A service token is refused. Built from the events this service received, never from another service’s database (ADR-071).",
+        "operationId": "DashboardController_fleet_v1",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Start of the window, inclusive (ISO 8601 with offset)."
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "End of the window, exclusive (ISO 8601 with offset)."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The organization the dashboard is for: the request’s."
+                    },
+                    "from": {
+                      "type": "string"
+                    },
+                    "to": {
+                      "type": "string"
+                    },
+                    "earliestCompletionAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "The earliest completion this service holds a fact for, in any window — or null when it holds none. Facts exist only from the events it has received (domain topics keep seven days), so before this instant an empty window means \"not known here\", not \"none\"."
+                    },
+                    "maintenance": {
+                      "type": "object",
+                      "properties": {
+                        "completed": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "description": "The maintenance type as maintenance-service publishes it (PREVENTIVE, CORRECTIVE today). A type the producer adds appears under its own name."
+                              },
+                              "count": {
+                                "type": "integer",
+                                "description": "Completions of this type in the window."
+                              },
+                              "downtime": {
+                                "type": "object",
+                                "properties": {
+                                  "knownCount": {
+                                    "type": "integer",
+                                    "description": "Completions whose downtime the producer knew. The others are not counted as zero."
+                                  },
+                                  "totalMinutes": {
+                                    "type": "string",
+                                    "pattern": "^\\d+$",
+                                    "description": "Summed over those completions only; a decimal string, exact however large the sum."
+                                  }
+                                },
+                                "required": ["knownCount", "totalMinutes"],
+                                "additionalProperties": false
+                              },
+                              "cost": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "currency": {
+                                      "type": "string",
+                                      "description": "ISO 4217, as the producer stated it."
+                                    },
+                                    "amountMinor": {
+                                      "type": "string",
+                                      "pattern": "^\\d+$",
+                                      "description": "The sum in minor units (rials for IRR), a decimal string; never a float. Exact, and may exceed a 64-bit integer: each cost fits a bigint, their sum need not."
+                                    }
+                                  },
+                                  "required": ["currency", "amountMinor"],
+                                  "additionalProperties": false
+                                },
+                                "description": "Summed per currency, never across two; ordered by currency."
+                              }
+                            },
+                            "required": ["type", "count", "downtime", "cost"],
+                            "additionalProperties": false
+                          },
+                          "description": "Completed maintenance in the window, by type, ordered by type. No ratio."
+                        }
+                      },
+                      "required": ["completed"],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "organizationId",
+                    "from",
+                    "to",
+                    "earliestCompletionAt",
+                    "maintenance"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query does not match the published schema, or the window does not start before it ends. Unknown parameters are refused rather than ignored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration (ANALYTICS_FLEET_DASHBOARD_ROLES) does not grant (INSUFFICIENT_ROLE), the oversight role (AUDITOR reads aggregate governance views only), a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The fleet dashboard of the organization the request acts for",
+        "tags": ["dashboards"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "Rasta — Analytics Service",
+    "description": "Event-driven read models (RUN-001, ADR-071). Every number here is built from the domain events this service received — never from another service’s database — and only for the organization the request acts for. This release offers the maintenance part of the fleet dashboard, from MAINTENANCE_COMPLETED. Amounts are decimal strings of minor units, per currency. No route writes, and no parameter names an organization, a subtree or a scope. The governance view (aggregate-only, for AUDITOR) is not served yet; when it is, it answers only an organization that is a root of the hierarchy, as one group, for one closed period, from an immutable release — never a child subtree, never live facts (ADR-071 § 5). The KPIs with INSUFFICIENT_BASELINE and the other dashboards follow (ADR-071 implementation plan).",
+    "version": "0.1.0",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "type": "http"
+      }
+    },
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "correlationId": {
+            "type": "string"
+          },
+          "details": {
+            "type": "array",
+            "items": {}
+          }
+        },
+        "required": ["code", "message"],
+        "additionalProperties": false
+      }
+    }
+  }
+}
