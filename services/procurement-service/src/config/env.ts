@@ -42,6 +42,9 @@ const PLATFORM_ROLE = 'SYSTEM_ADMIN';
  */
 export const MAX_FOLLOW_BATCH_SIZE = 10_000;
 
+/** The largest `PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS`: the window the scale test closes in budget. */
+export const MAX_LIVE_DEMANDS_LIMIT = 10_000;
+
 /** A comma-separated list, trimmed, with empty elements dropped. */
 function commaList() {
   return z.string().transform((raw) =>
@@ -96,6 +99,13 @@ function roleList(name: string, options: { min: number }) {
  *                                      from PR 6). Default `ORGANIZATION_ADMIN` — `docs/09` gives
  *                                      `PROCUREMENT_USER` only `rfq:read`. AUDITOR or SYSTEM_ADMIN
  *                                      here stops startup.
+ *   PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS
+ *                                      Not a domain setting: a technical limit (Q-119 note of
+ *                                      2026-10-17). The most live demands a window holds, so that
+ *                                      its synchronous close fits the transaction budget: default
+ *                                      5000, at most 10000. One more is 422
+ *                                      AGGREGATION_DEMAND_LIMIT_REACHED. Read at each submit, never
+ *                                      snapshotted.
  *   PROCUREMENT_IDEMPOTENCY_TTL_HOURS / _CLAIM_LEASE_SECONDS
  *                                      How long a completed command's response is replayed, and how
  *                                      long an in-flight claim holds its key before a retry may
@@ -149,6 +159,23 @@ export const procurementEnvSchema = baseEnvSchema
       .string()
       .default('ORGANIZATION_ADMIN')
       .pipe(roleList('PROCUREMENT_RFQ_ISSUER_ROLES', { min: 1 })),
+
+    /**
+     * A technical limit, not a business rule (PR-327 r2 F1, Q-119 note of 2026-10-17): the most
+     * live demands one window holds. A window ending under REFER or CLOSE moves every one of them
+     * in the transaction of the demand that ends it, which must fit the service's transaction
+     * budget (Prisma's default, 5 s) — or that submit, and every later one for the product, fails
+     * and rolls back with the window still OPEN. Measured on rasta-dev the close costs about
+     * 0.13 ms a demand (about 35,000 within 5 s); the default is a seventh of that, and the maximum
+     * is what `test/window-close-scale.int-spec.ts` proves within the budget, on CI too. PR 2's
+     * batched sweeper ends a window in bounded steps and lifts this dependency.
+     */
+    PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_LIVE_DEMANDS_LIMIT)
+      .default(5_000),
 
     PROCUREMENT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
     PROCUREMENT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce

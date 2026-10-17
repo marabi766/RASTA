@@ -1,5 +1,10 @@
 import { MAX_QUANTITY } from '../demand/dto';
-import { corsOrigins, loadProcurementEnv, MAX_FOLLOW_BATCH_SIZE } from './env';
+import {
+  corsOrigins,
+  loadProcurementEnv,
+  MAX_FOLLOW_BATCH_SIZE,
+  MAX_LIVE_DEMANDS_LIMIT,
+} from './env';
 import { procurementOperationBudgets } from './operation-budgets';
 
 const base: NodeJS.ProcessEnv = {
@@ -43,6 +48,10 @@ describe('the provisional defaults (Q-10, Q-119, ADR-070 § 2)', () => {
   it('replays a command’s response for a day and leases an in-flight key for two minutes', () => {
     expect(env.PROCUREMENT_IDEMPOTENCY_TTL_HOURS).toBe(24);
     expect(env.PROCUREMENT_IDEMPOTENCY_CLAIM_LEASE_SECONDS).toBe(120);
+  });
+
+  it('holds a window to 5000 live demands, a technical limit well inside the close budget (Q-119 note of 2026-10-17)', () => {
+    expect(env.PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS).toBe(5_000);
   });
 
   it('names itself, and listens on 3107', () => {
@@ -104,6 +113,17 @@ describe('overrides', () => {
   });
 
   it.each([
+    ['one', 1],
+    ['MAX_LIVE_DEMANDS_LIMIT, the window the scale test closes within the budget', 10_000],
+  ])('accepts a live-demand limit of %s', (_label, limit) => {
+    expect(
+      load({ PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: String(limit) })
+        .PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS,
+    ).toBe(limit);
+    expect(MAX_LIVE_DEMANDS_LIMIT).toBe(10_000);
+  });
+
+  it.each([
     ['AUDITOR among the demand roles', { PROCUREMENT_DEMAND_ROLES: 'PROCUREMENT_USER,AUDITOR' }],
     ['SYSTEM_ADMIN among the demand roles', { PROCUREMENT_DEMAND_ROLES: 'SYSTEM_ADMIN' }],
     ['an empty demand role list', { PROCUREMENT_DEMAND_ROLES: '' }],
@@ -120,6 +140,12 @@ describe('overrides', () => {
       'a shortfall policy outside the closed set',
       { PROCUREMENT_AGGREGATION_SHORTFALL_POLICY: 'WAIT' },
     ],
+    ['a live-demand limit of zero', { PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: '0' }],
+    [
+      'a live-demand limit past what one close is proven to fit',
+      { PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: '10001' },
+    ],
+    ['a fractional live-demand limit', { PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: '2.5' }],
     ['a zero idempotency lifetime', { PROCUREMENT_IDEMPOTENCY_TTL_HOURS: '0' }],
     ['a lease under ten seconds', { PROCUREMENT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: '5' }],
     ['AUDITOR among the RFQ issuer roles', { PROCUREMENT_RFQ_ISSUER_ROLES: 'AUDITOR' }],

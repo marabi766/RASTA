@@ -3,7 +3,7 @@
   "paths": {
     "/v1/demand-requests": {
       "post": {
-        "description": "Joins the OPEN aggregation of (organization, productId), or opens one with the first demand, under the aggregation’s row lock and the database clock read after it. The window is half-open, [openedAt, closesAt): a demand at or after closesAt never joins it — that same request ends the window (READY when it holds a demand and reaches its threshold; otherwise its snapshot’s policy: EXTEND moves it on and the demand joins it, REFER and CLOSE end it) and the demand joins the window that follows. A demand that would take the total of the window it joins past 2147483647 is 422 AGGREGATION_QUANTITY_LIMIT_EXCEEDED and writes nothing. productId is opaque and never checked against marketplace (Q-105, Q-120). DEMAND_SUBMITTED carries identifiers, the quantity and instants only — never the note. Closed by default (S-02). The buyer’s own organization only: a person holding a role PROCUREMENT_DEMAND_ROLES names (default PROCUREMENT_USER, ORGANIZATION_ADMIN) in the organization the request acts for. A demand or aggregation of any other organization, and one that does not exist, are both 404, never 403 (S-03). AUDITOR, the platform administrator (SYSTEM_ADMIN, whatever organization it selected) and a service token are refused (403) before anything is read. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id (403 otherwise).",
+        "description": "Joins the OPEN aggregation of (organization, productId), or opens one with the first demand, under the aggregation’s row lock and the database clock read after it. The window is half-open, [openedAt, closesAt): a demand at or after closesAt never joins it — that same request ends the window (READY when it holds a demand and reaches its threshold; otherwise its snapshot’s policy: EXTEND moves it on and the demand joins it, REFER and CLOSE end it) and the demand joins the window that follows. A demand that would take the total of the window it joins past 2147483647 is 422 AGGREGATION_QUANTITY_LIMIT_EXCEEDED and writes nothing; so is one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands (default 5000), 422 AGGREGATION_DEMAND_LIMIT_REACHED — a technical limit that keeps the window’s close within one transaction. productId is opaque and never checked against marketplace (Q-105, Q-120). DEMAND_SUBMITTED carries identifiers, the quantity and instants only — never the note. Closed by default (S-02). The buyer’s own organization only: a person holding a role PROCUREMENT_DEMAND_ROLES names (default PROCUREMENT_USER, ORGANIZATION_ADMIN) in the organization the request acts for. A demand or aggregation of any other organization, and one that does not exist, are both 404, never 403 (S-03). AUDITOR, the platform administrator (SYSTEM_ADMIN, whatever organization it selected) and a service token are refused (403) before anything is read. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id (403 otherwise).",
         "operationId": "DemandController_submit_v1",
         "parameters": [
           {
@@ -141,7 +141,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal or cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (submission: AGGREGATION_QUANTITY_LIMIT_EXCEEDED)",
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; nothing is written); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal or cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (submission: AGGREGATION_QUANTITY_LIMIT_EXCEEDED, AGGREGATION_DEMAND_LIMIT_REACHED)",
             "content": {
               "application/json": {
                 "schema": {
@@ -163,7 +163,10 @@
                           },
                           "code": {
                             "type": "string",
-                            "enum": ["AGGREGATION_QUANTITY_LIMIT_EXCEEDED"]
+                            "enum": [
+                              "AGGREGATION_QUANTITY_LIMIT_EXCEEDED",
+                              "AGGREGATION_DEMAND_LIMIT_REACHED"
+                            ]
                           },
                           "message": {
                             "type": "string"
@@ -706,7 +709,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal or cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (withdrawal: DEMAND_NOT_SUBMITTED, AGGREGATION_WINDOW_ENDED)",
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; nothing is written); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal or cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (withdrawal: DEMAND_NOT_SUBMITTED, AGGREGATION_WINDOW_ENDED)",
             "content": {
               "application/json": {
                 "schema": {
@@ -888,7 +891,8 @@
                             "description": "The sum of the quantities of the demands it holds (withdrawn ones excluded); frozen once the window ended. Never above MAX_QUANTITY: a demand that would take it past is 422 AGGREGATION_QUANTITY_LIMIT_EXCEEDED (ADR-070 § 2)."
                           },
                           "demandCount": {
-                            "type": "integer"
+                            "type": "integer",
+                            "description": "How many live demands it holds (withdrawn ones excluded). A demand that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS is 422 AGGREGATION_DEMAND_LIMIT_REACHED."
                           },
                           "extensionCount": {
                             "type": "integer"
@@ -1079,7 +1083,8 @@
                       "description": "The sum of the quantities of the demands it holds (withdrawn ones excluded); frozen once the window ended. Never above MAX_QUANTITY: a demand that would take it past is 422 AGGREGATION_QUANTITY_LIMIT_EXCEEDED (ADR-070 § 2)."
                     },
                     "demandCount": {
-                      "type": "integer"
+                      "type": "integer",
+                      "description": "How many live demands it holds (withdrawn ones excluded). A demand that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS is 422 AGGREGATION_DEMAND_LIMIT_REACHED."
                     },
                     "extensionCount": {
                       "type": "integer"
@@ -1272,7 +1277,8 @@
                       "description": "The sum of the quantities of the demands it holds (withdrawn ones excluded); frozen once the window ended. Never above MAX_QUANTITY: a demand that would take it past is 422 AGGREGATION_QUANTITY_LIMIT_EXCEEDED (ADR-070 § 2)."
                     },
                     "demandCount": {
-                      "type": "integer"
+                      "type": "integer",
+                      "description": "How many live demands it holds (withdrawn ones excluded). A demand that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS is 422 AGGREGATION_DEMAND_LIMIT_REACHED."
                     },
                     "extensionCount": {
                       "type": "integer"
@@ -1415,7 +1421,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal or cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (cancellation: AGGREGATION_NOT_READY)",
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; nothing is written); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal or cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (cancellation: AGGREGATION_NOT_READY)",
             "content": {
               "application/json": {
                 "schema": {

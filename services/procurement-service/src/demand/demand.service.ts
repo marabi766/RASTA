@@ -61,7 +61,9 @@ export class DemandService {
     const actor = currentActor({ requirePlatformUserId: true });
     const correlationId = getContext().correlationId;
 
-    const done: { ended?: WindowOutcome; opened: boolean } = { opened: false };
+    const done: { ended?: WindowOutcome; refused?: RastaError; opened: boolean } = {
+      opened: false,
+    };
     const view = await this.prisma.transaction(async (tx) => {
       await fence.hold(tx);
 
@@ -90,6 +92,26 @@ export class DemandService {
           ['AGGREGATION_QUANTITY_LIMIT_EXCEEDED'],
           { aggregationId: window.id },
         );
+      }
+      // A technical limit (Q-119 note of 2026-10-17), set by PR 1, whose synchronous close moved
+      // every live demand in one transaction. The end here moves at most
+      // PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE and the sweeper the rest, so the limit no longer guards
+      // the budget; it stays as configured (widening it is a separate decision). `demandCount`
+      // counts the live demands (the totals check holds it), read under the same lock.
+      if (window.demandCount >= this.env.PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS) {
+        const refusal = ruleRefusal(
+          'The window this demand would join holds as many demands as it can take',
+          'submission',
+          ['AGGREGATION_DEMAND_LIMIT_REACHED'],
+          { aggregationId: window.id },
+        );
+        // Unlike a quantity that does not fit, this refuses every demand: an end this transaction
+        // made (EXTEND, the one end that keeps the full window) is committed without the demand —
+        // it was due at closesAt whatever arrived, as the sweeper would have made it — and the
+        // window, open again, lets a demand be withdrawn to make room.
+        if (!done.ended) throw refusal;
+        done.refused = refusal;
+        return null;
       }
 
       const demand = await this.repository.insertDemand(tx, {
@@ -129,6 +151,8 @@ export class DemandService {
 
     // Counted once committed: a rolled-back command changed nothing.
     if (done.ended) countWindowEnded(done.ended, 'demand');
+    // Refused after its window's end committed: the claim is released like any refusal's.
+    if (view === null) throw done.refused;
     demandCommandsTotal.inc({
       service: SERVICE_NAME,
       command: 'submit',
