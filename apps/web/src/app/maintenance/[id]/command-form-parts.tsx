@@ -1,6 +1,7 @@
 import { Alert } from '@/ui';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
+import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
 import type { RequestCommandFormState } from './form-state';
 
@@ -63,8 +64,8 @@ export function CommandBanner({
     case 'REFUSED':
       return (
         <Alert tone="danger">
-          {state.reason === 'NO_SESSION'
-            ? 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.'
+          {isSessionRefusal(state.reason)
+            ? SESSION_REFUSAL_MESSAGES[state.reason]
             : state.reason === 'BASELINE'
               ? 'این فرم منقضی شده است یا با صفحهٔ نمایش‌داده‌شده نمی‌خواند. صفحه را تازه کنید و دوباره تلاش کنید.'
               : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.'}

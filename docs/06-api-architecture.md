@@ -867,10 +867,10 @@ POST   /v1/rewards/rules                           تعریف قاعده   (SYST
 PATCH  /v1/rewards/rules/{id}                      اصلاح قاعده   (SYSTEM_ADMIN)
 GET    /v1/rewards/me/participation                امتیاز مشارکت خودِ فراخوان با Breakdown — جدا از امتیاز پاداش، قابل خرج نیست (ADR-047، Q-139)
 GET    /v1/rewards/participation-rules             نسخه‌های قاعدهٔ مشارکت، تازه‌ترین اول   (SYSTEM_ADMIN/UNION_ADMIN/ORGANIZATION_ADMIN)
-POST   /v1/rewards/participation-rules             نسخهٔ بعدی قاعدهٔ مشارکت — هرگز ویرایش نمی‌شود   (SYSTEM_ADMIN)
+POST   /v1/rewards/participation-rules             نسخهٔ بعدی قاعدهٔ مشارکت — هرگز ویرایش نمی‌شود؛ expectedCurrentVersion کهنه = 409 OPTIMISTIC_LOCK_FAILED   [K] (SYSTEM_ADMIN)
 GET    /v1/rewards/me/recognition                  سطح و نشان‌هایی که خودِ فراخوان دارد و چرایش (مبنا، مقدار، نسخه) — فقط آنچه دارد، نه سطح بعد (COM-012، Q-140)
 GET    /v1/rewards/recognition-rules               نسخه‌های سطح و نشان، تازه‌ترین اول   (SYSTEM_ADMIN/UNION_ADMIN/ORGANIZATION_ADMIN)
-POST   /v1/rewards/recognition-rules               نسخهٔ بعدی سطح و نشان با مبنای صریح — هرگز ویرایش نمی‌شود   (SYSTEM_ADMIN)
+POST   /v1/rewards/recognition-rules               نسخهٔ بعدی سطح و نشان با مبنای صریح — هرگز ویرایش نمی‌شود؛ expectedCurrentVersion کهنه = 409 OPTIMISTIC_LOCK_FAILED   [K] (SYSTEM_ADMIN)
 
 GET    /v1/payment-intents                         فهرست پرداخت‌ها
 GET    /v1/payment-intents/{id}                    یک پرداخت
@@ -919,7 +919,13 @@ POST   /v1/returns/{id}/inspections           [K] ثبت بازرسی و تعی�
 > **وضعیت پیاده‌سازی (RUN-005 PR ۱، 2026-10-16، marketplace-service):** `POST /v1/orders/{id}/returns`، `GET /v1/returns/{id}`
 > و `POST /v1/returns/{id}/decisions` (`AUTHORIZE`\|`REJECT`، فقط تأمین‌کنندهٔ همان سفارش) ساخته شده‌اند، به‌اضافهٔ دو مسیر که
 > فهرست بالا ندارد: `GET /v1/returns` (درخواست‌های خود سازمان) و `POST /v1/returns/{id}/cancellation` (لغو توسط خریدار). ادعای
-> ضمانت، محمولهٔ برگشت و بازرسی هنوز **NOT_IMPLEMENTED** است. هیچ مسیر Refund وجود ندارد.
+> ضمانت هنوز **NOT_IMPLEMENTED** است. هیچ مسیر Refund وجود ندارد.
+>
+> **RUN-005 PR ۲ (inventory-service):** `POST /v1/return-shipments` (همان مسیر برنامه‌ریزی‌شده) به‌اضافهٔ
+> `POST /v1/return-shipments/{id}/receive`، `GET /v1/return-shipments`، `GET /v1/return-shipments/{id}` و `…/{id}/tracking`.
+> **بازرسی و تعیین تکلیف** (`POST /v1/returns/{id}/inspections` در فهرست) زیر `/v1/return-shipments/{id}/…` پیاده شد، نه زیر
+> `/v1/returns`: آن پیشوند در Gateway از آنِ marketplace است. دو فرمان جدا: `POST …/{id}/inspection` و `POST …/{id}/resolution`
+> (بدنهٔ دوم: `dispositions[]`؛ مجاز بودن هر نتیجه پیکربندی و بی‌پیش‌فرض است، Q-133). هیچ‌کدام موجودی یا Refund را تغییر نمی‌دهند.
 
 همهٔ مسیرهای نوشتنی به Tenant Scope، مجوز سطح Object، Audit و در صورت اثر تکرارپذیر به
 `Idempotency-Key` نیاز دارند. نمایش مسیر برنامه‌ریزی‌شده به‌عنوان API موجود ممنوع است.

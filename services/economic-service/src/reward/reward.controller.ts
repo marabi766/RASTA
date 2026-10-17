@@ -1,4 +1,14 @@
-import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { RewardService } from './reward.service';
@@ -7,6 +17,8 @@ import { toParticipationRuleApiView, toParticipationView } from './participation
 import { RecognitionService } from './recognition.service';
 import { toRecognitionRuleApiView, toRecognitionView } from './recognition-views';
 import { assertNotAuditor } from '../access/access';
+import { IdempotencyStore } from '../shared/idempotency';
+import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import {
   toRewardBalanceView,
   toRewardView,
@@ -60,6 +72,7 @@ export class RewardController {
     private readonly rewards: RewardService,
     private readonly participation: ParticipationService,
     private readonly recognition: RecognitionService,
+    private readonly idempotency: IdempotencyStore,
   ) {}
 
   // ---- The caller's own standing -------------------------------------------
@@ -157,13 +170,29 @@ export class RewardController {
       'badge has a default and none is seeded — the product document gives none (docs/24 ' +
       'Q-140). There is no benefit field (Q-13). In force from now for every organization; ' +
       'the previous version stays as the record and is never edited. Publishes ' +
-      'RECOGNITION_RULE_CHANGED with the actor and the terms before and after.',
+      'RECOGNITION_RULE_CHANGED with the actor and the terms before and after. ' +
+      '`expectedCurrentVersion` is the version being replaced (0 while none exists); if another ' +
+      'version was created since, 409 OPTIMISTIC_LOCK_FAILED and nothing is written. Requires ' +
+      'an `Idempotency-Key`: a retry returns the version the first request created, never ' +
+      'another one.',
   })
   async createRecognitionRule(
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body(zodPipe(createRecognitionRuleSchema)) dto: CreateRecognitionRuleDto,
   ) {
     assertNotAuditor();
-    return toRecognitionRuleApiView(await this.recognition.createRule(dto));
+    const key = requireIdempotencyKey(idempotencyKey);
+
+    return this.idempotency.run(
+      'POST /v1/rewards/recognition-rules',
+      key,
+      dto,
+      201,
+      (answer) => this.recognition.createRule(dto, answer.map(toRecognitionRuleApiView)),
+      // As the participation rule: platform-wide, listed to every
+      // administrator, and the role checks have run as the caller now is.
+      { mayReplay: async () => undefined },
+    );
   }
 
   // ---- Participation rule versions -----------------------------------------
@@ -190,13 +219,30 @@ export class RewardController {
       'many per window, and the window in days. In force from now for every organization; the ' +
       'previous version stays as the record and is never edited. No number has a default — the ' +
       'product document gives none (docs/24 Q-139). Publishes PARTICIPATION_RULE_CHANGED with ' +
-      'the actor and the terms before and after. Weights are positive: no penalties.',
+      'the actor and the terms before and after. Weights are positive: no penalties. ' +
+      '`expectedCurrentVersion` is the version being replaced (0 while none exists); if another ' +
+      'version was created since, 409 OPTIMISTIC_LOCK_FAILED and nothing is written. Requires ' +
+      'an `Idempotency-Key`: a retry returns the version the first request created, never ' +
+      'another one.',
   })
   async createParticipationRule(
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body(zodPipe(createParticipationRuleSchema)) dto: CreateParticipationRuleDto,
   ) {
     assertNotAuditor();
-    return toParticipationRuleApiView(await this.participation.createRule(dto));
+    const key = requireIdempotencyKey(idempotencyKey);
+
+    return this.idempotency.run(
+      'POST /v1/rewards/participation-rules',
+      key,
+      dto,
+      201,
+      (answer) => this.participation.createRule(dto, answer.map(toParticipationRuleApiView)),
+      // Nothing to re-check: a version is platform-wide and listed to every
+      // administrator, and the role and oversight checks above have already
+      // run as the caller now is. The record answers only its own actor.
+      { mayReplay: async () => undefined },
+    );
   }
 
   // ---- Rules ---------------------------------------------------------------

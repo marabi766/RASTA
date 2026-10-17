@@ -6,6 +6,7 @@ import { LedgerService } from '../ledger/ledger.service';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { SERVICE_NAME } from '../config/env';
 import type { Prisma } from '../generated/prisma';
+import type { IdempotentAnswer } from '../shared/idempotency';
 import {
   parseContributions,
   participationWindow,
@@ -138,19 +139,27 @@ export class ParticipationService {
 
   /**
    * A new rule version, in force from now, recorded with who created it
-   * (`PARTICIPATION_RULE_CHANGED`, in the same transaction).
+   * (`PARTICIPATION_RULE_CHANGED`) and answered for its `Idempotency-Key`
+   * (`answer`), all in one transaction.
    *
    * Versions are numbered under a transaction-scoped advisory lock, so two
-   * administrators creating one at once get consecutive numbers rather than a
-   * unique violation, and the event's `before` is the version actually
-   * replaced.
+   * administrators creating one at once never collide on a number, and the
+   * event's `before` is the version actually replaced. The lock serialises;
+   * it does not decide. What decides is `expectedCurrentVersion`, read under
+   * the lock: a request made against a version that is no longer the latest is
+   * refused, so of two administrators who both saw version N only the first
+   * replaces it (review of #328, r1).
    */
-  async createRule(dto: CreateParticipationRuleDto) {
+  async createRule(
+    dto: CreateParticipationRuleDto,
+    answer: IdempotentAnswer<ParticipationRuleRow>,
+  ): Promise<ParticipationRuleRow> {
     const actor = getContext().userId ?? SERVICE_NAME;
 
     return this.prisma.transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${PARTICIPATION_RULE_LOCK_KEY})`;
       const previous = await this.ruleInForce(tx);
+      assertReplacing(previous?.version ?? 0, dto.expectedCurrentVersion);
 
       const created = await tx.participationRule.create({
         data: {
@@ -184,6 +193,9 @@ export class ParticipationService {
         },
       });
 
+      // With the version and its event: a retry whose first response was lost
+      // replays this version, never creates another.
+      await answer.respond(tx, created);
       return created;
     });
   }
@@ -203,9 +215,25 @@ export class ParticipationService {
  * The key the version numbering serialises on. Any fixed bigint will do; this
  * one is `participation_rule` in ASCII, so it is recognisable in `pg_locks`.
  */
-const PARTICIPATION_RULE_LOCK_KEY = BigInt('0x7061727469636970');
+export const PARTICIPATION_RULE_LOCK_KEY = BigInt('0x7061727469636970');
 
 type ParticipationRuleRow = Prisma.ParticipationRuleGetPayload<Record<string, never>>;
+
+/**
+ * Refuses a new version decided against one that is no longer in force — the
+ * platform's stale-precondition answer, `409 OPTIMISTIC_LOCK_FAILED`, with
+ * nothing written. Exported for the recognition rule, which is versioned the
+ * same way.
+ */
+export function assertReplacing(current: number, expected: number): void {
+  if (current !== expected) {
+    throw new RastaError(
+      'OPTIMISTIC_LOCK_FAILED',
+      'Another version was created since; read the versions again and decide against the latest',
+      { internalContext: { current, expected } },
+    );
+  }
+}
 
 export function toRuleView(row: ParticipationRuleRow): ParticipationRuleView {
   return {

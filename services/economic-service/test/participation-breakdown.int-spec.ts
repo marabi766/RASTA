@@ -7,6 +7,7 @@ import { RewardTriggerConsumer } from '../src/consumers/reward-trigger.consumer'
 import { CONSUMED_EVENTS } from '../src/events/consumed';
 import { recordCutoverIfMissing } from '../src/reward/evaluation-cutover';
 import { RewardService } from '../src/reward/reward.service';
+import { PARTICIPATION_RULE_LOCK_KEY } from '../src/reward/participation.service';
 import { PrismaClient } from '../src/generated/prisma';
 import { admin, apiTenant, bearer, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, ITEST_ACTOR, ownerDatabaseUrl } from './helpers';
@@ -45,6 +46,8 @@ describe('participation breakdown (COM-012)', () => {
   const CAROL = `${ITEST_ACTOR}-CAROL-${ulid().slice(-6)}`;
   /** Bound to the run, so the cleanup below finds exactly this run's versions. */
   const RULE_ADMIN = `${ITEST_ACTOR}-PARTICIPATION-ADMIN`;
+  /** A second platform administrator, for the retry that must not overwrite them. */
+  const OTHER_RULE_ADMIN = `${ITEST_ACTOR}-PARTICIPATION-ADMIN-B`;
 
   const as = (userId: string, organizationId: string, roles = ['OPERATOR']) =>
     `Bearer ${bearer({
@@ -55,6 +58,21 @@ describe('participation breakdown (COM-012)', () => {
       roles,
     })}`;
   const asRuleAdmin = () => as(RULE_ADMIN, orgA, ['SYSTEM_ADMIN']);
+  const asOtherRuleAdmin = () => as(OTHER_RULE_ADMIN, orgA, ['SYSTEM_ADMIN']);
+
+  /** A version request, under a fresh Idempotency-Key unless one is given. */
+  const createVersion = (
+    body: object,
+    {
+      token = asRuleAdmin(),
+      key = `participation-${ulid()}`,
+    }: { token?: string; key?: string } = {},
+  ) =>
+    request(http)
+      .post('/v1/rewards/participation-rules')
+      .set('authorization', token)
+      .set('idempotency-key', key)
+      .send(body);
 
   const noBroker = (): EventConsumer =>
     ({ start: async () => undefined, stop: async () => undefined }) as unknown as EventConsumer;
@@ -212,29 +230,23 @@ describe('participation breakdown (COM-012)', () => {
         ],
         label: 'نمونه — نیازمند تصویب',
       };
+      const before = await currentVersion();
       for (const token of [
         as(ALICE, orgA, ['ORGANIZATION_ADMIN']),
         as(ALICE, orgA, ['UNION_ADMIN']),
         `Bearer ${admin(orgA, ['AUDITOR'])}`,
       ]) {
-        await request(http)
-          .post('/v1/rewards/participation-rules')
-          .set('authorization', token)
-          .send(body)
-          .expect(403);
+        await createVersion({ ...body, expectedCurrentVersion: before }, { token }).expect(403);
       }
-      await request(http)
-        .post('/v1/rewards/participation-rules')
-        .set('authorization', asRuleAdmin())
-        .send({ ...body, contributions: [{ triggerEvent: 'USAGE_RECORDED', weight: -1 }] })
-        .expect(400);
+      await createVersion({
+        ...body,
+        expectedCurrentVersion: before,
+        contributions: [{ triggerEvent: 'USAGE_RECORDED', weight: -1 }],
+      }).expect(400);
+      // The version being replaced is part of the request, never assumed.
+      await createVersion(body).expect(400);
 
-      const before = await currentVersion();
-      const created = await request(http)
-        .post('/v1/rewards/participation-rules')
-        .set('authorization', asRuleAdmin())
-        .send(body)
-        .expect(201);
+      const created = await createVersion({ ...body, expectedCurrentVersion: before }).expect(201);
       expect(created.body).toMatchObject({
         version: before + 1,
         windowDays: 30,
@@ -271,30 +283,140 @@ describe('participation breakdown (COM-012)', () => {
       ).rejects.toThrow(/append-only/);
     });
 
-    it('is numbered consecutively when two are created at once', async () => {
+    it('replaces the version it names only: of two made against the same one, one wins', async () => {
       const before = await currentVersion();
       const body = {
+        expectedCurrentVersion: before,
         windowDays: 30,
         contributions: [{ triggerEvent: 'USAGE_RECORDED', weight: 1 }],
       };
-      const responses = await Promise.all(
-        [0, 1].map(() =>
-          request(http)
-            .post('/v1/rewards/participation-rules')
-            .set('authorization', asRuleAdmin())
-            .send(body),
-        ),
-      );
-      expect(responses.map((response) => response.status)).toEqual([201, 201]);
-      expect(responses.map((response) => response.body.version as number).sort()).toEqual([
-        before + 1,
-        before + 2,
-      ]);
-      // Each record's `before` is the version it actually replaced.
-      for (const response of responses) {
-        const [record] = await changeRecords(response.body.id as string);
-        expect(record!.before?.version).toBe((response.body.version as number) - 1);
+      const responses = await Promise.all([0, 1].map(() => createVersion(body)));
+      expect(responses.map((response) => response.status).sort()).toEqual([201, 409]);
+      const [won] = responses.filter((response) => response.status === 201);
+      const [lost] = responses.filter((response) => response.status === 409);
+      expect(won!.body.version).toBe(before + 1);
+      expect(lost!.body.code).toBe('OPTIMISTIC_LOCK_FAILED');
+      expect(await currentVersion()).toBe(before + 1);
+      const [record] = await changeRecords(won!.body.id as string);
+      expect(record!.before?.version ?? 0).toBe(before);
+    });
+
+    it('waits for a version being created, and numbers itself after it', async () => {
+      // Deterministic where two requests at once are only likely to overlap: a
+      // version is being created (lock held, row written, not committed) while
+      // the request — made against that version — arrives. Without the lock it
+      // would read the old number and be refused as stale.
+      const before = await currentVersion();
+      let pending: Promise<request.Response> | undefined;
+      await harness.prisma.client.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${PARTICIPATION_RULE_LOCK_KEY})`;
+        await tx.$executeRaw`
+          INSERT INTO participation_rule (id, version, window_days, contributions, created_by)
+          VALUES (${`PRL_${ulid()}`}, ${before + 1}, 30,
+                  '[{"triggerEvent":"USAGE_RECORDED","weight":1,"maxPerWindow":null}]'::jsonb,
+                  ${RULE_ADMIN})`;
+        pending = createVersion({
+          expectedCurrentVersion: before + 1,
+          windowDays: 30,
+          contributions: [{ triggerEvent: 'USAGE_RECORDED', weight: 1 }],
+        }).then((response) => response);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      });
+      const response = await pending!;
+      expect(response.status).toBe(201);
+      expect(response.body.version).toBe(before + 2);
+      const [record] = await changeRecords(response.body.id as string);
+      expect(record!.before?.version).toBe(before + 1);
+    });
+  });
+
+  describe('a retried request (review of #328, r1)', () => {
+    const termsX = {
+      windowDays: 30,
+      contributions: [{ triggerEvent: 'USAGE_RECORDED', weight: 3 }],
+      label: 'X',
+    };
+    const termsY = {
+      windowDays: 14,
+      contributions: [{ triggerEvent: 'MAINTENANCE_COMPLETED', weight: 4 }],
+      label: 'Y',
+    };
+
+    it('replays the version its first attempt created, and never replaces one made since', async () => {
+      const current = await currentVersion();
+      const keyK = `participation-retry-${ulid()}`;
+      const requestX = { ...termsX, expectedCurrentVersion: current };
+
+      // 1. Administrator A sends X under K; it commits, and the response is lost.
+      const first = await createVersion(requestX, { key: keyK }).expect(201);
+      expect(first.body.version).toBe(current + 1);
+      // 2. Administrator B, who saw A's version, replaces it with Y.
+      const second = await createVersion(
+        { ...termsY, expectedCurrentVersion: current + 1 },
+        { token: asOtherRuleAdmin() },
+      ).expect(201);
+      expect(second.body.version).toBe(current + 2);
+      // 3. A retries the identical request under K.
+      const retry = await createVersion(requestX, { key: keyK }).expect(201);
+
+      // The first answer, exactly — not a new version of X over Y.
+      expect(retry.body).toEqual(first.body);
+      const listed = await request(http)
+        .get('/v1/rewards/participation-rules')
+        .set('authorization', asRuleAdmin())
+        .expect(200);
+      expect(listed.body.items[0]).toMatchObject({
+        id: second.body.id,
+        version: current + 2,
+        label: 'Y',
+        createdBy: OTHER_RULE_ADMIN,
+      });
+      expect(
+        (listed.body.items as { version: number }[]).filter((item) => item.version > current),
+      ).toHaveLength(2);
+      expect(await changeRecords(first.body.id as string)).toHaveLength(1);
+    });
+
+    it('refuses the key with other terms, or from another administrator, and writes nothing', async () => {
+      const current = await currentVersion();
+      const key = `participation-reuse-${ulid()}`;
+      const requestX = { ...termsX, expectedCurrentVersion: current };
+      await createVersion(requestX, { key }).expect(201);
+
+      const otherTerms = await createVersion(
+        { ...termsY, expectedCurrentVersion: current },
+        { key },
+      ).expect(409);
+      expect(otherTerms.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+      const otherActor = await createVersion(requestX, {
+        key,
+        token: asOtherRuleAdmin(),
+      }).expect(409);
+      expect(otherActor.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+      expect(await currentVersion()).toBe(current + 1);
+    });
+
+    it('refuses a fresh request made against a version no longer in force, writing nothing', async () => {
+      const current = await currentVersion();
+      // An administrator still looking at the previous version, with a new key
+      // — a key that expired, or another organization acted from.
+      for (const stale of [current - 1, current + 1]) {
+        const refused = await createVersion({ ...termsX, expectedCurrentVersion: stale }).expect(
+          409,
+        );
+        expect(refused.body.code).toBe('OPTIMISTIC_LOCK_FAILED');
       }
+      expect(await currentVersion()).toBe(current);
+    });
+
+    it('is refused without an Idempotency-Key', async () => {
+      const current = await currentVersion();
+      await request(http)
+        .post('/v1/rewards/participation-rules')
+        .set('authorization', asRuleAdmin())
+        .send({ ...termsX, expectedCurrentVersion: current })
+        .expect(400);
+      expect(await currentVersion()).toBe(current);
     });
   });
 
@@ -303,17 +425,14 @@ describe('participation breakdown (COM-012)', () => {
 
     beforeAll(async () => {
       // The version every assertion below reads under.
-      await request(http)
-        .post('/v1/rewards/participation-rules')
-        .set('authorization', asRuleAdmin())
-        .send({
-          windowDays: 30,
-          contributions: [
-            { triggerEvent: 'USAGE_RECORDED', weight: 2, maxPerWindow: 2 },
-            { triggerEvent: 'MAINTENANCE_COMPLETED', weight: 5 },
-          ],
-        })
-        .expect(201);
+      await createVersion({
+        expectedCurrentVersion: await currentVersion(),
+        windowDays: 30,
+        contributions: [
+          { triggerEvent: 'USAGE_RECORDED', weight: 2, maxPerWindow: 2 },
+          { triggerEvent: 'MAINTENANCE_COMPLETED', weight: 5 },
+        ],
+      }).expect(201);
 
       // Alice in A: three usage records in the window (two count), one repair,
       // one usage record forty days ago (outside), and one recorded by nobody.
@@ -440,14 +559,11 @@ describe('participation breakdown (COM-012)', () => {
     });
 
     it('reads the window under the next version from the instant it is created', async () => {
-      const next = await request(http)
-        .post('/v1/rewards/participation-rules')
-        .set('authorization', asRuleAdmin())
-        .send({
-          windowDays: 30,
-          contributions: [{ triggerEvent: 'MAINTENANCE_COMPLETED', weight: 1 }],
-        })
-        .expect(201);
+      const next = await createVersion({
+        expectedCurrentVersion: await currentVersion(),
+        windowDays: 30,
+        contributions: [{ triggerEvent: 'MAINTENANCE_COMPLETED', weight: 1 }],
+      }).expect(201);
       const response = await participation(as(ALICE, orgA)).expect(200);
       expect(response.body).toMatchObject({
         score: 1,

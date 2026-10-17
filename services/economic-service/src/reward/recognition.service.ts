@@ -6,7 +6,8 @@ import { LedgerService } from '../ledger/ledger.service';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { SERVICE_NAME } from '../config/env';
 import type { Prisma } from '../generated/prisma';
-import { ParticipationService, databaseNow } from './participation.service';
+import type { IdempotentAnswer } from '../shared/idempotency';
+import { ParticipationService, assertReplacing, databaseNow } from './participation.service';
 import {
   parseRecognitionTerms,
   recognise,
@@ -80,16 +81,23 @@ export class RecognitionService {
 
   /**
    * A new version, in force from now, recorded with who created it
-   * (`RECOGNITION_RULE_CHANGED`, in the same transaction). Numbered under a
-   * transaction-scoped advisory lock, so two at once get consecutive numbers
-   * and each event's `before` is the version it actually replaced.
+   * (`RECOGNITION_RULE_CHANGED`) and answered for its `Idempotency-Key`
+   * (`answer`), in one transaction. Numbered under a transaction-scoped
+   * advisory lock, and refused under it when `expectedCurrentVersion` is no
+   * longer the latest — exactly as the participation rule (review of #328, r1),
+   * so a retry or a stale administrator never replaces a version they did not
+   * see.
    */
-  async createRule(dto: CreateRecognitionRuleDto) {
+  async createRule(
+    dto: CreateRecognitionRuleDto,
+    answer: IdempotentAnswer<RecognitionRuleRow>,
+  ): Promise<RecognitionRuleRow> {
     const actor = getContext().userId ?? SERVICE_NAME;
 
     return this.prisma.transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${RECOGNITION_RULE_LOCK_KEY})`;
       const previous = await this.ruleInForce(tx);
+      assertReplacing(previous?.version ?? 0, dto.expectedCurrentVersion);
 
       const created = await tx.recognitionRule.create({
         data: {
@@ -127,6 +135,8 @@ export class RecognitionService {
         },
       });
 
+      // With the version and its event: a retry replays this version.
+      await answer.respond(tx, created);
       return created;
     });
   }

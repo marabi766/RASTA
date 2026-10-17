@@ -84,7 +84,9 @@
         "GATEWAY_*",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
-        "MARKETPLACE_RETURN_WINDOW_DAYS"
+        "MARKETPLACE_RETURN_WINDOW_DAYS",
+        "INVENTORY_RETURN_DISPOSITIONS_ALLOWED",
+        "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED"
       ]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
@@ -138,7 +140,9 @@
         "GATEWAY_*",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
-        "MARKETPLACE_RETURN_WINDOW_DAYS"
+        "MARKETPLACE_RETURN_WINDOW_DAYS",
+        "INVENTORY_RETURN_DISPOSITIONS_ALLOWED",
+        "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED"
       ]
     },
     // identity-service's two 500-write aggregation proofs, run alone after the
@@ -232,6 +236,11 @@
     // MARKETPLACE_RETURN_WINDOW_DAYS (RUN-005, Q-132): marketplace's return
     // window, no default — unset, every return request is refused. The first
     // new setting under that check, declared here and in the test tasks above.
+    // INVENTORY_RETURN_DISPOSITIONS_ALLOWED (RUN-005 PR 2b, Q-133) likewise:
+    // the dispositions a return may resolve to, empty by default — unset, no
+    // return can be resolved. INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED (Q-133 (4))
+    // likewise: false by default — unset, a return of which nothing arrived is
+    // not resolved.
     "dev": {
       "cache": false,
       "persistent": true,
@@ -251,7 +260,9 @@
         "GATEWAY_*",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
-        "MARKETPLACE_RETURN_WINDOW_DAYS"
+        "MARKETPLACE_RETURN_WINDOW_DAYS",
+        "INVENTORY_RETURN_DISPOSITIONS_ALLOWED",
+        "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED"
       ]
     },
     "clean": { "cache": false }

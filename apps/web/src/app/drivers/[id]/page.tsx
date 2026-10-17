@@ -2,7 +2,7 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { canManageDrivers, fetchDriver, fetchDriverAssignments } from '@/server/drivers';
-import { fetchCurrentUser } from '@/server/identity';
+import { tokenWriteRoles } from '@/server/realm-roles';
 import { mintSubmissionId } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { DriverDetailScreen } from './DriverDetailScreen';
@@ -28,16 +28,19 @@ export default async function DriverDetailPage({ params }: { params: Promise<{ i
 
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/drivers/${id}`)}`);
+  // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
+  // the set the service decides on — not `/v1/users/me`, which runs ahead of the
+  // token until it is refreshed.
+  const roles = tokenWriteRoles(session.accessToken);
 
-  const [result, assignments, currentUser] = await Promise.all([
+  const [result, assignments] = await Promise.all([
     fetchDriver(session, id),
     fetchDriverAssignments(session, id),
-    fetchCurrentUser(session),
   ]);
 
-  // A failed identity read shows no write form rather than one that might
+  // A token whose roles cannot be read shows no write form rather than one that might
   // not work — the same fail-closed default `canManageDrivers` documents.
-  const manage = currentUser.kind === 'USER' && canManageDrivers(currentUser.user.effectiveRoles);
+  const manage = roles !== null && canManageDrivers(roles);
 
   return (
     <AppShell
@@ -51,7 +54,7 @@ export default async function DriverDetailPage({ params }: { params: Promise<{ i
           </form>
         </TopBar>
       }
-      sidebar={<PortalSidebar session={session} currentHref="/drivers" current={currentUser} />}
+      sidebar={<PortalSidebar session={session} currentHref="/drivers" />}
     >
       <DriverDetailScreen
         result={result}

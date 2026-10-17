@@ -143,3 +143,28 @@ export function disputedThroughOrder(transaction: {
       : null;
   return { href: orderId ? `/orders/${encodeURIComponent(orderId)}` : '/orders', orderId };
 }
+
+/**
+ * What a dispute form's submission is bound to: the transaction, and — for a
+ * resolution — **the dispute the page showed** (`disputeId` on
+ * `GET /v1/transactions/:id`, docs/23 D-053). A decision is about one dispute;
+ * economic-service applies a resolution that names it only while the
+ * transaction still holds that dispute, under its row lock. Signed into the
+ * submission's replay stamp (`server/dispute-replay.ts`), so the first send and
+ * every retry name the same dispute — never one read again later.
+ */
+export interface DisputeTarget {
+  readonly transactionId: string;
+  /** The dispute a resolution decides; null for opening one, which decides none. */
+  readonly disputeId: string | null;
+}
+
+export function disputeTargetOf(
+  transaction: { readonly id: string; readonly disputeId: string | null },
+  command: DisputeCommand,
+): DisputeTarget {
+  return {
+    transactionId: transaction.id,
+    disputeId: command === 'RESOLVE_DISPUTE' ? transaction.disputeId : null,
+  };
+}

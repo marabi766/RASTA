@@ -21,6 +21,7 @@ import {
   type OrderCommandField,
   type OrderCommandFormValues,
 } from '@/lib/order-fields';
+import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
 import { submitOrderCommand } from './actions';
 import { IDLE_ORDER_COMMAND_FORM, type OrderCommandFormState } from './form-state';
@@ -335,10 +336,9 @@ function CommandBanner({ state }: { state: OrderCommandFormState }) {
   }
 
   if (state.kind === 'REFUSED') {
-    const text =
-      state.reason === 'NO_SESSION'
-        ? 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.'
-        : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.';
+    const text = isSessionRefusal(state.reason)
+      ? SESSION_REFUSAL_MESSAGES[state.reason]
+      : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.';
     return <Alert tone="danger">{text}</Alert>;
   }
 

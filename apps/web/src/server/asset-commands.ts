@@ -15,6 +15,7 @@ import { BIDI_CONTROL } from './drivers';
 import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
+import { rolesGuardAdmits } from './roles-guard';
 
 /**
  * Writing to asset-service through the gateway (ADR-058 § 3, ADR-059 § 3).
@@ -45,8 +46,8 @@ const ASSET_MANAGEMENT_ROLES: readonly string[] = [
   'UNION_ADMIN',
 ];
 
-export function canManageAssets(effectiveRoles: readonly string[]): boolean {
-  return effectiveRoles.some((role) => ASSET_MANAGEMENT_ROLES.includes(role));
+export function canManageAssets(roles: readonly string[]): boolean {
+  return rolesGuardAdmits(roles, ASSET_MANAGEMENT_ROLES);
 }
 
 // ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ import { renderableDate } from './instant';
 import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
+import { rolesGuardAdmits } from './roles-guard';
 
 /**
  * Insurance policies and technical inspections of a machine, through the
@@ -71,8 +72,8 @@ import type { WebSession } from './session';
  */
 const RECORD_ROLES: readonly string[] = ['ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN'];
 
-export const canRecordAssetCompliance = (effectiveRoles: readonly string[]): boolean =>
-  effectiveRoles.some((role) => RECORD_ROLES.includes(role));
+export const canRecordAssetCompliance = (roles: readonly string[]): boolean =>
+  rolesGuardAdmits(roles, RECORD_ROLES);
 
 // ---------------------------------------------------------------------------
 // Which asset a form is for

@@ -87,8 +87,26 @@ describe('levels and badges (COM-012 criterion 2)', () => {
   const recognition = (token: string, query = '') =>
     request(http).get(`/v1/rewards/me/recognition${query}`).set('authorization', token);
 
-  const createVersion = (body: object, token = asRuleAdmin()) =>
-    request(http).post('/v1/rewards/recognition-rules').set('authorization', token).send(body);
+  /** A second platform administrator, for the retry that must not overwrite them. */
+  const OTHER_RULE_ADMIN = `${ITEST_ACTOR}-RECOGNITION-ADMIN-B`;
+  const asOtherRuleAdmin = () => as(OTHER_RULE_ADMIN, orgA, ['SYSTEM_ADMIN']);
+
+  /** A version request, under a fresh Idempotency-Key unless one is given. */
+  const createVersion = (
+    body: object,
+    { token = asRuleAdmin(), key = `recognition-${ulid()}` }: { token?: string; key?: string } = {},
+  ) =>
+    request(http)
+      .post('/v1/rewards/recognition-rules')
+      .set('authorization', token)
+      .set('idempotency-key', key)
+      .send(body);
+
+  /** `body` made against the version in force now. */
+  const againstCurrent = async (body: object) => ({
+    ...body,
+    expectedCurrentVersion: await currentVersion(),
+  });
 
   async function currentVersion(): Promise<number> {
     const listed = await request(http)
@@ -205,13 +223,16 @@ describe('levels and badges (COM-012 criterion 2)', () => {
         as(ALICE, orgA, ['OPERATOR']),
         `Bearer ${admin(orgA, ['AUDITOR'])}`,
       ]) {
-        await createVersion(POINTS_VERSION, token).expect(403);
+        await createVersion(await againstCurrent(POINTS_VERSION), { token }).expect(403);
       }
       await request(http).post('/v1/rewards/recognition-rules').send(POINTS_VERSION).expect(401);
     });
 
     it('names its basis explicitly, rising thresholds, and nothing it was not given', async () => {
+      const before = await currentVersion();
       const { basis: _basis, ...withoutBasis } = POINTS_VERSION;
+      // The version being replaced is part of the request, never assumed.
+      await createVersion(POINTS_VERSION).expect(400);
       for (const body of [
         withoutBasis,
         { ...POINTS_VERSION, basis: 'LOGINS' },
@@ -226,13 +247,16 @@ describe('levels and badges (COM-012 criterion 2)', () => {
         { ...POINTS_VERSION, benefits: ['PRIORITY_SUPPORT'] },
         { ...POINTS_VERSION, organizationId: orgA },
       ]) {
-        await createVersion(body).expect(400);
+        await createVersion({ ...body, expectedCurrentVersion: before }).expect(400);
       }
     });
 
     it('is numbered, ranked in order, and audited with the actor and the terms before and after', async () => {
       const before = await currentVersion();
-      const created = await createVersion(POINTS_VERSION).expect(201);
+      const created = await createVersion({
+        ...POINTS_VERSION,
+        expectedCurrentVersion: before,
+      }).expect(201);
       expect(created.body).toMatchObject({
         version: before + 1,
         basis: 'REWARD_POINTS_CUMULATIVE',
@@ -278,25 +302,25 @@ describe('levels and badges (COM-012 criterion 2)', () => {
       ).rejects.toThrow(/append-only/);
     });
 
-    it('is numbered consecutively when two are created at once', async () => {
+    it('replaces the version it names only: of two made against the same one, one wins', async () => {
       const before = await currentVersion();
-      const responses = await Promise.all([0, 1].map(() => createVersion(POINTS_VERSION)));
-      expect(responses.map((response) => response.status)).toEqual([201, 201]);
-      expect(responses.map((response) => response.body.version as number).sort()).toEqual([
-        before + 1,
-        before + 2,
-      ]);
-      for (const response of responses) {
-        const [record] = await changeRecords(response.body.id as string);
-        expect(record!.before?.version).toBe((response.body.version as number) - 1);
-      }
+      const body = { ...POINTS_VERSION, expectedCurrentVersion: before };
+      const responses = await Promise.all([0, 1].map(() => createVersion(body)));
+      expect(responses.map((response) => response.status).sort()).toEqual([201, 409]);
+      const [won] = responses.filter((response) => response.status === 201);
+      const [lost] = responses.filter((response) => response.status === 409);
+      expect(won!.body.version).toBe(before + 1);
+      expect(lost!.body.code).toBe('OPTIMISTIC_LOCK_FAILED');
+      expect(await currentVersion()).toBe(before + 1);
+      const [record] = await changeRecords(won!.body.id as string);
+      expect(record!.before?.version ?? 0).toBe(before);
     });
 
     it('waits for a version being created, and numbers itself after it', async () => {
       // Deterministic where two requests at once are only likely to overlap: a
       // version is being created (lock held, row written, not committed) while
-      // the request arrives. Without the lock the request would read the old
-      // number and collide with the uncommitted row on the unique version.
+      // the request — made against that version — arrives. Without the lock it
+      // would read the old number and be refused as stale.
       const before = await currentVersion();
       let pending: Promise<request.Response> | undefined;
       await harness.prisma.client.$transaction(async (tx) => {
@@ -305,7 +329,9 @@ describe('levels and badges (COM-012 criterion 2)', () => {
           INSERT INTO recognition_rule (id, version, basis, levels, badges, created_by)
           VALUES (${`RCR_${ulid()}`}, ${before + 1}, 'REWARD_POINTS_CUMULATIVE',
                   '[{"rank":1,"name":"L1","threshold":0}]'::jsonb, '[]'::jsonb, ${RULE_ADMIN})`;
-        pending = createVersion(POINTS_VERSION).then((response) => response);
+        pending = createVersion({ ...POINTS_VERSION, expectedCurrentVersion: before + 1 }).then(
+          (response) => response,
+        );
         await new Promise((resolve) => setTimeout(resolve, 500));
       });
       const response = await pending!;
@@ -331,6 +357,91 @@ describe('levels and badges (COM-012 criterion 2)', () => {
     });
   });
 
+  describe('a retried request (review of #328, r1)', () => {
+    const termsY = {
+      basis: 'PARTICIPATION_SCORE',
+      levels: [{ name: 'Y — نمونه', threshold: 1 }],
+      badges: [],
+      label: 'Y',
+    };
+
+    it('replays the version its first attempt created, and never replaces one made since', async () => {
+      const current = await currentVersion();
+      const keyK = `recognition-retry-${ulid()}`;
+      const requestX = { ...POINTS_VERSION, label: 'X', expectedCurrentVersion: current };
+
+      // 1. Administrator A sends X under K; it commits, and the response is lost.
+      const first = await createVersion(requestX, { key: keyK }).expect(201);
+      expect(first.body.version).toBe(current + 1);
+      // 2. Administrator B, who saw A's version, replaces it with Y.
+      const second = await createVersion(
+        { ...termsY, expectedCurrentVersion: current + 1 },
+        { token: asOtherRuleAdmin() },
+      ).expect(201);
+      expect(second.body.version).toBe(current + 2);
+      // 3. A retries the identical request under K.
+      const retry = await createVersion(requestX, { key: keyK }).expect(201);
+
+      // The first answer, exactly — not a new version of X over Y.
+      expect(retry.body).toEqual(first.body);
+      const listed = await request(http)
+        .get('/v1/rewards/recognition-rules')
+        .set('authorization', asRuleAdmin())
+        .expect(200);
+      expect(listed.body.items[0]).toMatchObject({
+        id: second.body.id,
+        version: current + 2,
+        label: 'Y',
+        createdBy: OTHER_RULE_ADMIN,
+      });
+      expect(
+        (listed.body.items as { version: number }[]).filter((item) => item.version > current),
+      ).toHaveLength(2);
+      expect(await changeRecords(first.body.id as string)).toHaveLength(1);
+    });
+
+    it('refuses the key with other terms, or from another administrator, and writes nothing', async () => {
+      const current = await currentVersion();
+      const key = `recognition-reuse-${ulid()}`;
+      const requestX = { ...POINTS_VERSION, expectedCurrentVersion: current };
+      await createVersion(requestX, { key }).expect(201);
+
+      const otherTerms = await createVersion(
+        { ...termsY, expectedCurrentVersion: current },
+        { key },
+      ).expect(409);
+      expect(otherTerms.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+      const otherActor = await createVersion(requestX, {
+        key,
+        token: asOtherRuleAdmin(),
+      }).expect(409);
+      expect(otherActor.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+      expect(await currentVersion()).toBe(current + 1);
+    });
+
+    it('refuses a fresh request made against a version no longer in force, writing nothing', async () => {
+      const current = await currentVersion();
+      for (const stale of [current - 1, current + 1]) {
+        const refused = await createVersion({
+          ...POINTS_VERSION,
+          expectedCurrentVersion: stale,
+        }).expect(409);
+        expect(refused.body.code).toBe('OPTIMISTIC_LOCK_FAILED');
+      }
+      expect(await currentVersion()).toBe(current);
+    });
+
+    it('is refused without an Idempotency-Key', async () => {
+      const current = await currentVersion();
+      await request(http)
+        .post('/v1/rewards/recognition-rules')
+        .set('authorization', asRuleAdmin())
+        .send({ ...POINTS_VERSION, expectedCurrentVersion: current })
+        .expect(400);
+      expect(await currentVersion()).toBe(current);
+    });
+  });
+
   describe('the caller standing', () => {
     let pointsVersion: number;
 
@@ -341,7 +452,8 @@ describe('levels and badges (COM-012 criterion 2)', () => {
         .set('authorization', asRuleAdmin())
         .send({ organizationId: orgA, triggerEvent: 'USAGE_RECORDED', points: 25 })
         .expect(201);
-      pointsVersion = (await createVersion(POINTS_VERSION).expect(201)).body.version as number;
+      pointsVersion = (await createVersion(await againstCurrent(POINTS_VERSION)).expect(201)).body
+        .version as number;
 
       await usage(orgA, ALICE);
       // Alice in B: a fact, but no rule pays points there.
@@ -422,15 +534,15 @@ describe('levels and badges (COM-012 criterion 2)', () => {
         ],
         badges: [{ code: 'SAMPLE_SCORE_TWO', name: 'نشان — نمونه', threshold: 2 }],
       };
-      const hadParticipationRule = await request(http)
+      const participationVersion = await request(http)
         .get('/v1/rewards/participation-rules')
         .set('authorization', asRuleAdmin())
         .expect(200)
-        .then((listed) => (listed.body.items as unknown[]).length > 0);
+        .then((listed) => (listed.body.items[0]?.version as number | undefined) ?? 0);
 
-      const created = await createVersion(scoreVersion).expect(201);
+      const created = await createVersion(await againstCurrent(scoreVersion)).expect(201);
 
-      if (!hadParticipationRule) {
+      if (participationVersion === 0) {
         // A score version with no participation rule: nothing to measure.
         const response = await recognition(as(ALICE, orgA)).expect(200);
         expect(response.body).toMatchObject({
@@ -446,7 +558,12 @@ describe('levels and badges (COM-012 criterion 2)', () => {
       const participation = await request(http)
         .post('/v1/rewards/participation-rules')
         .set('authorization', asRuleAdmin())
-        .send({ windowDays: 30, contributions: [{ triggerEvent: 'USAGE_RECORDED', weight: 3 }] })
+        .set('idempotency-key', `participation-${ulid()}`)
+        .send({
+          expectedCurrentVersion: participationVersion,
+          windowDays: 30,
+          contributions: [{ triggerEvent: 'USAGE_RECORDED', weight: 3 }],
+        })
         .expect(201);
 
       const response = await recognition(as(ALICE, orgA)).expect(200);

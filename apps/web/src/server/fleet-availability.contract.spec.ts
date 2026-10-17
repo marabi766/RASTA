@@ -5,6 +5,7 @@ import { AVAILABILITY_CHOICES, DECLARE_AVAILABILITY_FIELDS } from '@/lib/fleet-a
 import { blockerWording } from '@/lib/availability-wording';
 import {
   decoratorOf,
+  guardAdmitsAlone,
   handlerOf,
   parseSource,
   readSource,
@@ -65,7 +66,9 @@ describe('who may declare and revoke', () => {
       const admitted = rolesOf(controller, method);
       expect(admitted.length).toBeGreaterThan(0);
       const offered = EVERY_ROLE.filter((role) => canManageAvailability([role]));
-      expect(offered.sort()).toEqual(EVERY_ROLE.filter((role) => admitted.includes(role)).sort());
+      expect(offered.sort()).toEqual(
+        EVERY_ROLE.filter((role) => guardAdmitsAlone(role, admitted)).sort(),
+      );
     },
   );
 

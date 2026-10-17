@@ -11,7 +11,7 @@ import {
   type AvailabilityBaseline,
 } from '@/server/fleet-availability';
 import { verifyCsrf } from '@/server/csrf';
-import { currentSession } from '@/server/current-session';
+import { currentSession, missingSessionReason } from '@/server/current-session';
 import { mintFlash } from '@/server/flash';
 import type { WebSession } from '@/server/session';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
@@ -55,7 +55,8 @@ async function authorize(
   | { readonly ok: false; readonly state: RecordFormState<never, never> }
 > {
   const session = await currentSession();
-  if (!session) return { ok: false, state: { kind: 'REFUSED', reason: 'NO_SESSION' } };
+  if (!session)
+    return { ok: false, state: { kind: 'REFUSED', reason: await missingSessionReason() } };
 
   const csrf = verifyCsrf(session, form);
   if (!csrf.ok) return { ok: false, state: { kind: 'REFUSED', reason: 'CSRF' } };

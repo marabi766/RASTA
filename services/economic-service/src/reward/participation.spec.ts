@@ -142,23 +142,30 @@ describe('participation rule terms', () => {
   });
 
   const valid = {
+    expectedCurrentVersion: 0,
     windowDays: 90,
     contributions: [{ triggerEvent: 'USAGE_RECORDED', weight: 1, maxPerWindow: 60 }],
   };
 
   it('accepts a rule and invents no number for it', () => {
     const parsed = createParticipationRuleSchema.parse({
+      expectedCurrentVersion: 4,
       windowDays: 7,
       contributions: [{ triggerEvent: 'MAINTENANCE_COMPLETED', weight: 3 }],
     });
     expect(parsed).toEqual({
+      expectedCurrentVersion: 4,
       windowDays: 7,
       contributions: [{ triggerEvent: 'MAINTENANCE_COMPLETED', weight: 3 }],
     });
   });
 
   it.each([
-    ['no window', { contributions: valid.contributions }],
+    // The version being replaced is stated, never assumed (review of #328, r1).
+    ['no version being replaced', { windowDays: 90, contributions: valid.contributions }],
+    ['a negative version being replaced', { ...valid, expectedCurrentVersion: -1 }],
+    ['a fractional version being replaced', { ...valid, expectedCurrentVersion: 1.5 }],
+    ['no window', { expectedCurrentVersion: 0, contributions: valid.contributions }],
     ['a window past a year', { ...valid, windowDays: 367 }],
     ['no contributions', { ...valid, contributions: [] }],
     [

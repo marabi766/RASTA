@@ -71,6 +71,16 @@ describe('UpdateDriverForm', () => {
     );
   }
 
+  it('a session only unavailable: says so, not "ended", with no accessibility violations', async () => {
+    const { container, getByText, queryByText } = renderForm({
+      kind: 'REFUSED',
+      reason: 'SESSION_UNAVAILABLE',
+    });
+    expect(getByText(/همین حالا در دسترس نیست/)).toBeInTheDocument();
+    expect(queryByText(/پایان یافته/)).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it('is pre-filled with the driver’s current values, not blank', () => {
     const { container } = renderForm();
     expect(container.querySelector('[name="employeeNo"]')).toHaveValue('EMP-1');
@@ -144,6 +154,16 @@ describe('ChangeStatusForm', () => {
     );
   }
 
+  it('a session only unavailable: says so, not "ended", with no accessibility violations', async () => {
+    const { container, getByText, queryByText } = renderForm('ACTIVE', {
+      kind: 'REFUSED',
+      reason: 'SESSION_UNAVAILABLE',
+    });
+    expect(getByText(/همین حالا در دسترس نیست/)).toBeInTheDocument();
+    expect(queryByText(/پایان یافته/)).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it('offers every status except the driver’s current one', () => {
     const { queryByRole, getByRole } = renderForm('ACTIVE');
     expect(queryByRole('option', { name: 'فعال' })).toBeNull();
@@ -180,6 +200,16 @@ describe('AssignDriverForm', () => {
     pending = isPending;
     return render(<AssignDriverForm driverId="DRV_1" csrfToken={CSRF} submissionId={SUBMISSION} />);
   }
+
+  it('a session only unavailable: says so, not "ended", with no accessibility violations', async () => {
+    const { container, getByText, queryByText } = renderForm({
+      kind: 'REFUSED',
+      reason: 'SESSION_UNAVAILABLE',
+    });
+    expect(getByText(/همین حالا در دسترس نیست/)).toBeInTheDocument();
+    expect(queryByText(/پایان یافته/)).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
+  });
 
   it('names the field the machine goes in', () => {
     const { container } = renderForm();
@@ -228,6 +258,16 @@ describe('EndAssignmentForm', () => {
       />,
     );
   }
+
+  it('a session only unavailable: says so, not "ended", with no accessibility violations', async () => {
+    const { container, getByText, queryByText } = renderForm({
+      kind: 'REFUSED',
+      reason: 'SESSION_UNAVAILABLE',
+    });
+    expect(getByText(/همین حالا در دسترس نیست/)).toBeInTheDocument();
+    expect(queryByText(/پایان یافته/)).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
+  });
 
   it('defaults the reason to COMPLETED', () => {
     const { container } = renderForm();

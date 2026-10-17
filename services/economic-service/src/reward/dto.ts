@@ -160,9 +160,16 @@ const participationContributionSchema = z
  * (`PARTICIPATION_RULE_CHANGED`); nothing has a default, because the product
  * document gives none of them (docs/24 Q-139). There is no update: the next
  * version replaces this one from the instant it is created.
+ *
+ * `expectedCurrentVersion` is the version the administrator is replacing — `0`
+ * while none exists. The version in force is what scores every organization,
+ * so a request decided against an older one is refused `409
+ * OPTIMISTIC_LOCK_FAILED` rather than silently replacing a version its author
+ * never saw (review of #328, r1).
  */
 export const createParticipationRuleSchema = z
   .object({
+    expectedCurrentVersion: z.number().int().min(0),
     windowDays: z.number().int().positive().max(PARTICIPATION_MAX_WINDOW_DAYS),
     contributions: z
       .array(participationContributionSchema)
@@ -250,9 +257,12 @@ const recognitionThreshold = z.number().int().min(0).max(RECOGNITION_MAX_THRESHO
  * ranked in that order; their thresholds rise strictly, so a value holds one
  * level at most. There is no field for a benefit (Q-13, Q-31) and no update:
  * the next version replaces this one from the instant it is created.
+ * `expectedCurrentVersion` is the version being replaced, as for the
+ * participation rule (review of #328, r1).
  */
 export const createRecognitionRuleSchema = z
   .object({
+    expectedCurrentVersion: z.number().int().min(0),
     basis: z.enum(RECOGNITION_BASES),
     levels: z
       .array(z.object({ name: recognitionName, threshold: recognitionThreshold }).strict())

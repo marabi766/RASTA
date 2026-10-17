@@ -19,6 +19,7 @@ import { webServerEnv } from './env';
 import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
+import { rolesGuardAdmits } from './roles-guard';
 
 /**
  * A machine's documents, through the gateway (EXP-002, slice 7; ADR-058 § 3,
@@ -76,8 +77,8 @@ import type { WebSession } from './session';
  */
 const DOCUMENT_ROLES: readonly string[] = ['ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN'];
 
-export const canAttachAssetDocuments = (effectiveRoles: readonly string[]): boolean =>
-  effectiveRoles.some((role) => DOCUMENT_ROLES.includes(role));
+export const canAttachAssetDocuments = (roles: readonly string[]): boolean =>
+  rolesGuardAdmits(roles, DOCUMENT_ROLES);
 
 // ---------------------------------------------------------------------------
 // Which asset a form is for, and which document it already uploaded

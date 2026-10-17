@@ -164,6 +164,14 @@ describe('the attach-document form', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(expected);
   });
 
+  it('a session only unavailable: says so, not "ended", with no accessibility violations', async () => {
+    setState({ kind: 'REFUSED', reason: 'SESSION_UNAVAILABLE' });
+    const { container } = render(<AttachDocumentForm {...IDENTITY} />);
+    expect(screen.getByRole('alert')).toHaveTextContent(/همین حالا در دسترس نیست/);
+    expect(screen.getByRole('alert')).not.toHaveTextContent(/پایان یافته/);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it('uses no physical-direction utility, and has no accessibility violations', async () => {
     setState({ kind: 'UNCONFIRMED', correlationId: 'corr', resume: 'tok.sig' });
     const { container } = render(<AttachDocumentForm {...IDENTITY} />);

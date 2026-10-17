@@ -160,6 +160,7 @@ describe('the caller view', () => {
 
 describe('a new version', () => {
   const valid = {
+    expectedCurrentVersion: 0,
     basis: 'PARTICIPATION_SCORE',
     levels: [
       { name: 'L1', threshold: 0 },
@@ -167,6 +168,20 @@ describe('a new version', () => {
     ],
     badges: [{ code: 'FIRST_REPAIR', name: 'B', threshold: 5 }],
   };
+
+  it('states the version it replaces, never assumed (review of #328, r1)', () => {
+    const { expectedCurrentVersion: _expected, ...withoutExpected } = valid;
+    for (const body of [
+      withoutExpected,
+      { ...valid, expectedCurrentVersion: -1 },
+      { ...valid, expectedCurrentVersion: 1.5 },
+    ]) {
+      expect(createRecognitionRuleSchema.safeParse(body).success).toBe(false);
+    }
+    expect(
+      createRecognitionRuleSchema.parse({ ...valid, expectedCurrentVersion: 3 }),
+    ).toMatchObject({ expectedCurrentVersion: 3 });
+  });
 
   it('accepts exactly the two bases, and has no default for it', () => {
     expect([...RECOGNITION_BASES]).toEqual(['REWARD_POINTS_CUMULATIVE', 'PARTICIPATION_SCORE']);

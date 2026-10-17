@@ -70,6 +70,9 @@ describe('the committed OpenAPI document', () => {
     const keys = operations().map((o) => o.key);
     expect(keys.sort()).toEqual(Object.keys(RESPONSE_BODIES).sort());
     expect(keys.sort()).toEqual([
+      'GET /v1/return-shipments',
+      'GET /v1/return-shipments/{id}',
+      'GET /v1/return-shipments/{id}/tracking',
       'GET /v1/shipments',
       'GET /v1/shipments/{id}',
       'GET /v1/shipments/{id}/tracking',
@@ -80,6 +83,10 @@ describe('the committed OpenAPI document', () => {
       'GET /v1/stock/{id}',
       'GET /v1/warehouses',
       'GET /v1/warehouses/{id}',
+      'POST /v1/return-shipments',
+      'POST /v1/return-shipments/{id}/inspection',
+      'POST /v1/return-shipments/{id}/receive',
+      'POST /v1/return-shipments/{id}/resolution',
       'POST /v1/shipments',
       'POST /v1/shipments/{id}/deliver',
       'POST /v1/shipments/{id}/dispatch',

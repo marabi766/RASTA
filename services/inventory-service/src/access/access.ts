@@ -58,6 +58,16 @@ export interface ShipmentReader {
   readonly asConsignee: boolean;
 }
 
+/**
+ * The sides of a return shipment the acting organization may read it from (ADR-048 § 2): as the
+ * owner of its destination warehouse, as its sender, or both — each opened by its own roles.
+ */
+export interface ReturnShipmentReader {
+  readonly organizationId: string;
+  readonly asDestination: boolean;
+  readonly asSender: boolean;
+}
+
 @Injectable()
 export class InventoryAccess {
   private readonly operators: readonly string[];
@@ -100,6 +110,31 @@ export class InventoryAccess {
       asConsignee: holds(this.consigneeReaders),
     };
     if (!reader.asOrigin && !reader.asConsignee) {
+      throw RastaError.insufficientRole(
+        [...new Set([...this.readers, ...this.consigneeReaders])],
+        roles,
+      );
+    }
+    return reader;
+  }
+
+  /**
+   * The caller of a return-shipment read: a signed-in person of the destination warehouse's owner
+   * with a reader or operator role, or of the sender with a role of
+   * INVENTORY_CONSIGNEE_READER_ROLES — the same roles that open a forward shipment's consignee
+   * side (Q-113, Q-133). A return shipment outside the sides the roles open is `404`, like any
+   * other organization's.
+   */
+  assertReturnShipmentReader(): ReturnShipmentReader {
+    const organizationId = this.assertPerson();
+    const roles = getContext().roles;
+    const holds = (granted: readonly string[]) => granted.some((role) => roles.includes(role));
+    const reader = {
+      organizationId,
+      asDestination: holds(this.readers),
+      asSender: holds(this.consigneeReaders),
+    };
+    if (!reader.asDestination && !reader.asSender) {
       throw RastaError.insufficientRole(
         [...new Set([...this.readers, ...this.consigneeReaders])],
         roles,

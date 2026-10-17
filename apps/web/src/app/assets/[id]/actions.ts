@@ -3,7 +3,7 @@
 import { redirect } from 'next/navigation';
 
 import { BASELINE_FIELD, FLASH_PARAM } from '@/lib/form-fields';
-import { currentSession } from '@/server/current-session';
+import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
 import { mintFlash } from '@/server/flash';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
@@ -47,7 +47,7 @@ export async function submitUpdateAsset(
   form: FormData,
 ): Promise<UpdateAssetFormState> {
   const session = await currentSession();
-  if (!session) return { kind: 'REFUSED', reason: 'NO_SESSION' };
+  if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
   const csrf = verifyCsrf(session, form);
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };

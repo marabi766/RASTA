@@ -28,6 +28,17 @@ const shipment = {
   trackingEventId: `TRK_${ULID}`,
 };
 
+const returnShipment = {
+  returnShipmentId: `RSP_${ULID}`,
+  organizationId: 'ORG_1',
+  returnRequestId: `RET_${ULID}`,
+  orderId: `ORD_${ULID}`,
+  buyerOrganizationId: `ORG_${ULID}`,
+  destinationWarehouseId: `WHS_${ULID}`,
+  trackingEventId: `RTK_${ULID}`,
+};
+const returnLine = { orderLineId: 'OLN_1', productId: `PRD_${ULID}`, expectedQuantity: 3 };
+
 const VALID = {
   WAREHOUSE_CREATED: {
     warehouseId: `WHS_${ULID}`,
@@ -73,13 +84,45 @@ const VALID = {
   },
   SHIPMENT_DISPATCHED: { ...shipment, shipmentVersion: 2, dispatchedBy: 'USR_1', dispatchedAt: at },
   SHIPMENT_DELIVERED: { ...shipment, shipmentVersion: 3, deliveredBy: 'USR_1', deliveredAt: at },
+  RETURN_SHIPMENT_DISPATCHED: {
+    ...returnShipment,
+    returnShipmentVersion: 1,
+    lines: [returnLine],
+    dispatchedBy: 'USR_1',
+    dispatchedAt: at,
+  },
+  RETURN_SHIPMENT_RECEIVED: {
+    ...returnShipment,
+    returnShipmentVersion: 2,
+    lines: [{ ...returnLine, receivedQuantity: 2 }],
+    receivedBy: 'USR_1',
+    receivedAt: at,
+  },
+  RETURN_SHIPMENT_INSPECTED: {
+    ...returnShipment,
+    returnShipmentVersion: 3,
+    reportDocumentId: null,
+    inspectedBy: 'USR_1',
+    inspectedAt: at,
+  },
+  RETURN_SHIPMENT_RESOLVED: {
+    ...returnShipment,
+    returnShipmentVersion: 4,
+    dispositions: [{ orderLineId: 'OLN_1', disposition: 'SCRAP', quantity: 2 }],
+    resolvedBy: 'USR_1',
+    resolvedAt: at,
+  },
 } as const;
 
 const SHIPMENT_EVENTS = ['SHIPMENT_CREATED', 'SHIPMENT_DISPATCHED', 'SHIPMENT_DELIVERED'];
 
 describe('the published event contracts (ADR-056 § 6)', () => {
-  it('names the catalogue’s stock and shipment events, STOCK_ADJUSTED and WAREHOUSE_CREATED — no LOW_STOCK_DETECTED yet', () => {
+  it('names the catalogue’s stock and shipment events, the return-shipment events, STOCK_ADJUSTED and WAREHOUSE_CREATED — no LOW_STOCK_DETECTED yet', () => {
     expect(Object.keys(INVENTORY_EVENTS).sort()).toEqual([
+      'RETURN_SHIPMENT_DISPATCHED',
+      'RETURN_SHIPMENT_INSPECTED',
+      'RETURN_SHIPMENT_RECEIVED',
+      'RETURN_SHIPMENT_RESOLVED',
       'SHIPMENT_CREATED',
       'SHIPMENT_DELIVERED',
       'SHIPMENT_DISPATCHED',
@@ -147,6 +190,9 @@ describe('the partition policy', () => {
       if (name === 'WAREHOUSE_CREATED') {
         expect(decision).toEqual({ scope: 'WAREHOUSE', key: `WHS_${ULID}` });
         expect(AGGREGATE_OF[name]).toBe('Warehouse');
+      } else if (name.startsWith('RETURN_SHIPMENT_')) {
+        expect([name, decision]).toEqual([name, { scope: 'RETURN_SHIPMENT', key: `RSP_${ULID}` }]);
+        expect(AGGREGATE_OF[name]).toBe('ReturnShipment');
       } else if (SHIPMENT_EVENTS.includes(name)) {
         expect([name, decision]).toEqual([name, { scope: 'SHIPMENT', key: `SHP_${ULID}` }]);
         expect(AGGREGATE_OF[name]).toBe('Shipment');

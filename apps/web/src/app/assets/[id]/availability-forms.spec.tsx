@@ -115,6 +115,14 @@ describe.each(FORMS)('$name', (form) => {
     expect(screen.getByRole('alert')).toHaveTextContent(expected);
   });
 
+  it('a session only unavailable: says so, not "ended", with no accessibility violations', async () => {
+    setState({ kind: 'REFUSED', reason: 'SESSION_UNAVAILABLE' });
+    const { container } = form.render();
+    expect(screen.getByRole('alert')).toHaveTextContent(/همین حالا در دسترس نیست/);
+    expect(screen.getByRole('alert')).not.toHaveTextContent(/پایان یافته/);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it('never claims nothing changed when the outcome is unknown, and does when it is known', () => {
     setState({ kind: 'UNCONFIRMED', correlationId: 'corr-unk' });
     const unknown = form.render();

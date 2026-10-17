@@ -128,6 +128,12 @@ const IDEMPOTENT_ROUTES = new Set([
   'POST /v1/payment-intents/{id}/reconciliation/resolutions',
   'POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/approve',
   'POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/reject',
+  // Moves no money, but a retried version would replace the one in force for
+  // every organization (review of #328, r1). Required by the service; the
+  // gateway's `rewards` prefix carries no requirement, so it forwards the key.
+  'POST /v1/rewards/participation-rules',
+  // The same for levels and badges: one version in force for everyone.
+  'POST /v1/rewards/recognition-rules',
 ]);
 
 /**
@@ -180,13 +186,13 @@ const ERRORS: Record<string, readonly number[]> = {
   // A query that fails its schema — a `userId` included — is a 400.
   'GET /v1/rewards/me/participation': [...COMMON, 400],
   'GET /v1/rewards/participation-rules': COMMON,
-  // No 404 or 409: nothing is named, and numbering waits on a lock.
-  'POST /v1/rewards/participation-rules': [...COMMON, 400],
+  // No 404: nothing is named. 409: a stale `expectedCurrentVersion`, or the key.
+  'POST /v1/rewards/participation-rules': [...COMMON, 400, 409],
   // Any query parameter at all — a `userId` — is a 400.
   'GET /v1/rewards/me/recognition': [...COMMON, 400],
   'GET /v1/rewards/recognition-rules': COMMON,
-  // As the participation rule: nothing is named, and numbering waits on a lock.
-  'POST /v1/rewards/recognition-rules': [...COMMON, 400],
+  // As the participation rule.
+  'POST /v1/rewards/recognition-rules': [...COMMON, 400, 409],
   'GET /v1/payment-intents': LIST,
   'GET /v1/payment-intents/{id}': READ_ONE,
   'POST /v1/payment-intents/{id}/refund': WRITE,
@@ -202,7 +208,7 @@ const STATUS_TEXT: Record<number, string> = {
   401: 'No credentials, or a token that is expired or invalid',
   403: 'Authenticated, but the role or the requested organization is not permitted. The oversight role (AUDITOR) is refused every endpoint in this service',
   404: 'Not found — also returned for a resource owned by another organization, so its existence is never disclosed',
-  409: 'Conflict: an illegal state transition, an idempotency key reused with a different body, or a request already in flight',
+  409: 'Conflict: an illegal state transition, a stale expected version (OPTIMISTIC_LOCK_FAILED), an idempotency key reused with a different body, or a request already in flight',
   422: 'The request is well-formed but a business rule refuses it — INSUFFICIENT_BALANCE, LEDGER_UNBALANCED, or a domain rule',
   500: 'Unexpected server error',
 };

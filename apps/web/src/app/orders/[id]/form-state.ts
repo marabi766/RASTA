@@ -1,3 +1,4 @@
+import type { SessionRefusal } from '@/lib/session-refusal';
 import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type { OrderCommand, OrderCommandField, OrderCommandFormValues } from '@/lib/order-fields';
 
@@ -28,7 +29,10 @@ export type OrderCommandFormState =
        */
       readonly message: string | null;
     }
-  | { readonly kind: 'REFUSED'; readonly reason: 'NO_SESSION' | 'CSRF' | 'SUBMISSION' | 'COMMAND' }
+  | {
+      readonly kind: 'REFUSED';
+      readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION' | 'COMMAND';
+    }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   /** Gone, or never visible to this caller — the service says 404 for both. */
   | { readonly kind: 'NOT_FOUND' }
