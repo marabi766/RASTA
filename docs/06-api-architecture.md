@@ -913,12 +913,13 @@ POST   /v1/returns/{id}/inspections           [K] ثبت بازرسی و تعی�
 > **وضعیت پیاده‌سازی (RUN-005 PR ۱، 2026-10-16، marketplace-service):** `POST /v1/orders/{id}/returns`، `GET /v1/returns/{id}`
 > و `POST /v1/returns/{id}/decisions` (`AUTHORIZE`\|`REJECT`، فقط تأمین‌کنندهٔ همان سفارش) ساخته شده‌اند، به‌اضافهٔ دو مسیر که
 > فهرست بالا ندارد: `GET /v1/returns` (درخواست‌های خود سازمان) و `POST /v1/returns/{id}/cancellation` (لغو توسط خریدار). ادعای
-> ضمانت و بازرسی هنوز **NOT_IMPLEMENTED** است. هیچ مسیر Refund وجود ندارد.
+> ضمانت هنوز **NOT_IMPLEMENTED** است. هیچ مسیر Refund وجود ندارد.
 >
 > **RUN-005 PR ۲ (inventory-service):** `POST /v1/return-shipments` (همان مسیر برنامه‌ریزی‌شده) به‌اضافهٔ
 > `POST /v1/return-shipments/{id}/receive`، `GET /v1/return-shipments`، `GET /v1/return-shipments/{id}` و `…/{id}/tracking`.
-> مسیر بازرسی زیر `/v1/returns/{id}/…` نمی‌آید: پیشوند `returns` در Gateway از آنِ marketplace است؛ بازرسی پس از این
-> زیر `return-shipments` خواهد بود.
+> **بازرسی و تعیین تکلیف** (`POST /v1/returns/{id}/inspections` در فهرست) زیر `/v1/return-shipments/{id}/…` پیاده شد، نه زیر
+> `/v1/returns`: آن پیشوند در Gateway از آنِ marketplace است. دو فرمان جدا: `POST …/{id}/inspection` و `POST …/{id}/resolution`
+> (بدنهٔ دوم: `dispositions[]`؛ مجاز بودن هر نتیجه پیکربندی و بی‌پیش‌فرض است، Q-133). هیچ‌کدام موجودی یا Refund را تغییر نمی‌دهند.
 
 همهٔ مسیرهای نوشتنی به Tenant Scope، مجوز سطح Object، Audit و در صورت اثر تکرارپذیر به
 `Idempotency-Key` نیاز دارند. نمایش مسیر برنامه‌ریزی‌شده به‌عنوان API موجود ممنوع است.

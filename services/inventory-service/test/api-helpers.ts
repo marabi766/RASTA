@@ -274,6 +274,10 @@ export function client(api: ApiHarness, token: string) {
       ),
     receiveReturn: (id: string, body: object, k?: string) =>
       post(`/v1/return-shipments/${id}/receive`, body, k),
+    inspectReturn: (id: string, body: object = {}, k?: string) =>
+      post(`/v1/return-shipments/${id}/inspection`, body, k),
+    resolveReturn: (id: string, body: object, k?: string) =>
+      post(`/v1/return-shipments/${id}/resolution`, body, k),
     returnShipment: (id: string) => get(`/v1/return-shipments/${id}`),
     returnTracking: (id: string) => get(`/v1/return-shipments/${id}/tracking`),
   };

@@ -46,7 +46,9 @@ import { ReturnShipmentService } from '../return-shipment/return-shipment.servic
 import {
   createReturnShipmentSchema,
   listReturnShipmentsQuerySchema,
+  inspectReturnShipmentSchema,
   receiveReturnShipmentSchema,
+  resolveReturnShipmentSchema,
   returnShipmentViewSchema,
   returnTrackingViewSchema,
 } from '../return-shipment/dto';
@@ -120,6 +122,8 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'GET /v1/return-shipments/{id}/tracking': { status: '200', schema: returnTrackingViewSchema },
   'POST /v1/return-shipments': { status: '201', schema: returnShipmentViewSchema },
   'POST /v1/return-shipments/{id}/receive': { status: '200', schema: returnShipmentViewSchema },
+  'POST /v1/return-shipments/{id}/inspection': { status: '200', schema: returnShipmentViewSchema },
+  'POST /v1/return-shipments/{id}/resolution': { status: '200', schema: returnShipmentViewSchema },
 };
 
 /** Every command takes a strict body, and every command requires an Idempotency-Key. */
@@ -135,6 +139,8 @@ const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'POST /v1/shipments/{id}/deliver': moveShipmentSchema,
   'POST /v1/return-shipments': createReturnShipmentSchema,
   'POST /v1/return-shipments/{id}/receive': receiveReturnShipmentSchema,
+  'POST /v1/return-shipments/{id}/inspection': inspectReturnShipmentSchema,
+  'POST /v1/return-shipments/{id}/resolution': resolveReturnShipmentSchema,
 };
 
 /** The area whose closed reasons a command's refusals carry in `details[].code` (docs/06 § 6.7). */
@@ -148,6 +154,8 @@ const REFUSAL_AREA_OF: Record<string, RefusalArea> = {
   'POST /v1/shipments/{id}/deliver': 'shipment',
   'POST /v1/return-shipments': 'returnShipment',
   'POST /v1/return-shipments/{id}/receive': 'returnShipment',
+  'POST /v1/return-shipments/{id}/inspection': 'returnShipment',
+  'POST /v1/return-shipments/{id}/resolution': 'returnShipment',
 };
 
 /** The stock commands: they lock stock items and may break a stock rule (422). */
@@ -157,8 +165,14 @@ const STOCK_COMMANDS: ReadonlySet<string> = new Set(
     .map(([key]) => key),
 );
 
-/** The one non-stock command with a rule to break (422): a receipt must match what was dispatched. */
-const RECEIPT_COMMANDS: ReadonlySet<string> = new Set(['POST /v1/return-shipments/{id}/receive']);
+/**
+ * The non-stock commands with a rule to break (422): a receipt must match what was dispatched, and
+ * a resolution must name allowed dispositions that add up to what was received.
+ */
+const RECEIPT_COMMANDS: ReadonlySet<string> = new Set([
+  'POST /v1/return-shipments/{id}/receive',
+  'POST /v1/return-shipments/{id}/resolution',
+]);
 
 /** Commands whose **body** names an existing row of the caller's — another's is 404. */
 const BODY_NAMES_A_ROW: ReadonlySet<string> = new Set([

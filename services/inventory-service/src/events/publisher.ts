@@ -117,6 +117,7 @@ export const ID_PREFIX = {
   returnShipment: ID_PREFIXES.returnShipment,
   returnShipmentLine: 'RSL',
   returnTrackingEvent: 'RTK',
+  returnDisposition: 'RDP',
 } as const;
 
 /**

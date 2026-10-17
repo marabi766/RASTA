@@ -133,6 +133,7 @@ describe('the schema models nothing COM-006 has not decided', () => {
       'ReturnShipment',
       'ReturnShipmentLine',
       'ReturnTrackingEvent',
+      'ReturnDisposition',
       'IdempotencyKey',
     ]);
   });
