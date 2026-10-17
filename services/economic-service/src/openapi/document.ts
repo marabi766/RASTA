@@ -33,9 +33,11 @@ import {
 } from '../commission/dto';
 import {
   createParticipationRuleSchema,
+  createRecognitionRuleSchema,
   createRewardRuleSchema,
   listRewardRulesQuerySchema,
   myParticipationQuerySchema,
+  myRecognitionQuerySchema,
   myRewardsQuerySchema,
   updateRewardRuleSchema,
 } from '../reward/dto';
@@ -71,6 +73,7 @@ const REQUEST_BODIES: Record<string, JsonSchema> = {
   'POST /v1/rewards/rules': toJsonSchema(createRewardRuleSchema),
   'PATCH /v1/rewards/rules/{id}': toJsonSchema(updateRewardRuleSchema),
   'POST /v1/rewards/participation-rules': toJsonSchema(createParticipationRuleSchema),
+  'POST /v1/rewards/recognition-rules': toJsonSchema(createRecognitionRuleSchema),
   'POST /v1/payment-intents/{id}/refund': toJsonSchema(refundPaymentSchema),
   'POST /v1/payment-intents/{id}/reconciliation/requeue': toJsonSchema(operatorDecisionSchema),
   'POST /v1/payment-intents/{id}/reconciliation/resolutions': toJsonSchema(proposeResolutionSchema),
@@ -93,6 +96,7 @@ const QUERY_SCHEMAS: Record<string, JsonSchema> = {
   'GET /v1/rewards/me': toJsonSchema(myRewardsQuerySchema),
   'GET /v1/rewards/rules': toJsonSchema(listRewardRulesQuerySchema),
   'GET /v1/rewards/me/participation': toJsonSchema(myParticipationQuerySchema),
+  'GET /v1/rewards/me/recognition': toJsonSchema(myRecognitionQuerySchema),
   'GET /v1/payment-intents': toJsonSchema(listPaymentsQuerySchema),
 };
 
@@ -128,6 +132,8 @@ const IDEMPOTENT_ROUTES = new Set([
   // every organization (review of #328, r1). Required by the service; the
   // gateway's `rewards` prefix carries no requirement, so it forwards the key.
   'POST /v1/rewards/participation-rules',
+  // The same for levels and badges: one version in force for everyone.
+  'POST /v1/rewards/recognition-rules',
 ]);
 
 /**
@@ -182,6 +188,11 @@ const ERRORS: Record<string, readonly number[]> = {
   'GET /v1/rewards/participation-rules': COMMON,
   // No 404: nothing is named. 409: a stale `expectedCurrentVersion`, or the key.
   'POST /v1/rewards/participation-rules': [...COMMON, 400, 409],
+  // Any query parameter at all — a `userId` — is a 400.
+  'GET /v1/rewards/me/recognition': [...COMMON, 400],
+  'GET /v1/rewards/recognition-rules': COMMON,
+  // As the participation rule.
+  'POST /v1/rewards/recognition-rules': [...COMMON, 400, 409],
   'GET /v1/payment-intents': LIST,
   'GET /v1/payment-intents/{id}': READ_ONE,
   'POST /v1/payment-intents/{id}/refund': WRITE,

@@ -1064,6 +1064,122 @@ const PARTICIPATION_RULE_STEPS = [
   },
 ];
 
+const RECOGNITION_RULE = '20261017120000_recognition_rule';
+
+const RECOGNITION_RULE_MIGCHECK = (id, version, basis, levels, badges) => `
+INSERT INTO "recognition_rule" ("id", "version", "basis", "levels", "badges", "created_by")
+VALUES ('${id}', ${version}, '${basis}', '${levels}', '${badges}', 'USR-MIGCHECK');`;
+
+/**
+ * Levels and badges (COM-012 criterion 2, docs/24 Q-140), rolled back and
+ * re-applied over rows. A version names its basis from a closed set and at
+ * least one level or badge; it is append-only, and the rollback refuses while
+ * one exists rather than erase the record of what was in force.
+ */
+const RECOGNITION_RULE_STEPS = [
+  {
+    label: 'recognition: down to the schema before it (empty)',
+    runDownScript: [RECOGNITION_RULE],
+  },
+  {
+    label: 'recognition: the reward balances it reads on, as the previous release wrote them',
+    sql: `INSERT INTO "reward_balance" ("organization_id", "user_id", "total_points", "updated_at")
+          VALUES ('ORG-MIGCHECK', 'USR-MIGCHECK-HOLDER', 40, now());`,
+  },
+  { label: 'recognition: up again over them', reapply: true },
+  {
+    label: 'recognition: a basis outside the two is refused',
+    sql: RECOGNITION_RULE_MIGCHECK(
+      'RCR_MIGCHECK_X',
+      1,
+      'LOGINS',
+      '[{"rank":1,"name":"L1","threshold":0}]',
+      '[]',
+    ),
+    mustFail: 'ck_recognition_rule_basis',
+  },
+  {
+    label: 'recognition: a version that recognises nothing is refused',
+    sql: RECOGNITION_RULE_MIGCHECK('RCR_MIGCHECK_X', 1, 'PARTICIPATION_SCORE', '[]', '[]'),
+    mustFail: 'ck_recognition_rule_terms',
+  },
+  {
+    label: 'recognition: a first version',
+    sql: RECOGNITION_RULE_MIGCHECK(
+      'RCR_MIGCHECK_1',
+      1,
+      'REWARD_POINTS_CUMULATIVE',
+      '[{"rank":1,"name":"L1","threshold":0}]',
+      '[{"code":"B1","name":"B1","threshold":10}]',
+    ),
+  },
+  {
+    label: 'recognition: a version number is used once',
+    sql: RECOGNITION_RULE_MIGCHECK(
+      'RCR_MIGCHECK_2',
+      1,
+      'PARTICIPATION_SCORE',
+      '[]',
+      '[{"code":"B2","name":"B2","threshold":1}]',
+    ),
+    mustFail: 'Unique constraint failed on the fields: (`version`)',
+  },
+  {
+    label: 'recognition: a version is never edited',
+    sql: `UPDATE "recognition_rule" SET basis = 'PARTICIPATION_SCORE' WHERE id = 'RCR_MIGCHECK_1';`,
+    mustFail: 'append-only',
+  },
+  {
+    label: 'recognition: a version is never deleted',
+    sql: `DELETE FROM "recognition_rule" WHERE id = 'RCR_MIGCHECK_1';`,
+    mustFail: 'append-only',
+  },
+  {
+    label: 'recognition: the rollback refuses while a version exists',
+    runDownScript: [RECOGNITION_RULE],
+    mustFail: 'refusing to drop the record of what was in force',
+  },
+  {
+    label: 'recognition: …and changed nothing',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "recognition_rule" WHERE id = 'RCR_MIGCHECK_1';
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback dropped the version'; END IF;
+      END $$;`,
+  },
+  {
+    label: 'recognition: the owner removes the probe version (guard lifted in this script only)',
+    sql: `ALTER TABLE "recognition_rule" DISABLE TRIGGER "trg_recognition_rule_append_only";
+          DELETE FROM "recognition_rule" WHERE id LIKE 'RCR_MIGCHECK_%';
+          ALTER TABLE "recognition_rule" ENABLE TRIGGER "trg_recognition_rule_append_only";`,
+  },
+  {
+    label: 'recognition: down succeeds with no version, and keeps every reward balance',
+    runDownScript: [RECOGNITION_RULE],
+  },
+  {
+    label: 'recognition: the balance is still there, the table gone',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "reward_balance"
+         WHERE organization_id = 'ORG-MIGCHECK' AND user_id = 'USR-MIGCHECK-HOLDER' AND total_points = 40;
+        IF found <> 1 THEN RAISE EXCEPTION 'the rollback lost a reward balance'; END IF;
+        IF to_regclass('recognition_rule') IS NOT NULL THEN
+          RAISE EXCEPTION 'the rollback left the recognition_rule table';
+        END IF;
+      END $$;`,
+  },
+  { label: 'recognition: up again', reapply: true },
+  {
+    label: 'recognition: clean up the probe rows',
+    sql: `DELETE FROM "reward_balance" WHERE organization_id = 'ORG-MIGCHECK';`,
+  },
+];
+
 export const ECONOMIC_DATA_ROLLBACK = {
   migration: '20260930200000_payment_reconciliation_task',
   label:
@@ -1210,6 +1326,7 @@ export const ECONOMIC_DATA_ROLLBACK = {
         $$;`,
     },
     ...PARTICIPATION_RULE_STEPS,
+    ...RECOGNITION_RULE_STEPS,
     {
       label: 'cleanup: the probe rows are removed before the chain reversal',
       // The append-only trigger is lifted for the probe's own row only, in this
@@ -1680,6 +1797,8 @@ export const EXPECTED = {
       'commission_pricing_cutover',
       // The participation rule's versions (ADR-047, docs/24 Q-139).
       'participation_rule',
+      // The levels-and-badges versions (COM-012, docs/24 Q-140).
+      'recognition_rule',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -1699,6 +1818,9 @@ export const EXPECTED = {
       // A participation rule version is never edited: the next one replaces it.
       'trg_participation_rule_append_only',
       'trg_participation_rule_no_truncate',
+      // Nor is a levels-and-badges version.
+      'trg_recognition_rule_append_only',
+      'trg_recognition_rule_no_truncate',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: ['BusinessLine', 'CommissionOutcome'],
@@ -1713,6 +1835,7 @@ export const EXPECTED = {
       'reject_transaction_repricing',
       'reject_statement_obligation_change',
       'reject_participation_rule_mutation',
+      'reject_recognition_rule_mutation',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
@@ -1741,6 +1864,10 @@ export const EXPECTED = {
       'ck_reward_source_evaluation_subject',
       'ck_participation_rule_contributions',
       'ux_participation_rule_version',
+      // A version's basis is one of two, it recognises something, and is numbered once.
+      'ck_recognition_rule_basis',
+      'ck_recognition_rule_terms',
+      'ux_recognition_rule_version',
     ],
     // One obligation per business fact per payer. A down script that dropped
     // it without the forward migration restoring it would bring back the

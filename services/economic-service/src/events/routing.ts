@@ -53,6 +53,7 @@ export const AGGREGATE_OF = {
   COMMISSION_RULE_CHANGED: 'CommissionRule',
   REWARD_RULE_CHANGED: 'RewardRule',
   PARTICIPATION_RULE_CHANGED: 'ParticipationRule',
+  RECOGNITION_RULE_CHANGED: 'RecognitionRule',
   TRANSACTION_STATUS_CHANGED: 'Transaction',
 } as const satisfies Record<EconomicEventName, string>;
 
@@ -183,6 +184,7 @@ export const PARTITION_KEY_POLICY: { [N in EconomicEventName]: PartitionRule<N> 
   COMMISSION_RULE_CHANGED: (payload) => ({ scope: 'RULE', key: payload.ruleId }),
   REWARD_RULE_CHANGED: (payload) => ({ scope: 'RULE', key: payload.ruleId }),
   PARTICIPATION_RULE_CHANGED: (payload) => ({ scope: 'RULE', key: payload.ruleId }),
+  RECOGNITION_RULE_CHANGED: (payload) => ({ scope: 'RULE', key: payload.ruleId }),
 };
 
 /**
