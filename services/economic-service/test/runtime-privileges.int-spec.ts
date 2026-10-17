@@ -53,6 +53,9 @@ const GUARDS: readonly (readonly [table: string, trigger: string])[] = [
   // A participation rule version is the record of what was in force (ADR-047 § 3).
   ['participation_rule', 'trg_participation_rule_append_only'],
   ['participation_rule', 'trg_participation_rule_no_truncate'],
+  // So is a levels-and-badges version (COM-012 criterion 2).
+  ['recognition_rule', 'trg_recognition_rule_append_only'],
+  ['recognition_rule', 'trg_recognition_rule_no_truncate'],
 ];
 
 describe('the runtime role cannot lift an integrity guard (D-045)', () => {
