@@ -78,7 +78,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       cancel: method('cancel', async () => undefined),
       dispute: method('dispute', async () => ({ disputeId: 'TXD_STUB' })),
       resolveDispute: method('resolveDispute', async () => undefined),
-      findObligation: method('findObligation', async () => null),
+      findObligations: method('findObligations', async () => []),
       // JUSTIFIED-ANY: the activities call only these eight methods, and the
       // client's own HTTP behaviour has its own spec.
     } as any as EconomicClient;
