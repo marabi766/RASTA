@@ -1399,6 +1399,8 @@ jobs:
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -1445,6 +1447,8 @@ jobs:
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -1797,6 +1801,8 @@ jobs:
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -1900,6 +1906,8 @@ jobs:
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -2055,6 +2063,8 @@ jobs:
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -2119,7 +2129,7 @@ jobs:
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
 
   integration-coverage:
-    name: Coverage gates (economic, marketplace, document, supplier, audit, notification, organization)
+    name: Coverage gates (economic, marketplace, document, supplier, audit, notification, organization, procurement)
     runs-on: ubuntu-latest
     # About 10.5 minutes on main run 38600385830 (setup ~4m, the seven gates
     # 399 s together, economic the longest at 115 s). Each keeps its own 8.
@@ -2333,6 +2343,8 @@ jobs:
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -2514,6 +2526,24 @@ jobs:
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
 
+      - name: Procurement coverage gate
+        # `docs/14` § 14.2 puts procurement-service with the other services, in the 75% band
+        # (COM-007 PR 1, ADR-070). Both projects: the aggregation's row lock that serialises
+        # demands, the partial unique index of one open window, the triggers that keep a demand
+        # inside its window and a window's totals its demands', and the tenant guard against
+        # real rows exist only against a real database.
+        timeout-minutes: 8
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm --filter @rasta/procurement-service run test:coverage
+        env:
+          KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
+
   # The check branch protection and the merge queue require by name. It runs
   # always(), not on the default success(): a job skipped because a job it
   # needs failed reports "skipped", which a required check counts as passing.
@@ -2655,6 +2685,8 @@ jobs:
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -2717,6 +2749,8 @@ jobs:
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit

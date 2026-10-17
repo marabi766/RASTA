@@ -282,9 +282,9 @@ describe('audit-service configuration', () => {
       ['audit-service'],
       // `notification-service` used to stand here as the service that exists
       // but produces nothing. It became a producer with NTF-002's audit
-      // events, so the example moved to one that still does not:
-      // `procurement-service` is named in the topology as deliberately absent.
-      ['procurement-service'],
+      // events, and `procurement-service`, the next example, with COM-007's
+      // demands, so the example moved to a name that still produces nothing.
+      ['analytics-service'],
       ['Identity-Service'],
       ['identity'],
       ['identity-service;asset-service'],
