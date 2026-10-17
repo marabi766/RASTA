@@ -604,6 +604,18 @@ jobs:
           # that does not exist.
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
 
+      - name: Load the completed orders the return scenarios act on
+        # `e2e/returns.spec.ts` (EXP-003, RUN-005): a return is asked only of
+        # a COMPLETED order, which only a settlement this job never runs makes.
+        # The fixture says why it is rows, and writes them as the service's own
+        # runtime role through every CHECK the tables keep; on the seed's
+        # tenants and cement offer, so after the seed.
+        env:
+          PGPASSWORD: rasta_marketplace_dev_password
+        run: >-
+          psql -v ON_ERROR_STOP=1 -h localhost -U rasta_marketplace -d rasta_marketplace
+          -f apps/web/e2e/fixtures/marketplace-returns.sql
+
       - name: Build portal and live-path services
         # Build the exact deployable artifacts this job starts, plus their
         # workspace dependencies. Services run from dist, never watch mode.
@@ -792,12 +804,17 @@ jobs:
           # mode, so an order stays PENDING: no saga runs and no wallet is
           # touched — the suite places orders and reads them, and cannot move
           # money (economic-service is in this stack for the settlement
-          # scenarios only, and no order reaches it).
+          # scenarios only, and no order reaches it). The return window is a
+          # value for this throwaway stack only — Q-132 leaves the real one
+          # open, and with none set every return is refused — so the return
+          # scenarios (`e2e/returns.spec.ts`) have a window to be inside of,
+          # and one the fixture's old order is past.
           ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service marketplace-service)" && \
             eval "${kafka_credentials}" && \
             cd services/marketplace-service && \
             PORT=3106 SERVICE_NAME=marketplace-service \
             MARKETPLACE_TEMPORAL_ENABLED=false \
+            MARKETPLACE_RETURN_WINDOW_DAYS=30 \
             DATABASE_URL=postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public \
             node dist/main.js > /tmp/rasta-web-e2e-logs/marketplace.log 2>&1 & )
 
@@ -946,6 +963,12 @@ jobs:
           # job (above), so `/projects` and `/inventory` live-isolation
           # scenarios run for real instead of skipping.
           WEB_LIVE_STACK_E2E_EXP004: 'true'
+          # EXP-003 returns: the fixture's completed orders are loaded and
+          # marketplace-service has a return window (above). The scenario
+          # provisions its third organization's person through identity-service
+          # and the Keycloak admin API, with this run's KEYCLOAK_ADMIN_PASSWORD
+          # (job environment).
+          WEB_LIVE_STACK_E2E_RETURNS: 'true'
           WEB_E2E_FLEET_URL: http://localhost:3104
           WEB_E2E_MAINTENANCE_URL: http://localhost:3105
           API_GATEWAY_URL: http://localhost:3000

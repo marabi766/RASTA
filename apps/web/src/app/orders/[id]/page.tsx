@@ -3,11 +3,21 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, ButtonLink, PageHeader, TopBar } from '@/ui';
 import { isOrderCommand } from '@/lib/order-fields';
 import { currentSession } from '@/server/current-session';
+import { webServerEnv } from '@/server/env';
 import { fetchOrder } from '@/server/orders';
-import { mintSubmissionId } from '@/server/submission';
+import { mintReturnSubmission } from '@/server/return-replay';
+import {
+  RETURNABLE_ORDER_STATUS,
+  canRequestReturn,
+  fetchReturnsOfOrder,
+  returnCallerOf,
+  returnableLines,
+  sideOf,
+} from '@/server/returns';
+import { mintSubmissionId, submissionBinding } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
-import { OrderDetailScreen } from './OrderDetailScreen';
+import { OrderDetailScreen, type OrderDetailScreenProps } from './OrderDetailScreen';
 
 /**
  * The `/orders/[id]` route — جزئیات سفارش + Stepper (docs/16 § ۱۶٫۶).
@@ -37,6 +47,52 @@ export default async function OrderPage({
   const placed = query.placed === '1';
 
   const result = await fetchOrder(session, id);
+
+  // Returns (EXP-003): this order's requests on the viewer's side, and the
+  // request form where `canRequestReturn` — a copy of marketplace-service's
+  // checks, from the token's roles — says the service would take one.
+  let returns: OrderDetailScreenProps['returns'] = null;
+  if (result.kind === 'OK') {
+    const order = result.data;
+    const caller = returnCallerOf(session.accessToken);
+    const side = sideOf(caller, order);
+    if (side !== null) {
+      const requests = await fetchReturnsOfOrder(session, order.id, side);
+      const offerable = side === 'BUYER' && canRequestReturn(caller, order);
+      const available = returnableLines(order, requests.kind === 'OK' ? requests.data.items : null);
+      returns = {
+        requests,
+        offered: offerable
+          ? [
+              {
+                command: 'REQUEST',
+                submission: mintReturnSubmission(session, {
+                  command: 'REQUEST',
+                  orderId: order.id,
+                }),
+              },
+            ]
+          : [],
+        lines: order.lines.flatMap((line) => {
+          const known = available.find((entry) => entry.orderLineId === line.id);
+          return known
+            ? [
+                {
+                  orderLineId: known.orderLineId,
+                  productName: line.productName,
+                  sold: line.quantity,
+                  available: known.available,
+                },
+              ]
+            : [];
+        }),
+        notCompleted: side === 'BUYER' && order.status !== RETURNABLE_ORDER_STATUS,
+        binding: submissionBinding(session),
+        sessionMaxAgeSeconds: webServerEnv().WEB_SESSION_MAX_AGE_SECONDS,
+        pageHref: `/orders/${encodeURIComponent(order.id)}`,
+      };
+    }
+  }
 
   return (
     <AppShell
@@ -68,6 +124,7 @@ export default async function OrderPage({
           mintSubmissionId={() => mintSubmissionId(session)}
           done={done}
           placed={placed}
+          returns={returns}
         />
       </div>
     </AppShell>

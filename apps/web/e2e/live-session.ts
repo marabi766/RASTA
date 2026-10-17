@@ -224,7 +224,40 @@ export async function installLiveSession(
   context: BrowserContext,
   persona: LivePersona = 'operator',
 ): Promise<LiveSession> {
+  return installSession(context, fixtureFor(persona));
+}
+
+/**
+ * A realm persona's access token, checked as `installLiveSession` checks it,
+ * for a scenario's own gateway calls — no browser session is made.
+ */
+export async function liveAccessToken(persona: LivePersona): Promise<string> {
   const fixture = fixtureFor(persona);
+  const tokens = await tokensFor(fixture);
+  await requireSeededPlatformUser(fixture, tokens.access_token);
+  return tokens.access_token;
+}
+
+/** A person a scenario provisioned through identity-service (`provisioned-people.ts`). */
+export interface ProvisionedPerson {
+  readonly username: string;
+  readonly password: string;
+  readonly organizationId: string;
+  readonly userId: string;
+}
+
+/**
+ * Signs in a person the scenario provisioned, with every check a realm persona
+ * gets: the token's claims, and `/v1/users/me` agreeing with them.
+ */
+export async function installProvisionedSession(
+  context: BrowserContext,
+  person: ProvisionedPerson,
+): Promise<LiveSession> {
+  return installSession(context, person);
+}
+
+async function installSession(context: BrowserContext, fixture: Fixture): Promise<LiveSession> {
   const tokens = await tokensFor(fixture);
   const claims = z
     .object({

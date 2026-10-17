@@ -79,6 +79,14 @@ export interface FieldMapping<F extends string> {
   readonly paths: Readonly<Record<string, F>>;
   readonly messages?: Readonly<Record<string, string>>;
   /**
+   * Sentences that carry a value — an id, a count — matched whole, after
+   * `messages` and before `byCode`. For a service whose refusals differ only
+   * in their sentence (every business rule is the same code), so the portal
+   * can say which rule in its own words; each pattern is pinned against the
+   * service's source by a contract spec, and the sentence is never shown.
+   */
+  readonly patterns?: readonly (readonly [RegExp, string])[];
+  /**
    * What is said for a sentence `messages` does not know, keyed by the
    * platform error code of the response (`INVALID_STATE_TRANSITION`, …). The
    * code is the part of an error body a client may rely on; the sentence is
@@ -108,7 +116,11 @@ export function mapProblemToFields<F extends string>(
   const fieldErrors: FieldErrors<F> = {};
   const unplaced: string[] = [];
   const textOf = (message: string): string =>
-    mapping.messages?.[message] ?? mapping.byCode?.[problem.code] ?? mapping.fallback ?? message;
+    mapping.messages?.[message] ??
+    mapping.patterns?.find(([pattern]) => pattern.test(message))?.[1] ??
+    mapping.byCode?.[problem.code] ??
+    mapping.fallback ??
+    message;
 
   for (const detail of problem.details ?? []) {
     const field = mapping.paths[detail.path];

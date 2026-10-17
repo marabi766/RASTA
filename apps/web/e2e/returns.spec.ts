@@ -1,0 +1,332 @@
+import { randomUUID } from 'node:crypto';
+
+import AxeBuilder from '@axe-core/playwright';
+import { expect, test, type Browser, type Locator, type Page } from '@playwright/test';
+
+import { toLatinDigits, toPersianDigits } from '../src/lib/format';
+import { RETURN_REFUSAL_TEXT } from '../src/lib/return-fields';
+import {
+  installLiveSession,
+  installProvisionedSession,
+  liveAccessToken,
+  type LivePersona,
+  type ProvisionedPerson,
+} from './live-session';
+import { provisionPerson } from './provisioned-people';
+
+/**
+ * Returns through the real stack (EXP-003, RUN-005): the portal, the real
+ * gateway, a real marketplace-service and inventory-service on a real
+ * PostgreSQL, real tokens.
+ *
+ * ## The data
+ *
+ * The orders are the "Portal in a browser" job's fixture
+ * (`e2e/fixtures/marketplace-returns.sql`, which says why they are rows and
+ * not routes): ORG-DEH-0001 bought from ORG-DEH-0002, one order completed two
+ * days ago and one four hundred days ago, with the job's return window set to
+ * thirty days (`MARKETPLACE_RETURN_WINDOW_DAYS`, a value for this stack only:
+ * Q-132 leaves the real one open). Everything else is made here: the requests
+ * are asked, decided and withdrawn **in the browser**, through the portal's own
+ * forms; the goods' side — inventory-service's commands, which the portal does
+ * not offer — through its API, as the supplier.
+ *
+ * ## Who does what
+ *
+ * - **the buyer** — `dehyari.admin` (ORG-DEH-0001): asks, is refused the old
+ *   order in fixed words, withdraws its second request; is offered no decision.
+ * - **the supplier** — `dehyari.admin.b` (ORG-DEH-0002): sees the request on
+ *   its side and authorizes it; records the goods on their way and received.
+ * - **a third organization** — provisioned with ORGANIZATION_ADMIN into an
+ *   organization of its own: the request and the order are the same absence as
+ *   an id that does not exist.
+ *
+ * No money moves and none is claimed to: a return is not a refund (Q-76).
+ */
+
+const RECENT_ORDER = 'ORD_01JE2ERETVRNS0000000000001';
+const OLD_ORDER = 'ORD_01JE2ERETVRNS0000000000002';
+const LINE_AGGREGATE = 'OLN_01JE2ERETVRNS00000000000A1';
+const LINE_CEMENT = 'OLN_01JE2ERETVRNS00000000000B1';
+const BUYER = 'ORG-DEH-0001';
+const OUTSIDER_ORGANIZATION = 'ORG-E2E-OUTSIDER';
+const MISSING_RETURN = 'RET_01JZZZZZZZZZZZZZZZZZZZZZZZ';
+const RUN = randomUUID().slice(0, 8);
+const REASON = `سه تن شن خیس و کلوخه رسید — آزمون ${RUN}`;
+
+const WCAG_2_1_AA = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'];
+
+async function mainText(page: Page): Promise<string> {
+  return (await page.locator('main').innerText()).trim();
+}
+
+async function expectAccessible(page: Page): Promise<void> {
+  const { violations } = await new AxeBuilder({ page }).withTags(WCAG_2_1_AA).analyze();
+  expect(violations).toEqual([]);
+}
+
+/** The number after «قابل بازگشت:» in the hint of a line's input, read back from Persian digits. */
+async function availableOn(input: Locator): Promise<number> {
+  const described = await input.evaluate((element) =>
+    (element.getAttribute('aria-describedby') ?? '')
+      .split(/\s+/)
+      .map((id) => document.getElementById(id)?.textContent ?? '')
+      .join(' '),
+  );
+  const text = toLatinDigits(described);
+  const match = /قابل بازگشت: (\d+)/.exec(text);
+  if (!match) throw new Error(`no available quantity in "${text}"`);
+  return Number(match[1]);
+}
+
+/** A fresh browser context signed in as one person, for one step of the story. */
+async function as(
+  browser: Browser,
+  who: LivePersona | ProvisionedPerson,
+): Promise<{ page: Page; close: () => Promise<void> }> {
+  const context = await browser.newContext({ locale: 'fa-IR', timezoneId: 'Asia/Tehran' });
+  if (typeof who === 'string') await installLiveSession(context, who);
+  else await installProvisionedSession(context, who);
+  const page = await context.newPage();
+  return { page, close: () => context.close() };
+}
+
+function gatewayUrl(path: string): string {
+  const base = process.env.API_GATEWAY_URL;
+  if (!base) throw new Error('The live return scenarios require API_GATEWAY_URL');
+  return `${base.replace(/\/+$/, '')}${path}`;
+}
+
+/** One inventory-service command as the supplier, through the gateway. */
+async function asSupplier(path: string, body: unknown): Promise<{ id: string; version: number }> {
+  const token = await liveAccessToken('orgAdminB');
+  const response = await fetch(gatewayUrl(path), {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+      'idempotency-key': `e2e-returns-${randomUUID()}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (response.status !== 200 && response.status !== 201) {
+    throw new Error(`${path} answered ${response.status}: ${await response.text()}`);
+  }
+  return (await response.json()) as { id: string; version: number };
+}
+
+// Under CI the job sets the flag; a skip there would be a green job with no evidence.
+if (process.env.CI && process.env.WEB_LIVE_STACK_E2E_RETURNS !== 'true') {
+  test('CI runs the live return scenarios, none skipped', () => {
+    throw new Error(
+      'WEB_LIVE_STACK_E2E_RETURNS must be \'true\' in CI: the "Portal in a browser" job loads ' +
+        'the marketplace return fixture and sets the return window for these scenarios.',
+    );
+  });
+}
+
+test.describe.serial('returns, live (EXP-003)', () => {
+  test.skip(
+    process.env.WEB_LIVE_STACK_E2E_RETURNS !== 'true',
+    'needs e2e/fixtures/marketplace-returns.sql loaded and MARKETPLACE_RETURN_WINDOW_DAYS set, ' +
+      'alongside the usual live stack — set WEB_LIVE_STACK_E2E_RETURNS=true locally after ' +
+      'starting it (the "Portal in a browser" CI job always does)',
+  );
+  test.setTimeout(120_000);
+
+  let outsider: ProvisionedPerson;
+  let returnPath = '';
+
+  test.beforeAll(async () => {
+    test.setTimeout(120_000);
+    outsider = await provisionPerson(
+      await liveAccessToken('systemAdmin'),
+      `e2e.returns.${RUN}.outsider`,
+      OUTSIDER_ORGANIZATION,
+      ['ORGANIZATION_ADMIN'],
+    );
+  });
+
+  test('the buyer asks to return goods of the completed order', async ({ browser }) => {
+    const { page, close } = await as(browser, 'orgAdmin');
+    try {
+      await page.goto(`/orders/${RECENT_ORDER}`);
+      const form = page.getByRole('form', { name: 'درخواست بازگشت کالا' });
+      await expect(form).toBeVisible();
+      // What the gravel line still allows: 10 on a fresh database, less what an
+      // earlier attempt's open request (a retry, a local re-run) already takes.
+      const allowed = await availableOn(form.locator(`[name="quantity.${LINE_AGGREGATE}"]`));
+      expect(allowed).toBeGreaterThanOrEqual(3);
+      await expectAccessible(page);
+
+      await form.getByLabel('دلیل بازگشت').fill(REASON);
+      await form.locator(`[name="quantity.${LINE_AGGREGATE}"]`).fill('۳');
+      await form.getByRole('button', { name: 'درخواست بازگشت کالا' }).click();
+
+      await expect(page).toHaveURL(/\/returns\/RET_[^?]+\?flash=/);
+      returnPath = new URL(page.url()).pathname;
+      await expect(
+        page.getByText('درخواست بازگشت ثبت شد و برای تأمین‌کننده فرستاده شد.'),
+      ).toBeVisible();
+      await expect(
+        page.getByText('درخواست‌شده، در انتظار تصمیم تأمین‌کننده').first(),
+      ).toBeVisible();
+      await expect(page.getByText(REASON)).toBeVisible();
+      await expect(page.getByText('درخواست بازگشت بازپرداخت نیست', { exact: false })).toBeVisible();
+      // The buyer withdraws; it never decides.
+      await expect(page.getByRole('form', { name: 'لغو درخواست بازگشت' })).toBeVisible();
+      await expect(page.getByRole('form', { name: 'پذیرفتن بازگشت' })).toHaveCount(0);
+      await expect(page.getByRole('region', { name: 'جابه‌جایی و بازرسی کالا' })).toContainText(
+        'هنوز محموله‌ای',
+      );
+      await expectAccessible(page);
+
+      // Back on the order, the line now allows what is left.
+      await page.goto(`/orders/${RECENT_ORDER}`);
+      await expect(page.getByRole('form', { name: 'درخواست بازگشت کالا' })).toContainText(
+        `قابل بازگشت: ${toPersianDigits(String(allowed - 3))}`,
+      );
+      await expect(page.getByRole('list', { name: 'درخواست‌های بازگشت این سفارش' })).toBeVisible();
+    } finally {
+      await close();
+    }
+  });
+
+  test('an order completed long ago is refused in the portal’s own words', async ({ browser }) => {
+    const { page, close } = await as(browser, 'orgAdmin');
+    try {
+      await page.goto(`/orders/${OLD_ORDER}`);
+      const form = page.getByRole('form', { name: 'درخواست بازگشت کالا' });
+      await form.getByLabel('دلیل بازگشت').fill(REASON);
+      await form.locator('input[name^="quantity."]').first().fill('1');
+      await form.getByRole('button', { name: 'درخواست بازگشت کالا' }).click();
+      await expect(page.getByText(RETURN_REFUSAL_TEXT.WINDOW_ELAPSED)).toBeVisible();
+      expect(await mainText(page)).not.toMatch(/elapsed|window/i);
+      await expectAccessible(page);
+    } finally {
+      await close();
+    }
+  });
+
+  test('the supplier finds it on its side and authorizes it', async ({ browser }) => {
+    expect(returnPath).not.toBe('');
+    const { page, close } = await as(browser, 'orgAdminB');
+    try {
+      await page.goto('/returns?role=SUPPLIER');
+      const row = page
+        .getByRole('listitem')
+        .filter({ has: page.locator(`a[href="${returnPath}"]`) });
+      await expect(row).toContainText('اقدامی از سوی شما لازم است');
+      await expectAccessible(page);
+
+      await page.goto(returnPath);
+      await expect(page.getByText(REASON)).toBeVisible();
+      await expect(page.getByRole('form', { name: 'لغو درخواست بازگشت' })).toHaveCount(0);
+      await page
+        .getByRole('form', { name: 'پذیرفتن بازگشت' })
+        .getByRole('button', { name: 'پذیرفتن بازگشت' })
+        .click();
+      await expect(
+        page.getByText('بازگشت پذیرفته شد. کالا هنوز باید فرستاده، دریافت و بازرسی شود.'),
+      ).toBeVisible();
+      await expect(page.getByText('پذیرفته‌شده، در انتظار ارسال کالا').first()).toBeVisible();
+      await expect(page.getByRole('form', { name: 'رد درخواست بازگشت' })).toHaveCount(0);
+      await expectAccessible(page);
+    } finally {
+      await close();
+    }
+  });
+
+  test('the goods come back: both parties see them on their way, then received', async ({
+    browser,
+  }) => {
+    expect(returnPath).not.toBe('');
+    const returnId = returnPath.split('/').pop()!;
+    const warehouse = await asSupplier('/v1/warehouses', { name: `انبار بازگشت ${RUN}` });
+    const shipment = await asSupplier('/v1/return-shipments', {
+      returnRequestId: returnId,
+      orderId: RECENT_ORDER,
+      buyerOrganizationId: BUYER,
+      destinationWarehouseId: warehouse.id,
+      lines: [
+        { orderLineId: LINE_AGGREGATE, productId: 'PRD_01JE2ERETVRNS00000000000P1', quantity: 3 },
+      ],
+      carrierName: 'باربری آزمون',
+    });
+
+    const buyer = await as(browser, 'orgAdmin');
+    try {
+      await buyer.page.goto(returnPath);
+      const goods = buyer.page.getByRole('region', { name: 'جابه‌جایی و بازرسی کالا' });
+      await expect(goods).toContainText('در راه بازگشت');
+      await expect(goods).toContainText('باربری آزمون');
+      await expectAccessible(buyer.page);
+    } finally {
+      await buyer.close();
+    }
+
+    await asSupplier(`/v1/return-shipments/${shipment.id}/receive`, {
+      lines: [{ orderLineId: LINE_AGGREGATE, receivedQuantity: 3 }],
+    });
+    const supplier = await as(browser, 'orgAdminB');
+    try {
+      await supplier.page.goto(returnPath);
+      const goods = supplier.page.getByRole('region', { name: 'جابه‌جایی و بازرسی کالا' });
+      await expect(goods).toContainText('دریافت‌شده، در انتظار بازرسی');
+      await expect(goods).toContainText('کالا دریافت شد');
+    } finally {
+      await supplier.close();
+    }
+  });
+
+  test('the buyer withdraws a second request before anything moves', async ({ browser }) => {
+    const { page, close } = await as(browser, 'orgAdmin');
+    try {
+      await page.goto(`/orders/${RECENT_ORDER}`);
+      const form = page.getByRole('form', { name: 'درخواست بازگشت کالا' });
+      await form.getByLabel('دلیل بازگشت').fill(`${REASON} — سیمان`);
+      await form.locator(`[name="quantity.${LINE_CEMENT}"]`).fill('2');
+      await form.getByRole('button', { name: 'درخواست بازگشت کالا' }).click();
+      await expect(page).toHaveURL(/\/returns\/RET_[^?]+\?flash=/);
+
+      await page
+        .getByRole('form', { name: 'لغو درخواست بازگشت' })
+        .getByRole('button', { name: 'لغو درخواست بازگشت' })
+        .click();
+      await expect(page.getByText('درخواست بازگشت لغو شد.')).toBeVisible();
+      await expect(page.getByText('لغوشده', { exact: true }).first()).toBeVisible();
+      await expect(page.getByRole('list', { name: 'سابقهٔ درخواست بازگشت' })).toContainText(
+        'خریدار درخواست را لغو کرد',
+      );
+      await expect(page.getByRole('form')).toHaveCount(0);
+      await expectAccessible(page);
+    } finally {
+      await close();
+    }
+  });
+
+  test('a third organization sees the request, and the order, as ids that do not exist', async ({
+    browser,
+  }) => {
+    expect(returnPath).not.toBe('');
+    const { page, close } = await as(browser, outsider);
+    try {
+      await page.goto(returnPath);
+      await expect(page.getByText('این درخواست بازگشت پیدا نشد')).toBeVisible();
+      const theirs = await mainText(page);
+      expect(theirs).not.toContain(REASON);
+      await page.goto(`/returns/${MISSING_RETURN}`);
+      await expect(page.getByText('این درخواست بازگشت پیدا نشد')).toBeVisible();
+      expect(await mainText(page)).toBe(theirs);
+
+      await page.goto(`/orders/${RECENT_ORDER}`);
+      await expect(page.getByText('سفارشی با این شناسه یافت نشد')).toBeVisible();
+      await expect(page.getByRole('form', { name: 'درخواست بازگشت کالا' })).toHaveCount(0);
+
+      await page.goto('/returns?role=BUYER');
+      expect(await mainText(page)).not.toContain(returnPath.split('/').pop()!);
+    } finally {
+      await close();
+    }
+  });
+});
