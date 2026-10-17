@@ -488,12 +488,24 @@ model ReturnRequest {
   /// `REQUESTED` or `AUTHORIZED`: where a cancellation left from.
   cancelledFrom String? @map("cancelled_from")
 
+  /// The physical half, mirrored from inventory-service's `RETURN_SHIPMENT_*` events once checked
+  /// against this request (RUN-005 PR 3). `RSP_<ULID>`: the shipment in inventory-service.
+  returnShipmentId           String?   @map("return_shipment_id")
+  /// When inventory-service says each step happened — its facts, not this service's clock.
+  inTransitAt                DateTime? @map("in_transit_at") @db.Timestamptz(3)
+  receivedAt                 DateTime? @map("received_at") @db.Timestamptz(3)
+  inspectedAt                DateTime? @map("inspected_at") @db.Timestamptz(3)
+  /// `DOC_<ULID>` in document-service, or null: the inspection report, named by id only.
+  inspectionReportDocumentId String?   @map("inspection_report_document_id")
+  resolvedAt                 DateTime? @map("resolved_at") @db.Timestamptz(3)
+
   updatedAt DateTime @map("updated_at") @db.Timestamptz(3)
 
   lines   ReturnLine[]
   history ReturnStatusHistory[]
 
   @@unique([organizationId, commandKeyHash], map: "ux_return_request_command")
+  @@unique([organizationId, returnShipmentId], map: "ux_return_request_shipment")
   @@index([organizationId, status, id], map: "ix_return_request_org_status")
   @@index([organizationId, orderId, id], map: "ix_return_request_order")
   @@index([supplierOrganizationId, id], map: "ix_return_request_supplier")

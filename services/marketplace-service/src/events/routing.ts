@@ -43,6 +43,10 @@ export const AGGREGATE_OF = {
   RETURN_AUTHORIZED: 'ReturnRequest',
   RETURN_REJECTED: 'ReturnRequest',
   RETURN_CANCELLED: 'ReturnRequest',
+  RETURN_IN_TRANSIT: 'ReturnRequest',
+  RETURN_RECEIVED: 'ReturnRequest',
+  RETURN_INSPECTED: 'ReturnRequest',
+  RETURN_RESOLVED: 'ReturnRequest',
 } as const satisfies Record<MarketplaceEventName, string>;
 
 export const PARTITION_SCOPES = {
@@ -132,6 +136,12 @@ export const PARTITION_KEY_POLICY: { [N in MarketplaceEventName]: PartitionRule<
   RETURN_AUTHORIZED: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
   RETURN_REJECTED: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
   RETURN_CANCELLED: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
+  // The physical half as the request states it (RUN-005 PR 3): the same request's stream, not
+  // the shipment's — a consumer of this topic follows the request, versions 3 to 6.
+  RETURN_IN_TRANSIT: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
+  RETURN_RECEIVED: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
+  RETURN_INSPECTED: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
+  RETURN_RESOLVED: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
 
   /** A product is its own lifecycle; nothing else is ordered against it (L7-14). */
   PRODUCT_CREATED: (payload) => ({ scope: 'PRODUCT', key: payload.productId }),
