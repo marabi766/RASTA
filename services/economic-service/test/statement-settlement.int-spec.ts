@@ -1,5 +1,3 @@
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import request from 'supertest';
 import { ulid } from 'ulid';
@@ -16,7 +14,15 @@ import { StatementSettlementConsumer } from '../src/consumers/statement-settleme
 import { SourceFactsClient, type StatementFact } from '../src/provenance/source-facts.client';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import type { BusinessLine } from '../src/generated/prisma';
-import { admin, apiTenant, startApi, type ApiHarness } from './api-helpers';
+import {
+  admin,
+  apiTenant,
+  internalToken,
+  platformAdmin,
+  startApi,
+  type ApiHarness,
+} from './api-helpers';
+import { StubContractService } from './contract-service.stub';
 import {
   asActor,
   cleanup,
@@ -34,13 +40,8 @@ import {
  * becomes exactly one settleable obligation, built from contract-service's
  * answer and never from the event.
  *
- * contract-service is a local HTTP stand-in for `GET /v1/internal/statements/{id}`
- * that holds the real route's lock: an `X-Internal-Token` and no
- * `Authorization`, verified for `contract-service`, minted by
- * `economic-service` as a `SERVICE` token, signed for an organization — and
- * the statement answered only for that organization, its employer; every
- * other organization's token (the contractor's included) gets `404 Statement
- * not found`. The client is the real `SourceFactsClient`, so the token, the
+ * contract-service is a local HTTP stand-in that holds the real route's lock
+ * (`StubContractService`). The client is the real `SourceFactsClient`, so the token, the
  * timeout and the three answers are the production path. Everything below the
  * handler — the transaction, `processed_event`, the unique key, the CHECK and
  * the trigger — is the real database.
@@ -48,72 +49,6 @@ import {
 
 const SECRET = 'itest_internal_secret_at_least_32_characters';
 const REQUEST_TIMEOUT_MS = 400;
-
-class StubContractService {
-  readonly statements = new Map<string, StatementFact>();
-  readonly asked: { statementId: string; organizationId: string }[] = [];
-  mode: 'up' | 'down' | 'hang' = 'up';
-  url = '';
-  private server?: http.Server;
-  private readonly held: http.ServerResponse[] = [];
-
-  constructor(private readonly tokens: InternalTokenService) {}
-
-  async start(): Promise<void> {
-    this.server = http.createServer((req, res) => void this.answer(req, res));
-    await new Promise<void>((resolve) => this.server!.listen(0, '127.0.0.1', () => resolve()));
-    this.url = `http://127.0.0.1:${(this.server.address() as AddressInfo).port}`;
-  }
-
-  async stop(): Promise<void> {
-    for (const res of this.held) res.destroy();
-    this.server?.closeAllConnections();
-    await new Promise<void>((resolve) => this.server?.close(() => resolve()));
-  }
-
-  record(fact: StatementFact): StatementFact {
-    this.statements.set(fact.statementId, fact);
-    return fact;
-  }
-
-  private async answer(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const send = (status: number, body: unknown) => {
-      res.writeHead(status, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(body));
-    };
-    const match = /^\/v1\/internal\/statements\/([^/?]+)$/.exec(req.url ?? '');
-    if (!match) return send(404, { code: 'NOT_FOUND', message: `Cannot GET ${req.url}` });
-    const token = req.headers['x-internal-token'];
-    if (typeof token !== 'string' || req.headers.authorization !== undefined) {
-      return send(401, { code: 'UNAUTHENTICATED', message: 'Authentication required' });
-    }
-    let claims;
-    try {
-      claims = await this.tokens.verify(token, 'contract-service');
-    } catch {
-      return send(401, { code: 'UNAUTHENTICATED', message: 'Authentication required' });
-    }
-    if (claims.callerService !== 'economic-service' || claims.purpose !== 'SERVICE') {
-      return send(403, { code: 'FORBIDDEN', message: 'Forbidden' });
-    }
-    if (!claims.organizationId) {
-      return send(403, { code: 'SERVICE_TENANT_CONTEXT_INVALID', message: 'No tenant' });
-    }
-    const statementId = decodeURIComponent(match[1]!);
-    this.asked.push({ statementId, organizationId: claims.organizationId });
-    // Down or silent only once the question was asked, with a valid token.
-    if (this.mode === 'hang') {
-      this.held.push(res);
-      return;
-    }
-    if (this.mode === 'down') return send(503, { code: 'INTERNAL_ERROR', message: 'down' });
-    const fact = this.statements.get(statementId);
-    if (!fact || fact.payerOrganizationId !== claims.organizationId) {
-      return send(404, { code: 'NOT_FOUND', message: 'Statement not found' });
-    }
-    send(200, fact);
-  }
-}
 
 describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () => {
   let prisma: PrismaService;
@@ -866,6 +801,247 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
         expect(await obligationsOf(statementId, harness.prisma)).toHaveLength(0);
       },
     );
+  });
+
+  /**
+   * docs/24 Q-97 (temporary decision, 2026-10-17; review of #329 round 1,
+   * finding 1): no hold stands behind a statement's obligation, so a refund or
+   * a cancellation would move no money and only end it — a waiver of an
+   * approved payable that no replay could undo. Both are refused to every
+   * caller; a dispute only freezes it, and a platform decision lifts it.
+   */
+  describe('never refunded nor cancelled, by anyone; a dispute only freezes it (Q-97)', () => {
+    let harness: ApiHarness;
+    let api: Server;
+    let apiConsumer: StatementSettlementConsumer;
+    const payer = apiTenant('STM-W-EMPLOYER');
+    const payee = apiTenant('STM-W-CONTRACTOR');
+    const outsider = apiTenant('STM-W-OUTSIDER');
+    const REFUSED =
+      "An approved statement's obligation is not refunded or cancelled; the statement is corrected only by a compensating statement";
+
+    type Caller = { header: string; value: () => Promise<string> };
+    const person = (token: () => string): Caller => ({
+      header: 'authorization',
+      value: async () => `Bearer ${token()}`,
+    });
+    const saga = (organizationId: () => string): Caller => ({
+      header: 'x-internal-token',
+      value: () => internalToken('marketplace-service', { organizationId: organizationId() }),
+    });
+
+    // Every caller either route admits: both parties' financial administrators,
+    // both platform roles acting from elsewhere, each platform role acting for
+    // the payer itself, and the one service the routes allow, for either party.
+    const callers: [string, Caller][] = [
+      ['the payee’s ORGANIZATION_ADMIN', person(() => admin(payee))],
+      ['the payer’s ORGANIZATION_ADMIN', person(() => admin(payer))],
+      ['a SYSTEM_ADMIN acting from elsewhere', person(() => platformAdmin())],
+      [
+        // Refused before the hierarchy is asked: organization-service is not
+        // stood up here, and asking it would answer 503, not this refusal.
+        'a UNION_ADMIN acting from elsewhere',
+        person(() => admin(apiTenant('STM-W-UNION'), ['UNION_ADMIN'], 'union')),
+      ],
+      ['the payer’s own SYSTEM_ADMIN', person(() => admin(payer, ['SYSTEM_ADMIN'], 'own-sys'))],
+      ['the payer’s own UNION_ADMIN', person(() => admin(payer, ['UNION_ADMIN'], 'own-union'))],
+      ['marketplace-service for the payer', saga(() => payer)],
+      ['marketplace-service for the payee', saga(() => payee)],
+    ];
+
+    beforeAll(async () => {
+      harness = await startApi();
+      api = harness.app.getHttpServer() as Server;
+      apiConsumer = consumerWith(null, wire(harness.prisma), harness.prisma);
+      const wallet = await walletOf(payer);
+      await request(api)
+        .post(`/v1/wallets/${wallet.id}/top-up`)
+        .set('authorization', `Bearer ${admin(payer)}`)
+        .set('idempotency-key', id('stm-w-fund'))
+        .send({ amountMinor: '100000000' })
+        .expect(201);
+      await walletOf(payee);
+    });
+
+    afterAll(async () => {
+      await cleanup(harness.prisma, [payer, payee, outsider]);
+      await harness.close();
+    });
+
+    async function walletOf(organizationId: string) {
+      const wallet = await request(api)
+        .get('/v1/wallets/me')
+        .set('authorization', `Bearer ${admin(organizationId)}`)
+        .expect(200);
+      return {
+        id: wallet.body.id as string,
+        available: BigInt(wallet.body.availableBalanceMinor),
+        pending: BigInt(wallet.body.pendingBalanceMinor),
+        ledger: BigInt(wallet.body.ledgerBalanceMinor),
+      };
+    }
+
+    /** One approval, consumed: its obligation's id, and the event that recorded it. */
+    async function obligation(): Promise<{
+      transactionId: string;
+      payload: Record<string, unknown>;
+    }> {
+      const { fact, payload } = approved({
+        payerOrganizationId: payer,
+        beneficiaryOrganizationId: payee,
+        netMinor: '4200000',
+      });
+      await apiConsumer.handle(envelope(payload));
+      const [row] = await obligationsOf(fact.statementId, harness.prisma);
+      return { transactionId: row!.id, payload };
+    }
+
+    async function command(
+      transactionId: string,
+      act: 'refund' | 'cancel' | 'dispute' | 'resolve-dispute',
+      caller: Caller,
+      status: number,
+      key = id(`stm-w-${act}`),
+    ) {
+      const body =
+        act === 'dispute'
+          ? { reason: 'The measured quantities are contested.' }
+          : act === 'resolve-dispute'
+            ? { resolution: 'Measurements confirmed on site.' }
+            : { reason: 'Asked for in the statement suite.' };
+      return request(api)
+        .post(`/v1/transactions/${transactionId}/${act}`)
+        .set(caller.header, await caller.value())
+        .set('idempotency-key', key)
+        .send(body)
+        .expect(status);
+    }
+
+    const statusOf = async (transactionId: string) =>
+      (
+        await request(api)
+          .get(`/v1/transactions/${transactionId}`)
+          .set('authorization', `Bearer ${admin(payer)}`)
+          .expect(200)
+      ).body.status as string;
+
+    const recordedActions = (transactionId: string) =>
+      runUnscoped('the suite reads one transaction’s outbox records', async () =>
+        (
+          await harness.prisma.client.outboxMessage.findMany({
+            where: { aggregateId: transactionId, eventName: 'TRANSACTION_STATUS_CHANGED' },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          })
+        ).map((m) => (m.payload as { payload: { action: string } }).payload.action),
+      );
+
+    const settle = (transactionId: string) =>
+      request(api)
+        .post('/v1/settlements')
+        .set('authorization', `Bearer ${admin(payer)}`)
+        .set('idempotency-key', id('stm-w-settle'))
+        .send({ transactionId });
+
+    describe.each(['refund', 'cancel'] as const)('%s', (act) => {
+      it.each(callers)(`refused to %s: 422, fixed words, nothing moved`, async (_who, caller) => {
+        const { transactionId } = await obligation();
+        const before = await walletOf(payer);
+
+        const response = await command(transactionId, act, caller, 422);
+
+        expect(response.body).toMatchObject({ code: 'BUSINESS_RULE_VIOLATION', message: REFUSED });
+        expect(response.body.message).not.toContain(transactionId);
+        expect(await statusOf(transactionId)).toBe('PENDING_SETTLEMENT');
+        expect(await walletOf(payer)).toEqual(before);
+        expect(await recordedActions(transactionId)).toEqual(['RECORD_AUTHORISED_OBLIGATION']);
+      });
+
+      it('a non-party still learns nothing: 404, before this refusal', async () => {
+        const { transactionId } = await obligation();
+
+        const response = await command(
+          transactionId,
+          act,
+          person(() => admin(outsider)),
+          404,
+        );
+
+        expect(response.body.code).toBe('NOT_FOUND');
+        expect(await statusOf(transactionId)).toBe('PENDING_SETTLEMENT');
+      });
+    });
+
+    it('a disputed obligation is not refunded either, even by a SYSTEM_ADMIN', async () => {
+      const { transactionId } = await obligation();
+      await command(
+        transactionId,
+        'dispute',
+        person(() => admin(payer)),
+        200,
+      );
+
+      for (const [, caller] of callers) {
+        const response = await command(transactionId, 'refund', caller, 422);
+        expect(response.body.message).toBe(REFUSED);
+      }
+      expect(await statusOf(transactionId)).toBe('DISPUTED');
+    });
+
+    it('a dispute freezes it and a platform decision lifts it; then it settles in full', async () => {
+      const { transactionId } = await obligation();
+      const before = await walletOf(payer);
+
+      await command(
+        transactionId,
+        'dispute',
+        person(() => admin(payer)),
+        200,
+      );
+      const frozen = await settle(transactionId).expect(409);
+      expect(frozen.body.code).toBe('INVALID_STATE_TRANSITION');
+
+      const resolved = await command(
+        transactionId,
+        'resolve-dispute',
+        person(() => platformAdmin()),
+        200,
+      );
+      expect(resolved.body.status).toBe('PENDING_SETTLEMENT');
+
+      expect(await recordedActions(transactionId)).toEqual([
+        'RECORD_AUTHORISED_OBLIGATION',
+        'DISPUTE',
+        'RESOLVE_DISPUTE',
+      ]);
+      expect(await walletOf(payer)).toEqual(before);
+
+      const settled = await settle(transactionId).expect(201);
+      expect(BigInt(settled.body.grossAmountMinor)).toBe(4_200_000n);
+      expect(await statusOf(transactionId)).toBe('SETTLED');
+      expect((await walletOf(payer)).available).toBe(before.available - 4_200_000n);
+    });
+
+    it('after a refused refund: the same key is refused again, a replayed approval finds the same live obligation, and it settles', async () => {
+      const { transactionId, payload } = await obligation();
+      const payeeAdmin = person(() => admin(payee));
+      const key = id('stm-w-replay');
+
+      const first = await command(transactionId, 'refund', payeeAdmin, 422, key);
+      const again = await command(transactionId, 'refund', payeeAdmin, 422, key);
+      expect(again.body).toMatchObject({ code: first.body.code, message: REFUSED });
+      await command(transactionId, 'cancel', payeeAdmin, 422);
+
+      // The approval, re-emitted under a new event id and redelivered: still
+      // the one obligation, still owed.
+      await expect(apiConsumer.handle(envelope(payload))).resolves.toBeUndefined();
+      const rows = await obligationsOf(String(payload.statementId), harness.prisma);
+      expect(rows.map((row) => [row.id, row.status])).toEqual([
+        [transactionId, 'PENDING_SETTLEMENT'],
+      ]);
+
+      await settle(transactionId).expect(201);
+      expect(await statusOf(transactionId)).toBe('SETTLED');
+    });
   });
 });
 

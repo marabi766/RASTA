@@ -8,7 +8,13 @@
 -- ux_transaction_source_fact, and still settles through POST /v1/settlements.
 -- What the rollback gives up is the database's own refusal to change or delete
 -- it, and to let POST /v1/transactions claim the source type — the previous
--- release's API does not refuse it either, which is the residual of running it.
+-- release's API does not refuse it either, nor a refund or cancellation of an
+-- obligation (docs/24 Q-97), which is the residual of running it.
+--
+-- Applying the migration again accepts every obligation the consumer
+-- recorded — each is linked to its processed_event marker, which this file
+-- keeps too — and refuses, with nothing changed, any STATEMENT row the
+-- previous release let POST /v1/transactions write meanwhile (its HINT).
 BEGIN;
 
 SET LOCAL lock_timeout = '3s';

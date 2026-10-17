@@ -21,23 +21,42 @@
 --    cancellation columns) moves as for any obligation; pricing is already
 --    fixed by trg_transaction_pricing_fixed.
 --
--- Populated databases: no row can carry source_type 'STATEMENT' before this
--- release except through POST /v1/transactions. Such a row is checked first
--- and refused loudly, with nothing changed: which of them, if any, is an
--- obligation someone owes is a financial decision for a person.
+-- Populated databases. A STATEMENT row can already exist in two ways, and
+-- only one of them is an obligation:
+--
+-- - recorded by the STATEMENT_APPROVED consumer, when this migration was
+--   applied, rolled back by down.sql (which keeps every row) and is applied
+--   again. Such a row is provably the consumer's: its causation_id is an
+--   event the consumer marked processed in the same transaction —
+--   processed_event under 'economic-service.statement-settlement'
+--   (StatementSettlementConsumer.CONSUMER_NAME), which nothing deletes.
+--   POST /v1/transactions never writes a causation id nor that marker, in
+--   this release or any earlier one. Accepted as it is; the CHECK below still
+--   holds it to the consumer's shape.
+-- - written through POST /v1/transactions, by a release that did not reserve
+--   the source type (any before this one, or the previous release during a
+--   rollback). Not an approval's obligation, and it holds the key the real
+--   approval needs. Counted and refused loudly, with nothing changed: what
+--   happens to it is a financial decision for a person (the HINT).
 DO $$
 DECLARE
   offending integer;
 BEGIN
   SELECT count(*) INTO offending
-    FROM "transaction"
-   WHERE "source_type" = 'STATEMENT';
+    FROM "transaction" t
+   WHERE t."source_type" = 'STATEMENT'
+     AND NOT EXISTS (
+       SELECT 1
+         FROM "processed_event" p
+        WHERE p."event_id" = t."causation_id"
+          AND p."consumer_name" = 'economic-service.statement-settlement'
+     );
 
   IF offending > 0 THEN
     RAISE EXCEPTION
-      'transaction: % row(s) already carry source_type STATEMENT; refusing to reserve it',
+      'transaction: % row(s) carry source_type STATEMENT without being recorded by the STATEMENT_APPROVED consumer; refusing to reserve it',
       offending
-      USING HINT = 'List them with: SELECT id, organization_id, source_reference, status, created_by FROM "transaction" WHERE source_type = ''STATEMENT''; resolve each by a recorded financial decision (cancel or refund it), never by DELETE or UPDATE.';
+      USING HINT = 'List them with: SELECT id, organization_id, source_reference, status, created_by, idempotency_key, causation_id FROM "transaction" t WHERE source_type = ''STATEMENT'' AND NOT EXISTS (SELECT 1 FROM processed_event p WHERE p.event_id = t.causation_id AND p.consumer_name = ''economic-service.statement-settlement''); none is an approved statement''s obligation. For each, record the financial decision on it under the release now running (cancel or refund it if nobody owes it), then take it off the reserved type by a reviewed data correction recorded with that decision: UPDATE "transaction" SET source_type = ''STATEMENT_UNCONFIRMED'' WHERE id = <id>. Never DELETE it.';
   END IF;
 END $$;
 
