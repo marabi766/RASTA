@@ -59,6 +59,11 @@ describe('TOPIC_CONSUMERS', () => {
         subscribes: ['rasta.construction.v1', 'rasta.organization.v1'],
         deadLetterTopic: 'rasta.contract.v1.dlq',
       },
+      // RUN-005: the physical half of a return, mirrored onto marketplace's own request.
+      'marketplace-service': {
+        subscribes: ['rasta.inventory.v1'],
+        deadLetterTopic: 'rasta.marketplace.v1.dlq',
+      },
       'supplier-service': {
         subscribes: ['rasta.marketplace.v1'],
         deadLetterTopic: 'rasta.supplier.v1.dlq',
@@ -153,11 +158,11 @@ describe('consumerDeclarationProblem', () => {
 
   it('refuses an undeclared service', () => {
     expect(
-      consumerDeclarationProblem('marketplace-service', {
+      consumerDeclarationProblem('organization-service', {
         ...fleet,
-        groupId: 'marketplace-service.x',
+        groupId: 'organization-service.x',
       }),
-    ).toMatch(/marketplace-service is not declared/);
+    ).toMatch(/organization-service is not declared/);
     expect(isDeclaredConsumer('toString')).toBe(false);
   });
 

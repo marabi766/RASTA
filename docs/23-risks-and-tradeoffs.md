@@ -2269,7 +2269,21 @@ refusing to drop acting_organization_id` و هیچ چیز را عوض نمی‌�
   `RETURN_SHIPMENT_*` را Idempotent (`processed_event` + `streamSeq`) مصرف می‌کند و وضعیت درخواست را به `IN_TRANSIT … RESOLVED`
   می‌برد. **Refund ساخته نمی‌شود:** economic-service برای سفارش تسویه‌شده عملیاتی ندارد (`docs/10` § ۱۰٫۴، **Q-76**)؛ این
   زنجیره فقط واقعیت‌هایی را روی Topic می‌گذارد که آن عملیات روزی لازم دارد. پنجرهٔ مرجوعی پیکربندی است و پیش‌فرض ندارد (**Q-132**).
-- **رفع:** تکمیل PR ۲ و ۳، پاسخ Q-76 (برای Refund) و بستن Q-132 و Q-133.
+- **PR ۳ (RUN-005، ساخته‌شده).** `ReturnMirrorConsumer` (گروه `marketplace-service.return-mirror`، `rasta.inventory.v1`، DLQ
+  `rasta.marketplace.v1.dlq`) چهار رویداد `RETURN_SHIPMENT_*` را پس از سنجش با درخواست ذخیره‌شده به
+  `IN_TRANSIT → RECEIVED → INSPECTED → RESOLVED` (نسخهٔ ۳ تا ۶) می‌برد و `RETURN_IN_TRANSIT … RETURN_RESOLVED` را با Outbox منتشر
+  می‌کند. Migration برگشت‌پذیر `20261016140000_return_request_physical` همان `CHECK`ها و Trigger را گسترش می‌دهد (شناسهٔ محموله و
+  لحظهٔ هر گام پس از ثبت تغییرناپذیرند؛ `down` با وجود درخواستِ فیزیکی رد می‌کند). **مستأجر:** از Envelope، برابر سازمان Payload
+  (ADR-061 § ۵)، و تأمین‌کننده/خریدار/سفارش درخواست باید همان‌های رویداد باشند؛ ناهم‌خوانی ← `SOURCE_UNCONFIRMED`، هیچ نوشتنی.
+  **Idempotency:** قفل ردیف درخواست، نسخهٔ درخواست = جای محموله، `processed_event` در همان تراکنش، و کلید تاریخچه = Hash شناسهٔ
+  رویداد. **ترتیب:** گام تکراری یا کهنه بی‌اثر است؛ گامی که پیش از گام قبلی برسد **اعمال نمی‌شود** — تلاش دوباره و سپس DLQ
+  (`MAX_RETRIES_EXCEEDED`) تا پس از گام قبلی Replay شود. **پارک خودکار ساخته نشده** (مثل fleet نیست): ریسک فقط وقتی است که گام قبلی
+  خودش به DLQ رفته باشد، و آن‌گاه هر دو با هم Replay می‌شوند. **پول:** هیچ گامی اثر مالی ندارد، `RESOLVED` Refund نیست و
+  منبعی پرسیده نمی‌شود (ADR-061 § ۴ لازم نیست). Consumer پیش‌فرض خاموش است و بی Broker احرازشده روشن نمی‌شود
+  (`MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED`). یک خطای PR ۱ هم بسته شد: تعداد «باز» یک ردیف سفارش فقط `REQUESTED`/`AUTHORIZED`
+  را می‌شمرد، پس کالای در راه یا رسیده دوباره قابل مرجوعی می‌شد — اکنون هر درخواستی جز `REJECTED`/`CANCELLED` (سرویس و Trigger).
+  تصمیم تازهٔ موقت: Q-133 (8).
+- **رفع:** پاسخ Q-76 (برای Refund) و بستن Q-132 و Q-133.
 - **اولویت:** متوسط
 - **ثبت‌شده:** 2026-10-16
 

@@ -26,5 +26,11 @@ export function toReturnView(row: ReturnRequestRow): ReturnRequestView {
     cancelledAt: iso(row.cancelledAt),
     cancelledBy: row.cancelledBy,
     cancelledFrom: row.cancelledFrom,
+    returnShipmentId: row.returnShipmentId,
+    inTransitAt: iso(row.inTransitAt),
+    receivedAt: iso(row.receivedAt),
+    inspectedAt: iso(row.inspectedAt),
+    inspectionReportDocumentId: row.inspectionReportDocumentId,
+    resolvedAt: iso(row.resolvedAt),
   };
 }

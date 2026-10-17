@@ -90,6 +90,8 @@
         "MARKETPLACE_RETURN_WINDOW_DAYS",
         "INVENTORY_RETURN_DISPOSITIONS_ALLOWED",
         "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
+        "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
+        "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
         "ANALYTICS_*",
         "CORS_ORIGINS"
       ]
@@ -151,6 +153,8 @@
         "MARKETPLACE_RETURN_WINDOW_DAYS",
         "INVENTORY_RETURN_DISPOSITIONS_ALLOWED",
         "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
+        "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
+        "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
         "ANALYTICS_*",
         "CORS_ORIGINS"
       ]
@@ -250,7 +254,10 @@
     // the dispositions a return may resolve to, empty by default — unset, no
     // return can be resolved. INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED (Q-133 (4))
     // likewise: false by default — unset, a return of which nothing arrived is
-    // not resolved.
+    // not resolved. MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED (RUN-005 PR 3)
+    // likewise: false by default, and refused without an authenticated broker.
+    // MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED (Q-133 (8)): false by default —
+    // a return shipment names exactly what was authorized.
     //
     // ANALYTICS_* (RUN-001, ADR-071): analytics-service's own settings — the
     // fleet dashboard's readers and the projection switch — declared from its
@@ -283,6 +290,8 @@
         "MARKETPLACE_RETURN_WINDOW_DAYS",
         "INVENTORY_RETURN_DISPOSITIONS_ALLOWED",
         "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
+        "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
+        "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
         "ANALYTICS_*",
         "CORS_ORIGINS"
       ]
