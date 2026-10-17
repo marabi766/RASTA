@@ -67,6 +67,11 @@ describe('TOPIC_CONSUMERS', () => {
         subscribes: Object.keys(TOPIC_PRODUCERS),
         deadLetterTopic: 'rasta.audit.v1.dlq',
       },
+      // RUN-001 PR 1: the first read model, MAINTENANCE_COMPLETED → fact_maintenance (ADR-071).
+      'analytics-service': {
+        subscribes: ['rasta.maintenance.v1'],
+        deadLetterTopic: 'rasta.analytics.v1.dlq',
+      },
     });
   });
 

@@ -71,6 +71,7 @@ const SERVICES = [
   'CONSTRUCTION',
   'CONTRACT',
   'INVENTORY',
+  'ANALYTICS',
   'NOTIFICATION',
   'AUDIT',
 ];

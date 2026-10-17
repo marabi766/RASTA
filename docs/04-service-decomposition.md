@@ -821,6 +821,12 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 | **CONSTRAINT**  | KPIهای وابسته به خط مبنا تا پر شدن `baseline_metric` وضعیت `INSUFFICIENT_BASELINE` برمی‌گردانند — **نه صفر، نه تخمین.**                      |
 | **ADR**         | [ADR-071](adr/ADR-071-analytics-read-models-and-governed-views.md) — `Proposed`. فقط Kafka؛ Q-141، Q-142                                     |
 
+> **وضعیت (RUN-001 PR 1، 2026-10-17).** سرویس ساخته شد (پورت ۳۱۱۶، `rasta_analytics`، تقسیم نقش D-045، بی Outbox): نخستین Fact،
+> `fact_maintenance` از `MAINTENANCE_COMPLETED` (فقط‌الحاقی، یکتا به‌ازای سازمان و درخواست، نشانگر `processed_event` در همان
+> تراکنش) و `GET /v1/dashboards/fleet` برای سازمان فعال (پیش‌فرض `ORGANIZATION_ADMIN` و `FLEET_MANAGER`؛ `AUDITOR` رد). Consumer
+> پیش‌فرض خاموش است و فقط با اتصال احرازشده به بروکر روشن می‌شود. بقیهٔ Factها، `kpi_snapshot`، `baseline_metric` و نمای
+> حاکمیتی برش‌های بعدی [برنامهٔ اجرا](adr/ADR-071-implementation-plan.md)اند.
+
 ---
 
 ## ۴٫۱۶ ماتریس وابستگی

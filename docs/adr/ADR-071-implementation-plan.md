@@ -31,6 +31,9 @@ Projection رویدادمحور و ایمن) و با ۴ تا ۶ گسترده؛ *
 
 ### PR 1 — Skeleton و نخستین Projection (`XL`)
 
+> **وضعیت (2026-10-17):** پیاده در `feat/analytics-skeleton`. دروازهٔ پوشش CI ـِ analytics (Step جدا در `integration-coverage`)
+> در این برش نیست؛ آستانهٔ ۷۵٪ `docs/14` در `jest.config.js` هست و Step آن پیگیری بعدی است.
+
 - `services/analytics-service` (پورت ۳۱۱۶، `rasta_analytics`، نقش مالک/زمان‌اجرا D-045) با همان اسکلت سرویس‌های دیگر: `env`،
   Health، OpenAPI از Zod، Prisma با Tenant Scope، متریک بی برچسب سازمان، Dockerfile، CI (Integration و Migration).
 - **بی Outbox و بی Topic اصلی**؛ فقط `rasta.analytics.v1.dlq`. اعلام در `TOPIC_CONSUMERS` (`rasta.maintenance.v1`)، ACLهای

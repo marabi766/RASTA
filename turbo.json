@@ -89,7 +89,9 @@
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",
         "INVENTORY_RETURN_DISPOSITIONS_ALLOWED",
-        "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED"
+        "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
+        "ANALYTICS_*",
+        "CORS_ORIGINS"
       ]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
@@ -148,7 +150,9 @@
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",
         "INVENTORY_RETURN_DISPOSITIONS_ALLOWED",
-        "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED"
+        "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
+        "ANALYTICS_*",
+        "CORS_ORIGINS"
       ]
     },
     // identity-service's two 500-write aggregation proofs, run alone after the
@@ -247,6 +251,13 @@
     // return can be resolved. INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED (Q-133 (4))
     // likewise: false by default — unset, a return of which nothing arrived is
     // not resolved.
+    //
+    // ANALYTICS_* (RUN-001, ADR-071): analytics-service's own settings — the
+    // fleet dashboard's readers and the projection switch — declared from its
+    // first commit. CORS_ORIGINS with them: every service's schema reads it, and
+    // declaring it for analytics declares it for all, so it leaves the withheld
+    // list in the three tasks above (identity's aggregation-stress task still
+    // withholds it).
     "dev": {
       "cache": false,
       "persistent": true,
@@ -271,7 +282,9 @@
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",
         "INVENTORY_RETURN_DISPOSITIONS_ALLOWED",
-        "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED"
+        "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
+        "ANALYTICS_*",
+        "CORS_ORIGINS"
       ]
     },
     "clean": { "cache": false }

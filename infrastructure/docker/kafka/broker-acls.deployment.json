@@ -2,6 +2,7 @@
   "profile": "deployment",
   "admin": "admin",
   "principals": [
+    "analytics-service",
     "asset-service",
     "audit-service",
     "construction-service",
@@ -19,6 +20,34 @@
     "supplier-service"
   ],
   "acls": [
+    {
+      "principal": "analytics-service",
+      "resourceType": "GROUP",
+      "resourceName": "analytics-service.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "analytics-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.analytics.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "analytics-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "analytics-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
     {
       "principal": "asset-service",
       "resourceType": "GROUP",
@@ -731,6 +760,13 @@
       "resourceType": "GROUP",
       "resourceName": "ops-replay.",
       "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.analytics.v1.dlq",
+      "patternType": "LITERAL",
       "operation": "READ"
     },
     {

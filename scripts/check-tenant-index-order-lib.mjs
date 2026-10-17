@@ -51,6 +51,7 @@ export const SERVICES = [
   'construction',
   'contract',
   'inventory',
+  'analytics',
   'organization',
   'fleet',
   'identity',
