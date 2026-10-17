@@ -236,6 +236,29 @@ const schema = z.object({
     .max(30 * 60)
     .default(10 * 60),
 
+  /**
+   * How long construction-service keeps an idempotency record, in hours — the
+   * window in which a bid re-sent under its original key is answered with its
+   * stored receipt rather than run again (`server/bid-replay.ts`).
+   *
+   * This **mirrors** construction-service's `CONSTRUCTION_IDEMPOTENCY_TTL_HOURS`
+   * (same bounds, 1..168) and must be changed together with it, or set lower.
+   * The default is that setting's floor, as for economic-service's above.
+   */
+  WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+
+  /**
+   * How much earlier than that retention the portal stops re-sending a bid
+   * command, in seconds: room for the request to reach construction-service.
+   * Same bounds as the dispute margin.
+   */
+  WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .max(30 * 60)
+    .default(10 * 60),
+
   WEB_COOKIE_SECURE: z
     .enum(['true', 'false'])
     .default('true')

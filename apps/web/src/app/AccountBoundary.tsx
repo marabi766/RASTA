@@ -17,6 +17,11 @@ import {
   purgeAllUnresolvedStatements,
   purgeForeignUnresolvedStatements,
 } from '@/lib/unresolved-statement';
+import {
+  markBidsOpen,
+  purgeAllUnresolvedBids,
+  purgeForeignUnresolvedBids,
+} from '@/lib/unresolved-bid';
 
 /**
  * The browser's side of an account boundary: what an unresolved order,
@@ -24,7 +29,9 @@ import {
  * (`lib/unresolved-order.ts`, `lib/unresolved-dispute.ts`,
  * `lib/unresolved-statement.ts`) must not outlive. All follow the same rules;
  * a statement command is reduced to a marker at logout like a dispute command
- * (a draft repeated under a fresh key is a second statement).
+ * (a draft repeated under a fresh key is a second statement). A bid command's
+ * record (`lib/unresolved-bid.ts`) is a marker from the start — it never holds
+ * the bid — so a logout only stops it being written again.
  *
  * - **Logout.** Any form posting to `/auth/logout` — every portal page has its
  *   own — empties every remembered order before the navigation leaves. A capture
@@ -56,9 +63,11 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
     markAccountOpen();
     markDisputesOpen();
     markStatementsOpen();
+    markBidsOpen();
     purgeForeignUnresolvedOrders(owner);
     purgeForeignUnresolvedDisputes(owner);
     purgeForeignUnresolvedStatements(owner);
+    purgeForeignUnresolvedBids(owner);
   }, [owner]);
 
   useEffect(() => {
@@ -68,6 +77,7 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
         purgeAllUnresolvedOrders();
         purgeAllUnresolvedDisputes();
         purgeAllUnresolvedStatements();
+        purgeAllUnresolvedBids();
       }
     };
     document.addEventListener('submit', onSubmit, true);

@@ -101,6 +101,27 @@ separation-of-duties refusal, the financial approval.
 - Each run adds one approved statement to the fixture's contract, found by the
   id its own draft returned; the contract's price is large enough for many runs.
 
+## A contractor's bid (`tender-bids.spec.ts`) — a fresh tender per test, through the routes
+
+Unlike the contract scenarios, a tender can be made through the platform's own routes, so
+nothing here is a fixture: `tender-cast.ts` makes, **once per run** (per hook run, so a retry in
+a new worker makes its own), an owner organization under ORG-UNION-YAZD with its
+`project.execution` and `tender.publication` policies (written by `union.admin`, put in force by
+`system.admin`), two of its administrators (the one who asks never approves), an approved
+project, a contractor qualified for CONTRACTING at supplier-service, an invited contractor that
+is not, and a contractor of ORG-DEH-0002. **Every test publishes its own tender** on that
+project, so a retry bids on a tender nobody has bid on. In the browser: submit, replace and
+withdraw a bid (read back with the contractor's own token — receipt and status, never content);
+the unqualified contractor refused `BIDDER_NOT_ELIGIBLE` in fixed words; a form drawn before
+the deadline and sent after it refused `BID_WINDOW_CLOSED` (the test waits on the clock for
+about 45 s); the other tenant's contractor shown the restricted tender as a missing id.
+
+- It needs `WEB_LIVE_STACK_E2E_TENDERS=true`: construction-service started with a
+  `CONSTRUCTION_TENDER_KEKS` key (the job mints one per run) and supplier-service up. Under
+  `CI` a skip fails the job.
+- It reruns locally against the same stack: every run makes new organizations, people and
+  tenders, and cleans up nothing, as for settlements.
+
 ## Adding a live scenario
 
 - Record the id of everything the scenario creates and clean up by id, not by
