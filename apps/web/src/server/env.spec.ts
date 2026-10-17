@@ -155,6 +155,49 @@ describe('who is shown the Contracts link', () => {
   });
 });
 
+describe('who is drawn the contract command forms, and with which reasons', () => {
+  it("defaults to contract-service's own defaults", () => {
+    const env = loadWebServerEnv(REQUIRED);
+    expect(env.WEB_CONTRACT_CANCEL_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+    expect(env.WEB_CONTRACT_AMENDMENT_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+    expect(env.WEB_CONTRACT_MILESTONE_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+    expect(env.WEB_CONTRACT_CANCEL_AFTER_SIGNATURE).toBe(false);
+    expect(env.WEB_CONTRACT_CANCEL_REASON_CODES).toEqual([
+      'TERMS_NOT_AGREED',
+      'CONTRACTOR_WITHDREW',
+      'AWARD_ERROR',
+      'OTHER',
+    ]);
+    expect(env.WEB_CONTRACT_AMENDMENT_REASON_CODES).toEqual([
+      'SCOPE_CHANGE',
+      'PRICE_ADJUSTMENT',
+      'SCHEDULE_CHANGE',
+      'OTHER',
+    ]);
+  });
+
+  it('an empty role list means nobody, as there; AUDITOR refuses to start', () => {
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_CANCEL_ROLES: '' }).WEB_CONTRACT_CANCEL_ROLES,
+    ).toEqual([]);
+    expect(() =>
+      loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_MILESTONE_ROLES: 'AUDITOR' }),
+    ).toThrow(/WEB_CONTRACT_MILESTONE_ROLES/);
+  });
+
+  it('a reason list is closed codes, at least one, none twice', () => {
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_CANCEL_REASON_CODES: ' OTHER , CLIENT_CODE ' })
+        .WEB_CONTRACT_CANCEL_REASON_CODES,
+    ).toEqual(['OTHER', 'CLIENT_CODE']);
+    for (const refused of ['', 'lower_case', 'OTHER,OTHER']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_AMENDMENT_REASON_CODES: refused }),
+      ).toThrow(/WEB_CONTRACT_AMENDMENT_REASON_CODES/);
+    }
+  });
+});
+
 describe('the dispute replay deadline (PR 319 review 2, finding 2)', () => {
   it('defaults to economic-service’s floor, not its default, less ten minutes', () => {
     const env = loadWebServerEnv(REQUIRED);
