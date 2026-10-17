@@ -90,7 +90,10 @@ const CONTRACT: ContractDetail = {
   version: 3,
 };
 
-const EMPTY_PAGE = { kind: 'OK', data: { items: [], nextCursor: null, hasMore: false } } as const;
+const EMPTY_PAGE: ReadResult<StatementPage> = {
+  kind: 'OK',
+  data: { items: [], nextCursor: null, hasMore: false },
+};
 
 function contractPage(
   statements: ReadResult<StatementPage>,
