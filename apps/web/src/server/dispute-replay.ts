@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import type { DisputeTarget } from '@/lib/transaction-dispute-fields';
 import type { DisputeSubmission, ReplayStamp } from '@/lib/unresolved-dispute';
 
 import { webServerEnv, type WebServerEnv } from './env';
@@ -44,6 +45,16 @@ import { mintSubmissionId } from './submission';
  * economic-service after its shorter-lived record had gone. A longer window
  * never extends a stamp: its signed expiry still binds.
  *
+ * ## Which dispute a resolution decides
+ *
+ * A resolution's stamp also signs **the dispute the page showed**
+ * (`DisputeTarget`, docs/23 D-053), and the action sends that identity — from
+ * the verified stamp, never from the form and never read again — so the first
+ * send and every retry under the key name the same dispute. economic-service
+ * applies it only while the transaction still holds that dispute (PR 325
+ * review 1, finding 1). A stamp that names none (opening a dispute, or a stamp
+ * signed before this field existed) cannot carry a resolution.
+ *
  * It is `signed-payload.ts`' construction: bound to this login, readable by
  * whoever holds it (nothing secret in it), not a credential for anything.
  */
@@ -57,7 +68,13 @@ const replaySchema = z.object({
   issuedAt: z.number().int().nonnegative(),
   /** The signed expiry again, in milliseconds, for the browser to draw the right controls. */
   until: z.number().int(),
+  /** The dispute a resolution decides; absent or null when it decides none. */
+  disputeId: z.string().min(1).max(64).nullable().optional(),
 });
+
+/** A transaction id alone is a target that decides no dispute. */
+const targetOf = (target: DisputeTarget | string): DisputeTarget =>
+  typeof target === 'string' ? { transactionId: target, disputeId: null } : target;
 
 type ReplayEnv = Pick<
   WebServerEnv,
@@ -69,14 +86,15 @@ export function replayWindowSeconds(env: ReplayEnv = webServerEnv()): number {
   return env.WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS * 60 * 60 - env.WEB_DISPUTE_REPLAY_MARGIN_SECONDS;
 }
 
-/** The stamp for `submissionId` on `transactionId`, from `now`. */
+/** The stamp for `submissionId` on the target (a transaction, and the dispute a resolution decides), from `now`. */
 export function mintReplayStamp(
   session: WebSession,
-  transactionId: string,
+  target: DisputeTarget | string,
   submissionId: string,
   now: number = Date.now(),
   env: ReplayEnv = webServerEnv(),
 ): ReplayStamp {
+  const { transactionId, disputeId } = targetOf(target);
   const window = replayWindowSeconds(env);
   // The same instant `signPayload` signs as its expiry. Advisory in the
   // browser; the action decides from the signed expiry itself.
@@ -85,7 +103,7 @@ export function mintReplayStamp(
     token: signPayload(
       session,
       PURPOSE,
-      { transactionId, submissionId, issuedAt: now, until },
+      { transactionId, submissionId, issuedAt: now, until, disputeId },
       window,
       now,
     ),
@@ -93,14 +111,19 @@ export function mintReplayStamp(
   };
 }
 
-/** A fresh submission id for a dispute form on `transactionId`, with its stamp. */
+/** A fresh submission id for a dispute form on the target, with its stamp. */
 export function mintDisputeSubmission(
   session: WebSession,
-  transactionId: string,
+  target: DisputeTarget | string,
   now: number = Date.now(),
 ): DisputeSubmission {
   const id = mintSubmissionId(session);
-  return { id, replay: mintReplayStamp(session, transactionId, id, now) };
+  return { id, replay: mintReplayStamp(session, target, id, now) };
+}
+
+/** A stamp the action verified, with the dispute it binds the request to. */
+export interface VerifiedReplayStamp extends ReplayStamp {
+  readonly disputeId: string | null;
 }
 
 /**
@@ -108,7 +131,8 @@ export function mintDisputeSubmission(
  * transaction and this submission id, its signed expiry has not passed, **and**
  * it is still inside the window as configured now, counted from when it was
  * issued; otherwise null — one answer for every way it can be wrong. The
- * returned `until` is the earlier of the two deadlines.
+ * returned `until` is the earlier of the two deadlines; `disputeId` is the
+ * dispute it was signed for, or null.
  */
 export function verifyReplayStamp(
   session: WebSession,
@@ -117,7 +141,7 @@ export function verifyReplayStamp(
   submissionId: string,
   now: number = Date.now(),
   env: ReplayEnv = webServerEnv(),
-): ReplayStamp | null {
+): VerifiedReplayStamp | null {
   const payload = verifyPayload(session, PURPOSE, token, replaySchema, now);
   if (
     payload === null ||
@@ -129,5 +153,5 @@ export function verifyReplayStamp(
   }
   const current = payload.issuedAt + replayWindowSeconds(env) * 1000;
   if (now > current) return null;
-  return { token, until: Math.min(payload.until, current) };
+  return { token, until: Math.min(payload.until, current), disputeId: payload.disputeId ?? null };
 }

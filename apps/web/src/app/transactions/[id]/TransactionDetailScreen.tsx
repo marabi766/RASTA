@@ -12,7 +12,12 @@ import {
 } from '@/ui';
 import { formatJalaliDateLong } from '@/lib/format';
 import { transactionStatusLabel, transactionTypeLabel } from '@/lib/labels';
-import { disputedThroughOrder, type DisputeCommand } from '@/lib/transaction-dispute-fields';
+import {
+  disputedThroughOrder,
+  disputeTargetOf,
+  type DisputeCommand,
+  type DisputeTarget,
+} from '@/lib/transaction-dispute-fields';
 import type { DisputeSubmission } from '@/lib/unresolved-dispute';
 import type { Binding } from '@/lib/unresolved-order';
 import { formatOrderAmount } from '@/app/orders/OrdersScreen';
@@ -62,7 +67,7 @@ export interface TransactionDetailScreenProps {
    * One fresh submission id per form — each its own idempotency key — with
    * its signed replay deadline for this transaction (`server/dispute-replay.ts`).
    */
-  readonly mintSubmission: (transactionId: string) => DisputeSubmission;
+  readonly mintSubmission: (target: DisputeTarget) => DisputeSubmission;
   /** Whose login this page is for (`submissionBinding`): one-way tags. */
   readonly binding: Binding;
   readonly sessionMaxAgeSeconds: number;
@@ -107,7 +112,9 @@ export function TransactionDetailScreen({
   const money = (minor: string) => formatOrderAmount(minor, t.currency);
   const throughOrder = disputedThroughOrder(t);
   const submissions: Partial<Record<DisputeCommand, DisputeSubmission>> = {};
-  for (const command of commands) submissions[command] = mintSubmission(t.id);
+  // A resolution's submission is bound to the dispute shown here (D-053).
+  for (const command of commands)
+    submissions[command] = mintSubmission(disputeTargetOf(t, command));
 
   return (
     <div className="flex flex-col gap-4">

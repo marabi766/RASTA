@@ -1,3 +1,4 @@
+import type { SessionRefusal } from '@/lib/session-refusal';
 import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 
 /**
@@ -31,7 +32,10 @@ export type LifecycleFormState<V, F extends string> =
    */
   | { readonly kind: 'NOT_FOUND'; readonly correlationId: string }
   /** The post could not be trusted as this person's own. */
-  | { readonly kind: 'REFUSED'; readonly reason: 'NO_SESSION' | 'CSRF' | 'SUBMISSION' | 'BASELINE' }
+  | {
+      readonly kind: 'REFUSED';
+      readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION' | 'BASELINE';
+    }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
   | UnconfirmedWriteState;

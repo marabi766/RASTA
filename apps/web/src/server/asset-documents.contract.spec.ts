@@ -8,6 +8,7 @@ import { assetDocumentSchema } from '@/server/assets';
 import {
   collect,
   decoratorOf,
+  guardAdmitsAlone,
   handlerOf,
   literalsOf,
   parseSource,
@@ -85,7 +86,9 @@ describe('who may attach', () => {
     const admitted = rolesOf(assetController, 'attachDocument');
     expect(admitted.length).toBeGreaterThan(0);
     const offered = EVERY_ROLE.filter((role) => canAttachAssetDocuments([role]));
-    expect(offered.sort()).toEqual(EVERY_ROLE.filter((role) => admitted.includes(role)).sort());
+    expect(offered.sort()).toEqual(
+      EVERY_ROLE.filter((role) => guardAdmitsAlone(role, admitted)).sort(),
+    );
   });
 
   it('is a subset of the roles document-service lets upload and register a file', () => {

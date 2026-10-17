@@ -21,6 +21,7 @@ import { renderableDate } from './instant';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
+import { rolesGuardAdmits } from './roles-guard';
 
 export { fetchDriverAssignments } from './assignments';
 export type { AssignmentPage, AssignmentSummary } from './assignments';
@@ -51,7 +52,7 @@ export type { ReadResult };
  * The screen reads this to decide which forms to render — a Route Guard as
  * UX, explicitly not as security (`docs/16 § ۱۶٫۱۱`): fleet-service applies
  * its own guard again on every write regardless of what this function said,
- * and a caller whose identity read failed sees no write form rather than one
+ * and a token whose roles cannot be read offers no write form rather than one
  * that might work.
  */
 const DRIVER_MANAGEMENT_ROLES: readonly string[] = [
@@ -60,8 +61,8 @@ const DRIVER_MANAGEMENT_ROLES: readonly string[] = [
   'UNION_ADMIN',
 ];
 
-export function canManageDrivers(effectiveRoles: readonly string[]): boolean {
-  return effectiveRoles.some((role) => DRIVER_MANAGEMENT_ROLES.includes(role));
+export function canManageDrivers(roles: readonly string[]): boolean {
+  return rolesGuardAdmits(roles, DRIVER_MANAGEMENT_ROLES);
 }
 
 // ---------------------------------------------------------------------------

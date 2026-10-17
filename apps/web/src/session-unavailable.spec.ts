@@ -5,9 +5,9 @@ import { NextRequest } from 'next/server';
 
 /**
  * PR 319 review 3, finding 2, end to end in memory: the real middleware, the
- * real session refresh and coordinator, then the real `/auth/session` route
- * and the real dispute action, each reading exactly the cookie and headers
- * middleware forwarded.
+ * real session refresh and coordinator, then the real `/auth/session` route,
+ * the real dispute action and the real place-order action, each reading
+ * exactly the cookie and headers middleware forwarded.
  *
  * The access token has one second left when the refresh starts; the provider
  * takes two and fails for a reason that may pass. The login is recoverable,
@@ -29,6 +29,7 @@ delete process.env.WEB_REDIS_URL;
 let clock = 1_900_000_000_000;
 const refreshTokens = jest.fn();
 const issueDisputeCommand = jest.fn();
+const placeOrder = jest.fn();
 
 /** What middleware handed the route: its forwarded request headers and cookie. */
 let forwarded = new Headers();
@@ -40,6 +41,10 @@ jest.mock('@/server/oidc', () => {
 jest.mock('@/server/transactions', () => {
   const actual = jest.requireActual('@/server/transactions');
   return { ...actual, issueDisputeCommand: (...args: unknown[]) => issueDisputeCommand(...args) };
+});
+jest.mock('@/server/place-order', () => {
+  const actual = jest.requireActual('@/server/place-order');
+  return { ...actual, placeOrder: (...args: unknown[]) => placeOrder(...args) };
 });
 jest.mock('next/navigation', () => ({
   redirect: (url: string) => {
@@ -64,6 +69,10 @@ const { middleware } = require('./middleware') as typeof import('./middleware');
 const { GET } = require('./app/auth/session/route') as typeof import('./app/auth/session/route');
 const { submitDisputeCommand } =
   require('./app/transactions/[id]/actions') as typeof import('./app/transactions/[id]/actions');
+const { submitPlaceOrder } =
+  require('./app/marketplace/[productId]/place-order-actions') as typeof import('./app/marketplace/[productId]/place-order-actions');
+const { IDLE_PLACE_ORDER_FORM } =
+  require('./app/marketplace/[productId]/place-order-form-state') as typeof import('./app/marketplace/[productId]/place-order-form-state');
 const { OidcError } = require('@/server/oidc') as typeof import('@/server/oidc');
 const { SESSION_COOKIE, sealSession } =
   require('@/server/session') as typeof import('@/server/session');
@@ -135,12 +144,32 @@ function dispute(sessionValue: ReturnType<typeof session>) {
   };
 }
 
+/** An order form as the page drew it, and the same order once its outcome is unknown. */
+function order(sessionValue: ReturnType<typeof session>) {
+  const submission = mintSubmissionId(sessionValue);
+  const form = new FormData();
+  form.set('offerId', 'OFR_1');
+  form.set('quantity', '3');
+  form.set(CSRF_FIELD, sessionValue.csrfToken);
+  form.set(SUBMISSION_FIELD, submission);
+  return {
+    form,
+    previous: {
+      kind: 'UNCONFIRMED' as const,
+      correlationId: 'corr-original',
+      submissionId: submission,
+      values: { offerId: 'OFR_1', quantity: '3' },
+    },
+  };
+}
+
 beforeEach(() => {
   clock = 1_900_000_000_000;
   jest.spyOn(Date, 'now').mockImplementation(() => clock);
   forgetSharedRefreshes();
   refreshTokens.mockReset();
   issueDisputeCommand.mockReset();
+  placeOrder.mockReset();
   forwarded = new Headers();
 });
 
@@ -186,6 +215,41 @@ describe('the token expires during a refresh that fails transiently', () => {
   });
 });
 
+describe('the same expiry during a failing refresh, on an order', () => {
+  beforeEach(() => {
+    refreshTokens.mockImplementation(async () => {
+      clock += 2_000;
+      throw new OidcError('TOKEN_REQUEST_FAILED', 'the identity provider answered 503');
+    });
+  });
+
+  const live = () => session(Math.floor(clock / 1000) + 1);
+  const cookie = (value: ReturnType<typeof session>) =>
+    sealSession(value, process.env.WEB_SESSION_SECRET!);
+
+  it('a first send is refused as unavailable, not "ended"; nothing is ordered', async () => {
+    const value = live();
+    const { form } = order(value);
+    await throughMiddleware(cookie(value), '/marketplace/PRD_1');
+    expect(refreshTokens).toHaveBeenCalledTimes(1);
+    expect(await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, form)).toEqual({
+      kind: 'REFUSED',
+      reason: 'SESSION_UNAVAILABLE',
+    });
+    expect(placeOrder).not.toHaveBeenCalled();
+  });
+
+  it('a retry of an unknown order stays unknown with its retry: same key, same body', async () => {
+    const value = live();
+    const { form, previous } = order(value);
+    await throughMiddleware(cookie(value), '/marketplace/PRD_1');
+    const state = await submitPlaceOrder(previous, form);
+    expect(state).toEqual({ ...previous, retryUnknown: true });
+    expect(state).not.toHaveProperty('sessionEnded');
+    expect(placeOrder).not.toHaveBeenCalled();
+  });
+});
+
 describe('a session that has ended, through the same path', () => {
   it('a cookie that does not open: 401, and a retry says the session ended', async () => {
     const value = session(Math.floor(clock / 1000) + 600);
@@ -201,5 +265,12 @@ describe('a session that has ended, through the same path', () => {
     });
     expect(refreshTokens).not.toHaveBeenCalled();
     expect(issueDisputeCommand).not.toHaveBeenCalled();
+  });
+
+  it('a cookie that does not open: a retry of an unknown order says the session ended', async () => {
+    const { form, previous } = order(session(Math.floor(clock / 1000) + 600));
+    await throughMiddleware('not-a-sealed-session', '/marketplace/PRD_1');
+    expect(await submitPlaceOrder(previous, form)).toEqual({ ...previous, sessionEnded: true });
+    expect(placeOrder).not.toHaveBeenCalled();
   });
 });

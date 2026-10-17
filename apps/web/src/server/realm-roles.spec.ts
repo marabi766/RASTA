@@ -1,7 +1,7 @@
 /**
  * @jest-environment node
  */
-import { globalRealmRoles, requestRoles, tokenAuthority } from './realm-roles';
+import { globalRealmRoles, tokenAuthority, tokenRoles } from './realm-roles';
 import { tenderDoorsFor, tenderSidesFor } from './portal-nav';
 
 const token = (claims: unknown): string =>
@@ -40,21 +40,39 @@ describe('globalRealmRoles', () => {
   });
 });
 
-describe('requestRoles', () => {
-  it('is the membership roles plus the global realm roles, once each', () => {
-    const jwt = token({ realm_access: { roles: ['SYSTEM_ADMIN'] } });
-    expect(requestRoles(['CONTRACTOR'], jwt)).toEqual(['CONTRACTOR', 'SYSTEM_ADMIN']);
-    expect(requestRoles(['SYSTEM_ADMIN'], jwt)).toEqual(['SYSTEM_ADMIN']);
-    expect(requestRoles(['CONTRACTOR'], 'opaque')).toEqual(['CONTRACTOR']);
+describe('tokenRoles — what every screen draws from', () => {
+  const ORG = 'ORG-DEH-0001';
+
+  it('is tokenAuthority’s roles: org_roles of the resolved organization plus the global realm roles', () => {
+    const jwt = token({
+      org_id: ORG,
+      org_ids: [ORG],
+      org_roles: [`${ORG}:CONTRACTOR`],
+      realm_access: { roles: ['SYSTEM_ADMIN'] },
+    });
+    expect(tokenRoles(jwt)).toEqual(['CONTRACTOR', 'SYSTEM_ADMIN']);
   });
 
   it('gives a realm SYSTEM_ADMIN with a CONTRACTOR membership the owner’s door only', () => {
-    const roles = requestRoles(
-      ['CONTRACTOR'],
-      token({ realm_access: { roles: ['SYSTEM_ADMIN'] } }),
+    const roles = tokenRoles(
+      token({
+        org_id: ORG,
+        org_ids: [ORG],
+        org_roles: [`${ORG}:CONTRACTOR`],
+        realm_access: { roles: ['SYSTEM_ADMIN'] },
+      }),
     );
-    expect(tenderSidesFor(roles, DEFAULTS)).toEqual({ owner: true, bidder: false });
-    expect(tenderDoorsFor(roles, DEFAULTS)).toEqual({ own: true, open: false });
+    expect(roles).not.toBeNull();
+    expect(tenderSidesFor(roles!, DEFAULTS)).toEqual({ owner: true, bidder: false });
+    expect(tenderDoorsFor(roles!, DEFAULTS)).toEqual({ own: true, open: false });
+  });
+
+  it('is null for a token that cannot be read or that the guard would refuse', () => {
+    expect(tokenRoles('opaque')).toBeNull();
+    expect(
+      tokenRoles(token({ org_id: ORG, org_ids: [], org_roles: [`${ORG}:CONTRACTOR`] })),
+    ).toBeNull();
+    expect(tokenRoles(token({ org_id: ORG, org_ids: [ORG], org_roles: [] }))).toBeNull();
   });
 });
 

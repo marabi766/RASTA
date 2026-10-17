@@ -92,7 +92,7 @@ export default async function TransactionPage({
           result={result}
           commands={commands}
           csrfToken={session.csrfToken}
-          mintSubmission={(transactionId) => mintDisputeSubmission(session, transactionId)}
+          mintSubmission={(target) => mintDisputeSubmission(session, target)}
           binding={submissionBinding(session)}
           sessionMaxAgeSeconds={webServerEnv().WEB_SESSION_MAX_AGE_SECONDS}
           notice={notice}

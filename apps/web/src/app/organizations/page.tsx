@@ -153,9 +153,7 @@ export default async function OrganizationsPage({
           </form>
         </TopBar>
       }
-      sidebar={
-        <PortalSidebar session={session} currentHref="/organizations" current={currentUser} />
-      }
+      sidebar={<PortalSidebar session={session} currentHref="/organizations" />}
     >
       <PageHeader
         title="سازمان و اعضا"
