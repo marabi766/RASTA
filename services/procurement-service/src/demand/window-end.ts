@@ -65,6 +65,11 @@ export function endPending(window: DemandAggregation): boolean {
  * - **the demands to follow** a REFERRED or LAPSED window: that many more moved to its status.
  *
  * Until the event is out, nothing moves the window on (a cancellation is a retryable 409).
+ *
+ * The database takes the digest's progress only phase by phase (`demand_aggregation_guard`,
+ * PR-338 r2 F1): begun by the end from nothing, each batch exactly the ids after the cursor that it
+ * counts — their bytes in the state — and written by the batch that takes the last id. A count
+ * written beside these can no longer make the event carry a digest of fewer ids than the window.
  */
 @Injectable()
 export class WindowEnd {
@@ -162,7 +167,7 @@ export class WindowEnd {
     }
 
     const digest = hash.hex();
-    await this.repository.digestWritten(tx, window, digest);
+    await this.repository.digestWritten(tx, window, { digest, counted });
     await this.publisher.enqueue(tx, endEvent(window, digest));
     return true;
   }

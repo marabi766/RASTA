@@ -23,9 +23,15 @@
 --    batch an index range, whatever the window holds.
 -- 5. `demand_aggregation_guard` admits the new kinds of change and keeps every
 --    old rule: the bookkeeping alone may change without a version, the count of
---    demands to follow is set only by the end and only ever comes down, the digest
---    is begun only by the end, only moves forward and is written once, and the
---    cancellation is written only by READY → CANCELLED.
+--    demands to follow is set only by the end and only ever comes down, and the
+--    cancellation is written only by READY → CANCELLED. The digest's progress
+--    moves phase by phase only (PR-338 r2 F1): none on an OPEN window; begun by
+--    the end from nothing (the empty SHA-256, no id taken); each batch exactly the
+--    ids after the last one taken, as many as it counts, their bytes in the
+--    state; written by the batch that takes the last id, the count then the
+--    window's; never changed after. The database recomputes all of it but the
+--    eight SHA-256 working words (`demand_aggregation_digest_range` reads the
+--    batch's ids again: one range, as the batch's own read).
 -- =============================================================================
 
 ALTER TABLE "demand_aggregation"
@@ -78,7 +84,50 @@ CREATE INDEX "ix_demand_request_window_ids"
     ON "demand_request" ("organization_id", "aggregation_id", "id" COLLATE "C")
  WHERE "status" <> 'WITHDRAWN';
 
+-- The ids of a window's demands that count after `p_after` (NULL: from the first) up to `p_upto`
+-- (NULL: to the last), in byte order, at most `p_limit` of them: how many, the last, and the bytes
+-- the digest takes of them (joined by a newline). One range of `ix_demand_request_window_ids`, with
+-- sorting off as for the batch's own read (`DemandRepository.nextDemandIds`), so the guard's check
+-- of a batch costs the batch's, whatever the window holds.
+CREATE FUNCTION "demand_aggregation_digest_range"(
+    p_organization_id TEXT, p_aggregation_id TEXT, p_after TEXT, p_upto TEXT, p_limit INTEGER,
+    OUT taken INTEGER, OUT last_id TEXT, OUT joined BYTEA)
+AS $$
+BEGIN
+  IF p_upto IS NULL THEN
+    SELECT count(*), max(b."id" COLLATE "C"),
+           convert_to(coalesce(string_agg(b."id", E'\n' ORDER BY b."id" COLLATE "C"), ''), 'UTF8')
+      INTO taken, last_id, joined
+      FROM (SELECT d."id" FROM "demand_request" AS d
+             WHERE d."organization_id" = p_organization_id AND d."aggregation_id" = p_aggregation_id
+               AND d."status" <> 'WITHDRAWN' AND d."id" COLLATE "C" > coalesce(p_after, '')
+             ORDER BY d."id" COLLATE "C" LIMIT p_limit) AS b;
+  ELSE
+    SELECT count(*), max(b."id" COLLATE "C"),
+           convert_to(coalesce(string_agg(b."id", E'\n' ORDER BY b."id" COLLATE "C"), ''), 'UTF8')
+      INTO taken, last_id, joined
+      FROM (SELECT d."id" FROM "demand_request" AS d
+             WHERE d."organization_id" = p_organization_id AND d."aggregation_id" = p_aggregation_id
+               AND d."status" <> 'WITHDRAWN' AND d."id" COLLATE "C" > coalesce(p_after, '')
+               AND d."id" COLLATE "C" <= p_upto
+             ORDER BY d."id" COLLATE "C" LIMIT p_limit) AS b;
+  END IF;
+END;
+$$ LANGUAGE plpgsql STABLE SET enable_sort = off;
+
+-- The guard calls it as the writer — the runtime role. PUBLIC has no EXECUTE on what the migrator
+-- creates (service-privilege-split.bash); it is SECURITY INVOKER.
+GRANT EXECUTE ON FUNCTION "demand_aggregation_digest_range"(TEXT, TEXT, TEXT, TEXT, INTEGER) TO rasta_procurement;
+
 CREATE OR REPLACE FUNCTION "demand_aggregation_guard"() RETURNS trigger AS $$
+DECLARE
+  -- A saved SHA-256 state (`ResumableSha256`): 8 words, the bytes taken (uint64, big-endian), the
+  -- incomplete block's bytes. The empty one is the initial words and nothing taken.
+  fresh CONSTANT BYTEA := '\x6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd190000000000000000';
+  batch RECORD;
+  fed BYTEA;
+  old_length BIGINT;
+  new_length BIGINT;
 BEGIN
   IF TG_OP = 'UPDATE' THEN
     -- The demands still to follow an ended window: set by the end itself (OPEN → REFERRED or
@@ -91,33 +140,78 @@ BEGIN
       RAISE EXCEPTION 'ck_demand_aggregation_follow: the demands to follow a window are set by its end and only ever fewer'
         USING ERRCODE = 'check_violation';
     END IF;
-    -- The digest of the demands a window ended with: written once, never changed after.
-    IF OLD."demand_ids_sha256" IS NOT NULL
-       AND (NEW."demand_ids_sha256" IS DISTINCT FROM OLD."demand_ids_sha256"
-            OR NEW."end_digest_state" IS NOT NULL)
-    THEN
-      RAISE EXCEPTION 'ck_demand_aggregation_digest: the digest of a window''s demands is written once'
-        USING ERRCODE = 'check_violation';
-    END IF;
-    -- Begun by the end itself (OPEN → READY, REFERRED or LAPSED), and by nothing else.
-    IF OLD."end_digest_state" IS NULL AND NEW."end_digest_state" IS NOT NULL
-       AND NOT (OLD."status" = 'OPEN' AND NEW."status" IN ('READY', 'REFERRED', 'LAPSED'))
-    THEN
-      RAISE EXCEPTION 'ck_demand_aggregation_digest: a digest is begun only by the window''s end'
-        USING ERRCODE = 'check_violation';
-    END IF;
-    -- Each batch takes more ids, past the last one taken: a digest never starts over or goes back.
-    IF OLD."end_digest_state" IS NOT NULL AND NEW."end_digest_state" IS NOT NULL
-       AND (NEW."end_digest_state" IS DISTINCT FROM OLD."end_digest_state"
-            OR NEW."end_digest_cursor" IS DISTINCT FROM OLD."end_digest_cursor"
-            OR NEW."end_digest_counted" <> OLD."end_digest_counted")
-       AND NOT (NEW."end_digest_counted" > OLD."end_digest_counted"
-                AND NEW."end_digest_cursor" IS NOT NULL
-                AND (OLD."end_digest_cursor" IS NULL
-                     OR NEW."end_digest_cursor" COLLATE "C" > OLD."end_digest_cursor" COLLATE "C"))
-    THEN
-      RAISE EXCEPTION 'ck_demand_aggregation_digest: a digest only moves forward'
-        USING ERRCODE = 'check_violation';
+    -- The digest of the demands a window ended with moves phase by phase, and in no other way
+    -- (PR-338 r2 F1): what one phase leaves is all the next one starts from, so nothing written
+    -- beside them — a count, a cursor, a state — can make the end's event carry a digest of fewer
+    -- ids than the window ended with.
+    IF OLD."end_digest_state" IS NULL AND NEW."end_digest_state" IS NULL THEN
+      -- None being built (an OPEN window, or one whose digest is written): nothing of it moves.
+      IF NEW."demand_ids_sha256" IS DISTINCT FROM OLD."demand_ids_sha256"
+         OR NEW."end_digest_cursor" IS DISTINCT FROM OLD."end_digest_cursor"
+         OR NEW."end_digest_counted" <> OLD."end_digest_counted"
+      THEN
+        RAISE EXCEPTION 'ck_demand_aggregation_digest: a digest''s progress moves only while it is built, and its value is written once'
+          USING ERRCODE = 'check_violation';
+      END IF;
+    ELSIF OLD."end_digest_state" IS NULL THEN
+      -- Begun: by the end itself (OPEN → READY, REFERRED or LAPSED), from nothing — the empty
+      -- SHA-256, no id taken, no cursor.
+      IF NOT (OLD."status" = 'OPEN' AND NEW."status" IN ('READY', 'REFERRED', 'LAPSED')
+              AND NEW."end_digest_state" = fresh AND NEW."end_digest_counted" = 0
+              AND NEW."end_digest_cursor" IS NULL AND NEW."demand_ids_sha256" IS NULL)
+      THEN
+        RAISE EXCEPTION 'ck_demand_aggregation_digest: a digest is begun only by the window''s end, from nothing'
+          USING ERRCODE = 'check_violation';
+      END IF;
+    ELSIF NEW."end_digest_state" IS NOT NULL THEN
+      -- A batch: the ids after the last one taken up to the new cursor, exactly as many as it
+      -- counts more, their bytes taken by the state and its incomplete block their last bytes; the
+      -- words move only when a block was completed. Never back, never again from the start.
+      IF NEW."end_digest_state" IS DISTINCT FROM OLD."end_digest_state"
+         OR NEW."end_digest_cursor" IS DISTINCT FROM OLD."end_digest_cursor"
+         OR NEW."end_digest_counted" <> OLD."end_digest_counted"
+      THEN
+        IF NEW."status" <> OLD."status" OR NEW."end_digest_counted" <= OLD."end_digest_counted"
+           OR NEW."end_digest_cursor" IS NULL
+           OR NEW."end_digest_cursor" COLLATE "C" <= coalesce(OLD."end_digest_cursor", '') COLLATE "C"
+        THEN
+          RAISE EXCEPTION 'ck_demand_aggregation_digest: a digest only moves forward'
+            USING ERRCODE = 'check_violation';
+        END IF;
+        SELECT * INTO batch FROM "demand_aggregation_digest_range"(
+          NEW."organization_id", NEW."id", OLD."end_digest_cursor", NEW."end_digest_cursor",
+          NEW."end_digest_counted" - OLD."end_digest_counted" + 1);
+        fed := CASE WHEN OLD."end_digest_counted" = 0 THEN ''::bytea ELSE '\x0a'::bytea END
+               || batch.joined;
+        old_length := ('x' || encode(substring(OLD."end_digest_state" FROM 33 FOR 8), 'hex'))::bit(64)::bigint;
+        new_length := ('x' || encode(substring(NEW."end_digest_state" FROM 33 FOR 8), 'hex'))::bit(64)::bigint;
+        IF batch.taken <> NEW."end_digest_counted" - OLD."end_digest_counted"
+           OR batch.last_id IS DISTINCT FROM NEW."end_digest_cursor"
+           OR new_length <> old_length + octet_length(fed)
+           OR substring(NEW."end_digest_state" FROM 41)
+              <> substring(substring(OLD."end_digest_state" FROM 41) || fed
+                           FROM octet_length(OLD."end_digest_state") - 40 + octet_length(fed)
+                                - (new_length % 64)::integer + 1)
+           OR (new_length / 64 = old_length / 64
+               AND substring(NEW."end_digest_state" FOR 32) <> substring(OLD."end_digest_state" FOR 32))
+        THEN
+          RAISE EXCEPTION 'ck_demand_aggregation_digest: a batch of a digest takes exactly the ids it counts, after the last one taken'
+            USING ERRCODE = 'check_violation';
+        END IF;
+      END IF;
+    ELSE
+      -- Written: by the batch that takes the last id — every id after the last one taken, the
+      -- count then the window's — and the state cleared with it.
+      SELECT * INTO batch FROM "demand_aggregation_digest_range"(
+        NEW."organization_id", NEW."id", OLD."end_digest_cursor", NULL,
+        NEW."demand_count" - OLD."end_digest_counted" + 1);
+      IF NEW."status" <> OLD."status" OR NEW."demand_ids_sha256" IS NULL
+         OR NEW."end_digest_counted" <> NEW."demand_count"
+         OR batch.taken <> NEW."demand_count" - OLD."end_digest_counted"
+      THEN
+        RAISE EXCEPTION 'ck_demand_aggregation_digest: a digest is written only by the batch that takes its last id'
+          USING ERRCODE = 'check_violation';
+      END IF;
     END IF;
     -- The sweeper's bookkeeping alone — a claim, its release, a failed attempt, a batch of
     -- demands that followed, a batch of the digest — is not a change of the aggregation: no
@@ -198,6 +292,10 @@ $$ LANGUAGE plpgsql;
 
 -- A window that ended under PR 1 had its end's event written with this same digest, in one
 -- statement (PR 1 holds a window to at most 10,000 live demands): it is stored with the window.
+-- The guard admits a digest only from the batches that build it, and these windows ended before
+-- there were any, so it is lifted for this one statement (the owner alone can), and the totals
+-- check the statement queued runs before it is put back.
+ALTER TABLE "demand_aggregation" DISABLE TRIGGER "tg_demand_aggregation_guard";
 UPDATE "demand_aggregation" AS a
    SET "demand_ids_sha256" = (
          SELECT encode(sha256(convert_to(
@@ -207,18 +305,24 @@ UPDATE "demand_aggregation" AS a
             AND d."status" <> 'WITHDRAWN'),
        "end_digest_counted" = a."demand_count"
  WHERE a."status" <> 'OPEN';
+SET CONSTRAINTS "tg_demand_aggregation_totals_check" IMMEDIATE;
+SET CONSTRAINTS "tg_demand_aggregation_totals_check" DEFERRED;
+ALTER TABLE "demand_aggregation" ENABLE TRIGGER "tg_demand_aggregation_guard";
 
--- An OPEN window has no digest. An ended one has its digest, or the state of the one being built
--- (READY, REFERRED or LAPSED only: nothing moves a window on before its end's event is out) —
--- one or the other, never both.
+-- An OPEN window has no digest and no progress of one: nothing taken, no cursor, no state. An
+-- ended one has its digest, or the state of the one being built (READY, REFERRED or LAPSED only:
+-- nothing moves a window on before its end's event is out) — one or the other, never both; a
+-- written digest took every id the window ended with.
 ALTER TABLE "demand_aggregation" ADD CONSTRAINT "ck_demand_aggregation_digest"
   CHECK (("demand_ids_sha256" IS NULL OR "demand_ids_sha256" ~ '^[0-9a-f]{64}$')
          AND (CASE WHEN "status" = 'OPEN'
                    THEN "demand_ids_sha256" IS NULL AND "end_digest_state" IS NULL
+                        AND "end_digest_counted" = 0
                    WHEN "status" IN ('READY', 'REFERRED', 'LAPSED', 'RFQ_ISSUED', 'CANCELLED')
                    THEN ("demand_ids_sha256" IS NULL) <> ("end_digest_state" IS NULL)
                    -- Any other status is ck_demand_aggregation_status's to refuse.
                    ELSE TRUE END)
          AND ("end_digest_state" IS NULL OR "status" IN ('READY', 'REFERRED', 'LAPSED'))
          AND ("end_digest_state" IS NOT NULL OR "end_digest_cursor" IS NULL)
+         AND ("demand_ids_sha256" IS NULL OR "end_digest_counted" = "demand_count")
          AND "end_digest_counted" BETWEEN 0 AND "demand_count");

@@ -153,9 +153,10 @@ describe('cancelling an aggregation', () => {
 
   // PR-338 r1 F3: Zod counted UTF-16 code units, the CHECK counts characters (`char_length`).
   // Four emoji are eight code units and four characters: they passed `min(8)`, failed the CHECK
-  // and answered a 500. Now a 400, the same one a short reason gets; eight emoji are accepted.
-  it('counts a reason in characters, as the database does: four emoji are a 400 like any short reason, nothing changed; eight are a cancellation', async () => {
-    const { organizationId, as, aggregation, demands } = await readyAggregation();
+  // and answered a 500. Now a 400, the same one a short reason gets. PR-338 r2 F2: the upper bound
+  // too — 500 emoji are 1000 code units and a reason the CHECK takes; 501 are a 400 like 501 letters.
+  it('counts a reason in characters, as the database does: four emoji are a 400 like any short reason, nothing changed; 501 like any long one; 500 are a cancellation', async () => {
+    const { organizationId, as, aggregation, demands, late } = await readyAggregation();
     const admin = client(api, actor(organizationId, ['ORGANIZATION_ADMIN']));
     const short = '\u{1F600}'.repeat(4);
     expect(short).toHaveLength(8);
@@ -176,7 +177,18 @@ describe('cancelling an aggregation', () => {
     const withdrawn = await as.withdraw(demands[0]!.id as string, 1, short);
     expect(withdrawn.status).toBe(400);
 
-    const long = '\u{1F600}'.repeat(8);
+    const over = await admin.cancel(aggregation.id, aggregation.version, '\u{1F600}'.repeat(501));
+    const overAscii = await admin.cancel(aggregation.id, aggregation.version, 'a'.repeat(501));
+    expect([over.status, overAscii.status]).toEqual([400, 400]);
+    expect(over.body.details).toEqual(overAscii.body.details);
+
+    // 300 emoji: a withdrawal of the open window's demand, stored as sent.
+    const withdrawal = await as.withdraw(late.id as string, 1, '\u{1F600}'.repeat(300));
+    expect(withdrawal.status).toBe(200);
+    expect(withdrawal.body.withdrawReason).toBe('\u{1F600}'.repeat(300));
+
+    const long = '\u{1F600}'.repeat(500);
+    expect(long).toHaveLength(1000);
     const cancelled = await admin.cancel(aggregation.id, aggregation.version, long);
     expect(cancelled.status).toBe(200);
     expect(cancelled.body.cancelReason).toBe(long);

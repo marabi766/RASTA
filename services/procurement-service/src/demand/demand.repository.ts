@@ -116,7 +116,8 @@ export class DemandRepository {
    * The end of a window that leaves OPEN: READY, REFERRED or LAPSED, at `at`. `demandsToFollow` is
    * how many of its live demands are still to move to its status (all of a REFERRED or LAPSED
    * window's; 0 for READY), `digestState` the empty digest of the demands it ended with: both are
-   * carried on in bounded batches (`WindowEnd.carryOn`).
+   * carried on in bounded batches (`WindowEnd.carryOn`). The digest starts from nothing, whatever
+   * the row held: no id taken, no cursor (PR-338 r2 F1; the guard refuses any other start).
    */
   async endWindow(
     tx: ExtendedPrismaClient,
@@ -130,6 +131,8 @@ export class DemandRepository {
       updatedAt: at,
       demandsToFollow: end.demandsToFollow,
       endDigestState: end.digestState,
+      endDigestCursor: null,
+      endDigestCounted: 0,
     });
   }
 
@@ -223,16 +226,20 @@ export class DemandRepository {
     if (changed !== 1) throw RastaError.optimisticLockFailed('DemandAggregation', window.id);
   }
 
-  /** The digest is complete: written once, the state cleared (bookkeeping: no version). */
+  /**
+   * The digest is complete: written once with how many ids it took, the state cleared
+   * (bookkeeping: no version). The guard checks that count is the window's and that the ids after
+   * the last one stored are exactly the ones this batch took.
+   */
   async digestWritten(
     tx: ExtendedPrismaClient,
     window: DemandAggregation,
-    digest: string,
+    written: { digest: string; counted: number },
   ): Promise<void> {
     const changed = await tx.$executeRaw`
       UPDATE demand_aggregation
-         SET demand_ids_sha256 = ${digest}, end_digest_state = NULL, end_digest_cursor = NULL,
-             end_digest_counted = demand_count
+         SET demand_ids_sha256 = ${written.digest}, end_digest_state = NULL,
+             end_digest_cursor = NULL, end_digest_counted = ${written.counted}
        WHERE organization_id = ${window.organizationId} AND id = ${window.id}
          AND status = ${window.status} AND end_digest_state IS NOT NULL
          AND end_digest_counted = ${window.endDigestCounted}`;
@@ -421,6 +428,8 @@ export class DemandRepository {
       closedAt?: Date;
       demandsToFollow?: number;
       endDigestState?: Uint8Array<ArrayBuffer>;
+      endDigestCursor?: null;
+      endDigestCounted?: 0;
       cancelledAt?: Date;
       cancelledBy?: string;
       cancelReason?: string;

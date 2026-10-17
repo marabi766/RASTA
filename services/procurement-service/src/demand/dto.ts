@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { cursorPaginationSchema, plainText } from '@rasta/contracts';
 import { SHORTFALL_POLICIES } from '../config/env';
+import { codePointLength } from '../openapi/zod-schema';
 import { AGGREGATION_STATES, DEMAND_STATES } from './demand.state-machine';
 
 /**
@@ -29,26 +30,11 @@ export const MAX_REASON_LENGTH = 500;
 
 /**
  * A reason, trimmed, of MIN_REASON_LENGTH to MAX_REASON_LENGTH characters as PostgreSQL's CHECK
- * counts them (`char_length`: code points). Zod's `min` counts UTF-16 code units, so a character
- * outside the BMP counts twice there: "😀😀😀😀" passed `min(8)` and failed the CHECK, a 500
- * (PR-338 r1 F3). The extra check answers the same 400 a short reason gets. `max` in code units
- * stays: never more code points than code units, so nothing it admits is over the CHECK's bound.
+ * counts them (`char_length`: code points), both bounds (PR-338 r1 F3, r2 F2): a reason too short
+ * or too long in characters gets the same 400 whatever characters it is made of.
  */
 function reasonText() {
-  return plainText()
-    .min(MIN_REASON_LENGTH)
-    .max(MAX_REASON_LENGTH)
-    .superRefine((value, context) => {
-      // Only where `min` passed: a reason short in code units already has its one issue.
-      if (value.length >= MIN_REASON_LENGTH && [...value].length < MIN_REASON_LENGTH) {
-        context.addIssue({
-          code: z.ZodIssueCode.too_small,
-          minimum: MIN_REASON_LENGTH,
-          type: 'string',
-          inclusive: true,
-        });
-      }
-    });
+  return codePointLength(plainText(), MIN_REASON_LENGTH, MAX_REASON_LENGTH);
 }
 
 /** `POST /v1/demand-requests`: a need of the caller's organization. */

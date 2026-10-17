@@ -30,7 +30,10 @@
 2. وضعیت ردیف (با دسترسی مجاز): `status`، `closes_at`، `demands_to_follow`، `end_digest_counted` (و کدام‌یک از `end_digest_state` و
    `demand_ids_sha256` پر است)، `sweep_attempts`، `sweep_next_attempt_at`، `sweep_fence`، `version`.
 3. علت‌های محتمل: `OPTIMISTIC_LOCK_FAILED` تکراری، خطای پایگاه‌داده یا Outbox، قفلی که تراکنشی طولانی روی ردیف پنجره نگه داشته، یا ردیفی
-   که محدودیت (`ck_demand_aggregation_*`) را نقض می‌کند.
+   که محدودیت (`ck_demand_aggregation_*`) را نقض می‌کند. اگر هر گام با `ck_demand_aggregation_digest: a batch of a digest takes exactly …`
+   یا `… written only by the batch that takes its last id` رد شود، پیشرفت Digest ردیف (`end_digest_counted`، `end_digest_cursor`،
+   `end_digest_state`) با شناسه‌های خود پنجره نمی‌خواند — چیزی بیرون از `WindowEnd` آن را نوشته است (PR-338 r2 F1). Trigger
+   رویداد پایان با Digest ناقص را رد می‌کند؛ ردیف را دستی «درست» نکنید و به مالک سرویس ارجاع دهید.
 
 ## ۳. رفع
 

@@ -7,7 +7,8 @@
 -- it (they would stay SUBMITTED under a REFERRED or LAPSED window for good: PR 1
 -- has no sweeper to move them), or an ended window whose digest is still being
 -- built (its end's event is not out yet, and PR 1 has nothing to finish it).
--- Otherwise it drops the indexes, the constraints and the columns, and puts back
+-- Otherwise it drops the digest's range function, the indexes, the constraints and
+-- the columns, and puts back
 -- PR 1's `demand_aggregation_guard` word for word. A finished digest is dropped:
 -- the end's event carried it.
 --
@@ -81,6 +82,8 @@ BEGIN
     USING ERRCODE = 'check_violation';
 END;
 $$ LANGUAGE plpgsql;
+
+DROP FUNCTION IF EXISTS "demand_aggregation_digest_range"(TEXT, TEXT, TEXT, TEXT, INTEGER);
 
 DROP INDEX IF EXISTS "ix_demand_request_window_ids";
 DROP INDEX IF EXISTS "ix_demand_aggregation_sweep_follow";
