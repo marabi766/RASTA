@@ -40,20 +40,22 @@ const returnRequestIdSchema = z
   .string()
   .regex(new RegExp(`^RET_${ULID}$`))
   .describe(
-    'The marketplace return request this shipment is for: an opaque `RET_<ULID>` reference this ' +
-      'service never resolves. Marketplace verifies it — the return exists, is authorized, and ' +
-      'names this organization as its supplier — before acting on anything published here.',
+    'The marketplace return request this shipment is for (`RET_<ULID>`). Read from ' +
+      'marketplace-service before anything is written (A-13): it must name the organization the ' +
+      'request acts for as its supplier (else 404), be AUTHORIZED, and agree with the order, ' +
+      'buyer and lines given here; its dispatch is then reserved there, which ends the buyer’s ' +
+      'right to cancel it (Q-133 (5)).',
   );
 
 const orderIdSchema = z
   .string()
   .regex(new RegExp(`^ORD_${ULID}$`))
-  .describe('The marketplace order the goods were sold under. Opaque; never resolved here.');
+  .describe('The marketplace order the goods were sold under: the return request’s own.');
 
 const orderLineIdSchema = z
   .string()
   .regex(new RegExp(`^OLN_${ULID}$`))
-  .describe('A line of that order. Opaque; never resolved here.');
+  .describe('A line of that order, one the return request returns.');
 
 const dispatchedLineSchema = z
   .object({
@@ -70,8 +72,8 @@ export const createReturnShipmentSchema = z
     orderId: orderIdSchema,
     buyerOrganizationId: consigneeOrganizationIdSchema.describe(
       'The organization the goods come from: it may read the return shipment and its tracking, ' +
-        'never move it. An opaque platform organization id, not resolved or verified here, and ' +
-        'never the organization the request acts for.',
+        'never move it. The return request’s buyer, as marketplace records it (checked before ' +
+        'anything is written), and never the organization the request acts for.',
     ),
     destinationWarehouseId: warehouseIdSchema.describe(
       'The warehouse the goods come back to: one of the organization the request acts for ' +

@@ -166,13 +166,21 @@ const STOCK_COMMANDS: ReadonlySet<string> = new Set(
 );
 
 /**
- * The non-stock commands with a rule to break (422): a receipt must match what was dispatched, and
- * a resolution must name allowed dispositions that add up to what was received.
+ * The non-stock commands with a rule to break (422): a dispatch must match the return request
+ * marketplace holds, a receipt must match what was dispatched, and a resolution must name allowed
+ * dispositions that add up to what was received.
  */
 const RECEIPT_COMMANDS: ReadonlySet<string> = new Set([
+  'POST /v1/return-shipments',
   'POST /v1/return-shipments/{id}/receive',
   'POST /v1/return-shipments/{id}/resolution',
 ]);
+
+/**
+ * The commands that ask another service before their transaction (A-13): a return shipment reads
+ * and reserves its return request in marketplace-service, and is refused when it cannot.
+ */
+const UPSTREAM_COMMANDS: ReadonlySet<string> = new Set(['POST /v1/return-shipments']);
 
 /** Commands whose **body** names an existing row of the caller's — another's is 404. */
 const BODY_NAMES_A_ROW: ReadonlySet<string> = new Set([
@@ -232,10 +240,12 @@ export const ERROR_DESCRIPTIONS: Record<number, string> = {
   400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
   403: 'Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).',
-  404: 'Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.',
+  404: 'Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.',
   409: 'An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).',
   422: 'Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once.',
   500: 'Unexpected server error.',
+  503: 'marketplace-service, which owns the return request, could not be asked or gave no usable answer (UPSTREAM_UNAVAILABLE): the return shipment is not recorded and its dispatch not reserved; retry with the same Idempotency-Key.',
+  504: 'marketplace-service did not answer within INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS (UPSTREAM_TIMEOUT): the return shipment is not recorded; retry with the same Idempotency-Key.',
 };
 
 const DESCRIPTION =
@@ -360,6 +370,7 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         // has no rule to break, only a state to be in (409).
         if (status === '409' && !body) continue;
         if (status === '422' && !STOCK_COMMANDS.has(key) && !RECEIPT_COMMANDS.has(key)) continue;
+        if ((status === '503' || status === '504') && !UPSTREAM_COMMANDS.has(key)) continue;
         operation.responses[status] ??= {
           description,
           ...(status === '409' && body ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } } : {}),
@@ -375,8 +386,8 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
           if (!typed) continue;
           const existing = operation.responses[String(status)] as
             { description?: string } | undefined;
-          // A command that cannot answer this status (creating a return shipment breaks no 422
-          // rule; its area's 422 is the receipt's) has nothing to type.
+          // A command that cannot answer this status (inspecting a return shipment breaks no 422
+          // rule) has nothing to type.
           if (!existing) continue;
           const listed = Object.entries(REFUSAL_REASONS[area])
             .filter(([, answered]) => answered === status)

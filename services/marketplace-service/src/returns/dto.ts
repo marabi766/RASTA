@@ -110,4 +110,31 @@ export interface ReturnRequestView {
   inspectedAt: string | null;
   inspectionReportDocumentId: string | null;
   resolvedAt: string | null;
+  /**
+   * When inventory-service reserved the dispatch of this request, before recording its shipment
+   * (Q-133 (5)). Set while the request may still read AUTHORIZED — the shipment's own event moves
+   * it on later, or not while the mirror is off — and from then on it cannot be cancelled.
+   */
+  dispatchReservedAt: string | null;
+}
+
+/**
+ * `GET /v1/internal/returns/{id}` and `POST /v1/internal/returns/{id}/dispatch-reservation`: the
+ * request as its owner states it, for the one service that records its goods (inventory-service,
+ * ADR-061 § 4). Identifiers, the status and the lines only — never the buyer's reason.
+ */
+export interface ReturnDispatchSourceView {
+  returnRequestId: string;
+  orderId: string;
+  buyerOrganizationId: string;
+  supplierOrganizationId: string;
+  status: string;
+  lines: ReturnLineView[];
+  dispatchReservedAt: string | null;
+  /**
+   * Whether a shipment may name fewer lines or units than were authorized:
+   * `MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED` (Q-133 (8)), stated here so the shipment is
+   * checked against the same rule the mirror later applies, from one setting.
+   */
+  partialDispatchAllowed: boolean;
 }

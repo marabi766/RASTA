@@ -236,13 +236,17 @@ export class ReturnShipmentRepository {
     return rows[0] ?? null;
   }
 
-  /** The owner's shipment for a return request, if one was already dispatched. */
+  /**
+   * The owner's shipment for a return request, if one was already dispatched — in the command's
+   * transaction, or (no `tx`) before it, as the check that runs ahead of asking marketplace.
+   */
   async findByRequest(
-    tx: ExtendedPrismaClient,
+    tx: ExtendedPrismaClient | undefined,
     organizationId: string,
     returnRequestId: string,
   ): Promise<ReturnShipmentRow | null> {
-    const rows = await tx.$queryRaw<ReturnShipmentRow[]>`
+    const client = tx ?? this.prisma.client;
+    const rows = await client.$queryRaw<ReturnShipmentRow[]>`
       SELECT ${COLUMNS} FROM "return_shipment"
        WHERE "organization_id" = ${organizationId} AND "return_request_id" = ${returnRequestId}`;
     return rows[0] ?? null;

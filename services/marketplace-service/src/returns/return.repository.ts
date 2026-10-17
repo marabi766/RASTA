@@ -44,6 +44,8 @@ export interface LockedReturnRow {
   authorizedAt: Date | null;
   /** The inventory shipment mirrored onto it, once goods are on the road (RUN-005 PR 3). */
   returnShipmentId: string | null;
+  /** inventory-service reserved its dispatch (Q-133 (5)): it can no longer be cancelled. */
+  dispatchReservedAt: Date | null;
   updatedAt: Date;
 }
 
@@ -56,6 +58,7 @@ interface RawLockedReturn {
   version: number;
   authorized_at: Date | null;
   return_shipment_id: string | null;
+  dispatch_reserved_at: Date | null;
   updated_at: Date;
 }
 
@@ -108,7 +111,7 @@ export class ReturnRepository {
       'a return request names two organizations and its supplier decides it; the party check follows in access',
       () => tx.$queryRaw<RawLockedReturn[]>`
         SELECT id, organization_id, supplier_organization_id, order_id, status, version,
-               authorized_at, return_shipment_id, updated_at
+               authorized_at, return_shipment_id, dispatch_reserved_at, updated_at
         FROM "return_request"
         WHERE id = ${id}
         FOR UPDATE
@@ -125,6 +128,7 @@ export class ReturnRepository {
       version: row.version,
       authorizedAt: row.authorized_at,
       returnShipmentId: row.return_shipment_id,
+      dispatchReservedAt: row.dispatch_reserved_at,
       updatedAt: row.updated_at,
     };
   }
@@ -169,6 +173,34 @@ export class ReturnRepository {
         tx.returnRequest.updateMany({
           where: { id: locked.id, version: locked.version },
           data,
+        }),
+    );
+    return count === 1;
+  }
+
+  /**
+   * Reserves the dispatch of a request locked above: the one write that moves no status and no
+   * version (the trigger allows it on an AUTHORIZED request, once). Compare-and-set on the version
+   * and on there being no reservation yet, so it fails — and the caller fails the command — only if
+   * the lock was somehow not held. Crosses the guard because the request is the buyer's and the
+   * supplier's inventory reserves it; the supplier check is the caller's, made on the locked row.
+   */
+  async reserveDispatch(
+    tx: ExtendedPrismaClient,
+    locked: LockedReturnRow,
+    data: { at: Date; by: string; correlationId: string },
+  ): Promise<boolean> {
+    const { count } = await runUnscoped(
+      'the supplier’s inventory reserves the dispatch of a request locked above under its version',
+      () =>
+        tx.returnRequest.updateMany({
+          where: { id: locked.id, version: locked.version, dispatchReservedAt: null },
+          data: {
+            dispatchReservedAt: data.at,
+            dispatchReservedBy: data.by,
+            dispatchReservedCorrelationId: data.correlationId,
+            updatedAt: data.at,
+          },
         }),
     );
     return count === 1;

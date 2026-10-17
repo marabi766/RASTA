@@ -51,6 +51,19 @@ export const REFUSAL_REASONS = {
   returnShipment: {
     /** This return request already has its return shipment in this owner's books: one consignment (Q-133). */
     RETURN_ALREADY_DISPATCHED: 409,
+    /**
+     * marketplace, which owns the return request, has it in another status than AUTHORIZED: not
+     * yet decided, rejected, cancelled, or already moved on (A-13; Codex r1 on #336).
+     */
+    RETURN_REQUEST_NOT_AUTHORIZED: 422,
+    /** The order or the buyer named is not the return request's, as marketplace records it. */
+    RETURN_REQUEST_MISMATCH: 422,
+    /**
+     * The lines named are not the return request's: a line it does not return, another product,
+     * more than was authorized — or, unless marketplace allows a partial dispatch (Q-133 (8)),
+     * not every line in exactly its authorized quantity.
+     */
+    RETURN_LINES_MISMATCH: 422,
     /** Received already: a return shipment is received once, from IN_TRANSIT. */
     RETURN_SHIPMENT_NOT_IN_TRANSIT: 409,
     /** The lines of a receipt are not exactly the lines the shipment was dispatched with. */

@@ -42,6 +42,8 @@ import { IdempotencyStore } from './shared/idempotency';
 import { OrderRepository } from './order/order.repository';
 import { OrderService } from './order/order.service';
 import { OrderController } from './order/order.controller';
+import { ReturnDispatchSourceService } from './returns/dispatch-source';
+import { InternalReturnController } from './returns/internal-return.controller';
 import { OrderReturnsController, ReturnController } from './returns/return.controller';
 import { ReturnRepository } from './returns/return.repository';
 import { ReturnService } from './returns/return.service';
@@ -83,6 +85,7 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
     OrderController,
     OrderReturnsController,
     ReturnController,
+    InternalReturnController,
     ProductController,
     OfferController,
     HealthController,
@@ -128,6 +131,7 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
     OrderService,
     ReturnRepository,
     ReturnService,
+    ReturnDispatchSourceService,
     CatalogueService,
     OrderSagaClient,
     OrderSagaWorker,

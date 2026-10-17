@@ -136,7 +136,10 @@ export class ReturnController {
     summary: 'Cancel a return request',
     description:
       'The buyer withdraws a REQUESTED or AUTHORIZED return before any goods moved. Only the ' +
-      'buying organization may.',
+      'buying organization may. Once inventory-service has reserved the dispatch ' +
+      '(`dispatchReservedAt` set) the return is no longer cancelled, even while it still reads ' +
+      'AUTHORIZED: 422 BUSINESS_RULE_VIOLATION with `details[].code` RETURN_DISPATCH_RESERVED ' +
+      '(Q-133 (5)).',
   })
   cancel(@Param('id') id: string, @Headers('idempotency-key') idempotencyKey?: string) {
     return this.command(

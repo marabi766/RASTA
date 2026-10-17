@@ -25,6 +25,8 @@ import {
   type ReturnShipmentLineRow,
   type ReturnShipmentRow,
 } from './return-shipment.repository';
+import { assertShipmentMatchesRequest } from './return-request-check';
+import { RETURN_REQUEST_SOURCE, type ReturnRequestSource } from './return-request-source';
 import { RETURN_SHIPMENT_VERSION_OF, canMove } from './return-shipment.state-machine';
 import { toReturnShipmentView, toReturnTrackingView } from './views';
 
@@ -36,10 +38,12 @@ import { toReturnShipmentView, toReturnTrackingView } from './views';
  *
  * ## What this service does and does not say
  *
- * It records what happened to goods — nothing else. It never reads marketplace's return request,
- * so it cannot say the return was *allowed*; marketplace, which owns the request, verifies every
- * event published here against it (a return it does not know, did not authorize, or whose supplier
- * is not this event's organization is refused there). It moves no stock — returned goods are not
+ * It records what happened to goods — nothing else. Whether the return was *allowed* is
+ * marketplace's, which owns the request: before a shipment is recorded, the request is read there
+ * and the shipment checked against it — this organization its supplier, its buyer, its order, its
+ * lines and quantities, AUTHORIZED — and its dispatch reserved there, which ends the buyer's right
+ * to cancel it (A-13, Q-133 (5); Codex r1 on #336). Marketplace still verifies every event
+ * published here against the request before mirroring it. It moves no stock — returned goods are not
  * sellable until inspection ends (ADR-048 § 4), and a RESTOCK disposition is a record, not a
  * receipt into a balance — and no money: a refund is economic's, and cannot be asked for here
  * (Q-76). Which dispositions may be recorded is configuration with no default (Q-133).
@@ -53,7 +57,8 @@ import { toReturnShipmentView, toReturnTrackingView } from './views';
  *
  * ## One transaction per command
  *
- * `CommandRunner`, as every stock and shipment command: the return shipment (created, or locked and
+ * `CommandRunner`, as every stock and shipment command — the dispatch's two exchanges with
+ * marketplace run before it, never inside: the return shipment (created, or locked and
  * moved by compare-and-set), its lines, its tracking event, its outbox event and the stored
  * response commit together or not at all. A command locks one row — the return shipment — and no
  * stock item.
@@ -67,6 +72,7 @@ export class ReturnShipmentService {
     private readonly publisher: EventPublisher,
     private readonly runner: CommandRunner,
     @Inject(ENV) private readonly env: InventoryEnv,
+    @Inject(RETURN_REQUEST_SOURCE) private readonly requests: ReturnRequestSource,
   ) {}
 
   // -- dispatch -----------------------------------------------------------------------------
@@ -92,31 +98,34 @@ export class ReturnShipmentService {
       );
     }
 
-    return this.runner.run('create_return_shipment', command.fence, null, async (tx, at) => {
-      // Another organization's warehouse, or none: 404 — a return arrives in its owner's
-      // warehouse and no other (the composite foreign key says the same).
-      const warehouse = await this.warehouses.find(
-        acting.organizationId,
-        dto.destinationWarehouseId,
-        tx,
-      );
-      if (!warehouse) throw RastaError.notFound('Warehouse', dto.destinationWarehouseId);
+    // What this service can refuse on its own is refused first, before marketplace is asked: a
+    // reservation taken for a dispatch that then fails here would leave the buyer unable to cancel
+    // a return whose goods never left (Q-133 (5)).
+    await this.assertDispatchable(undefined, acting.organizationId, dto);
 
-      // One consignment per return (Q-133): a second dispatch under another key is refused, with
-      // the unique index behind this read for two that race.
-      const existing = await this.shipments.findByRequest(
-        tx,
-        acting.organizationId,
-        dto.returnRequestId,
+    // Then the owner of the return request (A-13): read it and check the shipment against it, then
+    // reserve its dispatch there — under the lock a cancellation takes, so the buyer cannot cancel
+    // once the goods may be on the road, whether or not marketplace has heard of this shipment
+    // yet. Both exchanges run before the transaction, never inside it, and an owner that cannot be
+    // asked refuses the dispatch (503/504) with nothing written.
+    const request = await this.requests.read(acting.organizationId, dto.returnRequestId);
+    if (!request) throw RastaError.notFound('ReturnRequest', dto.returnRequestId);
+    assertShipmentMatchesRequest(dto, acting.organizationId, request);
+    const reserved = await this.requests.reserve(acting.organizationId, dto.returnRequestId);
+    if (!reserved) throw RastaError.notFound('ReturnRequest', dto.returnRequestId);
+    // Cancelled (or otherwise moved on) between the read and the reservation.
+    if (reserved === 'NOT_DISPATCHABLE') {
+      throw refusal(
+        'returnShipment',
+        'RETURN_REQUEST_NOT_AUTHORIZED',
+        'Only an AUTHORIZED return request’s goods are dispatched',
+        { returnRequestId: dto.returnRequestId },
       );
-      if (existing) {
-        throw refusal(
-          'returnShipment',
-          'RETURN_ALREADY_DISPATCHED',
-          'This return request already has a return shipment',
-          { returnShipmentId: existing.id },
-        );
-      }
+    }
+    assertShipmentMatchesRequest(dto, acting.organizationId, reserved);
+
+    return this.runner.run('create_return_shipment', command.fence, null, async (tx, at) => {
+      const warehouse = await this.assertDispatchable(tx, acting.organizationId, dto);
 
       const shipment = await this.shipments.insert(tx, {
         id: newId(ID_PREFIX.returnShipment),
@@ -177,6 +186,34 @@ export class ReturnShipmentService {
       });
       return toReturnShipmentView(shipment, lines);
     });
+  }
+
+  /**
+   * The destination warehouse, and that the request has no shipment yet: checked ahead of asking
+   * marketplace (no `tx`) and again in the command's transaction, where it counts.
+   */
+  private async assertDispatchable(
+    tx: ExtendedPrismaClient | undefined,
+    organizationId: string,
+    dto: CreateReturnShipmentDto,
+  ) {
+    // Another organization's warehouse, or none: 404 — a return arrives in its owner's
+    // warehouse and no other (the composite foreign key says the same).
+    const warehouse = await this.warehouses.find(organizationId, dto.destinationWarehouseId, tx);
+    if (!warehouse) throw RastaError.notFound('Warehouse', dto.destinationWarehouseId);
+
+    // One consignment per return (Q-133): a second dispatch under another key is refused, with
+    // the unique index behind this read for two that race.
+    const existing = await this.shipments.findByRequest(tx, organizationId, dto.returnRequestId);
+    if (existing) {
+      throw refusal(
+        'returnShipment',
+        'RETURN_ALREADY_DISPATCHED',
+        'This return request already has a return shipment',
+        { returnShipmentId: existing.id },
+      );
+    }
+    return warehouse;
   }
 
   // -- receive ------------------------------------------------------------------------------

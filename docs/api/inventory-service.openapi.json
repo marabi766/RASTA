@@ -446,7 +446,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -811,7 +811,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1115,7 +1115,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1284,7 +1284,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1573,7 +1573,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2178,7 +2178,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2388,7 +2388,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2697,7 +2697,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3152,7 +3152,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3380,7 +3380,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3503,7 +3503,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3675,7 +3675,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3919,7 +3919,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4071,7 +4071,7 @@
             "schema": {
               "type": "string",
               "pattern": "^RET_[0-9A-HJKMNP-TV-Z]{26}$",
-              "description": "The marketplace return request this shipment is for: an opaque `RET_<ULID>` reference this service never resolves. Marketplace verifies it — the return exists, is authorized, and names this organization as its supplier — before acting on anything published here."
+              "description": "The marketplace return request this shipment is for (`RET_<ULID>`). Read from marketplace-service before anything is written (A-13): it must name the organization the request acts for as its supplier (else 404), be AUTHORIZED, and agree with the order, buyer and lines given here; its dispatch is then reserved there, which ends the buyer’s right to cancel it (Q-133 (5))."
             }
           }
         ],
@@ -4297,7 +4297,7 @@
         ]
       },
       "post": {
-        "description": "An IN_TRANSIT return shipment into `destinationWarehouseId` — a warehouse of the organization the request acts for (another’s is 404) — from `buyerOrganizationId`, for `returnRequestId`, with 1 to 50 order lines and their quantities. One return shipment per return request: a second is 409 `RETURN_ALREADY_DISPATCHED`. It moves no stock. The shipment, its lines, its IN_TRANSIT tracking event and RETURN_SHIPMENT_DISPATCHED (identifiers and quantities only — no carrier) commit in one transaction. Only an operator of the destination warehouse’s owner records a return shipment (Q-133: the order’s supplier); its sender reads it and is refused 403 FORBIDDEN here, any other organization gets 404. This service records physical facts only: whether the return was allowed is marketplace’s, which verifies every RETURN_SHIPMENT_* event against its own request. Nothing here moves stock or money. One transaction: the row is locked, moved by compare-and-set, and its tracking event, its RETURN_SHIPMENT_* event and the stored response commit together. A shipment another command holds longer than INVENTORY_LOCK_TIMEOUT_MS is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "description": "An IN_TRANSIT return shipment into `destinationWarehouseId` — a warehouse of the organization the request acts for (another’s is 404) — from `buyerOrganizationId`, for `returnRequestId`, with 1 to 50 order lines and their quantities. One return shipment per return request: a second is 409 `RETURN_ALREADY_DISPATCHED`. Before anything is written the return request is read from marketplace-service, which owns it (A-13): one this organization does not supply is 404 as if it did not exist; one that is not AUTHORIZED is 422 `RETURN_REQUEST_NOT_AUTHORIZED`; another order or buyer 422 `RETURN_REQUEST_MISMATCH`; lines that are not its own, of another product or over what was authorized — or, unless marketplace allows a partial dispatch (Q-133 (8)), not all of them in exactly their authorized quantities — 422 `RETURN_LINES_MISMATCH`. Then its dispatch is reserved there, after which the buyer can no longer cancel it (Q-133 (5)). A marketplace that cannot be asked refuses the dispatch (503/504) and nothing is written. It moves no stock. The shipment, its lines, its IN_TRANSIT tracking event and RETURN_SHIPMENT_DISPATCHED (identifiers and quantities only — no carrier) commit in one transaction. Only an operator of the destination warehouse’s owner records a return shipment (Q-133: the order’s supplier); its sender reads it and is refused 403 FORBIDDEN here, any other organization gets 404. This service records physical facts only: whether the return was allowed is marketplace’s, which verifies every RETURN_SHIPMENT_* event against its own request. Nothing here moves stock or money. One transaction: the row is locked, moved by compare-and-set, and its tracking event, its RETURN_SHIPMENT_* event and the stored response commit together. A shipment another command holds longer than INVENTORY_LOCK_TIMEOUT_MS is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
         "operationId": "ReturnShipmentController_create_v1",
         "parameters": [
           {
@@ -4498,7 +4498,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4566,8 +4566,80 @@
               }
             }
           },
+          "422": {
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_REQUEST_NOT_AUTHORIZED, RETURN_REQUEST_MISMATCH, RETURN_LINES_MISMATCH, RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED, DISPOSITION_NOT_ALLOWED, DISPOSITIONS_DO_NOT_BALANCE, NOTHING_RECEIVED_TO_RESOLVE)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "returnShipment"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "RETURN_REQUEST_NOT_AUTHORIZED",
+                              "RETURN_REQUEST_MISMATCH",
+                              "RETURN_LINES_MISMATCH",
+                              "RECEIPT_LINES_MISMATCH",
+                              "RECEIVED_EXCEEDS_EXPECTED",
+                              "DISPOSITION_NOT_ALLOWED",
+                              "DISPOSITIONS_DO_NOT_BALANCE",
+                              "NOTHING_RECEIVED_TO_RESOLVE"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
           "500": {
             "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "marketplace-service, which owns the return request, could not be asked or gave no usable answer (UPSTREAM_UNAVAILABLE): the return shipment is not recorded and its dispatch not reserved; retry with the same Idempotency-Key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "marketplace-service did not answer within INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS (UPSTREAM_TIMEOUT): the return shipment is not recorded; retry with the same Idempotency-Key.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4594,17 +4666,17 @@
                   "returnRequestId": {
                     "type": "string",
                     "pattern": "^RET_[0-9A-HJKMNP-TV-Z]{26}$",
-                    "description": "The marketplace return request this shipment is for: an opaque `RET_<ULID>` reference this service never resolves. Marketplace verifies it — the return exists, is authorized, and names this organization as its supplier — before acting on anything published here."
+                    "description": "The marketplace return request this shipment is for (`RET_<ULID>`). Read from marketplace-service before anything is written (A-13): it must name the organization the request acts for as its supplier (else 404), be AUTHORIZED, and agree with the order, buyer and lines given here; its dispatch is then reserved there, which ends the buyer’s right to cancel it (Q-133 (5))."
                   },
                   "orderId": {
                     "type": "string",
                     "pattern": "^ORD_[0-9A-HJKMNP-TV-Z]{26}$",
-                    "description": "The marketplace order the goods were sold under. Opaque; never resolved here."
+                    "description": "The marketplace order the goods were sold under: the return request’s own."
                   },
                   "buyerOrganizationId": {
                     "type": "string",
                     "pattern": "^ORG(_[0-9A-HJKMNP-TV-Z]{26}|-[A-Z0-9-]{1,48})$",
-                    "description": "The organization the goods come from: it may read the return shipment and its tracking, never move it. An opaque platform organization id, not resolved or verified here, and never the organization the request acts for."
+                    "description": "The organization the goods come from: it may read the return shipment and its tracking, never move it. The return request’s buyer, as marketplace records it (checked before anything is written), and never the organization the request acts for."
                   },
                   "destinationWarehouseId": {
                     "type": "string",
@@ -4619,7 +4691,7 @@
                         "orderLineId": {
                           "type": "string",
                           "pattern": "^OLN_[0-9A-HJKMNP-TV-Z]{26}$",
-                          "description": "A line of that order. Opaque; never resolved here."
+                          "description": "A line of that order, one the return request returns."
                         },
                         "productId": {
                           "type": "string",
@@ -4858,7 +4930,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4981,7 +5053,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5221,7 +5293,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5290,7 +5362,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED, DISPOSITION_NOT_ALLOWED, DISPOSITIONS_DO_NOT_BALANCE, NOTHING_RECEIVED_TO_RESOLVE)",
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_REQUEST_NOT_AUTHORIZED, RETURN_REQUEST_MISMATCH, RETURN_LINES_MISMATCH, RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED, DISPOSITION_NOT_ALLOWED, DISPOSITIONS_DO_NOT_BALANCE, NOTHING_RECEIVED_TO_RESOLVE)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5316,6 +5388,9 @@
                           "code": {
                             "type": "string",
                             "enum": [
+                              "RETURN_REQUEST_NOT_AUTHORIZED",
+                              "RETURN_REQUEST_MISMATCH",
+                              "RETURN_LINES_MISMATCH",
                               "RECEIPT_LINES_MISMATCH",
                               "RECEIVED_EXCEEDS_EXPECTED",
                               "DISPOSITION_NOT_ALLOWED",
@@ -5376,7 +5451,7 @@
                         "orderLineId": {
                           "type": "string",
                           "pattern": "^OLN_[0-9A-HJKMNP-TV-Z]{26}$",
-                          "description": "A line of that order. Opaque; never resolved here."
+                          "description": "A line of that order, one the return request returns."
                         },
                         "receivedQuantity": {
                           "type": "integer",
@@ -5612,7 +5687,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5941,7 +6016,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6010,7 +6085,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED, DISPOSITION_NOT_ALLOWED, DISPOSITIONS_DO_NOT_BALANCE, NOTHING_RECEIVED_TO_RESOLVE)",
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_REQUEST_NOT_AUTHORIZED, RETURN_REQUEST_MISMATCH, RETURN_LINES_MISMATCH, RECEIPT_LINES_MISMATCH, RECEIVED_EXCEEDS_EXPECTED, DISPOSITION_NOT_ALLOWED, DISPOSITIONS_DO_NOT_BALANCE, NOTHING_RECEIVED_TO_RESOLVE)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6036,6 +6111,9 @@
                           "code": {
                             "type": "string",
                             "enum": [
+                              "RETURN_REQUEST_NOT_AUTHORIZED",
+                              "RETURN_REQUEST_MISMATCH",
+                              "RETURN_LINES_MISMATCH",
                               "RECEIPT_LINES_MISMATCH",
                               "RECEIVED_EXCEEDS_EXPECTED",
                               "DISPOSITION_NOT_ALLOWED",
@@ -6096,7 +6174,7 @@
                         "orderLineId": {
                           "type": "string",
                           "pattern": "^OLN_[0-9A-HJKMNP-TV-Z]{26}$",
-                          "description": "A line of that order. Opaque; never resolved here."
+                          "description": "A line of that order, one the return request returns."
                         },
                         "disposition": {
                           "type": "string",

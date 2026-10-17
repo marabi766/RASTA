@@ -1833,6 +1833,8 @@ export const EXPECTED = {
       // 20261016140000_return_request_physical (RUN-005 PR 3): which shipment, and its report.
       'ck_return_request_shipment_id',
       'ck_return_request_report_document_id',
+      // 20261017160000_return_dispatch_reservation (Codex r1 on #336, F2): the reservation's columns.
+      'ck_return_request_dispatch_reservation',
       'ck_saga_step_key_not_blank',
       'ck_order_settled_after_receipt',
       'ck_order_completed_has_settlement',

@@ -1,4 +1,4 @@
-import type { ReturnRequestView } from './dto';
+import type { ReturnDispatchSourceView, ReturnRequestView } from './dto';
 import type { ReturnRequestRow } from './return.repository';
 
 const iso = (value: Date | null): string | null => (value ? value.toISOString() : null);
@@ -32,5 +32,26 @@ export function toReturnView(row: ReturnRequestRow): ReturnRequestView {
     inspectedAt: iso(row.inspectedAt),
     inspectionReportDocumentId: row.inspectionReportDocumentId,
     resolvedAt: iso(row.resolvedAt),
+    dispatchReservedAt: iso(row.dispatchReservedAt),
+  };
+}
+
+export function toReturnDispatchSourceView(
+  row: ReturnRequestRow,
+  partialDispatchAllowed: boolean,
+): ReturnDispatchSourceView {
+  return {
+    returnRequestId: row.id,
+    orderId: row.orderId,
+    buyerOrganizationId: row.organizationId,
+    supplierOrganizationId: row.supplierOrganizationId,
+    status: row.status,
+    lines: row.lines.map((line) => ({
+      orderLineId: line.orderLineId,
+      productId: line.productId,
+      quantity: line.quantity,
+    })),
+    dispatchReservedAt: iso(row.dispatchReservedAt),
+    partialDispatchAllowed,
   };
 }

@@ -4,7 +4,9 @@ import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swag
 import { IdempotencyStore } from '../shared/idempotency';
 import { OrderReturnsController, ReturnController } from '../returns/return.controller';
 import { ReturnService } from '../returns/return.service';
-import { enrichOpenApiDocument } from './document';
+import { ReturnDispatchSourceService } from '../returns/dispatch-source';
+import { InternalReturnController } from '../returns/internal-return.controller';
+import { INTERNAL_TOKEN_API_KEY, INTERNAL_TOKEN_SCHEME, enrichOpenApiDocument } from './document';
 
 /**
  * The return-request routes as the running service publishes them (Codex r1 on #310, finding 2).
@@ -17,24 +19,32 @@ import { enrichOpenApiDocument } from './document';
  */
 async function servedDocument(): Promise<OpenAPIObject> {
   const moduleRef = await Test.createTestingModule({
-    controllers: [OrderReturnsController, ReturnController],
+    controllers: [OrderReturnsController, ReturnController, InternalReturnController],
     providers: [
       { provide: ReturnService, useValue: {} },
+      { provide: ReturnDispatchSourceService, useValue: {} },
       { provide: IdempotencyStore, useValue: {} },
     ],
   }).compile();
   const app = moduleRef.createNestApplication();
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
   await app.init();
+  // The builder as `main.ts` calls it: the bearer scheme and the internal token's.
   const document = SwaggerModule.createDocument(
     app,
-    new DocumentBuilder().setTitle('Rasta — Marketplace Service').setVersion('test').build(),
+    new DocumentBuilder()
+      .setTitle('Rasta — Marketplace Service')
+      .setVersion('test')
+      .addBearerAuth()
+      .addApiKey(INTERNAL_TOKEN_API_KEY, INTERNAL_TOKEN_SCHEME)
+      .build(),
   );
   await app.close();
   return enrichOpenApiDocument(document, { idempotencyTtlHours: 24 });
 }
 
 interface Operation {
+  security?: Record<string, string[]>[];
   parameters?: { name: string; in: string; required?: boolean }[];
   requestBody?: {
     required: boolean;
@@ -44,7 +54,7 @@ interface Operation {
       };
     };
   };
-  responses: Record<string, { content?: unknown }>;
+  responses: Record<string, { content?: unknown; description?: string }>;
 }
 
 describe('the served return-request routes', () => {
@@ -66,8 +76,10 @@ describe('the served return-request routes', () => {
     document = await servedDocument();
   });
 
-  it('publishes all five routes under the parameter names the controllers use', () => {
+  it('publishes all five routes, and the two internal ones, under the parameter names the controllers use', () => {
     expect(Object.keys(document.paths).sort()).toEqual([
+      '/v1/internal/returns/{id}',
+      '/v1/internal/returns/{id}/dispatch-reservation',
       '/v1/orders/{orderId}/returns',
       '/v1/returns',
       '/v1/returns/{id}',
@@ -130,5 +142,26 @@ describe('the served return-request routes', () => {
     expect(JSON.stringify(create.responses['409']?.content)).toContain(
       '#/components/schemas/ApiError',
     );
+  });
+
+  it('publishes the internal routes under the X-Internal-Token scheme, never the bearer one (Codex r1 on #336)', () => {
+    expect(document.components?.securitySchemes?.[INTERNAL_TOKEN_SCHEME]).toEqual(
+      expect.objectContaining({ type: 'apiKey', in: 'header', name: 'X-Internal-Token' }),
+    );
+    const read = operation('/v1/internal/returns/{id}', 'get');
+    const reserve = operation('/v1/internal/returns/{id}/dispatch-reservation', 'post');
+    for (const internal of [read, reserve]) {
+      expect(internal.security).toEqual([{ [INTERNAL_TOKEN_SCHEME]: [] }]);
+      expect(keyOf(internal)).toBeUndefined();
+      expect(internal.responses['403']?.description).toMatch(/not the service this route answers/);
+      expect(internal.responses['404']?.description).toMatch(/any supplier but the one/);
+    }
+    expect(successOf(read)).toEqual(['200']);
+    expect(errorsOf(read)).toEqual(['401', '403', '404', '500']);
+    expect(reserve.requestBody).toBeUndefined();
+    expect(successOf(reserve)).toEqual(['200']);
+    expect(errorsOf(reserve)).toEqual(['401', '403', '404', '409', '422', '500']);
+    // The public routes are not described by the internal scheme.
+    expect(operation('/v1/returns/{id}', 'get').security).toBeUndefined();
   });
 });

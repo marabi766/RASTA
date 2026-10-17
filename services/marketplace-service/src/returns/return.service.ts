@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
+import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError, getContext } from '@rasta/nest-common';
 import { assertOrderVisible } from '../access/access';
 import { SERVICE_NAME, type MarketplaceEnv } from '../config/env';
@@ -234,7 +235,10 @@ export class ReturnService {
     return this.decide(id, 'REJECTED', 'reject', idempotencyKey, record);
   }
 
-  /** REQUESTED|AUTHORIZED → CANCELLED. The buyer withdraws it, before any goods moved. */
+  /**
+   * REQUESTED|AUTHORIZED → CANCELLED. The buyer withdraws it, before any goods moved: never once
+   * inventory has reserved its dispatch, even while it still reads AUTHORIZED (Q-133 (5)).
+   */
   cancel(
     id: string,
     idempotencyKey: string,
@@ -268,6 +272,14 @@ export class ReturnService {
       } catch (error) {
         returnRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'ILLEGAL_TRANSITION' });
         throw error;
+      }
+      // The goods may be on the road while the request still reads AUTHORIZED: inventory reserved
+      // the dispatch here before recording its shipment, and the shipment's own event moves the
+      // request on later — or not at all while the mirror is off (Q-133 (5)). Read under the same
+      // lock the reservation takes, so the two never both succeed.
+      if (to === 'CANCELLED' && locked.dispatchReservedAt !== null) {
+        returnRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'DISPATCH_RESERVED' });
+        throw dispatchReservedRefusal(locked.id);
       }
 
       // Never before what it follows: a command whose transaction began before the previous move
@@ -470,6 +482,28 @@ export function facts(row: ReturnRequestRow) {
       quantity: line.quantity,
     })),
   };
+}
+
+/**
+ * A cancellation of a request whose dispatch inventory reserved: the platform's business-rule code
+ * (`422`, as any other move the request's state refuses), with the closed reason in `details` so a
+ * client can say why without reading the message.
+ */
+export function dispatchReservedRefusal(returnRequestId: string): RastaError {
+  return new RastaError(
+    ERROR_CODES.BUSINESS_RULE_VIOLATION,
+    `Return request ${returnRequestId} is being dispatched and can no longer be cancelled`,
+    {
+      details: [
+        {
+          path: 'returnRequest',
+          code: 'RETURN_DISPATCH_RESERVED',
+          message: 'The goods of this return are being dispatched',
+        },
+      ],
+      internalContext: { returnRequestId },
+    },
+  );
 }
 
 /**

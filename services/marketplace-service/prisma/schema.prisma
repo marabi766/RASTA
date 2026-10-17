@@ -499,6 +499,13 @@ model ReturnRequest {
   inspectionReportDocumentId String?   @map("inspection_report_document_id")
   resolvedAt                 DateTime? @map("resolved_at") @db.Timestamptz(3)
 
+  /// inventory-service reserved the dispatch of this AUTHORIZED request before recording its
+  /// shipment (Q-133 (5)): from then on the buyer cannot cancel it. Written once, never changed.
+  dispatchReservedAt            DateTime? @map("dispatch_reserved_at") @db.Timestamptz(3)
+  /// The service whose authenticated token reserved it.
+  dispatchReservedBy            String?   @map("dispatch_reserved_by")
+  dispatchReservedCorrelationId String?   @map("dispatch_reserved_correlation_id")
+
   updatedAt DateTime @map("updated_at") @db.Timestamptz(3)
 
   lines   ReturnLine[]

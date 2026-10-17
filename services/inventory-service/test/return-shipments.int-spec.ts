@@ -30,8 +30,10 @@ import {
  * (tenant isolation, object-level authorization), the database keeping the same rules, and the
  * STRICT `returnShipmentId` stream in the outbox.
  *
- * What it does NOT do, on purpose: read marketplace, move stock, or make a refund. A return
- * shipment is a fact about goods; nothing here may change a stock balance or ask for money.
+ * What it does NOT do, on purpose: move stock or make a refund. A return shipment is a fact about
+ * goods; nothing here may change a stock balance or ask for money. Marketplace's return request is
+ * the stand-in's (`marketplace-fake.ts`), stored to agree with each dispatch; what happens when it
+ * does not is `return-dispatch-ownership.int-spec.ts`.
  */
 describe('return shipments', () => {
   let api: ApiHarness;
@@ -236,12 +238,15 @@ describe('return shipments', () => {
 
     it('lets only one of ten concurrent dispatches of one return, under different keys, through', async () => {
       const s = await setup();
-      const returnRequestId = newReturnRequestId();
+      // One return, so one order and one set of lines: the request marketplace holds.
+      const same = {
+        returnRequestId: newReturnRequestId(),
+        orderId: newOrderReference(),
+        lines: [{ orderLineId: newOrderLineId(), productId: newProductId(), quantity: 3 }],
+      };
 
       const results = await Promise.all(
-        Array.from({ length: 10 }, () =>
-          s.ops.dispatchReturn(s.warehouseId, s.buyer, { returnRequestId }),
-        ),
+        Array.from({ length: 10 }, () => s.ops.dispatchReturn(s.warehouseId, s.buyer, same)),
       );
 
       expect(results.filter((r) => r.status === 201)).toHaveLength(1);
