@@ -485,6 +485,20 @@
     {
       "principal": "economic-service",
       "resourceType": "TOPIC",
+      "resourceName": "rasta.contract.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "economic-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.contract.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "economic-service",
+      "resourceType": "TOPIC",
       "resourceName": "rasta.economic.v1.dlq",
       "patternType": "LITERAL",
       "operation": "WRITE"
