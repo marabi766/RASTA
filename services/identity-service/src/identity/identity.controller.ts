@@ -1,7 +1,7 @@
 import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiOperation, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { AllowService, AuditorSelfService, Public, Roles, zodPipe } from '@rasta/nest-common';
-import { IdentityService } from './identity.service';
+import { IdentityService, MEMBERSHIP_READ_CALLERS } from './identity.service';
 import {
   approveRegistrationSchema,
   createMembershipSchema,
@@ -26,6 +26,12 @@ import {
   type UpdateMembershipRolesDto,
   type UpdateUserDto,
 } from './dto';
+
+/**
+ * The OpenAPI security scheme of the service-to-service route: the signed internal
+ * token in `X-Internal-Token` (ADR-020), not the bearer. Declared in `main.ts`.
+ */
+export const INTERNAL_TOKEN_SCHEME = 'internalToken';
 
 /**
  * HTTP surface for identity.
@@ -74,15 +80,18 @@ export class UserController {
   }
 
   @Get(':id/organizations')
-  @AllowService('construction-service')
+  @AllowService(...MEMBERSHIP_READ_CALLERS)
+  @ApiSecurity(INTERNAL_TOKEN_SCHEME)
   @ApiOperation({
     summary: 'The organizations a user belongs to now, with the roles held in each',
     description:
-      'Service-to-service only: `construction-service` with a token signed for no tenant; a ' +
+      'Service-to-service only: `construction-service` or `procurement-service` with a token ' +
+      'signed for no tenant, in `X-Internal-Token`; a ' +
       'person, any other service, or a token signed for a tenant is refused 403. Live ' +
       'memberships only, judged on the database clock. With `from`, the organizations the user ' +
       'held a membership in at any time between `from` and the database clock as the query ran ' +
-      '(ids only). Used to check a conflict of interest around a bid opening.',
+      '(ids only). Used to check a conflict of interest around a bid opening, and around an ' +
+      'RFQ opening, evaluation, selection and approval (ADR-070 § 7).',
   })
   liveOrganizations(
     @Param('id') id: string,

@@ -31,6 +31,7 @@ rasta.maintenance.v1 stream
 rasta.maintenance.v1.dlq dead-letter
 rasta.maintenance.v1.retry retry
 rasta.marketplace.v1 stream
+rasta.marketplace.v1.dlq dead-letter
 rasta.marketplace.v1.retry retry
 rasta.notification.v1 stream
 rasta.notification.v1.dlq dead-letter

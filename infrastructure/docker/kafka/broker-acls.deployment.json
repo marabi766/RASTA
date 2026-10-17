@@ -687,6 +687,34 @@
     },
     {
       "principal": "marketplace-service",
+      "resourceType": "GROUP",
+      "resourceName": "marketplace-service.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "marketplace-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "marketplace-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "marketplace-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.marketplace.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "marketplace-service",
       "resourceType": "TOPIC",
       "resourceName": "rasta.marketplace.v1",
       "patternType": "LITERAL",
@@ -1011,6 +1039,13 @@
       "principal": "ops-replay",
       "resourceType": "TOPIC",
       "resourceName": "rasta.maintenance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.marketplace.v1.dlq",
       "patternType": "LITERAL",
       "operation": "READ"
     },

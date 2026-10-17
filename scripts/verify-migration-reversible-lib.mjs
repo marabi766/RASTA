@@ -1697,6 +1697,9 @@ export const EXPECTED = {
       'ck_return_request_parties',
       'ck_return_line_quantity_positive',
       'ck_return_history_status',
+      // 20261016140000_return_request_physical (RUN-005 PR 3): which shipment, and its report.
+      'ck_return_request_shipment_id',
+      'ck_return_request_report_document_id',
       'ck_saga_step_key_not_blank',
       'ck_order_settled_after_receipt',
       'ck_order_completed_has_settlement',
@@ -1720,6 +1723,7 @@ export const EXPECTED = {
       'ux_return_history_command',
       'ux_return_history_version',
       'ux_return_line_order_line',
+      'ux_return_request_shipment',
     ],
     types: ['ResponsibilityAttribution'],
     dataRollback: MARKETPLACE_DATA_ROLLBACK,
