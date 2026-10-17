@@ -8,6 +8,7 @@ import type { RewardService } from '../reward/reward.service';
 import type { TransactionService } from '../transaction/transaction.service';
 import { RewardTriggerConsumer } from './reward-trigger.consumer';
 import { SettlementAuthorityConsumer } from './settlement-authority.consumer';
+import { StatementSettlementConsumer } from './statement-settlement.consumer';
 
 /**
  * L7-26 and S-09 for economic-service's two consumers, through the REAL
@@ -36,13 +37,17 @@ class FakeDlqProducer {
   }
 }
 
-function envelope(eventName: string, payload: Record<string, unknown>): EventEnvelope {
+function envelope(
+  eventName: string,
+  payload: Record<string, unknown>,
+  producer = 'maintenance-service',
+): EventEnvelope {
   return {
     eventId: `01JINVALIDPAYLOAD${eventName.slice(0, 8).padEnd(8, 'X')}`,
     eventName,
     eventVersion: 1,
     occurredAt: '2026-10-03T10:00:00.000Z',
-    producer: 'maintenance-service',
+    producer,
     producerVersion: '1.0.0',
     aggregateType: 'MaintenanceRequest',
     aggregateId: 'MNT_1',
@@ -73,6 +78,7 @@ function untouchablePrisma(): { prisma: PrismaService; touched: jest.Mock } {
 function deliverThrough(
   make: (build: (handler: (e: EventEnvelope) => Promise<HandlerOutcome>) => EventConsumer) => void,
   event: EventEnvelope,
+  topic = 'rasta.maintenance.v1',
 ) {
   let handler!: (e: EventEnvelope) => Promise<HandlerOutcome>;
   make((h) => {
@@ -91,7 +97,7 @@ function deliverThrough(
       brokers: ['localhost:9092'],
       clientId: 'invalid-payload-spec',
       groupId: 'invalid-payload-spec.group',
-      topics: ['rasta.maintenance.v1'],
+      topics: [topic],
       deadLetterTopic: 'rasta.maintenance.v1.dlq',
       maxRetries: 3,
       retryBackoffMs: 0,
@@ -107,7 +113,7 @@ function deliverThrough(
   internals.dlqProducer = dlq;
   const body = Buffer.from(JSON.stringify(event), 'utf8');
   return {
-    deliver: () => internals.handleMessage('rasta.maintenance.v1', 0, body, undefined, '11'),
+    deliver: () => internals.handleMessage(topic, 0, body, undefined, '11'),
     dlq,
     lines,
   };
@@ -176,6 +182,41 @@ describe('a known event with a malformed payload, through the real EventConsumer
     await deliver();
 
     expectDeadLetteredAtOnce(dlq, lines, 'approvedBy invalid_type; totalCostMinor invalid_string');
+    expect(touched).not.toHaveBeenCalled();
+  });
+
+  it('statement-settlement: STATEMENT_APPROVED is dead-lettered at once; nothing is touched', async () => {
+    const { prisma, touched } = untouchablePrisma();
+    const { deliver, dlq, lines } = deliverThrough(
+      (build) =>
+        new StatementSettlementConsumer(
+          build,
+          prisma,
+          {} as TransactionService,
+          {} as SourceFacts,
+          null,
+        ),
+      envelope(
+        'STATEMENT_APPROVED',
+        {
+          contractId: 'CTR_1',
+          statementId: 9,
+          organizationId: 'ORG_INVALID',
+          contractorOrganizationId: { name: SENTINEL },
+          approvedAt: '2026-10-16T11:00:00.000Z',
+        },
+        'contract-service',
+      ),
+      'rasta.contract.v1',
+    );
+
+    await deliver();
+
+    expectDeadLetteredAtOnce(
+      dlq,
+      lines,
+      'statementId invalid_type; contractorOrganizationId invalid_type',
+    );
     expect(touched).not.toHaveBeenCalled();
   });
 

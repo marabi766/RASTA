@@ -63,6 +63,11 @@
 `ORDER_CANCELLED` · `ORDER_DISPUTED` · `STATEMENT_APPROVED` · `PURCHASE_ORDER_ISSUED` ·
 `GOODS_RECEIVED`.
 
+> **اصلاحیهٔ 2026-10-17 (CON-003 PR 6b).** `STATEMENT_APPROVED` دیگر موکول نیست: تولیدکننده‌اش (contract-service، ADR-068)
+> قراردادش را فقط شناسه و لحظه تعریف کرد (Q-97 (۲)) و مبلغ را پشت `GET /v1/internal/statements/{id}` گذاشت، پس economic
+> شکلی برای سرویس دیگر اختراع نمی‌کند. Consumer `statement-settlement` همان الگوی `settlement-authority` است: یک تعهد
+> `PENDING_SETTLEMENT` از **پاسخ مالک**، بی هیچ حرکت پول (ADR-068، یادداشت PR 6b). بقیهٔ موکول‌ها همان‌اند.
+
 هیچ‌کدام Stub ندارند. یک Handler خالی که رویداد را می‌بلعد، بدتر از نبودنش است — چون در
 `processed_event` رد می‌گذارد و شبیه «پردازش شد» به نظر می‌رسد.
 

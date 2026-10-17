@@ -2,6 +2,7 @@ import { RastaError } from '@rasta/nest-common';
 import type {
   MaintenanceRequestFact,
   SourceFacts,
+  StatementFact,
   UsageRecordFact,
 } from '../src/provenance/source-facts.client';
 
@@ -20,7 +21,12 @@ import type {
 export class FakeSourceFacts implements SourceFacts {
   readonly requests = new Map<string, MaintenanceRequestFact>();
   readonly usage = new Map<string, UsageRecordFact>();
-  readonly calls: { owner: 'maintenance' | 'fleet'; organizationId: string; id: string }[] = [];
+  readonly statements = new Map<string, StatementFact>();
+  readonly calls: {
+    owner: 'maintenance' | 'fleet' | 'contract';
+    organizationId: string;
+    id: string;
+  }[] = [];
   unavailable = false;
 
   async maintenanceRequest(
@@ -38,6 +44,14 @@ export class FakeSourceFacts implements SourceFacts {
     if (this.unavailable) throw RastaError.upstreamUnavailable('fleet-service');
     const fact = this.usage.get(id);
     return fact && fact.organizationId === organizationId ? fact : null;
+  }
+
+  /** As contract-service answers: only for the employer the token is signed for. */
+  async statement(organizationId: string, id: string): Promise<StatementFact | null> {
+    this.calls.push({ owner: 'contract', organizationId, id });
+    if (this.unavailable) throw RastaError.upstreamUnavailable('contract-service');
+    const fact = this.statements.get(id);
+    return fact && fact.payerOrganizationId === organizationId ? fact : null;
   }
 
   /** The approval an honest `MAINTENANCE_APPROVED` announces, recorded by its owner. */

@@ -9,6 +9,7 @@ import {
 import { AppModule } from './app.module';
 import { RewardTriggerConsumer } from './consumers/reward-trigger.consumer';
 import { SettlementAuthorityConsumer } from './consumers/settlement-authority.consumer';
+import { StatementSettlementConsumer } from './consumers/statement-settlement.consumer';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { PaymentReconciliationSweeper } from './payment/payment-reconciliation.sweeper';
 import { ENV } from './tokens';
@@ -88,6 +89,7 @@ describe('AppModule shutdown wiring (D-052)', () => {
       OutboxPurgeScheduler,
       PaymentReconciliationSweeper,
       SettlementAuthorityConsumer,
+      StatementSettlementConsumer,
       RewardTriggerConsumer,
       LedgerBalanceAudit,
       // Closed last, after the drain, by the same deadline (D-052 phase 4b):
@@ -114,15 +116,20 @@ describe('AppModule shutdown wiring (D-052)', () => {
 });
 
 describe('AppModule shutdown wiring (Codex r1 on #277)', () => {
-  it('stops both consumers with the relay, the purge and the payment sweep, by one deadline', async () => {
+  it('stops every consumer with the relay, the purge and the payment sweep, by one deadline', async () => {
     const before = Date.now();
     const { inject, stops } = await stopThroughFactory();
 
     expect(inject).toEqual(
-      expect.arrayContaining([SettlementAuthorityConsumer, RewardTriggerConsumer]),
+      expect.arrayContaining([
+        SettlementAuthorityConsumer,
+        StatementSettlementConsumer,
+        RewardTriggerConsumer,
+      ]),
     );
     expect(stops.size).toBe(inject.length - 1);
     expect(stops.get(SettlementAuthorityConsumer)).toHaveLength(1);
+    expect(stops.get(StatementSettlementConsumer)).toHaveLength(1);
     expect(stops.get(RewardTriggerConsumer)).toHaveLength(1);
     const deadlines = new Set([...stops.values()].map((calls) => calls[0]?.deadlineAt));
     expect(deadlines.size).toBe(1);
@@ -133,12 +140,19 @@ describe('AppModule shutdown wiring (Codex r1 on #277)', () => {
 
   it.each([
     ['SettlementAuthorityConsumer', SettlementAuthorityConsumer],
+    ['StatementSettlementConsumer', StatementSettlementConsumer],
     ['RewardTriggerConsumer', RewardTriggerConsumer],
   ] as const)(
     '%s passes the deadline to its EventConsumer; its own hook joins that stop',
     async (_name, Consumer) => {
       const consumerStop = jest.fn(async (_options?: OutboxStopOptions) => undefined);
-      const consumer = new Consumer(buildOf(consumerStop), {} as never, {} as never, {} as never);
+      const consumer = new Consumer(
+        buildOf(consumerStop),
+        {} as never,
+        {} as never,
+        {} as never,
+        null as never,
+      );
 
       await consumer.stop({ deadlineAt: 1234 });
       await consumer.onApplicationShutdown();

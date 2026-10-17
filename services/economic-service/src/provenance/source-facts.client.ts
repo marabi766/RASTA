@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MAX_AMOUNT_MINOR } from '@rasta/contracts';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
@@ -48,6 +49,7 @@ import { SERVICE_NAME } from '../config/env';
 
 export const MAINTENANCE_SERVICE = 'maintenance-service';
 export const FLEET_SERVICE = 'fleet-service';
+export const CONTRACT_SERVICE = 'contract-service';
 
 /** Identifier characters only; anything else is not forwarded as a correlation id. */
 const SAFE_CORRELATION_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -101,6 +103,28 @@ const usageRecordFactSchema = z.object({
 export type UsageRecordFact = z.infer<typeof usageRecordFactSchema>;
 
 /**
+ * A statement as contract-service states it for settlement
+ * (`GET /v1/internal/statements/{id}`, ADR-068 § 6 (2)): the stored row,
+ * whatever its status. The net is a decimal string of minor units, and one
+ * past PostgreSQL `BIGINT` is not an answer any owner can give, so it does not
+ * parse. The status and the currency are kept as strings: a value this side
+ * does not know is the consumer's refusal to make, not a parse failure to
+ * retry.
+ */
+const statementFactSchema = z.object({
+  statementId: z.string().min(1),
+  contractId: z.string().min(1),
+  status: z.string().min(1),
+  netMinor: minorAmount.refine((value) => BigInt(value) <= MAX_AMOUNT_MINOR),
+  currency: z.string().min(3),
+  payerOrganizationId: z.string().min(1),
+  beneficiaryOrganizationId: z.string().min(1),
+  approvedAt: instant.nullable(),
+});
+
+export type StatementFact = z.infer<typeof statementFactSchema>;
+
+/**
  * What the consumers depend on. An interface so a test can stand in for the
  * owning services without a network.
  */
@@ -109,6 +133,8 @@ export interface SourceFacts {
   maintenanceRequest(organizationId: string, id: string): Promise<MaintenanceRequestFact | null>;
   /** The usage record as fleet-service records it, or `null`. */
   usageRecord(organizationId: string, id: string): Promise<UsageRecordFact | null>;
+  /** The statement as contract-service records it, for its employer, or `null`. */
+  statement(organizationId: string, id: string): Promise<StatementFact | null>;
 }
 
 export interface SourceFactsClientOptions {
@@ -116,6 +142,8 @@ export interface SourceFactsClientOptions {
   readonly maintenanceBaseUrl: string;
   /** `FLEET_SERVICE_URL`. */
   readonly fleetBaseUrl: string;
+  /** `CONTRACT_SERVICE_URL`. */
+  readonly contractBaseUrl: string;
   /** `ECONOMIC_SOURCE_REQUEST_TIMEOUT_MS`: the whole exchange, body included. */
   readonly timeoutMs: number;
   readonly tokens: Pick<InternalTokenService, 'issue'>;
@@ -139,6 +167,7 @@ export class SourceFactsClient implements SourceFacts {
       organizationId,
       id,
       maintenanceRequestFactSchema,
+      (fact) => fact.id,
     );
   }
 
@@ -151,10 +180,29 @@ export class SourceFactsClient implements SourceFacts {
       organizationId,
       id,
       usageRecordFactSchema,
+      (fact) => fact.id,
     );
   }
 
-  private async read<T extends { id: string; organizationId: string }>(
+  /**
+   * Signed for the employer — the statement's own organization, the only one
+   * contract-service answers it for; any other organization's token, the
+   * contractor's included, finds nothing (`404 Statement not found`).
+   */
+  statement(organizationId: string, id: string): Promise<StatementFact | null> {
+    return this.read(
+      CONTRACT_SERVICE,
+      this.options.contractBaseUrl,
+      `/v1/internal/statements/${encodeURIComponent(id)}`,
+      'Statement',
+      organizationId,
+      id,
+      statementFactSchema,
+      (fact) => fact.statementId,
+    );
+  }
+
+  private async read<T>(
     service: string,
     baseUrl: string,
     path: string,
@@ -162,6 +210,7 @@ export class SourceFactsClient implements SourceFacts {
     organizationId: string,
     id: string,
     schema: z.ZodType<T>,
+    idOf: (fact: T) => string,
   ): Promise<T | null> {
     const token = await this.options.tokens.issue(SERVICE_NAME, service, 'SERVICE', organizationId);
 
@@ -227,7 +276,7 @@ export class SourceFactsClient implements SourceFacts {
 
       // An answer about another record is not an answer. The organization is
       // compared by the consumer, which reports it as its own mismatch.
-      if (parsed.data.id !== id) throw RastaError.upstreamUnavailable(service);
+      if (idOf(parsed.data) !== id) throw RastaError.upstreamUnavailable(service);
 
       return parsed.data;
     } finally {
