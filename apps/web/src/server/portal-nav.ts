@@ -3,8 +3,7 @@ import { canReadSettlements } from '@/app/portal-nav';
 import type { SidebarItem } from '@/ui';
 
 import { webServerEnv, type WebServerEnv } from './env';
-import { fetchCurrentUser, type CurrentUserResult } from './identity';
-import { requestRoles } from './realm-roles';
+import { tokenRoles } from './realm-roles';
 import type { WebSession } from './session';
 
 /**
@@ -192,29 +191,28 @@ export function canReadSuppliers(roles: readonly string[]): boolean {
 }
 
 /**
- * The navigation for a person, from the roles identity-service reports for the
- * organization they are acting in plus the global realm roles in their token
- * (`SYSTEM_ADMIN`), which is the set the backend services act on.
+ * The navigation for a person, from the roles their access token carries for
+ * the organization it resolves to (`tokenRoles`): the set the backend services
+ * act on (`rolesForRequest`). Not `/v1/users/me`, whose membership rows run
+ * ahead of the token until it is refreshed — a role removed there still works
+ * and a role added is still refused, and a link drawn from the rows would
+ * disagree with the service's answer behind it.
  *
- * An identity answer that is missing or unreadable hides the gated link: it is
- * only a convenience, and showing it on a guess is the mistake being fixed. The
- * page that called this renders its own identity outcome where it needs one.
+ * A token that cannot be read hides every gated link: they are only a
+ * convenience, and showing one on a guess is the mistake being fixed.
  */
-export async function loadPortalNav(
-  session: WebSession,
-  current?: CurrentUserResult,
-): Promise<readonly SidebarItem[]> {
-  const result = current ?? (await fetchCurrentUser(session));
-  // The realm claim is read only once identity answered: with no answer the gated
-  // links stay hidden, whatever the token says.
-  const roles =
-    result.kind === 'USER' ? requestRoles(result.user.effectiveRoles, session.accessToken) : [];
+export function portalNavForSession(
+  session: Pick<WebSession, 'accessToken'>,
+): readonly SidebarItem[] {
+  const read = tokenRoles(session.accessToken);
+  const roles = read ?? [];
+  const env = webServerEnv();
   return portalNavFor({
-    canReadProjects: canReadProjects(roles, webServerEnv()),
-    canReadTenders: canReadTenders(roles, webServerEnv()),
-    canReadContracts: canReadContracts(roles, webServerEnv()),
-    canReadSettlements: canReadSettlements(result.kind === 'USER' ? roles : null),
-    canReadInventory: canReadInventory(roles, webServerEnv()),
+    canReadProjects: canReadProjects(roles, env),
+    canReadTenders: canReadTenders(roles, env),
+    canReadContracts: canReadContracts(roles, env),
+    canReadSettlements: canReadSettlements(read),
+    canReadInventory: canReadInventory(roles, env),
     canReadSuppliers: canReadSuppliers(roles),
   });
 }

@@ -425,3 +425,49 @@ describe('accessibility', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 });
+
+describe('a session only unavailable, on every form here', () => {
+  it.each([
+    [
+      'the profile form',
+      () => (
+        <OrganizationProfileForm
+          organizationId="ORG_1"
+          csrfToken={CSRF}
+          submissionId={SUBMISSION}
+          initialValues={{ name: '', shortName: '', externalCode: '' }}
+        />
+      ),
+    ],
+    [
+      'the member roles form',
+      () => (
+        <MemberRolesForm
+          membershipId="MBR_2"
+          memberName="همکار نمونه"
+          currentRoles={[]}
+          grantableRoles={ORG_ADMIN_GRANTS}
+          csrfToken={CSRF}
+          submissionId={SUBMISSION}
+        />
+      ),
+    ],
+    [
+      'the revoke form',
+      () => (
+        <RevokeMembershipForm
+          membershipId="MBR_2"
+          memberName="همکار نمونه"
+          csrfToken={CSRF}
+          submissionId={SUBMISSION}
+        />
+      ),
+    ],
+  ])('%s: says so, not "ended", with no accessibility violations', async (_name, form) => {
+    currentState = { kind: 'REFUSED', reason: 'SESSION_UNAVAILABLE' };
+    const { container } = render(form());
+    expect(screen.getByText(/همین حالا در دسترس نیست/)).toBeInTheDocument();
+    expect(screen.queryByText(/پایان یافته/)).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});

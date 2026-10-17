@@ -2,7 +2,7 @@
 
 import { redirect } from 'next/navigation';
 
-import { currentSession } from '@/server/current-session';
+import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import {
@@ -44,7 +44,8 @@ import type {
 /** Everything the three actions check before they differ. */
 async function gate(form: FormData) {
   const session = await currentSession();
-  if (!session) return { ok: false, state: { kind: 'REFUSED', reason: 'NO_SESSION' } } as const;
+  if (!session)
+    return { ok: false, state: { kind: 'REFUSED', reason: await missingSessionReason() } } as const;
 
   const csrf = verifyCsrf(session, form);
   if (!csrf.ok) return { ok: false, state: { kind: 'REFUSED', reason: 'CSRF' } } as const;

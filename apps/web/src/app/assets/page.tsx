@@ -3,7 +3,7 @@ import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchAssets, type AssetListQuery } from '@/server/assets';
 import { canManageAssets } from '@/server/asset-commands';
-import { fetchCurrentUser } from '@/server/identity';
+import { tokenWriteRoles } from '@/server/realm-roles';
 import { mintSubmissionId } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { ASSET_STATUSES, ASSET_TYPES, oneOf } from '@/lib/asset-fields';
@@ -33,6 +33,10 @@ export default async function AssetsPage({
 }) {
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/assets');
+  // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
+  // the set the service decides on — not `/v1/users/me`, which runs ahead of the
+  // token until it is refreshed.
+  const roles = tokenWriteRoles(session.accessToken);
 
   const params = await searchParams;
   // `status` and `type` are strict enums on asset-service's side: a value
@@ -45,15 +49,12 @@ export default async function AssetsPage({
     cursor: one(params.cursor),
   };
 
-  const [result, currentUser] = await Promise.all([
-    fetchAssets(session, query),
-    fetchCurrentUser(session),
-  ]);
+  const result = await fetchAssets(session, query);
 
-  // A Route Guard as UX, not as security (`docs/16 § ۱۶٫۱۱`): a failed identity
-  // read shows no form rather than one that might not work, and asset-service
+  // A Route Guard as UX, not as security (`docs/16 § ۱۶٫۱۱`): a token whose roles
+  // cannot be read shows no form rather than one that might not work, and asset-service
   // decides again on every submit.
-  const manage = currentUser.kind === 'USER' && canManageAssets(currentUser.user.effectiveRoles);
+  const manage = roles !== null && canManageAssets(roles);
 
   return (
     <AppShell
@@ -67,7 +68,7 @@ export default async function AssetsPage({
           </form>
         </TopBar>
       }
-      sidebar={<PortalSidebar session={session} currentHref="/assets" current={currentUser} />}
+      sidebar={<PortalSidebar session={session} currentHref="/assets" />}
     >
       <AssetsScreen
         result={result}

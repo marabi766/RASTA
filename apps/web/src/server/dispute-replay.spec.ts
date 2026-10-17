@@ -48,9 +48,10 @@ describe('a stamp issued under a longer retention, after the retention is shorte
   const stamp = mintReplayStamp(SESSION, TXN, submission, T0, LONG);
 
   it('is still valid under the configuration it was issued with', () => {
-    expect(verifyReplayStamp(SESSION, stamp.token, TXN, submission, T0 + 4 * HOUR, LONG)).toEqual(
-      stamp,
-    );
+    expect(verifyReplayStamp(SESSION, stamp.token, TXN, submission, T0 + 4 * HOUR, LONG)).toEqual({
+      ...stamp,
+      disputeId: null,
+    });
   });
 
   it('is refused at +4 h once the window as configured now has passed', () => {
@@ -64,6 +65,7 @@ describe('a stamp issued under a longer retention, after the retention is shorte
     expect(verifyReplayStamp(SESSION, stamp.token, TXN, submission, at, SHORT)).toEqual({
       token: stamp.token,
       until: T0 + replayWindowSeconds(SHORT) * 1000,
+      disputeId: null,
     });
   });
 
@@ -106,6 +108,46 @@ describe('what it is bound to', () => {
     );
     expect(
       verifyReplayStamp(SESSION, `${forged}.${mac}`, TXN, submission, T0 + 2 * HOUR, SHORT),
+    ).toBeNull();
+  });
+});
+
+/**
+ * PR 325 review 1, finding 1: a resolution's stamp signs the dispute the page
+ * showed, and verifying it returns that identity — never one the request could
+ * choose.
+ */
+describe('the dispute a resolution decides', () => {
+  const submission = mintSubmissionId(SESSION);
+  const target = { transactionId: TXN, disputeId: 'TXD_A' };
+
+  it('is signed into the stamp and returned on verification', () => {
+    const stamp = mintReplayStamp(SESSION, target, submission, T0, SHORT);
+    expect(verifyReplayStamp(SESSION, stamp.token, TXN, submission, T0 + HOUR / 2, SHORT)).toEqual({
+      ...stamp,
+      disputeId: 'TXD_A',
+    });
+  });
+
+  it('is null for a stamp that decides no dispute (opening one)', () => {
+    const stamp = mintReplayStamp(SESSION, TXN, submission, T0, SHORT);
+    expect(
+      verifyReplayStamp(SESSION, stamp.token, TXN, submission, T0 + HOUR / 2, SHORT)?.disputeId,
+    ).toBeNull();
+  });
+
+  it('cannot be swapped for another: a stamp whose dispute was edited does not verify', () => {
+    const stamp = mintReplayStamp(SESSION, target, submission, T0, SHORT);
+    const [payload, mac] = stamp.token.split('.') as [string, string];
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as Record<
+      string,
+      unknown
+    >;
+    const swapped = Buffer.from(JSON.stringify({ ...claims, disputeId: 'TXD_B' })).toString(
+      'base64url',
+    );
+    expect(
+      verifyReplayStamp(SESSION, `${swapped}.${mac}`, TXN, submission, T0 + HOUR / 2, SHORT),
     ).toBeNull();
   });
 });
