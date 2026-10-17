@@ -183,6 +183,10 @@ export {
   receivedReturnShipmentLineSchema,
   returnShipmentDispatchedPayloadSchema,
   returnShipmentReceivedPayloadSchema,
+  returnShipmentInspectedPayloadSchema,
+  returnShipmentResolvedPayloadSchema,
+  returnDispositionLineSchema,
+  RETURN_DISPOSITIONS,
 } from './events/inventory-returns';
 export type {
   InventoryReturnEventName,
@@ -190,6 +194,10 @@ export type {
   ReceivedReturnShipmentLine,
   ReturnShipmentDispatchedPayload,
   ReturnShipmentReceivedPayload,
+  ReturnShipmentInspectedPayload,
+  ReturnShipmentResolvedPayload,
+  ReturnDispositionLine,
+  ReturnDisposition,
 } from './events/inventory-returns';
 export {
   RETURN_REQUEST_EVENTS,

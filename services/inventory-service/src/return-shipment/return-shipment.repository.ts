@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import type { ReturnDisposition } from '@rasta/contracts';
 import { Prisma } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { ReturnShipmentSide, ReturnShipmentStatus } from './dto';
@@ -17,8 +18,19 @@ export interface ReturnShipmentRow {
   createdAt: Date;
   createdBy: string;
   receivedAt: Date | null;
+  inspectedAt: Date | null;
+  inspectionNote: string | null;
+  inspectionReportDocumentId: string | null;
+  resolvedAt: Date | null;
   updatedAt: Date;
   version: number;
+}
+
+export interface ReturnDispositionRow {
+  id: string;
+  orderLineId: string;
+  disposition: ReturnDisposition;
+  quantity: number;
 }
 
 export interface ReturnShipmentLineRow {
@@ -54,7 +66,13 @@ const COLUMNS = Prisma.sql`
   "buyer_organization_id" AS "buyerOrganizationId", "return_request_id" AS "returnRequestId",
   "order_id" AS "orderId", "carrier_name" AS "carrierName", "carrier_reference" AS "carrierReference",
   "line_count" AS "lineCount", "status", "created_at" AS "createdAt", "created_by" AS "createdBy",
-  "received_at" AS "receivedAt", "updated_at" AS "updatedAt", "version"`;
+  "received_at" AS "receivedAt", "inspected_at" AS "inspectedAt",
+  "inspection_note" AS "inspectionNote",
+  "inspection_report_document_id" AS "inspectionReportDocumentId",
+  "resolved_at" AS "resolvedAt", "updated_at" AS "updatedAt", "version"`;
+
+const DISPOSITION_COLUMNS = Prisma.sql`
+  "id", "order_line_id" AS "orderLineId", "disposition", "quantity"`;
 
 const LINE_COLUMNS = Prisma.sql`
   "id", "order_line_id" AS "orderLineId", "product_id" AS "productId",
@@ -248,6 +266,84 @@ export class ReturnShipmentRepository {
          AND "status" = ${shipment.status} AND "version" = ${shipment.version}::integer
        RETURNING ${COLUMNS}`;
     return rows[0] ?? null;
+  }
+
+  /**
+   * RECEIVED → INSPECTED, the same way: compare-and-set, the inspector and instant recorded beside
+   * it, with the note and the report reference the inspection carries.
+   */
+  async markInspected(
+    tx: ExtendedPrismaClient,
+    shipment: Pick<ReturnShipmentRow, 'organizationId' | 'id' | 'status' | 'version'>,
+    inspection: { note: string | null; reportDocumentId: string | null },
+    actor: string,
+    at: Date,
+  ): Promise<ReturnShipmentRow | null> {
+    const rows = await tx.$queryRaw<ReturnShipmentRow[]>`
+      UPDATE "return_shipment"
+         SET "status" = 'INSPECTED', "inspected_at" = ${at}, "inspected_by" = ${actor},
+             "inspection_note" = ${inspection.note},
+             "inspection_report_document_id" = ${inspection.reportDocumentId},
+             "updated_at" = ${at}, "version" = "version" + 1
+       WHERE "organization_id" = ${shipment.organizationId} AND "id" = ${shipment.id}
+         AND "status" = ${shipment.status} AND "version" = ${shipment.version}::integer
+       RETURNING ${COLUMNS}`;
+    return rows[0] ?? null;
+  }
+
+  /** INSPECTED → RESOLVED, the same way. Its dispositions are written right after, in the same transaction. */
+  async markResolved(
+    tx: ExtendedPrismaClient,
+    shipment: Pick<ReturnShipmentRow, 'organizationId' | 'id' | 'status' | 'version'>,
+    actor: string,
+    at: Date,
+  ): Promise<ReturnShipmentRow | null> {
+    const rows = await tx.$queryRaw<ReturnShipmentRow[]>`
+      UPDATE "return_shipment"
+         SET "status" = 'RESOLVED', "resolved_at" = ${at}, "resolved_by" = ${actor},
+             "updated_at" = ${at}, "version" = "version" + 1
+       WHERE "organization_id" = ${shipment.organizationId} AND "id" = ${shipment.id}
+         AND "status" = ${shipment.status} AND "version" = ${shipment.version}::integer
+       RETURNING ${COLUMNS}`;
+    return rows[0] ?? null;
+  }
+
+  async insertDisposition(
+    tx: ExtendedPrismaClient,
+    input: {
+      id: string;
+      organizationId: string;
+      returnShipmentId: string;
+      orderLineId: string;
+      disposition: ReturnDisposition;
+      quantity: number;
+      at: Date;
+    },
+  ): Promise<ReturnDispositionRow> {
+    const rows = await tx.$queryRaw<ReturnDispositionRow[]>`
+      INSERT INTO "return_disposition" ("id", "organization_id", "return_shipment_id",
+                                        "order_line_id", "disposition", "quantity", "created_at")
+      VALUES (${input.id}, ${input.organizationId}, ${input.returnShipmentId},
+              ${input.orderLineId}, ${input.disposition}, ${input.quantity}::integer, ${input.at})
+      RETURNING ${DISPOSITION_COLUMNS}`;
+    return rows[0] as ReturnDispositionRow;
+  }
+
+  /** The dispositions of shipments already found visible, through their owner, in a stable order. */
+  async dispositionsOf(
+    shipments: readonly Pick<ReturnShipmentRow, 'organizationId' | 'id'>[],
+    client: ExtendedPrismaClient = this.prisma.client,
+  ): Promise<Map<string, ReturnDispositionRow[]>> {
+    const found = new Map<string, ReturnDispositionRow[]>(shipments.map((s) => [s.id, []]));
+    if (shipments.length === 0) return found;
+    const pairs = shipments.map((s) => Prisma.sql`(${s.organizationId}, ${s.id})`);
+    const rows = await client.$queryRaw<(ReturnDispositionRow & { returnShipmentId: string })[]>`
+      SELECT ${DISPOSITION_COLUMNS}, "return_shipment_id" AS "returnShipmentId"
+        FROM "return_disposition"
+       WHERE ("organization_id", "return_shipment_id") IN (${Prisma.join(pairs)})
+       ORDER BY "return_shipment_id", "order_line_id", "disposition"`;
+    for (const { returnShipmentId, ...row } of rows) found.get(returnShipmentId)?.push(row);
+    return found;
   }
 
   // -- reads (destination owner or sender) ----------------------------------------------------

@@ -21,6 +21,8 @@ docs/api/
 **استثنا — قرارداد طرح‌شده.** `construction-service.tender.planned.openapi.json` (CON-002) قرارداد **طراحی** است، نه رفتار امروز: با
 کنترلر تولید نمی‌شود و آزمون همگامی (`document.spec.ts`، `openapi.int-spec.ts`) آن را نمی‌خواند. هر ردیف `x-step` دارد؛ وقتی PR آن گام
 پیاده شد، همان مسیرها به `construction-service.openapi.json` تولیدشده منتقل و از فایل طرح حذف می‌شوند؛ با پایان CON-002 این فایل حذف می‌شود.
+`procurement-service.planned.openapi.json` (COM-007، [ADR-070](../adr/ADR-070-procurement-service-boundary-and-lifecycle.md)) همین قاعده را دارد: سرویس هنوز
+وجود ندارد، `x-step` شمارهٔ برش [برنامهٔ اجرا](../adr/ADR-070-implementation-plan.md) است و هر برش مسیرهایش را به فایل تولیدشدهٔ سرویس منتقل می‌کند.
 
 ## تولید
 

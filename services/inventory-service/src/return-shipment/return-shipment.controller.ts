@@ -12,10 +12,14 @@ import {
 import {
   createReturnShipmentSchema,
   listReturnShipmentsQuerySchema,
+  inspectReturnShipmentSchema,
   receiveReturnShipmentSchema,
+  resolveReturnShipmentSchema,
   type CreateReturnShipmentDto,
   type ListReturnShipmentsQuery,
+  type InspectReturnShipmentDto,
   type ReceiveReturnShipmentDto,
+  type ResolveReturnShipmentDto,
   type ReturnShipmentView,
   type ReturnTrackingView,
 } from './dto';
@@ -24,6 +28,8 @@ import { ReturnShipmentService } from './return-shipment.service';
 /** The route templates the idempotency store keys on: a closed set, never an id. */
 export const CREATE_RETURN_SHIPMENT_ENDPOINT = 'POST /v1/return-shipments';
 export const RECEIVE_RETURN_SHIPMENT_ENDPOINT = 'POST /v1/return-shipments/{id}/receive';
+export const INSPECT_RETURN_SHIPMENT_ENDPOINT = 'POST /v1/return-shipments/{id}/inspection';
+export const RESOLVE_RETURN_SHIPMENT_ENDPOINT = 'POST /v1/return-shipments/{id}/resolution';
 
 const IDEMPOTENCY_HEADER = {
   name: 'Idempotency-Key',
@@ -145,6 +151,84 @@ export class ReturnShipmentController {
       { id, ...dto },
       200,
       (fence) => this.shipments.receive(id, dto, { fence, keyHash }),
+      (stored) => this.shipments.assertVisible(stored.id),
+    );
+    return result;
+  }
+
+  @RequirePlatformUserId()
+  @Post(':id/inspection')
+  @HttpCode(200)
+  @ApiHeader(IDEMPOTENCY_HEADER)
+  @ApiOperation({
+    summary: 'Record the inspection of a return shipment (RECEIVED → INSPECTED)',
+    description:
+      'The received goods were examined. An optional `note` (kept here, shown to the readers, ' +
+      'never on an event) and an optional `reportDocumentId` — the report is a file in ' +
+      'document-service, referenced by id. Records the INSPECTED tracking event and ' +
+      'RETURN_SHIPMENT_INSPECTED. The goods are still not stock (ADR-048 § 4). A return shipment ' +
+      'not yet received, or inspected already, is 409 `RETURN_SHIPMENT_NOT_RECEIVED` ' +
+      '(INVALID_STATE_TRANSITION). `expectedVersion` is optional. ' +
+      RETURN_SHIPMENT_MOVE_NOTE +
+      ' ' +
+      COMMAND_NOTE,
+  })
+  async inspect(
+    @Param('id') id: string,
+    @Body(zodPipe(inspectReturnShipmentSchema)) dto: InspectReturnShipmentDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ): Promise<ReturnShipmentView> {
+    const key = requiredIdempotencyKey(idempotencyKey);
+    const keyHash = commandKeyHash(INSPECT_RETURN_SHIPMENT_ENDPOINT, key);
+    const { result } = await this.idempotency.execute<ReturnShipmentView>(
+      INSPECT_RETURN_SHIPMENT_ENDPOINT,
+      key,
+      { id, ...dto },
+      200,
+      (fence) => this.shipments.inspect(id, dto, { fence, keyHash }),
+      (stored) => this.shipments.assertVisible(stored.id),
+    );
+    return result;
+  }
+
+  @RequirePlatformUserId()
+  @Post(':id/resolution')
+  @HttpCode(200)
+  @ApiHeader(IDEMPOTENCY_HEADER)
+  @ApiOperation({
+    summary:
+      'Resolve a return shipment: give every received unit an outcome (INSPECTED → RESOLVED)',
+    description:
+      'Per line, its received units by disposition (RESTOCK, REPAIR, REPLACE, ' +
+      'RETURN_TO_SUPPLIER, SCRAP, RECYCLE) — only those named in ' +
+      'INVENTORY_RETURN_DISPOSITIONS_ALLOWED, which is empty by default (Q-133): 422 ' +
+      '`DISPOSITION_NOT_ALLOWED`, and while it is empty nothing is resolved. For every line the ' +
+      'quantities add up to exactly what was received: 422 `DISPOSITIONS_DO_NOT_BALANCE`. A ' +
+      'shipment of which nothing arrived resolves with `dispositions: []`, and only where ' +
+      'INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED is true; it is false by default (Q-133): 422 ' +
+      '`NOTHING_RECEIVED_TO_RESOLVE`. Records the RESOLVED tracking event and ' +
+      'RETURN_SHIPMENT_RESOLVED. **This records an outcome and nothing else**: no stock is ' +
+      'received into a balance (RESTOCK included) and no refund is requested — a refund is ' +
+      'economic-service’s and has no operation for a settled order yet (Q-76). A return shipment ' +
+      'not yet inspected, or resolved already, is 409 `RETURN_SHIPMENT_NOT_INSPECTED` ' +
+      '(INVALID_STATE_TRANSITION). `expectedVersion` is optional. ' +
+      RETURN_SHIPMENT_MOVE_NOTE +
+      ' ' +
+      COMMAND_NOTE,
+  })
+  async resolve(
+    @Param('id') id: string,
+    @Body(zodPipe(resolveReturnShipmentSchema)) dto: ResolveReturnShipmentDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ): Promise<ReturnShipmentView> {
+    const key = requiredIdempotencyKey(idempotencyKey);
+    const keyHash = commandKeyHash(RESOLVE_RETURN_SHIPMENT_ENDPOINT, key);
+    const { result } = await this.idempotency.execute<ReturnShipmentView>(
+      RESOLVE_RETURN_SHIPMENT_ENDPOINT,
+      key,
+      { id, ...dto },
+      200,
+      (fence) => this.shipments.resolve(id, dto, { fence, keyHash }),
       (stored) => this.shipments.assertVisible(stored.id),
     );
     return result;

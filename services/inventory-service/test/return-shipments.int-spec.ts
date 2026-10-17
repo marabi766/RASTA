@@ -122,6 +122,11 @@ describe('return shipments', () => {
         carrierReference: 'WB-2001',
         createdAt: expect.any(String),
         receivedAt: null,
+        inspectedAt: null,
+        inspectionNote: null,
+        inspectionReportDocumentId: null,
+        resolvedAt: null,
+        dispositions: [],
         updatedAt: created.body.createdAt,
         version: 1,
       });

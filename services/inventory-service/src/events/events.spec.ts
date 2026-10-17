@@ -98,6 +98,20 @@ const VALID = {
     receivedBy: 'USR_1',
     receivedAt: at,
   },
+  RETURN_SHIPMENT_INSPECTED: {
+    ...returnShipment,
+    returnShipmentVersion: 3,
+    reportDocumentId: null,
+    inspectedBy: 'USR_1',
+    inspectedAt: at,
+  },
+  RETURN_SHIPMENT_RESOLVED: {
+    ...returnShipment,
+    returnShipmentVersion: 4,
+    dispositions: [{ orderLineId: 'OLN_1', disposition: 'SCRAP', quantity: 2 }],
+    resolvedBy: 'USR_1',
+    resolvedAt: at,
+  },
 } as const;
 
 const SHIPMENT_EVENTS = ['SHIPMENT_CREATED', 'SHIPMENT_DISPATCHED', 'SHIPMENT_DELIVERED'];
@@ -106,7 +120,9 @@ describe('the published event contracts (ADR-056 § 6)', () => {
   it('names the catalogue’s stock and shipment events, the return-shipment events, STOCK_ADJUSTED and WAREHOUSE_CREATED — no LOW_STOCK_DETECTED yet', () => {
     expect(Object.keys(INVENTORY_EVENTS).sort()).toEqual([
       'RETURN_SHIPMENT_DISPATCHED',
+      'RETURN_SHIPMENT_INSPECTED',
       'RETURN_SHIPMENT_RECEIVED',
+      'RETURN_SHIPMENT_RESOLVED',
       'SHIPMENT_CREATED',
       'SHIPMENT_DELIVERED',
       'SHIPMENT_DISPATCHED',
