@@ -101,6 +101,23 @@ separation-of-duties refusal, the financial approval.
 - Each run adds one approved statement to the fixture's contract, found by the
   id its own draft returned; the contract's price is large enough for many runs.
 
+## Contract commands (`contract-commands.spec.ts`) — drafts nobody has signed
+
+For the same reason, `fixtures/contract-commands.sql` (loaded after
+`contract-statements.sql`, whose `contract.signature` policy the employer signs
+under) writes three **draft** contracts nobody has signed. Everything else is
+done in the browser: both sides accept CTR_E2E_SIGNING, the employer proposes an
+amendment and both sides sign it, the employer plans a milestone and changes it;
+a cancel form the employer opened on CTR_E2E_CANCEL before the contractor signed
+is refused once it has (`SIGNATURE_RECORDED`, in the page's fixed words); and
+ORG-DEH-0002, with no signing policy in force, is told nobody may sign for it.
+
+- Same flag (`WEB_LIVE_STACK_E2E_CONTRACTS=true`), same CI rule, and it
+  provisions its own contractor per run.
+- **Once per database:** the drafts are fixed rows, and a contract once signed or
+  cancelled never goes back. The CI job's database is fresh; locally, recreate
+  contract-service's database to run it again.
+
 ## Adding a live scenario
 
 - Record the id of everything the scenario creates and clean up by id, not by

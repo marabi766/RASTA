@@ -580,17 +580,21 @@ jobs:
           DATABASE_URL_CONTRACT: postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
 
-      - name: Load the signed contract the statement scenarios act on
+      - name: Load the contracts the statement and contract command scenarios act on
         # contract-service has no route that creates a contract (one is drafted
-        # only from TENDER_AWARDED, ADR-068 § 3), so the scenarios start from a
-        # SIGNED contract and the two statement chains in force, written as
-        # contract-service's own runtime role through every guard its database
-        # keeps. The file says why, and what each row is.
+        # only from TENDER_AWARDED, ADR-068 § 3), so the statement scenarios
+        # start from a SIGNED contract and the two statement chains in force, and
+        # the contract command scenarios from drafts nobody has signed (signing,
+        # cancelling, amending and planning are then done in the browser) —
+        # written as contract-service's own runtime role through every guard its
+        # database keeps. Each file says why, and what each row is; the second
+        # signs under the first's signing policy.
         env:
           PGPASSWORD: rasta_contract_dev_password
         run: >-
           psql -v ON_ERROR_STOP=1 -h localhost -U rasta_contract -d rasta_contract
           -f apps/web/e2e/fixtures/contract-statements.sql
+          -f apps/web/e2e/fixtures/contract-commands.sql
 
       - name: Seed the live users and both tenants' machines, drivers and schedules
         # operator.one is the same platform user in identity, Keycloak and
@@ -978,8 +982,10 @@ jobs:
           # job (above), so `/projects` and `/inventory` live-isolation
           # scenarios run for real instead of skipping.
           WEB_LIVE_STACK_E2E_EXP004: 'true'
-          # contract-service is up and its fixture loaded (above), so the
-          # statement scenarios (`e2e/contract-statements.spec.ts`) run for real.
+          # contract-service is up and its fixtures loaded (above), so the
+          # statement and contract command scenarios
+          # (`e2e/contract-statements.spec.ts`, `e2e/contract-commands.spec.ts`)
+          # run for real.
           # They provision their contractor and second approver through
           # identity-service and give each a password through Keycloak's admin
           # API, with this run's KEYCLOAK_ADMIN_PASSWORD (job environment).
