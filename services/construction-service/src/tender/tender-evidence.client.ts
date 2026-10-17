@@ -4,8 +4,7 @@ import { z } from 'zod';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import { readCapped } from '../organization/organization-directory';
-import { SealingError } from './sealing/errors';
-import { genesisReceipt, verifyReceipts, type VerifiedReceipts } from './sealing/sealing';
+import { trustedTenderReceiptsOf, type VerifiedReceipts } from './sealing/sealing';
 
 /** The service that holds the receipt chain outside this one's database. */
 export const AUDIT_SERVICE = 'audit-service';
@@ -147,16 +146,5 @@ function safeCorrelationId(): string {
  * read) opens reuses it (Codex r1 on #250, R2).
  */
 export function trustedReceiptsOf(chain: TenderChain): VerifiedReceipts {
-  if (chain.genesis !== genesisReceipt(chain.tenderId)) {
-    throw new SealingError('RECEIPT_CHAIN_BROKEN');
-  }
-  const links = chain.links.map((link) => ({
-    bidId: link.bidId,
-    revision: link.revision,
-    receivedAt: new Date(link.receivedAt),
-    ciphertextSha256: link.ciphertextSha256,
-    contentCommitment: link.contentCommitment,
-    receipt: link.receipt,
-  }));
-  return verifyReceipts(chain.tenderId, { links, head: chain.head });
+  return trustedTenderReceiptsOf(chain);
 }

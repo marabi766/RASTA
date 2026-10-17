@@ -148,6 +148,7 @@ services/asset-service/
 | `@rasta/observability` | راه‌اندازی OTel SDK · Helper ساخت Span                                                                                                                                               |
 | `@rasta/nest-common`   | Guard (JWT، Role، Tenant) · Filter (خطا) · Interceptor (Correlation، Logging) · `RequestContext` · Repository پایه با Scope · Outbox Relay · Wrapper تولید/مصرف Kafka · ماژول Health |
 | `@rasta/testing`       | Factory · Helper Testcontainers · Matcher سفارشی · Builder توکن تست                                                                                                                  |
+| `@rasta/sealing`       | Utility رمزنگاری بی‌دامنه: مهر و موم (RSA-OAEP + AES-256-GCM) · تعهد · زنجیرهٔ رسید · Canonical JSON؛ برچسب‌ها از مصرف‌کننده (ADR-070 PR 4)                                          |
 
 ### چه چیزی ممنوع است
 
@@ -187,6 +188,7 @@ services/* ───────────┤
                       ├──► @rasta/logging
                       ├──► @rasta/observability
                       ├──► @rasta/nest-common  (فقط سرویس‌ها)
+                      ├──► @rasta/sealing      (construction؛ procurement از ADR-070 PR 6)
                       └──► @rasta/testing      (فقط devDependency)
 
 @rasta/nest-common ──► @rasta/contracts، @rasta/logging، @rasta/config
