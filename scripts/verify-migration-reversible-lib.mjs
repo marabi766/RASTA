@@ -2524,9 +2524,16 @@ export const EXPECTED = {
       'ux_demand_request_org_id',
       'ix_demand_request_org_status',
       'ix_demand_request_aggregation',
+      // COM-007 PR 2: the window sweeper's two queues.
+      'ix_demand_aggregation_sweep_open',
+      'ix_demand_aggregation_sweep_follow',
     ],
     constraints: [
       'fk_demand_request_aggregation',
+      // COM-007 PR 2: demands still to follow an ended window, the sweeper's claim, a cancellation.
+      'ck_demand_aggregation_follow',
+      'ck_demand_aggregation_sweep_claim',
+      'ck_demand_aggregation_cancelled',
       'ck_demand_aggregation_status',
       'ck_demand_aggregation_identifiers',
       'ck_demand_aggregation_window',

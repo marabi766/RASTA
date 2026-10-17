@@ -3,24 +3,20 @@ import { RastaError, currentActor, getContext } from '@rasta/nest-common';
 import type { DemandAggregation } from '../generated/prisma';
 import { ProcurementAccess, assertOwnedBy, type Acting } from '../access/access';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
-import { demandIdsDigest } from '../events/events';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { DatabaseClock } from '../shared/clock';
 import type { ClaimFence } from '../shared/idempotency';
 import { ruleRefusal } from '../shared/refusal';
 import { ENV } from '../tokens';
-import { SERVICE_NAME, type ProcurementEnv, type ShortfallPolicy } from '../config/env';
-import { aggregationWindowsEndedTotal, demandCommandsTotal } from '../observability/metrics';
+import { SERVICE_NAME, type ProcurementEnv } from '../config/env';
+import { aggregationCancelledTotal, demandCommandsTotal } from '../observability/metrics';
 import { DemandRepository, snapshotOf } from './demand.repository';
-import {
-  closingInstant,
-  extendedClosingInstant,
-  windowOutcome,
-  type WindowOutcome,
-} from './demand.state-machine';
+import { closingInstant, type WindowOutcome } from './demand.state-machine';
+import { countWindowEnded, WindowEnd } from './window-end';
 import {
   MAX_QUANTITY,
   type AggregationView,
+  type CancelAggregationDto,
   type CursorPage,
   type DemandView,
   type ListAggregationsQuery,
@@ -33,14 +29,6 @@ import { toAggregationView, toDemandView } from './views';
 /** How many times a submission looks for or opens a window that another request keeps replacing. */
 const WINDOW_ATTEMPTS = 3;
 
-/** The metric label of each end of a window (a fixed, small set). */
-const ENDED_LABEL: Record<WindowOutcome['command'], string> = {
-  reachThreshold: 'ready',
-  extend: 'extended',
-  refer: 'referred',
-  lapse: 'lapsed',
-};
-
 /**
  * Demands and the windows they join (ADR-070 § 2, COM-007 PR 1).
  *
@@ -50,8 +38,8 @@ const ENDED_LABEL: Record<WindowOutcome['command'], string> = {
  * index deciding between two first demands — and only then reads the database clock
  * (`DatabaseClock`). The window is half-open, `[openedAt, closesAt)`: a demand at or after
  * `closesAt` never joins it, whatever its status still says. That same transaction ends the window
- * (the transition the sweeper of plan PR 2 makes) and the demand joins the window that follows —
- * the same one, moved on, under EXTEND; a new one otherwise. Correctness never waits for a sweep.
+ * (`WindowEnd`, the transition the sweeper makes too) and the demand joins the window that follows
+ * — the same one, moved on, under EXTEND; a new one otherwise. Correctness never waits for a sweep.
  *
  * Every change is a compare-and-set in one transaction with its event (A-08), and so with its
  * audit record; the idempotency claim's fence is the transaction's first and last statement.
@@ -64,6 +52,7 @@ export class DemandService {
     private readonly access: ProcurementAccess,
     private readonly publisher: EventPublisher,
     private readonly clock: DatabaseClock,
+    private readonly windowEnd: WindowEnd,
     @Inject(ENV) private readonly env: ProcurementEnv,
   ) {}
 
@@ -81,7 +70,7 @@ export class DemandService {
 
       if (now.getTime() >= window.closesAt.getTime()) {
         // The window ended before this demand: end it here, then join what follows it.
-        const outcome = await this.endWindow(tx, window, now);
+        const { outcome } = await this.windowEnd.end(tx, window, now);
         done.ended = outcome;
         if (outcome.to === 'OPEN') {
           window = await this.repository.aggregationAfter(tx, window);
@@ -139,13 +128,7 @@ export class DemandService {
     });
 
     // Counted once committed: a rolled-back command changed nothing.
-    if (done.ended) {
-      aggregationWindowsEndedTotal.inc({
-        service: SERVICE_NAME,
-        transition: ENDED_LABEL[done.ended.command],
-        trigger: 'demand',
-      });
-    }
+    if (done.ended) countWindowEnded(done.ended, 'demand');
     demandCommandsTotal.inc({
       service: SERVICE_NAME,
       command: 'submit',
@@ -224,6 +207,81 @@ export class DemandService {
     });
     demandCommandsTotal.inc({ service: SERVICE_NAME, command: 'withdraw', outcome: 'withdrawn' });
     return view;
+  }
+
+  /**
+   * READY → CANCELLED with a reason, by a role of the RFQ issuer (ADR-070 § 2; Q-119 (4): the one
+   * way out for the requesters of a window that ended). Its demands stay as they are: the window
+   * ended READY with them, and they are final with it. The reason stays here; the event carries
+   * the demands by count and digest and who cancelled.
+   */
+  async cancelAggregation(
+    id: string,
+    dto: CancelAggregationDto,
+    fence: ClaimFence<AggregationView>,
+  ): Promise<AggregationView> {
+    const acting = this.access.assertRfqIssuer();
+    const actor = currentActor({ requirePlatformUserId: true });
+
+    const view = await this.prisma.transaction(async (tx) => {
+      await fence.hold(tx);
+
+      const window = await this.repository.lockWindow(tx, acting.organizationId, id);
+      if (!window) throw RastaError.notFound('DemandAggregation', id);
+      assertOwnedBy(window, acting, 'DemandAggregation');
+
+      if (window.status !== 'READY') {
+        throw ruleRefusal('Only a READY aggregation is cancelled', 'cancellation', [
+          'AGGREGATION_NOT_READY',
+        ]);
+      }
+      if (window.version !== dto.expectedVersion) {
+        throw RastaError.optimisticLockFailed('DemandAggregation', id);
+      }
+
+      const now = await this.clock.now(tx);
+      const live = await this.repository.liveDemands(tx, window);
+      await this.repository.cancelWindow(tx, window, {
+        by: actor.userId,
+        reason: dto.reason,
+        at: now,
+      });
+      await this.publisher.enqueue(tx, {
+        eventName: 'AGGREGATION_CANCELLED',
+        aggregateId: window.id,
+        organizationId: window.organizationId,
+        occurredAt: now,
+        payload: {
+          aggregationId: window.id,
+          organizationId: window.organizationId,
+          productId: window.productId,
+          totalQuantity: Number(window.totalQuantity),
+          demandCount: live.count,
+          demandIdsSha256: live.digest,
+          cancelledBy: actor.userId,
+          cancelledAt: now.toISOString(),
+        },
+      });
+
+      return fence.complete(
+        tx,
+        toAggregationView(await this.repository.aggregationAfter(tx, window)),
+      );
+    });
+    aggregationCancelledTotal.inc({ service: SERVICE_NAME });
+    return view;
+  }
+
+  /**
+   * Whether the caller may still cancel this aggregation's way: the rule a fresh cancellation
+   * applies (the issuer's roles, the caller's own organization), checked before a stored answer is
+   * replayed.
+   */
+  async assertCancellationVisible(id: string): Promise<void> {
+    const acting = this.access.assertRfqIssuer();
+    const aggregation = await this.repository.findAggregation(id);
+    if (!aggregation) throw RastaError.notFound('DemandAggregation', id);
+    assertOwnedBy(aggregation, acting, 'DemandAggregation');
   }
 
   async getDemand(id: string): Promise<DemandView> {
@@ -342,103 +400,5 @@ export class DemandService {
       closesAt: closingInstant(openedAt, snapshot.windowHours),
       snapshot,
     });
-  }
-
-  /**
-   * The end of a window this transaction holds the lock of, at `now` (ADR-070 § 2): decided by the
-   * window's own snapshot and the demands it holds, with its event. The transition the sweeper of
-   * plan PR 2 makes; here, the synchronous path of a demand that arrived after `closesAt`.
-   */
-  private async endWindow(
-    tx: ExtendedPrismaClient,
-    window: DemandAggregation,
-    now: Date,
-  ): Promise<WindowOutcome> {
-    const live = await this.repository.liveDemandIds(tx, window);
-    const outcome = windowOutcome(
-      {
-        windowHours: window.windowHours,
-        minQuantity: window.minQuantity,
-        shortfallPolicy: window.shortfallPolicy as ShortfallPolicy,
-      },
-      { liveDemands: live.length, totalQuantity: window.totalQuantity },
-      window.closesAt,
-      now,
-    );
-    const facts = {
-      aggregationId: window.id,
-      organizationId: window.organizationId,
-      productId: window.productId,
-      totalQuantity: Number(window.totalQuantity),
-    };
-    // The demands it ended with, by count and digest: never a list without a bound (ADR-070 § 9).
-    const demands = { demandCount: live.length, demandIdsSha256: demandIdsDigest(live) };
-    const event = {
-      aggregateId: window.id,
-      organizationId: window.organizationId,
-      occurredAt: now,
-    };
-
-    switch (outcome.command) {
-      case 'reachThreshold':
-        await this.repository.endWindow(tx, window, 'READY', now);
-        await this.publisher.enqueue(tx, {
-          ...event,
-          eventName: 'DEMAND_AGGREGATED',
-          payload: {
-            ...facts,
-            ...demands,
-            settingVersion: window.settingVersion,
-            closedAt: now.toISOString(),
-          },
-        });
-        break;
-      case 'refer':
-        await this.repository.endWindow(tx, window, 'REFERRED', now);
-        await this.repository.closeDemands(tx, window, 'REFERRED', live.length, now);
-        await this.publisher.enqueue(tx, {
-          ...event,
-          eventName: 'AGGREGATION_REFERRED',
-          payload: { ...facts, ...demands, closedAt: now.toISOString() },
-        });
-        break;
-      case 'lapse':
-        await this.repository.endWindow(tx, window, 'LAPSED', now);
-        if (live.length > 0) {
-          await this.repository.closeDemands(tx, window, 'LAPSED', live.length, now);
-        }
-        await this.publisher.enqueue(tx, {
-          ...event,
-          eventName: 'AGGREGATION_LAPSED',
-          payload: {
-            ...facts,
-            ...demands,
-            reasonCode: live.length === 0 ? 'NO_LIVE_DEMAND' : 'SHORTFALL_CLOSED',
-            closedAt: now.toISOString(),
-          },
-        });
-        break;
-      case 'extend': {
-        const closesAt = extendedClosingInstant(
-          window.closesAt,
-          window.windowHours,
-          outcome.windows,
-        );
-        await this.repository.extendWindow(tx, window, closesAt, outcome.windows, now);
-        await this.publisher.enqueue(tx, {
-          ...event,
-          eventName: 'AGGREGATION_WINDOW_EXTENDED',
-          payload: {
-            ...facts,
-            previousClosesAt: window.closesAt.toISOString(),
-            closesAt: closesAt.toISOString(),
-            windows: outcome.windows,
-            extensionCount: window.extensionCount + outcome.windows,
-          },
-        });
-        break;
-      }
-    }
-    return outcome;
   }
 }

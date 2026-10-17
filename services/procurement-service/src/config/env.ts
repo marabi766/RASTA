@@ -35,6 +35,13 @@ const REFUSED_ROLE = 'AUDITOR';
  */
 const PLATFORM_ROLE = 'SYSTEM_ADMIN';
 
+/**
+ * The most demands one transaction may move with a window's end: 10,000 is ~1.8 s of the 5 s
+ * transaction budget on the reference machine (0.18 ms a demand, rasta-dev 2026-10-17), leaving
+ * room for the rest of the transaction and a slower host.
+ */
+export const MAX_FOLLOW_BATCH_SIZE = 10_000;
+
 /** A comma-separated list, trimmed, with empty elements dropped. */
 function commaList() {
   return z.string().transform((raw) =>
@@ -84,10 +91,19 @@ function roleList(name: string, options: { min: number }) {
  *                                      Q-10. What a window that ends short of it does: EXTEND
  *                                      (default — "carried into the next window"; its demands stay),
  *                                      REFER (a fact only: marketplace is never called) or CLOSE.
+ *   PROCUREMENT_RFQ_ISSUER_ROLES       ADR-070 § 3. Which roles of the buyer's own organization
+ *                                      cancel a READY aggregation (plan PR 2; they issue its RFQ
+ *                                      from PR 6). Default `ORGANIZATION_ADMIN` — `docs/09` gives
+ *                                      `PROCUREMENT_USER` only `rfq:read`. AUDITOR or SYSTEM_ADMIN
+ *                                      here stops startup.
  *   PROCUREMENT_IDEMPOTENCY_TTL_HOURS / _CLAIM_LEASE_SECONDS
  *                                      How long a completed command's response is replayed, and how
  *                                      long an in-flight claim holds its key before a retry may
  *                                      take it over (docs/06 § 6.8).
+ *   PROCUREMENT_WINDOW_SWEEP_* / PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE
+ *                                      The sweeper that ends windows on time (ADR-070 § 2, plan
+ *                                      PR 2) and the bound on the demands one transaction moves
+ *                                      with a window's end. Operational, not business values.
  *
  * The three aggregation values are snapshotted onto each aggregation when its window opens; a
  * change reaches only windows opened after it (`docs/08` § 8.9). The per-organization versioned
@@ -128,6 +144,12 @@ export const procurementEnvSchema = baseEnvSchema
     /** Q-10: "carried into the next window". */
     PROCUREMENT_AGGREGATION_SHORTFALL_POLICY: z.enum(SHORTFALL_POLICIES).default('EXTEND'),
 
+    /** ADR-070 § 3: who cancels a READY aggregation (and, from PR 6, issues its RFQ). */
+    PROCUREMENT_RFQ_ISSUER_ROLES: z
+      .string()
+      .default('ORGANIZATION_ADMIN')
+      .pipe(roleList('PROCUREMENT_RFQ_ISSUER_ROLES', { min: 1 })),
+
     PROCUREMENT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
     PROCUREMENT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce
       .number()
@@ -135,6 +157,52 @@ export const procurementEnvSchema = baseEnvSchema
       .min(10)
       .max(900)
       .default(120),
+
+    /**
+     * The sweeper that ends windows past `closes_at` (ADR-070 § 2, plan PR 2; the shape of
+     * construction's tender close sweeper, ADR-065 § 3). A sweep every `INTERVAL_MS` claims at most
+     * `BATCH_SIZE` windows — due OPEN ones, and ended ones whose demands are still following them —
+     * under a lease of `LEASE_SECONDS` and a fencing token, and works each in short transactions of
+     * its own, renewing the lease with each. Correctness never waits for it: a demand at or after
+     * `closes_at` ends the window itself. A window whose sweep failed is not claimed again for
+     * `min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS × 2^failures)`;
+     * `RastaProcurementWindowSweepRetriesHigh` fires past 5 failures.
+     */
+    PROCUREMENT_WINDOW_SWEEP_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(500)
+      .max(300_000)
+      .default(5000),
+    PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+    PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(60),
+    PROCUREMENT_WINDOW_SWEEP_BACKOFF_BASE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(3600)
+      .default(10),
+    PROCUREMENT_WINDOW_SWEEP_BACKOFF_MAX_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(86_400)
+      .default(900),
+
+    /**
+     * The most live demands one transaction moves to REFERRED or LAPSED with their window's end
+     * (`MAX_FOLLOW_BATCH_SIZE`): the end moves this many in its own transaction — a demand's
+     * submit included — and the sweeper the rest, this many per transaction. So no window, however
+     * large, makes its end outrun the transaction budget (PR-327 r1 F1: one UPDATE of every demand
+     * is ~0.13 ms each, over the 5 s budget past ~35k demands). A window up to this size ends whole
+     * in one transaction, as in PR 1.
+     */
+    PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_FOLLOW_BATCH_SIZE)
+      .default(2000),
   });
 
 export type ProcurementEnv = z.infer<typeof procurementEnvSchema>;

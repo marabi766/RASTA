@@ -82,6 +82,31 @@ procurement در organization-service در PR 11) ولی امتیازی را ع�
 - متریک: سن قدیمی‌ترین تجمیع سررسیده، شمار تمدید؛ هشدار مانند `RastaConstructionTenderClose…`.
 - آزمون: هر سه سیاست، آستانهٔ صفر، تجمیع بی نیاز زنده، دو جاروکنندهٔ هم‌زمان، Restart و بستن به‌دست جاروکننده، Rollback رویداد و گذار با هم.
 
+> **وضعیت: ساخته شد (2026-10-17، COM-007 PR 2).** همان فهرست بالا، با این تفاوت‌ها که هر کدام اینجا و در PR نام برده شده‌اند:
+>
+> 1. **پایان پنجره کران‌دار است، هر اندازه که باشد** (بازبینی PR-327 r1 F1: بستن هم‌زمان PR 1 حدود ۳۵٬۰۰۰ نیاز را در بودجهٔ ۵ ثانیه‌ای
+>    تراکنش جا می‌داد). `WindowEnd` (تابع گذار مشترک ثبت نیاز و جاروکننده) حداکثر `PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE` (پیش‌فرض ۲۰۰۰،
+>    حداکثر ۱۰٬۰۰۰) نیاز زنده را با پنجرهٔ `REFERRED`/`LAPSED` در همان تراکنش جابه‌جا می‌کند؛ باقی در ستون `demands_to_follow` شمرده و
+>    جاروکننده آن‌ها را دسته‌دسته، هر دسته در یک تراکنش، جابه‌جا می‌کند. شمار و Digest نیازها در پایگاه داده حساب می‌شود (همان تعریف
+>    `demandIdsDigest`). **حد تازه:** پایان پنجره در خود ثبت نیاز دیررس با ۲۰۰٬۰۰۰ نیاز ۰٫۸۴ ثانیه و با ۱٬۰۰۰٬۰۰۰ نیاز ۲٫۸۵ ثانیه طول کشید
+>    (rasta-dev، از راه API)، پس حدود ۱٫۸ میلیون نیاز زنده در هر پنجره؛ آزمون `window-close-scale` آن را با ۲۰۰٬۰۰۰ نیاز (پنج برابر حد
+>    PR 1) و هر گام بعدی جاروکننده زیر بودجه نشان می‌دهد. پیامد: در پنجرهٔ `REFERRED`/`LAPSED` بزرگ‌تر از یک دسته، نیازهای باقی‌مانده تا چند
+>    دور جاروکننده `SUBMITTED` خوانده می‌شوند (انصرافشان مانند پیش `422 AGGREGATION_WINDOW_ENDED` است و رویداد پنجره همه را از همان آغاز
+>    نام می‌برد). سقف شمار نیاز در پنجره قاعدهٔ تجاری است و ساخته نشد (یادداشت Q-120).
+> 2. **دفترداری جاروکننده روی ردیف پنجره** (`sweep_lease_until`، `sweep_fence`، `sweep_attempts`، `sweep_next_attempt_at`، الگوی
+>    `tender`): `demand_aggregation_guard` تغییر فقط‌دفترداری را بی `version` می‌پذیرد، `demands_to_follow` را فقط پایان پنجره می‌گذارد و
+>    پس از آن فقط کم می‌شود، و `closed_at` پنجرهٔ پایان‌یافته منجمد است. Migration برگشت‌پذیر است و روی تجمیع `CANCELLED` یا نیاز در
+>    راه رد می‌شود.
+> 3. **ابطال:** نقش‌ها از `PROCUREMENT_RFQ_ISSUER_ROLES` (پیش‌فرض `ORGANIZATION_ADMIN`، ADR-070 § ۳) که همین‌جا ساخته شد؛ ابطال فقط از
+>    `READY` (پنجرهٔ `OPEN` حتی پس از پایانش `422 AGGREGATION_NOT_READY` است؛ ابطال پنجره را پایان نمی‌دهد)؛ نیازهای تجمیع باطل‌شده همان
+>    `SUBMITTED` می‌مانند و با آن پایانی‌اند (یادداشت Q-119)؛ نما `cancelledAt` و `cancelReason` هم دارد (فقط API)؛ `AGGREGATION_CANCELLED`
+>    شمار، Digest و `cancelledBy` دارد، نه دلیل.
+> 4. **متریک و هشدار:** `rasta_procurement_window_sweep_total{result}`، Gaugeهای `…_window_sweep_due`، `…_oldest_due_age_seconds`،
+>    `…_window_demands_to_follow`، `…_window_sweep_max_attempts`، `…_window_max_extension_count`، شمارندهٔ
+>    `rasta_procurement_aggregation_extensions_total` و برچسب `trigger="sweeper"`؛ هشدارهای `RastaProcurementWindowSweepRetriesHigh` و
+>    `RastaProcurementWindowSweepOverdue` با آزمون promtool و Runbook `aggregation-window-sweep-stuck`. جاروکننده در `OutboxShutdown` با همان
+>    موعد Relay و Purge می‌ایستد (D-052).
+
 ### PR 3 — تنظیمات به‌ازای سازمان (`M`)
 
 - `aggregation_setting` الحاقی و نسخه‌دار (طول پنجره به ساعت، آستانهٔ مقدار، سیاست کمبود)؛ نویسنده طبق پاسخ موقت Q-119؛ Snapshot در گشودن پنجره

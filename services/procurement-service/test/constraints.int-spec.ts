@@ -266,4 +266,123 @@ describe('the database keeps the demand and aggregation invariants', () => {
       /ck_demand_aggregation_snapshot/,
     );
   });
+
+  describe('the sweeper’s bookkeeping and the cancellation (plan PR 2)', () => {
+    /** A window of two demands, ended REFERRED with one of them still to follow it. */
+    async function referredWithOneToFollow(a: string) {
+      const agg = await window(a);
+      await join(a, agg, T0);
+      await join(a, agg, T0);
+      await db.$executeRaw`
+        UPDATE demand_aggregation SET status = 'REFERRED', closed_at = ${T0}, demands_to_follow = 1,
+               version = version + 1 WHERE id = ${agg.id}`;
+      return agg;
+    }
+
+    it('lets a claim, its release and a failed attempt through without a version — on an ended window too', async () => {
+      const a = org();
+      const agg = await referredWithOneToFollow(a);
+      await db.$executeRaw`
+        UPDATE demand_aggregation
+           SET sweep_lease_until = ${T0}, sweep_fence = 'F1', sweep_attempts = 2,
+               sweep_next_attempt_at = ${T0}
+         WHERE id = ${agg.id}`;
+      await db.$executeRaw`
+        UPDATE demand_aggregation SET sweep_lease_until = NULL, sweep_fence = NULL
+         WHERE id = ${agg.id}`;
+      // Anything else changed beside it is no longer bookkeeping: the ended window is history.
+      await refusedWith(
+        db.$executeRaw`UPDATE demand_aggregation SET sweep_fence = 'F2',
+                         sweep_lease_until = ${T0}, updated_at = ${new Date(T0.getTime() + 1)}
+                        WHERE id = ${agg.id}`,
+        /ck_demand_aggregation_transition/,
+      );
+      // A lease without its fence, or a fence without its lease, is not a claim.
+      await refusedWith(
+        db.$executeRaw`UPDATE demand_aggregation SET sweep_fence = 'F3' WHERE id = ${agg.id}`,
+        /ck_demand_aggregation_sweep_claim/,
+      );
+    });
+
+    it('sets the demands to follow only with the end, and only ever fewer after it', async () => {
+      const a = org();
+      const agg = await referredWithOneToFollow(a);
+      await refusedWith(
+        db.$executeRaw`UPDATE demand_aggregation SET demands_to_follow = 2 WHERE id = ${agg.id}`,
+        /ck_demand_aggregation_follow/,
+      );
+      await db.$executeRaw`UPDATE demand_aggregation SET demands_to_follow = 0 WHERE id = ${agg.id}`;
+      // An OPEN or READY window has none to follow.
+      const open = await window(a);
+      await join(a, open, T0);
+      await refusedWith(
+        db.$executeRaw`UPDATE demand_aggregation SET demands_to_follow = 1 WHERE id = ${open.id}`,
+        /ck_demand_aggregation_follow/,
+      );
+      await refusedWith(
+        db.$executeRaw`UPDATE demand_aggregation SET status = 'READY', closed_at = ${T0},
+                         demands_to_follow = 1, version = version + 1 WHERE id = ${open.id}`,
+        /ck_demand_aggregation_follow/,
+      );
+    });
+
+    it('keeps the instant a window ended', async () => {
+      const a = org();
+      const agg = await referredWithOneToFollow(a);
+      await refusedWith(
+        db.$executeRaw`UPDATE demand_aggregation SET status = 'REFERRED',
+                         closed_at = ${new Date(T0.getTime() + HOUR)}, version = version + 1
+                        WHERE id = ${agg.id}`,
+        /ck_demand_aggregation_transition/,
+      );
+      const ready = await window(a);
+      await join(a, ready, T0);
+      await db.$executeRaw`UPDATE demand_aggregation SET status = 'READY', closed_at = ${T0},
+                             version = version + 1 WHERE id = ${ready.id}`;
+      await refusedWith(
+        db.$executeRaw`UPDATE demand_aggregation SET status = 'CANCELLED',
+                         closed_at = ${new Date(T0.getTime() + HOUR)},
+                         cancelled_at = ${new Date(T0.getTime() + HOUR)}, cancelled_by = 'USR_1',
+                         cancel_reason = 'the need went away', version = version + 1
+                        WHERE id = ${ready.id}`,
+        /ck_demand_aggregation_frozen/,
+      );
+    });
+
+    it('writes a cancellation only by READY → CANCELLED, with who, when and why', async () => {
+      const a = org();
+      const open = await window(a);
+      await join(a, open, T0);
+      const later = new Date(T0.getTime() + HOUR);
+      await refusedWith(
+        db.$executeRaw`UPDATE demand_aggregation SET status = 'CANCELLED', closed_at = ${T0},
+                         cancelled_at = ${later}, cancelled_by = 'USR_1',
+                         cancel_reason = 'the need went away', version = version + 1
+                        WHERE id = ${open.id}`,
+        /ck_demand_aggregation_transition/,
+      );
+      await db.$executeRaw`UPDATE demand_aggregation SET status = 'READY', closed_at = ${T0},
+                             version = version + 1 WHERE id = ${open.id}`;
+      await refusedWith(
+        db.$executeRaw`UPDATE demand_aggregation SET status = 'CANCELLED', version = version + 1
+                        WHERE id = ${open.id}`,
+        /ck_demand_aggregation_cancelled/,
+      );
+      await refusedWith(
+        db.$executeRaw`UPDATE demand_aggregation SET status = 'CANCELLED', cancelled_at = ${later},
+                         cancelled_by = 'USR_1', cancel_reason = 'short', version = version + 1
+                        WHERE id = ${open.id}`,
+        /ck_demand_aggregation_cancelled/,
+      );
+      await db.$executeRaw`UPDATE demand_aggregation SET status = 'CANCELLED', cancelled_at = ${later},
+                             cancelled_by = 'USR_1', cancel_reason = 'the need went away',
+                             version = version + 1 WHERE id = ${open.id}`;
+      // A cancelled one is history: its reason never changes.
+      await refusedWith(
+        db.$executeRaw`UPDATE demand_aggregation SET cancel_reason = 'a better reason, later',
+                         version = version + 1 WHERE id = ${open.id}`,
+        /ck_demand_aggregation_transition/,
+      );
+    });
+  });
 });

@@ -1,5 +1,5 @@
 import { MAX_QUANTITY } from '../demand/dto';
-import { corsOrigins, loadProcurementEnv } from './env';
+import { corsOrigins, loadProcurementEnv, MAX_FOLLOW_BATCH_SIZE } from './env';
 import { procurementOperationBudgets } from './operation-budgets';
 
 const base: NodeJS.ProcessEnv = {
@@ -25,6 +25,19 @@ describe('the provisional defaults (Q-10, Q-119, ADR-070 § 2)', () => {
     expect(env.PROCUREMENT_AGGREGATION_WINDOW_HOURS).toBe(168);
     expect(env.PROCUREMENT_AGGREGATION_MIN_QUANTITY).toBe(0);
     expect(env.PROCUREMENT_AGGREGATION_SHORTFALL_POLICY).toBe('EXTEND');
+  });
+
+  it('lets only the buyer’s ORGANIZATION_ADMIN cancel an aggregation (ADR-070 § 3)', () => {
+    expect(env.PROCUREMENT_RFQ_ISSUER_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+  });
+
+  it('sweeps every five seconds, twenty windows under a one-minute lease, and moves 2000 demands a transaction', () => {
+    expect(env.PROCUREMENT_WINDOW_SWEEP_INTERVAL_MS).toBe(5000);
+    expect(env.PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE).toBe(20);
+    expect(env.PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS).toBe(60);
+    expect(env.PROCUREMENT_WINDOW_SWEEP_BACKOFF_BASE_SECONDS).toBe(10);
+    expect(env.PROCUREMENT_WINDOW_SWEEP_BACKOFF_MAX_SECONDS).toBe(900);
+    expect(env.PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE).toBe(2000);
   });
 
   it('replays a command’s response for a day and leases an in-flight key for two minutes', () => {
@@ -109,8 +122,29 @@ describe('overrides', () => {
     ],
     ['a zero idempotency lifetime', { PROCUREMENT_IDEMPOTENCY_TTL_HOURS: '0' }],
     ['a lease under ten seconds', { PROCUREMENT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: '5' }],
+    ['AUDITOR among the RFQ issuer roles', { PROCUREMENT_RFQ_ISSUER_ROLES: 'AUDITOR' }],
+    [
+      'SYSTEM_ADMIN among the RFQ issuer roles',
+      { PROCUREMENT_RFQ_ISSUER_ROLES: 'ORGANIZATION_ADMIN,SYSTEM_ADMIN' },
+    ],
+    ['an empty RFQ issuer role list', { PROCUREMENT_RFQ_ISSUER_ROLES: '' }],
+    ['a sweep more often than twice a second', { PROCUREMENT_WINDOW_SWEEP_INTERVAL_MS: '499' }],
+    ['a sweep of no window', { PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE: '0' }],
+    ['a sweep lease under ten seconds', { PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS: '9' }],
+    ['a follow batch of no demand', { PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE: '0' }],
+    [
+      'a follow batch past MAX_FOLLOW_BATCH_SIZE, which the transaction budget does not hold',
+      { PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE: String(MAX_FOLLOW_BATCH_SIZE + 1) },
+    ],
   ])('refuses %s at startup', (_label, change) => {
     expect(() => load(change)).toThrow();
+  });
+
+  it('accepts a follow batch of exactly MAX_FOLLOW_BATCH_SIZE', () => {
+    expect(
+      load({ PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE: String(MAX_FOLLOW_BATCH_SIZE) })
+        .PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE,
+    ).toBe(MAX_FOLLOW_BATCH_SIZE);
   });
 });
 

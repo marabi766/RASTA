@@ -42,6 +42,8 @@ export function toAggregationView(row: DemandAggregation): AggregationView {
       settingVersion: row.settingVersion,
     },
     closedAt: row.closedAt?.toISOString() ?? null,
+    cancelledAt: row.cancelledAt?.toISOString() ?? null,
+    cancelReason: row.cancelReason,
     rfqId: row.rfqId,
     version: row.version,
   };

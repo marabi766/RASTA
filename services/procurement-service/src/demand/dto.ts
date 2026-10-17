@@ -77,6 +77,28 @@ export const withdrawDemandSchema = z
   .strict();
 export type WithdrawDemandDto = z.infer<typeof withdrawDemandSchema>;
 
+/** `POST /v1/aggregations/{id}/cancel`: READY → CANCELLED; the reason is required (ADR-070 § 2). */
+export const cancelAggregationSchema = z
+  .object({
+    expectedVersion: z
+      .number()
+      .int()
+      .min(1)
+      .describe(
+        'The `version` of the aggregation the caller read: the cancellation applies only to that ' +
+          'version (409 OPTIMISTIC_LOCK_FAILED otherwise).',
+      ),
+    reason: plainText()
+      .min(MIN_REASON_LENGTH)
+      .max(MAX_REASON_LENGTH)
+      .describe(
+        'Why, 8 to 500 characters, trimmed, without bidirectional control characters. Kept with ' +
+          'the aggregation and read through this API; never on an event.',
+      ),
+  })
+  .strict();
+export type CancelAggregationDto = z.infer<typeof cancelAggregationSchema>;
+
 export const listDemandsQuerySchema = cursorPaginationSchema
   .extend({ status: z.enum(DEMAND_STATES).optional() })
   .strict();
@@ -147,6 +169,11 @@ export const aggregationViewSchema = z
     extensionCount: z.number().int(),
     setting: settingSnapshotSchema,
     closedAt: z.string().nullable().describe('When the window ended, or null while OPEN.'),
+    cancelledAt: z
+      .string()
+      .nullable()
+      .describe('When the READY aggregation was cancelled (UTC, ISO 8601 with Z), or null.'),
+    cancelReason: z.string().nullable().describe('Why it was cancelled, or null.'),
     rfqId: z.string().nullable(),
     version: z.number().int(),
   })

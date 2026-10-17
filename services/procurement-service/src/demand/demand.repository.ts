@@ -112,14 +112,33 @@ export class DemandRepository {
     });
   }
 
-  /** The end of a window that leaves OPEN: READY, REFERRED or LAPSED, at `at`. */
+  /**
+   * The end of a window that leaves OPEN: READY, REFERRED or LAPSED, at `at`. `demandsToFollow` is
+   * how many of its live demands this transaction leaves for the sweeper to move (REFERRED and
+   * LAPSED only; 0 for a window that ends whole).
+   */
   async endWindow(
     tx: ExtendedPrismaClient,
     window: DemandAggregation,
     to: Extract<AggregationStateName, 'READY' | 'REFERRED' | 'LAPSED'>,
     at: Date,
+    demandsToFollow = 0,
   ): Promise<void> {
-    await this.moveWindow(tx, window, to, { closedAt: at, updatedAt: at });
+    await this.moveWindow(tx, window, to, { closedAt: at, updatedAt: at, demandsToFollow });
+  }
+
+  /** READY → CANCELLED with who, when and why (ADR-070 § 2). */
+  async cancelWindow(
+    tx: ExtendedPrismaClient,
+    window: DemandAggregation,
+    cancellation: { by: string; reason: string; at: Date },
+  ): Promise<void> {
+    await this.moveWindow(tx, window, 'CANCELLED', {
+      cancelledAt: cancellation.at,
+      cancelledBy: cancellation.by,
+      cancelReason: cancellation.reason,
+      updatedAt: cancellation.at,
+    });
   }
 
   /** The end of a window under EXTEND: it moves on by `windows` of its own length; it stays OPEN. */
@@ -137,39 +156,87 @@ export class DemandRepository {
     });
   }
 
-  /** The demands still SUBMITTED in a window, in id order. */
-  async liveDemandIds(tx: ExtendedPrismaClient, window: DemandAggregation): Promise<string[]> {
-    const rows = await tx.demandRequest.findMany({
-      where: {
-        organizationId: window.organizationId,
-        aggregationId: window.id,
-        status: 'SUBMITTED',
-      },
-      select: { id: true },
-      orderBy: { id: 'asc' },
-    });
-    return rows.map((row) => row.id);
-  }
-
-  /** The live demands of a window that ended under REFER or CLOSE follow it. */
-  async closeDemands(
+  /**
+   * The demands still SUBMITTED in a window, by count and digest (`demandIdsDigest`): computed in
+   * the database, so the ids never travel and the cost is one index scan and a sort — ~1.5 µs a
+   * demand on rasta-dev (1,000,000 in 1.5 s), against 0.13 ms to move one. `COLLATE "C"` orders
+   * by bytes, as JavaScript's default sort orders these ASCII ids; an empty set digests the empty
+   * string, as `demandIdsDigest([])` does.
+   */
+  async liveDemands(
     tx: ExtendedPrismaClient,
     window: DemandAggregation,
+  ): Promise<{ count: number; digest: string }> {
+    const rows = await tx.$queryRaw<{ count: bigint; digest: string }[]>`
+      SELECT count(*) AS count,
+             encode(sha256(convert_to(
+               coalesce(string_agg(id, E'\n' ORDER BY id COLLATE "C"), ''), 'UTF8')), 'hex') AS digest
+        FROM demand_request
+       WHERE organization_id = ${window.organizationId} AND aggregation_id = ${window.id}
+         AND status = 'SUBMITTED'`;
+    const row = rows[0];
+    if (!row) throw new Error(`counting the live demands of window ${window.id} answered no row`);
+    return { count: Number(row.count), digest: row.digest };
+  }
+
+  /**
+   * Up to `limit` live demands of a window that ended under REFER or CLOSE follow it — after the
+   * window's own row moved, which the demand guard requires. Under the window's lock nobody else
+   * moves them, so a count other than `limit` is a defect, never a race to report as a conflict.
+   *
+   * The rows are picked once (`ARRAY(…)`, an init plan) and updated by their physical address — a
+   * TID scan, whatever the planner believes about the table. Both id-based forms let it, on a table
+   * it has no statistics for yet, scan the window's index and test every one of its demands against
+   * the whole batch: `id IN (SELECT … LIMIT n)` took minutes for one batch of a 200,000-demand
+   * window, `id = ANY(ARRAY(…))` 23 s, and so did this form with the organization repeated outside
+   * (any indexed predicate there brings the index path back). So the organization, the window and
+   * the status are the picking subquery's, in the statement's own snapshot, and the addresses cannot
+   * move in between: the window's lock keeps every other writer off these rows. The demand guard
+   * still checks each row follows its own window, and the count is checked below.
+   */
+  async followWindow(
+    tx: ExtendedPrismaClient,
+    window: { organizationId: string; id: string },
     to: Extract<DemandStateName, 'REFERRED' | 'LAPSED'>,
-    expected: number,
+    limit: number,
     at: Date,
   ): Promise<void> {
+    if (limit === 0) return;
     const moved = await tx.$executeRaw`
       UPDATE demand_request
          SET status = ${to}, closed_at = ${at}, updated_at = ${at}, version = version + 1
-       WHERE organization_id = ${window.organizationId} AND aggregation_id = ${window.id}
-         AND status = 'SUBMITTED'`;
-    if (moved !== expected) {
-      // Every demand of the window is changed under the window's lock, so a different count is
-      // a defect, never a race to report as a conflict.
-      throw new Error(
-        `closing window ${window.id}: ${moved} demands moved to ${to}, ${expected} expected`,
-      );
+       WHERE ctid = ANY(ARRAY(SELECT ctid FROM demand_request
+                               WHERE organization_id = ${window.organizationId}
+                                 AND aggregation_id = ${window.id} AND status = 'SUBMITTED'
+                               LIMIT ${limit}))`;
+    if (moved !== limit) {
+      throw new Error(`window ${window.id}: ${moved} demands moved to ${to}, ${limit} expected`);
+    }
+  }
+
+  /**
+   * After a batch followed an ended window: the count of those still to follow comes down, by
+   * compare-and-set on the count read under the lock (bookkeeping: no version). When it reaches 0
+   * no demand of the window may still be SUBMITTED.
+   */
+  async followed(
+    tx: ExtendedPrismaClient,
+    window: DemandAggregation,
+    remaining: number,
+  ): Promise<void> {
+    const changed = await tx.$executeRaw`
+      UPDATE demand_aggregation SET demands_to_follow = ${remaining}
+       WHERE organization_id = ${window.organizationId} AND id = ${window.id}
+         AND status = ${window.status} AND demands_to_follow = ${window.demandsToFollow}`;
+    if (changed !== 1) throw RastaError.optimisticLockFailed('DemandAggregation', window.id);
+    if (remaining === 0) {
+      const left = await tx.$queryRaw<{ left: boolean }[]>`
+        SELECT EXISTS (SELECT 1 FROM demand_request
+                        WHERE organization_id = ${window.organizationId}
+                          AND aggregation_id = ${window.id} AND status = 'SUBMITTED') AS left`;
+      if (left[0]?.left) {
+        throw new Error(`window ${window.id} has followed in full but still holds a live demand`);
+      }
     }
   }
 
@@ -292,6 +359,10 @@ export class DemandRepository {
       closesAt?: Date;
       extensionCount?: number;
       closedAt?: Date;
+      demandsToFollow?: number;
+      cancelledAt?: Date;
+      cancelledBy?: string;
+      cancelReason?: string;
       updatedAt: Date;
     },
   ): Promise<void> {
