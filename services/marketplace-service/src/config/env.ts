@@ -8,6 +8,7 @@ import {
   kafkaSaslConfigured,
   loadEnv,
   outboxPurgeEnvSchema,
+  PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
 } from '@rasta/config';
 import { marketplaceOperationBudgets } from './operation-budgets';
 
@@ -19,6 +20,11 @@ import { marketplaceOperationBudgets } from './operation-budgets';
  * defaults come from `docs/08` § 8.4, which labels them ASSUMPTION in the
  * document itself (AGENTS.md § 9).
  */
+/** Half the transaction the hierarchy question is asked in (`MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS`). */
+export const ORGANIZATION_REQUEST_CEILING_MS = Math.floor(
+  PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS / 2,
+);
+
 export const marketplaceEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
   .merge(kafkaEnvSchema)
@@ -35,6 +41,27 @@ export const marketplaceEnvSchema = baseEnvSchema
      * and Temporal retries it.
      */
     ECONOMIC_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(500).max(60_000).default(10_000),
+
+    /**
+     * Where a union administrator's subtree is confirmed before it decides a
+     * dispute (docs/24 Q-136): organization-service, the owner of the
+     * hierarchy (A-13), asked as economic-service asks it.
+     */
+    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+
+    /**
+     * How long that question may take, body included. It is asked under the
+     * order's row lock, inside a transaction with Prisma's default budget
+     * (`PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS`, 5 s), so the ceiling keeps it
+     * at half of that; no answer in time refuses the decision with 504 and
+     * nothing is written (fail closed).
+     */
+    MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(ORGANIZATION_REQUEST_CEILING_MS)
+      .default(2_000),
 
     // ---- Temporal ---------------------------------------------------------
 

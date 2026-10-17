@@ -279,7 +279,7 @@ describe('order lifecycle (real database)', () => {
     expect(stillDisputed.receiptConfirmedAt).toBeNull();
 
     // And an operator can still resolve it, which is what that edge is for.
-    await asActor({ organizationId: org.other, roles: ['UNION_ADMIN'], userId: 'USR-OPS' }, () =>
+    await asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-OPS' }, () =>
       wiring.orders.resolveDispute(order.id, {
         outcome: 'SETTLE',
         resolution: 'the supplier provided evidence of correct delivery',
@@ -319,7 +319,7 @@ describe('order lifecycle (real database)', () => {
     );
 
     await expect(
-      asActor({ organizationId: org.other, roles: ['UNION_ADMIN'], userId: 'USR-OPS' }, () =>
+      asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-OPS' }, () =>
         wiring.orders.resolveDispute(order.id, {
           outcome: 'SETTLE',
           resolution: 'a resolution with a responsibility nobody defined',
@@ -343,7 +343,7 @@ describe('order lifecycle (real database)', () => {
       wiring.orders.raiseDispute(order.id, { reason: 'the goods never left the warehouse' }),
     );
 
-    await asActor({ organizationId: org.other, roles: ['UNION_ADMIN'], userId: 'USR-OPS' }, () =>
+    await asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-OPS' }, () =>
       wiring.orders.resolveDispute(order.id, {
         outcome: 'REFUND',
         resolution: 'the supplier never shipped the goods',
@@ -377,7 +377,7 @@ describe('order lifecycle (real database)', () => {
     await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
 
     await expect(
-      asActor({ organizationId: org.other, roles: ['UNION_ADMIN'], userId: 'USR-OPS' }, () =>
+      asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-OPS' }, () =>
         wiring.orders.resolveDispute(order.id, {
           outcome: 'REFUND',
           resolution: 'resolving something that was never disputed',

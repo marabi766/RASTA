@@ -70,6 +70,7 @@ import { transactionsDisputed, transactionsPendingSettlement } from './observabi
 import { HealthController, MetricsController } from './health/health.controller';
 import { ENV, LOGGER, PAYMENT_PROVIDER, SOURCE_FACTS } from './tokens';
 import { SourceFactsClient, type SourceFacts } from './provenance/source-facts.client';
+import { OrganizationHierarchy } from './organization/organization-hierarchy';
 import { ECONOMIC_DLQ_TOPIC, loadEconomicEnv, SERVICE_NAME, type EconomicEnv } from './config/env';
 
 /**
@@ -209,6 +210,26 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
           maintenanceBaseUrl: env.MAINTENANCE_SERVICE_URL,
           fleetBaseUrl: env.FLEET_SERVICE_URL,
           timeoutMs: env.ECONOMIC_SOURCE_REQUEST_TIMEOUT_MS,
+          tokens: new InternalTokenService(
+            env.INTERNAL_TOKEN_SECRET,
+            env.INTERNAL_TOKEN_ISSUER,
+            env.INTERNAL_TOKEN_TTL_SECONDS,
+          ),
+        }),
+    },
+
+    /**
+     * The owner of the organization hierarchy (A-13), asked whether a union
+     * administrator acts for an organization within its union (docs/24 Q-136).
+     * Its own `InternalTokenService`, as `SOURCE_FACTS` above.
+     */
+    {
+      provide: OrganizationHierarchy,
+      inject: [ENV],
+      useFactory: (env: EconomicEnv) =>
+        new OrganizationHierarchy({
+          baseUrl: env.ORGANIZATION_SERVICE_URL,
+          timeoutMs: env.ECONOMIC_ORGANIZATION_REQUEST_TIMEOUT_MS,
           tokens: new InternalTokenService(
             env.INTERNAL_TOKEN_SECRET,
             env.INTERNAL_TOKEN_ISSUER,

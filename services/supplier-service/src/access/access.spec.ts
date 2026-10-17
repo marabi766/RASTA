@@ -1,6 +1,8 @@
 import { isRastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
 import {
   assertActingAsSupplier,
+  assertCallerIsConstructionService,
+  assertCallerMayReadStandingOf,
   assertCanBrowseDirectory,
   assertCanDecideAbout,
   assertCanManagePerformanceFormula,
@@ -14,6 +16,8 @@ import {
   FORMULA_MANAGER_ROLES,
   hasPlatformScope,
   PLATFORM_ROLES,
+  STANDING_OF_CALLERS,
+  STANDING_SNAPSHOT_CALLER,
   SUPPLIER_SIDE_ROLES,
 } from './access';
 
@@ -556,6 +560,58 @@ describe('changing the platform-wide performance formula (docs/24 Q-75)', () => 
           assertCanManagePerformanceFormula(),
         ),
       ),
+    ).toBe('FORBIDDEN');
+  });
+});
+
+describe('the standing reads: named services, platform-wide, nobody else (ADR-061 § 4, ADR-070 § 7)', () => {
+  const service = (
+    callerService: string,
+    overrides: Partial<RequestContext> = {},
+  ): Partial<RequestContext> => ({ authType: 'SERVICE', callerService, roles: [], ...overrides });
+
+  it('lets construction-service and procurement-service ask for one organization, tenant-less', () => {
+    expect(STANDING_OF_CALLERS).toEqual(['construction-service', 'procurement-service']);
+    for (const caller of STANDING_OF_CALLERS) {
+      expect(codeOf(() => as(service(caller), () => assertCallerMayReadStandingOf()))).toBe(
+        'NO_ERROR',
+      );
+    }
+  });
+
+  it.each([
+    ['another service', service('marketplace-service')],
+    [
+      'procurement-service acting for a tenant',
+      service('procurement-service', { organizationId: OTHER_ORG }),
+    ],
+    [
+      'construction-service acting for a tenant',
+      service('construction-service', { organizationId: OTHER_ORG }),
+    ],
+    ['a person with platform scope', { userId: 'USR-1', roles: ['SYSTEM_ADMIN'] }],
+    [
+      'a procurement user',
+      { userId: 'USR-1', organizationId: SUPPLIER_ORG, roles: ['PROCUREMENT_USER'] },
+    ],
+    [
+      'a person whose context names procurement-service',
+      { userId: 'USR-1', callerService: 'procurement-service', roles: ['SYSTEM_ADMIN'] },
+    ],
+  ] as [string, Partial<RequestContext>][])(
+    'refuses %s with 403 on one organization',
+    (_name, caller) => {
+      expect(codeOf(() => as(caller, () => assertCallerMayReadStandingOf()))).toBe('FORBIDDEN');
+    },
+  );
+
+  it('keeps the paged snapshot construction-service’s alone: procurement-service is refused there', () => {
+    expect(STANDING_SNAPSHOT_CALLER).toBe('construction-service');
+    expect(
+      codeOf(() => as(service('construction-service'), () => assertCallerIsConstructionService())),
+    ).toBe('NO_ERROR');
+    expect(
+      codeOf(() => as(service('procurement-service'), () => assertCallerIsConstructionService())),
     ).toBe('FORBIDDEN');
   });
 });

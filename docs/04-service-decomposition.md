@@ -282,7 +282,7 @@ fleet رونوشت `asset_ref` را از رویداد می‌سازد و واب�
 | **Publishes**    | `DEMAND_SUBMITTED` · `DEMAND_AGGREGATED` · `RFQ_ISSUED` · `QUOTATION_SUBMITTED` · `QUOTATIONS_EVALUATED` · `PURCHASE_ORDER_ISSUED` · `GOODS_RECEIVED` · `QUALITY_CHECK_RECORDED`                                                                       |
 | **Consumes**     | `SUPPLIER_QUALIFIED` · `ORGANIZATION_*`                                                                                                                                                                                                                |
 | **Dependencies** | PostgreSQL · Kafka · Temporal (پنجره تجمیع، مهلت RFQ) · `supplier-service`                                                                                                                                                                             |
-| **مرز امنیتی**   | پیشنهاد قیمت تا پایان مهلت **رمزنگاری‌شده در حالت سکون** و غیرقابل مشاهده حتی برای اپراتور.                                                                                                                                                            |
+| **مرز امنیتی**   | پیشنهاد قیمت تا بازگشایی **مهرشده و رمزنگاری‌شده در حالت سکون**، هر خواندن ممیزی‌شده؛ سطح ادعا ADR-066 (اپراتور از نظر رمزنگاری بیرون نیست، D-055).                                                                                                    |
 | **Scale**        | کم. تجمیع یک کار زمان‌بندی‌شده Temporal است.                                                                                                                                                                                                           |
 | **Failure**      | افت آن نیازهای در انتظار را نگه می‌دارد؛ پنجره تجمیع پس از بازیابی اجرا می‌شود.                                                                                                                                                                        |
 
@@ -290,6 +290,16 @@ fleet رونوشت `asset_ref` را از رویداد می‌سازد و واب�
 و هم‌مشخصات گروه می‌شوند → اگر مجموع مقدار ≥ `minAggregationThreshold` باشد، `RFQ` صادر
 می‌شود؛ در غیر این صورت به پنجره بعدی منتقل یا به `marketplace` ارجاع می‌شود.
 هر سه پارامتر (طول پنجره، آستانه، سیاست انتقال) **پیکربندی سازمانی**اند.
+
+> **یادداشت طراحی COM-007 ([ADR-070](adr/ADR-070-procurement-service-boundary-and-lifecycle.md)، 2026-10-15؛ هیچ کدی هنوز نیست).** جدول و
+> الگوریتم بالا با این تفاوت‌ها ساخته می‌شوند: (۱) **بی Temporal** — پنجره و مهلت ستون ماندگارند، ساعت پایگاه داده پس از قفل تصمیم می‌گیرد و
+> بستن کار جاروکننده است (§ ۱۱، D-055). (۲) پایان پنجره RFQ **صادر نمی‌کند**؛ تجمیع `READY` می‌شود و صدور فرمان انسانی `POST /aggregations/{id}/rfq`
+> است، چون `procurementNature`، دعوت، معیار و مهلت پیش‌فرض ندارند. (۳) تجمیع فقط درون یک سازمان و کلید `(سازمان، productId)` است (Q-119، Q-120).
+> (۴) **مرز امنیتی** همان سطح ADR-066 است: پیشنهاد قیمت تا بازگشایی مهرشده، رمزنگاری‌شده در حالت سکون و هر خواندنش ممیزی‌شده — اجراشده در
+> برنامه و افشاگر دستکاری؛ اپراتوری که KEK، پایگاه داده و اجرای کد را با هم دارد از نظر رمزنگاری بیرون نیست (D-043، D-055). (۵) **Consumes:** فقط
+> `ORGANIZATION_MOVED` (آشتی سیاست موافقت سفارش)؛ صلاحیت تأمین‌کننده در لحظهٔ تصمیم از `supplier-service` پرسیده می‌شود و مصرف‌کنندهٔ `SUPPLIER_*`
+> ساخته نمی‌شود. (۶) `PURCHASE_ORDER_ISSUED` بی مبلغ و `QUOTATIONS_EVALUATED` بی امتیاز است؛ procurement هیچ پولی حرکت نمی‌دهد (§ ۸، Q-124).
+> (۷) صدور سفارش بی سیاست فعال `procurement.purchase_order` رد می‌شود (Q-122). برنامهٔ برش‌ها: [ADR-070 implementation plan](adr/ADR-070-implementation-plan.md).
 
 ---
 
@@ -485,7 +495,7 @@ Cursor؛ هر سازمانِ دارای تأیید `CONTRACTING` یا دورهٔ
 (Fail Closed). Snapshot و رویداد زنده با هم تکرارپذیرند. **این مدل خواندنی مشورتی است (بازبینی دور دوم Codex):** برای فهرست و UI است، نه منبع تصمیم؛
 چون پس از قطعی بلندتر از نگه‌داشت لاگ (هفت روز) تعلیقِ منقضی‌شده را نمی‌بیند، و تعلیقی که در `supplier-service` Commit شده ولی Outbox هنوز
 نرسانده را هم. **صلاحیت برای پیشنهاد تصمیمی قطعی است:** هنگام ثبت، `construction-service` وضعیت همان یک پیمانکار را با
-`GET /v1/suppliers/standing-snapshot/{organizationId}` (همان `@AllowService` و توکن بی مستأجر) از `supplier-service` می‌پرسد (بیرون از
+`GET /v1/suppliers/standing-snapshot/{organizationId}` (توکن بی مستأجر؛ `@AllowService` این مسیر `procurement-service` را هم دارد و لحظهٔ تأیید `GOODS_SUPPLY` را هم می‌دهد، ADR-070 § ۷) از `supplier-service` می‌پرسد (بیرون از
 تراکنش و قفل مناقصه) و اگر در دسترس نبود `503/504` می‌دهد، یعنی Fail Closed (`StandingAuthority`). همین مسیر، بازسازی پس از `down.sql` است
 (`docs/runbooks/contractor-standing-bootstrap.md`).
 
@@ -515,7 +525,7 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 خواندن** (از جمله ردشده) `bid_access_log` و `BID_ACCESSED` دارد. بازگشایی Idempotent است (بار دوم همان نما با `alreadyOpened`، بی‌رویداد).
 پیش از بازگشایی کارفرما فقط شمار و مهر زمان دریافت را می‌بیند. **چهارچشمی برای بازگشایی** (Q-91، موقت تا تأیید صاحب محصول): بازگشایی به پیشنهاد یک کاربر مجاز و تأیید کاربر دوم نیاز دارد، هیچ‌کدام عضو سازمان پیشنهاددهنده نیست؛
 `CONSTRUCTION_TENDER_OPEN_FOUR_EYES` (پیش‌فرض روشن؛ خاموش فقط در `development` و `test`). **هنگام تأیید** عضویت _فعلی_ هر دو نفر (پیشنهاددهنده
-و تأییدکننده) دوباره از `identity-service` (`GET /v1/users/{id}/organizations`، فقط `construction-service`، توکن بی‌مستأجر) خوانده می‌شود، نه آنچه هنگام
+و تأییدکننده) دوباره از `identity-service` (`GET /v1/users/{id}/organizations`، فقط `construction-service` و `procurement-service`، توکن بی‌مستأجر) خوانده می‌شود، نه آنچه هنگام
 پیشنهاد بود؛ ناخوانا بودن ⇒ `502/504` و هیچ‌چیز باز نمی‌شود (`IDENTITY_SERVICE_URL`، `CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS`). خودِ پیشنهاد هم
 یک ردیف `bid_access_log` و `BID_ACCESSED` (هدف `PROPOSE_OPENING`، بی `bidId`) در همان تراکنش می‌گذارد. بررسی تعارض منافع **پیش از** هر پاسخی دربارهٔ
 وضعیت مناقصه (`NOT_CLOSED`/`NOT_OPENED`) انجام می‌شود. `down.sql` مهاجرت تا وقتی بازگشایی یا پیشنهادی در انتظار ثبت شده باشد رد می‌کند.
