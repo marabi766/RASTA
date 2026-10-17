@@ -16,6 +16,7 @@ export const STATEMENT_STATES = [
   'TECHNICALLY_APPROVED',
   'APPROVED',
   'REJECTED',
+  'SETTLED',
 ] as const;
 
 export type StatementStatus = (typeof STATEMENT_STATES)[number];
@@ -26,6 +27,7 @@ export const STATEMENT_STATE_LABELS: Readonly<Record<StatementStatus, string>> =
   TECHNICALLY_APPROVED: 'تأیید فنی شده، در انتظار تأیید مالی',
   APPROVED: 'تأییدشده',
   REJECTED: 'ردشده',
+  SETTLED: 'تسویه‌شده',
 };
 
 export function isStatementStatus(value: string | undefined): value is StatementStatus {

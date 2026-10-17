@@ -140,10 +140,19 @@ function optionalRoleList(name: string) {
  *   CONTRACT_AWARD_REQUEST_TIMEOUT_MS   How long that read may take, headers and body
  *                                       included; no answer in time is "unavailable",
  *                                       never "no award".
+ *   ECONOMIC_SERVICE_URL                Where a statement's obligation is read before the
+ *                                       statement is SETTLED (ADR-068 § 6 (3), CON-003 PR 6c):
+ *                                       `GET {url}/v1/internal/obligations/by-source/STATEMENT/
+ *                                       {id}`, with a service token signed for the employer.
+ *   CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS
+ *                                       How long that read may take, headers and body
+ *                                       included; no answer in time is "unavailable", never
+ *                                       "not paid" and never "paid".
  *   CONTRACT_CONSUMER_MAX_RETRIES / _RETRY_BACKOFF_MS
- *                                       How often the `TENDER_AWARDED` consumer retries an
- *                                       award that could not be read before it dead-letters
- *                                       the event as UPSTREAM_UNAVAILABLE.
+ *                                       How often the `TENDER_AWARDED` and
+ *                                       `SETTLEMENT_COMPLETED` consumers retry an owner that
+ *                                       could not be asked before they dead-letter the event
+ *                                       as UPSTREAM_UNAVAILABLE.
  *   CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS
  *                                       D-050. The clock-skew allowance added to a signature's
  *                                       commit deadline before the earliest move's instant is
@@ -255,6 +264,15 @@ export const contractEnvSchema = baseEnvSchema
     CONSTRUCTION_SERVICE_URL: z.string().url().default('http://localhost:3110'),
 
     CONTRACT_AWARD_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
+
+    ECONOMIC_SERVICE_URL: z.string().url().default('http://localhost:3112'),
+
+    CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(60_000)
+      .default(5000),
 
     CONTRACT_CONSUMER_MAX_RETRIES: z.coerce.number().int().min(1).max(20).default(5),
     CONTRACT_CONSUMER_RETRY_BACKOFF_MS: z.coerce.number().int().min(10).max(60_000).default(1000),

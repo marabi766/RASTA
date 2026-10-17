@@ -9,6 +9,7 @@ import type {
   TransactionType,
 } from '../generated/prisma';
 import { after, resolveCursor } from '../shared/cursor';
+import { STATEMENT_SOURCE_TYPE } from './dto';
 
 /** How a transaction list may be narrowed. */
 export interface TransactionFilter {
@@ -200,6 +201,24 @@ export class TransactionRepository {
     return runUnscoped('an inbound event names its own organization, not the reader', () =>
       tx.transaction.findFirst({ where: { organizationId, sourceType, sourceReference } }),
     );
+  }
+
+  /**
+   * One contract statement's obligation, as its payer holds it, with its
+   * settlement (ADR-068 § 6 (3)).
+   *
+   * Scoped, never `runUnscoped`: `organizationId` is the tenant signed into the
+   * caller's token, and the tenant guard injects the same one, so the
+   * predicate is stated where the query is read and enforced again below it.
+   * `ux_transaction_source_fact` makes this at most one row. Another payer's
+   * statement — the beneficiary asking about what it is owed included — is
+   * simply not found.
+   */
+  findStatementObligation(organizationId: string, statementId: string) {
+    return this.client.transaction.findFirst({
+      where: { organizationId, sourceType: STATEMENT_SOURCE_TYPE, sourceReference: statementId },
+      include: { settlement: true },
+    });
   }
 
   async list(
