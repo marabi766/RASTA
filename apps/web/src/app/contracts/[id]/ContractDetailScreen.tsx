@@ -17,6 +17,9 @@ import {
   toPersianDigits,
 } from '@/lib/format';
 import { amendmentStatusLabel, contractStatusLabel, formatShareBp } from '@/lib/contract-fields';
+import { statementStatusLabel } from '@/lib/statement-fields';
+import type { Binding } from '@/lib/unresolved-order';
+import type { Statement, StatementPage } from '@/server/contract-statements';
 import type {
   Amendment,
   AmendmentPage,
@@ -25,6 +28,9 @@ import type {
   MilestonePage,
   ReadResult,
 } from '@/server/contracts';
+
+import { StatementCommands, type OfferedStatementCommand } from './StatementCommands';
+import type { MilestoneOption } from './StatementCommandForm';
 
 /**
  * The contract detail (docs/16 § ۱۶٫۶, `/contracts/[id]`), read-only.
@@ -41,8 +47,11 @@ import type {
  * contract above them.
  *
  * Signing, cancelling, proposing an amendment and planning a milestone are
- * all out of scope here — read-only, and no statement is read or shown
- * (`server/contracts.ts` explains why).
+ * out of scope here. The contract's **statements** are listed below them, read
+ * like the amendments, each linking to its own page
+ * (`statements/[statementId]`); the contractor's draft form is drawn under the
+ * list when `server/contract-statements.ts` says contract-service would
+ * accept it (`canDraftStatement`).
  */
 
 const NOT_FOUND_TITLE = 'این قرارداد پیدا نشد';
@@ -211,17 +220,133 @@ function MilestonesSection({ result }: { result: ReadResult<MilestonePage> }) {
   );
 }
 
+function StatementRow({ contractId, statement }: { contractId: string; statement: Statement }) {
+  const number = toPersianDigits(String(statement.statementNumber));
+  return (
+    <li className="rounded-md border border-border bg-surface-raised p-3 text-sm">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <a
+          href={`/contracts/${encodeURIComponent(contractId)}/statements/${encodeURIComponent(statement.id)}`}
+          className="font-medium underline"
+        >
+          صورت‌وضعیت شمارهٔ {number}
+        </a>
+        <StatusBadge status={statement.status} label={statementStatusLabel(statement.status)} />
+      </div>
+      <dl className="mt-2 grid gap-2 sm:grid-cols-3">
+        <Term label="مبلغ ناخالص">{formatMoney(statement.grossMinor, IRR)}</Term>
+        <Term label="کسورات">{formatMoney(statement.deductionsMinor, IRR)}</Term>
+        <Term label="مبلغ خالص">
+          <span className="font-medium">{formatMoney(statement.netMinor, IRR)}</span>
+        </Term>
+      </dl>
+      <p className="mt-1 text-content-muted">
+        {statement.submittedAt
+          ? `ارسال در ${formatJalaliDateLong(statement.submittedAt)}`
+          : 'هنوز ارسال نشده'}
+      </p>
+    </li>
+  );
+}
+
+/** What the draft form needs, when the page offers it. */
+export interface StatementDraftOffer {
+  readonly offered: readonly OfferedStatementCommand[];
+  readonly csrfToken: string;
+  readonly binding: Binding;
+  readonly sessionMaxAgeSeconds: number;
+  readonly milestones: readonly MilestoneOption[];
+}
+
+/** The statements, read separately and able to fail on their own, paged by `statementCursor`. */
+function StatementsSection({
+  contractId,
+  result,
+  draft,
+}: {
+  contractId: string;
+  result: ReadResult<StatementPage>;
+  draft: StatementDraftOffer | null;
+}) {
+  const form = draft ? (
+    <div className="mt-4">
+      <StatementCommands
+        contractId={contractId}
+        statementId={null}
+        offered={draft.offered}
+        csrfToken={draft.csrfToken}
+        binding={draft.binding}
+        sessionMaxAgeSeconds={draft.sessionMaxAgeSeconds}
+        milestones={draft.milestones}
+        pageHref={`/contracts/${encodeURIComponent(contractId)}`}
+      />
+    </div>
+  ) : null;
+
+  if (result.kind !== 'OK') {
+    return (
+      <Section headingId="contract-statements" title="صورت‌وضعیت‌ها">
+        {result.kind === 'FORBIDDEN' || result.kind === 'NOT_FOUND' ? (
+          <NoAccessState description="صورت‌وضعیت‌های این قرارداد در اختیار شما نیست." />
+        ) : (
+          <ErrorState
+            description="صورت‌وضعیت‌ها خوانده نشد. کمی بعد دوباره تلاش کنید."
+            correlationId={result.correlationId}
+          />
+        )}
+        {form}
+      </Section>
+    );
+  }
+
+  const { items, nextCursor } = result.data;
+
+  return (
+    <Section headingId="contract-statements" title="صورت‌وضعیت‌ها">
+      {items.length === 0 ? (
+        <EmptyState
+          title="صورت‌وضعیتی نیست"
+          description="برای این قرارداد هنوز صورت‌وضعیتی ثبت نشده است."
+        />
+      ) : (
+        <ul className="flex flex-col gap-2">
+          {items.map((statement) => (
+            <StatementRow key={statement.id} contractId={contractId} statement={statement} />
+          ))}
+        </ul>
+      )}
+
+      {nextCursor ? (
+        <div className="mt-4">
+          <ButtonLink
+            href={`/contracts/${encodeURIComponent(contractId)}?statementCursor=${encodeURIComponent(nextCursor)}`}
+            tone="secondary"
+          >
+            صفحهٔ بعدِ صورت‌وضعیت‌ها
+          </ButtonLink>
+        </div>
+      ) : null}
+      {form}
+    </Section>
+  );
+}
+
 export interface ContractDetailScreenProps {
   readonly result: ReadResult<ContractDetail>;
   /** `null` when the contract itself could not be read, so these were not asked. */
   readonly amendments: ReadResult<AmendmentPage> | null;
   readonly milestones: ReadResult<MilestonePage> | null;
+  readonly statements?: ReadResult<StatementPage> | null;
+  /** The contractor's draft form, when contract-service would accept it; null otherwise. */
+  readonly draft?: StatementDraftOffer | null;
 }
 
 export function ContractDetailScreen({
   result,
   amendments,
   milestones,
+  statements = null,
+  draft = null,
 }: ContractDetailScreenProps) {
   if (result.kind !== 'OK') return <Failure result={result} />;
 
@@ -282,6 +407,9 @@ export function ContractDetailScreen({
 
       {amendments ? <AmendmentsSection contractId={contract.id} result={amendments} /> : null}
       {milestones ? <MilestonesSection result={milestones} /> : null}
+      {statements ? (
+        <StatementsSection contractId={contract.id} result={statements} draft={draft} />
+      ) : null}
     </div>
   );
 }

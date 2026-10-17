@@ -1,0 +1,369 @@
+import {
+  LINE_DESCRIPTION_MAX,
+  MAX_STATEMENT_LINES,
+  isStatementCommand,
+  type StatementCommand,
+} from './statement-fields';
+import type { StatementLineRequest } from './statement-draft';
+import type { Binding } from './unresolved-order';
+
+/**
+ * A statement command whose outcome is unknown, kept in `sessionStorage` so
+ * that a reload cannot turn "maybe done" back into a fresh form with a fresh
+ * key — `lib/unresolved-dispute.ts`'s rules, for the statement commands.
+ *
+ * ## Why a fresh key is not safe here
+ *
+ * A draft sent under key K can commit unseen; the same lines sent again under
+ * a new key are a **second statement** — a second claim for the same work.
+ * Only the original key with the original body is answered by the service's
+ * stored response instead of being executed again. A submit or a decision
+ * repeated under a new key is refused by the state it left behind, but its
+ * outcome is just as unknown until the page is read again, so it is held the
+ * same way and no fresh form is drawn over it.
+ *
+ * ## What is kept
+ *
+ * Per scope — a contract's draft, or one statement's commands — the command,
+ * the submission id, a draft's lines exactly as they were sent (the service
+ * computes every amount from them, so they are what makes the retry the same
+ * request), the original correlation id, when it was saved, and its replay
+ * stamp (`server/statement-replay.ts`, a signed deadline, not a credential),
+ * with the two one-way login tags (`submissionBinding`). No token, no session
+ * value, no CSRF value.
+ *
+ * ## Never silently gone
+ *
+ * An entry older than the session's lifetime, and every entry at logout, is
+ * **reduced** to a marker — no lines, no login tag, no stamp — shown view-only
+ * as "the outcome is unknown" until the person acknowledges it. A confirmed
+ * answer (the action redirects) drops it; otherwise only the person does, with
+ * the labelled action the uncertainty view offers once the same request has
+ * been tried again or can no longer be. Another person's page drops every
+ * entry of anyone else (`purgeForeignUnresolvedStatements`).
+ */
+
+const KEY_PREFIX = 'rasta.unresolved-statement.';
+const VERSION = 1;
+
+const SUBMISSION_ID = /^sub_[A-Za-z0-9_-]{8,128}$/;
+const MAX_TAG_LENGTH = 128;
+const MAX_STAMP_LENGTH = 4096;
+const AMOUNT = /^[1-9][0-9]{0,18}$/;
+
+/**
+ * Until when the server will let the same request be sent again: `token` is
+ * checked by the action, `until` (milliseconds since the epoch) only decides
+ * which controls are drawn.
+ */
+export interface ReplayStamp {
+  readonly token: string;
+  readonly until: number;
+}
+
+/** A fresh submission id for one statement form, with its signed replay deadline. */
+export interface StatementSubmission {
+  readonly id: string;
+  readonly replay: ReplayStamp;
+}
+
+/** A draft's line as it was sent. */
+export type SentLine = StatementLineRequest;
+
+export interface UnresolvedStatement {
+  readonly command: StatementCommand;
+  readonly submissionId: string;
+  /** A draft's lines as sent; empty for every other command, and in a marker. */
+  readonly lines: readonly SentLine[];
+  /** Null while the first send has not been answered. */
+  readonly correlationId: string | null;
+  /** Milliseconds since the epoch, browser clock. */
+  readonly savedAt: number;
+  /** Null in a marker, and once the server has said the deadline passed. */
+  readonly replay: ReplayStamp | null;
+  /** True for the outcome-unknown marker: nothing re-sendable is kept. */
+  readonly marker: boolean;
+}
+
+/** Where an entry is kept: a contract's draft, or one statement. */
+export interface StatementScope {
+  readonly contractId: string;
+  /** Null for the contract's draft form. */
+  readonly statementId: string | null;
+}
+
+type Stored = Omit<UnresolvedStatement, 'marker'> & {
+  readonly v: typeof VERSION;
+  readonly marker: boolean;
+  readonly owner: string;
+  readonly session?: string;
+};
+
+export type RestoredStatement =
+  /** Same login, before the replay deadline: the same request may be sent again. */
+  | { readonly kind: 'RETRYABLE'; readonly entry: UnresolvedStatement }
+  /** Another login, past the replay deadline, or a marker: shown, never re-sent. */
+  | { readonly kind: 'VIEW_ONLY'; readonly entry: UnresolvedStatement };
+
+let accountClosing = false;
+
+export function markStatementsClosing(): void {
+  accountClosing = true;
+}
+
+export function markStatementsOpen(): void {
+  accountClosing = false;
+}
+
+function storage(): Storage | null {
+  try {
+    return typeof window === 'undefined' ? null : window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function keyOf(scope: StatementScope): string {
+  return `${KEY_PREFIX}${scope.contractId}.${scope.statementId ?? 'draft'}`;
+}
+
+function tag(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_TAG_LENGTH;
+}
+
+function replayOf(value: unknown): ReplayStamp | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== 'object') return undefined;
+  const stamp = value as Record<string, unknown>;
+  if (
+    typeof stamp.token !== 'string' ||
+    stamp.token.length === 0 ||
+    stamp.token.length > MAX_STAMP_LENGTH ||
+    typeof stamp.until !== 'number' ||
+    !Number.isFinite(stamp.until)
+  ) {
+    return undefined;
+  }
+  return { token: stamp.token, until: stamp.until };
+}
+
+function linesOf(value: unknown): SentLine[] | null {
+  if (!Array.isArray(value) || value.length > MAX_STATEMENT_LINES) return null;
+  const lines: SentLine[] = [];
+  for (const raw of value) {
+    if (typeof raw !== 'object' || raw === null) return null;
+    const line = raw as Record<string, unknown>;
+    if (
+      typeof line.description !== 'string' ||
+      line.description.length < 1 ||
+      line.description.length > LINE_DESCRIPTION_MAX ||
+      typeof line.amountMinor !== 'string' ||
+      !AMOUNT.test(line.amountMinor) ||
+      !(line.milestoneId === undefined || tag(line.milestoneId))
+    ) {
+      return null;
+    }
+    lines.push({
+      description: line.description,
+      amountMinor: line.amountMinor,
+      ...(typeof line.milestoneId === 'string' ? { milestoneId: line.milestoneId } : {}),
+    });
+  }
+  return lines;
+}
+
+function parse(raw: string): Stored | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof value !== 'object' || value === null) return null;
+  const entry = value as Record<string, unknown>;
+  if (
+    entry.v !== VERSION ||
+    !isStatementCommand(entry.command) ||
+    !tag(entry.submissionId) ||
+    !SUBMISSION_ID.test(entry.submissionId) ||
+    !(entry.correlationId === null || tag(entry.correlationId)) ||
+    !tag(entry.owner) ||
+    typeof entry.savedAt !== 'number' ||
+    !Number.isFinite(entry.savedAt)
+  ) {
+    return null;
+  }
+  const common = {
+    v: VERSION,
+    command: entry.command,
+    submissionId: entry.submissionId,
+    correlationId: entry.correlationId,
+    savedAt: entry.savedAt,
+    owner: entry.owner,
+  } as const;
+  if (entry.marker === true) return { ...common, marker: true, replay: null, lines: [] };
+
+  const replay = replayOf(entry.replay);
+  const lines = linesOf(entry.lines);
+  if (entry.marker !== false || !tag(entry.session) || replay === undefined || lines === null) {
+    return null;
+  }
+  // A draft carries the lines it sent; nothing else carries any.
+  if ((entry.command === 'DRAFT') !== lines.length > 0) return null;
+  return { ...common, marker: false, session: entry.session, replay, lines };
+}
+
+/** What a marker keeps: nothing of the lines, the login or the stamp. */
+function markerOf(entry: Stored): string {
+  return JSON.stringify({
+    v: VERSION,
+    marker: true,
+    command: entry.command,
+    submissionId: entry.submissionId,
+    correlationId: entry.correlationId,
+    savedAt: entry.savedAt,
+    owner: entry.owner,
+  });
+}
+
+function ownKeys(store: Storage): string[] {
+  const keys: string[] = [];
+  for (let index = 0; index < store.length; index += 1) {
+    const key = store.key(index);
+    if (key !== null && key.startsWith(KEY_PREFIX)) keys.push(key);
+  }
+  return keys;
+}
+
+/** Logout: every entry reduced to a marker; unreadable ones removed. */
+export function purgeAllUnresolvedStatements(): void {
+  markStatementsClosing();
+  try {
+    const store = storage();
+    if (!store) return;
+    for (const key of ownKeys(store)) {
+      const raw = store.getItem(key);
+      const entry = raw === null ? null : parse(raw);
+      if (entry) store.setItem(key, markerOf(entry));
+      else store.removeItem(key);
+    }
+  } catch {
+    // Unavailable storage holds nothing to purge.
+  }
+}
+
+/** A page for `owner`: entries of anyone else, and unreadable ones, are removed. */
+export function purgeForeignUnresolvedStatements(owner: string): void {
+  try {
+    const store = storage();
+    if (!store) return;
+    for (const key of ownKeys(store)) {
+      const raw = store.getItem(key);
+      const entry = raw === null ? null : parse(raw);
+      if (!entry || entry.owner !== owner) store.removeItem(key);
+    }
+  } catch {
+    // See above.
+  }
+}
+
+/** True when the entry is stored. False: storage refused it, or a logout has started. */
+export function saveUnresolvedStatement(
+  scope: StatementScope,
+  entry: Omit<UnresolvedStatement, 'savedAt' | 'marker'>,
+  binding: Binding,
+  now: number = Date.now(),
+): boolean {
+  if (accountClosing) return false;
+  try {
+    const store = storage();
+    if (!store) return false;
+    const previous = store.getItem(keyOf(scope));
+    const earlier = previous === null ? null : parse(previous);
+    // A marker is never turned back into something that can be re-sent.
+    if (earlier?.marker) return earlier.submissionId === entry.submissionId;
+    const same = earlier !== null && earlier.submissionId === entry.submissionId;
+    store.setItem(
+      keyOf(scope),
+      JSON.stringify({
+        v: VERSION,
+        marker: false,
+        command: entry.command,
+        submissionId: entry.submissionId,
+        lines: entry.lines,
+        correlationId: entry.correlationId,
+        // The entry dates from the first send.
+        savedAt: same ? earlier.savedAt : now,
+        // Once withdrawn — the server said the deadline passed — never restored.
+        replay: same && earlier.replay === null ? null : entry.replay,
+        owner: binding.owner,
+        session: binding.session,
+      }),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function clearUnresolvedStatement(scope: StatementScope): void {
+  try {
+    storage()?.removeItem(keyOf(scope));
+  } catch {
+    // See above.
+  }
+}
+
+/**
+ * The unresolved statement command in this scope, if this person has one.
+ * Unreadable, or someone else's: removed, read as none. Older than the
+ * session's lifetime: reduced to the marker, and read as that — never as none.
+ */
+export function restoreUnresolvedStatement(
+  scope: StatementScope,
+  binding: Binding,
+  maxAgeSeconds: number,
+  now: number = Date.now(),
+): RestoredStatement | null {
+  try {
+    const store = storage();
+    const raw = store?.getItem(keyOf(scope));
+    if (!store || raw === null || raw === undefined) return null;
+
+    const entry = parse(raw);
+    if (!entry || entry.owner !== binding.owner) {
+      store.removeItem(keyOf(scope));
+      return null;
+    }
+    const { command, submissionId, correlationId, savedAt } = entry;
+    if (entry.marker || now - savedAt > maxAgeSeconds * 1000) {
+      if (!entry.marker) store.setItem(keyOf(scope), markerOf(entry));
+      return {
+        kind: 'VIEW_ONLY',
+        entry: {
+          command,
+          submissionId,
+          correlationId,
+          savedAt,
+          lines: [],
+          replay: null,
+          marker: true,
+        },
+      };
+    }
+    const restored: UnresolvedStatement = {
+      command,
+      submissionId,
+      lines: entry.lines,
+      correlationId,
+      savedAt,
+      replay: entry.replay,
+      marker: false,
+    };
+    const retryable =
+      entry.session === binding.session && entry.replay !== null && now < entry.replay.until;
+    return { kind: retryable ? 'RETRYABLE' : 'VIEW_ONLY', entry: restored };
+  } catch {
+    return null;
+  }
+}
