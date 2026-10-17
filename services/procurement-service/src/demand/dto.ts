@@ -143,7 +143,14 @@ export const aggregationViewSchema = z
           'the window ended. Never above MAX_QUANTITY: a demand that would take it past is 422 ' +
           'AGGREGATION_QUANTITY_LIMIT_EXCEEDED (ADR-070 § 2).',
       ),
-    demandCount: z.number().int(),
+    demandCount: z
+      .number()
+      .int()
+      .describe(
+        'How many live demands it holds (withdrawn ones excluded). A demand that would join a ' +
+          'window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS is 422 ' +
+          'AGGREGATION_DEMAND_LIMIT_REACHED.',
+      ),
     extensionCount: z.number().int(),
     setting: settingSnapshotSchema,
     closedAt: z.string().nullable().describe('When the window ended, or null while OPEN.'),

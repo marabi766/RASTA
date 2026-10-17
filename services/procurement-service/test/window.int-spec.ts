@@ -34,6 +34,7 @@ describe('the window of an aggregation', () => {
     hours?: number;
     min?: number;
     policy?: 'EXTEND' | 'REFER' | 'CLOSE';
+    maxLiveDemands?: number;
   }) {
     const clock = new TestClock();
     const harness = await startApi(
@@ -41,6 +42,7 @@ describe('the window of an aggregation', () => {
         PROCUREMENT_AGGREGATION_WINDOW_HOURS: String(settings.hours ?? 24),
         PROCUREMENT_AGGREGATION_MIN_QUANTITY: String(settings.min ?? 0),
         PROCUREMENT_AGGREGATION_SHORTFALL_POLICY: settings.policy ?? 'EXTEND',
+        PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: String(settings.maxLiveDemands ?? 5_000),
       },
       { clock },
     );
@@ -303,6 +305,106 @@ describe('the window of an aggregation', () => {
       status: 'READY',
       totalQuantity: MAX_QUANTITY,
     });
+  });
+
+  it('holds a window to PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands: one more is 422 AGGREGATION_DEMAND_LIMIT_REACHED and writes nothing; a withdrawal frees a place; the next window takes the late demand', async () => {
+    const { harness, clock } = await api({
+      hours: 10,
+      min: 100,
+      policy: 'REFER',
+      maxLiveDemands: 3,
+    });
+    const a = org();
+    const as = client(harness, buyer(a));
+    const productId = newProductId();
+
+    clock.set(T0);
+    const joined = [];
+    for (let n = 0; n < 3; n += 1) joined.push(await as.submit({ productId, quantity: 1 }));
+    const window = joined[0]!.body.aggregationId as string;
+    expect(joined.map((r) => [r.status, r.body.aggregationId])).toEqual([
+      [201, window],
+      [201, window],
+      [201, window],
+    ]);
+    const full = await as.aggregation(window);
+    expect(full.body).toMatchObject({ demandCount: 3, totalQuantity: 3 });
+
+    const refused = await as.submit({ productId, quantity: 1 });
+    expect(refused.status).toBe(422);
+    expect(refused.body).toMatchObject({
+      code: 'BUSINESS_RULE_VIOLATION',
+      message: 'The window this demand would join holds as many demands as it can take',
+      details: [
+        {
+          path: 'submission',
+          code: 'AGGREGATION_DEMAND_LIMIT_REACHED',
+          message: 'Demand cannot be submitted: AGGREGATION_DEMAND_LIMIT_REACHED',
+        },
+      ],
+    });
+    expect((await as.aggregation(window)).body).toEqual(full.body);
+    expect(await streamOf(harness, a, window)).toEqual([
+      'DEMAND_SUBMITTED',
+      'DEMAND_SUBMITTED',
+      'DEMAND_SUBMITTED',
+    ]);
+
+    // The limit counts live demands: a withdrawn one frees its place.
+    expect((await as.withdraw(joined[0]!.body.id, 1)).status).toBe(200);
+    const again = await as.submit({ productId, quantity: 1 });
+    expect([again.status, again.body.aggregationId]).toEqual([201, window]);
+
+    // A full window still ends; the late demand opens the window that follows.
+    clock.set(new Date(T0.getTime() + 10 * HOUR));
+    const late = await as.submit({ productId, quantity: 1 });
+    expect(late.status).toBe(201);
+    expect(late.body.aggregationId).not.toBe(window);
+    expect((await as.aggregation(window)).body).toMatchObject({
+      status: 'REFERRED',
+      demandCount: 3,
+    });
+  });
+
+  it('a full window that EXTEND keeps still moves on: the late demand is refused, the extension commits, and a withdrawal makes room again', async () => {
+    const { harness, clock } = await api({
+      hours: 10,
+      min: 100,
+      policy: 'EXTEND',
+      maxLiveDemands: 2,
+    });
+    const a = org();
+    const as = client(harness, buyer(a));
+    const productId = newProductId();
+
+    clock.set(T0);
+    const first = await as.submit({ productId, quantity: 1 });
+    const window = first.body.aggregationId as string;
+    expect((await as.submit({ productId, quantity: 1 })).status).toBe(201);
+
+    // Past closesAt the window extends — the same window, still full — and the demand is refused.
+    clock.set(new Date(T0.getTime() + 10 * HOUR));
+    const refused = await as.submit({ productId, quantity: 1 });
+    expect(refused.status).toBe(422);
+    expect(refused.body.details).toEqual([
+      expect.objectContaining({ path: 'submission', code: 'AGGREGATION_DEMAND_LIMIT_REACHED' }),
+    ]);
+    expect((await as.aggregation(window)).body).toMatchObject({
+      status: 'OPEN',
+      demandCount: 2,
+      extensionCount: 1,
+      closesAt: new Date(T0.getTime() + 20 * HOUR).toISOString(),
+    });
+    expect(await streamOf(harness, a, window)).toEqual([
+      'DEMAND_SUBMITTED',
+      'DEMAND_SUBMITTED',
+      'AGGREGATION_WINDOW_EXTENDED',
+    ]);
+
+    // Open again, so a demand can be withdrawn and its place taken.
+    expect((await as.withdraw(first.body.id, 1)).status).toBe(200);
+    const joined = await as.submit({ productId, quantity: 1 });
+    expect([joined.status, joined.body.aggregationId]).toEqual([201, window]);
   });
 
   it('a threshold of exactly MAX_QUANTITY is reachable: a full window ends READY (PR-300 r2 R2-1)', async () => {

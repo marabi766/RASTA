@@ -107,7 +107,11 @@ describe('the committed OpenAPI document', () => {
   });
 
   it.each([
-    ['POST /v1/demand-requests', 'submission', ['AGGREGATION_QUANTITY_LIMIT_EXCEEDED']],
+    [
+      'POST /v1/demand-requests',
+      'submission',
+      ['AGGREGATION_QUANTITY_LIMIT_EXCEEDED', 'AGGREGATION_DEMAND_LIMIT_REACHED'],
+    ],
     [
       'POST /v1/demand-requests/{id}/withdraw',
       'withdrawal',

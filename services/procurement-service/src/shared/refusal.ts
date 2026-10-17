@@ -30,6 +30,12 @@ export const REFUSAL_REASONS = {
      * it had ended; nothing is written.
      */
     AGGREGATION_QUANTITY_LIMIT_EXCEEDED: 422,
+    /**
+     * The window it would join already holds `PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS` live demands —
+     * a technical limit, so that the window's synchronous close fits the transaction budget (Q-119
+     * note of 2026-10-17). Decided the same way; nothing is written.
+     */
+    AGGREGATION_DEMAND_LIMIT_REACHED: 422,
   },
   /** Withdrawing a demand (ADR-070 § 2). */
   withdrawal: {
