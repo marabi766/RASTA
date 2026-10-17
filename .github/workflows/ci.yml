@@ -585,7 +585,9 @@ jobs:
         # only from TENDER_AWARDED, ADR-068 § 3), so the scenarios start from a
         # SIGNED contract and the two statement chains in force, written as
         # contract-service's own runtime role through every guard its database
-        # keeps. The file says why, and what each row is.
+        # keeps. The file says why, and what each row is. The contract command
+        # scenarios write a fresh contract per test the same way
+        # (`e2e/contract-fixture.ts`), signing under this file's policy.
         env:
           PGPASSWORD: rasta_contract_dev_password
         run: >-
@@ -978,12 +980,18 @@ jobs:
           # job (above), so `/projects` and `/inventory` live-isolation
           # scenarios run for real instead of skipping.
           WEB_LIVE_STACK_E2E_EXP004: 'true'
-          # contract-service is up and its fixture loaded (above), so the
-          # statement scenarios (`e2e/contract-statements.spec.ts`) run for real.
+          # contract-service is up and its fixtures loaded (above), so the
+          # statement and contract command scenarios
+          # (`e2e/contract-statements.spec.ts`, `e2e/contract-commands.spec.ts`)
+          # run for real.
           # They provision their contractor and second approver through
           # identity-service and give each a password through Keycloak's admin
           # API, with this run's KEYCLOAK_ADMIN_PASSWORD (job environment).
           WEB_LIVE_STACK_E2E_CONTRACTS: 'true'
+          # The contract command scenarios write their own contract per test, as
+          # contract-service's runtime role (`e2e/contract-fixture.ts`), so a
+          # retry runs against new state (PR 342 review 1, finding 2).
+          WEB_E2E_CONTRACT_DATABASE_URL: postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract
           WEB_E2E_FLEET_URL: http://localhost:3104
           WEB_E2E_MAINTENANCE_URL: http://localhost:3105
           API_GATEWAY_URL: http://localhost:3000

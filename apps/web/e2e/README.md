@@ -101,6 +101,25 @@ separation-of-duties refusal, the financial approval.
 - Each run adds one approved statement to the fixture's contract, found by the
   id its own draft returned; the contract's price is large enough for many runs.
 
+## Contract commands (`contract-commands.spec.ts`) — a fresh contract per test
+
+For the same reason (no route creates a contract), **each test writes its own**
+(`contract-fixture.ts` running `fixtures/contract-draft.sql` as contract-service's
+runtime role, through every guard its database keeps): a draft nobody has signed,
+or one both sides have signed under `contract-statements.sql`'s signing policy,
+with ids chosen for that attempt — so a retry runs against new state, never what
+an earlier attempt signed or cancelled. Everything else is done in the browser:
+both sides accept a draft; a cancel form the employer opened before the contractor
+signed is refused once it has (`SIGNATURE_RECORDED`, in the page's fixed words);
+the employer proposes an amendment and both sides sign it; the employer plans a
+milestone and changes it; ORG-DEH-0002, with no signing policy in force, is told
+nobody may sign for it, and sees ORG-DEH-0001's contract as a missing id.
+
+- Same flag (`WEB_LIVE_STACK_E2E_CONTRACTS=true`) and CI rule; it also needs
+  `WEB_E2E_CONTRACT_DATABASE_URL` (the runtime role's URL, set by the job) and
+  `psql` on the path, and provisions its own contractor per run.
+- It reruns locally against the same database: every run writes new contracts.
+
 ## Adding a live scenario
 
 - Record the id of everything the scenario creates and clean up by id, not by

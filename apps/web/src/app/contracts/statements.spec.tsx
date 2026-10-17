@@ -26,6 +26,12 @@ import { StatementCommandForm } from './[id]/StatementCommandForm';
 import type { StatementFormState } from './[id]/statement-form-state';
 import { StatementDetailScreen } from './[id]/statements/[statementId]/StatementDetailScreen';
 
+// Each test renders a whole statement screen and runs jest-axe over it. On a loaded CI runner
+// one such test took longer than jest's 5 s default (main 59785c26); the axe run it left behind
+// then failed every later test with "Axe is already running". One test per state is already
+// the rule here (#297); this gives each of them room instead of failing the file.
+jest.setTimeout(20_000);
+
 /**
  * What the statement screens render: the list on `/contracts/[id]` and one
  * statement on its own page — every outcome a read can hand back, money as
