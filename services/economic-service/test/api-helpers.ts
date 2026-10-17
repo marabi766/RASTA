@@ -9,6 +9,7 @@ import {
 import { InMemoryEventPublisher } from '../src/outbox/kafka.publisher';
 import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { SettlementAuthorityConsumer } from '../src/consumers/settlement-authority.consumer';
+import { StatementSettlementConsumer } from '../src/consumers/statement-settlement.consumer';
 import { RewardTriggerConsumer } from '../src/consumers/reward-trigger.consumer';
 import { AppModule } from '../src/app.module';
 import { PAYMENT_PROVIDER } from '../src/tokens';
@@ -170,6 +171,7 @@ function applyEnvironment(): void {
   // The consumers are replaced below, so nothing dials these (ADR-061 § 4).
   process.env.MAINTENANCE_SERVICE_URL ??= 'http://127.0.0.1:9';
   process.env.FLEET_SERVICE_URL ??= 'http://127.0.0.1:9';
+  process.env.CONTRACT_SERVICE_URL ??= 'http://127.0.0.1:9';
   process.env.ECONOMIC_PLATFORM_ORGANIZATION_ID = PLATFORM_ORGANIZATION_ID;
   // The reconciliation is a timer that reports and never repairs; it has its
   // own suite and only adds noise here.
@@ -276,6 +278,8 @@ export async function startApi(options: StartApiOptions = {}): Promise<ApiHarnes
     .overrideProvider(KafkaEventPublisher)
     .useValue(publisher)
     .overrideProvider(SettlementAuthorityConsumer)
+    .useValue(inertConsumer)
+    .overrideProvider(StatementSettlementConsumer)
     .useValue(inertConsumer)
     .overrideProvider(RewardTriggerConsumer)
     .useValue(inertConsumer)

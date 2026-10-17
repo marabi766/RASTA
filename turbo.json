@@ -82,6 +82,8 @@
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
+        "CONTRACT_SERVICE_URL",
+        "ECONOMIC_STATEMENT_BUSINESS_LINE",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS"
@@ -136,6 +138,8 @@
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
+        "CONTRACT_SERVICE_URL",
+        "ECONOMIC_STATEMENT_BUSINESS_LINE",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS"
@@ -232,6 +236,10 @@
     // MARKETPLACE_RETURN_WINDOW_DAYS (RUN-005, Q-132): marketplace's return
     // window, no default — unset, every return request is refused. The first
     // new setting under that check, declared here and in the test tasks above.
+    //
+    // CONTRACT_SERVICE_URL and ECONOMIC_STATEMENT_BUSINESS_LINE (CON-003 PR 6b):
+    // economic-service's statement owner (A-13) and the line a statement's
+    // obligation is recorded under (Q-130, unset by default); the same rule.
     "dev": {
       "cache": false,
       "persistent": true,
@@ -249,6 +257,8 @@
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
+        "CONTRACT_SERVICE_URL",
+        "ECONOMIC_STATEMENT_BUSINESS_LINE",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS"

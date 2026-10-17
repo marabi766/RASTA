@@ -1571,6 +1571,8 @@ export const EXPECTED = {
       'trg_commission_rule_effective_dated',
       'trg_commission_pricing_cutover_fixed',
       'trg_transaction_pricing_fixed',
+      // A statement's obligation is never changed nor deleted (ADR-068 § 6).
+      'trg_transaction_statement_obligation_fixed',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: ['BusinessLine', 'CommissionOutcome'],
@@ -1583,6 +1585,7 @@ export const EXPECTED = {
       'commission_pricing_scope_lock',
       'reject_commission_pricing_cutover_mutation',
       'reject_transaction_repricing',
+      'reject_statement_obligation_change',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
@@ -1605,6 +1608,8 @@ export const EXPECTED = {
       'ck_payment_resolution_four_eyes',
       // The creator's stable identity: both or neither (ADR-064 § 6).
       'ck_payment_intent_creator_identity',
+      // Only the STATEMENT_APPROVED consumer records a statement's obligation (ADR-068 § 6).
+      'ck_transaction_statement_obligation',
     ],
     // One obligation per business fact per payer. A down script that dropped
     // it without the forward migration restoring it would bring back the

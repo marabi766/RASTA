@@ -513,6 +513,10 @@ model Transaction {
   /// a partial index Prisma cannot express, written in migration
   /// `20260924120000_transaction_source_fact_unique`. One obligation per
   /// business fact per payer: two approvals of one repair cannot both settle.
+  /// `sourceType = 'STATEMENT'` is reserved for the STATEMENT_APPROVED
+  /// consumer (`ck_transaction_statement_obligation`), and such a row's terms
+  /// never change nor is it deleted (`trg_transaction_statement_obligation_fixed`,
+  /// migration `20261017100000_transaction_statement_obligation`, ADR-068 § 6).
   @@index([organizationId, sourceType, sourceReference])
   @@index([counterpartyOrganizationId, status])
   @@index([pricingRuleId])

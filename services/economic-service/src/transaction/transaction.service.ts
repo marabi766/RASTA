@@ -249,8 +249,12 @@ export class TransactionService {
       organizationId: string;
       counterpartyOrganizationId: string;
       transactionType: TransactionType;
-      /** Stated by the consumer that knows what the fact is (ADR-045 § 4). */
-      businessLine: BusinessLine;
+      /**
+       * Stated by the consumer that knows what the fact is (ADR-045 § 4), or
+       * null where the line is an open question (docs/24 Q-130): priced then
+       * by the type-only rules alone.
+       */
+      businessLine: BusinessLine | null;
       grossAmountMinor: bigint;
       currency: string;
       occurredAt: Date;
