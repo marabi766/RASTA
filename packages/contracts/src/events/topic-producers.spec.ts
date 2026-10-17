@@ -32,6 +32,7 @@ describe('TOPIC_PRODUCERS', () => {
       'rasta.construction.v1': ['construction-service'],
       'rasta.contract.v1': ['contract-service'],
       'rasta.inventory.v1': ['inventory-service'],
+      'rasta.procurement.v1': ['procurement-service'],
       [AUDIT_TRAIL_TOPIC]: ['identity-service'],
       [OPS_REPLAY_TOPIC]: ['ops-replay'],
     });
@@ -82,13 +83,13 @@ describe('isAllowedProducer', () => {
   it('refuses an unknown producer and an undeclared topic', () => {
     expect(isAllowedProducer('rasta.asset.v1', 'asset-servíce')).toBe(false);
     expect(isAllowedProducer('rasta.asset.v1', '')).toBe(false);
-    expect(isAllowedProducer('rasta.procurement.v1', 'procurement-service')).toBe(false);
+    expect(isAllowedProducer('rasta.analytics.v1', 'analytics-service')).toBe(false);
   });
 
   it('lists a topic’s producers, and none for an undeclared topic', () => {
     expect(producersOf('rasta.insurance.v1')).toEqual(['asset-service']);
     expect(producersOf('rasta.insurance.v1.retry')).toEqual(['asset-service']);
-    expect(producersOf('rasta.procurement.v1')).toEqual([]);
+    expect(producersOf('rasta.analytics.v1')).toEqual([]);
     expect(producersOf('__proto__')).toEqual([]);
   });
 

@@ -13,6 +13,11 @@ import {
   purgeForeignUnresolvedDisputes,
 } from '@/lib/unresolved-dispute';
 import {
+  markContractCommandsOpen,
+  purgeAllUnresolvedContractCommands,
+  purgeForeignUnresolvedContractCommands,
+} from '@/lib/unresolved-contract-command';
+import {
   markStatementsOpen,
   purgeAllUnresolvedStatements,
   purgeForeignUnresolvedStatements,
@@ -25,11 +30,12 @@ import {
 
 /**
  * The browser's side of an account boundary: what an unresolved order,
- * dispute command or statement command left in `sessionStorage`
- * (`lib/unresolved-order.ts`, `lib/unresolved-dispute.ts`,
- * `lib/unresolved-statement.ts`) must not outlive. All follow the same rules;
- * a statement command is reduced to a marker at logout like a dispute command
- * (a draft repeated under a fresh key is a second statement). A bid command's
+ * dispute command, statement command or contract command left in
+ * `sessionStorage` (`lib/unresolved-order.ts`, `lib/unresolved-dispute.ts`,
+ * `lib/unresolved-statement.ts`, `lib/unresolved-contract-command.ts`) must
+ * not outlive. All follow the same rules; a statement or contract command is
+ * reduced to a marker at logout like a dispute command (a draft, an amendment
+ * or a milestone repeated under a fresh key is a second one). A bid command's
  * record (`lib/unresolved-bid.ts`) is a marker from the start — it never holds
  * the bid — so a logout only stops it being written again.
  *
@@ -63,10 +69,12 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
     markAccountOpen();
     markDisputesOpen();
     markStatementsOpen();
+    markContractCommandsOpen();
     markBidsOpen();
     purgeForeignUnresolvedOrders(owner);
     purgeForeignUnresolvedDisputes(owner);
     purgeForeignUnresolvedStatements(owner);
+    purgeForeignUnresolvedContractCommands(owner);
     purgeForeignUnresolvedBids(owner);
   }, [owner]);
 
@@ -77,6 +85,7 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
         purgeAllUnresolvedOrders();
         purgeAllUnresolvedDisputes();
         purgeAllUnresolvedStatements();
+        purgeAllUnresolvedContractCommands();
         purgeAllUnresolvedBids();
       }
     };

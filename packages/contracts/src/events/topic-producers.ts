@@ -23,10 +23,9 @@ import { OPS_REPLAY_PRODUCER, OPS_REPLAY_TOPIC } from './ops-replay';
  *
  * Every topic a consumer on `main` subscribes to, with the services that
  * publish on it — each domain topic has exactly one owner, the explicit audit
- * trail its known producers. A topic with no producer yet (procurement) is
- * absent on purpose: `EventConsumer` refuses to
- * subscribe to a topic nobody is declared to own, so adding a consumer for one
- * means declaring its producer here first.
+ * trail its known producers. A topic with no producer is absent on purpose:
+ * `EventConsumer` refuses to subscribe to a topic nobody is declared to own, so
+ * adding a consumer for one means declaring its producer here first.
  *
  * The values are the producers' `SERVICE_NAME` — what `buildOutboxRow` writes
  * into `envelope.producer`. `asset-service` owns two topics. One producer is
@@ -50,6 +49,9 @@ export const TOPIC_PRODUCERS = Object.freeze({
   'rasta.contract.v1': Object.freeze(['contract-service'] as const),
   // COM-006 (ADR-056 § 6): warehouses, stock movements and reservations; shipments follow.
   'rasta.inventory.v1': Object.freeze(['inventory-service'] as const),
+  // COM-007 (ADR-070 § 9): demand requests and their aggregation windows; RFQs, quotations and
+  // purchase orders follow.
+  'rasta.procurement.v1': Object.freeze(['procurement-service'] as const),
   [AUDIT_TRAIL_TOPIC]: Object.freeze(['identity-service'] as const),
   [OPS_REPLAY_TOPIC]: Object.freeze([OPS_REPLAY_PRODUCER] as const),
 });
