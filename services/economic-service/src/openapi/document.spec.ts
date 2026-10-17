@@ -129,6 +129,25 @@ describe('enrichOpenApiDocument', () => {
     );
   });
 
+  it('publishes the participation rule version as idempotent and preconditioned (#328 r1)', () => {
+    const document = emptyDocument();
+    document.paths = { '/v1/rewards/participation-rules': { post: { responses: {} } } } as never;
+
+    const enriched = enrichOpenApiDocument(document);
+    const create = (enriched.paths['/v1/rewards/participation-rules'] as Record<string, never>)
+      .post as unknown as {
+      parameters: { name: string; in: string; required: boolean }[];
+      requestBody: unknown;
+      responses: Record<string, { headers?: Record<string, unknown> }>;
+    };
+    const key = create.parameters.find((parameter) => parameter.name === 'Idempotency-Key');
+    expect(key).toMatchObject({ in: 'header', required: true });
+    expect(JSON.stringify(create.requestBody)).toMatch(
+      /"required":\[[^\]]*"expectedCurrentVersion"/,
+    );
+    expect(create.responses['409']?.headers?.['Retry-After']).toBeDefined();
+  });
+
   it('gives a POST that takes no body a 200 rather than a 201', () => {
     // `POST /v1/transactions/{id}/authorise-settlement` creates nothing; a
     // document promising 201 would have clients waiting for a Location header
