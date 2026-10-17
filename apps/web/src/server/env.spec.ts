@@ -310,3 +310,24 @@ describe('the statement replay deadline', () => {
     }
   });
 });
+
+describe('the bid replay deadline', () => {
+  it('defaults to construction-service’s floor, not its default, less ten minutes', () => {
+    const env = loadWebServerEnv(REQUIRED);
+    expect(env.WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS).toBe(1);
+    expect(env.WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS).toBe(600);
+  });
+
+  it('mirrors the service’s bounds for the retention (1..168 hours) and bounds the margin', () => {
+    for (const value of ['0', '169', 'soon']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: value }),
+      ).toThrow('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+    }
+    for (const value of ['59', '1801']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: value }),
+      ).toThrow('WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS');
+    }
+  });
+});
