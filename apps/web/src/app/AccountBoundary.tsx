@@ -13,6 +13,11 @@ import {
   purgeForeignUnresolvedDisputes,
 } from '@/lib/unresolved-dispute';
 import {
+  markReturnsOpen,
+  purgeAllUnresolvedReturns,
+  purgeForeignUnresolvedReturns,
+} from '@/lib/unresolved-return';
+import {
   markStatementsOpen,
   purgeAllUnresolvedStatements,
   purgeForeignUnresolvedStatements,
@@ -20,11 +25,12 @@ import {
 
 /**
  * The browser's side of an account boundary: what an unresolved order,
- * dispute command or statement command left in `sessionStorage`
- * (`lib/unresolved-order.ts`, `lib/unresolved-dispute.ts`,
- * `lib/unresolved-statement.ts`) must not outlive. All follow the same rules;
- * a statement command is reduced to a marker at logout like a dispute command
- * (a draft repeated under a fresh key is a second statement).
+ * dispute command, statement command or return command left in
+ * `sessionStorage` (`lib/unresolved-order.ts`, `lib/unresolved-dispute.ts`,
+ * `lib/unresolved-statement.ts`, `lib/unresolved-return.ts`) must not outlive.
+ * All follow the same rules; a statement or return command is reduced to a
+ * marker at logout like a dispute command (a draft or a request repeated under
+ * a fresh key is a second statement, or a second request for the same goods).
  *
  * - **Logout.** Any form posting to `/auth/logout` — every portal page has its
  *   own — empties every remembered order before the navigation leaves. A capture
@@ -55,9 +61,11 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
     if (owner === null) return;
     markAccountOpen();
     markDisputesOpen();
+    markReturnsOpen();
     markStatementsOpen();
     purgeForeignUnresolvedOrders(owner);
     purgeForeignUnresolvedDisputes(owner);
+    purgeForeignUnresolvedReturns(owner);
     purgeForeignUnresolvedStatements(owner);
   }, [owner]);
 
@@ -67,6 +75,7 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
       if (form instanceof HTMLFormElement && isLogout(form)) {
         purgeAllUnresolvedOrders();
         purgeAllUnresolvedDisputes();
+        purgeAllUnresolvedReturns();
         purgeAllUnresolvedStatements();
       }
     };

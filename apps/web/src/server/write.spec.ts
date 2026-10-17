@@ -278,6 +278,39 @@ describe('mapProblemToFields — a fallback keyed by error code', () => {
   });
 });
 
+describe('mapProblemToFields — a sentence that carries a value', () => {
+  const mapping = {
+    paths: {},
+    messages: { 'Order 7 is closed': 'جملهٔ دقیق' },
+    patterns: [
+      [/^Order \S+ is closed$/, 'سفارش بسته است'],
+      [/^Order \S+ is .+$/, 'سفارش در وضعیت دیگری است'],
+    ] as const,
+    byCode: { BUSINESS_RULE_VIOLATION: 'قاعدهٔ دیگر' },
+  };
+
+  it('is said by the first pattern that matches the whole sentence, never the sentence', () => {
+    const mapped = mapProblemToFields(
+      { code: 'BUSINESS_RULE_VIOLATION', message: 'Order ORD_9 is closed' },
+      mapping,
+    );
+    expect(mapped.message).toBe('سفارش بسته است');
+  });
+
+  it('comes after an exact sentence and before the code’s fallback', () => {
+    expect(
+      mapProblemToFields({ code: 'BUSINESS_RULE_VIOLATION', message: 'Order 7 is closed' }, mapping)
+        .message,
+    ).toBe('جملهٔ دقیق');
+    expect(
+      mapProblemToFields(
+        { code: 'BUSINESS_RULE_VIOLATION', message: 'Something new about Order 7' },
+        mapping,
+      ).message,
+    ).toBe('قاعدهٔ دیگر');
+  });
+});
+
 describe('mapProblemToFields — a closed code carried by a detail', () => {
   const mapping = {
     paths: { status: 'status' as const },

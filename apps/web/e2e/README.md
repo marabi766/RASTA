@@ -63,6 +63,36 @@ offer's availability. CI starts a fresh stack, so that is nothing there; a local
 the same stack keeps consuming it (and, like the other write scenarios, assumes it is the
 only run). The scenarios run in order and share the id the first one places.
 
+## Returns (`returns.spec.ts`) — completed orders from a fixture
+
+A return is asked only of a COMPLETED order, and an order completes only when a
+settlement this job never runs pays it, so this scenario starts from a
+**fixture**: `fixtures/marketplace-returns.sql`, loaded by the "Portal in a
+browser" job as marketplace-service's runtime role after the seed — two orders
+ORG-DEH-0001 bought from ORG-DEH-0002, one completed two days ago and one four
+hundred days ago. The job starts marketplace-service with
+`MARKETPLACE_RETURN_WINDOW_DAYS=30`, a value for that throwaway stack only
+(Q-132 leaves the real window open; with none set every return is refused).
+Everything after that is done **in the browser**: the buyer asks, the old order
+is refused in fixed words, the supplier authorizes (and the buyer's withdrawal
+form drawn before that is refused when sent after, nothing sent), the buyer
+withdraws a second request while it is still only requested. The goods' side — inventory-service's commands, which the
+portal does not offer — is recorded through its API: first a shipment the third
+organization forges into its own warehouse naming the buyer and the request
+(shown to the buyer only as not borne out), then the supplier's own (shown as
+progress). An authorized request offers no withdrawal in the portal at all.
+
+- It needs `WEB_LIVE_STACK_E2E_RETURNS=true` (the fixture loaded, the window
+  set), and under `CI` a skip fails the job.
+- The realm has no third non-platform organization, so it **provisions one
+  person per run** into `ORG-E2E-OUTSIDER` (`provisioned-people.ts`, with
+  `KEYCLOAK_ADMIN_PASSWORD`). Usernames carry the run's id; nothing is cleaned
+  up, as for settlements.
+- Each run asks for 3 of the recent order's 10 tonnes of gravel and keeps that
+  request open, so the order allows three runs per database (a retry within one
+  run included: the scenario reads what the line still allows rather than
+  assuming 10); a CI database is fresh every run.
+
 ## Settlements (`settlements.spec.ts`) — the one scenario that settles
 
 `/settlements` is read-only, so the scenario has to make settlements before it
