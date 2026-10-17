@@ -9,6 +9,7 @@ import type {
   TransactionType,
 } from '../generated/prisma';
 import { after, resolveCursor } from '../shared/cursor';
+import { STATEMENT_SOURCE_TYPE } from './dto';
 
 /** How a transaction list may be narrowed. */
 export interface TransactionFilter {
@@ -199,6 +200,56 @@ export class TransactionRepository {
   ) {
     return runUnscoped('an inbound event names its own organization, not the reader', () =>
       tx.transaction.findFirst({ where: { organizationId, sourceType, sourceReference } }),
+    );
+  }
+
+  /**
+   * One contract statement's obligation, as its payer holds it, with its
+   * settlement (ADR-068 § 6 (3)).
+   *
+   * Scoped, never `runUnscoped`: `organizationId` is the tenant signed into the
+   * caller's token, and the tenant guard injects the same one, so the
+   * predicate is stated where the query is read and enforced again below it.
+   * `ux_transaction_source_fact` makes this at most one row. Another payer's
+   * statement — the beneficiary asking about what it is owed included — is
+   * simply not found.
+   *
+   * ## One snapshot (review of #340 r1)
+   *
+   * The obligation and its settlement are two reads — Prisma loads an
+   * `include` with a query of its own, and this schema has no `relationJoins`
+   * — and under READ COMMITTED each would see its own moment. A settlement
+   * commits its row and the obligation's `SETTLED` together
+   * (`SettlementService`); landing between the two reads it would show a
+   * `PENDING_SETTLEMENT` obligation beside its settlement, a row that
+   * `fullySettledOf` rightly refuses as a defect — a 500 for a database that
+   * was consistent at every instant. REPEATABLE READ fixes the snapshot at the
+   * first read, so both see the same commit: before the settlement, or after
+   * it. READ ONLY because the read writes nothing, and it takes no row lock,
+   * so a settlement never waits on it. The two reads are written out rather
+   * than as an `include` so the second is a query of this service's own,
+   * scoped like the first (`settlement.organization_id` is the payer's), and
+   * `statement-obligation-read.int-spec.ts` can commit a settlement between
+   * them.
+   */
+  findStatementObligation(organizationId: string, statementId: string) {
+    return this.client.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+        const obligation = await tx.transaction.findFirst({
+          where: {
+            organizationId,
+            sourceType: STATEMENT_SOURCE_TYPE,
+            sourceReference: statementId,
+          },
+        });
+        if (!obligation) return null;
+        const settlement = await tx.settlement.findFirst({
+          where: { organizationId, transactionId: obligation.id },
+        });
+        return { ...obligation, settlement };
+      },
+      { isolationLevel: 'RepeatableRead' },
     );
   }
 
