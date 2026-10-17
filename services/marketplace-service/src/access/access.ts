@@ -1,4 +1,6 @@
+import { Logger } from '@nestjs/common';
 import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
+import type { HierarchyQuestion } from '../organization/organization-hierarchy';
 
 /**
  * Object-level authorization for the marketplace (S-03, BOLA).
@@ -172,12 +174,109 @@ export function assertOfferOwner(offer: { id: string; organizationId: string }):
   }
 }
 
-/** Resolving a dispute is an operator decision, never a party's. */
-export function assertDisputeResolver(): void {
+/**
+ * On what authority an operator decides a dispute:
+ *
+ * - `SYSTEM_ADMIN` — the platform operator, for any order;
+ * - `OWN_ORGANIZATION` — a union administrator acting for the order's buyer itself;
+ * - `UNION_SUBTREE` — a union administrator, for an order whose buyer
+ *   organization-service confirmed within its union (docs/24 Q-136), at
+ *   `hierarchyVersion`.
+ */
+export type DisputeAuthorityBasis = 'SYSTEM_ADMIN' | 'OWN_ORGANIZATION' | 'UNION_SUBTREE';
+
+export interface DisputeAuthority {
+  readonly basis: DisputeAuthorityBasis;
+  /** The platform user id. */
+  readonly actor: string;
+  /** The organization the operator acts for. */
+  readonly actingOrganizationId: string;
+  /** The order's buyer: the payer whose money the decision settles or refunds. */
+  readonly buyerOrganizationId: string;
+  /** For `UNION_SUBTREE`: organization-service's hierarchy version of the buyer. */
+  readonly hierarchyVersion: number | null;
+}
+
+/** The records of who decided a dispute for whom (`recordDisputeDecision`). */
+const disputeLog = new Logger('DisputeAuthority');
+
+/**
+ * Resolving a dispute is an operator decision, never a party's — and a
+ * financial one: `SETTLE` sends the order to settlement and `REFUND` to
+ * compensation, both carried out by the saga on the buyer's books with the
+ * buyer's own service token (ADR-040). economic-service never sees the
+ * operator, so the rule economic-service applies to its own six financial
+ * commands (docs/24 Q-136) is applied here, against the order's **buyer** —
+ * the payer whose money moves (Codex on #314 round 3, F1):
+ *
+ * | caller        | for the buyer itself | for another organization                    |
+ * | ------------- | -------------------- | ------------------------------------------- |
+ * | `SYSTEM_ADMIN`| yes                  | yes — unchanged                             |
+ * | `UNION_ADMIN` | yes                  | only when the buyer is within its union's subtree; else 403 |
+ * | anyone else   | 403 (not an operator)| 403                                         |
+ *
+ * "Within" is organization-service's answer (A-13), asked with a token signed
+ * for the union — the organization the request acts for — never anything the
+ * client sends. "Could not confirm" is 503/504 and the decision is not taken
+ * (fail closed). Asked by the command under the order's row lock, immediately
+ * before the decision is written, and by its replay guard before a stored
+ * decision is shown again.
+ */
+export async function assertDisputeResolver(
+  order: OrderParties,
+  hierarchy: HierarchyQuestion,
+): Promise<DisputeAuthority> {
   assertNotAuditor();
   if (!hasPlatformScope()) {
     throw RastaError.forbidden('Only a platform operator may resolve a dispute');
   }
+  const context = getContext();
+  const actingOrganizationId = getOrganizationId();
+  const authority = (basis: DisputeAuthorityBasis, hierarchyVersion: number | null = null) =>
+    Object.freeze({
+      basis,
+      actor: context.userId ?? '(unknown)',
+      actingOrganizationId,
+      buyerOrganizationId: order.organizationId,
+      hierarchyVersion,
+    });
+
+  if (context.roles.includes('SYSTEM_ADMIN')) return authority('SYSTEM_ADMIN');
+  // Past platform scope, the caller is a union administrator.
+  if (actingOrganizationId === order.organizationId) return authority('OWN_ORGANIZATION');
+  const within = await hierarchy.withinVersion(actingOrganizationId, order.organizationId);
+  if (within) return authority('UNION_SUBTREE', within.hierarchyVersion);
+
+  disputeLog.warn(
+    `Dispute decision on order ${order.id} refused: actor=${context.userId ?? '(unknown)'} ` +
+      `actingOrganization=${actingOrganizationId} buyerOrganization=${order.organizationId} ` +
+      'reason=OUTSIDE_UNION_SUBTREE',
+  );
+  throw RastaError.forbidden(
+    "Resolving a dispute is limited to orders whose buyer is within your union's subtree",
+  );
+}
+
+/**
+ * The record of a dispute decision that committed: who decided, for which
+ * organization, on whose order, which outcome, on what authority (docs/24
+ * Q-136). One line, after the decision's transaction commits — logged, not
+ * yet a durable audit record (S-06), as economic-service's
+ * `recordFinancialCommand`.
+ */
+export function recordDisputeDecision(
+  orderId: string,
+  outcome: string,
+  authority: DisputeAuthority,
+): void {
+  disputeLog.log(
+    `Dispute decision ${outcome} on order ${orderId}: actor=${authority.actor} ` +
+      `actingOrganization=${authority.actingOrganizationId} ` +
+      `buyerOrganization=${authority.buyerOrganizationId} authority=${authority.basis}` +
+      (authority.hierarchyVersion === null
+        ? ''
+        : ` hierarchyVersion=${authority.hierarchyVersion}`),
+  );
 }
 
 /**
@@ -198,6 +297,12 @@ export function assertDisputeResolver(): void {
  *    `buyer` and `platform`, and may confirm receipt *and* resolve a dispute;
  *  - an `AUDITOR` is none of them, because the oversight role has no access to
  *    an individual order at all.
+ *
+ * `platform` is the role half of {@link assertDisputeResolver} only. Its
+ * hierarchy half (docs/24 Q-136) is a question to organization-service, and a
+ * read — a list of orders above all — does not ask it: a union administrator
+ * is offered `RESOLVE_DISPUTE` on a disputed order whose buyer is outside its
+ * union, and the command refuses it with 403.
  */
 export interface OrderViewerParties {
   readonly buyer: boolean;

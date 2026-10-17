@@ -65,7 +65,7 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
     asActor({ organizationId: org.supplier, roles: ['SUPPLIER'], userId: 'USR-SUPPLIER' }, fn);
 
   const asOperator = <T>(fn: () => Promise<T>) =>
-    asActor({ organizationId: org.other, roles: ['UNION_ADMIN'], userId: 'USR-OPS' }, fn);
+    asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-OPS' }, fn);
 
   const asSaga = <T>(fn: () => Promise<T>) =>
     asActor(

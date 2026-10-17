@@ -39,10 +39,13 @@ import { SESSION_COOKIE, newCsrfToken, sealSession } from '../src/server/session
  *   scenario can show that what it owns is invisible to `orgAdmin` and the
  *   reverse.
  * - `unionAdmin` — `union.admin`, ORG-UNION-YAZD, `UNION_ADMIN`: a platform
- *   role, the one that may resolve a transaction dispute (EXP-003).
- * - `systemAdmin` — `system.admin`, the platform administrator: provisions the
- *   people a scenario needs and the realm does not hold
- *   (`provisioned-people.ts`). Never signed into the browser.
+ *   role. It acts financially for another organization only within its
+ *   union’s subtree (docs/24 Q-136), and the seeds put the dehyaris under
+ *   ORG-COUNTY-YAZD, not under the union.
+ * - `systemAdmin` — `system.admin`, ORG-UNION-YAZD, `SYSTEM_ADMIN`: the
+ *   platform operator, who may resolve a transaction dispute for any
+ *   organization (EXP-003), and who provisions the people a scenario needs
+ *   and the realm does not hold (`provisioned-people.ts`).
  */
 export const LIVE_PERSONAS = {
   operator: 'operator.one',

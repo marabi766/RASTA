@@ -451,12 +451,14 @@ export class SupplierRepository {
 
   /**
    * One organization's standing as it is right now: the same selection as one
-   * snapshot item. `null` when the organization has no supplier profile.
+   * snapshot item (`row`, `null` when the organization has no supplier profile),
+   * plus when its GOODS_SUPPLY qualification was last approved.
    */
   async findStandingOf(organizationId: string) {
     return runUnscoped(
-      'construction-service asks for one contractors current standing at the moment a bid ' +
-        'is decided (ADR-061 § 4); identifiers and instants only, caller checked in access.ts',
+      'construction-service or procurement-service asks for one organizations current standing ' +
+        'at the moment a bid, an invitation or a quotation is decided (ADR-061 § 4, ADR-070 § 7); ' +
+        'identifiers and instants only, caller checked in access.ts',
       () =>
         // One REPEATABLE READ snapshot for both: `asOf` is the transaction's start
         // (`now()`), taken no later than the snapshot, so the standing returned is at
@@ -483,7 +485,17 @@ export class SupplierRepository {
                 },
               },
             });
-            return { asOf, row };
+            // procurement-service's capability (ADR-070 § 7), in the same snapshot.
+            const goodsSupply = await tx.qualification.findFirst({
+              where: {
+                supplier: { organizationId },
+                capability: 'GOODS_SUPPLY',
+                state: 'APPROVED',
+              },
+              select: { decidedAt: true },
+              orderBy: { decidedAt: 'desc' },
+            });
+            return { asOf, row, goodsSupplyApprovedAt: goodsSupply?.decidedAt ?? null };
           },
           { isolationLevel: 'RepeatableRead' },
         ),
