@@ -81,7 +81,10 @@ function harness(
     ),
   } as unknown as EventPublisher;
 
-  const service = new OrderService(prisma, repository, events, {} as MarketplaceEnv);
+  const service = new OrderService(prisma, repository, events, {} as MarketplaceEnv, {
+    // The saga steps under test ask no hierarchy question.
+    withinVersion: () => Promise.reject(new Error('not asked by the saga')),
+  });
   const asSaga = <T>(fn: () => Promise<T>) =>
     runWithContext(
       createSystemContext({

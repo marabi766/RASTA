@@ -1,5 +1,5 @@
 import { EnvValidationError } from '@rasta/config';
-import { loadMarketplaceEnv } from './env';
+import { ORGANIZATION_REQUEST_CEILING_MS, loadMarketplaceEnv } from './env';
 import { marketplaceOperationBudgets } from './operation-budgets';
 
 /**
@@ -132,5 +132,42 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets', () => {
       /DATABASE_STATEMENT_TIMEOUT_MS: \(12500 ms\) is not above OUTBOX_CLAIM_LEASE_SECONDS, 12500 ms/,
     );
     expect(at('12501')).not.toThrow();
+  });
+});
+
+/**
+ * Where and how long a union administrator's subtree is asked before it
+ * decides a dispute (docs/24 Q-136). Asked under the order's row lock, so the
+ * timeout stays at half the transaction it runs in; out of range refuses to
+ * start rather than being clamped.
+ */
+describe('ORGANIZATION_SERVICE_URL and MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS', () => {
+  const withOrganization = (values: NodeJS.ProcessEnv) =>
+    loadMarketplaceEnv({ ...BASE, ...values });
+
+  it('default to organization-service on its port and 2 s', () => {
+    const env = withOrganization({});
+    expect(env.ORGANIZATION_SERVICE_URL).toBe('http://localhost:3102');
+    expect(env.MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS).toBe(2_000);
+  });
+
+  it('allow at most half of the 5 s transaction the question is asked in', () => {
+    expect(ORGANIZATION_REQUEST_CEILING_MS).toBe(2_500);
+    expect(
+      withOrganization({ MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS: '2500' })
+        .MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS,
+    ).toBe(2_500);
+  });
+
+  it.each(['99', '2501', '5000', 'soon', ''])('refuse a timeout of %p at startup', (value) => {
+    expect(() => withOrganization({ MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS: value })).toThrow(
+      EnvValidationError,
+    );
+  });
+
+  it('refuses an organization-service URL that is not a URL', () => {
+    expect(() => withOrganization({ ORGANIZATION_SERVICE_URL: 'organization-service' })).toThrow(
+      EnvValidationError,
+    );
   });
 });

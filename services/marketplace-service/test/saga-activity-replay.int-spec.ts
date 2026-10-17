@@ -59,7 +59,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
   const asSupplier = <T>(fn: () => Promise<T>) =>
     asActor({ organizationId: org.supplier, roles: ['SUPPLIER'], userId: 'USR-RPL-S' }, fn);
   const asOperator = <T>(fn: () => Promise<T>) =>
-    asActor({ organizationId: org.other, roles: ['UNION_ADMIN'], userId: 'USR-RPL-OPS' }, fn);
+    asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-RPL-OPS' }, fn);
 
   /** An economic-service stub that counts what it was asked, per method. */
   function stubEconomic(settle: () => Promise<unknown> = async () => SETTLED) {

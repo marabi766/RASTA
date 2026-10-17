@@ -1,6 +1,6 @@
 import { withUtcSession } from '@rasta/config';
 import { ulid } from 'ulid';
-import { runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
+import { RastaError, runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
 import { PrismaClient } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { EventPublisher } from '../src/events/publisher';
@@ -10,6 +10,7 @@ import { OrderService } from '../src/order/order.service';
 import { ReturnRepository } from '../src/returns/return.repository';
 import { ReturnService } from '../src/returns/return.service';
 import { CatalogueService } from '../src/offer/catalogue.service';
+import type { HierarchyQuestion } from '../src/organization/organization-hierarchy';
 import { loadMarketplaceEnv, type MarketplaceEnv } from '../src/config/env';
 import type { DisputedObligation, SettledResult } from '../src/temporal/activities';
 
@@ -126,12 +127,27 @@ export interface Wiring {
  * these suites depend on a timer. economic-service learned that one under
  * `--coverage`, where the relay emptied the table before the test could read it.
  */
-export function wire(prisma: PrismaService, overrides: Partial<MarketplaceEnv> = {}): Wiring {
+/**
+ * organization-service as no suite built here reaches it: a union administrator
+ * deciding a dispute for another organization asks it and is refused 503, as
+ * an unreachable owner would refuse it (docs/24 Q-136). The suites that decide
+ * as a union administrator pass their own — `dispute-decision-authority.int-spec.ts`
+ * asks a real HTTP stand-in.
+ */
+export const unreachableHierarchy: HierarchyQuestion = {
+  withinVersion: () => Promise.reject(RastaError.upstreamUnavailable('organization-service')),
+};
+
+export function wire(
+  prisma: PrismaService,
+  overrides: Partial<MarketplaceEnv> = {},
+  hierarchy: HierarchyQuestion = unreachableHierarchy,
+): Wiring {
   const env = { ...testEnv(), ...overrides };
   const events = new EventPublisher(env);
   const idempotency = new IdempotencyStore(prisma, env);
   const repository = new OrderRepository(prisma);
-  const orders = new OrderService(prisma, repository, events, env);
+  const orders = new OrderService(prisma, repository, events, env, hierarchy);
   const returns = new ReturnService(prisma, new ReturnRepository(prisma), events, env);
   const catalogue = new CatalogueService(prisma, events);
 
