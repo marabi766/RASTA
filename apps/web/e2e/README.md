@@ -109,6 +109,27 @@ provider is the mock one, and the browser job starts it for this spec alone.
   seeded person belongs to, because the development realm has no third tenant
   administrator. The service's rule is the same either way.
 
+## Contract statements (`contract-statements.spec.ts`) — a fixture, and people of its own
+
+contract-service has no route that creates a contract (one is drafted only from
+`TENDER_AWARDED`), so this scenario starts from a **fixture**:
+`fixtures/contract-statements.sql`, loaded by the "Portal in a browser" job as
+contract-service's runtime role through every guard its database keeps — one
+SIGNED contract (ORG-DEH-0001 employing `ORG-E2E-CONTRACTOR`) and the two
+statement chains in force. The file says what each row is. Everything after that
+is done **in the browser**: draft, submit, the technical approval, a
+separation-of-duties refusal, the financial approval.
+
+- It needs `WEB_LIVE_STACK_E2E_CONTRACTS=true` (contract-service up, the fixture
+  loaded), and under `CI` a skip fails the job.
+- The realm holds no contractor and only one person in ORG-DEH-0001 with the
+  financial step's role, so it **provisions two people per run** the way the
+  platform does (`provisioned-people.ts`: `POST /v1/users` as `system.admin`, then
+  a throwaway password through Keycloak's admin API — `KEYCLOAK_ADMIN_PASSWORD`).
+  Usernames carry the run's id; nothing is cleaned up, as for settlements.
+- Each run adds one approved statement to the fixture's contract, found by the
+  id its own draft returned; the contract's price is large enough for many runs.
+
 ## Adding a live scenario
 
 - Record the id of everything the scenario creates and clean up by id, not by

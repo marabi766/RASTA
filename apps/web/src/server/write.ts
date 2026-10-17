@@ -33,7 +33,17 @@ export type WriteResult<T, F extends string> =
       readonly message: string | null;
       readonly correlationId: string;
     }
-  | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
+  | {
+      readonly kind: 'FORBIDDEN';
+      readonly correlationId: string;
+      /**
+       * The closed reasons the refusal named in `details[].code` (docs/06
+       * § 6.7), present only when it named any — a separation-of-duties
+       * refusal, for one, which a form says in its own fixed words. Never the
+       * service's sentence.
+       */
+      readonly reasons?: readonly string[];
+    }
   /** The thing written *about* is not visible to this person — the platform's
    *  non-disclosure 404. */
   | { readonly kind: 'NOT_FOUND'; readonly correlationId: string }
@@ -201,7 +211,12 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
         correlationId,
       };
     }
-    if (status === 403) return { kind: 'FORBIDDEN', correlationId };
+    if (status === 403) {
+      const reasons = (problem?.details ?? []).flatMap((detail) =>
+        detail.code !== undefined ? [detail.code] : [],
+      );
+      return { kind: 'FORBIDDEN', correlationId, ...(reasons.length > 0 ? { reasons } : {}) };
+    }
     if (status === 404) return { kind: 'NOT_FOUND', correlationId };
     if ((status === 400 || status === 422 || status === 409) && problem) {
       return { kind: 'INVALID', correlationId, ...mapProblemToFields(problem, call.mapping) };

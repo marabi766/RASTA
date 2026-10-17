@@ -550,6 +550,7 @@ jobs:
           pnpm --filter @rasta/economic-service run db:migrate
           pnpm --filter @rasta/construction-service run db:migrate
           pnpm --filter @rasta/inventory-service run db:migrate
+          pnpm --filter @rasta/contract-service run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
@@ -574,6 +575,22 @@ jobs:
           DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          # EXP-004: `/contracts/[id]` reads and commands a contract's statements
+          # through contract-service (`e2e/contract-statements.spec.ts`).
+          DATABASE_URL_CONTRACT: postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract?schema=public
+          DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
+
+      - name: Load the signed contract the statement scenarios act on
+        # contract-service has no route that creates a contract (one is drafted
+        # only from TENDER_AWARDED, ADR-068 § 3), so the scenarios start from a
+        # SIGNED contract and the two statement chains in force, written as
+        # contract-service's own runtime role through every guard its database
+        # keeps. The file says why, and what each row is.
+        env:
+          PGPASSWORD: rasta_contract_dev_password
+        run: >-
+          psql -v ON_ERROR_STOP=1 -h localhost -U rasta_contract -d rasta_contract
+          -f apps/web/e2e/fixtures/contract-statements.sql
 
       - name: Seed the live users and both tenants' machines, drivers and schedules
         # operator.one is the same platform user in identity, Keycloak and
@@ -633,6 +650,7 @@ jobs:
           --filter=@rasta/economic-service...
           --filter=@rasta/construction-service...
           --filter=@rasta/inventory-service...
+          --filter=@rasta/contract-service...
 
       - name: Start MinIO and create the document bucket
         # EXP-002 slice 7: the portal attaches a file by having its server ask
@@ -682,7 +700,7 @@ jobs:
           docker logs rasta-web-e2e-keycloak
           exit 1
 
-      - name: Start identity, fleet, organization, asset, maintenance, construction, inventory and api-gateway
+      - name: Start identity, fleet, organization, asset, maintenance, construction, inventory, contract and api-gateway
         env:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           NODE_ENV: test
@@ -854,6 +872,17 @@ jobs:
             DATABASE_URL=postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public \
             node dist/main.js > /tmp/rasta-web-e2e-logs/inventory.log 2>&1 & )
 
+          # EXP-004 — contract-service: the statement scenarios draft, submit
+          # and decide a statement of the fixture's contract through the portal.
+          # Its Kafka consumers (TENDER_AWARDED, ORGANIZATION_MOVED) start and
+          # see nothing; no setting here widens a role.
+          ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service contract-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/contract-service && \
+            PORT=3111 SERVICE_NAME=contract-service \
+            DATABASE_URL=postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract?schema=public \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/contract.log 2>&1 & )
+
           # The per-person allowance (GATEWAY_RATE_LIMIT_MAX, 300 a minute per
           # user and route prefix by default) is sized for one human. Here three
           # seeded people stand in for every scenario of both Playwright
@@ -892,6 +921,8 @@ jobs:
               http://localhost:3110/health/ready || true)"
             inventory="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3109/health/ready || true)"
+            contract="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3111/health/ready || true)"
             gateway="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3000/v1/usage-records || true)"
             if [ "$identity" = "200" ] && [ "$fleet" = "200" ] \
@@ -899,14 +930,14 @@ jobs:
                && [ "$maintenance" = "200" ] && [ "$document" = "200" ] \
                && [ "$marketplace" = "200" ] && [ "$economic" = "200" ] \
                && [ "$construction" = "200" ] && [ "$inventory" = "200" ] \
-               && [ "$gateway" = "401" ]; then
+               && [ "$contract" = "200" ] && [ "$gateway" = "401" ]; then
               echo "portal live stack ready after ${attempt} attempt(s)"
               exit 0
             fi
             sleep 3
           done
 
-          echo "portal live stack failed (identity=${identity}, fleet=${fleet}, organization=${organization}, asset=${asset}, maintenance=${maintenance}, document=${document}, marketplace=${marketplace}, economic=${economic}, construction=${construction}, inventory=${inventory}, gateway=${gateway})"
+          echo "portal live stack failed (identity=${identity}, fleet=${fleet}, organization=${organization}, asset=${asset}, maintenance=${maintenance}, document=${document}, marketplace=${marketplace}, economic=${economic}, construction=${construction}, inventory=${inventory}, contract=${contract}, gateway=${gateway})"
           cat /tmp/rasta-web-e2e-logs/identity.log
           cat /tmp/rasta-web-e2e-logs/fleet.log
           cat /tmp/rasta-web-e2e-logs/organization.log
@@ -917,6 +948,7 @@ jobs:
           cat /tmp/rasta-web-e2e-logs/economic.log
           cat /tmp/rasta-web-e2e-logs/construction.log
           cat /tmp/rasta-web-e2e-logs/inventory.log
+          cat /tmp/rasta-web-e2e-logs/contract.log
           cat /tmp/rasta-web-e2e-logs/gateway.log
           exit 1
 
@@ -963,6 +995,12 @@ jobs:
           # job (above), so `/projects` and `/inventory` live-isolation
           # scenarios run for real instead of skipping.
           WEB_LIVE_STACK_E2E_EXP004: 'true'
+          # contract-service is up and its fixture loaded (above), so the
+          # statement scenarios (`e2e/contract-statements.spec.ts`) run for real.
+          # They provision their contractor and second approver through
+          # identity-service and give each a password through Keycloak's admin
+          # API, with this run's KEYCLOAK_ADMIN_PASSWORD (job environment).
+          WEB_LIVE_STACK_E2E_CONTRACTS: 'true'
           # EXP-003 returns: the fixture's completed orders are loaded and
           # marketplace-service has a return window (above). The scenario
           # provisions its third organization's person through identity-service
@@ -1002,6 +1040,8 @@ jobs:
           tail -n 200 /tmp/rasta-web-e2e-logs/construction.log || true
           echo '--- inventory-service ---'
           tail -n 200 /tmp/rasta-web-e2e-logs/inventory.log || true
+          echo '--- contract-service ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/contract.log || true
           echo '--- api-gateway ---'
           tail -n 200 /tmp/rasta-web-e2e-logs/gateway.log || true
           echo '--- keycloak ---'

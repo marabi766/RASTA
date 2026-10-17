@@ -44,7 +44,8 @@ import { SESSION_COOKIE, newCsrfToken, sealSession } from '../src/server/session
  *   ORG-COUNTY-YAZD, not under the union.
  * - `systemAdmin` — `system.admin`, ORG-UNION-YAZD, `SYSTEM_ADMIN`: the
  *   platform operator, who may resolve a transaction dispute for any
- *   organization (EXP-003).
+ *   organization (EXP-003), and who provisions the people a scenario needs
+ *   and the realm does not hold (`provisioned-people.ts`).
  */
 export const LIVE_PERSONAS = {
   operator: 'operator.one',
