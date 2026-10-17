@@ -32,6 +32,18 @@ import type { Binding } from './unresolved-order';
  * with the two one-way login tags (`submissionBinding`). No token, no session
  * value, no CSRF value.
  *
+ * ## One unresolved command per scope, never replaced
+ *
+ * A statement's approve and reject forms share its slot (PR 332 review 1): a
+ * new submission never **replaces** another submission's record — saving it is
+ * refused (`HELD`) and the form is not sent — and a record is cleared only by
+ * the submission it belongs to (`clearUnresolvedStatement` takes its id), on a
+ * definite outcome of that submission. Otherwise an approval whose answer was
+ * lost could be overwritten by a rejection, whose `409 STEP_DECIDED` would
+ * then erase the approval's key and its warning. Every change is announced to
+ * the page's other forms (`subscribeUnresolvedStatements`), which stay
+ * view-only while another command holds the slot.
+ *
  * ## Never silently gone
  *
  * An entry older than the session's lifetime, and every entry at logout, is
@@ -106,6 +118,21 @@ export type RestoredStatement =
   | { readonly kind: 'VIEW_ONLY'; readonly entry: UnresolvedStatement };
 
 let accountClosing = false;
+
+/** Same-tab listeners: the forms of a page, told when a slot changes (`sessionStorage` is per tab). */
+const listeners = new Set<() => void>();
+
+/** Called on every save and clear; returns the unsubscribe. */
+export function subscribeUnresolvedStatements(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+function changed(): void {
+  for (const listener of [...listeners]) listener();
+}
 
 export function markStatementsClosing(): void {
   accountClosing = true;
@@ -250,6 +277,7 @@ export function purgeAllUnresolvedStatements(): void {
   } catch {
     // Unavailable storage holds nothing to purge.
   }
+  changed();
 }
 
 /** A page for `owner`: entries of anyone else, and unreadable ones, are removed. */
@@ -267,22 +295,32 @@ export function purgeForeignUnresolvedStatements(owner: string): void {
   }
 }
 
-/** True when the entry is stored. False: storage refused it, or a logout has started. */
+/**
+ * `SAVED`: stored. `HELD`: another submission's record holds this scope — it is
+ * left exactly as it was, and this one must not be sent. `UNAVAILABLE`: storage
+ * refused it, or a logout has started.
+ */
+export type SaveOutcome = 'SAVED' | 'HELD' | 'UNAVAILABLE';
+
 export function saveUnresolvedStatement(
   scope: StatementScope,
   entry: Omit<UnresolvedStatement, 'savedAt' | 'marker'>,
   binding: Binding,
   now: number = Date.now(),
-): boolean {
-  if (accountClosing) return false;
+): SaveOutcome {
+  if (accountClosing) return 'UNAVAILABLE';
   try {
     const store = storage();
-    if (!store) return false;
+    if (!store) return 'UNAVAILABLE';
     const previous = store.getItem(keyOf(scope));
-    const earlier = previous === null ? null : parse(previous);
+    const parsed = previous === null ? null : parse(previous);
+    // Someone else's is not this person's to keep (`purgeForeignUnresolvedStatements`).
+    const earlier = parsed?.owner === binding.owner ? parsed : null;
+    // Another submission's record — even a marker — is never replaced.
+    if (earlier !== null && earlier.submissionId !== entry.submissionId) return 'HELD';
     // A marker is never turned back into something that can be re-sent.
-    if (earlier?.marker) return earlier.submissionId === entry.submissionId;
-    const same = earlier !== null && earlier.submissionId === entry.submissionId;
+    if (earlier?.marker) return 'SAVED';
+    const same = earlier !== null;
     store.setItem(
       keyOf(scope),
       JSON.stringify({
@@ -300,18 +338,30 @@ export function saveUnresolvedStatement(
         session: binding.session,
       }),
     );
-    return true;
+    changed();
+    return 'SAVED';
   } catch {
-    return false;
+    return 'UNAVAILABLE';
   }
 }
 
-export function clearUnresolvedStatement(scope: StatementScope): void {
+/**
+ * Forgets the record of `submissionId` — and only that one: a record another
+ * submission holds stays (PR 332 review 1). An unreadable record is left to
+ * `restoreUnresolvedStatement`, which removes it.
+ */
+export function clearUnresolvedStatement(scope: StatementScope, submissionId: string): void {
   try {
-    storage()?.removeItem(keyOf(scope));
+    const store = storage();
+    const raw = store?.getItem(keyOf(scope));
+    if (!store || raw === null || raw === undefined) return;
+    if (parse(raw)?.submissionId !== submissionId) return;
+    store.removeItem(keyOf(scope));
   } catch {
     // See above.
+    return;
   }
+  changed();
 }
 
 /**

@@ -35,6 +35,12 @@ export type StatementFormState =
     }
   /** Not sent: the submission could not be remembered in this browser (`lib/unresolved-statement.ts`). */
   | { readonly kind: 'STORAGE_UNAVAILABLE' }
+  /**
+   * Not sent: another command on this statement — sent from this browser, its
+   * outcome still unknown — holds the slot (PR 332 review 1). Its record and
+   * its retry are left untouched; this form waits until it is resolved.
+   */
+  | { readonly kind: 'HELD' }
   | {
       readonly kind: 'FORBIDDEN';
       readonly correlationId: string;

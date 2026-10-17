@@ -369,6 +369,12 @@ describe('each form state', () => {
     ],
     ['gone', 'APPROVE', { kind: 'NOT_FOUND' }, /دیگر در دسترس نیست/],
     ['nowhere to remember it', 'DRAFT', { kind: 'STORAGE_UNAVAILABLE' }, /دو بار ثبت شود/],
+    [
+      'another command of this statement in doubt',
+      'REJECT',
+      { kind: 'HELD' },
+      /نتیجه‌اش هنوز معلوم نیست/,
+    ],
     ['sent, not confirmed', 'DRAFT', UNCONFIRMED, 'ارسال دوبارهٔ همین درخواست'],
     [
       'a refused retry',

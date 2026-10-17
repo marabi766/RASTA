@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import type { StatementCommand } from '@/lib/statement-fields';
 import {
   restoreUnresolvedStatement,
+  subscribeUnresolvedStatements,
   type RestoredStatement,
   type StatementSubmission,
 } from '@/lib/unresolved-statement';
@@ -43,6 +44,12 @@ export interface StatementCommandsProps {
  * offer — the outcome-unknown marker included: the same request is reconciled
  * under its original key before any fresh form, with a fresh key, is offered.
  * Nothing is drawn until that question is answered.
+ *
+ * The question is asked again **whenever the scope's record changes**, not only
+ * on mount (PR 332 review 1): when one of the forms drawn here is sent and its
+ * outcome is not confirmed, every other form becomes view-only with the
+ * uncertainty notice (`heldBy`) while the one in doubt keeps its own retry —
+ * same key, same body — until a definite answer, or the person, resolves it.
  */
 export function StatementCommands({
   contractId,
@@ -60,20 +67,29 @@ export function StatementCommands({
   const { owner, session } = binding;
 
   useEffect(() => {
-    setChecked({
-      restored: restoreUnresolvedStatement(
-        { contractId, statementId },
-        { owner, session },
-        sessionMaxAgeSeconds,
-      ),
-    });
+    const read = () =>
+      setChecked({
+        restored: restoreUnresolvedStatement(
+          { contractId, statementId },
+          { owner, session },
+          sessionMaxAgeSeconds,
+        ),
+      });
+    read();
+    return subscribeUnresolvedStatements(read);
   }, [contractId, statementId, owner, session, sessionMaxAgeSeconds]);
 
   if (checked === null) return null;
   const scope = { contractId, statementId };
 
   const { restored } = checked;
-  if (restored) {
+  // A record of none of the forms drawn now — this page was drawn after it was
+  // sent (a reload): only its uncertainty view. A record of one of them: that
+  // form keeps it, in place, and the others wait (`heldBy`).
+  const drawnHere =
+    restored !== null &&
+    offered.some(({ submission }) => submission.id === restored.entry.submissionId);
+  if (restored && !drawnHere) {
     return (
       <div className="flex flex-col gap-4">
         <StatementCommandForm
@@ -107,6 +123,7 @@ export function StatementCommands({
           sessionMaxAgeSeconds={sessionMaxAgeSeconds}
           milestones={milestones}
           pageHref={pageHref}
+          heldBy={restored?.entry.submissionId ?? null}
         />
       ))}
     </div>

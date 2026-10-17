@@ -3,6 +3,7 @@ import { axe } from 'jest-axe';
 
 import { lineField } from '@/lib/statement-fields';
 import {
+  clearUnresolvedStatement,
   markStatementsOpen,
   purgeAllUnresolvedStatements,
   purgeForeignUnresolvedStatements,
@@ -271,7 +272,7 @@ describe('never silently gone', () => {
 
   it('nothing is stored once a logout has started', () => {
     purgeAllUnresolvedStatements();
-    expect(saveUnresolvedStatement(STATEMENT_SCOPE, entry, BINDING)).toBe(false);
+    expect(saveUnresolvedStatement(STATEMENT_SCOPE, entry, BINDING)).toBe('UNAVAILABLE');
   });
 
   it('from another login it is shown, never re-sent; another person’s page removes it', () => {
@@ -306,4 +307,176 @@ describe('never silently gone', () => {
     expect(restoreUnresolvedStatement(DRAFT_SCOPE, BINDING, SESSION_MAX_AGE)).toBeNull();
     expect(stored()).toBeNull();
   });
+});
+
+/**
+ * PR 332 review 1: a statement's approve and reject forms share one slot. An
+ * approval whose answer is lost must keep its record, its key and its warning
+ * whatever is done with the reject form — and through a reload.
+ */
+describe('one unresolved command per statement', () => {
+  const APPROVE_KEY = 'sub_APPROVEKEYAPPROVEKEY';
+  const REJECT_KEY = 'sub_REJECTKEYREJECTKEYRE';
+  const APPROVE_STAMP: ReplayStamp = { token: 'approve-stamp', until: STAMP.until };
+  const REJECT_STAMP: ReplayStamp = { token: 'reject-stamp', until: STAMP.until };
+  const SLOT = `rasta.unresolved-statement.${CONTRACT_ID}.${STATEMENT_ID}`;
+  const slot = () =>
+    JSON.parse(window.sessionStorage.getItem(SLOT) ?? 'null') as {
+      submissionId: string;
+      command: string;
+    } | null;
+
+  function renderStatementCommands(submissions = { approve: APPROVE_KEY, reject: REJECT_KEY }) {
+    return render(
+      <StatementCommands
+        contractId={CONTRACT_ID}
+        statementId={STATEMENT_ID}
+        offered={[
+          { command: 'APPROVE', submission: { id: submissions.approve, replay: APPROVE_STAMP } },
+          { command: 'REJECT', submission: { id: submissions.reject, replay: REJECT_STAMP } },
+        ]}
+        csrfToken="csrf"
+        binding={BINDING}
+        sessionMaxAgeSeconds={SESSION_MAX_AGE}
+        pageHref={`/contracts/${CONTRACT_ID}/statements/${STATEMENT_ID}`}
+      />,
+    );
+  }
+
+  const formOf = (name: string) => screen.queryByRole('form', { name });
+
+  async function loseTheApproval() {
+    command.mockRejectedValueOnce(lostResponse());
+    const view = renderStatementCommands();
+    const approve = await screen.findByRole('form', { name: 'تأیید این مرحله' });
+    await act(async () => {
+      fireEvent.submit(approve);
+    });
+    await screen.findByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' });
+    return view;
+  }
+
+  it('while the approval is in doubt, the reject form is view-only with the uncertainty notice', async () => {
+    const { container } = await loseTheApproval();
+    expect(slot()).toMatchObject({ submissionId: APPROVE_KEY, command: 'APPROVE' });
+    expect(formOf('رد صورت‌وضعیت')).toBeNull();
+    const held = screen.getByRole('region', { name: 'رد صورت‌وضعیت' });
+    expect(held).toHaveTextContent('نتیجه‌اش هنوز معلوم نیست');
+    expect(held.querySelector('button')).toBeNull();
+    expect(container.querySelector(`input[value="${REJECT_KEY}"]`)).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('a reject sent anyway is refused here: nothing sent, the approval’s record untouched', async () => {
+    saveUnresolvedStatement(
+      STATEMENT_SCOPE,
+      {
+        command: 'APPROVE',
+        submissionId: APPROVE_KEY,
+        lines: [],
+        correlationId: null,
+        replay: APPROVE_STAMP,
+      },
+      BINDING,
+    );
+    // The reject form as it was drawn before the approval was in doubt.
+    const { container } = render(
+      <StatementCommandForm
+        scope={STATEMENT_SCOPE}
+        command="REJECT"
+        csrfToken="csrf"
+        submissionId={REJECT_KEY}
+        replay={REJECT_STAMP}
+        binding={BINDING}
+        sessionMaxAgeSeconds={SESSION_MAX_AGE}
+        pageHref="/x"
+      />,
+    );
+    await submitForm(container);
+    expect(command).not.toHaveBeenCalled();
+    expect(await screen.findByText(/نتیجه‌اش هنوز معلوم نیست/)).toBeInTheDocument();
+    expect(slot()).toMatchObject({ submissionId: APPROVE_KEY, command: 'APPROVE' });
+  });
+
+  it('the approval’s retry still sends its original key and stamp', async () => {
+    await loseTheApproval();
+    command.mockResolvedValueOnce({
+      ...(unconfirmedApprove() as Extract<StatementFormState, { kind: 'UNCONFIRMED' }>),
+      retryUnknown: true,
+    });
+    await act(async () => {
+      fireEvent.submit(
+        screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' }).closest('form')!,
+      );
+    });
+    const retry = command.mock.calls[1]![3];
+    expect(retry.get('submission')).toBe(APPROVE_KEY);
+    expect(retry.get('replay')).toBe(APPROVE_STAMP.token);
+    expect(slot()).toMatchObject({ submissionId: APPROVE_KEY });
+  });
+
+  it('a reload keeps it: only the approval’s uncertainty view, under its original key', async () => {
+    const first = await loseTheApproval();
+    first.unmount();
+    const { container } = renderStatementCommands({
+      approve: 'sub_FRESHAPPROVEFRESHAPP',
+      reject: 'sub_FRESHREJECTFRESHREJ',
+    });
+    expect(
+      await screen.findByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' }),
+    ).toBeInTheDocument();
+    expect(container.querySelector('input[name="submission"]')).toHaveValue(APPROVE_KEY);
+    expect(formOf('رد صورت‌وضعیت')).toBeNull();
+    expect(container.querySelector('input[value="sub_FRESHREJECTFRESHREJ"]')).toBeNull();
+  });
+
+  it('a definite answer to the approval’s own first send frees the reject form', async () => {
+    command.mockResolvedValueOnce({
+      kind: 'INVALID',
+      command: 'APPROVE',
+      submissionId: APPROVE_KEY,
+      rows: [],
+      fieldErrors: {},
+      message: 'refused',
+    });
+    renderStatementCommands();
+    await act(async () => {
+      fireEvent.submit(await screen.findByRole('form', { name: 'تأیید این مرحله' }));
+    });
+    expect(slot()).toBeNull();
+    expect(await screen.findByRole('form', { name: 'رد صورت‌وضعیت' })).toBeInTheDocument();
+  });
+
+  it('the slot is never replaced, and cleared only by the submission it belongs to', () => {
+    const approve = {
+      command: 'APPROVE' as const,
+      submissionId: APPROVE_KEY,
+      lines: [],
+      correlationId: 'COR',
+      replay: APPROVE_STAMP,
+    };
+    expect(saveUnresolvedStatement(STATEMENT_SCOPE, approve, BINDING)).toBe('SAVED');
+    expect(
+      saveUnresolvedStatement(
+        STATEMENT_SCOPE,
+        { ...approve, command: 'REJECT', submissionId: REJECT_KEY },
+        BINDING,
+      ),
+    ).toBe('HELD');
+    clearUnresolvedStatement(STATEMENT_SCOPE, REJECT_KEY);
+    expect(slot()).toMatchObject({ submissionId: APPROVE_KEY, command: 'APPROVE' });
+    clearUnresolvedStatement(STATEMENT_SCOPE, APPROVE_KEY);
+    expect(slot()).toBeNull();
+  });
+
+  function unconfirmedApprove(): StatementFormState {
+    return {
+      kind: 'UNCONFIRMED',
+      command: 'APPROVE',
+      correlationId: null,
+      submissionId: APPROVE_KEY,
+      lines: [],
+      replay: APPROVE_STAMP,
+    };
+  }
 });

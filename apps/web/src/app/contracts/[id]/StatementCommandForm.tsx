@@ -55,6 +55,16 @@ import {
  * the entry; otherwise only the person drops it, once the same request has
  * been tried again or can no longer be.
  *
+ * ## One unresolved command per statement
+ *
+ * The approve and reject forms of a statement share one slot (PR 332 review
+ * 1). While another submission's outcome is unknown (`heldBy`, kept current by
+ * `StatementCommands`), this form draws no button, only the uncertainty notice;
+ * and a send is refused here, before anything leaves, whenever the slot holds
+ * another submission — so a rejection can never replace, or clear, a lost
+ * approval's record and key. A record is cleared only for the submission it
+ * belongs to.
+ *
  * ## When the call itself fails
  *
  * Only `/auth/session` answering `401` lets the view say the session has
@@ -81,6 +91,8 @@ export interface StatementCommandFormProps {
   /** The page that shows the outcome — reloaded to see whether the command took. */
   readonly pageHref: string;
   readonly initial?: StatementFormState;
+  /** The submission whose outcome is unknown in this scope, if any (`StatementCommands`). */
+  readonly heldBy?: string | null;
 }
 
 /** The remembered submission as the form's starting state. */
@@ -143,11 +155,19 @@ export function StatementCommandForm({
   milestones = [],
   pageHref,
   initial = IDLE_STATEMENT_FORM,
+  heldBy = null,
 }: StatementCommandFormProps) {
   const send = useCallback(
     async (previous: StatementFormState, form: FormData): Promise<StatementFormState> => {
       const firstSend = previous.kind !== 'UNCONFIRMED';
-      if (!firstSend) {
+      const sent = form.get(SUBMISSION_FIELD);
+      const sentId = firstSend ? (typeof sent === 'string' ? sent : '') : previous.submissionId;
+      if (firstSend) {
+        // Another submission's outcome is unknown here: nothing is sent, and its
+        // record is not touched.
+        const holder = restoreUnresolvedStatement(scope, binding, sessionMaxAgeSeconds);
+        if (holder && holder.entry.submissionId !== sentId) return { kind: 'HELD' };
+      } else {
         // A replay only while the service still holds its key, and only from
         // the login it is bound to. Past that, never re-sent.
         const stored = restoreUnresolvedStatement(scope, binding, sessionMaxAgeSeconds);
@@ -158,9 +178,9 @@ export function StatementCommandForm({
 
       // Remembered BEFORE it is sent; not sent if it cannot be remembered.
       const unsent = firstSend ? pendingFrom(form, command, replay) : null;
-      if (unsent && !saveUnresolvedStatement(scope, unsent, binding)) {
-        return { kind: 'STORAGE_UNAVAILABLE' };
-      }
+      const saved = unsent ? saveUnresolvedStatement(scope, unsent, binding) : null;
+      if (saved === 'HELD') return { kind: 'HELD' };
+      if (saved === 'UNAVAILABLE') return { kind: 'STORAGE_UNAVAILABLE' };
 
       let next: StatementFormState;
       try {
@@ -171,7 +191,7 @@ export function StatementCommandForm({
       } catch (error) {
         // Done: the action redirects to the statement.
         if (isRedirect(error)) {
-          clearUnresolvedStatement(scope);
+          clearUnresolvedStatement(scope, sentId);
           throw error;
         }
         const ended = await sessionHasEnded();
@@ -180,8 +200,10 @@ export function StatementCommandForm({
         throw error;
       }
 
+      // Still in doubt: kept. A definite answer to THIS submission's first send:
+      // its own record is dropped — never another's.
       if (next.kind === 'UNCONFIRMED') saveUnresolvedStatement(scope, next, binding);
-      else if (firstSend) clearUnresolvedStatement(scope);
+      else if (firstSend) clearUnresolvedStatement(scope, sentId);
       return next;
     },
     [scope, command, replay, binding, sessionMaxAgeSeconds],
@@ -198,13 +220,17 @@ export function StatementCommandForm({
         csrfToken={csrfToken}
         headingId={headingId}
         pageHref={pageHref}
-        onForget={() => clearUnresolvedStatement(scope)}
+        onForget={() => clearUnresolvedStatement(scope, state.submissionId)}
       />
     );
   }
 
   const invalid = state.kind === 'INVALID';
   const currentSubmissionId = invalid ? state.submissionId : submissionId;
+
+  if (heldBy !== null && heldBy !== currentSubmissionId) {
+    return <HeldCommand command={command} headingId={headingId} pageHref={pageHref} />;
+  }
 
   return (
     <form
@@ -360,7 +386,44 @@ export function forbiddenText(reasons: readonly string[]): string | null {
   return null;
 }
 
+const HELD_MESSAGE =
+  'درخواست دیگری روی همین صورت‌وضعیت فرستاده شده و نتیجه‌اش هنوز معلوم نیست؛ ممکن است انجام شده باشد. تا روشن‌شدن نتیجهٔ آن، این فرم فرستاده نمی‌شود. وضعیت را با تازه‌کردن صفحه ببینید.';
+
+/**
+ * Another command of this statement is unresolved: no form, no button — only
+ * what this command would be, and why it waits.
+ */
+function HeldCommand({
+  command,
+  headingId,
+  pageHref,
+}: {
+  command: StatementCommand;
+  headingId: string;
+  pageHref: string;
+}) {
+  return (
+    <section
+      aria-labelledby={headingId}
+      className="flex flex-col gap-3 rounded-lg border border-border bg-surface-raised p-4"
+    >
+      <h3 id={headingId} className="text-base font-medium">
+        {STATEMENT_COMMAND_LABELS[command]}
+      </h3>
+      <Alert tone="warning">
+        {HELD_MESSAGE}{' '}
+        <a href={pageHref} className="underline">
+          تازه‌کردن صفحه
+        </a>
+      </Alert>
+    </section>
+  );
+}
+
 function CommandBanner({ state }: { state: StatementFormState }) {
+  if (state.kind === 'HELD') {
+    return <Alert tone="warning">{HELD_MESSAGE}</Alert>;
+  }
   if (state.kind === 'INVALID' && state.message) {
     return <Alert tone="warning">{state.message}</Alert>;
   }
