@@ -53,6 +53,7 @@ import { CommissionController } from './commission/commission.controller';
 import { RewardService } from './reward/reward.service';
 import { RewardController } from './reward/reward.controller';
 import { ParticipationService } from './reward/participation.service';
+import { RecognitionService } from './reward/recognition.service';
 import { PaymentService } from './payment/payment.service';
 import { PaymentReconciliationRepository } from './payment/payment-reconciliation.repository';
 import { PaymentController } from './payment/payment.controller';
@@ -66,6 +67,7 @@ import { SettlementService } from './settlement/settlement.service';
 import { SettlementController } from './settlement/settlement.controller';
 import { IdempotencyStore } from './shared/idempotency';
 import { SettlementAuthorityConsumer } from './consumers/settlement-authority.consumer';
+import { StatementSettlementConsumer } from './consumers/statement-settlement.consumer';
 import { RewardTriggerConsumer } from './consumers/reward-trigger.consumer';
 import { transactionsDisputed, transactionsPendingSettlement } from './observability/metrics';
 import { HealthController, MetricsController } from './health/health.controller';
@@ -85,6 +87,11 @@ import { ECONOMIC_DLQ_TOPIC, loadEconomicEnv, SERVICE_NAME, type EconomicEnv } f
  *                         product document's mandatory control before
  *                         settlement. Losing one means a workshop is never
  *                         paid.
+ *   statement-settlement  `rasta.contract.v1` — STATEMENT_APPROVED, an approved
+ *                         contract statement's obligation (ADR-068 § 6). Its
+ *                         own group: the contract topic carries every contract
+ *                         and statement event, and its lag must not delay a
+ *                         repair's approval, nor the reverse.
  *   reward-trigger        `rasta.fleet.v1` and `rasta.maintenance.v1` — the
  *                         behaviours that earn points. Losing one means a
  *                         missed reward.
@@ -98,6 +105,7 @@ import { ECONOMIC_DLQ_TOPIC, loadEconomicEnv, SERVICE_NAME, type EconomicEnv } f
  * nothing for every repair approved before that.
  */
 const MAINTENANCE_TOPICS = ['rasta.maintenance.v1'];
+const CONTRACT_TOPICS = ['rasta.contract.v1'];
 const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
 
 // A note on the providers that start themselves — the two consumers,
@@ -167,6 +175,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
     CommissionService,
     RewardService,
     ParticipationService,
+    RecognitionService,
     PaymentService,
     PaymentReconciliationRepository,
     PaymentReconciler,
@@ -211,6 +220,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
         new SourceFactsClient({
           maintenanceBaseUrl: env.MAINTENANCE_SERVICE_URL,
           fleetBaseUrl: env.FLEET_SERVICE_URL,
+          contractBaseUrl: env.CONTRACT_SERVICE_URL,
           timeoutMs: env.ECONOMIC_SOURCE_REQUEST_TIMEOUT_MS,
           tokens: new InternalTokenService(
             env.INTERNAL_TOKEN_SECRET,
@@ -270,6 +280,40 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
           prisma,
           transactions,
           sources,
+        ),
+    },
+
+    {
+      provide: StatementSettlementConsumer,
+      inject: [ENV, LOGGER, PrismaService, TransactionService, SOURCE_FACTS],
+      useFactory: (
+        env: EconomicEnv,
+        logger: Logger,
+        prisma: PrismaService,
+        transactions: TransactionService,
+        sources: SourceFacts,
+      ) =>
+        new StatementSettlementConsumer(
+          (handler) =>
+            new EventConsumer(
+              {
+                ...kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-statement-settlement`),
+                groupId: 'economic-service.statement-settlement',
+                topics: CONTRACT_TOPICS,
+                deadLetterTopic: ECONOMIC_DLQ_TOPIC,
+                fromBeginning: true,
+              },
+              handler,
+              {
+                log: (m) => logger.info(m),
+                warn: (m) => logger.warn(m),
+                error: (m, trace) => logger.error({ err: trace }, m),
+              },
+            ),
+          prisma,
+          transactions,
+          sources,
+          env.ECONOMIC_STATEMENT_BUSINESS_LINE ?? null,
         ),
     },
 
@@ -363,6 +407,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
         OutboxPurgeScheduler,
         PaymentReconciliationSweeper,
         SettlementAuthorityConsumer,
+        StatementSettlementConsumer,
         RewardTriggerConsumer,
         LedgerBalanceAudit,
         KafkaEventPublisher,
@@ -373,6 +418,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
         purge: OutboxPurgeScheduler,
         reconciler: PaymentReconciliationSweeper,
         settlements: SettlementAuthorityConsumer,
+        statements: StatementSettlementConsumer,
         rewards: RewardTriggerConsumer,
         audit: LedgerBalanceAudit,
         publisher: KafkaEventPublisher,
@@ -381,7 +427,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
         new OutboxShutdown({
           relay,
           purge,
-          workers: [reconciler, settlements, rewards, audit],
+          workers: [reconciler, settlements, statements, rewards, audit],
           // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),

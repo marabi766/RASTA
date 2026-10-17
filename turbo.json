@@ -87,6 +87,8 @@
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
+        "CONTRACT_SERVICE_URL",
+        "ECONOMIC_STATEMENT_BUSINESS_LINE",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",
@@ -150,6 +152,8 @@
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
+        "CONTRACT_SERVICE_URL",
+        "ECONOMIC_STATEMENT_BUSINESS_LINE",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",
@@ -258,6 +262,10 @@
     // likewise: false by default, and refused without an authenticated broker.
     // MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED (Q-133 (8)): false by default —
     // a return shipment names exactly what was authorized.
+    //
+    // CONTRACT_SERVICE_URL and ECONOMIC_STATEMENT_BUSINESS_LINE (CON-003 PR 6b):
+    // economic-service's statement owner (A-13) and the line a statement's
+    // obligation is recorded under (Q-130, unset by default); the same rule.
     "dev": {
       "cache": false,
       "persistent": true,
@@ -280,6 +288,8 @@
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
+        "CONTRACT_SERVICE_URL",
+        "ECONOMIC_STATEMENT_BUSINESS_LINE",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",

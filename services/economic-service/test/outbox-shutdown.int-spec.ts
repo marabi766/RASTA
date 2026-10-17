@@ -24,6 +24,7 @@ import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { PaymentReconciliationSweeper } from '../src/payment/payment-reconciliation.sweeper';
 import { SettlementAuthorityConsumer } from '../src/consumers/settlement-authority.consumer';
 import { RewardTriggerConsumer } from '../src/consumers/reward-trigger.consumer';
+import { StatementSettlementConsumer } from '../src/consumers/statement-settlement.consumer';
 import type { SourceFacts } from '../src/provenance/source-facts.client';
 import { databaseUrl, PLATFORM_ORGANIZATION_ID } from './helpers';
 
@@ -212,6 +213,7 @@ async function boot(options: {
     // Never dialled: SOURCE_FACTS is the stand-in below.
     MAINTENANCE_SERVICE_URL: 'http://127.0.0.1:9',
     FLEET_SERVICE_URL: 'http://127.0.0.1:9',
+    CONTRACT_SERVICE_URL: 'http://127.0.0.1:9',
     ECONOMIC_PLATFORM_ORGANIZATION_ID: PLATFORM_ORGANIZATION_ID,
     // The balance audit's own stop is not this suite's (and not this PR's).
     ECONOMIC_BALANCE_AUDIT_ENABLED: 'false',
@@ -251,6 +253,8 @@ async function boot(options: {
   const fakes = new Map<string, FakeKafkaConsumer>([
     [SettlementAuthorityConsumer.CONSUMER_NAME, new FakeKafkaConsumer('rasta.maintenance.v1')],
     [RewardTriggerConsumer.CONSUMER_NAME, new FakeKafkaConsumer('rasta.fleet.v1')],
+    // Idle here: it stops with the rest; its handler is proven in statement-settlement.int-spec.ts.
+    [StatementSettlementConsumer.CONSUMER_NAME, new FakeKafkaConsumer('rasta.contract.v1')],
   ]);
   const realStart = EventConsumer.prototype.start;
   jest.spyOn(EventConsumer.prototype, 'start').mockImplementation(function (this: EventConsumer) {
@@ -274,6 +278,7 @@ async function boot(options: {
       calls.usage += 1;
       return options.usageRecord();
     },
+    statement: () => Promise.reject(new Error('no statement is asked in this suite')),
   };
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
