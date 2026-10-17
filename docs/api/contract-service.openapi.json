@@ -3092,7 +3092,8 @@
                               "SUBMITTED",
                               "TECHNICALLY_APPROVED",
                               "APPROVED",
-                              "REJECTED"
+                              "REJECTED",
+                              "SETTLED"
                             ]
                           },
                           "grossMinor": {
@@ -3459,7 +3460,14 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": ["DRAFT", "SUBMITTED", "TECHNICALLY_APPROVED", "APPROVED", "REJECTED"]
+                      "enum": [
+                        "DRAFT",
+                        "SUBMITTED",
+                        "TECHNICALLY_APPROVED",
+                        "APPROVED",
+                        "REJECTED",
+                        "SETTLED"
+                      ]
                     },
                     "grossMinor": {
                       "type": "string",
@@ -3986,7 +3994,14 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": ["DRAFT", "SUBMITTED", "TECHNICALLY_APPROVED", "APPROVED", "REJECTED"]
+                      "enum": [
+                        "DRAFT",
+                        "SUBMITTED",
+                        "TECHNICALLY_APPROVED",
+                        "APPROVED",
+                        "REJECTED",
+                        "SETTLED"
+                      ]
                     },
                     "grossMinor": {
                       "type": "string",
@@ -4329,7 +4344,14 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": ["DRAFT", "SUBMITTED", "TECHNICALLY_APPROVED", "APPROVED", "REJECTED"]
+                      "enum": [
+                        "DRAFT",
+                        "SUBMITTED",
+                        "TECHNICALLY_APPROVED",
+                        "APPROVED",
+                        "REJECTED",
+                        "SETTLED"
+                      ]
                     },
                     "grossMinor": {
                       "type": "string",
@@ -4832,7 +4854,14 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": ["DRAFT", "SUBMITTED", "TECHNICALLY_APPROVED", "APPROVED", "REJECTED"]
+                      "enum": [
+                        "DRAFT",
+                        "SUBMITTED",
+                        "TECHNICALLY_APPROVED",
+                        "APPROVED",
+                        "REJECTED",
+                        "SETTLED"
+                      ]
                     },
                     "grossMinor": {
                       "type": "string",
@@ -5347,7 +5376,8 @@
                         "SUBMITTED",
                         "TECHNICALLY_APPROVED",
                         "APPROVED",
-                        "REJECTED"
+                        "REJECTED",
+                        "SETTLED"
                       ],
                       "description": "As stored. Only an APPROVED statement may be settled; the reader refuses the rest."
                     },

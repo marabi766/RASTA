@@ -16,3 +16,10 @@ export const LOGGER = Symbol('CONTRACT_LOGGER');
  * or throws UPSTREAM_UNAVAILABLE — never a guessed amount.
  */
 export const AWARD_SOURCE = Symbol('CONTRACT_AWARD_SOURCE');
+
+/**
+ * Where a statement's obligation is read from (`ObligationSource`, ADR-068 § 6 (3)): economic-service
+ * in production, a stand-in in tests. Fails closed: it answers the obligation, "no such obligation",
+ * or throws UPSTREAM_UNAVAILABLE — never "paid" on a guess.
+ */
+export const OBLIGATION_SOURCE = Symbol('CONTRACT_OBLIGATION_SOURCE');

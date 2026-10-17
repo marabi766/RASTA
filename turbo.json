@@ -87,6 +87,8 @@
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
         "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SERVICE_URL",
+        "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",
@@ -150,6 +152,8 @@
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
         "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SERVICE_URL",
+        "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",
@@ -262,6 +266,9 @@
     // CONTRACT_SERVICE_URL and ECONOMIC_STATEMENT_BUSINESS_LINE (CON-003 PR 6b):
     // economic-service's statement owner (A-13) and the line a statement's
     // obligation is recorded under (Q-130, unset by default); the same rule.
+    // ECONOMIC_SERVICE_URL and CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS (CON-003
+    // PR 6c): where contract-service asks economic-service, before a statement
+    // is SETTLED, for its obligation (A-13), and how long that may take.
     "dev": {
       "cache": false,
       "persistent": true,
@@ -284,6 +291,8 @@
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
         "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SERVICE_URL",
+        "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",

@@ -48,6 +48,8 @@ export const CONTRACT_EVENTS = {
   STATEMENT_TECHNICALLY_APPROVED: 'STATEMENT_TECHNICALLY_APPROVED',
   STATEMENT_APPROVED: 'STATEMENT_APPROVED',
   STATEMENT_REJECTED: 'STATEMENT_REJECTED',
+  STATEMENT_SETTLED: 'STATEMENT_SETTLED',
+  CONTRACT_SETTLED: 'CONTRACT_SETTLED',
 } as const;
 
 export type ContractEventName = keyof typeof CONTRACT_EVENTS;
@@ -637,6 +639,32 @@ export const statementRejectedPayload = z
   .object({ ...statementFacts, chain: statementChain, stepOrder: positive, rejectedAt: instant })
   .strict();
 
+/**
+ * economic-service confirmed the statement's obligation settled in full: APPROVED → SETTLED
+ * (CON-003 PR 6c, ADR-068 § 6 (3), I5), in the transaction that records the settlement. Which
+ * obligation and which settlement of economic's, and when economic settled it — **no amount**
+ * (Q-97 (2)): the statement's net is read from this service's API, the settlement from economic's.
+ */
+export const statementSettledPayload = z
+  .object({ ...statementFacts, obligationId: id, settlementId: id, settledAt: instant })
+  .strict();
+
+/**
+ * The contract is settled: COMPLETED → SETTLED (ADR-068 § 2 and § 6 (3)), in the transaction that
+ * settled its last open statement — no statement open, and the sum settled the sum of the approved
+ * net. `docs/08` § 8.3's `COMPLETED → SETTLED`. Identifiers and the instant only; **no amount**.
+ */
+export const contractSettledPayload = z
+  .object({
+    contractId: id,
+    projectId: id,
+    /** The employer — the tender's owner and the tenant of the contract. */
+    organizationId: id,
+    contractorOrganizationId: id,
+    settledAt: instant,
+  })
+  .strict();
+
 export const CONTRACT_EVENT_SCHEMAS = {
   CONTRACT_DRAFTED: contractDraftedPayload,
   CONTRACT_SIGNATURE_RECORDED: contractSignatureRecordedPayload,
@@ -664,6 +692,8 @@ export const CONTRACT_EVENT_SCHEMAS = {
   STATEMENT_TECHNICALLY_APPROVED: statementTechnicallyApprovedPayload,
   STATEMENT_APPROVED: statementApprovedPayload,
   STATEMENT_REJECTED: statementRejectedPayload,
+  STATEMENT_SETTLED: statementSettledPayload,
+  CONTRACT_SETTLED: contractSettledPayload,
 } as const satisfies Record<ContractEventName, z.ZodTypeAny>;
 
 export type ContractEventPayload<N extends ContractEventName> = z.infer<

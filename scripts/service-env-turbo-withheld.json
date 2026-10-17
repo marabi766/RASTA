@@ -212,7 +212,6 @@
   "marketplace-service": {
     "CORS_ORIGINS": ["dev", "test", "test:integration"],
     "ECONOMIC_REQUEST_TIMEOUT_MS": ["dev", "test", "test:integration"],
-    "ECONOMIC_SERVICE_URL": ["dev", "test", "test:integration"],
     "MARKETPLACE_FULFILLMENT_WINDOW_DAYS": ["dev", "test", "test:integration"],
     "MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS": ["dev", "test", "test:integration"],
     "MARKETPLACE_IDEMPOTENCY_TTL_HOURS": ["dev", "test", "test:integration"],
