@@ -934,6 +934,16 @@ POST   /v1/returns/{id}/inspections           [K] ثبت بازرسی و تعی�
 > (`RETURN_REQUEST_NOT_AUTHORIZED`، `RETURN_REQUEST_MISMATCH`، `RETURN_LINES_MISMATCH`)، درخواستِ تأمین‌کنندهٔ دیگر `404`، marketplace
 > در دسترس‌ناپذیر `503`/`504`. نمای درخواست `dispatchReservedAt` دارد و `POST /v1/returns/{id}/cancellation` پس از آن
 > `422` با `RETURN_DISPATCH_RESERVED` است.
+>
+> **لغو شرطی و تطبیق رزرو (Codex r1 روی #339؛ D-058، Q-133 (۹)، (۱۰)):** بدنهٔ `POST /v1/returns/{id}/cancellation`
+> `{ "expectedStatus": "REQUESTED" | "AUTHORIZED" }` الزامی است (جزء اثرانگشت Idempotency-Key)؛ وضعیتِ دیگر زیر قفل ←
+> `409 OPTIMISTIC_LOCK_FAILED`. لغوِ `AUTHORIZED` پیش از نوشتن از inventory می‌پرسد: محمولهٔ موجود ← `422` با `RETURN_DISPATCHED`،
+> در دسترس نبودن ← `503`/`504`. مسیر تازهٔ `POST /v1/returns/{id}/dispatch-reconciliation` (هر دو طرف، Idempotency-Key، بی بدنه) رزرو
+> را فقط پس از «پس‌گرفتنِ» inventory آزاد می‌کند (`RETURN_DISPATCHED`، `RETURN_DISPATCH_NOT_RESERVED`، `503`/`504`). دو مسیر داخلی
+> inventory (فقط توکن `SERVICE` ـِ `marketplace-service` امضاشده برای تأمین‌کننده، طرح `internalToken`، بی Idempotency-Key):
+> `GET /v1/internal/return-requests/{id}/return-shipment` (محموله یا `null`، هرگز `404`) و
+> `POST /v1/internal/return-requests/{id}/dispatch-withdrawal` (`{ reservationId }` ← `WITHDRAWN` | `DISPATCHED`). محموله‌ای زیر
+> رزروِ پس‌گرفته ← `409 RETURN_DISPATCH_WITHDRAWN`.
 
 همهٔ مسیرهای نوشتنی به Tenant Scope، مجوز سطح Object، Audit و در صورت اثر تکرارپذیر به
 `Idempotency-Key` نیاز دارند. نمایش مسیر برنامه‌ریزی‌شده به‌عنوان API موجود ممنوع است.

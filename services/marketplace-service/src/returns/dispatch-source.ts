@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
 import { SERVICE_NAME, type MarketplaceEnv } from '../config/env';
+import { ID_PREFIX, newId } from '../events/publisher';
 import { returnRefusalsTotal } from '../observability/metrics';
 import { PrismaService } from '../prisma/prisma.service';
 import { ENV } from '../tokens';
@@ -75,9 +76,10 @@ export class ReturnDispatchSourceService {
 
   /**
    * Reserves the dispatch of an AUTHORIZED request of the caller's: after this, the buyer cannot
-   * cancel it. Idempotent — a request already reserved answers as it stands, so a retried dispatch
-   * passes again; one shipment per return is inventory's own rule. Anything but AUTHORIZED is
-   * refused: not yet decided, refused, withdrawn, or already moved on by its shipment's event.
+   * cancel it. Idempotent — a request already reserved answers as it stands, under the same
+   * reservation id, so a retried dispatch passes again; one shipment per return is inventory's own
+   * rule, and a reservation inventory has since withdrawn is refused there. Anything but
+   * AUTHORIZED is refused: not yet decided, refused, withdrawn, or moved on by its shipment's event.
    */
   async reserve(id: string): Promise<ReturnDispatchSourceView> {
     const supplier = this.supplier();
@@ -99,6 +101,9 @@ export class ReturnDispatchSourceService {
         // Never before what it follows, as every move of the request (`ReturnService.decide`).
         const at = new Date(Math.max(Date.now(), locked.updatedAt.getTime()));
         const reserved = await this.repository.reserveDispatch(tx, locked, {
+          // A fresh id per reservation: the one inventory's shipment carries, and the one a
+          // reconciliation withdraws there (Q-133 (9)(a)).
+          reservationId: newId(ID_PREFIX.returnDispatchReservation),
           at,
           by: context.callerService ?? DISPATCH_SOURCE_CALLER,
           correlationId: context.correlationId,

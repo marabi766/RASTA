@@ -8,6 +8,7 @@ const FACT = {
   supplierOrganizationId: 'ORG_SUPPLIER',
   status: 'AUTHORIZED',
   lines: [{ orderLineId: 'OLN_A', productId: 'PRD_A', quantity: 3 }],
+  dispatchReservationId: null,
   dispatchReservedAt: null,
   partialDispatchAllowed: false,
 };
@@ -67,9 +68,14 @@ describe('ReturnRequestSourceClient', () => {
   });
 
   it('reserves with a POST to the reservation route', async () => {
-    const { client, sent } = clientAnswering(200, { ...FACT, dispatchReservedAt: 'now' });
+    const { client, sent } = clientAnswering(200, {
+      ...FACT,
+      dispatchReservationId: 'RDR_1',
+      dispatchReservedAt: 'now',
+    });
 
     await expect(client.reserve('ORG_SUPPLIER', 'RET_1')).resolves.toMatchObject({
+      dispatchReservationId: 'RDR_1',
       dispatchReservedAt: 'now',
     });
     expect(sent.map((s) => [s.method, s.url])).toEqual([

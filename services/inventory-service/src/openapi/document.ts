@@ -51,7 +51,12 @@ import {
   resolveReturnShipmentSchema,
   returnShipmentViewSchema,
   returnTrackingViewSchema,
+  dispatchWithdrawalViewSchema,
+  returnRequestShipmentViewSchema,
+  withdrawDispatchSchema,
 } from '../return-shipment/dto';
+import { ReturnDispatchFenceService } from '../return-shipment/dispatch-fence';
+import { InternalReturnRequestController } from '../return-shipment/internal-return-request.controller';
 import { IdempotencyStore } from '../shared/idempotency';
 import { REFUSAL_REASONS, type RefusalArea } from '../shared/refusal';
 
@@ -124,6 +129,47 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'POST /v1/return-shipments/{id}/receive': { status: '200', schema: returnShipmentViewSchema },
   'POST /v1/return-shipments/{id}/inspection': { status: '200', schema: returnShipmentViewSchema },
   'POST /v1/return-shipments/{id}/resolution': { status: '200', schema: returnShipmentViewSchema },
+  // Internal (Q-133 (9)): marketplace-service asks before a cancellation and a release.
+  'GET /v1/internal/return-requests/{id}/return-shipment': {
+    status: '200',
+    schema: returnRequestShipmentViewSchema,
+  },
+  'POST /v1/internal/return-requests/{id}/dispatch-withdrawal': {
+    status: '200',
+    schema: dispatchWithdrawalViewSchema,
+  },
+};
+
+/**
+ * The internal routes' credential: a service's internal token in `X-Internal-Token` and nothing
+ * else — `AuthGuard` judges a request that also carries `Authorization` on that bearer token, as a
+ * user (marketplace-service's and contract-service's documents say the same).
+ */
+export const INTERNAL_TOKEN_SCHEME = 'internalToken';
+
+export const INTERNAL_TOKEN_API_KEY = {
+  type: 'apiKey' as const,
+  in: 'header',
+  name: 'X-Internal-Token',
+  description:
+    'A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user.',
+};
+
+const isInternal = (path: string): boolean => path.startsWith('/v1/internal/');
+
+/** The internal routes' bodies: no Idempotency-Key — each is idempotent by itself. */
+const INTERNAL_REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
+  'POST /v1/internal/return-requests/{id}/dispatch-withdrawal': withdrawDispatchSchema,
+};
+
+/** What an internal route can answer besides its 200: one named service, no user, no 404. */
+const INTERNAL_ERRORS: Record<number, string> = {
+  400: 'The path names no return request (`RET_<ULID>`), or the body does not match the published schema.',
+  401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
+  403: 'Authenticated, but not the service this route answers: any user token (whatever its roles), another service’s internal token, or an internal token signed for no organization.',
+  409: 'The request’s dispatch lock was held past INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget (CONFLICT, with Retry-After): nothing was withdrawn; ask again.',
+  422: 'The reservation was withdrawn for another return request (BUSINESS_RULE_VIOLATION): nothing was withdrawn.',
+  500: 'Unexpected server error.',
 };
 
 /** Every command takes a strict body, and every command requires an Idempotency-Key. */
@@ -273,6 +319,7 @@ export function buildInventoryOpenApiDocument(app: INestApplication): OpenAPIObj
       .setDescription(DESCRIPTION)
       .setVersion(INVENTORY_VERSION)
       .addBearerAuth()
+      .addApiKey(INTERNAL_TOKEN_API_KEY, INTERNAL_TOKEN_SCHEME)
       .build(),
   );
   return enrichOpenApiDocument(document);
@@ -289,8 +336,10 @@ export function buildInventoryOpenApiDocument(app: INestApplication): OpenAPIObj
     StockController,
     ShipmentController,
     ReturnShipmentController,
+    InternalReturnRequestController,
   ],
   providers: [
+    { provide: ReturnDispatchFenceService, useValue: {} },
     { provide: WarehouseService, useValue: {} },
     { provide: StockService, useValue: {} },
     { provide: ReservationService, useValue: {} },
@@ -318,6 +367,11 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       if (!isOperation(operation)) continue;
 
       const key = `${method.toUpperCase()} ${path}`;
+
+      if (isInternal(path)) {
+        enrichInternalOperation(key, operation);
+        continue;
+      }
 
       // `addBearerAuth()` declares the scheme; it does not apply it. Without this the contract
       // would describe endpoints anybody can call.
@@ -404,6 +458,40 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   }
 
   return document;
+}
+
+/**
+ * An internal route (ADR-061 § 4): the internal token's scheme, never the bearer one; its body,
+ * with no Idempotency-Key; its one success; and only the errors it can give.
+ */
+function enrichInternalOperation(key: string, operation: MutableOperation): void {
+  operation.security = [{ [INTERNAL_TOKEN_SCHEME]: [] }];
+  const body = INTERNAL_REQUEST_BODIES[key];
+  if (body) {
+    operation.requestBody = {
+      required: true,
+      content: { 'application/json': { schema: toJsonSchema(body) } },
+    };
+  }
+  operation.responses ??= {};
+  const response = RESPONSE_BODIES[key];
+  if (response) {
+    delete operation.responses['200'];
+    delete operation.responses['201'];
+    operation.responses[response.status] = {
+      description: 'Success',
+      content: { 'application/json': { schema: toJsonSchema(response.schema) } },
+    };
+  }
+  for (const [status, description] of Object.entries(INTERNAL_ERRORS)) {
+    // Only the withdrawal writes, so only it can contend for the lock or be refused.
+    if ((status === '409' || status === '422') && !body) continue;
+    operation.responses[status] = {
+      description,
+      ...(status === '409' ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } } : {}),
+      content: { 'application/json': { schema: { $ref: '#/components/schemas/ApiError' } } },
+    };
+  }
 }
 
 /**

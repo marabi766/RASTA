@@ -128,10 +128,12 @@ describe('return request API', () => {
     command: 'authorize' | 'reject' | 'cancel',
     token: string,
     idempotencyKey = apiKey(`ret-${command}`),
+    /** A cancellation names the status the buyer saw (Codex r1 on #339). */
+    expectedStatus: 'REQUESTED' | 'AUTHORIZED' = 'REQUESTED',
   ) => {
     const call =
       command === 'cancel'
-        ? request(http).post(`/v1/returns/${id}/cancellation`)
+        ? request(http).post(`/v1/returns/${id}/cancellation`).send({ expectedStatus })
         : request(http)
             .post(`/v1/returns/${id}/decisions`)
             .send({ decision: command === 'authorize' ? 'AUTHORIZE' : 'REJECT' });
@@ -454,7 +456,13 @@ describe('return request API', () => {
       await decide(id, 'authorize', supplier(supplierOrg)).expect(200);
 
       await decide(id, 'reject', supplier(supplierOrg)).expect(422);
-      const cancelled = await decide(id, 'cancel', buyer(buyerOrg)).expect(200);
+      const cancelled = await decide(
+        id,
+        'cancel',
+        buyer(buyerOrg),
+        apiKey('ret-cancel'),
+        'AUTHORIZED',
+      ).expect(200);
 
       expect(cancelled.body).toMatchObject({
         status: 'CANCELLED',

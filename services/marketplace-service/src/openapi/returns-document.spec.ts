@@ -76,7 +76,7 @@ describe('the served return-request routes', () => {
     document = await servedDocument();
   });
 
-  it('publishes all five routes, and the two internal ones, under the parameter names the controllers use', () => {
+  it('publishes all six routes, and the two internal ones, under the parameter names the controllers use', () => {
     expect(Object.keys(document.paths).sort()).toEqual([
       '/v1/internal/returns/{id}',
       '/v1/internal/returns/{id}/dispatch-reservation',
@@ -85,6 +85,7 @@ describe('the served return-request routes', () => {
       '/v1/returns/{id}',
       '/v1/returns/{id}/cancellation',
       '/v1/returns/{id}/decisions',
+      '/v1/returns/{id}/dispatch-reconciliation',
     ]);
   });
 
@@ -113,13 +114,41 @@ describe('the served return-request routes', () => {
     expect(errorsOf(decide)).toEqual(['400', '401', '403', '404', '409', '422', '500']);
   });
 
-  it('requires the key on a cancellation, which takes no body, and answers 200', () => {
+  it('describes a cancellation as conditional — the expected status required in its body — requires its key, and answers 200 (Codex r1 on #339)', () => {
     const cancel = operation('/v1/returns/{id}/cancellation', 'post');
 
-    expect(cancel.requestBody).toBeUndefined();
+    expect(cancel.requestBody?.required).toBe(true);
+    const schema = cancel.requestBody?.content['application/json'].schema as {
+      properties?: Record<string, { enum?: string[] }>;
+      required?: string[];
+    };
+    expect(Object.keys(schema.properties ?? {})).toEqual(['expectedStatus']);
+    expect(schema.properties?.expectedStatus?.enum).toEqual(['REQUESTED', 'AUTHORIZED']);
+    expect(schema.required).toEqual(['expectedStatus']);
     expect(keyOf(cancel)).toMatchObject({ in: 'header', required: true });
     expect(successOf(cancel)).toEqual(['200']);
-    expect(errorsOf(cancel)).toEqual(['400', '401', '403', '404', '409', '422', '500']);
+    // 503/504: an AUTHORIZED return is cancelled only on inventory's word (Q-133 (9)).
+    expect(errorsOf(cancel)).toEqual([
+      '400',
+      '401',
+      '403',
+      '404',
+      '409',
+      '422',
+      '500',
+      '503',
+      '504',
+    ]);
+  });
+
+  it('publishes the reconciliation of a dispatch reservation: no body, its key required, 200, and the upstream failures (Q-133 (9)(a))', () => {
+    const reconcile = operation('/v1/returns/{id}/dispatch-reconciliation', 'post');
+
+    expect(reconcile.requestBody).toBeUndefined();
+    expect(keyOf(reconcile)).toMatchObject({ in: 'header', required: true });
+    expect(successOf(reconcile)).toEqual(['200']);
+    expect(errorsOf(reconcile)).toEqual(['401', '403', '404', '409', '422', '500', '503', '504']);
+    expect(reconcile.security).toBeUndefined();
   });
 
   it('publishes the list filters and pagination as query parameters, and no key on a read', () => {

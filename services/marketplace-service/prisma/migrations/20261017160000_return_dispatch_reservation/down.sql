@@ -3,8 +3,10 @@
 -- Roll the code back BEFORE this runs: the previous code neither reads nor writes these columns.
 -- It REFUSES to run while an AUTHORIZED request has a reservation: dropping it would let the buyer
 -- cancel a return whose goods inventory may already have sent (Q-133 (5)) — the defect this
--- migration closed. Such an environment is not rolled back; it is rolled forward. A reservation on
--- a request that has since moved on (IN_TRANSIT and after) protects nothing the lifecycle does not
+-- migration closed. It also REFUSES while any reconciliation released a reservation: those rows are
+-- the only record of who released which reservation and on what answer from inventory, and are
+-- not dropped. Such an environment is not rolled back; it is rolled forward. A reservation on a
+-- request that has since moved on (IN_TRANSIT and after) protects nothing the lifecycle does not
 -- already, and is dropped with its columns.
 SET LOCAL lock_timeout = '3s';
 
@@ -15,6 +17,10 @@ BEGIN
      WHERE "status" = 'AUTHORIZED' AND "dispatch_reserved_at" IS NOT NULL
   ) THEN
     RAISE EXCEPTION 'down refused: an AUTHORIZED return request has a dispatch reservation; roll forward instead'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF EXISTS (SELECT 1 FROM "return_dispatch_release") THEN
+    RAISE EXCEPTION 'down refused: a dispatch reservation was released by reconciliation, and its record is kept; roll forward instead'
       USING ERRCODE = 'check_violation';
   END IF;
 END
@@ -84,9 +90,15 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS "tg_return_dispatch_release_no_truncate" ON "return_dispatch_release";
+DROP TRIGGER IF EXISTS "tg_return_dispatch_release_guard" ON "return_dispatch_release";
+DROP FUNCTION IF EXISTS "return_dispatch_release_guard"();
+DROP TABLE IF EXISTS "return_dispatch_release";
+
 ALTER TABLE "return_request" DROP CONSTRAINT IF EXISTS "ck_return_request_dispatch_reservation";
 
 ALTER TABLE "return_request"
+  DROP COLUMN IF EXISTS "dispatch_reservation_id",
   DROP COLUMN IF EXISTS "dispatch_reserved_at",
   DROP COLUMN IF EXISTS "dispatch_reserved_by",
   DROP COLUMN IF EXISTS "dispatch_reserved_correlation_id";

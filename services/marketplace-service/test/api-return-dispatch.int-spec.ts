@@ -126,11 +126,12 @@ describe('return request: internal dispatch routes and the cancellation boundary
     return { orderId, lineId, returnId };
   }
 
-  const cancel = (returnId: string) =>
+  const cancel = (returnId: string, expectedStatus: 'REQUESTED' | 'AUTHORIZED' = 'AUTHORIZED') =>
     request(http)
       .post(`/v1/returns/${returnId}/cancellation`)
       .set(as(buyer(buyerOrg)))
-      .set('idempotency-key', apiKey('rds-cancel'));
+      .set('idempotency-key', apiKey('rds-cancel'))
+      .send({ expectedStatus });
 
   /** inventory-service's token, signed for `organizationId` — or, with `null`, for none. */
   const inventoryFor = (organizationId: string | null) =>
@@ -180,6 +181,7 @@ describe('return request: internal dispatch routes and the cancellation boundary
         supplierOrganizationId: supplierOrg,
         status: 'AUTHORIZED',
         lines: [{ orderLineId: lineId, productId: expect.any(String), quantity: 2 }],
+        dispatchReservationId: null,
         dispatchReservedAt: null,
         partialDispatchAllowed: false,
       });
@@ -230,8 +232,10 @@ describe('return request: internal dispatch routes and the cancellation boundary
 
       expect(first.body).toMatchObject({ returnRequestId: returnId, status: 'AUTHORIZED' });
       expect(first.body.dispatchReservedAt).toEqual(expect.any(String));
-      // Idempotent: the reservation stands as first written.
+      expect(first.body.dispatchReservationId).toMatch(/^RDR_[0-9A-HJKMNP-TV-Z]{26}$/);
+      // Idempotent: the reservation stands as first written, under the same id.
       expect(again.body.dispatchReservedAt).toBe(first.body.dispatchReservedAt);
+      expect(again.body.dispatchReservationId).toBe(first.body.dispatchReservationId);
       expect(await stored(returnId)).toEqual({
         status: 'AUTHORIZED',
         version: 2,
@@ -316,12 +320,15 @@ describe('return request: internal dispatch routes and the cancellation boundary
       expect(second.body.code).toBe('BUSINESS_RULE_VIOLATION');
     });
 
-    it('control: an AUTHORIZED request nobody reserved is still cancelled by its buyer', async () => {
+    it('control: an AUTHORIZED request nobody reserved is still cancelled by its buyer, once inventory says it holds no shipment', async () => {
       const { returnId } = await aReturn();
 
       await cancel(returnId).expect(200);
 
       expect(await stored(returnId)).toMatchObject({ status: 'CANCELLED', version: 3 });
+      expect(
+        harness.inventory.calls.filter((call) => call.path.includes(returnId)).map((c) => c.method),
+      ).toEqual(['GET']);
     });
 
     it('is refused by the database too: a reserved request is not cancelled, and a reservation is not undone or moved', async () => {
@@ -336,12 +343,17 @@ describe('return request: internal dispatch routes and the cancellation boundary
         raw(`UPDATE return_request SET status='CANCELLED', version=3, cancelled_at=now(),
                     cancelled_by='USR-RAW', cancelled_from='AUTHORIZED' WHERE id=$1`),
       ).rejects.toThrow(/ck_return_request_cancel_after_dispatch/);
+      // Undone only beside its reconciliation record (Q-133 (9)(a)) — never by a bare write.
       await expect(
-        raw(`UPDATE return_request SET dispatch_reserved_at=NULL, dispatch_reserved_by=NULL,
-                    dispatch_reserved_correlation_id=NULL WHERE id=$1`),
-      ).rejects.toThrow(/ck_return_request_terms_immutable/);
+        raw(`UPDATE return_request SET dispatch_reservation_id=NULL, dispatch_reserved_at=NULL,
+                    dispatch_reserved_by=NULL, dispatch_reserved_correlation_id=NULL WHERE id=$1`),
+      ).rejects.toThrow(/ck_return_request_release_reconciled/);
       await expect(
         raw(`UPDATE return_request SET dispatch_reserved_by='someone-else' WHERE id=$1`),
+      ).rejects.toThrow(/ck_return_request_terms_immutable/);
+      await expect(
+        raw(`UPDATE return_request SET dispatch_reservation_id='RDR_01JABCDEFGHJKMNPQRSTVWXYZ0'
+              WHERE id=$1`),
       ).rejects.toThrow(/ck_return_request_terms_immutable/);
     });
 
@@ -351,7 +363,8 @@ describe('return request: internal dispatch routes and the cancellation boundary
         runUnscoped('the suite writes past the service', () =>
           harness.prisma.client.$executeRawUnsafe(sql, target),
         );
-      const reservation = `dispatch_reserved_at=now(), dispatch_reserved_by='inventory-service',
+      const reservation = `dispatch_reservation_id='RDR_01JABCDEFGHJKMNPQRSTVWXYZ0',
+                           dispatch_reserved_at=now(), dispatch_reserved_by='inventory-service',
                            dispatch_reserved_correlation_id='raw'`;
 
       await expect(
@@ -411,7 +424,7 @@ describe('return request: internal dispatch routes and the cancellation boundary
             harness.prisma.client.$queryRaw<{ n: number }[]>`
             SELECT count(*)::int AS n FROM pg_stat_activity
              WHERE wait_event_type = 'Lock'
-               AND query LIKE '%return_shipment_id, dispatch_reserved_at, updated_at%'`,
+               AND query LIKE '%dispatch_reserved_correlation_id, updated_at%'`,
         );
         return row?.n ?? 0;
       };
@@ -473,7 +486,8 @@ describe('return request: internal dispatch routes and the cancellation boundary
         async (tx) => {
           // What `ReturnRepository.reserveDispatch` writes.
           await tx.$executeRawUnsafe(
-            `UPDATE return_request SET dispatch_reserved_at=now(),
+            `UPDATE return_request SET dispatch_reservation_id='RDR_01JABCDEFGHJKMNPQRSTVWXYZ1',
+                    dispatch_reserved_at=now(),
                     dispatch_reserved_by='inventory-service',
                     dispatch_reserved_correlation_id='held', updated_at=now()
               WHERE id=$1`,

@@ -25,8 +25,13 @@ import {
   type ReturnShipmentLineRow,
   type ReturnShipmentRow,
 } from './return-shipment.repository';
+import { dispatchReservationIdSchema } from './dto';
 import { assertShipmentMatchesRequest } from './return-request-check';
-import { RETURN_REQUEST_SOURCE, type ReturnRequestSource } from './return-request-source';
+import {
+  MARKETPLACE_SERVICE,
+  RETURN_REQUEST_SOURCE,
+  type ReturnRequestSource,
+} from './return-request-source';
 import { RETURN_SHIPMENT_VERSION_OF, canMove } from './return-shipment.state-machine';
 import { toReturnShipmentView, toReturnTrackingView } from './views';
 
@@ -123,8 +128,26 @@ export class ReturnShipmentService {
       );
     }
     assertShipmentMatchesRequest(dto, acting.organizationId, reserved);
+    // A reservation answer that names no reservation reserved nothing this service can record a
+    // shipment under: no answer (fail closed).
+    const reservationId = reserved.dispatchReservationId;
+    if (reservationId === null || !dispatchReservationIdSchema.safeParse(reservationId).success) {
+      throw RastaError.upstreamUnavailable(MARKETPLACE_SERVICE);
+    }
 
     return this.runner.run('create_return_shipment', command.fence, null, async (tx, at) => {
+      // Under the lock a withdrawal takes (Q-133 (9)(a)): a reservation marketplace's
+      // reconciliation withdrew here — after this command reserved it, however long this
+      // transaction was delayed — records nothing. The trigger refuses it as well.
+      await this.shipments.lockDispatch(tx, acting.organizationId, dto.returnRequestId);
+      if (await this.shipments.findWithdrawal(tx, acting.organizationId, reservationId)) {
+        throw refusal(
+          'returnShipment',
+          'RETURN_DISPATCH_WITHDRAWN',
+          'The dispatch reservation of this return was withdrawn by a reconciliation',
+          { returnRequestId: dto.returnRequestId },
+        );
+      }
       const warehouse = await this.assertDispatchable(tx, acting.organizationId, dto);
 
       const shipment = await this.shipments.insert(tx, {
@@ -137,6 +160,7 @@ export class ReturnShipmentService {
         carrierName: dto.carrierName ?? null,
         carrierReference: dto.carrierReference ?? null,
         lineCount: dto.lines.length,
+        dispatchReservationId: reservationId,
         commandKeyHash: command.keyHash,
         actor: acting.userId,
         correlationId,

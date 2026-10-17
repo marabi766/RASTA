@@ -51,6 +51,7 @@ export function toReturnDispatchSourceView(
       productId: line.productId,
       quantity: line.quantity,
     })),
+    dispatchReservationId: row.dispatchReservationId,
     dispatchReservedAt: iso(row.dispatchReservedAt),
     partialDispatchAllowed,
   };

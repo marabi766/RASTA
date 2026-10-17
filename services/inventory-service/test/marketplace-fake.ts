@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { InternalTokenService } from '@rasta/nest-common';
+import { ulid } from 'ulid';
 
 /**
  * marketplace-service as inventory-service meets it: the two internal return routes
@@ -21,6 +22,8 @@ export interface FakeReturnRequest {
   supplierOrganizationId: string;
   status: string;
   lines: { orderLineId: string; productId: string; quantity: number }[];
+  /** `RDR_<ULID>`, as marketplace mints one per reservation (Q-133 (9)(a)). */
+  dispatchReservationId: string | null;
   dispatchReservedAt: string | null;
 }
 
@@ -42,12 +45,20 @@ export interface MarketplaceFake {
   partialDispatchAllowed: boolean;
   /** Runs once a reservation request is authenticated, before it is judged (a cancellation, say). */
   beforeReserve: ((id: string) => void) | null;
+  /**
+   * Runs once a reservation is taken, before it is answered — while the dispatch that asked waits
+   * for the answer. A reconciliation that withdraws it here is a dispatch delayed past it.
+   */
+  afterReserve: ((request: FakeReturnRequest) => Promise<void>) | null;
   /** Stores an AUTHORIZED request (unless told otherwise) and returns it. */
   register(
-    request: Omit<FakeReturnRequest, 'status' | 'dispatchReservedAt'> & {
+    request: Omit<FakeReturnRequest, 'status' | 'dispatchReservedAt' | 'dispatchReservationId'> & {
       status?: string;
+      dispatchReservationId?: string | null;
     },
   ): FakeReturnRequest;
+  /** What marketplace's reconciliation does once inventory withdrew the reservation: clears it. */
+  release(id: string): void;
   reset(): void;
   close(): Promise<void>;
 }
@@ -67,16 +78,29 @@ export async function startMarketplaceFake(secret: string): Promise<MarketplaceF
     mode: 'normal' as FakeMode,
     partialDispatchAllowed: false,
     beforeReserve: null as ((id: string) => void) | null,
+    afterReserve: null as ((request: FakeReturnRequest) => Promise<void>) | null,
     register(
-      request: Omit<FakeReturnRequest, 'status' | 'dispatchReservedAt'> & { status?: string },
+      request: Omit<
+        FakeReturnRequest,
+        'status' | 'dispatchReservedAt' | 'dispatchReservationId'
+      > & { status?: string; dispatchReservationId?: string | null },
     ) {
+      const reservationId = request.dispatchReservationId ?? null;
       const stored: FakeReturnRequest = {
         ...request,
         status: request.status ?? 'AUTHORIZED',
-        dispatchReservedAt: null,
+        dispatchReservationId: reservationId,
+        dispatchReservedAt: reservationId === null ? null : new Date().toISOString(),
       };
       requests.set(stored.returnRequestId, stored);
       return stored;
+    },
+    release(id: string) {
+      const request = requests.get(id);
+      if (request) {
+        request.dispatchReservationId = null;
+        request.dispatchReservedAt = null;
+      }
     },
     reset() {
       requests.clear();
@@ -84,6 +108,7 @@ export async function startMarketplaceFake(secret: string): Promise<MarketplaceF
       fake.mode = 'normal';
       fake.partialDispatchAllowed = false;
       fake.beforeReserve = null;
+      fake.afterReserve = null;
     },
     close: async (): Promise<void> => undefined,
   };
@@ -146,7 +171,12 @@ export async function startMarketplaceFake(secret: string): Promise<MarketplaceF
       if (request.status !== 'AUTHORIZED') {
         return send(response, 422, error('BUSINESS_RULE_VIOLATION', 'not AUTHORIZED'));
       }
-      request.dispatchReservedAt ??= new Date().toISOString();
+      // Idempotent, as the real route: a reservation standing is answered as it stands.
+      if (request.dispatchReservationId === null) {
+        request.dispatchReservationId = `RDR_${ulid()}`;
+        request.dispatchReservedAt = new Date().toISOString();
+      }
+      await fake.afterReserve?.(request);
     }
     return send(response, 200, view(request));
   };

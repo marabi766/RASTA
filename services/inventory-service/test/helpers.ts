@@ -155,6 +155,7 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
   try {
     await owner.$transaction(async (tx) => {
       for (const [table, triggers] of [
+        ['return_dispatch_withdrawal', ['tg_return_dispatch_withdrawal_guard']],
         ['return_disposition', ['tg_return_disposition_guard']],
         ['return_tracking_event', ['tg_return_tracking_event_guard']],
         ['return_shipment_line', ['tg_return_shipment_line_guard']],

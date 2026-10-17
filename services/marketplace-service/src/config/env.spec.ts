@@ -233,3 +233,29 @@ describe('ORGANIZATION_SERVICE_URL and MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_
     );
   });
 });
+
+/**
+ * Where and how long inventory-service is asked before an AUTHORIZED return is cancelled, and when
+ * a dispatch reservation is reconciled (docs/24 Q-133 (9)). Out of range refuses to start.
+ */
+describe('INVENTORY_SERVICE_URL and MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS', () => {
+  const withInventory = (values: NodeJS.ProcessEnv) => loadMarketplaceEnv({ ...BASE, ...values });
+
+  it('default to inventory-service on its port and 2 s', () => {
+    const env = withInventory({});
+    expect(env.INVENTORY_SERVICE_URL).toBe('http://localhost:3109');
+    expect(env.MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS).toBe(2_000);
+  });
+
+  it.each(['99', '30001', 'soon', ''])('refuse a timeout of %p at startup', (value) => {
+    expect(() => withInventory({ MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS: value })).toThrow(
+      EnvValidationError,
+    );
+  });
+
+  it('refuses an inventory-service URL that is not a URL', () => {
+    expect(() => withInventory({ INVENTORY_SERVICE_URL: 'inventory-service' })).toThrow(
+      EnvValidationError,
+    );
+  });
+});

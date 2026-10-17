@@ -513,7 +513,7 @@ describe('return mirror (RUN-005 PR 3)', () => {
     it('refuses goods for a request the buyer cancelled (Q-133 (5))', async () => {
       const f = await authorizedReturn();
       await asActor({ organizationId: f.buyer, roles: ['PROCUREMENT_USER'] }, () =>
-        wiring.returns.cancel(f.requestId, key('mir-cancel')),
+        wiring.returns.cancel(f.requestId, { expectedStatus: 'AUTHORIZED' }, key('mir-cancel')),
       );
       await expectRefused(event(f, 'DISPATCHED'), DLQ_REASONS.BUSINESS_RULE_VIOLATION);
       expect((await stored(f)).status).toBe('CANCELLED');
@@ -524,7 +524,11 @@ describe('return mirror (RUN-005 PR 3)', () => {
       await deliver(event(f, 'DISPATCHED'));
       await expect(
         asActor({ organizationId: f.buyer, roles: ['PROCUREMENT_USER'] }, () =>
-          wiring.returns.cancel(f.requestId, key('mir-cancel-late')),
+          wiring.returns.cancel(
+            f.requestId,
+            { expectedStatus: 'AUTHORIZED' },
+            key('mir-cancel-late'),
+          ),
         ),
       ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
       await expect(

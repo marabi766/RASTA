@@ -50,6 +50,23 @@ export const decideReturnSchema = z.object({ decision: z.enum(['AUTHORIZE', 'REJ
 
 export type DecideReturnDto = z.infer<typeof decideReturnSchema>;
 
+/** The statuses a request is cancelled from (ADR-048 § 3): before any goods moved. */
+export const CANCELLABLE_STATUSES = ['REQUESTED', 'AUTHORIZED'] as const;
+
+/**
+ * The buyer's cancellation (`POST /v1/returns/{id}/cancellation`, Codex r1 on #339 finding 1): the
+ * status the caller saw when it chose to cancel. **Required** — a cancellation is conditional, and
+ * judged under the request's row lock: a request that has moved on since (the supplier authorized
+ * it between the portal's read and this POST) is refused with `409 OPTIMISTIC_LOCK_FAILED` and
+ * nothing is written. Part of the request body, so of the Idempotency-Key's fingerprint: the same
+ * key with another expected status is `409 IDEMPOTENCY_KEY_REUSED`.
+ */
+export const cancelReturnSchema = z
+  .object({ expectedStatus: z.enum(CANCELLABLE_STATUSES) })
+  .strict();
+
+export type CancelReturnDto = z.infer<typeof cancelReturnSchema>;
+
 export const listReturnsQuerySchema = z
   .object({
     status: z.enum(RETURN_STATUSES).optional(),
@@ -113,7 +130,9 @@ export interface ReturnRequestView {
   /**
    * When inventory-service reserved the dispatch of this request, before recording its shipment
    * (Q-133 (5)). Set while the request may still read AUTHORIZED — the shipment's own event moves
-   * it on later, or not while the mirror is off — and from then on it cannot be cancelled.
+   * it on later, or not while the mirror is off — and from then on it cannot be cancelled, unless
+   * a reconciliation with inventory releases it (`POST /v1/returns/{id}/dispatch-reconciliation`,
+   * Q-133 (9)(a)); then it is `null` again.
    */
   dispatchReservedAt: string | null;
 }
@@ -130,6 +149,12 @@ export interface ReturnDispatchSourceView {
   supplierOrganizationId: string;
   status: string;
   lines: ReturnLineView[];
+  /**
+   * The reservation the dispatch is recorded under (`RDR_<ULID>`), or `null` while none stands. A
+   * shipment carries it, so inventory can refuse one whose reservation was withdrawn by a
+   * reconciliation (Q-133 (9)(a)).
+   */
+  dispatchReservationId: string | null;
   dispatchReservedAt: string | null;
   /**
    * Whether a shipment may name fewer lines or units than were authorized:

@@ -18,7 +18,12 @@ import {
   searchProductsQuerySchema,
   updateOfferSchema,
 } from '../offer/dto';
-import { createReturnSchema, decideReturnSchema, listReturnsQuerySchema } from '../returns/dto';
+import {
+  cancelReturnSchema,
+  createReturnSchema,
+  decideReturnSchema,
+  listReturnsQuerySchema,
+} from '../returns/dto';
 
 /**
  * Completes the OpenAPI document Nest builds from the decorators.
@@ -51,6 +56,8 @@ const REQUEST_BODIES: Record<string, JsonSchema> = {
   // RUN-005: the order path parameter is `orderId` there, as the controller names it.
   'POST /v1/orders/{orderId}/returns': toJsonSchema(createReturnSchema),
   'POST /v1/returns/{id}/decisions': toJsonSchema(decideReturnSchema),
+  // Codex r1 on #339: a cancellation is conditional on the status the caller saw.
+  'POST /v1/returns/{id}/cancellation': toJsonSchema(cancelReturnSchema),
 };
 
 /** Query schemas, so filtering and pagination are described, not implied. */
@@ -97,6 +104,7 @@ const IDEMPOTENT_ROUTES = new Set([
   'POST /v1/orders/{orderId}/returns',
   'POST /v1/returns/{id}/decisions',
   'POST /v1/returns/{id}/cancellation',
+  'POST /v1/returns/{id}/dispatch-reconciliation',
 ]);
 
 /**
@@ -132,7 +140,9 @@ const ERRORS: Record<string, readonly number[]> = {
   'GET /v1/returns/{id}': READ_ONE,
   'POST /v1/orders/{orderId}/returns': WRITE,
   'POST /v1/returns/{id}/decisions': WRITE,
-  'POST /v1/returns/{id}/cancellation': WRITE,
+  // Both ask inventory-service before writing (Q-133 (9)): 503/504 when it cannot be asked.
+  'POST /v1/returns/{id}/cancellation': [...WRITE, 503, 504],
+  'POST /v1/returns/{id}/dispatch-reconciliation': [...COMMON, 404, 409, 422, 503, 504],
   // The internal routes (ADR-061 § 4, Q-133 (5)): one named service, no user. The reservation is
   // 422 for a request that is not AUTHORIZED, 409 only if its row moved under a held lock.
   'GET /v1/internal/returns/{id}': READ_ONE,
@@ -172,6 +182,8 @@ const STATUS_TEXT: Record<number, string> = {
   409: 'Conflict: the resource already exists, the state transition is illegal, or another request changed it first',
   422: 'The request is well-formed but a business rule refuses it (see `code` and the `rule` it names)',
   500: 'Unexpected server error',
+  503: 'A service this answer depends on could not be asked or gave no valid answer (UPSTREAM_UNAVAILABLE); nothing was written',
+  504: 'A service this answer depends on did not answer in time (UPSTREAM_TIMEOUT); nothing was written',
 };
 
 /**

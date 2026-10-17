@@ -307,3 +307,62 @@ export const returnTrackingViewSchema = z
   })
   .strict();
 export type ReturnTrackingView = z.infer<typeof returnTrackingViewSchema>;
+
+// ---------------------------------------------------------------------------
+// The internal routes marketplace-service asks (Q-133 (9); ADR-061 § 4)
+// ---------------------------------------------------------------------------
+
+/** A marketplace return request id in a path, `RET_<ULID>`: anything else is a 400. */
+export const internalReturnRequestIdSchema = z.string().regex(new RegExp(`^RET_${ULID}$`));
+
+/** A marketplace dispatch reservation id, `RDR_<ULID>`. */
+export const dispatchReservationIdSchema = z
+  .string()
+  .regex(new RegExp(`^RDR_${ULID}$`))
+  .describe(
+    'The dispatch reservation marketplace-service gave this return request (`RDR_<ULID>`). A ' +
+      'return shipment is recorded under it; once withdrawn here, none ever is.',
+  );
+
+/** `POST /v1/internal/return-requests/{id}/dispatch-withdrawal`. */
+export const withdrawDispatchSchema = z
+  .object({ reservationId: dispatchReservationIdSchema })
+  .strict();
+export type WithdrawDispatchDto = z.infer<typeof withdrawDispatchSchema>;
+
+const shipmentRefSchema = z
+  .object({ id: z.string(), status: z.enum(RETURN_SHIPMENT_STATES) })
+  .strict();
+
+/** `GET /v1/internal/return-requests/{id}/return-shipment`: the shipment, or `null` — never 404. */
+export const returnRequestShipmentViewSchema = z
+  .object({
+    returnRequestId: z.string(),
+    returnShipment: shipmentRefSchema
+      .nullable()
+      .describe(
+        'The return shipment recorded for the request in the books of the organization the ' +
+          'internal token is signed for, whatever its status — or `null`: there is none.',
+      ),
+  })
+  .strict();
+export type ReturnRequestShipmentView = z.infer<typeof returnRequestShipmentViewSchema>;
+
+/** The answer to a withdrawal: the reservation is withdrawn, or the request has a shipment here. */
+export const dispatchWithdrawalViewSchema = z
+  .object({
+    outcome: z
+      .enum(['WITHDRAWN', 'DISPATCHED'])
+      .describe(
+        'WITHDRAWN: the request has no shipment here, and none will ever be recorded under this ' +
+          'reservation. DISPATCHED: a shipment exists for the request; nothing was withdrawn.',
+      ),
+    returnRequestId: z.string(),
+    reservationId: z.string(),
+    withdrawnAt: z.string().nullable().describe('When it was withdrawn; `null` when DISPATCHED.'),
+    returnShipment: shipmentRefSchema
+      .nullable()
+      .describe('The shipment the request has here when DISPATCHED; `null` when WITHDRAWN.'),
+  })
+  .strict();
+export type DispatchWithdrawalView = z.infer<typeof dispatchWithdrawalViewSchema>;

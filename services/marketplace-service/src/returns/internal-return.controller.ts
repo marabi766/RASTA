@@ -49,7 +49,9 @@ export class InternalReturnController {
     description:
       `${CALLER_RULE} Under the request’s row lock — the lock a cancellation takes — records that ` +
       'the supplier’s inventory is about to send its goods: from then on the buyer cannot cancel ' +
-      'it, even while it still reads AUTHORIZED (Q-133 (5)). Idempotent: a reserved request ' +
+      'it, even while it still reads AUTHORIZED (Q-133 (5)). Each reservation has its own id ' +
+      '(`dispatchReservationId`, `RDR_<ULID>`): the shipment is recorded under it, and a ' +
+      'reconciliation withdraws exactly it (Q-133 (9)(a)). Idempotent: a reserved request ' +
       'answers as it stands. A request that is not AUTHORIZED — not yet decided, rejected, ' +
       'cancelled, or already moved on by its shipment’s event — is 422 BUSINESS_RULE_VIOLATION ' +
       'and nothing is written. No body; answers the request as `GET` does.',

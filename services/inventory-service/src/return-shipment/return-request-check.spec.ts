@@ -16,6 +16,7 @@ const request = (change: Partial<ReturnRequestFact> = {}): ReturnRequestFact => 
     { orderLineId: 'OLN_A', productId: 'PRD_A', quantity: 3 },
     { orderLineId: 'OLN_B', productId: 'PRD_B', quantity: 2 },
   ],
+  dispatchReservationId: null,
   dispatchReservedAt: null,
   partialDispatchAllowed: false,
   ...change,

@@ -74,6 +74,8 @@ export const returnRequestFactSchema = z.object({
       }),
     )
     .min(1),
+  /** The reservation a shipment is recorded under (Q-133 (9)(a)); `null` while none stands. */
+  dispatchReservationId: z.string().nullable(),
   dispatchReservedAt: z.string().nullable(),
   partialDispatchAllowed: z.boolean(),
 });

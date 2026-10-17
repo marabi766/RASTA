@@ -45,7 +45,10 @@ export interface LockedReturnRow {
   /** The inventory shipment mirrored onto it, once goods are on the road (RUN-005 PR 3). */
   returnShipmentId: string | null;
   /** inventory-service reserved its dispatch (Q-133 (5)): it can no longer be cancelled. */
+  dispatchReservationId: string | null;
   dispatchReservedAt: Date | null;
+  dispatchReservedBy: string | null;
+  dispatchReservedCorrelationId: string | null;
   updatedAt: Date;
 }
 
@@ -58,7 +61,10 @@ interface RawLockedReturn {
   version: number;
   authorized_at: Date | null;
   return_shipment_id: string | null;
+  dispatch_reservation_id: string | null;
   dispatch_reserved_at: Date | null;
+  dispatch_reserved_by: string | null;
+  dispatch_reserved_correlation_id: string | null;
   updated_at: Date;
 }
 
@@ -111,7 +117,8 @@ export class ReturnRepository {
       'a return request names two organizations and its supplier decides it; the party check follows in access',
       () => tx.$queryRaw<RawLockedReturn[]>`
         SELECT id, organization_id, supplier_organization_id, order_id, status, version,
-               authorized_at, return_shipment_id, dispatch_reserved_at, updated_at
+               authorized_at, return_shipment_id, dispatch_reservation_id, dispatch_reserved_at,
+               dispatch_reserved_by, dispatch_reserved_correlation_id, updated_at
         FROM "return_request"
         WHERE id = ${id}
         FOR UPDATE
@@ -128,7 +135,10 @@ export class ReturnRepository {
       version: row.version,
       authorizedAt: row.authorized_at,
       returnShipmentId: row.return_shipment_id,
+      dispatchReservationId: row.dispatch_reservation_id,
       dispatchReservedAt: row.dispatch_reserved_at,
+      dispatchReservedBy: row.dispatch_reserved_by,
+      dispatchReservedCorrelationId: row.dispatch_reserved_correlation_id,
       updatedAt: row.updated_at,
     };
   }
@@ -188,7 +198,7 @@ export class ReturnRepository {
   async reserveDispatch(
     tx: ExtendedPrismaClient,
     locked: LockedReturnRow,
-    data: { at: Date; by: string; correlationId: string },
+    data: { reservationId: string; at: Date; by: string; correlationId: string },
   ): Promise<boolean> {
     const { count } = await runUnscoped(
       'the supplier’s inventory reserves the dispatch of a request locked above under its version',
@@ -196,6 +206,7 @@ export class ReturnRepository {
         tx.returnRequest.updateMany({
           where: { id: locked.id, version: locked.version, dispatchReservedAt: null },
           data: {
+            dispatchReservationId: data.reservationId,
             dispatchReservedAt: data.at,
             dispatchReservedBy: data.by,
             dispatchReservedCorrelationId: data.correlationId,
@@ -204,6 +215,69 @@ export class ReturnRepository {
         }),
     );
     return count === 1;
+  }
+
+  /**
+   * Releases the reservation a request locked above holds, after inventory withdrew it (Q-133
+   * (9)(a)): its record first — the trigger checks it copies the reservation the request holds —
+   * then the request's reservation columns, which the trigger clears only beside that record.
+   * Compare-and-set on the version and on the reservation id, so a reservation that changed under
+   * a lock somehow not held releases nothing. Crosses the guard as {@link advance} does: either
+   * party may ask, and the record carries the buyer's tenant, as the history does.
+   */
+  async releaseDispatch(
+    tx: ExtendedPrismaClient,
+    locked: LockedReturnRow & {
+      dispatchReservationId: string;
+      dispatchReservedAt: Date;
+      dispatchReservedBy: string;
+      dispatchReservedCorrelationId: string;
+    },
+    data: {
+      id: string;
+      withdrawnAt: Date;
+      at: Date;
+      by: string;
+      correlationId: string;
+      commandKeyHash: string;
+    },
+  ): Promise<boolean> {
+    return runUnscoped(
+      'a party reconciles the dispatch of a request locked above, on inventory’s answer',
+      async () => {
+        await tx.returnDispatchRelease.create({
+          data: {
+            id: data.id,
+            organizationId: locked.organizationId,
+            returnRequestId: locked.id,
+            reservationId: locked.dispatchReservationId,
+            reservedAt: locked.dispatchReservedAt,
+            reservedBy: locked.dispatchReservedBy,
+            reservedCorrelationId: locked.dispatchReservedCorrelationId,
+            withdrawnAt: data.withdrawnAt,
+            releasedAt: data.at,
+            releasedBy: data.by,
+            releasedCorrelationId: data.correlationId,
+            commandKeyHash: data.commandKeyHash,
+          },
+        });
+        const { count } = await tx.returnRequest.updateMany({
+          where: {
+            id: locked.id,
+            version: locked.version,
+            dispatchReservationId: locked.dispatchReservationId,
+          },
+          data: {
+            dispatchReservationId: null,
+            dispatchReservedAt: null,
+            dispatchReservedBy: null,
+            dispatchReservedCorrelationId: null,
+            updatedAt: data.at,
+          },
+        });
+        return count === 1;
+      },
+    );
   }
 
   /** One request with its lines, for either party — the caller checks which. */

@@ -66,6 +66,12 @@ export const REFUSAL_REASONS = {
     RETURN_LINES_MISMATCH: 422,
     /** Received already: a return shipment is received once, from IN_TRANSIT. */
     RETURN_SHIPMENT_NOT_IN_TRANSIT: 409,
+    /**
+     * The dispatch reservation marketplace answered with was withdrawn here by a reconciliation
+     * (Q-133 (9)(a)): no shipment is recorded under it. Once marketplace has released it, a new
+     * dispatch takes a new reservation.
+     */
+    RETURN_DISPATCH_WITHDRAWN: 409,
     /** The lines of a receipt are not exactly the lines the shipment was dispatched with. */
     RECEIPT_LINES_MISMATCH: 422,
     /** A line arrived in a larger quantity than it was said to be coming in. */

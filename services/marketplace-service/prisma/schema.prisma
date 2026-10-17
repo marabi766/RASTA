@@ -500,7 +500,9 @@ model ReturnRequest {
   resolvedAt                 DateTime? @map("resolved_at") @db.Timestamptz(3)
 
   /// inventory-service reserved the dispatch of this AUTHORIZED request before recording its
-  /// shipment (Q-133 (5)): from then on the buyer cannot cancel it. Written once, never changed.
+  /// shipment (Q-133 (5)): from then on the buyer cannot cancel it. Never changed while it stands;
+  /// cleared only beside a `ReturnDispatchRelease` (Q-133 (9)(a)). `RDR_<ULID>`, never reused.
+  dispatchReservationId         String?   @map("dispatch_reservation_id")
   dispatchReservedAt            DateTime? @map("dispatch_reserved_at") @db.Timestamptz(3)
   /// The service whose authenticated token reserved it.
   dispatchReservedBy            String?   @map("dispatch_reserved_by")
@@ -508,8 +510,9 @@ model ReturnRequest {
 
   updatedAt DateTime @map("updated_at") @db.Timestamptz(3)
 
-  lines   ReturnLine[]
-  history ReturnStatusHistory[]
+  lines    ReturnLine[]
+  history  ReturnStatusHistory[]
+  releases ReturnDispatchRelease[]
 
   @@unique([organizationId, commandKeyHash], map: "ux_return_request_command")
   @@unique([organizationId, returnShipmentId], map: "ux_return_request_shipment")
@@ -562,6 +565,39 @@ model ReturnStatusHistory {
   @@unique([organizationId, returnRequestId, version], map: "ux_return_history_version")
   @@unique([organizationId, commandKeyHash], map: "ux_return_history_command")
   @@map("return_status_history")
+}
+
+/// Append-only: one reconciliation with inventory-service that released one dispatch reservation
+/// (Q-133 (9)(a)). Inventory first recorded the reservation as withdrawn — so a delayed dispatch
+/// carrying it is refused there — and only then was it cleared from the request, beside this row.
+model ReturnDispatchRelease {
+  /// `RDL_<ULID>`.
+  id String @id
+
+  /// The buyer — the request's tenant.
+  organizationId  String        @map("organization_id")
+  returnRequestId String        @map("return_request_id")
+  returnRequest   ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Restrict)
+
+  /// The reservation cleared, as the request held it.
+  reservationId         String   @map("reservation_id")
+  reservedAt            DateTime @map("reserved_at") @db.Timestamptz(3)
+  reservedBy            String   @map("reserved_by")
+  reservedCorrelationId String   @map("reserved_correlation_id")
+
+  /// inventory-service's answer: when it recorded the reservation as withdrawn.
+  withdrawnAt DateTime @map("withdrawn_at") @db.Timestamptz(3)
+
+  releasedAt            DateTime @map("released_at") @db.Timestamptz(3)
+  releasedBy            String   @map("released_by")
+  releasedCorrelationId String   @map("released_correlation_id")
+  /// SHA-256 of route + request + Idempotency-Key; never the raw key (S-09).
+  commandKeyHash        String   @map("command_key_hash")
+
+  @@unique([organizationId, reservationId], map: "ux_return_dispatch_release_reservation")
+  @@unique([organizationId, commandKeyHash], map: "ux_return_dispatch_release_command")
+  @@index([organizationId, returnRequestId], map: "ix_return_dispatch_release_request")
+  @@map("return_dispatch_release")
 }
 
 model Review {
