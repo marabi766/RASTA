@@ -19,6 +19,7 @@ import { TENDER_ID } from '@/test/owner-fixtures';
 
 import { OwnerCommandForm } from './[id]/OwnerCommandForm';
 import { OwnerCommands } from './[id]/OwnerCommands';
+import { OwnTenderDetailScreen } from './[id]/TenderDetailScreen';
 import type { OwnerFormState } from './[id]/owner-form-state';
 
 jest.setTimeout(20_000);
@@ -243,8 +244,57 @@ it('after a reload the record is view-only instead of any fresh form, until set 
   expect(screen.queryByRole('button')).toBeNull();
   const aside = screen.getByRole('link', { name: /این درخواست را کنار بگذار/ });
   expect(await axe(container)).toHaveNoViolations();
+  aside.addEventListener('click', (event) => event.preventDefault());
   fireEvent.click(aside);
   expect(stored()).toBeNull();
+});
+
+it('an authority’s decision on its last step, its answer lost: after the reload the absence and, beside it, the record and its set-aside (PR 346 review 4)', async () => {
+  saveUnresolvedOwnerCommand(
+    TENDER_ID,
+    { command: 'GRANT_AWARD', submissionId: KEY, correlationId: null },
+    OWNER,
+  );
+  // The page as `page.tsx` draws it once the inbox holds no pending step: the absence, and the
+  // session's recovery next to it.
+  const absence = (owner: string) => (
+    <>
+      <OwnTenderDetailScreen result={{ kind: 'NOT_FOUND' }} criteria={null} />
+      <OwnerCommands
+        tenderId={TENDER_ID}
+        offered={[]}
+        csrfToken="csrf"
+        owner={owner}
+        pageHref={PAGE}
+        showsRestored
+        pageSubmissionIds={[]}
+      />
+    </>
+  );
+  const { container, unmount } = render(absence(OWNER));
+  expect(screen.getByText('این مناقصه پیدا نشد')).toBeInTheDocument();
+  expect(screen.getByText(/این درخواست پیش از تازه‌شدن صفحه فرستاده شد/)).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: /موافقت با واگذاری/ })).toBeInTheDocument();
+  expect(screen.queryByRole('button')).toBeNull();
+  const aside = screen.getByRole('link', { name: /این درخواست را کنار بگذار/ });
+  expect(aside).toHaveAttribute('href', PAGE);
+  expect(await axe(container)).toHaveNoViolations();
+  // jsdom does not navigate; the set-aside's own handler runs all the same.
+  aside.addEventListener('click', (event) => event.preventDefault());
+  fireEvent.click(aside);
+  expect(stored()).toBeNull();
+  unmount();
+
+  // Another session's page shows no record of this one, and nothing beside the absence.
+  saveUnresolvedOwnerCommand(
+    TENDER_ID,
+    { command: 'GRANT_AWARD', submissionId: KEY, correlationId: null },
+    OWNER,
+  );
+  render(absence('owner-tag-B'));
+  expect(screen.getByText('این مناقصه پیدا نشد')).toBeInTheDocument();
+  expect(screen.queryByText(/این درخواست پیش از تازه‌شدن صفحه فرستاده شد/)).toBeNull();
+  expect(screen.queryByRole('link', { name: /این درخواست را کنار بگذار/ })).toBeNull();
 });
 
 it('one slot per tender: another submission’s record is never replaced, the form not sent', async () => {

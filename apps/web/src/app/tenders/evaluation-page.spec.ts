@@ -114,6 +114,13 @@ function elements(node: unknown, out: ReactElement[] = []): ReactElement[] {
 
 const ofType = (tree: ReactNode, type: unknown) => elements(tree).filter((e) => e.type === type);
 
+/** The session's recovery beside an absence: no form of its own, a restored record drawn here. */
+const recoveries = (tree: ReactNode) =>
+  ofType(tree, OwnerCommands).filter((e) => {
+    const props = e.props as { offered: unknown[]; showsRestored?: boolean; tenderId: string };
+    return props.offered.length === 0 && props.showsRestored === true && props.tenderId === 'TND_1';
+  });
+
 const offered = (tree: ReactNode): string[] =>
   ofType(tree, OwnerCommands).flatMap((element) =>
     (element.props as { offered: { command: string }[] }).offered.map(({ command }) => command),
@@ -407,6 +414,9 @@ it('an approval authority of another organization decides its step of the tender
   expect(ofType(absent, AuthorityScreen)).toHaveLength(0);
   const [screen] = ofType(absent, OwnTenderDetailScreen);
   expect((screen?.props as { result: unknown }).result).toEqual({ kind: 'NOT_FOUND' });
+  // A decision on its last step whose answer was lost leaves the inbox empty: the session's record
+  // and its set-aside are still drawn beside the absence (PR 346 review 4).
+  expect(recoveries(absent)).toHaveLength(1);
 });
 
 it('the authority’s decision just made, its step gone from the inbox: the confirmation, only as minted for this session and tender', async () => {

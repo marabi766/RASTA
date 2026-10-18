@@ -176,7 +176,16 @@ export default async function TenderPage({
       result.kind === 'NOT_FOUND' || result.kind === 'FORBIDDEN'
         ? await authorityBody(session, id, query)
         : null;
-    body = authority ?? <OwnTenderDetailScreen result={result} criteria={criteria} owner={owner} />;
+    body =
+      authority ??
+      (result.kind === 'OK' ? (
+        <OwnTenderDetailScreen result={result} criteria={criteria} owner={owner} />
+      ) : (
+        <>
+          <OwnTenderDetailScreen result={result} criteria={criteria} />
+          {sessionRecovery(session, id)}
+        </>
+      ));
   }
 
   return (
@@ -325,18 +334,8 @@ async function authorityBody(
       flash={
         <>
           <OwnerFlash done={done} />
-          {load.views.length === 0 ? (
-            // No step drawn: a record restored after a reload is still shown, here.
-            <OwnerCommands
-              tenderId={id}
-              offered={[]}
-              csrfToken={session.csrfToken}
-              owner={submissionBinding(session).owner}
-              pageHref={tenderDetailPath(id, 'own')}
-              showsRestored
-              pageSubmissionIds={pageSubmissionIds}
-            />
-          ) : null}
+          {/* No step drawn: a record restored after a reload is still shown, here. */}
+          {load.views.length === 0 ? sessionRecovery(session, id) : null}
         </>
       }
       steps={authorityStepViews(session, id, load.views, pageSubmissionIds, true)}
@@ -361,7 +360,39 @@ async function absentOrAuthority(
     result.kind === 'NOT_FOUND' || result.kind === 'FORBIDDEN'
       ? await authorityBody(session, id, query)
       : null;
-  return authority ?? <OwnTenderDetailScreen result={result} criteria={null} />;
+  return (
+    authority ?? (
+      <>
+        <OwnTenderDetailScreen result={result} criteria={null} />
+        {sessionRecovery(session, id)}
+      </>
+    )
+  );
+}
+
+/**
+ * A command of this session on this tender whose answer was lost, restored after
+ * a reload where no form of it is drawn (PR 346 review 4): an authority's grant
+ * or rejection of its last pending step leaves its inbox empty, and the page is
+ * the absence — the record and its set-aside are kept beside it. It is this
+ * browser's own record, bound to this session (`submissionBinding`), drawn on
+ * the client only once storage is read: the server's page is the same for a
+ * tender that exists and one that does not, and says nothing of either.
+ */
+function sessionRecovery(session: WebSession, tenderId: string): ReactNode {
+  return (
+    <div className="mt-6">
+      <OwnerCommands
+        tenderId={tenderId}
+        offered={[]}
+        csrfToken={session.csrfToken}
+        owner={submissionBinding(session).owner}
+        pageHref={tenderDetailPath(tenderId, 'own')}
+        showsRestored
+        pageSubmissionIds={[]}
+      />
+    </div>
+  );
 }
 
 /** Every owner form's submission id on the page, all groups'. */

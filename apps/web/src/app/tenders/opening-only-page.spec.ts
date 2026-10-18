@@ -112,6 +112,13 @@ function elements(node: unknown, out: ReactElement[] = []): ReactElement[] {
 
 const ofType = (tree: ReactNode, type: unknown) => elements(tree).filter((e) => e.type === type);
 
+/** The session's recovery beside an absence: no form of its own, a restored record drawn here. */
+const recoveries = (tree: ReactNode) =>
+  ofType(tree, OwnerCommands).filter((e) => {
+    const props = e.props as { offered: unknown[]; showsRestored?: boolean; tenderId: string };
+    return props.offered.length === 0 && props.showsRestored === true && props.tenderId === 'TND_1';
+  });
+
 const offered = (tree: ReactNode): string[] =>
   ofType(tree, OwnerCommands).flatMap((element) =>
     (element.props as { offered: { command: string }[] }).offered.map(({ command }) => command),
@@ -160,6 +167,8 @@ it('another organization’s tender or a missing one is the absence the tender r
   const [screen] = ofType(tree, OwnTenderDetailScreen);
   expect((screen?.props as { result: unknown }).result).toEqual({ kind: 'NOT_FOUND' });
   expect(offered(tree)).toEqual([]);
+  // Beside the absence, the session's own lost command, if this browser holds one (PR 346 review 4).
+  expect(recoveries(tree)).toHaveLength(1);
 });
 
 it('an approval authority of another organization whose role also opens bids reaches its step after the bids are refused (PR 346 review 2, finding 2)', async () => {

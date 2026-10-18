@@ -180,7 +180,10 @@ Persian digits (`۸٫۵`, and a pass), sees the weighted total, completes the ev
 told the award is someone else's (`AWARDER_NOT_EVALUATOR`); the author asks for the award and is
 offered neither the grant nor the rejection (the step names the reviewer's organization); the
 reviewer — whose read of the tender is a 404 — finds the step through the approval inbox, sees
-the bid it names and grants it; the author executes it (an execution whose answer is lost is set
+the bid it names and grants it — and, in a test of its own, a grant whose answer the browser
+loses (`page.route` lets the request through and drops the response): after the reload the
+inbox is empty and the page is the absence, with the session's record and its set-aside beside
+it; the author executes it (an execution whose answer is lost is set
 aside and executed anew from a fresh form, never re-sent), the award shows the winner's price,
 and the strangers still find nothing. Each contractor's own page shows its own bid's status and
 nothing of the other's or of the scores.

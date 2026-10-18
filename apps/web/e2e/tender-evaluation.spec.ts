@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test, type Browser, type Page } from '@playwright/test';
+import { expect, test, type Browser, type Page, type Route } from '@playwright/test';
 
 import {
   installLiveSession,
@@ -68,6 +68,7 @@ const [TECHNICAL, COMPLIANCE] = TENDER_CRITERIA;
 /** `lib/tender-owner-fields.ts`'s and `lib/tender-evaluation-fields.ts`'s fixed words. */
 const UNCONFIRMED = 'نتوانستیم تأیید کنیم که';
 const SET_ASIDE = 'وضعیت مناقصه را دیدم؛ این درخواست را کنار بگذار';
+const RESTORED = 'این درخواست پیش از تازه‌شدن صفحه فرستاده شد';
 const AWARDER_IS_EVALUATOR = 'شما در ارزیابی این مناقصه نقش داشته‌اید';
 
 async function expectAccessible(page: Page): Promise<void> {
@@ -315,6 +316,57 @@ test.describe('the evaluation and the award of a tender, live (EXP-004)', () => 
         .click();
       await expect(page.getByText('موافقت شما با واگذاری ثبت شد.')).toBeVisible();
       await expect(page.getByRole('form')).toHaveCount(0);
+    } finally {
+      await close();
+    }
+  });
+
+  test('the reviewer’s grant of its last step, its answer lost: the reload keeps the record beside the absence, and it is set aside (PR 346 review 4)', async ({
+    browser,
+  }) => {
+    const cast = await freshCast(made);
+    const tender = await awardRequestedTender(cast, PRICE);
+    const awardRequest = async () =>
+      (
+        (await gateway(
+          cast.author,
+          'GET',
+          `/v1/tenders/${tender.id}/approvals?workflowKey=tender.award&limit=1`,
+          200,
+        )) as { items: { status: string }[] }
+      ).items[0]?.status;
+    const { page, close } = await as(browser, cast.reviewerPerson!);
+    try {
+      await page.goto(ownPage(tender.id));
+      // The decision reaches the service and is kept; its answer never reaches the browser.
+      const lose = async (route: Route) => {
+        if (route.request().method() === 'POST' && route.request().headers()['next-action']) {
+          await route.fetch();
+          await route.abort('connectionreset');
+        } else {
+          await route.continue();
+        }
+      };
+      await page.route('**/tenders/**', lose);
+      await form(page, 'موافقت با واگذاری')
+        .getByRole('button', { name: 'موافقت با واگذاری' })
+        .click();
+      await expect(page.getByText(UNCONFIRMED)).toBeVisible();
+      await page.unroute('**/tenders/**', lose);
+      await expect.poll(awardRequest, { timeout: 30_000 }).toBe('APPROVED');
+
+      // The inbox holds no pending step now: the page is the absence, the record beside it.
+      await page.reload();
+      await expect(page.getByText('این مناقصه پیدا نشد')).toBeVisible();
+      await expect(page.getByText(RESTORED)).toBeVisible();
+      await expect(page.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toHaveCount(0);
+      await expectAccessible(page);
+      await page.getByRole('link', { name: SET_ASIDE }).click();
+      await page.waitForLoadState();
+      await expect(page.getByText('این مناقصه پیدا نشد')).toBeVisible();
+      await expect(page.getByText(RESTORED)).toHaveCount(0);
+      await page.reload();
+      await expect(page.getByText(RESTORED)).toHaveCount(0);
     } finally {
       await close();
     }
