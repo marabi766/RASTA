@@ -25,7 +25,12 @@ import {
   isBidSideOnly,
   readsEvaluation,
 } from '@/server/tender-evaluation';
-import { authorityOffers, fetchAuthoritySteps } from '@/server/tender-authority';
+import {
+  INBOX_CURSOR_PARAM,
+  authorityOffers,
+  fetchAuthoritySteps,
+  inboxCursor,
+} from '@/server/tender-authority';
 import {
   canOpenBids,
   decidableStep,
@@ -205,13 +210,23 @@ async function authorityBody(
   id: string,
   query: Record<string, string | string[] | undefined>,
 ): Promise<ReactNode | null> {
-  const steps = await fetchAuthoritySteps(session, id);
+  const from = inboxCursor(query[INBOX_CURSOR_PARAM]);
+  const steps = await fetchAuthoritySteps(session, id, from);
   if (steps.kind !== 'OK') return null;
   const flash = query[FLASH_PARAM];
   const done = readFlash(session, typeof flash === 'string' ? flash : undefined, id, OWNER_DONE);
   // A decision just made leaves no pending step in the inbox; its confirmation, minted for this
-  // session and this tender after the service accepted it, is still shown.
-  if (steps.data.items.length === 0 && done === undefined) return null;
+  // session and this tender after the service accepted it, is still shown. An inbox longer than
+  // the walk is never an absence: it may hold this tender's step further on (PR 346 review 2,
+  // finding 3). Neither says anything of the tender — the walk is the caller's own inbox.
+  if (
+    steps.data.items.length === 0 &&
+    done === undefined &&
+    !steps.data.truncated &&
+    from === null
+  ) {
+    return null;
+  }
   const caller = ownerCallerOf(session.accessToken);
   // One step's forms each, so a step's decisions are drawn under that step alone.
   const views = steps.data.items.map((item) => {
@@ -224,10 +239,17 @@ async function authorityBody(
   );
   const ownerTag = submissionBinding(session).owner;
   const pageHref = tenderDetailPath(id, 'own');
+  const resume = steps.data.resumeFrom;
   return (
     <AuthorityScreen
       tenderId={id}
       truncated={steps.data.truncated}
+      continueHref={
+        resume === null
+          ? null
+          : `${pageHref}&${new URLSearchParams({ [INBOX_CURSOR_PARAM]: resume })}`
+      }
+      restartHref={from === null ? null : pageHref}
       flash={<OwnerFlash done={done} />}
       steps={views.map(({ item, notes, decisions }, index) => ({
         step: item.detail.kind === 'OK' ? item.detail.data : item.summary,
@@ -246,6 +268,26 @@ async function authorityBody(
       }))}
     />
   );
+}
+
+/**
+ * A bid-side read refused: the tender is not this organization's, or not one the
+ * caller's roles reach — and an approval authority of another organization whose
+ * role is also an opener's or evaluator's lands here too (PR 346 review 2,
+ * finding 2). Its steps of the tender come from its inbox; otherwise the
+ * absence the read showed, or its failure as it was.
+ */
+async function absentOrAuthority(
+  session: WebSession,
+  id: string,
+  query: Record<string, string | string[] | undefined>,
+  result: Exclude<ReadResult<TenderDetail>, { readonly kind: 'OK' }>,
+): Promise<ReactNode> {
+  const authority =
+    result.kind === 'NOT_FOUND' || result.kind === 'FORBIDDEN'
+      ? await authorityBody(session, id, query)
+      : null;
+  return authority ?? <OwnTenderDetailScreen result={result} criteria={null} />;
 }
 
 /** Every owner form's submission id on the page, all groups'. */
@@ -270,9 +312,7 @@ async function bidSideOnlyBody(
   const caller = ownerCallerOf(session.accessToken);
   const opens = canOpenBids(caller, settings);
   const bids = opens ? await fetchOwnerBids(session, id) : null;
-  if (bids !== null && bids.kind !== 'OK') {
-    return <OwnTenderDetailScreen result={bids} criteria={null} />;
-  }
+  if (bids !== null && bids.kind !== 'OK') return absentOrAuthority(session, id, query, bids);
   const opened = bids === null || bids.data.opened;
   const matrix =
     canEvaluate(caller, settings) && opened ? await fetchEvaluation(session, id) : null;
@@ -281,7 +321,7 @@ async function bidSideOnlyBody(
     matrix !== null &&
     (matrix.kind === 'NOT_FOUND' || matrix.kind === 'FORBIDDEN')
   ) {
-    return <OwnTenderDetailScreen result={matrix} criteria={null} />;
+    return absentOrAuthority(session, id, query, matrix);
   }
   const evaluation = evaluationOffers(caller, matrix, settings);
   const forms = ownerCommandOffers(

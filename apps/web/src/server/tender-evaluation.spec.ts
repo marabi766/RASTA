@@ -46,6 +46,7 @@ import {
   outcomeOf,
   ownerCallerOf,
   ownerRequest,
+  readsOwnerBids,
   type OwnerBids,
   type OwnerBinding,
 } from './tender-owner';
@@ -463,10 +464,19 @@ describe('the award’s offers', () => {
         SETTINGS,
       ),
     ).toEqual({ offers: [], notes: ['AWARD_REQUESTS_UNREAD'] });
+    // The matrix refused and no opener's list asked for: no candidate read is this person's.
     expect(awardOffers(awarder, state({ matrix: { kind: 'FORBIDDEN' } }), SETTINGS)).toEqual({
       offers: [],
-      notes: ['AWARD_MATRIX_UNREAD', 'AWARD_BIDS_UNREAD'],
+      notes: ['AWARD_CANDIDATES_UNREADABLE'],
     });
+    // A read that is theirs but failed: try again later.
+    expect(
+      awardOffers(
+        awarder,
+        state({ matrix: { kind: 'UNAVAILABLE', status: 503, correlationId: 'c' } }),
+        SETTINGS,
+      ),
+    ).toEqual({ offers: [], notes: ['AWARD_BIDS_UNREAD'] });
     expect(
       awardOffers(awarder, state({ tender: { status: 'AWARDED', version: 9 } }), SETTINGS),
     ).toEqual({
@@ -540,6 +550,41 @@ describe('the award without the evaluators’ read (PR 346 review 1, finding 2)'
     expect(awardOffers(awarder, { ...approved, completedByCaller: true }, SETTINGS)).toEqual({
       offers: [],
       notes: ['AWARDER_IS_EVALUATOR'],
+    });
+  });
+
+  it('an owner awarder who is neither opener nor evaluator: the award section says starting needs those reads; an approved award is still executed (PR 346 review 2, finding 1)', () => {
+    const split = {
+      ...SETTINGS,
+      WEB_TENDER_AWARD_ROLES: ['UNION_ADMIN'],
+      WEB_TENDER_OPEN_ROLES: ['ORGANIZATION_ADMIN'],
+    };
+    const unionAwarder = person(['UNION_ADMIN'], AWARDER);
+    expect(canEvaluate(unionAwarder, split)).toBe(false);
+    expect(readsOwnerBids(unionAwarder, 'EVALUATED', split)).toBe(false);
+    expect(awardOffers(unionAwarder, { ...base, matrix: null, bids: null }, split)).toEqual({
+      offers: [],
+      notes: ['AWARD_CANDIDATES_UNREADABLE'],
+    });
+    const approved = {
+      ...base,
+      matrix: null,
+      bids: null,
+      request: ok(AWARD_APPROVED_REQUEST),
+      step: ok({ ...AWARD_STEP, status: 'GRANTED' }),
+    };
+    expect(awardOffers(unionAwarder, approved, split)).toEqual({
+      offers: [
+        {
+          command: 'AWARD',
+          bidId: 'BID_C',
+          award: {
+            justificationRequired: false,
+            execution: { justification: 'زمان اجرای کوتاه‌تر' },
+          },
+        },
+      ],
+      notes: ['AWARD_APPROVED'],
     });
   });
 

@@ -36,6 +36,9 @@ import {
  * step, the request, and — for an award — the bid it names.
  */
 
+/** The page's query parameter that resumes the walk through the inbox. */
+export const INBOX_CURSOR_PARAM = 'inbox';
+
 /** How many pages of the inbox are looked through for one tender's steps. */
 export const INBOX_PAGES = 5;
 /** `MAX_PAGE_SIZE`. */
@@ -93,21 +96,38 @@ export interface AuthorityItem {
 
 export interface AuthoritySteps {
   readonly items: readonly AuthorityItem[];
-  /** The inbox was longer than the pages looked through: a step of this tender may be further on. */
+  /**
+   * The inbox was longer than the pages looked through: a step of this tender may be further on,
+   * from `resumeFrom` (PR 346 review 2, finding 3 — the inbox has no tender filter).
+   */
   readonly truncated: boolean;
+  /** Where the next walk starts, when `truncated`: the service's own cursor. */
+  readonly resumeFrom: string | null;
+}
+
+/**
+ * A cursor the page was given back to resume from (`INBOX_CURSOR_PARAM`): the
+ * service's own opaque token, at most `cursorPaginationSchema`'s 512
+ * characters, printable and without spaces; anything else starts from the top.
+ */
+export function inboxCursor(value: unknown): string | null {
+  return typeof value === 'string' && /^[\x21-\x7e]{1,512}$/.test(value) ? value : null;
 }
 
 /**
  * This tender's pending publication and award steps in the caller's inbox,
- * each read on its own; `OK` with no items when the inbox holds none.
+ * each read on its own; `OK` with no items when the inbox holds none. At most
+ * `INBOX_PAGES` pages from `from` (the top when null): a longer inbox is
+ * `truncated`, and the walk resumes from `resumeFrom`.
  */
 export async function fetchAuthoritySteps(
   session: WebSession,
   tenderId: string,
+  from: string | null = null,
 ): Promise<ReadResult<AuthoritySteps>> {
   const found: AuthorityStep[] = [];
-  let cursor: string | null = null;
-  let truncated = false;
+  let cursor: string | null = from;
+  let resumeFrom: string | null = null;
   for (let page = 0; page < INBOX_PAGES; page += 1) {
     const search = new URLSearchParams({ status: 'PENDING', limit: String(INBOX_PAGE_SIZE) });
     if (cursor !== null) search.set('cursor', cursor);
@@ -120,8 +140,9 @@ export async function fetchAuthoritySteps(
     }
     if (!read.data.hasMore || read.data.nextCursor === null) break;
     cursor = read.data.nextCursor;
-    truncated = page === INBOX_PAGES - 1;
+    if (page === INBOX_PAGES - 1) resumeFrom = cursor;
   }
+  const truncated = resumeFrom !== null;
   const items: AuthorityItem[] = [];
   for (const summary of found) {
     const detail = await readOwnerView(
@@ -136,7 +157,7 @@ export async function fetchAuthoritySteps(
         detail.data.workflowKey === summary.workflowKey);
     items.push({ summary, detail: same ? detail : { kind: 'MALFORMED', correlationId: '' } });
   }
-  return { kind: 'OK', data: { items, truncated } };
+  return { kind: 'OK', data: { items, truncated, resumeFrom } };
 }
 
 export type AuthorityNote =

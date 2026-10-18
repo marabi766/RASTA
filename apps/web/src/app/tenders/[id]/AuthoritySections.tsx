@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 
-import { Alert, Identifier, IsolatedText, Section, StatusBadge } from '@/ui';
+import { Alert, ButtonLink, Identifier, IsolatedText, Section, StatusBadge } from '@/ui';
 import { formatJalaliDateTime, toPersianDigits } from '@/lib/format';
 import { awardRequestStatusLabel } from '@/lib/tender-evaluation-fields';
 import { stepStatusLabel } from '@/lib/tender-owner-fields';
@@ -43,12 +43,18 @@ export function AuthorityScreen({
   tenderId,
   steps,
   truncated,
+  continueHref = null,
+  restartHref = null,
   flash,
 }: {
   readonly tenderId: string;
   readonly steps: readonly AuthorityStepView[];
   /** The inbox was longer than the pages looked through. */
   readonly truncated: boolean;
+  /** Where the walk through the inbox goes on, when `truncated`. */
+  readonly continueHref?: string | null;
+  /** The walk's start, when this page began further on. */
+  readonly restartHref?: string | null;
   readonly flash?: ReactNode;
 }) {
   return (
@@ -57,20 +63,41 @@ export function AuthorityScreen({
         <p className="text-sm text-content-muted">
           شناسه <Identifier>{tenderId}</Identifier>
         </p>
-        <p className="mt-2 text-sm">
-          سیاست موافقتِ سازمان مالک، شما را مرجع این مناقصه نام برده است. مشخصات مناقصه از آنِ
-          سازمان مالک است و برای شما خوانده نمی‌شود؛ این صفحه فقط مرحله‌هایی را نشان می‌دهد که سرویس
-          به مرجع نشان می‌دهد.
-        </p>
+        {steps.length > 0 ? (
+          <p className="mt-2 text-sm">
+            سیاست موافقتِ سازمان مالک، شما را مرجع این مناقصه نام برده است. مشخصات مناقصه از آنِ
+            سازمان مالک است و برای شما خوانده نمی‌شود؛ این صفحه فقط مرحله‌هایی را نشان می‌دهد که
+            سرویس به مرجع نشان می‌دهد.
+          </p>
+        ) : (
+          <p className="mt-2 text-sm">
+            مشخصات این مناقصه برای شما خوانده نمی‌شود. اگر سیاست موافقتِ سازمان مالک شما را مرجع آن
+            نام برده باشد، مرحله‌اش در صندوق موافقت‌های شماست و این صفحه آن را آنجا می‌جوید.
+          </p>
+        )}
         {truncated ? (
           <Alert tone="warning">
-            صندوق موافقت‌های شما بیش از آن است که این صفحه همه را بخواند؛ ممکن است مرحلهٔ دیگری از
-            این مناقصه نشان داده نشده باشد.
+            صندوق موافقت‌های در انتظار شما بیش از آن است که این صفحه یک‌جا بخواند؛ ممکن است مرحلهٔ
+            {steps.length > 0 ? ' دیگری' : ''} از این مناقصه در ادامهٔ صندوق باشد.
           </Alert>
+        ) : null}
+        {continueHref || restartHref ? (
+          <div className="mt-3 flex flex-wrap gap-3">
+            {continueHref ? (
+              <ButtonLink href={continueHref} tone="secondary">
+                ادامهٔ جست‌وجو در صندوق موافقت‌ها
+              </ButtonLink>
+            ) : null}
+            {restartHref ? (
+              <ButtonLink href={restartHref} tone="quiet">
+                جست‌وجو از آغاز صندوق
+              </ButtonLink>
+            ) : null}
+          </div>
         ) : null}
       </Section>
       {flash}
-      {steps.length === 0 ? (
+      {steps.length === 0 && !truncated ? (
         <p className="text-sm text-content-muted">
           مرحلهٔ دیگری از این مناقصه در صندوق موافقت‌های شما در انتظار تصمیم نیست.
         </p>

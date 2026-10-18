@@ -492,4 +492,41 @@ describe('the award without the evaluators’ read, and an authority of another 
     expect(screen.getByText(/مشخصات مناقصه از آنِ سازمان مالک است/)).toBeInTheDocument();
     expect(await axe(container)).toHaveNoViolations();
   });
+
+  it('an inbox longer than the walk: no claim about the tender, the warning, and the way on and back (PR 346 review 2, finding 3)', async () => {
+    const { container } = render(
+      <AuthorityScreen
+        tenderId={TENDER_ID}
+        truncated
+        continueHref="/tenders/TND_1?view=own&inbox=APR_NEXT"
+        restartHref="/tenders/TND_1?view=own"
+        steps={[]}
+      />,
+    );
+    expect(screen.getByText(/مشخصات این مناقصه برای شما خوانده نمی‌شود/)).toBeInTheDocument();
+    expect(screen.queryByText(/شما را مرجع این مناقصه نام برده است/)).not.toBeInTheDocument();
+    expect(screen.getByText(/بیش از آن است که این صفحه یک‌جا بخواند/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'ادامهٔ جست‌وجو در صندوق موافقت‌ها' })).toHaveAttribute(
+      'href',
+      '/tenders/TND_1?view=own&inbox=APR_NEXT',
+    );
+    expect(screen.getByRole('link', { name: 'جست‌وجو از آغاز صندوق' })).toHaveAttribute(
+      'href',
+      '/tenders/TND_1?view=own',
+    );
+    expect(screen.queryByText(/در انتظار تصمیم نیست/)).not.toBeInTheDocument();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('an awarder who reads neither the matrix nor the bids: the fixed notice, no form (PR 346 review 2, finding 1)', async () => {
+    const { container } = awardPage({ notes: ['AWARD_CANDIDATES_UNREADABLE'], offered: [] });
+    expect(region('واگذاری')).toHaveTextContent(
+      /در این نسخهٔ پورتال، آغاز واگذاری به خواندن ماتریس ارزیابی یا فهرست پیشنهادهای گشوده نیاز دارد/,
+    );
+    expect(region('واگذاری')).toHaveTextContent(
+      /اجرای واگذاریِ موافقت‌شده به این خواندن نیاز ندارد/,
+    );
+    expect(screen.queryByRole('form')).not.toBeInTheDocument();
+    expect(await axe(container)).toHaveNoViolations();
+  });
 });

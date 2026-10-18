@@ -313,6 +313,16 @@ describe('an award without the evaluators’ read (PR 346 review 1, finding 2)',
   });
 });
 
+describe('no award-scoped read of the candidates (PR 346 review 2, finding 1 — a backend gap)', () => {
+  it('the award routes are the command and the stored award, which is a 404 until awarded', () => {
+    const routes = squash(awardController.getText())!.match(/@(Get|Post)\('[^']*'\)/g);
+    expect(routes).toEqual(["@Post('tenders/:id/award')", "@Get('tenders/:id/award')"]);
+    expect(method(awardServiceTree, 'getAward')).toContain(
+      "constrow=awaitthis.awards.findAward(tx,tenderId);if(!row)throwRastaError.notFound('TenderAward',tenderId);",
+    );
+  });
+});
+
 describe('an authority of another organization (PR 346 review 1, finding 3)', () => {
   it('finds its steps in its inbox and reads each on its own, never the tender', () => {
     expect(decoratorOf(approvalController, 'inbox', 'Get')?.arguments).toHaveLength(0);

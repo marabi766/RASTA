@@ -28,6 +28,8 @@ const ORG = 'ORG-DEH-0001';
 const mockSession = { current: null as unknown };
 const mockFetched: string[] = [];
 const mockAnswers: Record<string, unknown> = {};
+/** What each stubbed read was last asked with. */
+const mockArgs: Record<string, unknown[]> = {};
 
 /** The module as it is, with every `fetch*` read answered from `mockAnswers` and recorded. */
 function mockStubFetchers(path: string): Record<string, unknown> {
@@ -36,8 +38,9 @@ function mockStubFetchers(path: string): Record<string, unknown> {
     Object.entries(actual).map(([name, value]) => [
       name,
       name.startsWith('fetch') && typeof value === 'function'
-        ? async () => {
+        ? async (...args: unknown[]) => {
             mockFetched.push(name);
+            mockArgs[name] = args;
             return mockAnswers[name] ?? { kind: 'NOT_FOUND' };
           }
         : value,
@@ -66,6 +69,8 @@ type Page = (props: {
 }) => Promise<ReactElement>;
 const TenderPage = (require('./[id]/page') as { default: Page }).default;
 const { OwnerCommands } = require('./[id]/OwnerCommands') as typeof import('./[id]/OwnerCommands');
+const { AuthorityScreen } =
+  require('./[id]/AuthoritySections') as typeof import('./[id]/AuthoritySections');
 const { OpeningOnlyScreen, OwnerBidsSection } =
   require('./[id]/OwnerSections') as typeof import('./[id]/OwnerSections');
 const { OwnTenderDetailScreen } =
@@ -77,7 +82,7 @@ const { OPENED_BIDS, UNOPENED_BIDS } =
 const jwt = (claims: unknown): string =>
   `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`;
 
-function signedInWith(roles: string[]) {
+function signedInWith(roles: string[], uid = 'USR-1') {
   return {
     subject: 'user-1',
     username: 'u',
@@ -86,7 +91,7 @@ function signedInWith(roles: string[]) {
       org_id: ORG,
       org_ids: [ORG],
       org_roles: roles.map((role) => `${ORG}:${role}`),
-      rasta_uid: 'USR-1',
+      rasta_uid: uid,
     }),
     accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 300,
     refreshToken: 'refresh-token-value',
@@ -149,10 +154,55 @@ it('once the bids are opened it is shown them, and offered nothing', async () =>
 it('another organization’s tender or a missing one is the absence the tender read would show', async () => {
   mockSession.current = signedInWith(['FLEET_MANAGER']);
   const tree = await run('own');
-  expect(mockFetched).toEqual(['fetchOwnerBids']);
+  // Refused the bids, it is looked for in the caller's approval inbox, which holds nothing of it.
+  expect(mockFetched).toEqual(['fetchOwnerBids', 'fetchAuthoritySteps']);
   const [screen] = ofType(tree, OwnTenderDetailScreen);
   expect((screen?.props as { result: unknown }).result).toEqual({ kind: 'NOT_FOUND' });
   expect(offered(tree)).toEqual([]);
+});
+
+it('an approval authority of another organization whose role also opens bids reaches its step after the bids are refused (PR 346 review 2, finding 2)', async () => {
+  mockSession.current = signedInWith(['FLEET_MANAGER'], 'USR-REVIEWER');
+  const step = {
+    id: 'APR_PUB_1',
+    tenderId: 'TND_1',
+    workflowKey: 'tender.publication',
+    stepOrder: 1,
+    status: 'PENDING',
+    authorityOrganizationId: ORG,
+    authorityRole: 'FLEET_MANAGER',
+    authorityLabel: 'بازبین (نمونه)',
+    requestedAt: '2026-10-22T07:00:00.000Z',
+    version: 2,
+    project: { title: 'بهسازی راه روستایی' },
+    request: {
+      requestId: 'TAR_PUB_1',
+      tenderVersion: 4,
+      status: 'PENDING',
+      requestedBy: 'USR-AUTHOR',
+      bid: null,
+    },
+  };
+  mockAnswers.fetchAuthoritySteps = {
+    kind: 'OK',
+    data: {
+      items: [{ summary: step, detail: { kind: 'OK', data: step } }],
+      truncated: false,
+      resumeFrom: null,
+    },
+  };
+  const tree = await run('own');
+  expect(mockFetched).toEqual(['fetchOwnerBids', 'fetchAuthoritySteps']);
+  expect(ofType(tree, OwnTenderDetailScreen)).toHaveLength(0);
+  const [authority] = ofType(tree, AuthorityScreen);
+  const steps = (authority?.props as { steps: { commands: ReactNode }[] }).steps;
+  expect(offered(steps.map(({ commands }) => commands))).toEqual(['GRANT', 'REJECT']);
+  // A failure that is not a refusal stays the failure it was: no inbox is walked on it.
+  mockFetched.length = 0;
+  mockAnswers.fetchOwnerBids = { kind: 'UNAVAILABLE', status: 503, correlationId: 'c' };
+  const failed = await run('own');
+  expect(mockFetched).toEqual(['fetchOwnerBids']);
+  expect(ofType(failed, AuthorityScreen)).toHaveLength(0);
 });
 
 it('an owner who reads the tender keeps the owner’s page; a reader who does not open is not given the opening', async () => {

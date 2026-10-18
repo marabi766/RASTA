@@ -9,6 +9,7 @@ import {
   INBOX_PAGES,
   authorityOffers,
   fetchAuthoritySteps,
+  inboxCursor,
   type AuthorityItem,
   type AuthorityStep,
 } from './tender-authority';
@@ -119,6 +120,7 @@ describe('finding the tender’s steps', () => {
       'APR_PUB',
     ]);
     expect(read.kind === 'OK' && read.data.truncated).toBe(false);
+    expect(read.kind === 'OK' && read.data.resumeFrom).toBeNull();
     expect(urls).toEqual([
       'http://gateway.test:3000/v1/approvals?status=PENDING&limit=200',
       'http://gateway.test:3000/v1/approvals?status=PENDING&limit=200&cursor=APR_NEXT',
@@ -163,7 +165,34 @@ describe('finding the tender’s steps', () => {
     }) as typeof fetch);
     const long = await fetchAuthoritySteps(SESSION, TENDER_ID);
     expect(pages).toBe(INBOX_PAGES);
-    expect(long).toEqual({ kind: 'OK', data: { items: [], truncated: true } });
+    // Truncated is never an empty answer: the walk says where it goes on (PR 346 review 2, finding 3).
+    expect(long).toEqual({
+      kind: 'OK',
+      data: { items: [], truncated: true, resumeFrom: `C${INBOX_PAGES}` },
+    });
+  });
+
+  it('a walk resumes from the cursor it was given, and one that reaches the end is not truncated', async () => {
+    const urls: string[] = [];
+    jest.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
+      urls.push(String(input));
+      return json(200, { items: [], nextCursor: null, hasMore: false });
+    }) as typeof fetch);
+    expect(await fetchAuthoritySteps(SESSION, TENDER_ID, 'APR_FROM')).toEqual({
+      kind: 'OK',
+      data: { items: [], truncated: false, resumeFrom: null },
+    });
+    expect(urls).toEqual([
+      'http://gateway.test:3000/v1/approvals?status=PENDING&limit=200&cursor=APR_FROM',
+    ]);
+  });
+
+  it('a cursor given back to the page is the service’s token or nothing', () => {
+    expect(inboxCursor('APR_0123abc')).toBe('APR_0123abc');
+    expect(inboxCursor('eyJpZCI6MX0=')).toBe('eyJpZCI6MX0=');
+    for (const bad of [undefined, '', 'a b', 'x'.repeat(513), ['APR_1'], 'تست', 'a\nb']) {
+      expect(inboxCursor(bad)).toBeNull();
+    }
   });
 });
 

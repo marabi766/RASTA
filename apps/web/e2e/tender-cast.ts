@@ -41,7 +41,10 @@ import { provisionPerson, provisionedAccessToken } from './provisioned-people';
  * criteria written out, its window set — left in draft for the owner's own
  * scenarios, published through its approval round, or bid on, closed by the
  * service at its deadline and opened by two people — so a retry of a test
- * acts on a tender nobody has acted on.
+ * acts on a tender nobody has acted on. From an opened one, through the
+ * gateway, each later stage the evaluation scenarios start from:
+ * `evaluatedTender`, `awardRequestedTender`, `awardApprovedTender`,
+ * `awardedTender` — so no test needs another to have run first.
  */
 
 const OWNER_ROLE = 'ORGANIZATION_ADMIN';
@@ -432,5 +435,126 @@ export async function openedTender(
     await new Promise((resolve) => setTimeout(resolve, 3000));
   }
   if ((await status()) !== 'EVALUATING') throw new Error(`tender ${id} is not EVALUATING`);
+  return { id };
+}
+
+/**
+ * The cast with its people's tokens taken anew: a test that starts long after
+ * the cast was made acts on tokens of its own, not on ones that may have run
+ * out by then.
+ */
+export async function freshCast(cast: TenderCast): Promise<TenderCast> {
+  const [author, approver] = await Promise.all([
+    provisionedAccessToken(cast.authorPerson),
+    provisionedAccessToken(cast.approverPerson),
+  ]);
+  return { ...cast, author, approver };
+}
+
+const matrixBids = z.object({
+  bids: z.array(z.object({ bidId: z.string(), bidderOrganizationId: z.string() })),
+});
+
+/** The tender's bids by their bidders, as the evaluator's matrix names them. */
+async function bidsOf(evaluator: string, id: string): Promise<Map<string, string>> {
+  const { bids } = matrixBids.parse(
+    await gateway(evaluator, 'GET', `/v1/tenders/${id}/evaluation`, 200),
+  );
+  return new Map(bids.map((bid) => [bid.bidderOrganizationId, bid.bidId]));
+}
+
+/**
+ * A fresh tender as `openedTender` makes it, evaluated through the gateway by
+ * the evaluator — the contractor qualified and scored (8.5 and a pass: rank 1),
+ * the rival disqualified — and completed. Its id and the contractor's bid, once
+ * it is `EVALUATED`.
+ */
+export async function evaluatedTender(
+  cast: TenderCast,
+  prices: { readonly contractor: string; readonly rival: string },
+): Promise<{ readonly id: string; readonly bidId: string }> {
+  const { id } = await openedTender(cast, prices);
+  const evaluator = await provisionedAccessToken(cast.evaluatorPerson!);
+  const bids = await bidsOf(evaluator, id);
+  const bidId = bids.get(cast.contractor.organizationId)!;
+  const rivalBid = bids.get(cast.rival!.organizationId)!;
+  const tender = `/v1/tenders/${id}`;
+  await gateway(evaluator, 'POST', `${tender}/bids/${bidId}/qualification`, 200, {
+    decision: 'QUALIFIED',
+  });
+  await gateway(evaluator, 'POST', `${tender}/bids/${rivalBid}/qualification`, 200, {
+    decision: 'DISQUALIFIED',
+    reasonCode: 'NON_RESPONSIVE',
+    reasonText: 'مدارک فنی پیوست نشده بود (آزمون)',
+  });
+  const [technical, compliance] = TENDER_CRITERIA;
+  await gateway(evaluator, 'POST', `${tender}/bids/${bidId}/scores`, 200, {
+    scores: [
+      { criterionCode: technical.code, scoreScaled: 850, expectedRevision: 0 },
+      {
+        criterionCode: compliance.code,
+        scoreScaled: compliance.maxScore * 100,
+        expectedRevision: 0,
+      },
+    ],
+  });
+  await gateway(evaluator, 'POST', `${tender}/evaluate`, 200, {});
+  return { id, bidId };
+}
+
+/**
+ * A fresh tender as `evaluatedTender` makes it, its award to the contractor
+ * asked for by the author: the request pending on the reviewer's step. Its id,
+ * the bid and the step.
+ */
+export async function awardRequestedTender(
+  cast: TenderCast,
+  prices: { readonly contractor: string; readonly rival: string },
+): Promise<{ readonly id: string; readonly bidId: string; readonly approvalId: string }> {
+  const { id, bidId } = await evaluatedTender(cast, prices);
+  const asked = z
+    .object({ steps: z.array(z.object({ approvalId: z.string() })).min(1) })
+    .parse(await gateway(cast.author, 'POST', `/v1/tenders/${id}/award`, 202, { bidId }));
+  return { id, bidId, approvalId: asked.steps[0]!.approvalId };
+}
+
+/** A fresh tender as `awardRequestedTender` makes it, its award granted by the reviewer. */
+export async function awardApprovedTender(
+  cast: TenderCast,
+  prices: { readonly contractor: string; readonly rival: string },
+): Promise<{ readonly id: string; readonly bidId: string }> {
+  const { id, bidId, approvalId } = await awardRequestedTender(cast, prices);
+  await grant(await provisionedAccessToken(cast.reviewerPerson!), approvalId);
+  return { id, bidId };
+}
+
+/**
+ * A fresh tender as `awardApprovedTender` makes it, the award executed by the
+ * author through the gateway — again while audit-service or supplier-service
+ * is still catching up (`503`/`504`), each a refusal that awarded nothing. Its
+ * id, once it is `AWARDED`.
+ */
+export async function awardedTender(
+  cast: TenderCast,
+  prices: { readonly contractor: string; readonly rival: string },
+): Promise<{ readonly id: string }> {
+  const { id, bidId } = await awardApprovedTender(cast, prices);
+  const giveUp = Date.now() + 90_000;
+  for (;;) {
+    const response = await fetch(gatewayUrl(`/v1/tenders/${id}/award`), {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${cast.author}`,
+        'content-type': 'application/json',
+        'idempotency-key': `e2e-bids-${randomUUID()}`,
+      },
+      body: JSON.stringify({ bidId }),
+    });
+    if (response.status === 200) break;
+    if (Date.now() > giveUp || (response.status !== 503 && response.status !== 504)) {
+      throw new Error(`awarding ${id} answered ${response.status}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
   return { id };
 }

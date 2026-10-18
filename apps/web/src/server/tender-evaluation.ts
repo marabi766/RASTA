@@ -385,8 +385,13 @@ export type AwardNote =
    * page knows neither the ranks nor whether they took part — the service judges both.
    */
   | 'AWARD_MATRIX_UNREAD'
-  /** Neither the matrix nor the opener's view of the bids is readable: no qualified bid to name. */
+  /** The matrix or the opener's view of the bids is this person's, but neither was read: try later. */
   | 'AWARD_BIDS_UNREAD'
+  /**
+   * Neither the matrix nor the opener's view of the bids is this person's to read, and there is no
+   * award-scoped read of the candidates: starting an award is not offered in this version.
+   */
+  | 'AWARD_CANDIDATES_UNREADABLE'
   /** The step this person decides, or the approved request to execute, could not be read. */
   | 'AWARD_STEP_UNREAD'
   /** The service refused this person the step: it would refuse the decision for the same reason. */
@@ -488,7 +493,6 @@ export function awardOffers(
     notes.push('AWARDER_IS_EVALUATOR');
     return { offers, notes };
   }
-  if (ranked === null) notes.push('AWARD_MATRIX_UNREAD');
 
   if (latest?.status === 'APPROVED' && latest.tenderVersion === tender.version) {
     notes.push('AWARD_APPROVED');
@@ -521,9 +525,18 @@ export function awardOffers(
   }
   const listed = state.bids?.kind === 'OK' && state.bids.data.opened ? state.bids.data : null;
   if (listed === null) {
-    notes.push('AWARD_BIDS_UNREAD');
+    // No read of the candidates is this person's (PR 346 review 2, finding 1): construction-service
+    // has no award-scoped read of them — only the matrix (`assertCanEvaluate`) and the opener's
+    // list (`assertCanOpenBids`) — so starting an award is not offered, though the service would
+    // accept it. A read that was the person's and failed is a different note: try again later.
+    const theirs = (read: ReadResult<unknown> | null | undefined) =>
+      read != null && read.kind !== 'FORBIDDEN' && read.kind !== 'NOT_FOUND';
+    notes.push(
+      theirs(matrix) || theirs(state.bids) ? 'AWARD_BIDS_UNREAD' : 'AWARD_CANDIDATES_UNREADABLE',
+    );
     return { offers, notes };
   }
+  notes.push('AWARD_MATRIX_UNREAD');
   for (const bid of listed.bids) {
     if (bid.status !== 'QUALIFIED') continue;
     offers.push({

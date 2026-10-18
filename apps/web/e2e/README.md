@@ -159,28 +159,31 @@ the page and on every owner route through the gateway.
   audit-service up (the opening is checked against its receipts). Under `CI` a skip fails the job.
 - It reruns locally against the same stack, as the bid scenarios do.
 
-## The evaluation and the award (`tender-evaluation.spec.ts`) — one tender, one step per test
+## The evaluation and the award (`tender-evaluation.spec.ts`) — each test its own tender
 
 The cast is made with `{ evaluation: true }`: besides the bid scenarios' people, the owner's
 `tender.award` policy naming the administrator of a **reviewer organization** made for the run,
 that reviewer, an evaluator (a third owner administrator, who takes no other part) and a rival (a
-second qualified contractor, invited too). The `beforeAll` opens **one tender**
-(`openedTender`: published with a one-minute window, bid on by both contractors through the
-gateway, closed by construction-service at its deadline, proposed by the author and opened by the
-approver through the gateway, again while audit-service catches up), and the scenario is a
-**serial describe** whose steps are tests of their own, each with at most one accessibility scan
-(PR 346 review 1, finding 5); a failing step skips the rest. In the browser: ORG-DEH-0002's
-administrator, and the contractor itself, get the 404 of a missing id on every evaluation and
-award route, and the page shows the same absence; the evaluator qualifies the contractor,
-disqualifies the rival with a closed reason, scores in Persian digits (`۸٫۵`, and a pass), sees
-the weighted total, completes the evaluation, and is told the award is someone else's
-(`AWARDER_NOT_EVALUATOR`); the author asks for the award and is offered neither the grant nor the
-rejection (the step names the reviewer's organization); the reviewer — whose read of the tender
-is a 404 — finds the step through the approval inbox, sees the bid it names and grants it
-(finding 3); the author executes it (an execution whose answer is lost is set aside and executed
-anew from a fresh form, never re-sent), the award shows the winner's price, and the strangers
-still find nothing. Each contractor's own page shows its own bid's status and nothing of the
-other's or of the scores.
+second qualified contractor, invited too). **Every test makes the tender it needs** with the
+cast's helpers, so no test depends on another having run (AGENTS.md § 5; PR 346 review 2,
+finding 4) and the describe runs in parallel: `openedTender` (published with a one-minute
+window, bid on by both contractors through the gateway, closed by construction-service at its
+deadline, proposed by the author and opened by the approver, again while audit-service catches
+up), and from it, through the gateway, `evaluatedTender` (qualified, disqualified, scored and
+completed by the evaluator), `awardRequestedTender` (the author asks), `awardApprovedTender` (the
+reviewer grants) and `awardedTender` (the author executes, again on a `503`/`504`). A test takes
+fresh tokens for the cast's people (`freshCast`). Each test has at most one accessibility scan.
+In the browser: ORG-DEH-0002's administrator, and the contractor itself, get the 404 of a
+missing id on every evaluation and award route, and the page shows the same absence; the
+evaluator qualifies the contractor, disqualifies the rival with a closed reason, scores in
+Persian digits (`۸٫۵`, and a pass), sees the weighted total, completes the evaluation, and is
+told the award is someone else's (`AWARDER_NOT_EVALUATOR`); the author asks for the award and is
+offered neither the grant nor the rejection (the step names the reviewer's organization); the
+reviewer — whose read of the tender is a 404 — finds the step through the approval inbox, sees
+the bid it names and grants it; the author executes it (an execution whose answer is lost is set
+aside and executed anew from a fresh form, never re-sent), the award shows the winner's price,
+and the strangers still find nothing. Each contractor's own page shows its own bid's status and
+nothing of the other's or of the scores.
 
 - It needs what the owner's scenarios need. Under `CI` a skip fails the job.
 - It reruns locally against the same stack, as the bid scenarios do.

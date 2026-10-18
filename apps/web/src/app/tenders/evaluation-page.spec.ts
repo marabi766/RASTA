@@ -26,6 +26,8 @@ const ORG = 'ORG-DEH-0001';
 const mockSession = { current: null as unknown };
 const mockFetched: string[] = [];
 const mockAnswers: Record<string, unknown> = {};
+/** What each stubbed read was last asked with. */
+const mockArgs: Record<string, unknown[]> = {};
 
 /** The module as it is, with every `fetch*` read answered from `mockAnswers` and recorded. */
 function mockStubFetchers(path: string): Record<string, unknown> {
@@ -34,8 +36,9 @@ function mockStubFetchers(path: string): Record<string, unknown> {
     Object.entries(actual).map(([name, value]) => [
       name,
       name.startsWith('fetch') && typeof value === 'function'
-        ? async () => {
+        ? async (...args: unknown[]) => {
             mockFetched.push(name);
+            mockArgs[name] = args;
             return mockAnswers[name] ?? { kind: 'NOT_FOUND' };
           }
         : value,
@@ -116,15 +119,24 @@ const offered = (tree: ReactNode): string[] =>
     (element.props as { offered: { command: string }[] }).offered.map(({ command }) => command),
   );
 
-function run(view?: string, flash?: string): Promise<ReactElement> {
+function run(
+  view?: string,
+  flash?: string,
+  more: Record<string, string> = {},
+): Promise<ReactElement> {
   return TenderPage({
     params: Promise.resolve({ id: 'TND_1' }),
-    searchParams: Promise.resolve({ ...(view ? { view } : {}), ...(flash ? { flash } : {}) }),
+    searchParams: Promise.resolve({
+      ...(view ? { view } : {}),
+      ...(flash ? { flash } : {}),
+      ...more,
+    }),
   });
 }
 
 beforeEach(() => {
   mockFetched.length = 0;
+  for (const key of Object.keys(mockArgs)) delete mockArgs[key];
   for (const key of Object.keys(mockAnswers)) delete mockAnswers[key];
 });
 
@@ -204,8 +216,69 @@ it('an evaluator outside the reader roles reads the matrix alone, never the tend
   mockFetched.length = 0;
   delete mockAnswers.fetchEvaluation;
   const absent = await run('own');
+  expect(mockFetched).toEqual(['fetchEvaluation', 'fetchAuthoritySteps']);
   const [screen] = ofType(absent, OwnTenderDetailScreen);
   expect((screen?.props as { result: unknown }).result).toEqual({ kind: 'NOT_FOUND' });
+  // An approval authority of another organization whose role also evaluates: refused the
+  // matrix, it reaches its step from its inbox (PR 346 review 2, finding 2).
+  mockFetched.length = 0;
+  const step = {
+    ...fixtures.AWARD_STEP,
+    stepOrder: 1,
+    authorityOrganizationId: ORG,
+    authorityRole: 'FLEET_MANAGER',
+    authorityLabel: 'بازبین (نمونه)',
+    requestedAt: '2026-10-22T07:00:00.000Z',
+    project: { title: 'بهسازی راه روستایی' },
+  };
+  mockAnswers.fetchAuthoritySteps = {
+    kind: 'OK',
+    data: {
+      items: [{ summary: step, detail: { kind: 'OK', data: step } }],
+      truncated: false,
+      resumeFrom: null,
+    },
+  };
+  const authority = await run('own');
+  expect(mockFetched).toEqual(['fetchEvaluation', 'fetchAuthoritySteps']);
+  const [found] = ofType(authority, AuthorityScreen);
+  expect((found?.props as { steps: unknown[] }).steps).toHaveLength(1);
+  expect(ofType(authority, OwnTenderDetailScreen)).toHaveLength(0);
+});
+
+it('an inbox longer than the walk is never an absence: the warning, and a way to go on and back (PR 346 review 2, finding 3)', async () => {
+  mockSession.current = signedInWith(['ORGANIZATION_ADMIN'], fixtures.AWARD_APPROVER);
+  mockAnswers.fetchAuthoritySteps = {
+    kind: 'OK',
+    data: { items: [], truncated: true, resumeFrom: 'APR_NEXT' },
+  };
+  const first = await run('own');
+  expect(mockArgs.fetchAuthoritySteps?.[2]).toBeNull();
+  expect(ofType(first, OwnTenderDetailScreen)).toHaveLength(0);
+  const [screen] = ofType(first, AuthorityScreen);
+  expect(screen?.props).toMatchObject({
+    steps: [],
+    truncated: true,
+    continueHref: '/tenders/TND_1?view=own&inbox=APR_NEXT',
+    restartHref: null,
+  });
+  // Going on: the walk resumes from the service's cursor; at its end the page still offers the
+  // way back to the start rather than turning into the absence.
+  mockAnswers.fetchAuthoritySteps = {
+    kind: 'OK',
+    data: { items: [], truncated: false, resumeFrom: null },
+  };
+  const next = await run('own', undefined, { inbox: 'APR_NEXT' });
+  expect(mockArgs.fetchAuthoritySteps?.[2]).toBe('APR_NEXT');
+  const [resumed] = ofType(next, AuthorityScreen);
+  expect(resumed?.props).toMatchObject({
+    truncated: false,
+    continueHref: null,
+    restartHref: '/tenders/TND_1?view=own',
+  });
+  // A cursor that is not the service's kind starts from the top.
+  await run('own', undefined, { inbox: 'not a cursor' });
+  expect(mockArgs.fetchAuthoritySteps?.[2]).toBeNull();
 });
 
 it('an approval authority of another organization decides its step of the tender without the tender read', async () => {
@@ -220,7 +293,11 @@ it('an approval authority of another organization decides its step of the tender
   };
   mockAnswers.fetchAuthoritySteps = {
     kind: 'OK',
-    data: { items: [{ summary: step, detail: { kind: 'OK', data: step } }], truncated: false },
+    data: {
+      items: [{ summary: step, detail: { kind: 'OK', data: step } }],
+      truncated: false,
+      resumeFrom: null,
+    },
   };
   const tree = await run('own');
   expect(mockFetched).toEqual(['fetchTender', 'fetchAuthoritySteps']);
@@ -231,7 +308,10 @@ it('an approval authority of another organization decides its step of the tender
   expect(offered(steps.map(({ commands }) => commands))).toEqual(['GRANT_AWARD', 'REJECT_AWARD']);
   // Nobody's step of this tender in the inbox: the absence the tender read showed.
   mockFetched.length = 0;
-  mockAnswers.fetchAuthoritySteps = { kind: 'OK', data: { items: [], truncated: false } };
+  mockAnswers.fetchAuthoritySteps = {
+    kind: 'OK',
+    data: { items: [], truncated: false, resumeFrom: null },
+  };
   const absent = await run('own');
   expect(ofType(absent, AuthorityScreen)).toHaveLength(0);
   const [screen] = ofType(absent, OwnTenderDetailScreen);
@@ -241,7 +321,10 @@ it('an approval authority of another organization decides its step of the tender
 it('the authority’s decision just made, its step gone from the inbox: the confirmation, only as minted for this session and tender', async () => {
   const session = signedInWith(['ORGANIZATION_ADMIN'], fixtures.AWARD_APPROVER);
   mockSession.current = session;
-  mockAnswers.fetchAuthoritySteps = { kind: 'OK', data: { items: [], truncated: false } };
+  mockAnswers.fetchAuthoritySteps = {
+    kind: 'OK',
+    data: { items: [], truncated: false, resumeFrom: null },
+  };
   const done = await run('own', mintFlash(session as never, 'TND_1', 'GRANT_AWARD'));
   const [authority] = ofType(done, AuthorityScreen);
   expect((authority?.props as { steps: unknown[] }).steps).toEqual([]);

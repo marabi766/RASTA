@@ -9,7 +9,18 @@ import {
   type ProvisionedPerson,
 } from './live-session';
 import { provisionedAccessToken } from './provisioned-people';
-import { castForRun, gateway, openedTender, TENDER_CRITERIA, type TenderCast } from './tender-cast';
+import {
+  awardApprovedTender,
+  awardedTender,
+  awardRequestedTender,
+  castForRun,
+  evaluatedTender,
+  freshCast,
+  gateway,
+  openedTender,
+  TENDER_CRITERIA,
+  type TenderCast,
+} from './tender-cast';
 
 /**
  * The evaluation and the award of a tender through the real stack: the portal,
@@ -21,17 +32,16 @@ import { castForRun, gateway, openedTender, TENDER_CRITERIA, type TenderCast } f
  *
  * Nothing seeded: `tender-cast.ts` makes the owner, its publication and award
  * policies, its project and the people once per run (`{ evaluation: true }`),
- * and opens **one tender** for the scenario — published, bid on by two
- * qualified contractors, closed by the service at its deadline and opened by
- * two people through the gateway (`openedTender`). What the evaluator, the
- * awarder and the award's authority do is done **in the browser**, through the
- * portal's own forms.
- *
- * ## One step per test
- *
- * The scenario is a serial describe: each step is a test of its own, with at
- * most one accessibility scan (PR 346 review 1, finding 5), and a failing step
- * skips the ones after it — they would act on a tender it left behind.
+ * and **every test makes the tender it needs** through the cast's helpers —
+ * `openedTender` (published, bid on by two qualified contractors, closed by the
+ * service at its deadline, opened by two people), and from it, through the
+ * gateway, `evaluatedTender`, `awardRequestedTender`, `awardApprovedTender` and
+ * `awardedTender`. No test depends on another having run, or on what one left
+ * behind (AGENTS.md § 5; PR 346 review 2, finding 4), so the tests run in
+ * parallel; each has at most one accessibility scan (review 1, finding 5).
+ * What a test is about — the evaluator's, the author's, the reviewer's or a
+ * contractor's part — is done **in the browser**, through the portal's own
+ * forms.
  *
  * ## Who does what
  *
@@ -180,22 +190,23 @@ test.describe('the evaluation and the award of a tender, live (EXP-004)', () => 
       'alongside the usual live stack — set WEB_LIVE_STACK_E2E_TENDERS=true locally after starting ' +
       'them (the "Portal in a browser" CI job always does)',
   );
-  test.describe.configure({ mode: 'serial' });
-  test.setTimeout(180_000);
+  // Independent tests, each with a tender of its own: they may run at once.
+  test.describe.configure({ mode: 'parallel' });
+  test.setTimeout(360_000);
 
-  let cast: TenderCast;
-  let tender: { id: string };
+  let made: TenderCast;
 
   test.beforeAll(async () => {
-    test.setTimeout(420_000);
-    // Per hook run: a retry in a new worker makes a cast and a tender of its own.
-    cast = await castForRun(`${RUN}e${randomUUID().slice(0, 4)}`, { evaluation: true });
-    tender = await openedTender(cast, PRICE);
+    test.setTimeout(240_000);
+    // Per hook run: each worker, and a retry in a new one, makes a cast of its own.
+    made = await castForRun(`${RUN}e${randomUUID().slice(0, 4)}`, { evaluation: true });
   });
 
   test('another tenant’s administrator and a contractor find nothing of the evaluation or the award', async ({
     browser,
   }) => {
+    const cast = await freshCast(made);
+    const tender = await openedTender(cast, PRICE);
     await strangersFindNothing(browser, cast, tender.id, { scan: true });
     expect((await held(cast, tender.id)).status).toBe('EVALUATING');
   });
@@ -203,6 +214,8 @@ test.describe('the evaluation and the award of a tender, live (EXP-004)', () => 
   test('the evaluator qualifies, disqualifies, scores and completes — and is not the one to award', async ({
     browser,
   }) => {
+    const cast = await freshCast(made);
+    const tender = await openedTender(cast, PRICE);
     const rival = cast.rival!;
     const { page, close } = await as(browser, cast.evaluatorPerson!);
     try {
@@ -254,6 +267,8 @@ test.describe('the evaluation and the award of a tender, live (EXP-004)', () => 
   test('the author asks for the award of the qualified bid; deciding it is the reviewer’s', async ({
     browser,
   }) => {
+    const cast = await freshCast(made);
+    const tender = await evaluatedTender(cast, PRICE);
     const AWARD = 'درخواست واگذاری';
     const { page, close } = await as(browser, cast.authorPerson);
     try {
@@ -282,6 +297,8 @@ test.describe('the evaluation and the award of a tender, live (EXP-004)', () => 
   test('the reviewer of another organization, who cannot read the tender, grants from its inbox', async ({
     browser,
   }) => {
+    const cast = await freshCast(made);
+    const tender = await awardRequestedTender(cast, PRICE);
     const reviewer = cast.reviewerPerson!;
     // The tender stays the owner's own: to the reviewer, the absence of an id that does not exist.
     await gateway(await provisionedAccessToken(reviewer), 'GET', `/v1/tenders/${tender.id}`, 404);
@@ -306,6 +323,8 @@ test.describe('the evaluation and the award of a tender, live (EXP-004)', () => 
   test('the author executes the approved award; a stranger still finds nothing', async ({
     browser,
   }) => {
+    const cast = await freshCast(made);
+    const tender = await awardApprovedTender(cast, PRICE);
     const { page, close } = await as(browser, cast.authorPerson);
     try {
       await executeAward(page, cast, tender.id);
@@ -325,6 +344,8 @@ test.describe('the evaluation and the award of a tender, live (EXP-004)', () => 
   test('each contractor, on the bidder’s door, sees its own bid and nothing of the other’s', async ({
     browser,
   }) => {
+    const cast = await freshCast(made);
+    const tender = await awardedTender(cast, PRICE);
     const winner = await as(browser, cast.contractor);
     const loser = await as(browser, cast.rival!);
     try {
