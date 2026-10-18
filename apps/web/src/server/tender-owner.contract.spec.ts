@@ -313,6 +313,7 @@ describe('which commands may be sent again after a lost answer (PR 345 reviews 1
       'PROPOSE_OPENING',
       'OPEN_BIDS',
       'WITHDRAW_PROPOSAL',
+      'AWARD',
     ]);
   });
 
@@ -324,7 +325,17 @@ describe('which commands may be sent again after a lost answer (PR 345 reviews 1
       "constmatched=awaitthis.approvals.transitionApproval(tx,{organizationId,approvalId:step.id,from:'PENDING',expectedVersion:dto.expectedVersion,",
     );
     expect(tenderApprovals).toContain("if(matched===0)throwthis.conflict('Approval',step.id);");
-    expect([...REPEATABLE_OWNER_COMMANDS]).toEqual(['GRANT', 'REJECT']);
+    // The evaluation's and the award decision's reasons: `tender-evaluation.contract.spec.ts`.
+    expect([...REPEATABLE_OWNER_COMMANDS]).toEqual([
+      'GRANT',
+      'REJECT',
+      'QUALIFY',
+      'DISQUALIFY',
+      'SCORE',
+      'EVALUATE',
+      'GRANT_AWARD',
+      'REJECT_AWARD',
+    ]);
   });
 });
 

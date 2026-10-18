@@ -278,7 +278,7 @@ describe('an owner form, in every state its action can put it in', () => {
       kind: 'INVALID',
       command,
       submissionId: 'sub_AAAAAAAAAAAAAAAAAAAA',
-      reason: null,
+      values: null,
       fieldErrors: {},
       message: message!,
     };
@@ -292,7 +292,7 @@ describe('an owner form, in every state its action can put it in', () => {
       kind: 'INVALID',
       command: 'REJECT',
       submissionId: 'sub_AAAAAAAAAAAAAAAAAAAA',
-      reason: 'کوتاه',
+      values: { reason: 'کوتاه' },
       fieldErrors: { reason: 'دلیل رد لازم است' },
       message: null,
     };
@@ -347,7 +347,7 @@ describe('an owner form, in every state its action can put it in', () => {
       command: 'REJECT',
       correlationId: 'corr-504',
       submissionId: 'sub_AAAAAAAAAAAAAAAAAAAA',
-      reason: 'معیارها کامل نیست',
+      values: { reason: 'معیارها کامل نیست' },
       replay: STAMP,
     };
     const { container } = formOf('REJECT');
@@ -386,7 +386,7 @@ describe('an unknown outcome that is never sent again', () => {
         command,
         correlationId: 'COR_1',
         submissionId: 'sub_AAAAAAAAAAAAAAAAAAAA',
-        reason: null,
+        values: null,
         replay: null,
         viewOnly: true,
         unrepeatable: true,

@@ -1,14 +1,20 @@
 import { z } from 'zod';
 
 import {
-  APPROVAL_REFUSAL_TEXT,
-  OPENING_REFUSAL_TEXT,
+  JUSTIFICATION_FIELD,
+  REASON_CODE_FIELD,
+  REASON_TEXT_FIELD,
+  scoreField,
+} from '@/lib/tender-evaluation-fields';
+import {
+  DECISION_COMMANDS,
   OWNER_CODE_TEXT,
   OWNER_REFUSAL_FALLBACK,
-  PUBLICATION_REFUSAL_TEXT,
   REASON_FIELD,
+  refusalTextFor,
   type OwnerCommand,
 } from '@/lib/tender-owner-fields';
+import type { OwnerInput, ScoringCell } from '@/lib/tender-owner-input';
 
 import { callGateway, GatewayRequestError } from './gateway';
 import { webServerEnv, type WebServerEnv } from './env';
@@ -158,9 +164,48 @@ const proposalAnswerSchema = z.object({
 
 const withdrawnAnswerSchema = z.object({ tenderId: z.string(), withdrawnProposal: z.string() });
 
+/** `tenderAwardViewSchema`: the award, with the winner's price as a decimal string. */
+export const AWARD_SCHEMA = z.object({
+  tenderId: z.string(),
+  status: z.string(),
+  bidId: z.string(),
+  bidderOrganizationId: z.string(),
+  amountMinor: minorUnits,
+  rank: z.number().int(),
+  tied: z.boolean(),
+  justification: z.string().nullable(),
+  standingAsOf: utcInstant,
+  awardedAt: utcInstant,
+  awardedBy: z.string(),
+});
+
+export type TenderAward = z.infer<typeof AWARD_SCHEMA>;
+
+const qualificationAnswerSchema = z.object({
+  bidId: z.string(),
+  tenderId: z.string(),
+  decision: z.enum(['QUALIFIED', 'DISQUALIFIED']),
+  alreadyDecided: z.boolean(),
+});
+
+const scoreAnswerSchema = z.object({
+  bidId: z.string(),
+  tenderId: z.string(),
+  recorded: z.array(z.object({ criterionCode: z.string() })),
+  unchanged: z.array(z.string()),
+  complete: z.boolean(),
+});
+
+const evaluatedAnswerSchema = z.object({
+  tenderId: z.string(),
+  status: z.string(),
+  alreadyEvaluated: z.boolean(),
+});
+
 // -- reads -------------------------------------------------------------------------------
 
-async function read<S extends z.ZodTypeAny>(
+/** One owner-side read through the gateway: a 403 and a 404 are outcomes, a bad shape is `MALFORMED`. */
+export async function readOwnerView<S extends z.ZodTypeAny>(
   session: WebSession,
   path: string,
   schema: S,
@@ -184,24 +229,45 @@ async function read<S extends z.ZodTypeAny>(
   }
 }
 
-const tenderPath = (tenderId: string): string => `/v1/tenders/${encodeURIComponent(tenderId)}`;
+export const tenderPath = (tenderId: string): string =>
+  `/v1/tenders/${encodeURIComponent(tenderId)}`;
 
 export const PUBLICATION_WORKFLOW = 'tender.publication';
+export const AWARD_WORKFLOW = 'tender.award';
 
 /** The newest publication request of the tender, or null when none was ever made. */
-export async function fetchPublicationRequest(
+export function fetchPublicationRequest(
   session: WebSession,
   tenderId: string,
 ): Promise<ReadResult<ApprovalRequest | null>> {
-  const search = new URLSearchParams({ workflowKey: PUBLICATION_WORKFLOW, limit: '1' });
-  const page = await read(
+  return fetchLatestRequest(session, tenderId, PUBLICATION_WORKFLOW);
+}
+
+/**
+ * The newest award request of the tender, or null when none was ever made —
+ * by status and steps only: the bid it names is read on its step.
+ */
+export function fetchAwardRequest(
+  session: WebSession,
+  tenderId: string,
+): Promise<ReadResult<ApprovalRequest | null>> {
+  return fetchLatestRequest(session, tenderId, AWARD_WORKFLOW);
+}
+
+async function fetchLatestRequest(
+  session: WebSession,
+  tenderId: string,
+  workflow: string,
+): Promise<ReadResult<ApprovalRequest | null>> {
+  const search = new URLSearchParams({ workflowKey: workflow, limit: '1' });
+  const page = await readOwnerView(
     session,
     `${tenderPath(tenderId)}/approvals?${search}`,
     requestPageSchema,
   );
   if (page.kind !== 'OK') return page;
   const [latest] = page.data.items;
-  if (latest && (latest.tenderId !== tenderId || latest.workflowKey !== PUBLICATION_WORKFLOW)) {
+  if (latest && (latest.tenderId !== tenderId || latest.workflowKey !== workflow)) {
     return { kind: 'MALFORMED', correlationId: '' };
   }
   return { kind: 'OK', data: latest ?? null };
@@ -211,14 +277,14 @@ export function fetchApproval(
   session: WebSession,
   approvalId: string,
 ): Promise<ReadResult<Approval>> {
-  return read(session, `/v1/approvals/${encodeURIComponent(approvalId)}`, APPROVAL_SCHEMA);
+  return readOwnerView(session, `/v1/approvals/${encodeURIComponent(approvalId)}`, APPROVAL_SCHEMA);
 }
 
 export function fetchOwnerBids(
   session: WebSession,
   tenderId: string,
 ): Promise<ReadResult<OwnerBids>> {
-  return read(session, `${tenderPath(tenderId)}/bids`, OWNER_BIDS_SCHEMA);
+  return readOwnerView(session, `${tenderPath(tenderId)}/bids`, OWNER_BIDS_SCHEMA);
 }
 
 // -- who may command ---------------------------------------------------------------------
@@ -336,7 +402,19 @@ export type OwnerOffer =
       readonly approvalId: string;
       readonly expectedVersion: number;
     }
-  | { readonly command: 'PROPOSE_OPENING' | 'OPEN_BIDS' | 'WITHDRAW_PROPOSAL' };
+  | { readonly command: 'PROPOSE_OPENING' | 'OPEN_BIDS' | 'WITHDRAW_PROPOSAL' | 'EVALUATE' }
+  | { readonly command: 'QUALIFY' | 'DISQUALIFY'; readonly bidId: string }
+  | {
+      readonly command: 'SCORE';
+      readonly bidId: string;
+      readonly scoring: readonly ScoringCell[];
+    }
+  | { readonly command: 'AWARD'; readonly bidId: string; readonly award: AwardTerms }
+  | {
+      readonly command: 'GRANT_AWARD' | 'REJECT_AWARD';
+      readonly approvalId: string;
+      readonly expectedVersion: number;
+    };
 
 export type OwnerNote =
   /** A request is being decided, and not by this person. */
@@ -483,69 +561,156 @@ export function readsOwnerBids(
 
 // -- the requests ------------------------------------------------------------------------
 
+/**
+ * An award's terms, as the page read them: whether the bid's rank needs a
+ * justification (`JUSTIFICATION_REQUIRED`: anything but the single first rank),
+ * and — executing an approved request — the justification that request was
+ * made with, which the award must repeat exactly (`TenderApprovalGate.covers`).
+ */
+export interface AwardTerms {
+  readonly justificationRequired: boolean;
+  readonly execution: { readonly justification: string | null } | null;
+}
+
 /** What a command acts on, from the verified stamp — never from the posted form. */
 export interface OwnerBinding {
   readonly command: OwnerCommand;
   readonly approvalId: string | null;
   readonly expectedVersion: number | null;
+  /** The bid of a qualification, a score or an award. */
+  readonly bidId?: string | null;
+  /** A score's criteria and the revisions of the caller's own cells. */
+  readonly scoring?: readonly ScoringCell[] | null;
+  readonly award?: AwardTerms | null;
 }
 
 export interface OwnerRequest {
   readonly path: string;
   readonly body: unknown;
+  /** Where the service's field paths land on this command's form, and its fixed words. */
+  readonly mapping: FieldMapping<string>;
 }
 
-/** The request of a command, or null when the binding cannot make one. */
+function mappingFor(
+  command: OwnerCommand,
+  paths: Readonly<Record<string, string>>,
+): FieldMapping<string> {
+  return {
+    paths,
+    byDetailCode: refusalTextFor(command),
+    byCode: OWNER_CODE_TEXT,
+    fallback: OWNER_REFUSAL_FALLBACK,
+  };
+}
+
+/**
+ * The request of a command, or null when the binding and the form's input
+ * cannot make one: everything but what the person typed comes from the binding.
+ */
 export function ownerRequest(
   tenderId: string,
   binding: OwnerBinding,
-  reason: string | null,
+  input: OwnerInput,
 ): OwnerRequest | null {
   const base = tenderPath(tenderId);
-  switch (binding.command) {
+  const { command, approvalId, expectedVersion } = binding;
+  const bidId = binding.bidId ?? null;
+  const scoring = binding.scoring ?? null;
+  const award = binding.award ?? null;
+  const bidPath = bidId === null ? null : `${base}/bids/${encodeURIComponent(bidId)}`;
+  const plain = approvalId === null && expectedVersion === null;
+  const onlyBid = plain && bidId !== null;
+  const unbound = plain && bidId === null && scoring === null && award === null;
+  const mapping = mappingFor(command, {});
+
+  if (DECISION_COMMANDS.includes(command)) {
+    if (approvalId === null || expectedVersion === null || bidId !== null) return null;
+    const rejects = command === 'REJECT' || command === 'REJECT_AWARD';
+    const reason = input.reason ?? null;
+    if (rejects !== (reason !== null)) return null;
+    return {
+      path: `/v1/approvals/${encodeURIComponent(approvalId)}/decision`,
+      body: {
+        expectedVersion,
+        decision: rejects ? 'REJECT' : 'GRANT',
+        ...(reason !== null ? { reason } : {}),
+      },
+      mapping: mappingFor(command, { reason: REASON_FIELD }),
+    };
+  }
+
+  switch (command) {
     case 'PUBLISH':
-      if (binding.approvalId !== null || binding.expectedVersion === null) return null;
-      return { path: `${base}/publish`, body: { expectedVersion: binding.expectedVersion } };
-    case 'GRANT':
-    case 'REJECT': {
-      if (binding.approvalId === null || binding.expectedVersion === null) return null;
-      if ((binding.command === 'REJECT') !== (reason !== null)) return null;
+      if (approvalId !== null || expectedVersion === null || bidId !== null) return null;
+      return { path: `${base}/publish`, body: { expectedVersion }, mapping };
+    case 'QUALIFY':
+      if (!onlyBid || scoring !== null || award !== null) return null;
+      return { path: `${bidPath}/qualification`, body: { decision: 'QUALIFIED' }, mapping };
+    case 'DISQUALIFY': {
+      const reasons = input.disqualification;
+      if (!onlyBid || scoring !== null || award !== null || !reasons) return null;
       return {
-        path: `/v1/approvals/${encodeURIComponent(binding.approvalId)}/decision`,
+        path: `${bidPath}/qualification`,
         body: {
-          expectedVersion: binding.expectedVersion,
-          decision: binding.command,
-          ...(reason !== null ? { reason } : {}),
+          decision: 'DISQUALIFIED',
+          reasonCode: reasons.reasonCode,
+          reasonText: reasons.reasonText,
         },
+        mapping: mappingFor(command, {
+          reasonCode: REASON_CODE_FIELD,
+          reasonText: REASON_TEXT_FIELD,
+        }),
+      };
+    }
+    case 'SCORE': {
+      const scores = input.scores ?? [];
+      if (!onlyBid || scoring === null || award !== null || scores.length === 0) return null;
+      // Only the criteria the page read, each at the revision it read.
+      const bound = new Map(scoring.map((cell) => [cell.criterionCode, cell.expectedRevision]));
+      if (scores.some((score) => bound.get(score.criterionCode) !== score.expectedRevision)) {
+        return null;
+      }
+      return {
+        path: `${bidPath}/scores`,
+        body: { scores },
+        mapping: mappingFor(
+          command,
+          Object.fromEntries(
+            scores.map((score, index) => [
+              `scores.${index}.scoreScaled`,
+              scoreField(score.criterionCode),
+            ]),
+          ),
+        ),
+      };
+    }
+    case 'EVALUATE':
+      return unbound ? { path: `${base}/evaluate`, body: {}, mapping } : null;
+    case 'AWARD': {
+      if (!onlyBid || scoring !== null || award === null) return null;
+      const justification = award.execution
+        ? award.execution.justification
+        : (input.justification ?? null);
+      return {
+        path: `${base}/award`,
+        body: { bidId, ...(justification !== null ? { justification } : {}) },
+        mapping: mappingFor(command, { justification: JUSTIFICATION_FIELD }),
       };
     }
     default:
-      if (binding.approvalId !== null || binding.expectedVersion !== null) return null;
+      if (!unbound) return null;
       return {
         path:
-          binding.command === 'OPEN_BIDS'
+          command === 'OPEN_BIDS'
             ? `${base}/open-bids`
-            : binding.command === 'PROPOSE_OPENING'
+            : command === 'PROPOSE_OPENING'
               ? `${base}/open-bids/proposal`
               : `${base}/open-bids/proposal/withdraw`,
         body: {},
+        mapping,
       };
   }
 }
-
-/** Every closed reason the owner's commands can name, in fixed words; one table for all areas. */
-const OWNER_REFUSAL_TEXT: Readonly<Record<string, string>> = {
-  ...PUBLICATION_REFUSAL_TEXT,
-  ...OPENING_REFUSAL_TEXT,
-  ...APPROVAL_REFUSAL_TEXT,
-};
-
-export const OWNER_FIELD_MAPPING: FieldMapping<string> = {
-  paths: { reason: REASON_FIELD },
-  byDetailCode: OWNER_REFUSAL_TEXT,
-  byCode: OWNER_CODE_TEXT,
-  fallback: OWNER_REFUSAL_FALLBACK,
-};
 
 /** What a confirmed command came to, for the flash. */
 export type OwnerOutcome =
@@ -555,10 +720,19 @@ export type OwnerOutcome =
   | 'REJECT'
   | 'PROPOSE_OPENING'
   | 'OPEN_BIDS'
-  | 'WITHDRAW_PROPOSAL';
+  | 'WITHDRAW_PROPOSAL'
+  | 'QUALIFY'
+  | 'DISQUALIFY'
+  | 'SCORE'
+  | 'EVALUATE'
+  | 'AWARDED'
+  | 'AWARD_REQUESTED'
+  | 'GRANT_AWARD'
+  | 'REJECT_AWARD';
 
 /** The answer each command must show to be confirmed; anything else is unconfirmed. */
 function answerSchema(tenderId: string, binding: OwnerBinding) {
+  const bidId = binding.bidId ?? null;
   switch (binding.command) {
     case 'PUBLISH':
       return z.union([
@@ -575,12 +749,18 @@ function answerSchema(tenderId: string, binding: OwnerBinding) {
       ]);
     case 'GRANT':
     case 'REJECT':
+    case 'GRANT_AWARD':
+    case 'REJECT_AWARD': {
+      const award = binding.command === 'GRANT_AWARD' || binding.command === 'REJECT_AWARD';
+      const grants = binding.command === 'GRANT' || binding.command === 'GRANT_AWARD';
       return APPROVAL_SCHEMA.refine(
         (approval) =>
           approval.id === binding.approvalId &&
           approval.tenderId === tenderId &&
-          approval.status === (binding.command === 'GRANT' ? 'GRANTED' : 'REJECTED'),
+          approval.workflowKey === (award ? AWARD_WORKFLOW : PUBLICATION_WORKFLOW) &&
+          approval.status === (grants ? 'GRANTED' : 'REJECTED'),
       );
+    }
     case 'PROPOSE_OPENING':
       return proposalAnswerSchema.refine((answer) => answer.tenderId === tenderId);
     case 'OPEN_BIDS':
@@ -589,6 +769,35 @@ function answerSchema(tenderId: string, binding: OwnerBinding) {
       );
     case 'WITHDRAW_PROPOSAL':
       return withdrawnAnswerSchema.refine((answer) => answer.tenderId === tenderId);
+    case 'QUALIFY':
+    case 'DISQUALIFY':
+      return qualificationAnswerSchema.refine(
+        (answer) =>
+          answer.tenderId === tenderId &&
+          answer.bidId === bidId &&
+          answer.decision === (binding.command === 'QUALIFY' ? 'QUALIFIED' : 'DISQUALIFIED'),
+      );
+    case 'SCORE':
+      return scoreAnswerSchema.refine(
+        (answer) => answer.tenderId === tenderId && answer.bidId === bidId,
+      );
+    case 'EVALUATE':
+      return evaluatedAnswerSchema.refine(
+        (answer) => answer.tenderId === tenderId && answer.status === 'EVALUATED',
+      );
+    case 'AWARD':
+      return z.union([
+        AWARD_SCHEMA.refine(
+          (award) =>
+            award.tenderId === tenderId && award.status === 'AWARDED' && award.bidId === bidId,
+        ),
+        APPROVAL_REQUEST_SCHEMA.refine(
+          (request) =>
+            request.tenderId === tenderId &&
+            request.workflowKey === AWARD_WORKFLOW &&
+            request.status === 'PENDING',
+        ),
+      ]);
   }
 }
 
@@ -596,11 +805,10 @@ export type OwnerCommandResult = Exclude<WriteResult<unknown, string>, { kind: '
 
 /**
  * Sends one command, with an `Idempotency-Key` — the gateway requires one on
- * every unsafe call under `/v1/tenders`. None of these commands is replayed by
- * it in the service: a publication and a decision are bound to the version the
- * page read (`409` once it moved), and the opening's three are idempotent there
- * (`alreadyProposed`, `alreadyOpened`, `NO_PROPOSAL`). Every `UNAVAILABLE` is
- * unconfirmed.
+ * every unsafe call under `/v1/tenders`. construction-service keeps a result
+ * under it for a score alone (`IdempotencyStore.run`); which commands may be
+ * sent again after a lost answer is `UNREPEATABLE_OWNER_COMMANDS`. Every
+ * `UNAVAILABLE` is unconfirmed.
  */
 export async function issueOwnerCommand(
   session: WebSession,
@@ -615,7 +823,7 @@ export async function issueOwnerCommand(
     body: request.body,
     submissionId,
     schema: answerSchema(tenderId, binding),
-    mapping: OWNER_FIELD_MAPPING,
+    mapping: request.mapping,
     fetchImpl,
   });
   if (result.kind === 'UNAVAILABLE') {
@@ -624,8 +832,10 @@ export async function issueOwnerCommand(
   return result;
 }
 
-/** What a confirmed answer means for the flash. */
+/** What a confirmed answer means for the flash: a gated command either executed or asked. */
 export function outcomeOf(command: OwnerCommand, answer: unknown): OwnerOutcome {
-  if (command !== 'PUBLISH') return command;
-  return (answer as { status?: unknown }).status === 'PUBLISHED' ? 'PUBLISHED' : 'REQUESTED';
+  const status = (answer as { status?: unknown }).status;
+  if (command === 'PUBLISH') return status === 'PUBLISHED' ? 'PUBLISHED' : 'REQUESTED';
+  if (command === 'AWARD') return status === 'AWARDED' ? 'AWARDED' : 'AWARD_REQUESTED';
+  return command;
 }

@@ -94,3 +94,56 @@ it('refuses another tender, another submission, another login, and a passed dead
   ).toBeNull();
   expect(verifyOwnerStamp(SESSION, token, 'TND_1', SUB, NOW + 3001 * 1000, ENV)).toBeNull();
 });
+
+describe('a bid’s commands', () => {
+  const bid = { expectedVersion: null, bidId: 'BID_A' } as const;
+  const scoring = [
+    { criterionCode: 'technical', maxScore: 10, passFail: false, expectedRevision: 2 },
+  ];
+  const award = { justificationRequired: true, execution: { justification: 'آنچه موافقت شد' } };
+  const verified = (overrides: Partial<OwnerTarget>) =>
+    verifyOwnerStamp(
+      SESSION,
+      mintOwnerStamp(SESSION, target(overrides), SUB, NOW, ENV).token,
+      'TND_1',
+      SUB,
+      NOW,
+      ENV,
+    );
+
+  it('binds a decision on a bid to the bid, a score to its criteria and revisions, an award to its terms', () => {
+    expect(verified({ command: 'QUALIFY', ...bid })).toMatchObject({
+      command: 'QUALIFY',
+      bidId: 'BID_A',
+      scoring: null,
+      award: null,
+    });
+    expect(verified({ command: 'SCORE', ...bid, scoring })).toMatchObject({
+      bidId: 'BID_A',
+      scoring,
+    });
+    expect(verified({ command: 'AWARD', ...bid, award })).toMatchObject({ bidId: 'BID_A', award });
+    expect(verified({ command: 'EVALUATE', expectedVersion: null })).toMatchObject({
+      command: 'EVALUATE',
+      bidId: null,
+    });
+    expect(
+      verified({ command: 'GRANT_AWARD', approvalId: 'APR_9', expectedVersion: 3 }),
+    ).toMatchObject({ approvalId: 'APR_9', expectedVersion: 3, bidId: null });
+  });
+
+  it('refuses a bid’s binding that does not fit its command', () => {
+    for (const wrong of [
+      { command: 'QUALIFY', expectedVersion: null },
+      { command: 'DISQUALIFY', ...bid, scoring },
+      { command: 'SCORE', ...bid },
+      { command: 'AWARD', ...bid },
+      { command: 'AWARD', ...bid, award, scoring },
+      { command: 'EVALUATE', ...bid },
+      { command: 'PUBLISH', bidId: 'BID_A' },
+      { command: 'GRANT_AWARD', approvalId: 'APR_9', expectedVersion: 3, bidId: 'BID_A' },
+    ] as Partial<OwnerTarget>[]) {
+      expect(verified(wrong)).toBeNull();
+    }
+  });
+});

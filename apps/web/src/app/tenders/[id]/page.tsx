@@ -14,16 +14,29 @@ import { tokenRoles } from '@/server/realm-roles';
 import { submissionBinding } from '@/server/submission';
 import { bidderCallerOf, canBid, fetchOwnBid } from '@/server/tender-bids';
 import {
+  awardOffers,
+  awardStepToRead,
+  canAward,
+  canEvaluate,
+  evaluationOffers,
+  fetchAward,
+  fetchAwardApproval,
+  fetchEvaluation,
+  isBidSideOnly,
+  readsEvaluation,
+} from '@/server/tender-evaluation';
+import {
   canOpenBids,
   decidableStep,
   fetchApproval,
+  fetchAwardRequest,
   fetchOwnerBids,
   fetchPublicationRequest,
-  isOpeningOnly,
   openingOnlyOffers,
   ownerCallerOf,
   ownerOffers,
   readsOwnerBids,
+  type OwnerOffer,
 } from '@/server/tender-owner';
 import {
   fetchOpenTender,
@@ -39,7 +52,8 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { BidCommands } from './BidCommands';
 import { bidCommandOffers } from './bid-offers';
-import { ownerCommandOffers } from './owner-offers';
+import { AwardSection, EvaluationSection } from './EvaluationSections';
+import { ownerCommandOffers, type OwnerForms } from './owner-offers';
 import { OwnerCommands } from './OwnerCommands';
 import {
   OpeningOnlyScreen,
@@ -134,9 +148,9 @@ export default async function TenderPage({
         />
       ) : null;
     body = <OpenTenderDetailScreen result={result} ownBid={ownBid} />;
-  } else if (isOpeningOnly(ownerCallerOf(session.accessToken), webServerEnv())) {
-    // An opener refused the tender read is given the opening without it (PR 345 r1, finding 4).
-    body = await openingOnlyBody(session, id, query);
+  } else if (isBidSideOnly(ownerCallerOf(session.accessToken), webServerEnv())) {
+    // An opener or evaluator refused the tender read is given the bid side without it (PR 345 r1, finding 4).
+    body = await bidSideOnlyBody(session, id, query);
   } else {
     const result = await fetchTender(session, id);
     const criteria = result.kind === 'OK' ? await fetchTenderCriteria(session, id) : null;
@@ -173,43 +187,81 @@ export default async function TenderPage({
   );
 }
 
+/** Every owner form's submission id on the page, all groups'. */
+const submissionIdsOf = (forms: OwnerForms): string[] =>
+  [...forms.publication, ...forms.opening, ...forms.evaluation, ...forms.award].map(
+    ({ submission }) => submission.id,
+  );
+
 /**
- * The page of an opener who may not read the tender (`isOpeningOnly`): only
- * `GET …/bids`, which construction-service answers an opener — `404` for
- * another organization's tender or a missing one, exactly as the tender read
- * would — and the opening's forms while the bids are not opened.
+ * The page of an opener or an evaluator who may not read the tender
+ * (`isBidSideOnly`): only what those roles read — `GET …/bids` for an opener,
+ * the matrix for an evaluator once the bids are opened, each `404` for another
+ * organization's tender or a missing one, exactly as the tender read would —
+ * the opening's forms while the bids are not opened, and the evaluators'.
  */
-async function openingOnlyBody(
+async function bidSideOnlyBody(
   session: WebSession,
   id: string,
   query: Record<string, string | string[] | undefined>,
 ): Promise<ReactNode> {
+  const settings = webServerEnv();
   const caller = ownerCallerOf(session.accessToken);
-  const bids = await fetchOwnerBids(session, id);
-  if (bids.kind !== 'OK') return <OwnTenderDetailScreen result={bids} criteria={null} />;
-  const forms = ownerCommandOffers(session, id, openingOnlyOffers(caller, bids, webServerEnv()));
+  const opens = canOpenBids(caller, settings);
+  const bids = opens ? await fetchOwnerBids(session, id) : null;
+  if (bids !== null && bids.kind !== 'OK') {
+    return <OwnTenderDetailScreen result={bids} criteria={null} />;
+  }
+  const opened = bids === null || bids.data.opened;
+  const matrix =
+    canEvaluate(caller, settings) && opened ? await fetchEvaluation(session, id) : null;
+  if (
+    bids === null &&
+    matrix !== null &&
+    (matrix.kind === 'NOT_FOUND' || matrix.kind === 'FORBIDDEN')
+  ) {
+    return <OwnTenderDetailScreen result={matrix} criteria={null} />;
+  }
+  const evaluation = evaluationOffers(caller, matrix, settings);
+  const forms = ownerCommandOffers(
+    session,
+    id,
+    [...(bids ? openingOnlyOffers(caller, bids, settings) : []), ...evaluation.offers],
+    Date.now(),
+    { matrix: matrix?.kind === 'OK' ? matrix.data : null, actorId: caller.actorId },
+  );
   const flash = query[FLASH_PARAM];
   const done = readFlash(session, typeof flash === 'string' ? flash : undefined, id, OWNER_DONE);
+  const group = (offered: OwnerForms['opening'], showsRestored: boolean) => (
+    <OwnerCommands
+      tenderId={id}
+      offered={offered}
+      csrfToken={session.csrfToken}
+      owner={submissionBinding(session).owner}
+      pageHref={tenderDetailPath(id, 'own')}
+      showsRestored={showsRestored}
+      pageSubmissionIds={submissionIdsOf(forms)}
+    />
+  );
   return (
-    <OpeningOnlyScreen tenderId={id}>
+    <OpeningOnlyScreen tenderId={id} opens={opens} evaluates={matrix !== null}>
       <OwnerFlash done={done} />
-      <OpeningSection
-        status={null}
-        opened={bids.data.opened}
-        notes={[]}
-        commands={
-          <OwnerCommands
-            tenderId={id}
-            offered={forms.opening}
-            csrfToken={session.csrfToken}
-            owner={submissionBinding(session).owner}
-            pageHref={tenderDetailPath(id, 'own')}
-            showsRestored
-            pageSubmissionIds={forms.opening.map(({ submission }) => submission.id)}
-          />
-        }
-      />
-      <OwnerBidsSection bids={bids} criteria={new Map()} />
+      {bids ? (
+        <OpeningSection
+          status={null}
+          opened={bids.data.opened}
+          notes={[]}
+          commands={group(forms.opening, matrix === null)}
+        />
+      ) : null}
+      {bids ? <OwnerBidsSection bids={bids} criteria={new Map()} /> : null}
+      {matrix ? (
+        <EvaluationSection
+          matrix={matrix}
+          notes={evaluation.notes}
+          commands={group(forms.evaluation, true)}
+        />
+      ) : null}
     </OpeningOnlyScreen>
   );
 }
@@ -217,8 +269,11 @@ async function openingOnlyBody(
 /**
  * The owner's sections, read only once the tender itself answered: the
  * publication's newest request while it is a draft, the step this person may
- * decide, and the bids for an opener once there can be any. Which forms is
- * `ownerOffers`, a copy of construction-service's checks.
+ * decide, the bids for an opener once there can be any, the matrix for an
+ * evaluator once they are opened, and — evaluated — the award's newest
+ * request, the award step this person decides or executes, and the award once
+ * made. Which forms is `ownerOffers`, `evaluationOffers` and `awardOffers`,
+ * copies of construction-service's checks.
  */
 async function ownerSections(
   session: WebSession,
@@ -230,28 +285,53 @@ async function ownerSections(
   const settings = webServerEnv();
   const caller = ownerCallerOf(session.accessToken);
   const draft = tender.status === 'DRAFT';
-  const [publication, bids] = await Promise.all([
+  const awarding = tender.status === 'EVALUATED' || tender.status === 'AWARDED';
+  const [publication, bids, matrix, awardRequest] = await Promise.all([
     draft ? fetchPublicationRequest(session, id) : null,
     readsOwnerBids(caller, tender.status, settings) ? fetchOwnerBids(session, id) : null,
+    readsEvaluation(caller, tender.status, settings) ? fetchEvaluation(session, id) : null,
+    awarding ? fetchAwardRequest(session, id) : null,
   ]);
   const decidable =
     publication?.kind === 'OK' ? decidableStep(caller, publication.data, tender.version) : null;
-  const step = decidable ? await fetchApproval(session, decidable.approvalId) : null;
+  const awardStepId =
+    awardRequest?.kind === 'OK'
+      ? awardStepToRead(caller, tender, awardRequest.data, settings)
+      : null;
+  const [step, awardStep, award] = await Promise.all([
+    decidable ? fetchApproval(session, decidable.approvalId) : null,
+    awardStepId ? fetchAwardApproval(session, awardStepId) : null,
+    tender.status === 'AWARDED' && canAward(caller, settings) ? fetchAward(session, id) : null,
+  ]);
   const { offers, notes } = ownerOffers(
     caller,
     { tender, publication, step },
     settings,
     Date.now(),
   );
-  const forms = ownerCommandOffers(session, id, offers);
+  const evaluation = evaluationOffers(caller, matrix, settings);
+  const awardSide = awardOffers(
+    caller,
+    {
+      tender,
+      completedByCaller: tender.status === 'EVALUATED' && tender.statusChangedByCaller,
+      matrix,
+      request: awardRequest,
+      step: awardStep,
+    },
+    settings,
+  );
+  const all: OwnerOffer[] = [...offers, ...evaluation.offers, ...awardSide.offers];
+  const forms = ownerCommandOffers(session, id, all, Date.now(), {
+    matrix: matrix?.kind === 'OK' ? matrix.data : null,
+    actorId: caller.actorId,
+  });
   const flash = query[FLASH_PARAM];
   const done = readFlash(session, typeof flash === 'string' ? flash : undefined, id, OWNER_DONE);
 
   const pageHref = tenderDetailPath(id, 'own');
   const ownerTag = submissionBinding(session).owner;
-  const pageSubmissionIds = [...forms.publication, ...forms.opening].map(
-    ({ submission }) => submission.id,
-  );
+  const pageSubmissionIds = submissionIdsOf(forms);
   const group = (offered: typeof forms.publication, showsRestored: boolean) => (
     <OwnerCommands
       tenderId={id}
@@ -264,6 +344,14 @@ async function ownerSections(
     />
   );
   const openingShown = !draft && tender.status !== 'CANCELLED' && canOpenBids(caller, settings);
+  // A record restored after a reload is drawn once: in the furthest section on the page.
+  const restoredIn = awarding
+    ? 'award'
+    : matrix
+      ? 'evaluation'
+      : openingShown
+        ? 'opening'
+        : 'publication';
   const labels = new Map(
     criteria?.kind === 'OK' ? criteria.data.items.map((item) => [item.code, item.label]) : [],
   );
@@ -275,17 +363,34 @@ async function ownerSections(
         <PublicationSection
           request={publication}
           notes={notes.filter((note) => note !== 'AWAITING_CLOSE')}
-          commands={group(forms.publication, true)}
+          commands={group(forms.publication, restoredIn === 'publication')}
         />
       ) : null}
       {openingShown ? (
         <OpeningSection
           status={tender.status}
           notes={notes.filter((note) => note === 'AWAITING_CLOSE')}
-          commands={group(forms.opening, true)}
+          commands={group(forms.opening, restoredIn === 'opening')}
         />
       ) : null}
       {bids ? <OwnerBidsSection bids={bids} criteria={labels} /> : null}
+      {matrix ? (
+        <EvaluationSection
+          matrix={matrix}
+          notes={evaluation.notes}
+          commands={group(forms.evaluation, restoredIn === 'evaluation')}
+        />
+      ) : null}
+      {awarding ? (
+        <AwardSection
+          status={tender.status}
+          request={awardRequest}
+          step={awardStep}
+          award={award}
+          notes={awardSide.notes}
+          commands={group(forms.award, restoredIn === 'award')}
+        />
+      ) : null}
     </>
   );
 }

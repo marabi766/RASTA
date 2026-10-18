@@ -1,22 +1,41 @@
 'use client';
 
-import { useActionState, useCallback } from 'react';
+import { useActionState, useCallback, type ReactNode } from 'react';
 
-import { Alert, Button, Field, controlClassName } from '@/ui';
+import { Alert, Button, Field, Identifier, IsolatedText, controlClassName } from '@/ui';
 import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
+import { formatScaledDecimal, toPersianDigits } from '@/lib/format';
 import { isRedirect, sessionHasEnded, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import {
-  APPROVAL_REFUSAL_TEXT,
-  OPENING_REFUSAL_TEXT,
+  DISQUALIFICATION_REASON_LABELS,
+  DISQUALIFY_TEXT_MAX,
+  JUSTIFICATION_FIELD,
+  JUSTIFICATION_MAX,
+  REASON_CODE_FIELD,
+  REASON_TEXT_FIELD,
+  SCORE_SCALE,
+  scoreField,
+} from '@/lib/tender-evaluation-fields';
+import {
   OWNER_COMMAND_CONSEQUENCES,
   OWNER_COMMAND_LABELS,
   OWNER_FORBIDDEN_TEXT,
   REASON_FIELD,
+  REJECTION_COMMANDS,
   REJECT_REASON_MAX,
   UNREPEATABLE_OWNER_COMMANDS,
+  refusalTextFor,
   type OwnerCommand,
 } from '@/lib/tender-owner-fields';
-import { parseRejectReason } from '@/lib/tender-owner-input';
+import {
+  ownerFields,
+  ownerFormContext,
+  ownerValuesOf,
+  parseOwnerForm,
+  scoreMessage,
+  type OwnerValues,
+  type ScoringCell,
+} from '@/lib/tender-owner-input';
 import {
   clearUnresolvedOwnerCommand,
   restoreUnresolvedOwnerCommand,
@@ -34,25 +53,47 @@ import {
 } from './owner-form-state';
 
 /**
- * One command the owner's side may issue on a tender — publish, decide the
- * publication's step, or one of the opening's three. The page draws one per
- * command `server/tender-owner.ts` says the service would accept; this
+ * One command the owner's side may issue on a tender — publish, decide a
+ * step, one of the opening's three, decide on or score a bid, complete the
+ * evaluation, award. The page draws one per command `server/tender-owner.ts`
+ * and `server/tender-evaluation.ts` say the service would accept; this
  * component never decides whether it is allowed. Each has its own submission
  * id (the `Idempotency-Key`) and its own signed stamp.
  *
  * Sent and not confirmed: `lib/unresolved-tender-command.ts` records that it
  * was sent — a marker, nothing of what it said — and the form is replaced by a
  * view that never says "nothing changed". In this page the same request may be
- * sent again under the same key; after a reload the record is only shown,
+ * sent again under the same key, unless the command is one never sent again
+ * (`UNREPEATABLE_OWNER_COMMANDS`); after a reload the record is only shown,
  * beside the tender the page read, until the person sets it aside. The owner's
  * commands of a tender share one slot (`heldBy`).
  */
+
+/** One criterion of a scoring form, as the page read it. */
+export interface ScoreRow {
+  readonly cell: ScoringCell;
+  readonly label: string;
+  /** The caller's own standing score, × 100; null for a cell not yet scored. */
+  readonly current: number | null;
+}
+
+/** An award form's terms, as the page read them (`AwardTerms`). */
+export interface AwardFormTerms {
+  readonly justificationRequired: boolean;
+  readonly execution: { readonly justification: string | null } | null;
+}
 
 export interface OwnerCommandFormProps {
   readonly tenderId: string;
   readonly command: OwnerCommand;
   /** A publication whose approval is in on this very version: the command executes. */
   readonly execute?: boolean;
+  /** What the command is about, said after its label — the bidder of a bid's command. */
+  readonly subject?: string;
+  /** Makes the form's ids its own where one command is drawn per bid. */
+  readonly scope?: string;
+  readonly scoreRows?: readonly ScoreRow[];
+  readonly award?: AwardFormTerms;
   readonly csrfToken: string;
   readonly submissionId: string;
   readonly replay: ReplayStamp | null;
@@ -68,23 +109,30 @@ export function unconfirmedFrom(restored: UnresolvedOwnerCommand): UnconfirmedOw
     command: restored.command,
     correlationId: restored.correlationId,
     submissionId: restored.submissionId,
-    reason: null,
+    values: null,
     replay: null,
     viewOnly: true,
     restored: true,
   };
 }
 
-/** The label a command is drawn with: a publication approved on this version executes. */
+/** The label a command is drawn with: a gated command approved on this version executes. */
 export function ownerLabel(command: OwnerCommand, execute = false): string {
   if (command === 'PUBLISH') return execute ? 'اجرای انتشار (موافقت گرفته شده)' : 'درخواست انتشار';
+  if (command === 'AWARD' && execute) return 'اجرای واگذاری (موافقت گرفته شده)';
   return OWNER_COMMAND_LABELS[command];
 }
+
+const idPart = (value: string): string => value.replace(/[^A-Za-z0-9_-]/g, '_');
 
 export function OwnerCommandForm({
   tenderId,
   command,
   execute = false,
+  subject,
+  scope,
+  scoreRows,
+  award,
   csrfToken,
   submissionId,
   replay,
@@ -93,6 +141,8 @@ export function OwnerCommandForm({
   initial = IDLE_OWNER_FORM,
   heldBy = null,
 }: OwnerCommandFormProps) {
+  const scoring = scoreRows?.map(({ cell }) => cell) ?? null;
+  const context = ownerFormContext({ scoring, award: award ?? null });
   const send = useCallback(
     async (previous: OwnerFormState, form: FormData): Promise<OwnerFormState> => {
       const firstSend = previous.kind !== 'UNCONFIRMED';
@@ -109,16 +159,9 @@ export function OwnerCommandForm({
         return { ...previous, viewOnly: true };
       }
 
-      // A rejection whose reason the action would refuse unsent is not remembered.
-      const raw = form.get(REASON_FIELD);
-      const reason =
-        command === 'REJECT'
-          ? (() => {
-              const parsed = parseRejectReason(typeof raw === 'string' ? raw : '');
-              return parsed.ok ? parsed.reason : undefined;
-            })()
-          : null;
-      const sendable = firstSend && reason !== undefined;
+      // A form the action would refuse unsent is not remembered.
+      const parsed = parseOwnerForm(command, ownerValuesOf(command, form, context), context);
+      const sendable = firstSend && parsed.ok;
       const saved = sendable
         ? saveUnresolvedOwnerCommand(
             tenderId,
@@ -146,7 +189,7 @@ export function OwnerCommandForm({
                 command,
                 correlationId: null,
                 submissionId: sentId,
-                reason: null,
+                values: null,
                 replay: null,
                 viewOnly: true,
                 unrepeatable: true,
@@ -157,7 +200,7 @@ export function OwnerCommandForm({
                 command,
                 correlationId: null,
                 submissionId: sentId,
-                reason: reason ?? null,
+                values: parsed.ok ? parsed.values : null,
                 replay,
                 ...(ended ? { sessionEnded: true as const } : {}),
               };
@@ -176,17 +219,32 @@ export function OwnerCommandForm({
       }
       return next;
     },
-    [tenderId, command, replay, owner],
+    // `context` is the props' own: a new one each render says nothing new.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tenderId, command, replay, owner, scoreRows, award],
   );
   const [state, action, pending] = useActionState(send, initial);
-  const headingId = `owner-command-${command}`;
+  const headingId = `owner-command-${command}${scope ? `-${idPart(scope)}` : ''}`;
   const label = ownerLabel(command, execute);
+  const heading = (
+    <h3 id={headingId} className="text-base font-medium">
+      {label}
+      {subject ? (
+        <>
+          {' — '}
+          <Identifier>{subject}</Identifier>
+        </>
+      ) : null}
+    </h3>
+  );
 
   if (state.kind === 'UNCONFIRMED') {
     return (
       <UnconfirmedCommand
         state={state}
         label={state.restored ? ownerLabel(state.command) : label}
+        heading={state.restored ? undefined : heading}
+        needsValues={ownerFields(state.command, context).length > 0}
         action={action}
         pending={pending}
         csrfToken={csrfToken}
@@ -206,9 +264,7 @@ export function OwnerCommandForm({
         aria-labelledby={headingId}
         className="flex flex-col gap-3 rounded-lg border border-border bg-surface-raised p-4"
       >
-        <h3 id={headingId} className="text-base font-medium">
-          {label}
-        </h3>
+        {heading}
         <Alert tone="warning">
           {HELD_MESSAGE}{' '}
           <a href={pageHref} className="underline">
@@ -229,38 +285,30 @@ export function OwnerCommandForm({
       <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId} />
       <input type="hidden" name={REPLAY_FIELD} value={replay?.token ?? ''} />
 
-      <h3 id={headingId} className="text-base font-medium">
-        {label}
-      </h3>
+      {heading}
       <p className="text-sm text-content-muted">{OWNER_COMMAND_CONSEQUENCES[command]}</p>
 
       <CommandBanner state={state} />
 
-      {command === 'REJECT' ? (
-        <Field
-          key={invalid ? (state.reason ?? '') : ''}
-          label="دلیل رد"
-          hint="دست‌کم ۸ نویسه؛ در سابقهٔ موافقت ثبت می‌شود."
-          error={invalid ? state.fieldErrors[REASON_FIELD] : undefined}
-          required
-        >
-          {(control) => (
-            <textarea
-              {...control}
-              name={REASON_FIELD}
-              rows={3}
-              maxLength={REJECT_REASON_MAX}
-              defaultValue={invalid ? (state.reason ?? '') : ''}
-              className={controlClassName}
-            />
-          )}
-        </Field>
-      ) : null}
+      <CommandFields
+        key={invalid ? JSON.stringify(state.values) : ''}
+        command={command}
+        values={invalid ? state.values : null}
+        errors={invalid ? state.fieldErrors : {}}
+        scoreRows={scoreRows ?? []}
+        award={award}
+      />
 
       <div>
         <Button
           type="submit"
-          tone={command === 'REJECT' || command === 'WITHDRAW_PROPOSAL' ? 'secondary' : 'primary'}
+          tone={
+            REJECTION_COMMANDS.includes(command) ||
+            command === 'WITHDRAW_PROPOSAL' ||
+            command === 'DISQUALIFY'
+              ? 'secondary'
+              : 'primary'
+          }
           disabled={pending}
         >
           {pending ? 'در حال ارسال…' : label}
@@ -280,19 +328,183 @@ const REFUSAL_MESSAGES: Record<Extract<OwnerFormState, { kind: 'REFUSED' }>['rea
 
 /** A 403: its closed reason in fixed words if it named one, else the command's own sentence. */
 export function forbiddenText(command: OwnerCommand, reasons: readonly string[]): string {
+  const table = refusalTextFor(command);
   for (const reason of reasons) {
-    const text = OPENING_REFUSAL_TEXT[reason] ?? APPROVAL_REFUSAL_TEXT[reason];
+    const text = table[reason];
     if (text) return text;
   }
   return OWNER_FORBIDDEN_TEXT[command];
 }
 
 /**
- * Why a proposal or its withdrawal whose outcome is unknown is not sent again
+ * Why a command whose outcome is unknown is not sent again
  * (`UNREPEATABLE_OWNER_COMMANDS`).
  */
 export const UNREPEATABLE_OWNER_TEXT =
   'این درخواست، وقتی نتیجه‌اش معلوم نیست، دوباره فرستاده نمی‌شود: سرویس نتیجهٔ آن را به شناسهٔ ارسال نگه نمی‌دارد و ارسال دوباره روی مناقصه آن‌طور که در آن لحظه است عمل می‌کند — مثلاً دور موافقت تازه‌ای باز می‌کند، یا پیشنهاد گشایش دیگری را پس می‌گیرد یا تأیید می‌کند. وضعیت را با تازه‌کردن صفحه ببینید و اگر لازم بود از نو اقدام کنید.';
+
+/** What a command asks of the person besides the button, as typed so far. */
+function CommandFields({
+  command,
+  values,
+  errors,
+  scoreRows,
+  award,
+}: {
+  command: OwnerCommand;
+  values: OwnerValues | null;
+  errors: Partial<Record<string, string>>;
+  scoreRows: readonly ScoreRow[];
+  award?: AwardFormTerms;
+}) {
+  const typed = (name: string): string | undefined => values?.[name];
+  if (REJECTION_COMMANDS.includes(command)) {
+    return (
+      <Field
+        label="دلیل رد"
+        hint="دست‌کم ۸ نویسه؛ در سابقهٔ موافقت ثبت می‌شود."
+        error={errors[REASON_FIELD]}
+        required
+      >
+        {(control) => (
+          <textarea
+            {...control}
+            name={REASON_FIELD}
+            rows={3}
+            maxLength={REJECT_REASON_MAX}
+            defaultValue={typed(REASON_FIELD) ?? ''}
+            className={controlClassName}
+          />
+        )}
+      </Field>
+    );
+  }
+  if (command === 'DISQUALIFY') {
+    return (
+      <>
+        <Field label="دلیل" error={errors[REASON_CODE_FIELD]} required>
+          {(control) => (
+            <select
+              {...control}
+              name={REASON_CODE_FIELD}
+              defaultValue={typed(REASON_CODE_FIELD) ?? ''}
+              className={controlClassName}
+            >
+              <option value="">— برگزینید —</option>
+              {Object.entries(DISQUALIFICATION_REASON_LABELS).map(([code, text]) => (
+                <option key={code} value={code}>
+                  {text}
+                </option>
+              ))}
+            </select>
+          )}
+        </Field>
+        <Field
+          label="شرح دلیل"
+          hint="در سامانه نگه داشته می‌شود و به پیشنهاددهنده نشان داده نمی‌شود."
+          error={errors[REASON_TEXT_FIELD]}
+          required
+        >
+          {(control) => (
+            <textarea
+              {...control}
+              name={REASON_TEXT_FIELD}
+              rows={3}
+              maxLength={DISQUALIFY_TEXT_MAX}
+              defaultValue={typed(REASON_TEXT_FIELD) ?? ''}
+              className={controlClassName}
+            />
+          )}
+        </Field>
+      </>
+    );
+  }
+  if (command === 'SCORE') {
+    return (
+      <>
+        {scoreRows.map(({ cell, label, current }) => {
+          const field = scoreField(cell.criterionCode);
+          const standing = current === null ? '' : formatScaledDecimal(String(current), 2);
+          const hint = `${scoreMessage(cell)} ${
+            current === null ? 'هنوز امتیازی نداده‌اید.' : `امتیاز کنونی شما: ${standing}.`
+          } خالی بماند، در این ارسال امتیاز نمی‌گیرد.`;
+          return (
+            <Field
+              key={cell.criterionCode}
+              label={<IsolatedText>{label}</IsolatedText>}
+              hint={hint}
+              error={errors[field]}
+            >
+              {(control) =>
+                cell.passFail ? (
+                  <select
+                    {...control}
+                    name={field}
+                    defaultValue={
+                      typed(field) ?? (current === null ? '' : String(current / SCORE_SCALE))
+                    }
+                    className={controlClassName}
+                  >
+                    <option value="">— بی‌امتیاز در این ارسال —</option>
+                    <option value="0">رد ({toPersianDigits('0')})</option>
+                    <option value={String(cell.maxScore)}>
+                      قبول ({formatScaledDecimal(String(cell.maxScore), 0)})
+                    </option>
+                  </select>
+                ) : (
+                  <input
+                    {...control}
+                    name={field}
+                    inputMode="decimal"
+                    autoComplete="off"
+                    defaultValue={typed(field) ?? standing}
+                    className={controlClassName}
+                  />
+                )
+              }
+            </Field>
+          );
+        })}
+      </>
+    );
+  }
+  if (command === 'AWARD' && award) {
+    if (award.execution) {
+      return award.execution.justification === null ? (
+        <p className="text-sm">درخواستِ موافقت‌شده دلیلی نداشت؛ همان اجرا می‌شود.</p>
+      ) : (
+        <p className="whitespace-pre-line text-sm">
+          دلیل درخواستِ موافقت‌شده، که همان اجرا می‌شود:{' '}
+          <IsolatedText>{award.execution.justification}</IsolatedText>
+        </p>
+      );
+    }
+    return (
+      <Field
+        label="دلیل انتخاب"
+        hint={
+          award.justificationRequired
+            ? 'این پیشنهاد تنها رتبهٔ نخست ماتریس نیست؛ انتخاب آن دلیل نوشته لازم دارد. دلیل در سامانه نگه داشته می‌شود و به پیشنهاددهندگان نشان داده نمی‌شود.'
+            : 'اختیاری برای تنها رتبهٔ نخست. دلیل در سامانه نگه داشته می‌شود و به پیشنهاددهندگان نشان داده نمی‌شود.'
+        }
+        error={errors[JUSTIFICATION_FIELD]}
+        required={award.justificationRequired}
+      >
+        {(control) => (
+          <textarea
+            {...control}
+            name={JUSTIFICATION_FIELD}
+            rows={3}
+            maxLength={JUSTIFICATION_MAX}
+            defaultValue={typed(JUSTIFICATION_FIELD) ?? ''}
+            className={controlClassName}
+          />
+        )}
+      </Field>
+    );
+  }
+  return null;
+}
 
 const HELD_MESSAGE =
   'درخواست دیگری روی همین مناقصه فرستاده شده و نتیجه‌اش هنوز معلوم نیست؛ ممکن است انجام شده باشد. تا روشن‌شدن نتیجهٔ آن، این فرم فرستاده نمی‌شود. وضعیت را با تازه‌کردن صفحه ببینید.';
@@ -334,6 +546,8 @@ function CommandBanner({ state }: { state: OwnerFormState }) {
 function UnconfirmedCommand({
   state,
   label,
+  heading,
+  needsValues,
   action,
   pending,
   csrfToken,
@@ -343,6 +557,9 @@ function UnconfirmedCommand({
 }: {
   state: UnconfirmedOwnerCommand;
   label: string;
+  heading?: ReactNode;
+  /** Whether a re-send needs the fields as first sent: without them there is nothing to re-send. */
+  needsValues: boolean;
   action: (form: FormData) => void;
   pending: boolean;
   csrfToken: string;
@@ -351,7 +568,7 @@ function UnconfirmedCommand({
   onForget: () => void;
 }) {
   const canRetry =
-    !state.viewOnly && !state.sessionEnded && (state.command !== 'REJECT' || state.reason !== null);
+    !state.viewOnly && !state.sessionEnded && (!needsValues || state.values !== null);
   const canForget = (state.viewOnly || state.retryRefused) && !state.sessionEnded;
 
   return (
@@ -363,13 +580,15 @@ function UnconfirmedCommand({
       <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
       <input type="hidden" name={SUBMISSION_FIELD} value={state.submissionId} />
       <input type="hidden" name={REPLAY_FIELD} value={state.replay?.token ?? ''} />
-      {state.reason !== null ? (
-        <input type="hidden" name={REASON_FIELD} value={state.reason} />
-      ) : null}
+      {Object.entries(state.values ?? {}).map(([name, value]) => (
+        <input key={name} type="hidden" name={name} value={value} />
+      ))}
 
-      <h3 id={headingId} className="text-base font-medium">
-        {label}
-      </h3>
+      {heading ?? (
+        <h3 id={headingId} className="text-base font-medium">
+          {label}
+        </h3>
+      )}
       <Alert tone="warning">
         نتوانستیم تأیید کنیم که «{label}» انجام شد یا نه؛ ممکن است انجام شده باشد. پیش از هر کار
         دیگر،{' '}

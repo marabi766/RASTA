@@ -424,42 +424,46 @@ describe('what each command sends — from the stamp', () => {
   ): OwnerBinding => ({ command, approvalId, expectedVersion });
 
   it('a publication is the version read', () => {
-    expect(ownerRequest(TENDER_ID, bind('PUBLISH', null, 4), null)).toEqual({
+    expect(ownerRequest(TENDER_ID, bind('PUBLISH', null, 4), {})).toMatchObject({
       path: `/v1/tenders/${TENDER_ID}/publish`,
       body: { expectedVersion: 4 },
     });
   });
 
   it('a decision is the step’s version and the decision; a rejection its reason', () => {
-    expect(ownerRequest(TENDER_ID, bind('GRANT', APPROVAL_ID, 7), null)).toEqual({
+    expect(ownerRequest(TENDER_ID, bind('GRANT', APPROVAL_ID, 7), {})).toMatchObject({
       path: `/v1/approvals/${APPROVAL_ID}/decision`,
       body: { expectedVersion: 7, decision: 'GRANT' },
     });
-    expect(ownerRequest(TENDER_ID, bind('REJECT', APPROVAL_ID, 7), 'معیارها کامل نیست')).toEqual({
+    expect(
+      ownerRequest(TENDER_ID, bind('REJECT', APPROVAL_ID, 7), { reason: 'معیارها کامل نیست' }),
+    ).toMatchObject({
       path: `/v1/approvals/${APPROVAL_ID}/decision`,
       body: { expectedVersion: 7, decision: 'REJECT', reason: 'معیارها کامل نیست' },
     });
   });
 
   it('the opening’s three carry nothing', () => {
-    expect(ownerRequest(TENDER_ID, bind('PROPOSE_OPENING', null, null), null)?.path).toBe(
+    expect(ownerRequest(TENDER_ID, bind('PROPOSE_OPENING', null, null), {})?.path).toBe(
       `/v1/tenders/${TENDER_ID}/open-bids/proposal`,
     );
-    expect(ownerRequest(TENDER_ID, bind('OPEN_BIDS', null, null), null)).toEqual({
+    expect(ownerRequest(TENDER_ID, bind('OPEN_BIDS', null, null), {})).toMatchObject({
       path: `/v1/tenders/${TENDER_ID}/open-bids`,
       body: {},
     });
-    expect(ownerRequest(TENDER_ID, bind('WITHDRAW_PROPOSAL', null, null), null)?.path).toBe(
+    expect(ownerRequest(TENDER_ID, bind('WITHDRAW_PROPOSAL', null, null), {})?.path).toBe(
       `/v1/tenders/${TENDER_ID}/open-bids/proposal/withdraw`,
     );
   });
 
   it('a binding that does not fit its command carries nothing', () => {
-    expect(ownerRequest(TENDER_ID, bind('PUBLISH', null, null), null)).toBeNull();
-    expect(ownerRequest(TENDER_ID, bind('GRANT', null, 7), null)).toBeNull();
-    expect(ownerRequest(TENDER_ID, bind('REJECT', APPROVAL_ID, 7), null)).toBeNull();
-    expect(ownerRequest(TENDER_ID, bind('GRANT', APPROVAL_ID, 7), 'a reason here')).toBeNull();
-    expect(ownerRequest(TENDER_ID, bind('OPEN_BIDS', null, 3), null)).toBeNull();
+    expect(ownerRequest(TENDER_ID, bind('PUBLISH', null, null), {})).toBeNull();
+    expect(ownerRequest(TENDER_ID, bind('GRANT', null, 7), {})).toBeNull();
+    expect(ownerRequest(TENDER_ID, bind('REJECT', APPROVAL_ID, 7), {})).toBeNull();
+    expect(
+      ownerRequest(TENDER_ID, bind('GRANT', APPROVAL_ID, 7), { reason: 'a reason here' }),
+    ).toBeNull();
+    expect(ownerRequest(TENDER_ID, bind('OPEN_BIDS', null, 3), {})).toBeNull();
   });
 });
 
@@ -469,7 +473,7 @@ describe('what every answer becomes', () => {
       SESSION,
       TENDER_ID,
       binding,
-      ownerRequest(TENDER_ID, binding, reason)!,
+      ownerRequest(TENDER_ID, binding, reason === null ? {} : { reason })!,
       SUBMISSION,
       fetchImpl as unknown as typeof fetch,
     );

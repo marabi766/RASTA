@@ -32,6 +32,7 @@ export const DRAFT_TENDER: TenderDetail = {
   publishedAt: null,
   createdAt: '2026-10-17T06:00:00.000Z',
   version: 4,
+  statusChangedByCaller: false,
 };
 
 export const PENDING_REQUEST: ApprovalRequest = {

@@ -74,7 +74,7 @@ const unconfirmed = (reason: string | null): OwnerFormState => ({
   command: 'REJECT',
   correlationId: 'COR_ORIGINAL',
   submissionId: KEY,
-  reason,
+  values: reason === null ? null : { reason },
   replay: STAMP,
 });
 
@@ -132,7 +132,7 @@ it('a reason the action would refuse unsent is not remembered', async () => {
     kind: 'INVALID',
     command: 'REJECT',
     submissionId: KEY,
-    reason: 'کوتاه',
+    values: { reason: 'کوتاه' },
     fieldErrors: { reason: 'x' },
     message: null,
   });
@@ -160,7 +160,7 @@ it('a publication whose answer was lost — then rejected — offers no retry, a
     command: 'PUBLISH',
     correlationId: 'COR_LOST',
     submissionId: KEY,
-    reason: null,
+    values: null,
     replay: null,
     viewOnly: true,
     unrepeatable: true,

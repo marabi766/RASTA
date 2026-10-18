@@ -1,3 +1,5 @@
+import { AWARD_REFUSAL_TEXT, EVALUATION_REFUSAL_TEXT } from './tender-evaluation-fields';
+
 /**
  * The vocabulary of the owner's tender commands on `/tenders/[id]` (EXP-004;
  * construction-service CON-002, ADR-065, ADR-066, Q-84, Q-91) — client-safe,
@@ -8,8 +10,17 @@
 /**
  * - `PUBLISH`: `POST /v1/tenders/{id}/publish` — opens the publication's
  *   approval request, or, once it is approved, publishes (the same command).
- * - `GRANT`/`REJECT`: `POST /v1/approvals/{id}/decision` on the request's step.
+ * - `GRANT`/`REJECT`: `POST /v1/approvals/{id}/decision` on the publication
+ *   request's step.
  * - `PROPOSE_OPENING`, `OPEN_BIDS`, `WITHDRAW_PROPOSAL`: the two-person opening.
+ * - `QUALIFY`/`DISQUALIFY`: `POST …/bids/{bidId}/qualification`, one decision
+ *   per opened bid.
+ * - `SCORE`: `POST …/bids/{bidId}/scores`, the caller's scores for a qualified bid.
+ * - `EVALUATE`: `POST …/evaluate`, completing the evaluation.
+ * - `AWARD`: `POST …/award` — opens the award's approval request, or, once it
+ *   is approved, awards (the same command).
+ * - `GRANT_AWARD`/`REJECT_AWARD`: `POST /v1/approvals/{id}/decision` on the
+ *   award request's step.
  */
 export const OWNER_COMMANDS = [
   'PUBLISH',
@@ -18,6 +29,13 @@ export const OWNER_COMMANDS = [
   'PROPOSE_OPENING',
   'OPEN_BIDS',
   'WITHDRAW_PROPOSAL',
+  'QUALIFY',
+  'DISQUALIFY',
+  'SCORE',
+  'EVALUATE',
+  'AWARD',
+  'GRANT_AWARD',
+  'REJECT_AWARD',
 ] as const;
 export type OwnerCommand = (typeof OWNER_COMMANDS)[number];
 
@@ -32,8 +50,8 @@ export function isOwnerCommand(value: unknown): value is OwnerCommand {
  * requires the header), so a re-send is a new request against the tender as it
  * is when it arrives:
  *
- * - **publish** — if the lost request was rejected meanwhile, the same version
- *   opens a new approval round (`TenderApprovalGate.resolve`);
+ * - **publish** and **award** — if the lost request was rejected meanwhile, the
+ *   same command opens a new approval round (`TenderApprovalGate.resolve`);
  * - **propose / withdraw the proposal** — neither names the proposal: a
  *   withdrawal clears whatever proposal stands, a newer one included, and a
  *   proposal may stand up one its author has since withdrawn;
@@ -52,6 +70,26 @@ export const UNREPEATABLE_OWNER_COMMANDS: readonly OwnerCommand[] = [
   'PROPOSE_OPENING',
   'OPEN_BIDS',
   'WITHDRAW_PROPOSAL',
+  'AWARD',
+];
+
+/** The decisions on an approval step: the publication's and the award's. */
+export const DECISION_COMMANDS: readonly OwnerCommand[] = [
+  'GRANT',
+  'REJECT',
+  'GRANT_AWARD',
+  'REJECT_AWARD',
+];
+
+/** The decisions that name a reason. */
+export const REJECTION_COMMANDS: readonly OwnerCommand[] = ['REJECT', 'REJECT_AWARD'];
+
+/** The evaluators' commands. */
+export const EVALUATION_COMMANDS: readonly OwnerCommand[] = [
+  'QUALIFY',
+  'DISQUALIFY',
+  'SCORE',
+  'EVALUATE',
 ];
 
 /** The commands a lost answer may be sent again for, under the same key: the rest. */
@@ -66,6 +104,13 @@ export const OWNER_COMMAND_LABELS: Readonly<Record<OwnerCommand, string>> = {
   PROPOSE_OPENING: 'پیشنهاد گشایش پیشنهادها',
   OPEN_BIDS: 'گشایش پیشنهادها (نفر دوم)',
   WITHDRAW_PROPOSAL: 'پس‌گرفتن پیشنهاد گشایش',
+  QUALIFY: 'اعلام واجد شرایط بودن',
+  DISQUALIFY: 'اعلام فاقد شرایط بودن',
+  SCORE: 'ثبت امتیاز',
+  EVALUATE: 'تکمیل ارزیابی',
+  AWARD: 'درخواست واگذاری',
+  GRANT_AWARD: 'موافقت با واگذاری',
+  REJECT_AWARD: 'رد درخواست واگذاری',
 };
 
 /** What each command does, said before it is sent. */
@@ -82,6 +127,20 @@ export const OWNER_COMMAND_CONSEQUENCES: Readonly<Record<OwnerCommand, string>> 
     'پیشنهادی را که شخص دیگری داده تأیید می‌کنید و همهٔ پیشنهادهای مناقصه گشوده می‌شوند؛ مناقصه به «در حال ارزیابی» می‌رود. این کار بازگشت ندارد.',
   WITHDRAW_PROPOSAL:
     'پیشنهاد گشایشی که خودتان داده‌اید پس گرفته می‌شود تا شخص مجاز دیگری بتواند از نو پیشنهاد دهد.',
+  QUALIFY:
+    'دربارهٔ هر پیشنهاد یک بار تصمیم گرفته می‌شود و تصمیم بازگشت ندارد. پیش از ثبت، صلاحیت کنونی پیشنهاددهنده از سرویس تأمین‌کنندگان پرسیده می‌شود و اگر واجد صلاحیت نباشد، پذیرفته نمی‌شود.',
+  DISQUALIFY:
+    'دربارهٔ هر پیشنهاد یک بار تصمیم گرفته می‌شود و تصمیم بازگشت ندارد. یکی از دلیل‌های بسته و شرح آن لازم است؛ شرح در سامانه نگه داشته می‌شود و به پیشنهاددهنده نشان داده نمی‌شود.',
+  SCORE:
+    'امتیاز شما برای هر معیار ثبت می‌شود؛ تغییر بعدی نسخهٔ تازه‌ای می‌افزاید و نسخه‌های پیشین می‌مانند. اگر از وقتی این صفحه باز شد امتیاز شما برای یکی از این معیارها تغییر کرده باشد، هیچ‌کدام ثبت نمی‌شود.',
+  EVALUATE:
+    'ارزیابی پایان می‌یابد و ماتریس امتیازها منجمد می‌شود؛ پس از آن هیچ تصمیم یا امتیازی تغییر نمی‌کند. رتبهٔ نخست برنده نیست: شخصی برنده را برمی‌گزیند.',
+  AWARD:
+    'سامانه رتبه‌بندی می‌کند و انتخاب نمی‌کند: پیشنهاد برنده را شما برمی‌گزینید. اگر موافقت با واگذاری هنوز گرفته نشده باشد، درخواست موافقت برای همین انتخاب ثبت می‌شود و انتخاب دیگری، درخواستِ در انتظار را پایان می‌دهد. پس از موافقت، همین فرمان واگذار می‌کند؛ پیش از آن صلاحیت کنونی برنده دوباره پرسیده می‌شود.',
+  GRANT_AWARD:
+    'موافقت شما با واگذاری به پیشنهادی که درخواست نام برده ثبت می‌شود. کسی که درخواست واگذاری را داده، خودش آن را تأیید نمی‌کند.',
+  REJECT_AWARD:
+    'درخواست واگذاری رد می‌شود و دور موافقت پایان می‌یابد؛ برای واگذاری باید دوباره درخواست داد. دلیل رد لازم است. ردکردن از کسی که درخواست داده هم پذیرفته می‌شود.',
 };
 
 /** The confirmation after the redirect (`server/flash.ts`). */
@@ -93,6 +152,14 @@ export const OWNER_COMMAND_DONE = {
   PROPOSE_OPENING: 'پیشنهاد گشایش ثبت شد؛ گشایش با تأیید نفر دوم انجام می‌شود.',
   OPEN_BIDS: 'پیشنهادها گشوده شدند و مناقصه در حال ارزیابی است.',
   WITHDRAW_PROPOSAL: 'پیشنهاد گشایش پس گرفته شد.',
+  QUALIFY: 'پیشنهاد واجد شرایط شناخته شد.',
+  DISQUALIFY: 'پیشنهاد فاقد شرایط اعلام شد.',
+  SCORE: 'امتیازهای شما ثبت شد.',
+  EVALUATE: 'ارزیابی کامل شد و ماتریس امتیازها منجمد شد.',
+  AWARDED: 'مناقصه واگذار شد.',
+  AWARD_REQUESTED: 'درخواست موافقت با واگذاری ثبت شد و در انتظار مرجع است.',
+  GRANT_AWARD: 'موافقت شما با واگذاری ثبت شد.',
+  REJECT_AWARD: 'درخواست واگذاری رد شد.',
 } as const;
 export type OwnerDone = keyof typeof OWNER_COMMAND_DONE;
 export const OWNER_DONE = Object.keys(OWNER_COMMAND_DONE) as OwnerDone[];
@@ -194,6 +261,9 @@ export const OWNER_CODE_TEXT: Readonly<Record<string, string>> = {
 export const OWNER_REFUSAL_FALLBACK =
   'این درخواست پذیرفته نشد و چیزی ثبت نشد. صفحه را تازه کنید و دوباره بررسی کنید.';
 
+const EVALUATION_FORBIDDEN =
+  'ارزیابی پیشنهادهای این مناقصه در اختیار شما نیست، یا اکنون نقش آن را ندارید.';
+
 /**
  * A `403` the service gives without a closed reason, per command: the
  * separation-of-duties refusal of the requester approving their own request
@@ -210,4 +280,38 @@ export const OWNER_FORBIDDEN_TEXT: Readonly<Record<OwnerCommand, string>> = {
   OPEN_BIDS:
     'گشایش پیشنهادهای این مناقصه در اختیار شما نیست، یا اکنون نقش آن را ندارید، یا خودتان یا پیشنهاددهندهٔ گشایش عضو سازمانی هستید که پیشنهاد داده است.',
   WITHDRAW_PROPOSAL: 'پیشنهاد گشایش را فقط کسی که آن را داده پس می‌گیرد.',
+  QUALIFY: EVALUATION_FORBIDDEN,
+  DISQUALIFY: EVALUATION_FORBIDDEN,
+  SCORE: EVALUATION_FORBIDDEN,
+  EVALUATE: EVALUATION_FORBIDDEN,
+  AWARD: 'واگذاری این مناقصه در اختیار شما نیست، یا اکنون نقش آن را ندارید.',
+  GRANT_AWARD:
+    'این مرحله را شما نمی‌توانید بررسی کنید: یا درخواست واگذاری را خودتان داده‌اید (تفکیک وظایف)، یا اکنون عضو سازمان مرجع با نقشِ نام‌برده نیستید، یا نقشی دارید که با پیشنهادها کاری ندارد.',
+  REJECT_AWARD:
+    'این مرحله را شما نمی‌توانید بررسی کنید: اکنون عضو سازمان مرجع با نقشِ نام‌برده نیستید، یا نقشی دارید که با پیشنهادها کاری ندارد.',
 };
+
+/**
+ * The closed reasons a command can be refused for, each in fixed words — one
+ * table per command, since a code such as `CONFLICT_OF_INTEREST` says a
+ * different thing for an opening, an evaluation and an award.
+ */
+export function refusalTextFor(command: OwnerCommand): Readonly<Record<string, string>> {
+  switch (command) {
+    case 'PUBLISH':
+      return { ...APPROVAL_REFUSAL_TEXT, ...PUBLICATION_REFUSAL_TEXT };
+    case 'GRANT':
+    case 'REJECT':
+    case 'GRANT_AWARD':
+    case 'REJECT_AWARD':
+      return APPROVAL_REFUSAL_TEXT;
+    case 'PROPOSE_OPENING':
+    case 'OPEN_BIDS':
+    case 'WITHDRAW_PROPOSAL':
+      return OPENING_REFUSAL_TEXT;
+    case 'AWARD':
+      return { ...APPROVAL_REFUSAL_TEXT, ...AWARD_REFUSAL_TEXT };
+    default:
+      return EVALUATION_REFUSAL_TEXT;
+  }
+}

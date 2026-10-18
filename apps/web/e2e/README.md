@@ -159,6 +159,27 @@ the page and on every owner route through the gateway.
   audit-service up (the opening is checked against its receipts). Under `CI` a skip fails the job.
 - It reruns locally against the same stack, as the bid scenarios do.
 
+## The evaluation and the award (`tender-evaluation.spec.ts`) — a fresh opened tender per test
+
+The cast is made with `{ evaluation: true }`: besides the bid scenarios' people, the owner's
+`tender.award` policy, an evaluator (a third administrator, who takes no other part) and a rival
+(a second qualified contractor, invited too). **Every test opens its own tender**
+(`openedTender`: published with a one-minute window, bid on by both contractors through the
+gateway, closed by construction-service at its deadline, proposed by the author and opened by the
+approver through the gateway, again while audit-service catches up). In the browser: the
+evaluator qualifies the contractor, disqualifies the rival with a closed reason, scores in
+Persian digits (`۸٫۵`, and a pass), sees the weighted total, completes the evaluation, and is told
+the award is someone else's (`AWARDER_NOT_EVALUATOR`); the author asks for the award (offered
+only the rejection of its own request), the approver — shown the bid the step names — grants it,
+and the author executes it (an execution whose answer is lost is set aside and executed anew from
+a fresh form, never re-sent); the award shows the winner's price. Each contractor's own page shows
+its own bid's status and nothing of the other's or of the scores. ORG-DEH-0002's administrator,
+and the contractor itself, get the 404 of a missing id on every evaluation and award route —
+while it is evaluated and again once awarded — and the page shows the same absence.
+
+- It needs what the owner's scenarios need. Under `CI` a skip fails the job.
+- It reruns locally against the same stack, as the bid scenarios do.
+
 ## Adding a live scenario
 
 - Record the id of everything the scenario creates and clean up by id, not by

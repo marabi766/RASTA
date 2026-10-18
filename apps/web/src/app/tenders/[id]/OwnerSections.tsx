@@ -86,30 +86,47 @@ export function PublicationSection({ request, notes, commands }: PublicationSect
   );
 }
 
-function RequestView({ request }: { readonly request: ReadResult<ApprovalRequest | null> | null }) {
+/** How a workflow's requests are named: the publication's (the default), or the award's. */
+export interface RequestWording {
+  readonly latest: string;
+  readonly none: string;
+  readonly unread: string;
+  readonly statusLabel: (status: string) => string;
+}
+
+const PUBLICATION_WORDING: RequestWording = {
+  latest: 'آخرین درخواست انتشار',
+  none: 'هنوز درخواست انتشاری برای این مناقصه ثبت نشده است.',
+  unread: 'درخواست‌های موافقت انتشار خوانده نشد. کمی بعد دوباره تلاش کنید.',
+  statusLabel: requestStatusLabel,
+};
+
+/** The newest request of a workflow and where each of its steps stands. */
+export function RequestView({
+  request,
+  wording = PUBLICATION_WORDING,
+}: {
+  readonly request: ReadResult<ApprovalRequest | null> | null;
+  readonly wording?: RequestWording;
+}) {
   if (request === null) return null;
   if (request.kind === 'FORBIDDEN' || request.kind === 'NOT_FOUND') {
     return <NoAccessState description="درخواست‌های موافقت این مناقصه در اختیار شما نیست." />;
   }
   if (request.kind !== 'OK') {
-    return (
-      <ErrorState
-        description="درخواست‌های موافقت انتشار خوانده نشد. کمی بعد دوباره تلاش کنید."
-        correlationId={request.correlationId}
-      />
-    );
+    return <ErrorState description={wording.unread} correlationId={request.correlationId} />;
   }
   const latest = request.data;
   if (latest === null) {
-    return <p>هنوز درخواست انتشاری برای این مناقصه ثبت نشده است.</p>;
+    return <p>{wording.none}</p>;
   }
   return (
     <div className="flex flex-col gap-3">
       <dl className="grid gap-3 sm:grid-cols-3">
         <div>
-          <dt className="text-sm text-content-muted">آخرین درخواست انتشار</dt>
+          <dt className="text-sm text-content-muted">{wording.latest}</dt>
           <dd>
-            <StatusBadge status={latest.status} label={requestStatusLabel(latest.status)} />
+            <StatusBadge status={latest.status} label={wording.statusLabel(latest.status)} />
           </dd>
         </div>
         <div>
@@ -180,25 +197,45 @@ export function OpeningSection({ status, opened = false, notes, commands }: Open
 }
 
 /**
- * The page of an opener who may not read the tender itself (`isOpeningOnly`):
- * its id, why nothing else of it is shown, then the opening and the bids.
+ * The page of an opener or an evaluator who may not read the tender itself
+ * (`isBidSideOnly`): its id, why nothing else of it is shown, then what those
+ * roles read — the opening and the bids, the evaluation.
  */
 export function OpeningOnlyScreen({
   tenderId,
+  opens = true,
+  evaluates = false,
   children,
 }: {
   readonly tenderId: string;
+  readonly opens?: boolean;
+  readonly evaluates?: boolean;
   readonly children: ReactNode;
 }) {
+  const duty =
+    opens && evaluates
+      ? 'گشایش و ارزیابی پیشنهادهای مناقصه‌های سازمان'
+      : evaluates
+        ? 'ارزیابی پیشنهادهای مناقصه‌های سازمان'
+        : 'گشایش پیشنهادهای مناقصه‌های سازمان';
+  const shown =
+    opens && evaluates
+      ? 'گشایش، پیشنهادها و ارزیابی را'
+      : evaluates
+        ? 'ارزیابی را'
+        : 'گشایش و پیشنهادها را';
   return (
     <div className="flex flex-col gap-6">
-      <Section headingId="tender-summary" title="گشایش پیشنهادهای مناقصه">
+      <Section
+        headingId="tender-summary"
+        title={opens ? 'گشایش پیشنهادهای مناقصه' : 'ارزیابی پیشنهادهای مناقصه'}
+      >
         <p className="text-sm text-content-muted">
           شناسه <Identifier>{tenderId}</Identifier>
         </p>
         <p className="mt-2 text-sm">
-          نقش شما گشایش پیشنهادهای مناقصه‌های سازمان است و مشخصات مناقصه را نمی‌خواند؛ این صفحه فقط
-          گشایش و پیشنهادها را، آن‌طور که سرویس به گشاینده نشان می‌دهد، نشان می‌دهد.
+          نقش شما {duty} است و مشخصات مناقصه را نمی‌خواند؛ این صفحه فقط {shown}، آن‌طور که سرویس به
+          نقش شما نشان می‌دهد، نشان می‌دهد.
         </p>
       </Section>
       {children}

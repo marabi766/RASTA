@@ -27,12 +27,18 @@ import { provisionPerson, provisionedAccessToken } from './provisioned-people';
  * - **an unqualified contractor** — invited like the first, never qualified.
  * - **another tenant's contractor** — a `CONTRACTOR` acting for ORG-DEH-0002,
  *   invited to nothing.
+ * - with `{ evaluation: true }`: the owner's `tender.award` policy (one step,
+ *   the owner's `ORGANIZATION_ADMIN`, a sample), an **evaluator** — a third
+ *   `ORGANIZATION_ADMIN`, who takes no other part, so that the author may award
+ *   and the approver approve (`AWARDER_NOT_EVALUATOR`) — and a **rival**: a
+ *   second qualified contractor, invited like the first.
  *
- * ## Once per test (`draftTender`, `publishedTender`)
+ * ## Once per test (`draftTender`, `publishedTender`, `openedTender`)
  *
- * A fresh RESTRICTED tender on that project, both contractors invited, its
+ * A fresh RESTRICTED tender on that project, the contractors invited, its
  * criteria written out, its window set — left in draft for the owner's own
- * scenarios, or published through its approval round — so a retry of a test
+ * scenarios, published through its approval round, or bid on, closed by the
+ * service at its deadline and opened by two people — so a retry of a test
  * acts on a tender nobody has acted on.
  */
 
@@ -104,6 +110,9 @@ export interface TenderCast {
   readonly contractor: ProvisionedPerson;
   readonly unqualified: ProvisionedPerson;
   readonly stranger: ProvisionedPerson;
+  /** `{ evaluation: true }` only: the owner's evaluator, and a second qualified contractor. */
+  readonly evaluatorPerson: ProvisionedPerson | null;
+  readonly rival: ProvisionedPerson | null;
 }
 
 async function organization(systemAdmin: string, name: string, parentId?: string) {
@@ -159,8 +168,34 @@ async function grant(approver: string, approvalId: string): Promise<unknown> {
   });
 }
 
+/** A contractor's standing, as supplier-service holds it: registered by it, its CONTRACTING qualification approved. */
+async function qualify(systemAdmin: string, who: ProvisionedPerson, name: string): Promise<void> {
+  const token = await provisionedAccessToken(who);
+  const supplier = withId.parse(
+    await gateway(token, 'POST', '/v1/suppliers', 201, {
+      displayName: name,
+      capabilities: ['CONTRACTING'],
+    }),
+  );
+  const qualification = withId.parse(
+    await gateway(token, 'POST', `/v1/suppliers/${supplier.id}/qualifications`, 201, {
+      capability: 'CONTRACTING',
+    }),
+  );
+  await gateway(
+    systemAdmin,
+    'POST',
+    `/v1/suppliers/${supplier.id}/qualifications/${qualification.id}/approve`,
+    200,
+    {},
+  );
+}
+
 /** The cast of one run; see the module header. `run` names everything it makes. */
-export async function castForRun(run: string): Promise<TenderCast> {
+export async function castForRun(
+  run: string,
+  { evaluation = false }: { readonly evaluation?: boolean } = {},
+): Promise<TenderCast> {
   const systemAdmin = await liveAccessToken('systemAdmin');
   const union = await liveAccessToken('unionAdmin');
 
@@ -180,28 +215,20 @@ export async function castForRun(run: string): Promise<TenderCast> {
 
   // The contractor's standing, as supplier-service holds it: registered by the
   // contractor, its CONTRACTING qualification approved by the platform.
-  const contractorToken = await provisionedAccessToken(contractor);
-  const supplier = withId.parse(
-    await gateway(contractorToken, 'POST', '/v1/suppliers', 201, {
-      displayName: `E2E bid contractor ${run}`,
-      capabilities: ['CONTRACTING'],
-    }),
-  );
-  const qualification = withId.parse(
-    await gateway(contractorToken, 'POST', `/v1/suppliers/${supplier.id}/qualifications`, 201, {
-      capability: 'CONTRACTING',
-    }),
-  );
-  await gateway(
-    systemAdmin,
-    'POST',
-    `/v1/suppliers/${supplier.id}/qualifications/${qualification.id}/approve`,
-    200,
-    {},
-  );
+  await qualify(systemAdmin, contractor, `E2E bid contractor ${run}`);
 
   await policy(union, systemAdmin, owner, 'project.execution', 'Execution approval (sample)');
   await policy(union, systemAdmin, owner, 'tender.publication', 'Publication approval (sample)');
+
+  let evaluatorPerson: ProvisionedPerson | null = null;
+  let rival: ProvisionedPerson | null = null;
+  if (evaluation) {
+    await policy(union, systemAdmin, owner, 'tender.award', 'Award approval (sample)');
+    evaluatorPerson = await person('evaluator', owner, [OWNER_ROLE]);
+    const rivalOrg = await organization(systemAdmin, `E2E bid rival ${run}`);
+    rival = await person('rival', rivalOrg, ['CONTRACTOR']);
+    await qualify(systemAdmin, rival, `E2E bid rival ${run}`);
+  }
 
   const project = versioned.parse(
     await gateway(author, 'POST', '/v1/projects', 201, {
@@ -241,6 +268,8 @@ export async function castForRun(run: string): Promise<TenderCast> {
     contractor,
     unqualified,
     stranger,
+    evaluatorPerson,
+    rival,
   };
 }
 
@@ -274,7 +303,8 @@ export async function draftTender(
       bidClosingAt: new Date(closesAt).toISOString(),
     }),
   );
-  for (const invited of [cast.contractor.organizationId, cast.unqualified.organizationId]) {
+  const invitees = [cast.contractor, cast.unqualified, ...(cast.rival ? [cast.rival] : [])];
+  for (const invited of invitees.map((who) => who.organizationId)) {
     await gateway(author, 'POST', `/v1/tenders/${id}/invitations`, 201, {
       organizationId: invited,
     });
@@ -316,22 +346,76 @@ export async function publishedTender(
   return { id, closesAt };
 }
 
-/** The contractor's bid on an open tender, through the gateway: `priceMinor` and one answer. */
+/** A contractor's bid on an open tender, through the gateway: `priceMinor` and one answer. */
 export async function contractorBid(
   cast: TenderCast,
   tenderId: string,
   priceMinor: string,
+  bidder: ProvisionedPerson = cast.contractor,
 ): Promise<void> {
-  await gateway(
-    await provisionedAccessToken(cast.contractor),
-    'POST',
-    `/v1/tenders/${tenderId}/bids`,
-    201,
-    {
-      content: {
-        priceMinor,
-        answers: [{ criterionCode: 'technical', response: 'روش اجرا با ماشین‌آلات خودی' }],
-      },
+  await gateway(await provisionedAccessToken(bidder), 'POST', `/v1/tenders/${tenderId}/bids`, 201, {
+    content: {
+      priceMinor,
+      answers: [{ criterionCode: 'technical', response: 'روش اجرا با ماشین‌آلات خودی' }],
     },
-  );
+  });
+}
+
+/** One gateway call; its status and body, whatever they are. */
+async function attempt(
+  token: string,
+  path: string,
+): Promise<{ readonly status: number; readonly body: unknown }> {
+  const response = await fetch(gatewayUrl(path), {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+      'idempotency-key': `e2e-bids-${randomUUID()}`,
+    },
+    body: '{}',
+  });
+  return { status: response.status, body: await response.json().catch(() => null) };
+}
+
+/**
+ * A fresh tender as `publishedTender` makes it, bid on by the contractor and
+ * the rival (a `{ evaluation: true }` cast), closed by construction-service at
+ * its deadline, and opened by two people through the gateway: the author
+ * proposes, the approver opens — again while audit-service is still catching
+ * up with the receipts (`EVIDENCE_BEHIND`, `503`), each a refusal that opened
+ * nothing. Its id, once it is `EVALUATING`.
+ */
+export async function openedTender(
+  cast: TenderCast,
+  prices: { readonly contractor: string; readonly rival: string },
+): Promise<{ readonly id: string }> {
+  if (!cast.rival) throw new Error('openedTender needs a cast made with { evaluation: true }');
+  const { id, closesAt } = await publishedTender(cast, 60_000);
+  await contractorBid(cast, id, prices.contractor);
+  await contractorBid(cast, id, prices.rival, cast.rival);
+  const status = async () =>
+    z
+      .object({ status: z.string() })
+      .parse(await gateway(cast.author, 'GET', `/v1/tenders/${id}`, 200)).status;
+  // construction-service closes it itself at the deadline; nobody closes it by hand.
+  const until = closesAt + 120_000;
+  while ((await status()) !== 'CLOSED') {
+    if (Date.now() > until) throw new Error(`tender ${id} was not closed at its deadline`);
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  await gateway(cast.author, 'POST', `/v1/tenders/${id}/open-bids/proposal`, 200, {});
+  const giveUp = Date.now() + 90_000;
+  for (;;) {
+    const opened = await attempt(cast.approver, `/v1/tenders/${id}/open-bids`);
+    if (opened.status === 200) break;
+    const code = (opened.body as { code?: unknown } | null)?.code;
+    const behind = opened.status === 422 && JSON.stringify(opened.body).includes('EVIDENCE_BEHIND');
+    if (Date.now() > giveUp || (opened.status !== 503 && !behind)) {
+      throw new Error(`opening ${id} answered ${opened.status} (${String(code)})`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+  if ((await status()) !== 'EVALUATING') throw new Error(`tender ${id} is not EVALUATING`);
+  return { id };
 }

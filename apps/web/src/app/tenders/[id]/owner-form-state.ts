@@ -1,11 +1,12 @@
 import type { SessionRefusal } from '@/lib/session-refusal';
 import type { OwnerCommand } from '@/lib/tender-owner-fields';
+import type { OwnerValues } from '@/lib/tender-owner-input';
 import type { ReplayStamp } from '@/lib/unresolved-tender-command';
 
 /**
  * What one owner command's form knows after an attempt — the bid forms'
- * states (`bid-form-state.ts`), for publishing, deciding the publication's
- * step and the two-person opening. A module of its own because the actions
+ * states (`bid-form-state.ts`), for publishing, deciding a step, the
+ * two-person opening, the evaluation and the award. A module of its own because the actions
  * file is `'use server'`. No success case: a confirmed command redirects with
  * a signed confirmation (`server/flash.ts`).
  */
@@ -15,8 +16,8 @@ export type OwnerFormState =
       readonly kind: 'INVALID';
       readonly command: OwnerCommand;
       readonly submissionId: string;
-      /** A rejection's reason as typed; null for every other command. */
-      readonly reason: string | null;
+      /** The command's fields as typed (`ownerFields`); null for a command that has none. */
+      readonly values: OwnerValues | null;
       readonly fieldErrors: Partial<Record<string, string>>;
       /** A refusal the service did not attach to a field, in fixed words. */
       readonly message: string | null;
@@ -36,16 +37,18 @@ export type OwnerFormState =
     }
   | { readonly kind: 'NOT_FOUND' }
   /**
-   * Sent, maybe committed, not confirmed. `reason` is a rejection's reason as
-   * first sent, held in this page's memory only; null for every other command
-   * and for a record restored after a reload, which is view-only (`restored`).
+   * Sent, maybe committed, not confirmed. `values` are the fields as first
+   * sent — a rejection's reason, a disqualification's, a score — held in this
+   * page's memory only; null for a command that has none, for one never sent
+   * again (`unrepeatable`) and for a record restored after a reload, which is
+   * view-only (`restored`).
    */
   | {
       readonly kind: 'UNCONFIRMED';
       readonly command: OwnerCommand;
       readonly correlationId: string | null;
       readonly submissionId: string;
-      readonly reason: string | null;
+      readonly values: OwnerValues | null;
       readonly replay: ReplayStamp | null;
       readonly retryRefused?: true;
       readonly retryUnknown?: true;
@@ -67,7 +70,7 @@ function original(unconfirmed: UnconfirmedOwnerCommand): UnconfirmedOwnerCommand
     command: unconfirmed.command,
     correlationId: unconfirmed.correlationId,
     submissionId: unconfirmed.submissionId,
-    reason: unconfirmed.reason,
+    values: unconfirmed.values,
     replay: unconfirmed.replay,
     ...(unconfirmed.viewOnly ? { viewOnly: true as const } : {}),
     ...(unconfirmed.restored ? { restored: true as const } : {}),

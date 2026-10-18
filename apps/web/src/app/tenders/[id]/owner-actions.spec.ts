@@ -170,7 +170,7 @@ describe('the order of checks — nothing is sent until every one passes', () =>
     expect(await send(form({ [REASON_FIELD]: 'کوتاه' }, REJECT))).toMatchObject({
       kind: 'INVALID',
       command: 'REJECT',
-      reason: 'کوتاه',
+      values: { [REASON_FIELD]: 'کوتاه' },
       fieldErrors: { [REASON_FIELD]: expect.any(String) },
     });
     expect(sent).toHaveLength(0);
@@ -261,7 +261,7 @@ describe('unconfirmed', () => {
     expect(first).toMatchObject({
       kind: 'UNCONFIRMED',
       command: 'REJECT',
-      reason: 'معیارها کامل نیست',
+      values: { [REASON_FIELD]: 'معیارها کامل نیست' },
     });
     answer = () => problem(409, 'OPTIMISTIC_LOCK_FAILED');
     const second = await send(data, first);
@@ -274,24 +274,29 @@ describe('unconfirmed', () => {
   });
 
   it('every command the service keeps no result for, unconfirmed, is view-only from the start and never sent again', async () => {
-    const targets: Record<OwnerCommand, OwnerTarget> = {
+    const targets: Partial<Record<OwnerCommand, OwnerTarget>> = {
       PUBLISH,
       PROPOSE_OPENING: { ...OPEN, command: 'PROPOSE_OPENING' },
       OPEN_BIDS: OPEN,
       WITHDRAW_PROPOSAL: { ...OPEN, command: 'WITHDRAW_PROPOSAL' },
-      GRANT: { ...REJECT, command: 'GRANT' },
-      REJECT,
+      AWARD: {
+        ...OPEN,
+        command: 'AWARD',
+        bidId: 'BID_1',
+        award: { justificationRequired: false, execution: null },
+      },
     };
     expect([...UNREPEATABLE_OWNER_COMMANDS]).toEqual([
       'PUBLISH',
       'PROPOSE_OPENING',
       'OPEN_BIDS',
       'WITHDRAW_PROPOSAL',
+      'AWARD',
     ]);
     for (const command of UNREPEATABLE_OWNER_COMMANDS) {
       sent = [];
       answer = () => problem(504, 'UPSTREAM_TIMEOUT');
-      const data = form({}, targets[command]);
+      const data = form({}, targets[command]!);
       const first = (await send(data)) as UnconfirmedOwnerCommand;
       expect(first).toMatchObject({
         kind: 'UNCONFIRMED',
@@ -320,7 +325,7 @@ describe('unconfirmed', () => {
   });
 
   it('a decision, unconfirmed, may be sent again: a compare-and-set on its very step', async () => {
-    expect([...REPEATABLE_OWNER_COMMANDS]).toEqual(['GRANT', 'REJECT']);
+    expect(REPEATABLE_OWNER_COMMANDS).toEqual(expect.arrayContaining(['GRANT', 'REJECT']));
     answer = () => problem(504, 'UPSTREAM_TIMEOUT');
     const data = form({}, { ...REJECT, command: 'GRANT' });
     const first = (await send(data)) as UnconfirmedOwnerCommand;
