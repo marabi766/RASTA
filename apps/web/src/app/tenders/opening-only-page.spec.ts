@@ -69,7 +69,7 @@ type Page = (props: {
 }) => Promise<ReactElement>;
 const TenderPage = (require('./[id]/page') as { default: Page }).default;
 const { OwnerCommands } = require('./[id]/OwnerCommands') as typeof import('./[id]/OwnerCommands');
-const { AuthorityScreen } =
+const { AuthorityInboxSection, AuthorityScreen } =
   require('./[id]/AuthoritySections') as typeof import('./[id]/AuthoritySections');
 const { OpeningOnlyScreen, OwnerBidsSection } =
   require('./[id]/OwnerSections') as typeof import('./[id]/OwnerSections');
@@ -135,7 +135,8 @@ it('an opening-only role reads only the bids — never the tender it is refused 
   for (const view of ['own', undefined]) {
     mockFetched.length = 0;
     const tree = await run(view);
-    expect(mockFetched).toEqual(['fetchOwnerBids']);
+    // Its approval inbox too, whatever the bids read (PR 346 review 3, finding 1).
+    expect(mockFetched).toEqual(['fetchOwnerBids', 'fetchAuthoritySteps']);
     expect(ofType(tree, OpeningOnlyScreen)).toHaveLength(1);
     expect(ofType(tree, OwnTenderDetailScreen)).toHaveLength(0);
     expect(offered(tree)).toEqual(['PROPOSE_OPENING', 'OPEN_BIDS', 'WITHDRAW_PROPOSAL']);
@@ -189,6 +190,7 @@ it('an approval authority of another organization whose role also opens bids rea
       items: [{ summary: step, detail: { kind: 'OK', data: step } }],
       truncated: false,
       resumeFrom: null,
+      failure: null,
     },
   };
   const tree = await run('own');
@@ -203,6 +205,64 @@ it('an approval authority of another organization whose role also opens bids rea
   const failed = await run('own');
   expect(mockFetched).toEqual(['fetchOwnerBids']);
   expect(ofType(failed, AuthorityScreen)).toHaveLength(0);
+});
+
+it('an opener whose bids read succeeds is given its publication decision from the inbox beside the opening, and an inbox failure beside it too (PR 346 review 3, findings 1 and 2)', async () => {
+  mockSession.current = signedInWith(['FLEET_MANAGER'], 'USR-REVIEWER');
+  mockAnswers.fetchOwnerBids = { kind: 'OK', data: UNOPENED_BIDS };
+  const step = {
+    id: 'APR_PUB_1',
+    tenderId: 'TND_1',
+    workflowKey: 'tender.publication',
+    stepOrder: 1,
+    status: 'PENDING',
+    authorityOrganizationId: ORG,
+    authorityRole: 'FLEET_MANAGER',
+    authorityLabel: 'بازبین (نمونه)',
+    requestedAt: '2026-10-22T07:00:00.000Z',
+    version: 2,
+    project: { title: 'بهسازی راه روستایی' },
+    request: {
+      requestId: 'TAR_PUB_1',
+      tenderVersion: 4,
+      status: 'PENDING',
+      requestedBy: 'USR-AUTHOR',
+      bid: null,
+    },
+  };
+  mockAnswers.fetchAuthoritySteps = {
+    kind: 'OK',
+    data: {
+      items: [{ summary: step, detail: { kind: 'OK', data: step } }],
+      truncated: false,
+      resumeFrom: null,
+      failure: null,
+    },
+  };
+  const tree = await run('own');
+  expect(mockFetched).toEqual(['fetchOwnerBids', 'fetchAuthoritySteps']);
+  expect(ofType(tree, OpeningOnlyScreen)).toHaveLength(1);
+  expect(offered(tree)).toEqual(['PROPOSE_OPENING', 'OPEN_BIDS', 'WITHDRAW_PROPOSAL']);
+  const [inbox] = ofType(tree, AuthorityInboxSection);
+  const steps = (inbox?.props as { steps: { commands: ReactNode }[] }).steps;
+  expect(offered(steps.map(({ commands }) => commands))).toEqual(['GRANT', 'REJECT']);
+  // The inbox failing beside a page that read: the bid side as it was, the failure with its retry.
+  mockAnswers.fetchAuthoritySteps = {
+    kind: 'OK',
+    data: {
+      items: [],
+      truncated: false,
+      resumeFrom: null,
+      failure: { correlationId: 'corr-9', at: null },
+    },
+  };
+  const failed = await run('own');
+  expect(offered(failed)).toEqual(['PROPOSE_OPENING', 'OPEN_BIDS', 'WITHDRAW_PROPOSAL']);
+  const [failure] = ofType(failed, AuthorityInboxSection);
+  expect(failure?.props).toMatchObject({
+    steps: [],
+    failure: { correlationId: 'corr-9', retryHref: '/tenders/TND_1?view=own' },
+  });
 });
 
 it('an owner who reads the tender keeps the owner’s page; a reader who does not open is not given the opening', async () => {

@@ -103,6 +103,19 @@ export interface AuthoritySteps {
   readonly truncated: boolean;
   /** Where the next walk starts, when `truncated`: the service's own cursor. */
   readonly resumeFrom: string | null;
+  /**
+   * A page of the inbox could not be read (PR 346 review 3, finding 2): the walk stopped there,
+   * the steps found before it are kept, and it is retried from the cursor of the page that failed
+   * (`at`, null for the top). The search is not complete, so it is never an absence.
+   */
+  readonly failure: AuthorityInboxFailure | null;
+}
+
+export interface AuthorityInboxFailure {
+  /** The service's correlation id for the failed read, when it gave one. */
+  readonly correlationId: string | null;
+  /** The cursor of the page that failed: where a retry starts (null: the top). */
+  readonly at: string | null;
 }
 
 /**
@@ -118,7 +131,10 @@ export function inboxCursor(value: unknown): string | null {
  * This tender's pending publication and award steps in the caller's inbox,
  * each read on its own; `OK` with no items when the inbox holds none. At most
  * `INBOX_PAGES` pages from `from` (the top when null): a longer inbox is
- * `truncated`, and the walk resumes from `resumeFrom`.
+ * `truncated`, and the walk resumes from `resumeFrom`. Only a refusal of the
+ * first page — the inbox is not this person's (`AUDITOR`, no role) — is the
+ * read's own outcome; any other page that cannot be read ends the walk with a
+ * `failure`, keeping what was found before it.
  */
 export async function fetchAuthoritySteps(
   session: WebSession,
@@ -128,11 +144,22 @@ export async function fetchAuthoritySteps(
   const found: AuthorityStep[] = [];
   let cursor: string | null = from;
   let resumeFrom: string | null = null;
+  let failure: AuthorityInboxFailure | null = null;
   for (let page = 0; page < INBOX_PAGES; page += 1) {
     const search = new URLSearchParams({ status: 'PENDING', limit: String(INBOX_PAGE_SIZE) });
     if (cursor !== null) search.set('cursor', cursor);
     const read = await readOwnerView(session, `/v1/approvals?${search}`, inboxPageSchema);
-    if (read.kind !== 'OK') return read;
+    if (read.kind !== 'OK') {
+      if (page === 0 && (read.kind === 'FORBIDDEN' || read.kind === 'NOT_FOUND')) return read;
+      failure = {
+        correlationId:
+          read.kind === 'UNAVAILABLE' || read.kind === 'MALFORMED'
+            ? read.correlationId || null
+            : null,
+        at: cursor,
+      };
+      break;
+    }
     for (const step of read.data.items) {
       if (step.tenderId === tenderId && TENDER_WORKFLOWS.includes(step.workflowKey)) {
         found.push(step);
@@ -157,7 +184,7 @@ export async function fetchAuthoritySteps(
         detail.data.workflowKey === summary.workflowKey);
     items.push({ summary, detail: same ? detail : { kind: 'MALFORMED', correlationId: '' } });
   }
-  return { kind: 'OK', data: { items, truncated, resumeFrom } };
+  return { kind: 'OK', data: { items, truncated, resumeFrom, failure } };
 }
 
 export type AuthorityNote =

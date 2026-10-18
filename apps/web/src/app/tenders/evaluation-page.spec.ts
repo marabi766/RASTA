@@ -76,7 +76,7 @@ const { OwnTenderDetailScreen } =
   require('./[id]/TenderDetailScreen') as typeof import('./[id]/TenderDetailScreen');
 const fixtures =
   require('@/test/evaluation-fixtures') as typeof import('@/test/evaluation-fixtures');
-const { AuthorityScreen } =
+const { AuthorityInboxSection, AuthorityScreen } =
   require('./[id]/AuthoritySections') as typeof import('./[id]/AuthoritySections');
 const { mintFlash } = require('@/server/flash') as typeof import('@/server/flash');
 /* eslint-enable @typescript-eslint/no-require-imports */
@@ -208,7 +208,7 @@ it('an evaluator outside the reader roles reads the matrix alone, never the tend
   mockSession.current = signedInWith(['FLEET_MANAGER'], fixtures.EVALUATOR);
   mockAnswers.fetchEvaluation = { kind: 'OK', data: fixtures.EVALUATING_MATRIX };
   const tree = await run('own');
-  expect(mockFetched).toEqual(['fetchEvaluation']);
+  expect(mockFetched).toEqual(['fetchEvaluation', 'fetchAuthoritySteps']);
   expect(ofType(tree, OpeningOnlyScreen)).toHaveLength(1);
   expect(ofType(tree, EvaluationSection)).toHaveLength(1);
   expect(offered(tree)).toEqual(['SCORE', 'QUALIFY', 'DISQUALIFY']);
@@ -237,6 +237,7 @@ it('an evaluator outside the reader roles reads the matrix alone, never the tend
       items: [{ summary: step, detail: { kind: 'OK', data: step } }],
       truncated: false,
       resumeFrom: null,
+      failure: null,
     },
   };
   const authority = await run('own');
@@ -246,11 +247,100 @@ it('an evaluator outside the reader roles reads the matrix alone, never the tend
   expect(ofType(authority, OwnTenderDetailScreen)).toHaveLength(0);
 });
 
+it('an evaluator whose matrix read succeeds is still offered its award-approval decision from the inbox (PR 346 review 3, finding 1)', async () => {
+  mockSession.current = signedInWith(['FLEET_MANAGER'], fixtures.EVALUATOR);
+  mockAnswers.fetchEvaluation = { kind: 'OK', data: fixtures.EVALUATING_MATRIX };
+  const step = {
+    ...fixtures.AWARD_STEP,
+    stepOrder: 1,
+    authorityOrganizationId: ORG,
+    authorityRole: 'FLEET_MANAGER',
+    authorityLabel: 'بازبین (نمونه)',
+    requestedAt: '2026-10-22T07:00:00.000Z',
+    project: { title: 'بهسازی راه روستایی' },
+  };
+  mockAnswers.fetchAuthoritySteps = {
+    kind: 'OK',
+    data: {
+      items: [{ summary: step, detail: { kind: 'OK', data: step } }],
+      truncated: false,
+      resumeFrom: null,
+      failure: null,
+    },
+  };
+  const tree = await run('own');
+  expect(mockFetched).toEqual(['fetchEvaluation', 'fetchAuthoritySteps']);
+  expect(ofType(tree, OpeningOnlyScreen)).toHaveLength(1);
+  expect(ofType(tree, EvaluationSection)).toHaveLength(1);
+  const [inbox] = ofType(tree, AuthorityInboxSection);
+  const steps = (inbox?.props as { steps: { commands: ReactNode }[] }).steps;
+  // Reading the matrix makes nobody a participant: the decision is offered beside the scoring.
+  expect(offered(steps.map(({ commands }) => commands))).toEqual(['GRANT_AWARD', 'REJECT_AWARD']);
+  expect(offered(tree)).toEqual(['SCORE', 'QUALIFY', 'DISQUALIFY']);
+  // One record restored after a reload is drawn once: in the evaluation's group, not again here.
+  const restoring = elements(tree)
+    .concat(elements(steps.map(({ commands }) => commands)))
+    .filter(
+      (e) => e.type === OwnerCommands && (e.props as { showsRestored?: boolean }).showsRestored,
+    );
+  expect(restoring).toHaveLength(1);
+  // Every form on the page is the page's own, the decisions included.
+  const ids = (restoring[0]?.props as { pageSubmissionIds: string[] }).pageSubmissionIds;
+  expect(ids).toHaveLength(5);
+});
+
+it('an inbox page that fails is never an absence: what was found, the correlation id, and a retry from that page (PR 346 review 3, finding 2)', async () => {
+  mockSession.current = signedInWith(['ORGANIZATION_ADMIN'], fixtures.AWARD_APPROVER);
+  const step = {
+    ...fixtures.AWARD_STEP,
+    stepOrder: 1,
+    authorityOrganizationId: ORG,
+    authorityLabel: 'بازبین (نمونه)',
+    requestedAt: '2026-10-22T07:00:00.000Z',
+    project: { title: 'بهسازی راه روستایی' },
+  };
+  mockAnswers.fetchAuthoritySteps = {
+    kind: 'OK',
+    data: {
+      items: [{ summary: step, detail: { kind: 'OK', data: step } }],
+      truncated: false,
+      resumeFrom: null,
+      failure: { correlationId: 'corr-9', at: 'APR_NEXT' },
+    },
+  };
+  const found = await run('own', undefined, { inbox: 'APR_FROM' });
+  expect(ofType(found, OwnTenderDetailScreen)).toHaveLength(0);
+  const [screen] = ofType(found, AuthorityScreen);
+  expect(screen?.props).toMatchObject({
+    failure: { correlationId: 'corr-9', retryHref: '/tenders/TND_1?view=own&inbox=APR_NEXT' },
+    restartHref: '/tenders/TND_1?view=own',
+  });
+  expect((screen?.props as { steps: unknown[] }).steps).toHaveLength(1);
+  // Nothing found before the very first page failed: still the failure, retried from the top.
+  mockAnswers.fetchAuthoritySteps = {
+    kind: 'OK',
+    data: {
+      items: [],
+      truncated: false,
+      resumeFrom: null,
+      failure: { correlationId: 'corr-9', at: null },
+    },
+  };
+  const none = await run('own');
+  expect(ofType(none, OwnTenderDetailScreen)).toHaveLength(0);
+  const [failed] = ofType(none, AuthorityScreen);
+  expect(failed?.props).toMatchObject({
+    steps: [],
+    failure: { correlationId: 'corr-9', retryHref: '/tenders/TND_1?view=own' },
+    restartHref: null,
+  });
+});
+
 it('an inbox longer than the walk is never an absence: the warning, and a way to go on and back (PR 346 review 2, finding 3)', async () => {
   mockSession.current = signedInWith(['ORGANIZATION_ADMIN'], fixtures.AWARD_APPROVER);
   mockAnswers.fetchAuthoritySteps = {
     kind: 'OK',
-    data: { items: [], truncated: true, resumeFrom: 'APR_NEXT' },
+    data: { items: [], truncated: true, resumeFrom: 'APR_NEXT', failure: null },
   };
   const first = await run('own');
   expect(mockArgs.fetchAuthoritySteps?.[2]).toBeNull();
@@ -266,7 +356,7 @@ it('an inbox longer than the walk is never an absence: the warning, and a way to
   // way back to the start rather than turning into the absence.
   mockAnswers.fetchAuthoritySteps = {
     kind: 'OK',
-    data: { items: [], truncated: false, resumeFrom: null },
+    data: { items: [], truncated: false, resumeFrom: null, failure: null },
   };
   const next = await run('own', undefined, { inbox: 'APR_NEXT' });
   expect(mockArgs.fetchAuthoritySteps?.[2]).toBe('APR_NEXT');
@@ -297,6 +387,7 @@ it('an approval authority of another organization decides its step of the tender
       items: [{ summary: step, detail: { kind: 'OK', data: step } }],
       truncated: false,
       resumeFrom: null,
+      failure: null,
     },
   };
   const tree = await run('own');
@@ -310,7 +401,7 @@ it('an approval authority of another organization decides its step of the tender
   mockFetched.length = 0;
   mockAnswers.fetchAuthoritySteps = {
     kind: 'OK',
-    data: { items: [], truncated: false, resumeFrom: null },
+    data: { items: [], truncated: false, resumeFrom: null, failure: null },
   };
   const absent = await run('own');
   expect(ofType(absent, AuthorityScreen)).toHaveLength(0);
@@ -323,7 +414,7 @@ it('the authority’s decision just made, its step gone from the inbox: the conf
   mockSession.current = session;
   mockAnswers.fetchAuthoritySteps = {
     kind: 'OK',
-    data: { items: [], truncated: false, resumeFrom: null },
+    data: { items: [], truncated: false, resumeFrom: null, failure: null },
   };
   const done = await run('own', mintFlash(session as never, 'TND_1', 'GRANT_AWARD'));
   const [authority] = ofType(done, AuthorityScreen);

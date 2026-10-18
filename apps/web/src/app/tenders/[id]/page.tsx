@@ -30,6 +30,8 @@ import {
   authorityOffers,
   fetchAuthoritySteps,
   inboxCursor,
+  type AuthorityNote,
+  type AuthorityStep,
 } from '@/server/tender-authority';
 import {
   canOpenBids,
@@ -58,10 +60,15 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { BidCommands } from './BidCommands';
 import { bidCommandOffers } from './bid-offers';
-import { AuthorityScreen } from './AuthoritySections';
+import {
+  AuthorityInboxSection,
+  AuthorityScreen,
+  type AuthorityStepView,
+  type InboxWalk,
+} from './AuthoritySections';
 import { AwardSection, EvaluationSection } from './EvaluationSections';
 import { ownerCommandOffers, type OwnerForms } from './owner-offers';
-import { OwnerCommands } from './OwnerCommands';
+import { OwnerCommands, type OfferedOwnerCommand } from './OwnerCommands';
 import {
   OpeningOnlyScreen,
   OpeningSection,
@@ -200,72 +207,139 @@ export default async function TenderPage({
   );
 }
 
+/** One inbox step of this tender, with the decisions this person is offered on it. */
+interface AuthorityView {
+  readonly step: AuthorityStep;
+  readonly notes: readonly AuthorityNote[];
+  readonly decisions: OfferedOwnerCommand[];
+}
+
+interface AuthorityLoad {
+  readonly views: readonly AuthorityView[];
+  readonly walk: InboxWalk;
+  /** A walk from the top whose every page was read, with nothing of this tender in it. */
+  readonly nothing: boolean;
+}
+
 /**
- * The page of an authority who may not read the tender (`server/tender-authority.ts`):
- * its steps of this tender in its inbox, each read on its own, with the decision
- * forms — or null when it has none, and the page is the absence the tender read showed.
+ * This tender's steps in the caller's approval inbox (`server/tender-authority.ts`),
+ * each with its decision forms, and where the walk stands — or null when the
+ * inbox is not this person's. A page that could not be read is a `failure`
+ * retried from its own cursor, never an absence (PR 346 review 3, finding 2).
+ */
+async function loadAuthority(
+  session: WebSession,
+  id: string,
+  query: Record<string, string | string[] | undefined>,
+): Promise<AuthorityLoad | null> {
+  const from = inboxCursor(query[INBOX_CURSOR_PARAM]);
+  const steps = await fetchAuthoritySteps(session, id, from);
+  if (steps.kind !== 'OK') return null;
+  const caller = ownerCallerOf(session.accessToken);
+  // One step's forms each, so a step's decisions are drawn under that step alone.
+  const views = steps.data.items.map((item) => {
+    const { offers, notes } = authorityOffers(caller, item);
+    const forms = ownerCommandOffers(session, id, offers);
+    return {
+      step: item.detail.kind === 'OK' ? item.detail.data : item.summary,
+      notes,
+      decisions: [...forms.publication, ...forms.award],
+    };
+  });
+  const pageHref = tenderDetailPath(id, 'own');
+  const at = (cursor: string | null) =>
+    cursor === null
+      ? pageHref
+      : `${pageHref}&${new URLSearchParams({ [INBOX_CURSOR_PARAM]: cursor })}`;
+  const { truncated, resumeFrom, failure } = steps.data;
+  return {
+    views,
+    walk: {
+      truncated,
+      continueHref: resumeFrom === null ? null : at(resumeFrom),
+      restartHref: from === null ? null : pageHref,
+      failure:
+        failure === null
+          ? null
+          : { correlationId: failure.correlationId, retryHref: at(failure.at) },
+    },
+    nothing: views.length === 0 && !truncated && failure === null && from === null,
+  };
+}
+
+const authoritySubmissionIds = (load: AuthorityLoad | null): string[] =>
+  (load?.views ?? []).flatMap(({ decisions }) => decisions.map(({ submission }) => submission.id));
+
+/** The steps as the screens draw them, each with its own group of forms. */
+function authorityStepViews(
+  session: WebSession,
+  id: string,
+  views: readonly AuthorityView[],
+  pageSubmissionIds: readonly string[],
+  firstShowsRestored: boolean,
+): AuthorityStepView[] {
+  const ownerTag = submissionBinding(session).owner;
+  return views.map(({ step, notes, decisions }, index) => ({
+    step,
+    notes,
+    commands: (
+      <OwnerCommands
+        tenderId={id}
+        offered={decisions}
+        csrfToken={session.csrfToken}
+        owner={ownerTag}
+        pageHref={tenderDetailPath(id, 'own')}
+        showsRestored={firstShowsRestored && index === 0}
+        pageSubmissionIds={pageSubmissionIds}
+      />
+    ),
+  }));
+}
+
+/**
+ * The page of an authority who may not read the tender: its steps of this
+ * tender in its inbox, each read on its own, with the decision forms — or null
+ * when the inbox is not this person's, or a completed walk found none, and the
+ * page is the absence the tender read showed.
  */
 async function authorityBody(
   session: WebSession,
   id: string,
   query: Record<string, string | string[] | undefined>,
 ): Promise<ReactNode | null> {
-  const from = inboxCursor(query[INBOX_CURSOR_PARAM]);
-  const steps = await fetchAuthoritySteps(session, id, from);
-  if (steps.kind !== 'OK') return null;
+  const load = await loadAuthority(session, id, query);
+  if (load === null) return null;
   const flash = query[FLASH_PARAM];
   const done = readFlash(session, typeof flash === 'string' ? flash : undefined, id, OWNER_DONE);
   // A decision just made leaves no pending step in the inbox; its confirmation, minted for this
   // session and this tender after the service accepted it, is still shown. An inbox longer than
-  // the walk is never an absence: it may hold this tender's step further on (PR 346 review 2,
-  // finding 3). Neither says anything of the tender — the walk is the caller's own inbox.
-  if (
-    steps.data.items.length === 0 &&
-    done === undefined &&
-    !steps.data.truncated &&
-    from === null
-  ) {
-    return null;
-  }
-  const caller = ownerCallerOf(session.accessToken);
-  // One step's forms each, so a step's decisions are drawn under that step alone.
-  const views = steps.data.items.map((item) => {
-    const { offers, notes } = authorityOffers(caller, item);
-    const forms = ownerCommandOffers(session, id, offers);
-    return { item, notes, decisions: [...forms.publication, ...forms.award] };
-  });
-  const pageSubmissionIds = views.flatMap(({ decisions }) =>
-    decisions.map(({ submission }) => submission.id),
-  );
-  const ownerTag = submissionBinding(session).owner;
-  const pageHref = tenderDetailPath(id, 'own');
-  const resume = steps.data.resumeFrom;
+  // the walk, or one a page of which could not be read, is never an absence: it may hold this
+  // tender's step further on (PR 346 reviews 2 and 3). None of it says anything of the tender —
+  // the walk is the caller's own inbox.
+  if (load.nothing && done === undefined) return null;
+  const pageSubmissionIds = authoritySubmissionIds(load);
   return (
     <AuthorityScreen
       tenderId={id}
-      truncated={steps.data.truncated}
-      continueHref={
-        resume === null
-          ? null
-          : `${pageHref}&${new URLSearchParams({ [INBOX_CURSOR_PARAM]: resume })}`
+      {...load.walk}
+      flash={
+        <>
+          <OwnerFlash done={done} />
+          {load.views.length === 0 ? (
+            // No step drawn: a record restored after a reload is still shown, here.
+            <OwnerCommands
+              tenderId={id}
+              offered={[]}
+              csrfToken={session.csrfToken}
+              owner={submissionBinding(session).owner}
+              pageHref={tenderDetailPath(id, 'own')}
+              showsRestored
+              pageSubmissionIds={pageSubmissionIds}
+            />
+          ) : null}
+        </>
       }
-      restartHref={from === null ? null : pageHref}
-      flash={<OwnerFlash done={done} />}
-      steps={views.map(({ item, notes, decisions }, index) => ({
-        step: item.detail.kind === 'OK' ? item.detail.data : item.summary,
-        notes,
-        commands: (
-          <OwnerCommands
-            tenderId={id}
-            offered={decisions}
-            csrfToken={session.csrfToken}
-            owner={ownerTag}
-            pageHref={pageHref}
-            showsRestored={index === 0}
-            pageSubmissionIds={pageSubmissionIds}
-          />
-        ),
-      }))}
+      steps={authorityStepViews(session, id, load.views, pageSubmissionIds, true)}
     />
   );
 }
@@ -331,6 +405,12 @@ async function bidSideOnlyBody(
     Date.now(),
     { matrix: matrix?.kind === 'OK' ? matrix.data : null, actorId: caller.actorId },
   );
+  // Its approval decisions too, whatever its bid-side roles read (PR 346 review 3, finding 1): an
+  // opener or evaluator the owner's policy names decides its step here. Reading the matrix makes
+  // nobody a participant in the evaluation; if this person took part, the service refuses them
+  // the step (`assertMayReadAward`) and the step says so.
+  const authority = await loadAuthority(session, id, query);
+  const pageSubmissionIds = [...submissionIdsOf(forms), ...authoritySubmissionIds(authority)];
   const flash = query[FLASH_PARAM];
   const done = readFlash(session, typeof flash === 'string' ? flash : undefined, id, OWNER_DONE);
   const group = (offered: OwnerForms['opening'], showsRestored: boolean) => (
@@ -341,7 +421,7 @@ async function bidSideOnlyBody(
       owner={submissionBinding(session).owner}
       pageHref={tenderDetailPath(id, 'own')}
       showsRestored={showsRestored}
-      pageSubmissionIds={submissionIdsOf(forms)}
+      pageSubmissionIds={pageSubmissionIds}
     />
   );
   return (
@@ -361,6 +441,18 @@ async function bidSideOnlyBody(
           matrix={matrix}
           notes={evaluation.notes}
           commands={group(forms.evaluation, true)}
+        />
+      ) : null}
+      {authority ? (
+        <AuthorityInboxSection
+          {...authority.walk}
+          steps={authorityStepViews(
+            session,
+            id,
+            authority.views,
+            pageSubmissionIds,
+            bids === null && matrix === null,
+          )}
         />
       ) : null}
     </OpeningOnlyScreen>

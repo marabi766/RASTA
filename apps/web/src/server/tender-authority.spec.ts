@@ -168,7 +168,7 @@ describe('finding the tender’s steps', () => {
     // Truncated is never an empty answer: the walk says where it goes on (PR 346 review 2, finding 3).
     expect(long).toEqual({
       kind: 'OK',
-      data: { items: [], truncated: true, resumeFrom: `C${INBOX_PAGES}` },
+      data: { items: [], truncated: true, resumeFrom: `C${INBOX_PAGES}`, failure: null },
     });
   });
 
@@ -180,11 +180,69 @@ describe('finding the tender’s steps', () => {
     }) as typeof fetch);
     expect(await fetchAuthoritySteps(SESSION, TENDER_ID, 'APR_FROM')).toEqual({
       kind: 'OK',
-      data: { items: [], truncated: false, resumeFrom: null },
+      data: { items: [], truncated: false, resumeFrom: null, failure: null },
     });
     expect(urls).toEqual([
       'http://gateway.test:3000/v1/approvals?status=PENDING&limit=200&cursor=APR_FROM',
     ]);
+  });
+
+  it('a page that cannot be read ends the walk with a failure, keeping what was found and where to retry (PR 346 review 3, finding 2)', async () => {
+    const urls: string[] = [];
+    jest.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.includes('/v1/approvals?')) {
+        return url.includes('cursor=APR_NEXT')
+          ? json(503, { code: 'SERVICE_UNAVAILABLE', message: 'x' })
+          : json(200, { items: [STEP], nextCursor: 'APR_NEXT', hasMore: true });
+      }
+      return json(200, STEP);
+    }) as typeof fetch);
+    const read = await fetchAuthoritySteps(SESSION, TENDER_ID);
+    expect(read.kind).toBe('OK');
+    if (read.kind !== 'OK') return;
+    // The step found before the failure is kept and read for its decision.
+    expect(read.data.items.map(({ summary }) => summary.id)).toEqual([AWARD_STEP_ID]);
+    expect(read.data.items[0]?.detail.kind).toBe('OK');
+    expect(read.data.failure).toEqual({ correlationId: expect.any(String), at: 'APR_NEXT' });
+    expect(read.data.truncated).toBe(false);
+    expect(urls).toContain(`http://gateway.test:3000/v1/approvals/${AWARD_STEP_ID}`);
+  });
+
+  it('the first page failing is a failure at the walk’s start — the top, or the cursor it resumed from — not an absence', async () => {
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((async () =>
+        json(503, { code: 'SERVICE_UNAVAILABLE', message: 'x' })) as typeof fetch);
+    expect(await fetchAuthoritySteps(SESSION, TENDER_ID)).toEqual({
+      kind: 'OK',
+      data: {
+        items: [],
+        truncated: false,
+        resumeFrom: null,
+        failure: { correlationId: expect.any(String), at: null },
+      },
+    });
+    const resumed = await fetchAuthoritySteps(SESSION, TENDER_ID, 'APR_FROM');
+    expect(resumed.kind === 'OK' && resumed.data.failure).toEqual({
+      correlationId: expect.any(String),
+      at: 'APR_FROM',
+    });
+  });
+
+  it('a later page refused is a failure too: only the first page’s refusal says the inbox is not this person’s', async () => {
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((async (input: RequestInfo | URL) =>
+        String(input).includes('cursor=')
+          ? json(403, { code: 'FORBIDDEN', message: 'x' })
+          : json(200, { items: [], nextCursor: 'APR_NEXT', hasMore: true })) as typeof fetch);
+    const read = await fetchAuthoritySteps(SESSION, TENDER_ID);
+    expect(read.kind === 'OK' && read.data.failure).toEqual({
+      correlationId: null,
+      at: 'APR_NEXT',
+    });
   });
 
   it('a cursor given back to the page is the service’s token or nothing', () => {

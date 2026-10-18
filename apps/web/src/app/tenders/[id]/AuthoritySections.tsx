@@ -39,69 +39,71 @@ export interface AuthorityStepView {
   readonly commands?: ReactNode;
 }
 
-export function AuthorityScreen({
-  tenderId,
-  steps,
-  truncated,
-  continueHref = null,
-  restartHref = null,
-  flash,
-}: {
-  readonly tenderId: string;
-  readonly steps: readonly AuthorityStepView[];
+/** Where the walk through the caller's approval inbox stands. */
+export interface InboxWalk {
   /** The inbox was longer than the pages looked through. */
   readonly truncated: boolean;
   /** Where the walk through the inbox goes on, when `truncated`. */
   readonly continueHref?: string | null;
   /** The walk's start, when this page began further on. */
   readonly restartHref?: string | null;
-  readonly flash?: ReactNode;
-}) {
+  /**
+   * A page of the inbox could not be read (PR 346 review 3, finding 2): the steps found before it
+   * are shown, and the walk is retried from the page that failed.
+   */
+  readonly failure?: { readonly correlationId: string | null; readonly retryHref: string } | null;
+}
+
+/** The walk's warnings and the ways on: retry, go on, start again. */
+function InboxStatus({ walk, found }: { readonly walk: InboxWalk; readonly found: boolean }) {
+  const { truncated, continueHref = null, restartHref = null, failure = null } = walk;
   return (
-    <div className="flex flex-col gap-6">
-      <Section headingId="tender-summary" title="بررسی موافقت مناقصه">
-        <p className="text-sm text-content-muted">
-          شناسه <Identifier>{tenderId}</Identifier>
-        </p>
-        {steps.length > 0 ? (
-          <p className="mt-2 text-sm">
-            سیاست موافقتِ سازمان مالک، شما را مرجع این مناقصه نام برده است. مشخصات مناقصه از آنِ
-            سازمان مالک است و برای شما خوانده نمی‌شود؛ این صفحه فقط مرحله‌هایی را نشان می‌دهد که
-            سرویس به مرجع نشان می‌دهد.
-          </p>
-        ) : (
-          <p className="mt-2 text-sm">
-            مشخصات این مناقصه برای شما خوانده نمی‌شود. اگر سیاست موافقتِ سازمان مالک شما را مرجع آن
-            نام برده باشد، مرحله‌اش در صندوق موافقت‌های شماست و این صفحه آن را آنجا می‌جوید.
-          </p>
-        )}
-        {truncated ? (
-          <Alert tone="warning">
-            صندوق موافقت‌های در انتظار شما بیش از آن است که این صفحه یک‌جا بخواند؛ ممکن است مرحلهٔ
-            {steps.length > 0 ? ' دیگری' : ''} از این مناقصه در ادامهٔ صندوق باشد.
-          </Alert>
-        ) : null}
-        {continueHref || restartHref ? (
-          <div className="mt-3 flex flex-wrap gap-3">
-            {continueHref ? (
-              <ButtonLink href={continueHref} tone="secondary">
-                ادامهٔ جست‌وجو در صندوق موافقت‌ها
-              </ButtonLink>
-            ) : null}
-            {restartHref ? (
-              <ButtonLink href={restartHref} tone="quiet">
-                جست‌وجو از آغاز صندوق
-              </ButtonLink>
-            ) : null}
-          </div>
-        ) : null}
-      </Section>
-      {flash}
-      {steps.length === 0 && !truncated ? (
-        <p className="text-sm text-content-muted">
-          مرحلهٔ دیگری از این مناقصه در صندوق موافقت‌های شما در انتظار تصمیم نیست.
-        </p>
+    <>
+      {failure ? (
+        <Alert tone="danger" title="صندوق موافقت‌ها خوانده نشد">
+          بخشی از صندوق موافقت‌های شما خوانده نشد، پس جست‌وجوی مرحله‌های این مناقصه کامل نیست
+          {found ? '؛ مرحله‌هایی که تا اینجا پیدا شد در زیر آمده است' : ''}. کمی بعد دوباره امتحان
+          کنید؛ جست‌وجو از همان جایی که ماند ادامه می‌یابد.
+          {failure.correlationId ? (
+            <>
+              {' '}
+              کد پیگیری: <Identifier>{failure.correlationId}</Identifier>
+            </>
+          ) : null}
+        </Alert>
       ) : null}
+      {truncated && !failure ? (
+        <Alert tone="warning">
+          صندوق موافقت‌های در انتظار شما بیش از آن است که این صفحه یک‌جا بخواند؛ ممکن است مرحلهٔ
+          {found ? ' دیگری' : ''} از این مناقصه در ادامهٔ صندوق باشد.
+        </Alert>
+      ) : null}
+      {failure || (truncated && continueHref) || restartHref ? (
+        <div className="mt-3 flex flex-wrap gap-3">
+          {failure ? (
+            <ButtonLink href={failure.retryHref} tone="secondary">
+              تلاش دوباره برای خواندن صندوق
+            </ButtonLink>
+          ) : continueHref ? (
+            <ButtonLink href={continueHref} tone="secondary">
+              ادامهٔ جست‌وجو در صندوق موافقت‌ها
+            </ButtonLink>
+          ) : null}
+          {restartHref ? (
+            <ButtonLink href={restartHref} tone="quiet">
+              جست‌وجو از آغاز صندوق
+            </ButtonLink>
+          ) : null}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+/** One section per step: the project, the step, the request and its bid, the notes and forms. */
+function AuthoritySteps({ steps }: { readonly steps: readonly AuthorityStepView[] }) {
+  return (
+    <>
       {steps.map(({ step, notes, commands }) => (
         <Section
           key={step.id}
@@ -145,6 +147,75 @@ export function AuthorityScreen({
           </div>
         </Section>
       ))}
+    </>
+  );
+}
+
+const complete = (walk: InboxWalk) => !walk.truncated && !walk.failure;
+
+export function AuthorityScreen({
+  tenderId,
+  steps,
+  flash,
+  ...walk
+}: InboxWalk & {
+  readonly tenderId: string;
+  readonly steps: readonly AuthorityStepView[];
+  readonly flash?: ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-6">
+      <Section headingId="tender-summary" title="بررسی موافقت مناقصه">
+        <p className="text-sm text-content-muted">
+          شناسه <Identifier>{tenderId}</Identifier>
+        </p>
+        {steps.length > 0 ? (
+          <p className="mt-2 text-sm">
+            سیاست موافقتِ سازمان مالک، شما را مرجع این مناقصه نام برده است. مشخصات مناقصه از آنِ
+            سازمان مالک است و برای شما خوانده نمی‌شود؛ این صفحه فقط مرحله‌هایی را نشان می‌دهد که
+            سرویس به مرجع نشان می‌دهد.
+          </p>
+        ) : (
+          <p className="mt-2 text-sm">
+            مشخصات این مناقصه برای شما خوانده نمی‌شود. اگر سیاست موافقتِ سازمان مالک شما را مرجع آن
+            نام برده باشد، مرحله‌اش در صندوق موافقت‌های شماست و این صفحه آن را آنجا می‌جوید.
+          </p>
+        )}
+        <InboxStatus walk={walk} found={steps.length > 0} />
+      </Section>
+      {flash}
+      {steps.length === 0 && complete(walk) ? (
+        <p className="text-sm text-content-muted">
+          مرحلهٔ دیگری از این مناقصه در صندوق موافقت‌های شما در انتظار تصمیم نیست.
+        </p>
+      ) : null}
+      <AuthoritySteps steps={steps} />
     </div>
+  );
+}
+
+/**
+ * The caller's approval decisions on this tender, beside what its bid-side roles
+ * read (PR 346 review 3, finding 1): an opener or evaluator who is also named by
+ * the owner's award or publication policy decides its step here. Nothing when
+ * a completed walk found none.
+ */
+export function AuthorityInboxSection({
+  steps,
+  ...walk
+}: InboxWalk & { readonly steps: readonly AuthorityStepView[] }) {
+  if (steps.length === 0 && complete(walk) && !walk.restartHref) return null;
+  return (
+    <>
+      <Section headingId="tender-authority-inbox" title="موافقت‌های شما در این مناقصه">
+        <p className="text-sm">
+          {steps.length > 0
+            ? 'سیاست موافقتِ سازمان مالک، شما را مرجع مرحله‌ای از این مناقصه نام برده است؛ تصمیم دربارهٔ آن جدا از نقش شما در گشایش یا ارزیابی است.'
+            : 'مرحله‌ای از این مناقصه در آن بخش از صندوق موافقت‌های شما که خوانده شد نیست.'}
+        </p>
+        <InboxStatus walk={walk} found={steps.length > 0} />
+      </Section>
+      <AuthoritySteps steps={steps} />
+    </>
   );
 }

@@ -24,7 +24,7 @@ import {
 } from '@/test/evaluation-fixtures';
 import { TENDER_ID } from '@/test/owner-fixtures';
 
-import { AuthorityScreen } from './[id]/AuthoritySections';
+import { AuthorityInboxSection, AuthorityScreen } from './[id]/AuthoritySections';
 import { AwardSection, EvaluationSection } from './[id]/EvaluationSections';
 import { UNREPEATABLE_OWNER_TEXT } from './[id]/OwnerCommandForm';
 import { OwnerCommands, type OfferedOwnerCommand } from './[id]/OwnerCommands';
@@ -516,6 +516,64 @@ describe('the award without the evaluators’ read, and an authority of another 
     );
     expect(screen.queryByText(/در انتظار تصمیم نیست/)).not.toBeInTheDocument();
     expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('an inbox page that failed: what was found, the correlation id, a retry from that page, no claim the search ended (PR 346 review 3, finding 2)', async () => {
+    const step = {
+      ...AWARD_STEP,
+      stepOrder: 1,
+      authorityLabel: 'بازبین (نمونه)',
+      requestedAt: '2026-10-22T07:00:00.000Z',
+      project: { title: 'بهسازی راه روستایی' },
+    };
+    const { container } = render(
+      <AuthorityScreen
+        tenderId={TENDER_ID}
+        truncated={false}
+        failure={{ correlationId: 'corr-9', retryHref: '/tenders/TND_1?view=own&inbox=APR_NEXT' }}
+        restartHref="/tenders/TND_1?view=own"
+        steps={[{ step, notes: [], commands: group([offer('GRANT_AWARD')]) }]}
+      />,
+    );
+    const alert = screen.getByText(/صندوق موافقت‌ها خوانده نشد/).closest('[role="alert"], div');
+    expect(alert).toHaveTextContent(/مرحله‌هایی که تا اینجا پیدا شد در زیر آمده است/);
+    expect(alert).toHaveTextContent('corr-9');
+    expect(screen.getByRole('link', { name: 'تلاش دوباره برای خواندن صندوق' })).toHaveAttribute(
+      'href',
+      '/tenders/TND_1?view=own&inbox=APR_NEXT',
+    );
+    expect(
+      screen.queryByRole('link', { name: 'ادامهٔ جست‌وجو در صندوق موافقت‌ها' }),
+    ).not.toBeInTheDocument();
+    expect(region('موافقت با واگذاری مناقصه')).toHaveTextContent('ORG-CON-C');
+    expect(screen.queryByText(/در انتظار تصمیم نیست/)).not.toBeInTheDocument();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('beside a bid-side page: the caller’s decisions on this tender in a section of their own, and nothing after a completed walk that found none (PR 346 review 3, finding 1)', async () => {
+    const step = {
+      ...AWARD_STEP,
+      stepOrder: 1,
+      authorityLabel: 'بازبین (نمونه)',
+      requestedAt: '2026-10-22T07:00:00.000Z',
+      project: { title: 'بهسازی راه روستایی' },
+    };
+    const { container } = render(
+      <AuthorityInboxSection
+        truncated={false}
+        steps={[
+          { step, notes: [], commands: group([offer('GRANT_AWARD'), offer('REJECT_AWARD')]) },
+        ]}
+      />,
+    );
+    expect(region('موافقت‌های شما در این مناقصه')).toHaveTextContent(
+      /جدا از نقش شما در گشایش یا ارزیابی است/,
+    );
+    expect(region('موافقت با واگذاری مناقصه')).toHaveTextContent('ORG-CON-C');
+    expect(screen.getByRole('form', { name: 'موافقت با واگذاری' })).toBeInTheDocument();
+    expect(await axe(container)).toHaveNoViolations();
+    const { container: empty } = render(<AuthorityInboxSection truncated={false} steps={[]} />);
+    expect(empty).toBeEmptyDOMElement();
   });
 
   it('an awarder who reads neither the matrix nor the bids: the fixed notice, no form (PR 346 review 2, finding 1)', async () => {
