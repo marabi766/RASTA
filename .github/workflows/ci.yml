@@ -552,6 +552,7 @@ jobs:
           pnpm --filter @rasta/inventory-service run db:migrate
           pnpm --filter @rasta/contract-service run db:migrate
           pnpm --filter @rasta/supplier-service run db:migrate
+          pnpm --filter @rasta/audit-service run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
@@ -585,6 +586,11 @@ jobs:
           # through contract-service (`e2e/contract-statements.spec.ts`).
           DATABASE_URL_CONTRACT: postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
+          # EXP-004: a tender's bids are opened only against the receipts
+          # audit-service holds (`e2e/tender-owner.spec.ts`). Migrated as the
+          # schema owner, run below as the runtime role (ADR-053 § 6).
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
       - name: Load the signed contract the statement scenarios act on
         # contract-service has no route that creates a contract (one is drafted
@@ -648,6 +654,7 @@ jobs:
           --filter=@rasta/inventory-service...
           --filter=@rasta/contract-service...
           --filter=@rasta/supplier-service...
+          --filter=@rasta/audit-service...
 
       - name: Start MinIO and create the document bucket
         # EXP-002 slice 7: the portal attaches a file by having its server ask
@@ -697,7 +704,7 @@ jobs:
           docker logs rasta-web-e2e-keycloak
           exit 1
 
-      - name: Start identity, fleet, organization, asset, maintenance, supplier, construction, inventory, contract and api-gateway
+      - name: Start identity, fleet, organization, asset, maintenance, supplier, audit, construction, inventory, contract and api-gateway
         env:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           NODE_ENV: test
@@ -856,6 +863,19 @@ jobs:
             DATABASE_URL=postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public \
             node dist/main.js > /tmp/rasta-web-e2e-logs/supplier.log 2>&1 & )
 
+          # EXP-004 — audit-service: the owner scenarios
+          # (`e2e/tender-owner.spec.ts`) open a tender's bids, which
+          # construction-service does only once audit-service holds every
+          # bid's receipt (from the bid events on Kafka) and the chain agrees
+          # with its own. The runtime role, never the migrator: audit-service
+          # must not be able to alter or drop what it writes (ADR-053 § 6).
+          ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service audit-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/audit-service && \
+            PORT=3115 SERVICE_NAME=audit-service \
+            DATABASE_URL_AUDIT=postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/audit.log 2>&1 & )
+
           # EXP-004 — construction-service: the `/projects` live-isolation
           # scenarios (`e2e/tenant-isolation.spec.ts`) create a real project
           # per tenant through `POST /v1/projects` and read it back through
@@ -933,6 +953,9 @@ jobs:
               http://localhost:3112/health/ready || true)"
             supplier="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3108/health/ready || true)"
+            # 200 only once its projector has joined its consumer group.
+            audit="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3115/health/ready || true)"
             construction="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3110/health/ready || true)"
             inventory="$(curl -s -o /dev/null -w '%{http_code}' \
@@ -945,7 +968,7 @@ jobs:
                && [ "$organization" = "200" ] && [ "$asset" = "200" ] \
                && [ "$maintenance" = "200" ] && [ "$document" = "200" ] \
                && [ "$marketplace" = "200" ] && [ "$economic" = "200" ] \
-               && [ "$supplier" = "200" ] \
+               && [ "$supplier" = "200" ] && [ "$audit" = "200" ] \
                && [ "$construction" = "200" ] && [ "$inventory" = "200" ] \
                && [ "$contract" = "200" ] && [ "$gateway" = "401" ]; then
               echo "portal live stack ready after ${attempt} attempt(s)"
@@ -954,7 +977,7 @@ jobs:
             sleep 3
           done
 
-          echo "portal live stack failed (identity=${identity}, fleet=${fleet}, organization=${organization}, asset=${asset}, maintenance=${maintenance}, document=${document}, marketplace=${marketplace}, economic=${economic}, supplier=${supplier}, construction=${construction}, inventory=${inventory}, contract=${contract}, gateway=${gateway})"
+          echo "portal live stack failed (identity=${identity}, fleet=${fleet}, organization=${organization}, asset=${asset}, maintenance=${maintenance}, document=${document}, marketplace=${marketplace}, economic=${economic}, supplier=${supplier}, audit=${audit}, construction=${construction}, inventory=${inventory}, contract=${contract}, gateway=${gateway})"
           cat /tmp/rasta-web-e2e-logs/identity.log
           cat /tmp/rasta-web-e2e-logs/fleet.log
           cat /tmp/rasta-web-e2e-logs/organization.log
@@ -964,6 +987,7 @@ jobs:
           cat /tmp/rasta-web-e2e-logs/marketplace.log
           cat /tmp/rasta-web-e2e-logs/economic.log
           cat /tmp/rasta-web-e2e-logs/supplier.log
+          cat /tmp/rasta-web-e2e-logs/audit.log
           cat /tmp/rasta-web-e2e-logs/construction.log
           cat /tmp/rasta-web-e2e-logs/inventory.log
           cat /tmp/rasta-web-e2e-logs/contract.log
@@ -1025,10 +1049,11 @@ jobs:
           # contract-service's runtime role (`e2e/contract-fixture.ts`), so a
           # retry runs against new state (PR 342 review 1, finding 2).
           WEB_E2E_CONTRACT_DATABASE_URL: postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract
-          # construction-service holds a tender key and supplier-service is up
-          # (above), so the bid scenarios (`e2e/tender-bids.spec.ts`) run for
+          # construction-service holds a tender key, and supplier-service and
+          # audit-service are up (above), so the bid and owner scenarios
+          # (`e2e/tender-bids.spec.ts`, `e2e/tender-owner.spec.ts`) run for
           # real: they make their own owner, policies, project and people
-          # through the platform's routes, and publish a tender per test.
+          # through the platform's routes, and draft a tender per test.
           WEB_LIVE_STACK_E2E_TENDERS: 'true'
           WEB_E2E_FLEET_URL: http://localhost:3104
           WEB_E2E_MAINTENANCE_URL: http://localhost:3105
@@ -1061,6 +1086,8 @@ jobs:
           tail -n 200 /tmp/rasta-web-e2e-logs/economic.log || true
           echo '--- supplier-service ---'
           tail -n 200 /tmp/rasta-web-e2e-logs/supplier.log || true
+          echo '--- audit-service ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/audit.log || true
           echo '--- construction-service ---'
           tail -n 200 /tmp/rasta-web-e2e-logs/construction.log || true
           echo '--- inventory-service ---'

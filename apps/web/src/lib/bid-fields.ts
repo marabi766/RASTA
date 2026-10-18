@@ -13,6 +13,16 @@ export function isBidCommand(value: unknown): value is BidCommand {
   return typeof value === 'string' && (BID_COMMANDS as readonly string[]).includes(value);
 }
 
+/**
+ * The commands whose unconfirmed outcome is never sent again (PR 345 review
+ * 1, finding 1): a replacement or a withdrawal acts on the organization's bid
+ * as it stands when the retry arrives, which another tab may have changed
+ * since, so a retry could act on a bid its author never saw. Until
+ * construction-service binds them to one bid state, an unknown outcome is
+ * view-only. A submission stays retryable: an organization has one bid.
+ */
+export const UNREPEATABLE_BID_COMMANDS: readonly BidCommand[] = ['REVISE', 'WITHDRAW'];
+
 export const BID_COMMAND_LABELS: Readonly<Record<BidCommand, string>> = {
   SUBMIT: 'ثبت پیشنهاد',
   REVISE: 'جایگزینی پیشنهاد',

@@ -9,6 +9,7 @@ import {
   BID_NOTE_MAX,
   BID_REFUSAL_TEXT,
   BID_STATUSES,
+  UNREPEATABLE_BID_COMMANDS,
 } from '@/lib/bid-fields';
 import {
   collect,
@@ -252,6 +253,18 @@ describe('the refusals the portal says in its own words', () => {
       expect(BID_REFUSAL_TEXT[reason]).toBeDefined();
     }
     expect(bidService).toContain("ruleRefusal(`Bidrefused:${refusals.join(',')}`,'bid',refusals,");
+  });
+});
+
+describe('which bid commands may be sent again after a lost answer (PR 345 reviews 1 and 2)', () => {
+  it('a submission keeps its result under its required key; a replacement and a withdrawal keep none', () => {
+    const submit = method('submit');
+    expect(submit).toContain('constkey=requiredIdempotencyKey(idempotencyKey);');
+    expect(submit).toContain('returnthis.idempotency.run(SUBMIT_BID_ENDPOINT,key,');
+    for (const name of ['revise', 'withdraw']) {
+      expect(method(name)).not.toContain('idempotency');
+    }
+    expect([...UNREPEATABLE_BID_COMMANDS]).toEqual(['REVISE', 'WITHDRAW']);
   });
 });
 
