@@ -346,3 +346,31 @@ describe('the tender opening roles', () => {
     }
   });
 });
+
+describe('the evaluation and award roles, and the conflict rules', () => {
+  it('evaluating and awarding default to the owner’s own role set, and refuse what never reads a bid', () => {
+    for (const name of ['WEB_TENDER_EVALUATE_ROLES', 'WEB_TENDER_AWARD_ROLES'] as const) {
+      expect(loadWebServerEnv(REQUIRED)[name]).toEqual([]);
+      expect(loadWebServerEnv({ ...REQUIRED, [name]: 'FLEET_MANAGER' })[name]).toEqual([
+        'FLEET_MANAGER',
+      ]);
+      for (const value of ['SYSTEM_ADMIN', 'CONTRACTOR', 'AUDITOR']) {
+        expect(() => loadWebServerEnv({ ...REQUIRED, [name]: value })).toThrow(name);
+      }
+    }
+  });
+
+  it('the conflict rules default to AWARDER_NOT_EVALUATOR, switch off when empty, and stop the portal on an unknown one', () => {
+    expect(loadWebServerEnv(REQUIRED).WEB_TENDER_COI_RULES).toEqual(['AWARDER_NOT_EVALUATOR']);
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_TENDER_COI_RULES: '' }).WEB_TENDER_COI_RULES,
+    ).toEqual([]);
+    expect(
+      loadWebServerEnv({
+        ...REQUIRED,
+        WEB_TENDER_COI_RULES: 'AWARDER_NOT_EVALUATOR, EVALUATOR_NOT_TENDER_AUTHOR',
+      }).WEB_TENDER_COI_RULES,
+    ).toEqual(['AWARDER_NOT_EVALUATOR', 'EVALUATOR_NOT_TENDER_AUTHOR']);
+    expect(() => loadWebServerEnv({ ...REQUIRED, WEB_TENDER_COI_RULES: 'MADE_UP' })).toThrow();
+  });
+});

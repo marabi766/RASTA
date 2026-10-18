@@ -10,11 +10,22 @@ import {
   type UnresolvedOwnerCommand,
 } from '@/lib/unresolved-tender-command';
 
-import { OwnerCommandForm, unconfirmedFrom } from './OwnerCommandForm';
+import {
+  OwnerCommandForm,
+  unconfirmedFrom,
+  type AwardFormTerms,
+  type ScoreRow,
+} from './OwnerCommandForm';
 
 export interface OfferedOwnerCommand {
   readonly command: OwnerCommand;
   readonly execute?: boolean;
+  /** The bidder a bid's command is about, said with its label. */
+  readonly subject?: string;
+  /** The bid, for the form's own ids. */
+  readonly scope?: string;
+  readonly scoreRows?: readonly ScoreRow[];
+  readonly award?: AwardFormTerms;
   readonly submission: OwnerSubmission;
 }
 
@@ -35,8 +46,8 @@ export interface OwnerCommandsProps {
 }
 
 /**
- * One group of the owner's forms on a tender — the publication's, or the
- * opening's — drawn only after this browser has been asked whether an owner
+ * One group of the owner's forms on a tender — the publication's, the
+ * opening's, the evaluation's or the award's — drawn only after this browser has been asked whether an owner
  * command of this tender is still unresolved (`lib/unresolved-tender-command.ts`;
  * one slot for the tender). A record of none of the forms drawn now (a reload)
  * shows only its uncertainty view, in the group that `showsRestored`; a record
@@ -89,15 +100,20 @@ export function OwnerCommands({
   if (offered.length === 0) return null;
   return (
     <div className="flex flex-col gap-4">
-      {offered.map(({ command, execute, submission }) => (
+      {offered.map(({ command, execute, subject, scope, scoreRows, award, submission }) => (
         <OwnerCommandForm
-          key={command}
+          key={submission.id}
           tenderId={tenderId}
           command={command}
           execute={execute}
+          subject={subject}
+          scope={scope}
+          scoreRows={scoreRows}
+          award={award}
           csrfToken={csrfToken}
           submissionId={submission.id}
           replay={submission.replay}
+          binding={submission.binding}
           owner={owner}
           pageHref={pageHref}
           heldBy={restored?.submissionId ?? null}

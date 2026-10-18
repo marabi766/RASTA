@@ -1,7 +1,12 @@
 /**
  * @jest-environment node
  */
-import { mintOwnerStamp, verifyOwnerStamp, type OwnerTarget } from './tender-owner-replay';
+import {
+  mintOwnerStamp,
+  ownerBindingText,
+  verifyOwnerStamp,
+  type OwnerTarget,
+} from './tender-owner-replay';
 import { mintSubmissionId } from './submission';
 import type { WebSession } from './session';
 
@@ -93,4 +98,112 @@ it('refuses another tender, another submission, another login, and a passed dead
     verifyOwnerStamp({ ...SESSION, csrfToken: 'another' }, token, 'TND_1', SUB, NOW, ENV),
   ).toBeNull();
   expect(verifyOwnerStamp(SESSION, token, 'TND_1', SUB, NOW + 3001 * 1000, ENV)).toBeNull();
+});
+
+describe('a bid’s commands', () => {
+  const bid = { expectedVersion: null, bidId: 'BID_A' } as const;
+  const scoring = [
+    { criterionCode: 'technical', maxScore: 10, passFail: false, expectedRevision: 2 },
+  ];
+  const award = { justificationRequired: true, execution: { justification: 'آنچه موافقت شد' } };
+  const minted = (overrides: Partial<OwnerTarget>) => {
+    const target = targetOf(overrides);
+    return {
+      token: mintOwnerStamp(SESSION, target, SUB, NOW, ENV).token,
+      binding: ownerBindingText(target),
+    };
+  };
+  const targetOf = (overrides: Partial<OwnerTarget>) => target(overrides);
+  const verified = (overrides: Partial<OwnerTarget>, posted?: unknown) => {
+    const { token, binding } = minted(overrides);
+    return verifyOwnerStamp(
+      SESSION,
+      token,
+      'TND_1',
+      SUB,
+      NOW,
+      ENV,
+      posted === undefined ? binding : posted,
+    );
+  };
+
+  it('binds a decision on a bid to the bid, a score to its criteria and revisions, an award to its terms', () => {
+    expect(verified({ command: 'QUALIFY', ...bid })).toMatchObject({
+      command: 'QUALIFY',
+      bidId: 'BID_A',
+      scoring: null,
+      award: null,
+    });
+    expect(verified({ command: 'SCORE', ...bid, scoring })).toMatchObject({
+      bidId: 'BID_A',
+      scoring,
+    });
+    expect(verified({ command: 'AWARD', ...bid, award })).toMatchObject({ bidId: 'BID_A', award });
+    expect(verified({ command: 'EVALUATE', expectedVersion: null })).toMatchObject({
+      command: 'EVALUATE',
+      bidId: null,
+    });
+    expect(
+      verified({ command: 'GRANT_AWARD', approvalId: 'APR_9', expectedVersion: 3 }),
+    ).toMatchObject({ approvalId: 'APR_9', expectedVersion: 3, bidId: null });
+  });
+
+  it('refuses a bid’s binding that does not fit its command', () => {
+    for (const wrong of [
+      { command: 'QUALIFY', expectedVersion: null },
+      { command: 'DISQUALIFY', ...bid, scoring },
+      { command: 'SCORE', ...bid },
+      { command: 'AWARD', ...bid },
+      { command: 'AWARD', ...bid, award, scoring },
+      { command: 'EVALUATE', ...bid },
+      { command: 'PUBLISH', bidId: 'BID_A' },
+      { command: 'GRANT_AWARD', approvalId: 'APR_9', expectedVersion: 3, bidId: 'BID_A' },
+    ] as Partial<OwnerTarget>[]) {
+      expect(verified(wrong)).toBeNull();
+    }
+  });
+
+  it('takes the bound body only as the stamp signed it: changed, missing or for another command, refused', () => {
+    const { token, binding } = minted({ command: 'SCORE', ...bid, scoring });
+    const changed = binding!.replace('"expectedRevision":2', '"expectedRevision":3');
+    for (const posted of [changed, null, '', 'not json', binding + ' ']) {
+      expect(verifyOwnerStamp(SESSION, token, 'TND_1', SUB, NOW, ENV, posted)).toBeNull();
+    }
+    // A body posted beside a stamp that binds none is refused too.
+    const qualify = minted({ command: 'QUALIFY', ...bid });
+    expect(verifyOwnerStamp(SESSION, qualify.token, 'TND_1', SUB, NOW, ENV, binding)).toBeNull();
+    // An award's terms are not a score's criteria, even with a signed digest.
+    const awardStamp = minted({ command: 'AWARD', ...bid, award });
+    expect(verifyOwnerStamp(SESSION, awardStamp.token, 'TND_1', SUB, NOW, ENV, binding)).toBeNull();
+  });
+
+  it('stays a small stamp at the largest body a form can bind: 50 criteria, a 2000-character Persian justification', () => {
+    const fifty = Array.from({ length: 50 }, (_, index) => ({
+      criterionCode: `${'c'.repeat(61)}${String(index).padStart(3, '0')}`,
+      maxScore: 1_000_000,
+      passFail: index % 2 === 0,
+      expectedRevision: 2_147_483_647,
+    }));
+    const score = minted({ command: 'SCORE', ...bid, scoring: fifty });
+    expect(score.binding!.length).toBeGreaterThan(5000);
+    expect(score.token.length).toBeLessThan(1000);
+    expect(
+      verifyOwnerStamp(SESSION, score.token, 'TND_1', SUB, NOW, ENV, score.binding),
+    ).toMatchObject({ scoring: fifty });
+
+    const persian = 'گزینش این پیشنهاد به‌دلیل زمان اجرای کوتاه‌تر '.repeat(60).slice(0, 2000);
+    expect(persian).toHaveLength(2000);
+    const terms = { justificationRequired: false, execution: { justification: persian } };
+    const execute = minted({ command: 'AWARD', ...bid, award: terms });
+    expect(execute.token.length).toBeLessThan(1000);
+    expect(
+      verifyOwnerStamp(SESSION, execute.token, 'TND_1', SUB, NOW, ENV, execute.binding),
+    ).toMatchObject({ award: terms });
+    // A justification past the DTO's 2000 characters is not a body this server binds.
+    const tooLong = { justificationRequired: false, execution: { justification: `${persian}ی` } };
+    const refused = minted({ command: 'AWARD', ...bid, award: tooLong });
+    expect(
+      verifyOwnerStamp(SESSION, refused.token, 'TND_1', SUB, NOW, ENV, refused.binding),
+    ).toBeNull();
+  });
 });

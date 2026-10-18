@@ -5,6 +5,7 @@ import type { TenderStatus } from '@/lib/tender-fields';
 import { callGateway, GatewayRequestError } from './gateway';
 import { webServerEnv } from './env';
 import { utcInstant } from './instant';
+import { tokenPerson } from './realm-roles';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 
@@ -37,7 +38,10 @@ export type { ReadResult };
  *
  * Only what a screen renders, and the owner's `version`, which the owner's
  * publication is bound to. The actor ids (`createdBy`, `statusChangedBy`, …)
- * and the owner's `organizationId` are dropped: a
+ * and the owner's `organizationId` are dropped — of `statusChangedBy` only
+ * whether it names the caller is kept (`statusChangedByCaller`: for an
+ * evaluated tender, whether the caller completed the evaluation, which the
+ * award's separation of duties needs, `server/tender-evaluation.ts`): a
  * React tree is serialized into the page, and a value nobody reads should not
  * travel with it. Every rendered timestamp is a valid UTC instant
  * (`instant.ts`): a malformed one is a `MALFORMED` outcome, not a render-time
@@ -67,9 +71,14 @@ const tenderDetailSchema = tenderSummarySchema.extend({
   createdAt: utcInstant,
   /** What a publication is bound to (`expectedVersion`, `server/tender-owner.ts`). */
   version: z.number().int().min(1),
+  /** Read to be compared with the caller and dropped (`fetchTender`). */
+  statusChangedBy: z.string().nullable().default(null),
 });
 
-export type TenderDetail = z.infer<typeof tenderDetailSchema>;
+export type TenderDetail = Omit<z.infer<typeof tenderDetailSchema>, 'statusChangedBy'> & {
+  /** Whether the caller moved the tender to its status — for an evaluated one, completed the evaluation. */
+  readonly statusChangedByCaller: boolean;
+};
 
 const tenderPageSchema = z.object({
   items: z.array(tenderSummarySchema),
@@ -177,11 +186,22 @@ export function fetchTenders(
   return read(session, `/v1/tenders?${search.toString()}`, tenderPageSchema);
 }
 
-export function fetchTender(
+export async function fetchTender(
   session: WebSession,
   tenderId: string,
 ): Promise<ReadResult<TenderDetail>> {
-  return read(session, `/v1/tenders/${encodeURIComponent(tenderId)}`, tenderDetailSchema);
+  const result = await read(
+    session,
+    `/v1/tenders/${encodeURIComponent(tenderId)}`,
+    tenderDetailSchema,
+  );
+  if (result.kind !== 'OK') return result;
+  const { statusChangedBy, ...detail } = result.data;
+  const actor = tokenPerson(session.accessToken)?.actorId ?? null;
+  return {
+    kind: 'OK',
+    data: { ...detail, statusChangedByCaller: actor !== null && statusChangedBy === actor },
+  };
 }
 
 export function fetchTenderCriteria(

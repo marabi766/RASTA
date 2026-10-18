@@ -45,7 +45,7 @@ import {
  *   owner's tender is the same absence as an id that does not exist.
  *
  * Closing has no form: construction-service closes a tender itself at its
- * deadline. Evaluation and award are the next slice.
+ * deadline. Evaluation and award are `tender-evaluation.spec.ts`.
  */
 
 const RUN = randomUUID().replace(/-/g, '').slice(0, 8);
@@ -76,7 +76,7 @@ async function as(
 }
 
 const ownPage = (id: string) => `/tenders/${encodeURIComponent(id)}?view=own`;
-const form = (page: Page, name: string) => page.getByRole('form', { name });
+const form = (page: Page, name: string | RegExp) => page.getByRole('form', { name });
 
 async function send(page: Page, name: string): Promise<void> {
   await form(page, name).getByRole('button', { name }).click();
@@ -264,7 +264,14 @@ test.describe('the owner’s side of a tender, live (EXP-004)', () => {
       const opened = other.getByRole('region', { name: 'پیشنهادهای رسیده' });
       await expect(opened).toContainText('۴٬۲۰۰٬۰۰۰٬۰۰۰');
       await expect(opened).toContainText(cast.contractor.organizationId);
-      await expect(other.getByRole('form')).toHaveCount(0);
+      // The opening is over: none of its forms is left. The bid now waits for an
+      // evaluator's decision, and this person holds the evaluators' role too.
+      for (const name of ['پیشنهاد گشایش پیشنهادها', OPEN, 'پس‌گرفتن پیشنهاد گشایش']) {
+        await expect(form(other, name)).toHaveCount(0);
+      }
+      await expect(
+        form(other, new RegExp(`^اعلام واجد شرایط بودن — ${cast.contractor.organizationId}$`)),
+      ).toBeVisible();
       await expectAccessible(other);
     } finally {
       await author.close();

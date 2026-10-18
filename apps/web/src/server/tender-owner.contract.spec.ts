@@ -295,8 +295,8 @@ describe('an opener who may not read the tender', () => {
   });
 });
 
-describe('which commands may be sent again after a lost answer (PR 345 reviews 1 and 2)', () => {
-  it('none of the owner’s commands keeps its result under its Idempotency-Key — the gateway only requires the header', () => {
+describe('which commands may be sent again after a lost answer (PR 345 reviews 1 and 2, PR 346 review 1)', () => {
+  it('none of the owner’s publication, opening or decision commands keeps its result under its Idempotency-Key — the gateway only requires the header', () => {
     for (const source of [publicationService, squash(openService)!, tenderApprovals]) {
       expect(source).not.toContain('IdempotencyStore');
       expect(source).not.toContain('idempotency.run(');
@@ -308,23 +308,27 @@ describe('which commands may be sent again after a lost answer (PR 345 reviews 1
     expect(approvalGate).toContain(
       "kind:'REQUESTED',request:awaitthis.open(tx,input),created:true,",
     );
-    expect([...UNREPEATABLE_OWNER_COMMANDS]).toEqual([
+    for (const command of [
       'PUBLISH',
+      'GRANT',
+      'REJECT',
       'PROPOSE_OPENING',
       'OPEN_BIDS',
       'WITHDRAW_PROPOSAL',
-    ]);
+    ] as const) {
+      expect(UNREPEATABLE_OWNER_COMMANDS).toContain(command);
+    }
   });
 
-  it('a decision is a compare-and-set on its very step, so its re-send acts only on the step as its sender saw it', () => {
+  it('a decision decides the step as it stands when it arrives: its re-send is not the first send’s, so it is never sent again', () => {
+    // The compare-and-set refuses a moved step, but a re-send that arrives first is still decided:
+    // the service keeps no answer to give it, so its outcome would be a new decision, not the lost one's.
     expect(tenderApprovals).toContain(
       "if(approval.version!==dto.expectedVersion)throwthis.conflict('Approval',step.id);",
     );
-    expect(tenderApprovals).toContain(
-      "constmatched=awaitthis.approvals.transitionApproval(tx,{organizationId,approvalId:step.id,from:'PENDING',expectedVersion:dto.expectedVersion,",
-    );
-    expect(tenderApprovals).toContain("if(matched===0)throwthis.conflict('Approval',step.id);");
-    expect([...REPEATABLE_OWNER_COMMANDS]).toEqual(['GRANT', 'REJECT']);
+    expect(tenderApprovals).not.toContain('idempotency');
+    // Only a score keeps its result by key (`tender-evaluation.contract.spec.ts`).
+    expect([...REPEATABLE_OWNER_COMMANDS]).toEqual(['SCORE']);
   });
 });
 
