@@ -6,6 +6,7 @@ import {
 } from './tender-evaluation-fields';
 import { REASON_FIELD } from './tender-owner-fields';
 import {
+  BINDING_FIELD,
   OWNER_INPUT_MESSAGES,
   REJECT_REASON_MESSAGE,
   ownerFields,
@@ -129,7 +130,7 @@ describe('the evaluation’s and the award’s forms, as their DTOs read them', 
       input: {},
       values: null,
     });
-    expect(ownerFields('AWARD', { executes: true })).toEqual([]);
+    expect(ownerFields('AWARD', { executes: true })).toEqual([BINDING_FIELD]);
   });
 
   it('only a command’s own fields are read off a form', () => {
@@ -143,6 +144,7 @@ describe('the evaluation’s and the award’s forms, as their DTOs read them', 
     expect(ownerValuesOf('SCORE', form, { scoring })).toEqual({
       [scoreField('technical')]: '7',
       [scoreField('compliance')]: '',
+      [BINDING_FIELD]: '',
     });
     expect(ownerValuesOf('EVALUATE', form, {})).toEqual({});
     expect(parseOwnerForm('QUALIFY', {}, {})).toEqual({ ok: true, input: {}, values: null });

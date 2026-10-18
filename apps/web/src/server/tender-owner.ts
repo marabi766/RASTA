@@ -568,7 +568,8 @@ export function readsOwnerBids(
  * made with, which the award must repeat exactly (`TenderApprovalGate.covers`).
  */
 export interface AwardTerms {
-  readonly justificationRequired: boolean;
+  /** Null when the page could not read the bid's rank: the service says, in fixed words. */
+  readonly justificationRequired: boolean | null;
   readonly execution: { readonly justification: string | null } | null;
 }
 

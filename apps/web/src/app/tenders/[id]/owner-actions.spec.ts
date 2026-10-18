@@ -5,7 +5,13 @@ import { CSRF_FIELD } from '@/server/csrf';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 import { readFlash } from '@/server/flash';
-import { mintOwnerStamp, type OwnerTarget } from '@/server/tender-owner-replay';
+import {
+  BINDING_FIELD,
+  mintOwnerStamp,
+  ownerBindingText,
+  type OwnerTarget,
+} from '@/server/tender-owner-replay';
+import { REASON_CODE_FIELD, REASON_TEXT_FIELD } from '@/lib/tender-evaluation-fields';
 import { REPLAY_FIELD } from '@/lib/form-fields';
 import {
   OPENING_REFUSAL_TEXT,
@@ -118,7 +124,12 @@ function form(
   if (csrf !== null) data.set(CSRF_FIELD, csrf);
   const submission = options.submission ?? mintSubmissionId(SESSION);
   data.set(SUBMISSION_FIELD, submission);
-  if (target) data.set(REPLAY_FIELD, mintOwnerStamp(SESSION, target, submission).token);
+  if (target) {
+    data.set(REPLAY_FIELD, mintOwnerStamp(SESSION, target, submission).token);
+    // The body a stamp binds by digest is posted beside it, as the page draws it.
+    const binding = ownerBindingText(target);
+    if (binding !== null) data.set(BINDING_FIELD, binding);
+  }
   return data;
 }
 
@@ -254,54 +265,60 @@ describe('what is sent, and what comes back', () => {
 });
 
 describe('unconfirmed', () => {
-  it('a 504 is unconfirmed, with the stamp and the reason sent; a retry sends the same key and body', async () => {
+  it('a decision whose answer was lost is view-only from the start: its reason is not kept, nothing is re-sent', async () => {
     answer = () => problem(504, 'UPSTREAM_TIMEOUT');
     const data = form({ [REASON_FIELD]: 'معیارها کامل نیست' }, REJECT);
     const first = (await send(data)) as UnconfirmedOwnerCommand;
     expect(first).toMatchObject({
       kind: 'UNCONFIRMED',
       command: 'REJECT',
-      values: { [REASON_FIELD]: 'معیارها کامل نیست' },
+      values: null,
+      replay: null,
+      viewOnly: true,
+      unrepeatable: true,
     });
-    answer = () => problem(409, 'OPTIMISTIC_LOCK_FAILED');
-    const second = await send(data, first);
-    expect(sent[1]).toEqual(sent[0]);
-    expect(second).toMatchObject({
-      kind: 'UNCONFIRMED',
-      correlationId: first.correlationId,
-      retryRefused: true,
-    });
+    expect(await send(data, first)).toEqual(first);
+    expect(sent).toHaveLength(1);
   });
 
-  it('every command the service keeps no result for, unconfirmed, is view-only from the start and never sent again', async () => {
-    const targets: Partial<Record<OwnerCommand, OwnerTarget>> = {
+  it('every command the service keeps no result for — all but a score — unconfirmed, is view-only and never sent again', async () => {
+    const bid = { ...OPEN, bidId: 'BID_1' };
+    const step = { ...REJECT, approvalId: 'APR_AWARD' };
+    const targets: Record<Exclude<OwnerCommand, 'SCORE'>, OwnerTarget> = {
       PUBLISH,
+      GRANT: { ...REJECT, command: 'GRANT' },
+      REJECT,
       PROPOSE_OPENING: { ...OPEN, command: 'PROPOSE_OPENING' },
       OPEN_BIDS: OPEN,
       WITHDRAW_PROPOSAL: { ...OPEN, command: 'WITHDRAW_PROPOSAL' },
+      QUALIFY: { ...bid, command: 'QUALIFY' },
+      DISQUALIFY: { ...bid, command: 'DISQUALIFY' },
+      EVALUATE: { ...OPEN, command: 'EVALUATE' },
       AWARD: {
-        ...OPEN,
+        ...bid,
         command: 'AWARD',
-        bidId: 'BID_1',
         award: { justificationRequired: false, execution: null },
       },
+      GRANT_AWARD: { ...step, command: 'GRANT_AWARD' },
+      REJECT_AWARD: { ...step, command: 'REJECT_AWARD' },
     };
-    expect([...UNREPEATABLE_OWNER_COMMANDS]).toEqual([
-      'PUBLISH',
-      'PROPOSE_OPENING',
-      'OPEN_BIDS',
-      'WITHDRAW_PROPOSAL',
-      'AWARD',
-    ]);
+    const fields: Partial<Record<OwnerCommand, Record<string, string>>> = {
+      REJECT: { [REASON_FIELD]: 'معیارها کامل نیست' },
+      REJECT_AWARD: { [REASON_FIELD]: 'رتبهٔ نخست بهتر است' },
+      DISQUALIFY: { [REASON_CODE_FIELD]: 'NON_RESPONSIVE', [REASON_TEXT_FIELD]: 'مدارک ناقص' },
+    };
+    expect(REPEATABLE_OWNER_COMMANDS).toEqual(['SCORE']);
+    expect([...UNREPEATABLE_OWNER_COMMANDS].sort()).toEqual(Object.keys(targets).sort());
     for (const command of UNREPEATABLE_OWNER_COMMANDS) {
       sent = [];
       answer = () => problem(504, 'UPSTREAM_TIMEOUT');
-      const data = form({}, targets[command]!);
+      const data = form(fields[command] ?? {}, targets[command as Exclude<OwnerCommand, 'SCORE'>]);
       const first = (await send(data)) as UnconfirmedOwnerCommand;
       expect(first).toMatchObject({
         kind: 'UNCONFIRMED',
         command,
         submissionId: data.get(SUBMISSION_FIELD),
+        values: null,
         replay: null,
         viewOnly: true,
         unrepeatable: true,
@@ -322,16 +339,5 @@ describe('unconfirmed', () => {
     answer = () => json(202, { ...PENDING_REQUEST, id: 'TAR_2', round: 2 });
     expect(await send(data, lost)).toEqual(lost);
     expect(sent).toHaveLength(1);
-  });
-
-  it('a decision, unconfirmed, may be sent again: a compare-and-set on its very step', async () => {
-    expect(REPEATABLE_OWNER_COMMANDS).toEqual(expect.arrayContaining(['GRANT', 'REJECT']));
-    answer = () => problem(504, 'UPSTREAM_TIMEOUT');
-    const data = form({}, { ...REJECT, command: 'GRANT' });
-    const first = (await send(data)) as UnconfirmedOwnerCommand;
-    expect(first.viewOnly).toBeUndefined();
-    await send(data, first);
-    expect(sent).toHaveLength(2);
-    expect(sent[1]).toEqual(sent[0]);
   });
 });

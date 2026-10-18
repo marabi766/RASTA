@@ -17,6 +17,7 @@ import {
   readOwnerView,
   tenderPath,
   type ApprovalRequest,
+  type OwnerBids,
   type OwnerCaller,
   type OwnerOffer,
   type TenderAward,
@@ -379,8 +380,13 @@ export type AwardNote =
   | 'AWARDER_IS_EVALUATOR'
   /** The award's requests could not be read: what to offer is unknown. */
   | 'AWARD_REQUESTS_UNREAD'
-  /** The matrix, which lists the qualified bids and their ranks, is not readable to this person. */
+  /**
+   * The matrix is not readable to this person (the evaluators' roles, or the author rule): the
+   * page knows neither the ranks nor whether they took part — the service judges both.
+   */
   | 'AWARD_MATRIX_UNREAD'
+  /** Neither the matrix nor the opener's view of the bids is readable: no qualified bid to name. */
+  | 'AWARD_BIDS_UNREAD'
   /** The step this person decides, or the approved request to execute, could not be read. */
   | 'AWARD_STEP_UNREAD'
   /** The service refused this person the step: it would refuse the decision for the same reason. */
@@ -391,6 +397,8 @@ export interface AwardState {
   /** Whether this person completed the evaluation (`statusChangedBy` of the `EVALUATED` tender). */
   readonly completedByCaller: boolean;
   readonly matrix: ReadResult<EvaluationMatrix> | null;
+  /** The opener's view of the bids: which are qualified, when the matrix cannot say. */
+  readonly bids?: ReadResult<OwnerBids> | null;
   readonly request: ReadResult<ApprovalRequest | null> | null;
   /** The award step read for this person: the one they decide, or one of the approved request. */
   readonly step: ReadResult<AwardApproval> | null;
@@ -426,13 +434,19 @@ export function awardStepToRead(
  *
  * - **decide** the pending step this person is the authority of, read for its
  *   version — reject always, grant only if they did not make the request;
- * - **award**, for an awarder who — with `AWARDER_NOT_EVALUATOR` — took no
- *   part in the evaluation: with the newest request approved on this version,
- *   only executing it, with its bid and justification; otherwise one form per
- *   `QUALIFIED` bid the matrix ranks, a justification required for anything
- *   but the single first rank (`JUSTIFICATION_REQUIRED`). A pending request
- *   does not hold it back: another choice ends it and asks anew
- *   (`TenderApprovalGate.resolve`).
+ * - **award**, for an awarder (`assertCanAward`) who — with
+ *   `AWARDER_NOT_EVALUATOR`, as far as the page can see — took no part in the
+ *   evaluation. Decided from what the award path needs (PR 346 review 1,
+ *   finding 2), not from the evaluators' read: with the newest request approved
+ *   on this version, only executing it, with the bid and justification its step
+ *   names — no matrix needed; otherwise one form per `QUALIFIED` bid, from the
+ *   matrix when this person may read it (ranked: a justification required for
+ *   anything but the single first rank, `JUSTIFICATION_REQUIRED`), else from the
+ *   opener's view of the bids (unranked: the justification is the person's to
+ *   give, and the service says in fixed words when the rank needed one). A
+ *   pending request does not hold it back: another choice ends it and asks anew
+ *   (`TenderApprovalGate.resolve`). Who took part the matrix names; without it
+ *   the service judges (`AWARDER_IS_EVALUATOR`, in fixed words).
  */
 export function awardOffers(
   caller: OwnerCaller,
@@ -465,17 +479,16 @@ export function awardOffers(
     notes.push('AWARD_REQUESTS_UNREAD');
     return { offers, notes };
   }
-  if (matrix?.kind !== 'OK') {
-    notes.push('AWARD_MATRIX_UNREAD');
-    return { offers, notes };
-  }
+  const ranked = matrix?.kind === 'OK' ? matrix.data : null;
   if (
     settings.WEB_TENDER_COI_RULES.includes('AWARDER_NOT_EVALUATOR') &&
-    (state.completedByCaller || evaluationParticipants(matrix.data).has(caller.actorId))
+    (state.completedByCaller ||
+      (ranked !== null && evaluationParticipants(ranked).has(caller.actorId)))
   ) {
     notes.push('AWARDER_IS_EVALUATOR');
     return { offers, notes };
   }
+  if (ranked === null) notes.push('AWARD_MATRIX_UNREAD');
 
   if (latest?.status === 'APPROVED' && latest.tenderVersion === tender.version) {
     notes.push('AWARD_APPROVED');
@@ -495,12 +508,28 @@ export function awardOffers(
   if (latest?.status === 'PENDING' && latest.tenderVersion === tender.version) {
     notes.push(latest.requestedBy === caller.actorId ? 'OWN_AWARD_REQUEST' : 'AWARD_PENDING');
   }
-  for (const bid of matrix.data.bids) {
-    if (bid.bidStatus !== 'QUALIFIED' || bid.rank === null) continue;
+  if (ranked !== null) {
+    for (const bid of ranked.bids) {
+      if (bid.bidStatus !== 'QUALIFIED' || bid.rank === null) continue;
+      offers.push({
+        command: 'AWARD',
+        bidId: bid.bidId,
+        award: { justificationRequired: bid.rank !== 1 || bid.tied, execution: null },
+      });
+    }
+    return { offers, notes };
+  }
+  const listed = state.bids?.kind === 'OK' && state.bids.data.opened ? state.bids.data : null;
+  if (listed === null) {
+    notes.push('AWARD_BIDS_UNREAD');
+    return { offers, notes };
+  }
+  for (const bid of listed.bids) {
+    if (bid.status !== 'QUALIFIED') continue;
     offers.push({
       command: 'AWARD',
       bidId: bid.bidId,
-      award: { justificationRequired: bid.rank !== 1 || bid.tied, execution: null },
+      award: { justificationRequired: null, execution: null },
     });
   }
   return { offers, notes };

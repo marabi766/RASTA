@@ -57,6 +57,7 @@ jest.mock('next/navigation', () => ({
 jest.mock('@/server/tenders', () => mockStubFetchers('@/server/tenders'));
 jest.mock('@/server/tender-owner', () => mockStubFetchers('@/server/tender-owner'));
 jest.mock('@/server/tender-bids', () => mockStubFetchers('@/server/tender-bids'));
+jest.mock('@/server/tender-authority', () => mockStubFetchers('@/server/tender-authority'));
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 type Page = (props: {
@@ -155,11 +156,12 @@ it('another organization’s tender or a missing one is the absence the tender r
 });
 
 it('an owner who reads the tender keeps the owner’s page; a reader who does not open is not given the opening', async () => {
+  // A tender refused to them is looked for in their approval inbox, never read another way.
   mockSession.current = signedInWith(['ORGANIZATION_ADMIN']);
   await run('own');
-  expect(mockFetched).toEqual(['fetchTender']);
+  expect(mockFetched).toEqual(['fetchTender', 'fetchAuthoritySteps']);
   mockFetched.length = 0;
   mockSession.current = signedInWith(['FLEET_MANAGER', 'AUDITOR']);
   await run('own');
-  expect(mockFetched).toEqual(['fetchTender']);
+  expect(mockFetched).toEqual(['fetchTender', 'fetchAuthoritySteps']);
 });

@@ -14,6 +14,7 @@ import {
   saveUnresolvedOwnerCommand,
   type ReplayStamp,
 } from '@/lib/unresolved-tender-command';
+import { REASON_CODE_FIELD, REASON_TEXT_FIELD, scoreField } from '@/lib/tender-evaluation-fields';
 import { TENDER_ID } from '@/test/owner-fixtures';
 
 import { OwnerCommandForm } from './[id]/OwnerCommandForm';
@@ -44,6 +45,15 @@ const STAMP: ReplayStamp = { token: 'signed-replay-stamp', until: Date.now() + 5
 const PAGE = `/tenders/${TENDER_ID}?view=own`;
 const REASON = 'معیارها کامل نیست';
 
+const SCORE_ROWS = [
+  {
+    cell: { criterionCode: 'technical', maxScore: 10, passFail: false, expectedRevision: 2 },
+    label: 'روش اجرا',
+    current: null,
+  },
+];
+const BINDING = '{"scoring":[{"criterionCode":"technical"}],"award":null}';
+
 function renderForm(command: OwnerCommand = 'REJECT') {
   return render(
     <OwnerCommandForm
@@ -54,6 +64,10 @@ function renderForm(command: OwnerCommand = 'REJECT') {
       replay={STAMP}
       owner={OWNER}
       pageHref={PAGE}
+      {...(command === 'SCORE' ? { scoreRows: SCORE_ROWS, binding: BINDING } : {})}
+      {...(command === 'AWARD'
+        ? { award: { justificationRequired: false, execution: null }, binding: BINDING }
+        : {})}
     />,
   );
 }
@@ -69,15 +83,6 @@ function stored(): Record<string, unknown> | null {
   return raw === null ? null : (JSON.parse(raw) as Record<string, unknown>);
 }
 
-const unconfirmed = (reason: string | null): OwnerFormState => ({
-  kind: 'UNCONFIRMED',
-  command: 'REJECT',
-  correlationId: 'COR_ORIGINAL',
-  submissionId: KEY,
-  values: reason === null ? null : { reason },
-  replay: STAMP,
-});
-
 beforeEach(() => {
   action.mockReset();
   sessionProbe.mockReset();
@@ -88,27 +93,49 @@ beforeEach(() => {
 
 afterEach(() => markOwnerCommandsOpen());
 
-it('a rejection is remembered before it leaves — that it was sent, never its reason — and retried as sent', async () => {
+it('a score is remembered before it leaves — that it was sent, never what it said — and retried as sent', async () => {
   let seen: Record<string, unknown> | null = null;
   action.mockImplementation(async (_t, _p, form) => {
     seen ??= stored();
-    return unconfirmed(String(form.get(REASON_FIELD)));
+    return {
+      kind: 'UNCONFIRMED',
+      command: 'SCORE',
+      correlationId: 'COR_ORIGINAL',
+      submissionId: KEY,
+      values: {
+        [scoreField('technical')]: String(form.get(scoreField('technical'))),
+        binding: BINDING,
+      },
+      replay: STAMP,
+    };
   });
-  const { container } = renderForm();
-  fireEvent.change(container.querySelector(`[name="${REASON_FIELD}"]`)!, {
-    target: { value: REASON },
+  const { container } = renderForm('SCORE');
+  fireEvent.change(container.querySelector(`[name="${scoreField('technical')}"]`)!, {
+    target: { value: '۷٫۵' },
   });
   await submit(container);
-  expect(seen).toMatchObject({ command: 'REJECT', submissionId: KEY, correlationId: null });
-  expect(JSON.stringify(window.sessionStorage)).not.toContain(REASON);
+  expect(seen).toMatchObject({ command: 'SCORE', submissionId: KEY, correlationId: null });
+  expect(JSON.stringify(window.sessionStorage)).not.toContain('۷٫۵');
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' }));
   });
   const [first, second] = action.mock.calls.map(([, , form]) => form);
   expect(second!.get('submission')).toBe(KEY);
-  expect(second!.get(REASON_FIELD)).toBe(first!.get(REASON_FIELD));
+  expect(second!.get(scoreField('technical'))).toBe(first!.get(scoreField('technical')));
+  expect(second!.get('binding')).toBe(BINDING);
   expect(await axe(container)).toHaveNoViolations();
 });
+
+/** What a command's form needs typed before it is sent at all. */
+function fillFor(command: OwnerCommand, container: HTMLElement): void {
+  const set = (name: string, value: string) =>
+    fireEvent.change(container.querySelector(`[name="${name}"]`)!, { target: { value } });
+  if (command === 'REJECT' || command === 'REJECT_AWARD') set(REASON_FIELD, REASON);
+  if (command === 'DISQUALIFY') {
+    set(REASON_CODE_FIELD, 'NON_RESPONSIVE');
+    set(REASON_TEXT_FIELD, 'مدارک ناقص');
+  }
+}
 
 it('every command the service keeps no result for, its call lost, is remembered, view-only, never sent again', async () => {
   for (const command of UNREPEATABLE_OWNER_COMMANDS) {
@@ -117,6 +144,7 @@ it('every command the service keeps no result for, its call lost, is remembered,
     action.mockRejectedValueOnce(new Error('An unexpected response was received from the server.'));
     sessionProbe.mockResolvedValue({ status: 503 });
     const { container, unmount } = renderForm(command);
+    fillFor(command, container);
     await submit(container);
     expect(stored()).toMatchObject({ command, submissionId: KEY });
     expect(screen.queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
@@ -147,11 +175,14 @@ it('a reason the action would refuse unsent is not remembered', async () => {
 it('a definite answer drops the record; a lost call is "session ended" only on a 401', async () => {
   action.mockRejectedValueOnce(new Error('An unexpected response was received from the server.'));
   sessionProbe.mockResolvedValue({ status: 503 });
-  const { container } = renderForm('GRANT');
+  const { container } = renderForm('SCORE');
+  fireEvent.change(container.querySelector(`[name="${scoreField('technical')}"]`)!, {
+    target: { value: '7' },
+  });
   await submit(container);
   expect(screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeInTheDocument();
   expect(screen.queryByText(/نشست شما پایان یافته است/)).toBeNull();
-  expect(stored()).toMatchObject({ command: 'GRANT' });
+  expect(stored()).toMatchObject({ command: 'SCORE' });
 });
 
 it('a publication whose answer was lost — then rejected — offers no retry, and the page no fresh form until set aside', async () => {

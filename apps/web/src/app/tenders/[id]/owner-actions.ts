@@ -3,10 +3,16 @@
 import { redirect } from 'next/navigation';
 
 import { FLASH_PARAM, REPLAY_FIELD } from '@/lib/form-fields';
-import { ownerFormContext, ownerValuesOf, parseOwnerForm } from '@/lib/tender-owner-input';
+import {
+  BINDING_FIELD,
+  ownerFormContext,
+  ownerValuesOf,
+  parseOwnerForm,
+} from '@/lib/tender-owner-input';
 import { UNREPEATABLE_OWNER_COMMANDS } from '@/lib/tender-owner-fields';
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
+import { webServerEnv } from '@/server/env';
 import { mintFlash } from '@/server/flash';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { issueOwnerCommand, outcomeOf, ownerRequest } from '@/server/tender-owner';
@@ -51,7 +57,15 @@ async function attempt(tenderId: string, form: FormData): Promise<OwnerFormState
   const submissionId = form.get(SUBMISSION_FIELD);
   if (!isBoundSubmissionId(submissionId, session)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
 
-  const stamp = verifyOwnerStamp(session, form.get(REPLAY_FIELD), tenderId, submissionId);
+  const stamp = verifyOwnerStamp(
+    session,
+    form.get(REPLAY_FIELD),
+    tenderId,
+    submissionId,
+    Date.now(),
+    webServerEnv(),
+    form.get(BINDING_FIELD),
+  );
   if (!stamp) return { kind: 'REFUSED', reason: 'REPLAY' };
   const { command } = stamp;
 

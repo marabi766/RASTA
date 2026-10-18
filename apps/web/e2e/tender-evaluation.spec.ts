@@ -21,20 +21,29 @@ import { castForRun, gateway, openedTender, TENDER_CRITERIA, type TenderCast } f
  *
  * Nothing seeded: `tender-cast.ts` makes the owner, its publication and award
  * policies, its project and the people once per run (`{ evaluation: true }`),
- * and **every test opens a tender of its own** — published, bid on by two
+ * and opens **one tender** for the scenario — published, bid on by two
  * qualified contractors, closed by the service at its deadline and opened by
  * two people through the gateway (`openedTender`). What the evaluator, the
- * awarder and the approver do is done **in the browser**, through the
+ * awarder and the award's authority do is done **in the browser**, through the
  * portal's own forms.
+ *
+ * ## One step per test
+ *
+ * The scenario is a serial describe: each step is a test of its own, with at
+ * most one accessibility scan (PR 346 review 1, finding 5), and a failing step
+ * skips the ones after it — they would act on a tender it left behind.
  *
  * ## Who does what
  *
  * - **the evaluator** — an `ORGANIZATION_ADMIN` who takes no other part:
  *   qualifies the contractor, disqualifies the rival, scores, completes.
  * - **the author** — awards: took no part in the evaluation
- *   (`AWARDER_NOT_EVALUATOR`, on by default), and asks for the award's approval.
- * - **the approver** — the authority the award policy names; never the person
- *   who asked, never an evaluator.
+ *   (`AWARDER_NOT_EVALUATOR`, on by default), asks for the award's approval,
+ *   and executes it once approved.
+ * - **the reviewer** — the authority the award policy names: the
+ *   `ORGANIZATION_ADMIN` of **another organization**, who cannot read the
+ *   owner's tender (a `404`, as to anyone outside it) and decides its step from
+ *   the approval inbox (PR 346 review 1, finding 3).
  * - **the contractor and the rival** — each reads its own bid on the bidder's
  *   door, and nothing of the other's or of the scores.
  * - **another tenant's administrator** — `dehyari.admin.b`, ORG-DEH-0002: the
@@ -116,7 +125,12 @@ async function executeAward(page: Page, cast: TenderCast, id: string): Promise<v
  * of an id that does not exist — ownership is judged first, whatever the
  * tender's state — and in the browser the owner's page is the same absence.
  */
-async function strangersFindNothing(browser: Browser, cast: TenderCast, id: string): Promise<void> {
+async function strangersFindNothing(
+  browser: Browser,
+  cast: TenderCast,
+  id: string,
+  { scan = false }: { readonly scan?: boolean } = {},
+): Promise<void> {
   const missing = `TND_E2E_MISSING_${RUN}`;
   const context = await browser.newContext();
   try {
@@ -125,6 +139,7 @@ async function strangersFindNothing(browser: Browser, cast: TenderCast, id: stri
     await page.goto(ownPage(id));
     await expect(page.getByText('این مناقصه پیدا نشد')).toBeVisible();
     await expect(page.getByRole('form')).toHaveCount(0);
+    if (scan) await expectAccessible(page);
     const theirs = (await page.locator('main').innerText()).trim();
     await page.goto(ownPage(missing));
     expect((await page.locator('main').innerText()).trim()).toBe(theirs);
@@ -165,30 +180,32 @@ test.describe('the evaluation and the award of a tender, live (EXP-004)', () => 
       'alongside the usual live stack — set WEB_LIVE_STACK_E2E_TENDERS=true locally after starting ' +
       'them (the "Portal in a browser" CI job always does)',
   );
-  test.describe.configure({ mode: 'default' });
-  test.setTimeout(420_000);
+  test.describe.configure({ mode: 'serial' });
+  test.setTimeout(180_000);
 
   let cast: TenderCast;
+  let tender: { id: string };
 
   test.beforeAll(async () => {
-    test.setTimeout(240_000);
-    // Per hook run: a retry in a new worker makes a cast of its own.
+    test.setTimeout(420_000);
+    // Per hook run: a retry in a new worker makes a cast and a tender of its own.
     cast = await castForRun(`${RUN}e${randomUUID().slice(0, 4)}`, { evaluation: true });
+    tender = await openedTender(cast, PRICE);
   });
 
-  test('evaluated by one person, awarded by another, approved by a third; each contractor sees only its own; a stranger nothing', async ({
+  test('another tenant’s administrator and a contractor find nothing of the evaluation or the award', async ({
     browser,
   }) => {
-    const tender = await openedTender(cast, PRICE);
-    const rival = cast.rival!;
-    await strangersFindNothing(browser, cast, tender.id);
+    await strangersFindNothing(browser, cast, tender.id, { scan: true });
     expect((await held(cast, tender.id)).status).toBe('EVALUATING');
-    const evaluator = await as(browser, cast.evaluatorPerson!);
-    const author = await as(browser, cast.authorPerson);
-    const approver = await as(browser, cast.approverPerson);
+  });
+
+  test('the evaluator qualifies, disqualifies, scores and completes — and is not the one to award', async ({
+    browser,
+  }) => {
+    const rival = cast.rival!;
+    const { page, close } = await as(browser, cast.evaluatorPerson!);
     try {
-      // -- the evaluation, in the evaluator's browser ------------------------------------
-      const { page } = evaluator;
       await page.goto(ownPage(tender.id));
       const evaluation = page.getByRole('region', { name: 'ارزیابی پیشنهادها' });
       await expect(evaluation).toContainText(cast.contractor.organizationId);
@@ -229,51 +246,87 @@ test.describe('the evaluation and the award of a tender, live (EXP-004)', () => 
         AWARDER_IS_EVALUATOR,
       );
       await expect(form(page, /^درخواست واگذاری/)).toHaveCount(0);
+    } finally {
+      await close();
+    }
+  });
 
-      // -- the award, asked by the author --------------------------------------------------
-      const AWARD = 'درخواست واگذاری';
-      await author.page.goto(ownPage(tender.id));
-      await expect(bidForm(author.page, AWARD, rival.organizationId)).toHaveCount(0);
-      await bidForm(author.page, AWARD, cast.contractor.organizationId)
+  test('the author asks for the award of the qualified bid; deciding it is the reviewer’s', async ({
+    browser,
+  }) => {
+    const AWARD = 'درخواست واگذاری';
+    const { page, close } = await as(browser, cast.authorPerson);
+    try {
+      await page.goto(ownPage(tender.id));
+      await expect(bidForm(page, AWARD, cast.rival!.organizationId)).toHaveCount(0);
+      await bidForm(page, AWARD, cast.contractor.organizationId)
         .getByRole('button', { name: AWARD })
         .click();
       await expect(
-        author.page.getByText('درخواست موافقت با واگذاری ثبت شد و در انتظار مرجع است.'),
+        page.getByText('درخواست موافقت با واگذاری ثبت شد و در انتظار مرجع است.'),
       ).toBeVisible();
-      // Its own request: the rejection is the author's to make, the grant never.
-      await expect(form(author.page, 'موافقت با واگذاری')).toHaveCount(0);
-      await expect(form(author.page, 'رد درخواست واگذاری')).toBeVisible();
+      // The step names the reviewer's organization: neither the grant nor the rejection is the
+      // author's, and the page says the request is theirs, waiting on its authority.
+      await expect(page.getByRole('region', { name: 'واگذاری' })).toContainText(
+        'درخواست واگذاری را شما داده‌اید',
+      );
+      await expect(form(page, 'موافقت با واگذاری')).toHaveCount(0);
+      await expect(form(page, 'رد درخواست واگذاری')).toHaveCount(0);
+      await expectAccessible(page);
       expect((await held(cast, tender.id)).status).toBe('EVALUATED');
+    } finally {
+      await close();
+    }
+  });
 
-      // -- approved by the approver, who sees the bid the step names -----------------------
-      await approver.page.goto(ownPage(tender.id));
-      const award = approver.page.getByRole('region', { name: 'واگذاری' });
-      await expect(award).toContainText(cast.contractor.organizationId);
-      await expect(award).toContainText('بی‌دلیل (تنها رتبهٔ نخست)');
-      await form(approver.page, 'موافقت با واگذاری')
+  test('the reviewer of another organization, who cannot read the tender, grants from its inbox', async ({
+    browser,
+  }) => {
+    const reviewer = cast.reviewerPerson!;
+    // The tender stays the owner's own: to the reviewer, the absence of an id that does not exist.
+    await gateway(await provisionedAccessToken(reviewer), 'GET', `/v1/tenders/${tender.id}`, 404);
+    const { page, close } = await as(browser, reviewer);
+    try {
+      await page.goto(ownPage(tender.id));
+      const step = page.getByRole('region', { name: 'موافقت با واگذاری مناقصه' });
+      await expect(step).toContainText(cast.contractor.organizationId);
+      await expect(step).toContainText('بی‌دلیل (تنها رتبهٔ نخست)');
+      await expect(page.getByText('این مناقصه پیدا نشد')).toHaveCount(0);
+      await expectAccessible(page);
+      await form(page, 'موافقت با واگذاری')
         .getByRole('button', { name: 'موافقت با واگذاری' })
         .click();
-      await expect(approver.page.getByText('موافقت شما با واگذاری ثبت شد.')).toBeVisible();
+      await expect(page.getByText('موافقت شما با واگذاری ثبت شد.')).toBeVisible();
+      await expect(page.getByRole('form')).toHaveCount(0);
+    } finally {
+      await close();
+    }
+  });
 
-      // -- executed by the author ----------------------------------------------------------
-      await executeAward(author.page, cast, tender.id);
-      await author.page.goto(ownPage(tender.id));
-      const record = author.page.getByRole('region', { name: 'واگذاری' });
+  test('the author executes the approved award; a stranger still finds nothing', async ({
+    browser,
+  }) => {
+    const { page, close } = await as(browser, cast.authorPerson);
+    try {
+      await executeAward(page, cast, tender.id);
+      await page.goto(ownPage(tender.id));
+      const record = page.getByRole('region', { name: 'واگذاری' });
       await expect(record).toContainText('۴٬۲۰۰٬۰۰۰٬۰۰۰');
       await expect(record).toContainText('اجراشده');
-      await expect(author.page.getByRole('form')).toHaveCount(0);
-      await expectAccessible(author.page);
-      // Awarded: the stranger still finds nothing, the award included.
-      await strangersFindNothing(browser, cast, tender.id);
+      await expect(page.getByRole('form')).toHaveCount(0);
+      await expectAccessible(page);
     } finally {
-      await evaluator.close();
-      await author.close();
-      await approver.close();
+      await close();
     }
+    // Awarded: the stranger still finds nothing, the award included.
+    await strangersFindNothing(browser, cast, tender.id);
+  });
 
-    // -- each contractor, on the bidder's door: its own bid, nothing of the other's ---------
+  test('each contractor, on the bidder’s door, sees its own bid and nothing of the other’s', async ({
+    browser,
+  }) => {
     const winner = await as(browser, cast.contractor);
-    const loser = await as(browser, rival);
+    const loser = await as(browser, cast.rival!);
     try {
       await winner.page.goto(openPage(tender.id));
       const own = winner.page.getByRole('region', { name: 'پیشنهاد سازمان شما' });

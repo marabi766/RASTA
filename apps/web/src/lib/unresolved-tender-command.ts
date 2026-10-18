@@ -25,6 +25,8 @@ export type { ReplayStamp, SaveOutcome };
 export interface OwnerSubmission {
   readonly id: string;
   readonly replay: ReplayStamp;
+  /** The body the stamp binds by digest, posted beside it (`server/tender-owner-replay.ts`). */
+  readonly binding?: string;
 }
 
 export type UnresolvedOwnerCommand = UnresolvedMarker<OwnerCommand>;

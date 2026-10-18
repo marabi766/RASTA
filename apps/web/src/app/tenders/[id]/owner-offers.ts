@@ -1,6 +1,6 @@
 import type { WebSession } from '@/server/session';
 import type { EvaluationMatrix } from '@/server/tender-evaluation';
-import type { OwnerOffer } from '@/server/tender-owner';
+import type { OwnerBids, OwnerOffer } from '@/server/tender-owner';
 import { mintOwnerSubmission, type OwnerTarget } from '@/server/tender-owner-replay';
 
 import type { OfferedOwnerCommand } from './OwnerCommands';
@@ -8,6 +8,8 @@ import type { OfferedOwnerCommand } from './OwnerCommands';
 /** What a bid's forms are drawn with, from the matrix the page read. */
 export interface OfferContext {
   readonly matrix?: EvaluationMatrix | null;
+  /** The opener's view of the bids: who a bid is, when the matrix is not read. */
+  readonly bids?: OwnerBids | null;
   /** The caller's user id: whose cells a scoring form starts from. */
   readonly actorId?: string | null;
 }
@@ -39,7 +41,10 @@ export function ownerCommandOffers(
   const mint = (target: Omit<OwnerTarget, 'tenderId'>) =>
     mintOwnerSubmission(session, { tenderId, ...target }, now);
   const bidOf = (bidId: string) => context.matrix?.bids.find((bid) => bid.bidId === bidId);
-  const subjectOf = (bidId: string) => bidOf(bidId)?.bidderOrganizationId ?? bidId;
+  const subjectOf = (bidId: string) =>
+    bidOf(bidId)?.bidderOrganizationId ??
+    context.bids?.bids.find((bid) => bid.bidId === bidId)?.bidderOrganizationId ??
+    bidId;
 
   for (const offer of offers) {
     switch (offer.command) {

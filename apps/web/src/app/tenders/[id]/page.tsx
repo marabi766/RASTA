@@ -25,6 +25,7 @@ import {
   isBidSideOnly,
   readsEvaluation,
 } from '@/server/tender-evaluation';
+import { authorityOffers, fetchAuthoritySteps } from '@/server/tender-authority';
 import {
   canOpenBids,
   decidableStep,
@@ -52,6 +53,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { BidCommands } from './BidCommands';
 import { bidCommandOffers } from './bid-offers';
+import { AuthorityScreen } from './AuthoritySections';
 import { AwardSection, EvaluationSection } from './EvaluationSections';
 import { ownerCommandOffers, type OwnerForms } from './owner-offers';
 import { OwnerCommands } from './OwnerCommands';
@@ -156,7 +158,13 @@ export default async function TenderPage({
     const criteria = result.kind === 'OK' ? await fetchTenderCriteria(session, id) : null;
     const owner =
       result.kind === 'OK' ? await ownerSections(session, id, result.data, query, criteria) : null;
-    body = <OwnTenderDetailScreen result={result} criteria={criteria} owner={owner} />;
+    // Refused the tender, which is the owner's own: an authority of another organization may
+    // still have a step of it to decide (PR 346 r1, finding 3). Otherwise the same absence.
+    const authority =
+      result.kind === 'NOT_FOUND' || result.kind === 'FORBIDDEN'
+        ? await authorityBody(session, id, query)
+        : null;
+    body = authority ?? <OwnTenderDetailScreen result={result} criteria={criteria} owner={owner} />;
   }
 
   return (
@@ -184,6 +192,59 @@ export default async function TenderPage({
       </div>
       <div className="mt-4">{body}</div>
     </AppShell>
+  );
+}
+
+/**
+ * The page of an authority who may not read the tender (`server/tender-authority.ts`):
+ * its steps of this tender in its inbox, each read on its own, with the decision
+ * forms — or null when it has none, and the page is the absence the tender read showed.
+ */
+async function authorityBody(
+  session: WebSession,
+  id: string,
+  query: Record<string, string | string[] | undefined>,
+): Promise<ReactNode | null> {
+  const steps = await fetchAuthoritySteps(session, id);
+  if (steps.kind !== 'OK') return null;
+  const flash = query[FLASH_PARAM];
+  const done = readFlash(session, typeof flash === 'string' ? flash : undefined, id, OWNER_DONE);
+  // A decision just made leaves no pending step in the inbox; its confirmation, minted for this
+  // session and this tender after the service accepted it, is still shown.
+  if (steps.data.items.length === 0 && done === undefined) return null;
+  const caller = ownerCallerOf(session.accessToken);
+  // One step's forms each, so a step's decisions are drawn under that step alone.
+  const views = steps.data.items.map((item) => {
+    const { offers, notes } = authorityOffers(caller, item);
+    const forms = ownerCommandOffers(session, id, offers);
+    return { item, notes, decisions: [...forms.publication, ...forms.award] };
+  });
+  const pageSubmissionIds = views.flatMap(({ decisions }) =>
+    decisions.map(({ submission }) => submission.id),
+  );
+  const ownerTag = submissionBinding(session).owner;
+  const pageHref = tenderDetailPath(id, 'own');
+  return (
+    <AuthorityScreen
+      tenderId={id}
+      truncated={steps.data.truncated}
+      flash={<OwnerFlash done={done} />}
+      steps={views.map(({ item, notes, decisions }, index) => ({
+        step: item.detail.kind === 'OK' ? item.detail.data : item.summary,
+        notes,
+        commands: (
+          <OwnerCommands
+            tenderId={id}
+            offered={decisions}
+            csrfToken={session.csrfToken}
+            owner={ownerTag}
+            pageHref={pageHref}
+            showsRestored={index === 0}
+            pageSubmissionIds={pageSubmissionIds}
+          />
+        ),
+      }))}
+    />
   );
 }
 
@@ -316,6 +377,7 @@ async function ownerSections(
       tender,
       completedByCaller: tender.status === 'EVALUATED' && tender.statusChangedByCaller,
       matrix,
+      bids,
       request: awardRequest,
       step: awardStep,
     },
@@ -324,6 +386,7 @@ async function ownerSections(
   const all: OwnerOffer[] = [...offers, ...evaluation.offers, ...awardSide.offers];
   const forms = ownerCommandOffers(session, id, all, Date.now(), {
     matrix: matrix?.kind === 'OK' ? matrix.data : null,
+    bids: bids?.kind === 'OK' ? bids.data : null,
     actorId: caller.actorId,
   });
   const flash = query[FLASH_PARAM];

@@ -113,6 +113,7 @@ export function OwnerCommands({
           csrfToken={csrfToken}
           submissionId={submission.id}
           replay={submission.replay}
+          binding={submission.binding}
           owner={owner}
           pageHref={pageHref}
           heldBy={restored?.submissionId ?? null}

@@ -70,8 +70,8 @@ export const scoreMessage = (cell: ScoringCell): string =>
 /** What a command's form is read against: from the stamp in the action, from the page in the form. */
 export interface OwnerFormContext {
   readonly scoring?: readonly ScoringCell[] | null;
-  /** An award to a bid that is not the single first rank: `JUSTIFICATION_REQUIRED`. */
-  readonly justificationRequired?: boolean;
+  /** An award to a bid that is not the single first rank (`JUSTIFICATION_REQUIRED`); null when unknown. */
+  readonly justificationRequired?: boolean | null;
   /** An award executing its approved request: the justification is the request's, not the form's. */
   readonly executes?: boolean;
 }
@@ -104,16 +104,25 @@ export type ParsedOwnerForm =
       readonly fieldErrors: Partial<Record<string, string>>;
     };
 
-/** The fields a command's form posts, as strings. */
+/** The field a form posts its bound body in (`server/tender-owner-replay.ts`'s `BINDING_FIELD`). */
+export const BINDING_FIELD = 'binding';
+
+/**
+ * The fields a command's form posts, as strings — a score's and an award's
+ * bound body among them, so a re-send carries it as the first send did.
+ */
 export function ownerFields(command: OwnerCommand, context: OwnerFormContext): readonly string[] {
   if (REJECTION_COMMANDS.includes(command)) return [REASON_FIELD];
   switch (command) {
     case 'DISQUALIFY':
       return [REASON_CODE_FIELD, REASON_TEXT_FIELD];
     case 'SCORE':
-      return (context.scoring ?? []).map(({ criterionCode }) => scoreField(criterionCode));
+      return [
+        ...(context.scoring ?? []).map(({ criterionCode }) => scoreField(criterionCode)),
+        BINDING_FIELD,
+      ];
     case 'AWARD':
-      return context.executes ? [] : [JUSTIFICATION_FIELD];
+      return context.executes ? [BINDING_FIELD] : [JUSTIFICATION_FIELD, BINDING_FIELD];
     default:
       return [];
   }
@@ -219,13 +228,13 @@ export function parseOwnerForm(
 export function ownerFormContext(binding: {
   readonly scoring?: readonly ScoringCell[] | null;
   readonly award?: {
-    readonly justificationRequired: boolean;
+    readonly justificationRequired: boolean | null;
     readonly execution: unknown;
   } | null;
 }): OwnerFormContext {
   return {
     scoring: binding.scoring ?? null,
-    justificationRequired: binding.award?.justificationRequired ?? false,
+    justificationRequired: binding.award ? binding.award.justificationRequired : false,
     executes: (binding.award?.execution ?? null) !== null,
   };
 }

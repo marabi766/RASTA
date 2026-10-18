@@ -28,6 +28,7 @@ import {
   type OwnerCommand,
 } from '@/lib/tender-owner-fields';
 import {
+  BINDING_FIELD,
   ownerFields,
   ownerFormContext,
   ownerValuesOf,
@@ -79,7 +80,8 @@ export interface ScoreRow {
 
 /** An award form's terms, as the page read them (`AwardTerms`). */
 export interface AwardFormTerms {
-  readonly justificationRequired: boolean;
+  /** Null when the page could not read the bid's rank. */
+  readonly justificationRequired: boolean | null;
   readonly execution: { readonly justification: string | null } | null;
 }
 
@@ -97,6 +99,8 @@ export interface OwnerCommandFormProps {
   readonly csrfToken: string;
   readonly submissionId: string;
   readonly replay: ReplayStamp | null;
+  /** The body the stamp binds by digest, posted beside it (a score's criteria, an award's terms). */
+  readonly binding?: string;
   readonly owner: string;
   readonly pageHref: string;
   readonly initial?: OwnerFormState;
@@ -136,6 +140,7 @@ export function OwnerCommandForm({
   csrfToken,
   submissionId,
   replay,
+  binding,
   owner,
   pageHref,
   initial = IDLE_OWNER_FORM,
@@ -284,6 +289,7 @@ export function OwnerCommandForm({
       <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
       <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId} />
       <input type="hidden" name={REPLAY_FIELD} value={replay?.token ?? ''} />
+      {binding !== undefined ? <input type="hidden" name={BINDING_FIELD} value={binding} /> : null}
 
       {heading}
       <p className="text-sm text-content-muted">{OWNER_COMMAND_CONSEQUENCES[command]}</p>
@@ -341,7 +347,7 @@ export function forbiddenText(command: OwnerCommand, reasons: readonly string[])
  * (`UNREPEATABLE_OWNER_COMMANDS`).
  */
 export const UNREPEATABLE_OWNER_TEXT =
-  'این درخواست، وقتی نتیجه‌اش معلوم نیست، دوباره فرستاده نمی‌شود: سرویس نتیجهٔ آن را به شناسهٔ ارسال نگه نمی‌دارد و ارسال دوباره روی مناقصه آن‌طور که در آن لحظه است عمل می‌کند — مثلاً دور موافقت تازه‌ای باز می‌کند، یا پیشنهاد گشایش دیگری را پس می‌گیرد یا تأیید می‌کند. وضعیت را با تازه‌کردن صفحه ببینید و اگر لازم بود از نو اقدام کنید.';
+  'این درخواست، وقتی نتیجه‌اش معلوم نیست، دوباره فرستاده نمی‌شود: سرویس نتیجهٔ آن را به شناسهٔ ارسال نگه نمی‌دارد و ارسال دوباره روی مناقصه آن‌طور که در آن لحظه است عمل می‌کند — مثلاً دور موافقت تازه‌ای باز می‌کند، پیشنهاد گشایش دیگری را پس می‌گیرد یا تأیید می‌کند، یا ماتریسی را که در این میان تغییر کرده منجمد می‌کند. وضعیت را با تازه‌کردن صفحه ببینید و اگر لازم بود از نو اقدام کنید.';
 
 /** What a command asks of the person besides the button, as typed so far. */
 function CommandFields({
@@ -483,12 +489,14 @@ function CommandFields({
       <Field
         label="دلیل انتخاب"
         hint={
-          award.justificationRequired
+          award.justificationRequired === true
             ? 'این پیشنهاد تنها رتبهٔ نخست ماتریس نیست؛ انتخاب آن دلیل نوشته لازم دارد. دلیل در سامانه نگه داشته می‌شود و به پیشنهاددهندگان نشان داده نمی‌شود.'
-            : 'اختیاری برای تنها رتبهٔ نخست. دلیل در سامانه نگه داشته می‌شود و به پیشنهاددهندگان نشان داده نمی‌شود.'
+            : award.justificationRequired === false
+              ? 'اختیاری برای تنها رتبهٔ نخست. دلیل در سامانه نگه داشته می‌شود و به پیشنهاددهندگان نشان داده نمی‌شود.'
+              : 'این صفحه رتبهٔ پیشنهاد را نمی‌داند: انتخاب هر پیشنهادی جز تنها رتبهٔ نخست دلیل نوشته لازم دارد. دلیل در سامانه نگه داشته می‌شود و به پیشنهاددهندگان نشان داده نمی‌شود.'
         }
         error={errors[JUSTIFICATION_FIELD]}
-        required={award.justificationRequired}
+        required={award.justificationRequired === true}
       >
         {(control) => (
           <textarea

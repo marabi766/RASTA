@@ -5,7 +5,12 @@ import { CSRF_FIELD } from '@/server/csrf';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 import { readFlash } from '@/server/flash';
-import { mintOwnerStamp, type OwnerTarget } from '@/server/tender-owner-replay';
+import {
+  BINDING_FIELD,
+  mintOwnerStamp,
+  ownerBindingText,
+  type OwnerTarget,
+} from '@/server/tender-owner-replay';
 import { REPLAY_FIELD } from '@/lib/form-fields';
 import {
   AWARD_REFUSAL_TEXT,
@@ -132,7 +137,12 @@ function form(
   if (csrf !== null) data.set(CSRF_FIELD, csrf);
   const submission = options.submission ?? mintSubmissionId(SESSION);
   data.set(SUBMISSION_FIELD, submission);
-  if (target) data.set(REPLAY_FIELD, mintOwnerStamp(SESSION, target, submission).token);
+  if (target) {
+    data.set(REPLAY_FIELD, mintOwnerStamp(SESSION, target, submission).token);
+    // The body a stamp binds by digest is posted beside it, as the page draws it.
+    const binding = ownerBindingText(target);
+    if (binding !== null) data.set(BINDING_FIELD, binding);
+  }
   return data;
 }
 
@@ -347,16 +357,28 @@ describe('unconfirmed', () => {
     expect(sent[1]).toEqual(sent[0]);
   });
 
-  it('a qualification and the completion, unconfirmed, may be sent again: each answers its own repeat', async () => {
+  it('a qualification and the completion, unconfirmed, are never sent again: the service keeps no result for them', async () => {
     for (const command of [QUALIFY, EVALUATE]) {
       sent = [];
       answer = () => problem(504, 'UPSTREAM_TIMEOUT');
       const data = form({}, command);
       const first = (await send(data)) as UnconfirmedOwnerCommand;
-      expect(first.viewOnly).toBeUndefined();
-      await send(data, first);
-      expect(sent).toHaveLength(2);
-      expect(sent[1]).toEqual(sent[0]);
+      expect(first).toMatchObject({ viewOnly: true, unrepeatable: true, replay: null });
+      // A completion re-sent would freeze the matrix as it stands then, a change since included.
+      answer = () =>
+        json(200, { tenderId: TENDER_ID, status: 'EVALUATED', alreadyEvaluated: false });
+      expect(await send(data, first)).toEqual(first);
+      expect(sent).toHaveLength(1);
     }
+  });
+
+  it('a score posted with a body changed from the one the page drew is refused unsent', async () => {
+    const data = form({ [scoreField('technical')]: '7' }, SCORE);
+    data.set(
+      BINDING_FIELD,
+      String(data.get(BINDING_FIELD)).replace('"expectedRevision":2', '"expectedRevision":5'),
+    );
+    expect(await send(data)).toEqual({ kind: 'REFUSED', reason: 'REPLAY' });
+    expect(sent).toHaveLength(0);
   });
 });

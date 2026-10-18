@@ -46,6 +46,7 @@ import {
   outcomeOf,
   ownerCallerOf,
   ownerRequest,
+  type OwnerBids,
   type OwnerBinding,
 } from './tender-owner';
 
@@ -464,7 +465,7 @@ describe('the award’s offers', () => {
     ).toEqual({ offers: [], notes: ['AWARD_REQUESTS_UNREAD'] });
     expect(awardOffers(awarder, state({ matrix: { kind: 'FORBIDDEN' } }), SETTINGS)).toEqual({
       offers: [],
-      notes: ['AWARD_MATRIX_UNREAD'],
+      notes: ['AWARD_MATRIX_UNREAD', 'AWARD_BIDS_UNREAD'],
     });
     expect(
       awardOffers(awarder, state({ tender: { status: 'AWARDED', version: 9 } }), SETTINGS),
@@ -472,6 +473,91 @@ describe('the award’s offers', () => {
       offers: [],
       notes: [],
     });
+  });
+});
+
+describe('the award without the evaluators’ read (PR 346 review 1, finding 2)', () => {
+  const awarder = person(ADMIN, AWARDER);
+  const unread = { kind: 'FORBIDDEN' } as const;
+  const base: AwardState = {
+    tender: EVALUATED_TENDER,
+    completedByCaller: false,
+    matrix: unread,
+    request: ok(null),
+    step: null,
+  };
+  const opened: OwnerBids = {
+    tenderId: TENDER_ID,
+    opened: true,
+    bidCount: 3,
+    receivedAt: [],
+    bids: (['QUALIFIED', 'DISQUALIFIED', 'QUALIFIED'] as const).map((status, index) => ({
+      bidId: `BID_${index}`,
+      tenderId: TENDER_ID,
+      bidderOrganizationId: `ORG-CON-${index}`,
+      status,
+      revision: 1,
+      receivedAt: '2026-10-19T08:00:00.000Z',
+      content: { priceMinor: '1', answers: [] },
+    })),
+  };
+
+  it('an awarder who may not read the matrix names a qualified bid from the opener’s view, its rank unknown', () => {
+    expect(awardOffers(awarder, { ...base, bids: ok(opened) }, SETTINGS)).toEqual({
+      offers: [
+        {
+          command: 'AWARD',
+          bidId: 'BID_0',
+          award: { justificationRequired: null, execution: null },
+        },
+        {
+          command: 'AWARD',
+          bidId: 'BID_2',
+          award: { justificationRequired: null, execution: null },
+        },
+      ],
+      notes: ['AWARD_MATRIX_UNREAD'],
+    });
+  });
+
+  it('an approved request is executed without the matrix: its step names the bid and the justification', () => {
+    const approved = {
+      ...base,
+      request: ok(AWARD_APPROVED_REQUEST),
+      step: ok({ ...AWARD_STEP, status: 'GRANTED' }),
+    };
+    expect(awardOffers(awarder, approved, SETTINGS).offers).toEqual([
+      {
+        command: 'AWARD',
+        bidId: 'BID_C',
+        award: {
+          justificationRequired: false,
+          execution: { justification: 'زمان اجرای کوتاه‌تر' },
+        },
+      },
+    ]);
+    // Who completed the evaluation the tender names: still never offered to that person.
+    expect(awardOffers(awarder, { ...approved, completedByCaller: true }, SETTINGS)).toEqual({
+      offers: [],
+      notes: ['AWARDER_IS_EVALUATOR'],
+    });
+  });
+
+  it('separate evaluator and awarder roles: the awarder, who reads no matrix, is still offered the award', () => {
+    const split = { ...SETTINGS, WEB_TENDER_AWARD_ROLES: ['UNION_ADMIN'] };
+    const unionAwarder = person(['UNION_ADMIN'], AWARDER);
+    expect(canEvaluate(unionAwarder, split)).toBe(false);
+    expect(readsEvaluation(unionAwarder, 'EVALUATED', split)).toBe(false);
+    const approved = {
+      ...base,
+      matrix: null,
+      request: ok(AWARD_APPROVED_REQUEST),
+      step: ok({ ...AWARD_STEP, status: 'GRANTED' }),
+    };
+    expect(awardStepToRead(unionAwarder, EVALUATED_TENDER, AWARD_APPROVED_REQUEST, split)).toBe(
+      AWARD_STEP_ID,
+    );
+    expect(awardOffers(unionAwarder, approved, split).offers).toHaveLength(1);
   });
 });
 

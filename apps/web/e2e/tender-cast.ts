@@ -28,10 +28,12 @@ import { provisionPerson, provisionedAccessToken } from './provisioned-people';
  * - **another tenant's contractor** — a `CONTRACTOR` acting for ORG-DEH-0002,
  *   invited to nothing.
  * - with `{ evaluation: true }`: the owner's `tender.award` policy (one step,
- *   the owner's `ORGANIZATION_ADMIN`, a sample), an **evaluator** — a third
+ *   naming the `ORGANIZATION_ADMIN` of a **reviewer** organization made for the
+ *   run — an authority who cannot read the owner's tender; a sample), the
+ *   reviewer's administrator, an **evaluator** — a third owner
  *   `ORGANIZATION_ADMIN`, who takes no other part, so that the author may award
- *   and the approver approve (`AWARDER_NOT_EVALUATOR`) — and a **rival**: a
- *   second qualified contractor, invited like the first.
+ *   (`AWARDER_NOT_EVALUATOR`) — and a **rival**: a second qualified contractor,
+ *   invited like the first.
  *
  * ## Once per test (`draftTender`, `publishedTender`, `openedTender`)
  *
@@ -113,6 +115,8 @@ export interface TenderCast {
   /** `{ evaluation: true }` only: the owner's evaluator, and a second qualified contractor. */
   readonly evaluatorPerson: ProvisionedPerson | null;
   readonly rival: ProvisionedPerson | null;
+  /** `{ evaluation: true }` only: the award's authority, an administrator of another organization. */
+  readonly reviewerPerson: ProvisionedPerson | null;
 }
 
 async function organization(systemAdmin: string, name: string, parentId?: string) {
@@ -131,6 +135,8 @@ async function policy(
   owner: string,
   workflowKey: string,
   approvalType: string,
+  /** The organization whose administrator decides: the owner's own unless named. */
+  authority: string = owner,
 ): Promise<void> {
   const created = withId.parse(
     await gateway(union, 'POST', '/v1/approval-policies', 201, {
@@ -142,9 +148,12 @@ async function policy(
       steps: [
         {
           approvalType,
-          authorityOrganizationId: owner,
+          authorityOrganizationId: authority,
           authorityRole: OWNER_ROLE,
-          authorityLabel: 'Owner administrator (sample)',
+          authorityLabel:
+            authority === owner
+              ? 'Owner administrator (sample)'
+              : 'Reviewer administrator (sample)',
         },
       ],
     }),
@@ -222,8 +231,13 @@ export async function castForRun(
 
   let evaluatorPerson: ProvisionedPerson | null = null;
   let rival: ProvisionedPerson | null = null;
+  let reviewerPerson: ProvisionedPerson | null = null;
   if (evaluation) {
-    await policy(union, systemAdmin, owner, 'tender.award', 'Award approval (sample)');
+    // The award's authority is another organization's administrator, who cannot read the
+    // owner's tender and decides from the approval inbox (PR 346 review 1, finding 3).
+    const reviewerOrg = await organization(systemAdmin, `E2E bid reviewer ${run}`);
+    reviewerPerson = await person('reviewer', reviewerOrg, [OWNER_ROLE]);
+    await policy(union, systemAdmin, owner, 'tender.award', 'Award approval (sample)', reviewerOrg);
     evaluatorPerson = await person('evaluator', owner, [OWNER_ROLE]);
     const rivalOrg = await organization(systemAdmin, `E2E bid rival ${run}`);
     rival = await person('rival', rivalOrg, ['CONTRACTOR']);
@@ -270,6 +284,7 @@ export async function castForRun(
     stranger,
     evaluatorPerson,
     rival,
+    reviewerPerson,
   };
 }
 

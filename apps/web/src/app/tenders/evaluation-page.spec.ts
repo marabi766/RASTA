@@ -55,6 +55,7 @@ jest.mock('next/navigation', () => ({
 jest.mock('@/server/tenders', () => mockStubFetchers('@/server/tenders'));
 jest.mock('@/server/tender-owner', () => mockStubFetchers('@/server/tender-owner'));
 jest.mock('@/server/tender-bids', () => mockStubFetchers('@/server/tender-bids'));
+jest.mock('@/server/tender-authority', () => mockStubFetchers('@/server/tender-authority'));
 jest.mock('@/server/tender-evaluation', () => mockStubFetchers('@/server/tender-evaluation'));
 
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -64,7 +65,7 @@ type Page = (props: {
 }) => Promise<ReactElement>;
 const TenderPage = (require('./[id]/page') as { default: Page }).default;
 const { OwnerCommands } = require('./[id]/OwnerCommands') as typeof import('./[id]/OwnerCommands');
-const { OpeningOnlyScreen } =
+const { OpeningOnlyScreen, OwnerFlash } =
   require('./[id]/OwnerSections') as typeof import('./[id]/OwnerSections');
 const { AwardSection, EvaluationSection } =
   require('./[id]/EvaluationSections') as typeof import('./[id]/EvaluationSections');
@@ -72,6 +73,9 @@ const { OwnTenderDetailScreen } =
   require('./[id]/TenderDetailScreen') as typeof import('./[id]/TenderDetailScreen');
 const fixtures =
   require('@/test/evaluation-fixtures') as typeof import('@/test/evaluation-fixtures');
+const { AuthorityScreen } =
+  require('./[id]/AuthoritySections') as typeof import('./[id]/AuthoritySections');
+const { mintFlash } = require('@/server/flash') as typeof import('@/server/flash');
 /* eslint-enable @typescript-eslint/no-require-imports */
 
 const jwt = (claims: unknown): string =>
@@ -112,10 +116,10 @@ const offered = (tree: ReactNode): string[] =>
     (element.props as { offered: { command: string }[] }).offered.map(({ command }) => command),
   );
 
-function run(view?: string): Promise<ReactElement> {
+function run(view?: string, flash?: string): Promise<ReactElement> {
   return TenderPage({
     params: Promise.resolve({ id: 'TND_1' }),
-    searchParams: Promise.resolve(view ? { view } : {}),
+    searchParams: Promise.resolve({ ...(view ? { view } : {}), ...(flash ? { flash } : {}) }),
   });
 }
 
@@ -202,4 +206,55 @@ it('an evaluator outside the reader roles reads the matrix alone, never the tend
   const absent = await run('own');
   const [screen] = ofType(absent, OwnTenderDetailScreen);
   expect((screen?.props as { result: unknown }).result).toEqual({ kind: 'NOT_FOUND' });
+});
+
+it('an approval authority of another organization decides its step of the tender without the tender read', async () => {
+  mockSession.current = signedInWith(['ORGANIZATION_ADMIN'], fixtures.AWARD_APPROVER);
+  const step = {
+    ...fixtures.AWARD_STEP,
+    stepOrder: 1,
+    authorityOrganizationId: ORG,
+    authorityLabel: 'بازبین (نمونه)',
+    requestedAt: '2026-10-22T07:00:00.000Z',
+    project: { title: 'بهسازی راه روستایی' },
+  };
+  mockAnswers.fetchAuthoritySteps = {
+    kind: 'OK',
+    data: { items: [{ summary: step, detail: { kind: 'OK', data: step } }], truncated: false },
+  };
+  const tree = await run('own');
+  expect(mockFetched).toEqual(['fetchTender', 'fetchAuthoritySteps']);
+  expect(ofType(tree, AuthorityScreen)).toHaveLength(1);
+  expect(ofType(tree, OwnTenderDetailScreen)).toHaveLength(0);
+  const [authority] = ofType(tree, AuthorityScreen);
+  const steps = (authority?.props as { steps: { commands: ReactNode }[] }).steps;
+  expect(offered(steps.map(({ commands }) => commands))).toEqual(['GRANT_AWARD', 'REJECT_AWARD']);
+  // Nobody's step of this tender in the inbox: the absence the tender read showed.
+  mockFetched.length = 0;
+  mockAnswers.fetchAuthoritySteps = { kind: 'OK', data: { items: [], truncated: false } };
+  const absent = await run('own');
+  expect(ofType(absent, AuthorityScreen)).toHaveLength(0);
+  const [screen] = ofType(absent, OwnTenderDetailScreen);
+  expect((screen?.props as { result: unknown }).result).toEqual({ kind: 'NOT_FOUND' });
+});
+
+it('the authority’s decision just made, its step gone from the inbox: the confirmation, only as minted for this session and tender', async () => {
+  const session = signedInWith(['ORGANIZATION_ADMIN'], fixtures.AWARD_APPROVER);
+  mockSession.current = session;
+  mockAnswers.fetchAuthoritySteps = { kind: 'OK', data: { items: [], truncated: false } };
+  const done = await run('own', mintFlash(session as never, 'TND_1', 'GRANT_AWARD'));
+  const [authority] = ofType(done, AuthorityScreen);
+  expect((authority?.props as { steps: unknown[] }).steps).toEqual([]);
+  expect(ofType(done, OwnerFlash).map((e) => (e.props as { done: unknown }).done)).toEqual([
+    'GRANT_AWARD',
+  ]);
+  // Another tender's confirmation, or another session's, shows the absence the tender read showed.
+  for (const flash of [
+    mintFlash(session as never, 'TND_OTHER', 'GRANT_AWARD'),
+    mintFlash({ ...session, csrfToken: 'another-session' } as never, 'TND_1', 'GRANT_AWARD'),
+  ]) {
+    const absent = await run('own', flash);
+    expect(ofType(absent, AuthorityScreen)).toHaveLength(0);
+    expect(ofType(absent, OwnTenderDetailScreen)).toHaveLength(1);
+  }
 });

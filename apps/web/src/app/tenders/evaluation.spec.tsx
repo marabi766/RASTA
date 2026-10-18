@@ -24,6 +24,7 @@ import {
 } from '@/test/evaluation-fixtures';
 import { TENDER_ID } from '@/test/owner-fixtures';
 
+import { AuthorityScreen } from './[id]/AuthoritySections';
 import { AwardSection, EvaluationSection } from './[id]/EvaluationSections';
 import { UNREPEATABLE_OWNER_TEXT } from './[id]/OwnerCommandForm';
 import { OwnerCommands, type OfferedOwnerCommand } from './[id]/OwnerCommands';
@@ -431,6 +432,64 @@ describe('the award', () => {
     );
     expect(screen.getByText(OWNER_COMMAND_DONE.AWARDED)).toBeInTheDocument();
     expect(screen.getByText(OWNER_COMMAND_DONE.AWARD_REQUESTED)).toBeInTheDocument();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe('the award without the evaluators’ read, and an authority of another organization', () => {
+  it('ranks unread: a form per qualified bid, the justification the person’s to give, and why', async () => {
+    const { container } = awardPage({
+      notes: ['AWARD_MATRIX_UNREAD'],
+      offered: [
+        offer('AWARD', {
+          subject: 'ORG-CON-A',
+          scope: 'BID_A',
+          award: { justificationRequired: null, execution: null },
+        }),
+      ],
+    });
+    expect(region('واگذاری')).toHaveTextContent(/ماتریس ارزیابی برای شما خوانده نمی‌شود/);
+    const field = within(
+      screen.getByRole('form', { name: /درخواست واگذاری — ORG-CON-A/ }),
+    ).getByLabelText('دلیل انتخاب');
+    expect(field).not.toBeRequired();
+    expect(field).toHaveAccessibleDescription(/این صفحه رتبهٔ پیشنهاد را نمی‌داند/);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('an authority of another organization: its steps as the service shows them, the decision, nothing of the tender', async () => {
+    const step = {
+      ...AWARD_STEP,
+      stepOrder: 1,
+      authorityLabel: 'بازبین (نمونه)',
+      requestedAt: '2026-10-22T07:00:00.000Z',
+      project: { title: 'بهسازی راه روستایی' },
+    };
+    const { container } = render(
+      <AuthorityScreen
+        tenderId={TENDER_ID}
+        truncated={false}
+        steps={[
+          {
+            step,
+            notes: [],
+            commands: group([offer('GRANT_AWARD'), offer('REJECT_AWARD')]),
+          },
+          {
+            step: { ...step, id: 'APR_PUB', workflowKey: 'tender.publication', request: null },
+            notes: ['STEP_REFUSED'],
+          },
+        ]}
+      />,
+    );
+    const award = region('موافقت با واگذاری مناقصه');
+    expect(award).toHaveTextContent('بهسازی راه روستایی');
+    expect(award).toHaveTextContent('ORG-CON-C');
+    expect(screen.getByRole('form', { name: 'موافقت با واگذاری' })).toBeInTheDocument();
+    expect(region('موافقت با انتشار مناقصه')).toHaveTextContent(
+      /تصمیم دربارهٔ آن را هم از شما نمی‌پذیرد/,
+    );
+    expect(screen.getByText(/مشخصات مناقصه از آنِ سازمان مالک است/)).toBeInTheDocument();
     expect(await axe(container)).toHaveNoViolations();
   });
 });

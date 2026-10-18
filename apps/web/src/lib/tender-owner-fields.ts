@@ -45,33 +45,34 @@ export function isOwnerCommand(value: unknown): value is OwnerCommand {
 
 /**
  * The commands whose unconfirmed outcome is never sent again (PR 345 reviews 1
- * and 2). construction-service keeps no result under the `Idempotency-Key` of
- * any of them (`IdempotencyStore.run` is not on their path; the gateway only
+ * and 2, PR 346 review 1): **every command construction-service keeps no
+ * result for**. `IdempotencyStore.run` is not on their path (the gateway only
  * requires the header), so a re-send is a new request against the tender as it
- * is when it arrives:
+ * is when it arrives — whatever its answer, it says nothing of the first:
  *
  * - **publish** and **award** — if the lost request was rejected meanwhile, the
  *   same command opens a new approval round (`TenderApprovalGate.resolve`);
  * - **propose / withdraw the proposal** — neither names the proposal: a
  *   withdrawal clears whatever proposal stands, a newer one included, and a
  *   proposal may stand up one its author has since withdrawn;
- * - **open** — approves whichever proposal stands when it arrives, not
- *   necessarily the one its sender saw.
+ * - **open** — approves whichever proposal stands when it arrives;
+ * - **a decision on a step** (publication's or award's) — decides the step as
+ *   it stands when it arrives;
+ * - **a decision on a bid** — the recorded decision answers its repeat, but
+ *   that answer cannot tell the first send from somebody else's;
+ * - **completing the evaluation** — freezes the matrix as it stands when it
+ *   arrives, a change made since the first send included.
  *
- * Until the backend keeps command results by key, an unknown outcome of these
- * is view-only. A **decision** stays retryable: it is a compare-and-set on the
- * very step it decides (`expectedVersion` checked and the transition
- * conditioned on it), so a re-send takes effect only on the step exactly as
- * its sender saw it, and is refused once anything — the first send included —
- * has moved it.
+ * Only a **score** is kept under its key (`IdempotencyStore.run`): its re-send
+ * under the same key is answered with the first answer, and each cell is a
+ * compare-and-set on the revision its sender read besides.
  */
-export const UNREPEATABLE_OWNER_COMMANDS: readonly OwnerCommand[] = [
-  'PUBLISH',
-  'PROPOSE_OPENING',
-  'OPEN_BIDS',
-  'WITHDRAW_PROPOSAL',
-  'AWARD',
-];
+export const REPEATABLE_OWNER_COMMANDS: readonly OwnerCommand[] = ['SCORE'];
+
+/** The commands a lost answer is never sent again for: the rest. */
+export const UNREPEATABLE_OWNER_COMMANDS: readonly OwnerCommand[] = OWNER_COMMANDS.filter(
+  (command) => !REPEATABLE_OWNER_COMMANDS.includes(command),
+);
 
 /** The decisions on an approval step: the publication's and the award's. */
 export const DECISION_COMMANDS: readonly OwnerCommand[] = [
@@ -91,11 +92,6 @@ export const EVALUATION_COMMANDS: readonly OwnerCommand[] = [
   'SCORE',
   'EVALUATE',
 ];
-
-/** The commands a lost answer may be sent again for, under the same key: the rest. */
-export const REPEATABLE_OWNER_COMMANDS: readonly OwnerCommand[] = OWNER_COMMANDS.filter(
-  (command) => !UNREPEATABLE_OWNER_COMMANDS.includes(command),
-);
 
 export const OWNER_COMMAND_LABELS: Readonly<Record<OwnerCommand, string>> = {
   PUBLISH: 'انتشار مناقصه',

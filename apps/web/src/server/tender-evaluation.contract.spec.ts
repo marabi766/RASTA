@@ -28,6 +28,7 @@ import {
   topLevelConst,
 } from '@/test/service-source';
 
+import { AUTHORITY_STEP_SCHEMA, INBOX_PAGE_SIZE } from './tender-authority';
 import { AWARD_APPROVAL_SCHEMA, MATRIX_SCHEMA } from './tender-evaluation';
 import { AWARD_SCHEMA, AWARD_WORKFLOW } from './tender-owner';
 
@@ -61,6 +62,13 @@ const access = squash(readSource(...SERVICE, 'access', 'access.ts'))!;
 const constructionEnv = squash(readSource(...SERVICE, 'config', 'env.ts'))!;
 const constructionEnvTree = parseSource(readSource(...SERVICE, 'config', 'env.ts'));
 const webEnv = squash(readSource('apps', 'web', 'src', 'server', 'env.ts'))!;
+const approvalController = parseSource(
+  readSource(...SERVICE, 'approval', 'approval.controller.ts'),
+);
+const approvalService = parseSource(readSource(...SERVICE, 'approval', 'approval.service.ts'));
+const pagination = parseSource(
+  readSource('packages', 'contracts', 'src', 'common', 'pagination.ts'),
+);
 
 function method(tree: ts.SourceFile, name: string): string {
   const found = collect(tree, ts.isMethodDeclaration).find((node) => node.name.getText() === name);
@@ -294,6 +302,39 @@ describe('what an awarder is offered — `awardOffers`', () => {
   });
 });
 
+describe('an award without the evaluators’ read (PR 346 review 1, finding 2)', () => {
+  it('awarding is decided by the award roles alone — no evaluation role is asked of the awarder', () => {
+    expect(method(awardServiceTree, 'authorize')).toContain('returnthis.access.assertCanAward();');
+    expect(awardServiceText).not.toContain('assertCanEvaluate');
+    // The bid is named by the caller and judged by the service, ranked or not.
+    expect(method(awardServiceTree, 'judge')).toContain(
+      'constbid=bids.find((candidate)=>candidate.id===dto.bidId);',
+    );
+  });
+});
+
+describe('an authority of another organization (PR 346 review 1, finding 3)', () => {
+  it('finds its steps in its inbox and reads each on its own, never the tender', () => {
+    expect(decoratorOf(approvalController, 'inbox', 'Get')?.arguments).toHaveLength(0);
+    expect(decoratorOf(approvalController, 'get', 'Get')?.arguments[0]?.getText()).toBe("':id'");
+    expect(method(approvalService, 'inbox')).toContain(
+      'constscope=this.access.inboxScope();constrows=awaitthis.approvals.inbox({authorityOrganizationId:scope.organizationId,roles:scope.roles,status:query.status,',
+    );
+    expect(access).toContain(
+      'inboxScope():{organizationId:string;roles:readonlystring[]}{assertNotAuditor();',
+    );
+    expect(squash(topLevelConst(approvalDto, 'inboxQuerySchema').getText())).toContain(
+      "status:z.enum(APPROVAL_STATES).default('PENDING')",
+    );
+    expect(method(approvalService, 'get')).toContain(
+      "this.access.assertCanSeeApproval(approval);//Whatanawardapprovalisaboutnamesabid:notshowntooneinconflictwiththetender.if(approval.workflowKey==='tender.award'){awaitthis.tenderApprovals.assertMayReadAward(approval);}",
+    );
+    expect(topLevelConst(pagination, 'MAX_PAGE_SIZE').getText()).toBe(String(INBOX_PAGE_SIZE));
+    const view = schemaProperties(approvalDto, 'approvalViewSchema');
+    for (const key of keysOf(AUTHORITY_STEP_SCHEMA)) expect(view.has(key)).toBe(true);
+  });
+});
+
 describe('every closed reason has fixed words', () => {
   it('the evaluation’s and the award’s', () => {
     const evaluation = literalsOf(
@@ -326,29 +367,29 @@ describe('which commands may be sent again after a lost answer', () => {
     expect(awardServiceText).not.toContain('idempotency.run(');
   });
 
-  it('a decision on a bid and the completion answer their own repeat; an award does not', () => {
-    const qualify = method(evaluationServiceTree, 'qualify');
-    expect(qualify).toContain(
-      "if(existing.decision!==dto.decision)throwthis.rule('BID_ALREADY_DECIDED');return{bidId,tenderId,decision:existing.decision,",
+  it('a decision on a bid, the completion and an award keep no result for a re-send: only a score may be sent again', () => {
+    // A decision on a bid answers its own repeat, but that answer cannot tell the first send from
+    // another evaluator's; a completion freezes the matrix as it stands when the re-send arrives.
+    expect(method(evaluationServiceTree, 'qualify')).toContain(
+      "if(existing.decision!==dto.decision)throwthis.rule('BID_ALREADY_DECIDED');",
     );
-    expect(qualify).toContain('alreadyDecided:true,');
     expect(method(evaluationServiceTree, 'evaluate')).toContain(
-      'if(tender.evaluatedAt!==null&&tender.evaluatedBy!==null){//Completedbefore:thesameanswer,writtenonce.return{view:evaluatedView(tender,input,tender.evaluatedAt,tender.evaluatedBy,true),',
+      'constmatched=awaitthis.repo.completeEvaluation(tx,{tenderId,expectedVersion:tender.version,',
     );
     // A lost award request, rejected meanwhile, is not found again: the same award opens a new round.
     expect(approvalGate).toContain(
       "return{kind:'REQUESTED',request:awaitthis.open(tx,input),created:true,",
     );
-    expect(UNREPEATABLE_OWNER_COMMANDS).toContain('AWARD');
+    expect([...REPEATABLE_OWNER_COMMANDS]).toEqual(['SCORE']);
     for (const command of [
       'QUALIFY',
       'DISQUALIFY',
-      'SCORE',
       'EVALUATE',
+      'AWARD',
       'GRANT_AWARD',
       'REJECT_AWARD',
     ]) {
-      expect(REPEATABLE_OWNER_COMMANDS).toContain(command);
+      expect(UNREPEATABLE_OWNER_COMMANDS).toContain(command);
     }
   });
 });
