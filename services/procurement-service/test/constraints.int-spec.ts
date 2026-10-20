@@ -507,6 +507,57 @@ describe('the database keeps the demand and aggregation invariants', () => {
         );
       });
 
+      it('none is born ended: the r3 terminal INSERT with a saved state is refused (PR-338 r3 F1)', async () => {
+        const a = org();
+        const productId = newProductId();
+        const phantom = ResumableSha256.fresh().update('phantom').save();
+        /** A row inserted as the runtime role, otherwise valid, with `extra` columns set. */
+        const born = (status: string, extra: Record<string, unknown>) => {
+          const columns = Object.keys(extra);
+          return db.$executeRawUnsafe(
+            `INSERT INTO demand_aggregation
+               (id, organization_id, product_id, status, opened_at, closes_at, window_hours,
+                min_quantity, shortfall_policy, total_quantity, demand_count, extension_count,
+                closed_at, created_at, updated_at${columns.map((column) => `, ${column}`).join('')})
+             VALUES ($1, $2, $3, $4, $5, $6, 10, 0, 'EXTEND', 0, 0, 0, $7, $5, $5${columns
+               .map((_, index) => `, $${index + 8}`)
+               .join('')})`,
+            `AGG_${ulid()}`,
+            a,
+            productId,
+            status,
+            T0,
+            new Date(T0.getTime() + 10 * HOUR),
+            status === 'OPEN' ? null : new Date(T0.getTime() + 10 * HOUR),
+            ...Object.values(extra),
+          );
+        };
+        // The review's reproduction: LAPSED, nothing counted, a state that already took "phantom".
+        // The sweeper would have finished it and its end's event carried SHA-256("phantom").
+        await refusedWith(
+          born('LAPSED', { end_digest_state: phantom }),
+          /ck_demand_aggregation_born_open/,
+        );
+        for (const status of ['READY', 'REFERRED', 'LAPSED', 'RFQ_ISSUED', 'CANCELLED']) {
+          await refusedWith(born(status, {}), /ck_demand_aggregation_born_open/);
+        }
+        // Born OPEN, it carries no sweep and no cancellation either.
+        await refusedWith(
+          born('OPEN', { sweep_lease_until: T0, sweep_fence: 'FENCE' }),
+          /ck_demand_aggregation_born_open/,
+        );
+        await refusedWith(born('OPEN', { sweep_attempts: 1 }), /ck_demand_aggregation_born_open/);
+        await refusedWith(
+          born('OPEN', { demand_ids_sha256: 'a'.repeat(64) }),
+          /ck_demand_aggregation_digest/,
+        );
+        const rows = await db.$queryRaw<{ n: bigint }[]>`
+          SELECT count(*) AS n FROM demand_aggregation WHERE organization_id = ${a}`;
+        expect(Number(rows[0]?.n)).toBe(0);
+        // A clean OPEN row is born as the service writes it.
+        await born('OPEN', {});
+      });
+
       it('is begun only by the end, from nothing: the empty SHA-256, no id taken, no cursor', async () => {
         const a = org();
         const { agg, ids } = await openWith(a, 2);

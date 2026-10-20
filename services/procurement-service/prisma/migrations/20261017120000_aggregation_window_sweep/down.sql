@@ -83,6 +83,9 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS "tg_demand_aggregation_born" ON "demand_aggregation";
+DROP FUNCTION IF EXISTS "demand_aggregation_born_guard"();
+
 DROP FUNCTION IF EXISTS "demand_aggregation_digest_range"(TEXT, TEXT, TEXT, TEXT, INTEGER);
 
 DROP INDEX IF EXISTS "ix_demand_request_window_ids";

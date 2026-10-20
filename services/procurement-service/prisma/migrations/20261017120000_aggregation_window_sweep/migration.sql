@@ -326,3 +326,37 @@ ALTER TABLE "demand_aggregation" ADD CONSTRAINT "ck_demand_aggregation_digest"
          AND ("end_digest_state" IS NOT NULL OR "end_digest_cursor" IS NULL)
          AND ("demand_ids_sha256" IS NULL OR "end_digest_counted" = "demand_count")
          AND "end_digest_counted" BETWEEN 0 AND "demand_count");
+
+-- An aggregation is born OPEN, with nothing of an end, a sweep or a cancellation on it (PR-338 r3
+-- F1). Every later phase is reachable only through `demand_aggregation_guard`, which runs on
+-- UPDATE: a row inserted already ended — LAPSED with a saved digest state, say — would skip the
+-- end's initialization of the digest and have its event carry the digest of ids it never held.
+-- An unknown status is ck_demand_aggregation_status's to refuse, `closed_at` on an OPEN row
+-- ck_demand_aggregation_closed's, the totals `tg_demand_aggregation_totals_check`'s at commit.
+CREATE FUNCTION "demand_aggregation_born_guard"() RETURNS trigger AS $$
+BEGIN
+  IF NEW."status" IN ('READY', 'REFERRED', 'LAPSED', 'RFQ_ISSUED', 'CANCELLED') THEN
+    RAISE EXCEPTION 'ck_demand_aggregation_born_open: an aggregation is created OPEN; it ends only by its window''s end'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF NEW."demand_ids_sha256" IS NOT NULL OR NEW."end_digest_state" IS NOT NULL
+     OR NEW."end_digest_cursor" IS NOT NULL OR NEW."end_digest_counted" <> 0
+  THEN
+    RAISE EXCEPTION 'ck_demand_aggregation_digest: an aggregation is created with no digest and no progress of one'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF NEW."demands_to_follow" <> 0 OR NEW."sweep_lease_until" IS NOT NULL
+     OR NEW."sweep_fence" IS NOT NULL OR NEW."sweep_attempts" <> 0
+     OR NEW."sweep_next_attempt_at" IS NOT NULL
+     OR num_nonnulls(NEW."cancelled_at", NEW."cancelled_by", NEW."cancel_reason") <> 0
+  THEN
+    RAISE EXCEPTION 'ck_demand_aggregation_born_open: an aggregation is created with no sweep and no cancellation'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "tg_demand_aggregation_born"
+  BEFORE INSERT ON "demand_aggregation"
+  FOR EACH ROW EXECUTE FUNCTION "demand_aggregation_born_guard"();
