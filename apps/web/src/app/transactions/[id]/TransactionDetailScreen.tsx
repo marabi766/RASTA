@@ -221,10 +221,12 @@ export function TransactionDetailScreen({
 /**
  * The dispute, as the record says it is.
  *
- * `disputeReason` holds whatever the last dispute act stored: the reason while
- * the transaction is `DISPUTED`, and — because `resolveDispute` overwrites it —
- * the resolution once it has been resolved. Outside `DISPUTED` the screen
- * cannot tell which it is, and says so instead of guessing.
+ * `disputeReason` is the reason the last dispute was raised with, and a
+ * resolution has its own fields (#322, docs/23 D-060). A resolution counts for
+ * the dispute shown only when it was decided at or after that dispute: one
+ * from an earlier dispute is not this one's. A row resolved before D-060 holds
+ * the resolution in `disputeReason` with `disputeResolution` null — there the
+ * screen cannot tell which text it is, and says so instead of guessing.
  */
 function DisputeState({ transaction: t }: { transaction: Transaction }) {
   if (t.status === 'DISPUTED') {
@@ -247,23 +249,38 @@ function DisputeState({ transaction: t }: { transaction: Transaction }) {
   }
 
   if (t.disputedAt !== null) {
+    const resolvedAt =
+      t.disputeResolvedAt !== null && Date.parse(t.disputeResolvedAt) >= Date.parse(t.disputedAt)
+        ? t.disputeResolvedAt
+        : null;
+    const legacy = resolvedAt !== null && t.disputeResolution === null;
     return (
       <div className="flex flex-col gap-3">
         <p className="text-sm">
           برای این تراکنش در {formatJalaliDateLong(t.disputedAt)} اعتراض ثبت شده بود و اکنون در
           وضعیت «{transactionStatusLabel(t.status)}» است.
         </p>
-        {t.disputeReason !== null ? (
-          <dl className="text-sm">
-            <Row term="آخرین متن ثبت‌شده برای اعتراض">
+        <dl className="text-sm">
+          {t.disputeReason !== null ? (
+            <Row term={legacy ? 'آخرین متن ثبت‌شده برای اعتراض' : 'دلیل اعتراض'}>
               <IsolatedText>{t.disputeReason}</IsolatedText>
             </Row>
-          </dl>
+          ) : null}
+          {resolvedAt !== null ? (
+            <Row term="زمان رسیدگی">{formatJalaliDateLong(resolvedAt)}</Row>
+          ) : null}
+          {resolvedAt !== null && t.disputeResolution !== null ? (
+            <Row term="شرح تصمیم">
+              <IsolatedText>{t.disputeResolution}</IsolatedText>
+            </Row>
+          ) : null}
+        </dl>
+        {legacy ? (
+          <p className="text-sm text-content-muted">
+            به این اعتراض پیش از آنکه سامانه شرح تصمیم را جدا نگه دارد رسیدگی شده است؛ این متن یا
+            دلیل اعتراض است یا شرح تصمیم، و این صفحه نمی‌تواند بگوید کدام است.
+          </p>
         ) : null}
-        <p className="text-sm text-content-muted">
-          این متن یا دلیل اعتراض است یا، اگر به اعتراض رسیدگی شده باشد، شرح تصمیم؛ سامانه هر دو را
-          در یک جا نگه می‌دارد و این صفحه نمی‌تواند بگوید کدام است.
-        </p>
       </div>
     );
   }

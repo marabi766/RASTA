@@ -70,6 +70,8 @@ const HELD: Transaction = {
   sourceReference: 'ref-1',
   disputedAt: null,
   disputeReason: null,
+  disputeResolvedAt: null,
+  disputeResolution: null,
   disputeId: null,
   settledAt: null,
   failureReason: null,
@@ -217,16 +219,56 @@ describe('the dispute state, as the record says it', () => {
     expect(mint).toHaveBeenCalledWith({ transactionId: 'TXN_1', disputeId: null });
   });
 
-  it('disputed earlier, now elsewhere: says when, and that the text may be either', async () => {
+  it('resolved: the reason, when it was decided and the decision, each under its own name (#322, D-060)', async () => {
     const { container } = renderScreen(
-      ok({ ...DISPUTED, status: 'PENDING_SETTLEMENT', disputeReason: 'تحویل تأیید شد' }),
+      ok({
+        ...DISPUTED,
+        status: 'PENDING_SETTLEMENT',
+        disputeResolvedAt: '2026-10-03T09:00:00.000Z',
+        disputeResolution: 'تحویل تأیید شد',
+      }),
     );
     const text = container.textContent ?? '';
     expect(text).toContain('اعتراض ثبت شده بود');
     expect(text).toContain('در انتظار تسویه');
+    expect(text).toContain('دلیل اعتراض');
+    expect(text).toContain(REASON);
+    expect(text).toContain('شرح تصمیم');
     expect(text).toContain('تحویل تأیید شد');
-    expect(text).toContain('نمی‌تواند بگوید کدام است');
+    expect(text).not.toContain('نمی‌تواند بگوید کدام است');
     await expectAccessible(container);
+  });
+
+  it('resolved before D-060: says when, and that the one text may be either', async () => {
+    const { container } = renderScreen(
+      ok({
+        ...DISPUTED,
+        status: 'PENDING_SETTLEMENT',
+        disputeReason: 'تحویل تأیید شد',
+        disputeResolvedAt: '2026-10-03T09:00:00.000Z',
+      }),
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('تحویل تأیید شد');
+    expect(text).toContain('آخرین متن ثبت‌شده برای اعتراض');
+    expect(text).toContain('نمی‌تواند بگوید کدام است');
+    expect(text).not.toContain('شرح تصمیم');
+    await expectAccessible(container);
+  });
+
+  it('a resolution of an earlier dispute is not this one’s', () => {
+    const { container } = renderScreen(
+      ok({
+        ...DISPUTED,
+        status: 'REFUNDED',
+        disputeResolvedAt: '2026-10-01T09:00:00.000Z',
+        disputeResolution: 'یک تصمیم قدیمی',
+      }),
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain(REASON);
+    expect(text).not.toContain('یک تصمیم قدیمی');
+    expect(text).not.toContain('شرح تصمیم');
   });
 
   it.each([
