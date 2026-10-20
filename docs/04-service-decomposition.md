@@ -300,6 +300,11 @@ fleet رونوشت `asset_ref` را از رویداد می‌سازد و واب�
 > `ORGANIZATION_MOVED` (آشتی سیاست موافقت سفارش)؛ صلاحیت تأمین‌کننده در لحظهٔ تصمیم از `supplier-service` پرسیده می‌شود و مصرف‌کنندهٔ `SUPPLIER_*`
 > ساخته نمی‌شود. (۶) `PURCHASE_ORDER_ISSUED` بی مبلغ و `QUOTATIONS_EVALUATED` بی امتیاز است؛ procurement هیچ پولی حرکت نمی‌دهد (§ ۸، Q-124).
 > (۷) صدور سفارش بی سیاست فعال `procurement.purchase_order` رد می‌شود (Q-122). برنامهٔ برش‌ها: [ADR-070 implementation plan](adr/ADR-070-implementation-plan.md).
+>
+> **وضعیت: برش PR 1 ساخته شد (2026-10-16).** `services/procurement-service` (پورت ۳۱۰۷): `DemandRequest` و `DemandAggregation` با
+> `POST/GET /v1/demand-requests[/{id}]`، `POST /v1/demand-requests/{id}/withdraw` و `GET /v1/aggregations[/{id}]`
+> (`docs/api/procurement-service.openapi.json`)؛ پیوستن زیر قفل ردیف تجمیع با ساعت پایگاه داده پس از قفل؛ نیازی که در `closesAt` یا پس از آن برسد
+> پنجره را در همان تراکنش می‌بندد. جاروکننده، لغو تجمیع، تنظیمات به‌ازای سازمان و هر چیز پس از آن برش‌های بعدی‌اند.
 
 ---
 
