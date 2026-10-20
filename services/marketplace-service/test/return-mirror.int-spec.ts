@@ -265,6 +265,18 @@ describe('return mirror (RUN-005 PR 3)', () => {
   }
 
   describe('the four steps, in order', () => {
+    it('answers a cancellation the buyer made from AUTHORIZED, once its goods moved it IN_TRANSIT, 409 — stale, not illegal (Codex r2 on #339, finding 2)', async () => {
+      const f = await authorizedReturn();
+      await expect(deliver(event(f, 'DISPATCHED'))).resolves.toBeUndefined();
+
+      await expect(
+        asActor({ organizationId: f.buyer, roles: ['PROCUREMENT_USER'], userId: 'USR-B' }, () =>
+          wiring.returns.cancel(f.requestId, { expectedStatus: 'AUTHORIZED' }, key('mir-cancel')),
+        ),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+      expect(await stored(f)).toMatchObject({ status: 'IN_TRANSIT', version: 3 });
+    });
+
     it('moves an AUTHORIZED request IN_TRANSIT → RECEIVED → INSPECTED → RESOLVED, each with its history and event', async () => {
       const f = await authorizedReturn();
       const inspected = event(f, 'INSPECTED');
@@ -513,7 +525,7 @@ describe('return mirror (RUN-005 PR 3)', () => {
     it('refuses goods for a request the buyer cancelled (Q-133 (5))', async () => {
       const f = await authorizedReturn();
       await asActor({ organizationId: f.buyer, roles: ['PROCUREMENT_USER'] }, () =>
-        wiring.returns.cancel(f.requestId, key('mir-cancel')),
+        wiring.returns.cancel(f.requestId, { expectedStatus: 'AUTHORIZED' }, key('mir-cancel')),
       );
       await expectRefused(event(f, 'DISPATCHED'), DLQ_REASONS.BUSINESS_RULE_VIOLATION);
       expect((await stored(f)).status).toBe('CANCELLED');
@@ -524,7 +536,11 @@ describe('return mirror (RUN-005 PR 3)', () => {
       await deliver(event(f, 'DISPATCHED'));
       await expect(
         asActor({ organizationId: f.buyer, roles: ['PROCUREMENT_USER'] }, () =>
-          wiring.returns.cancel(f.requestId, key('mir-cancel-late')),
+          wiring.returns.cancel(
+            f.requestId,
+            { expectedStatus: 'AUTHORIZED' },
+            key('mir-cancel-late'),
+          ),
         ),
       ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
       await expect(

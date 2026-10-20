@@ -69,6 +69,11 @@ describe('the provisional defaults (Q-102, Q-103)', () => {
     expect(env.INVENTORY_LOCK_TIMEOUT_MS).toBe(5000);
   });
 
+  it('asks marketplace, which owns the return request, on its port, for three seconds at most', () => {
+    expect(env.MARKETPLACE_SERVICE_URL).toBe('http://localhost:3106');
+    expect(env.INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS).toBe(3000);
+  });
+
   it('replays a command’s response for a day and leases an in-flight key for two minutes', () => {
     expect(env.INVENTORY_IDEMPOTENCY_TTL_HOURS).toBe(24);
     expect(env.INVENTORY_IDEMPOTENCY_CLAIM_LEASE_SECONDS).toBe(120);
@@ -142,6 +147,12 @@ describe('overrides', () => {
     ['a lock timeout over a minute', { INVENTORY_LOCK_TIMEOUT_MS: '60001' }],
     ['a zero idempotency lifetime', { INVENTORY_IDEMPOTENCY_TTL_HOURS: '0' }],
     ['a lease under ten seconds', { INVENTORY_IDEMPOTENCY_CLAIM_LEASE_SECONDS: '5' }],
+    ['a marketplace address that is not a URL', { MARKETPLACE_SERVICE_URL: 'marketplace' }],
+    ['a marketplace timeout under 200 ms', { INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS: '50' }],
+    [
+      'a marketplace timeout over ten seconds',
+      { INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS: '10001' },
+    ],
   ])('refuses %s at startup', (_label, change) => {
     expect(() => load(change)).toThrow();
   });

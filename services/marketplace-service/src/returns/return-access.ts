@@ -44,6 +44,15 @@ export const RETURN_AUTHORISATION = {
   authorize: (request: ReturnParties) => assertSupplier(request, 'authorize this return'),
   reject: (request: ReturnParties) => assertSupplier(request, 'reject this return'),
   cancel: (request: ReturnParties) => assertBuyer(request, 'cancel this return request'),
+  /**
+   * Either party may ask inventory to reconcile a dispatch reservation (Q-133 (9)(a), temporary
+   * decision): the buyer is the one it keeps from cancelling, the supplier the one whose dispatch
+   * failed. It decides nothing — inventory's answer does — so it is no other party's command.
+   */
+  reconcile: (request: ReturnParties) =>
+    getOrganizationId() === request.organizationId
+      ? assertBuyer(request, 'reconcile this return’s dispatch')
+      : assertSupplier(request, 'reconcile this return’s dispatch'),
 } as const;
 
 export type ReturnCommand = keyof typeof RETURN_AUTHORISATION;
