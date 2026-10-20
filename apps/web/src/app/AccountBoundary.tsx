@@ -13,18 +13,37 @@ import {
   purgeForeignUnresolvedDisputes,
 } from '@/lib/unresolved-dispute';
 import {
+  markContractCommandsOpen,
+  purgeAllUnresolvedContractCommands,
+  purgeForeignUnresolvedContractCommands,
+} from '@/lib/unresolved-contract-command';
+import {
   markStatementsOpen,
   purgeAllUnresolvedStatements,
   purgeForeignUnresolvedStatements,
 } from '@/lib/unresolved-statement';
+import {
+  markBidsOpen,
+  purgeAllUnresolvedBids,
+  purgeForeignUnresolvedBids,
+} from '@/lib/unresolved-bid';
+import {
+  markOwnerCommandsOpen,
+  purgeAllUnresolvedOwnerCommands,
+  purgeForeignUnresolvedOwnerCommands,
+} from '@/lib/unresolved-tender-command';
 
 /**
  * The browser's side of an account boundary: what an unresolved order,
- * dispute command or statement command left in `sessionStorage`
- * (`lib/unresolved-order.ts`, `lib/unresolved-dispute.ts`,
- * `lib/unresolved-statement.ts`) must not outlive. All follow the same rules;
- * a statement command is reduced to a marker at logout like a dispute command
- * (a draft repeated under a fresh key is a second statement).
+ * dispute command, statement command or contract command left in
+ * `sessionStorage` (`lib/unresolved-order.ts`, `lib/unresolved-dispute.ts`,
+ * `lib/unresolved-statement.ts`, `lib/unresolved-contract-command.ts`) must
+ * not outlive. All follow the same rules; a statement or contract command is
+ * reduced to a marker at logout like a dispute command (a draft, an amendment
+ * or a milestone repeated under a fresh key is a second one). A bid command's
+ * record (`lib/unresolved-bid.ts`), and a tender owner's command's
+ * (`lib/unresolved-tender-command.ts`), are markers from the start — they never
+ * hold what was sent — so a logout only stops them being written again.
  *
  * - **Logout.** Any form posting to `/auth/logout` — every portal page has its
  *   own — empties every remembered order before the navigation leaves. A capture
@@ -56,9 +75,15 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
     markAccountOpen();
     markDisputesOpen();
     markStatementsOpen();
+    markContractCommandsOpen();
+    markBidsOpen();
+    markOwnerCommandsOpen();
     purgeForeignUnresolvedOrders(owner);
     purgeForeignUnresolvedDisputes(owner);
     purgeForeignUnresolvedStatements(owner);
+    purgeForeignUnresolvedContractCommands(owner);
+    purgeForeignUnresolvedBids(owner);
+    purgeForeignUnresolvedOwnerCommands(owner);
   }, [owner]);
 
   useEffect(() => {
@@ -68,6 +93,9 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
         purgeAllUnresolvedOrders();
         purgeAllUnresolvedDisputes();
         purgeAllUnresolvedStatements();
+        purgeAllUnresolvedContractCommands();
+        purgeAllUnresolvedBids();
+        purgeAllUnresolvedOwnerCommands();
       }
     };
     document.addEventListener('submit', onSubmit, true);

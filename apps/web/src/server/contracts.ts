@@ -12,9 +12,11 @@ export type { ReadResult };
  * Reading contracts, amendments and milestones through the gateway (EXP-004
  * slice 4, ADR-068).
  *
- * Read-only: no command is issued from this module (signing, cancelling,
- * proposing an amendment and planning a milestone are all out of scope here),
- * so there is no Idempotency-Key. Reads follow `projects.ts` and `tenders.ts`.
+ * Read-only: no command is issued from this module, so there is no
+ * Idempotency-Key. Signing, cancelling, proposing and signing an amendment and
+ * planning and changing a milestone are `contract-commands.ts`, which confirms
+ * each answer against the schemas exported here. Reads follow `projects.ts`
+ * and `tenders.ts`.
  *
  * ## Access (ADR-068 § 7)
  *
@@ -34,10 +36,9 @@ export type { ReadResult };
  *
  * ## Statements
  *
- * Not read here, and not shown anywhere in this slice: `contract-service` has
- * no statement route on `main` yet (ADR-068 § 5 is design only). The
+ * Not read here: `contract-statements.ts` reads and commands them. The
  * milestone field `referenced` — whether a statement already refers to it —
- * is shown as given; nothing about the statement itself is fetched.
+ * is shown as given.
  */
 
 const minorUnits = z.string().regex(/^-?\d+$/, 'amount must be whole minor units');
@@ -67,7 +68,7 @@ const contractSummarySchema = z.object({
 export type ContractSummary = z.infer<typeof contractSummarySchema>;
 
 /** Every signature fact lives on the contract itself; there is no separate signature route. */
-const contractDetailSchema = contractSummarySchema.extend({
+export const CONTRACT_DETAIL_SCHEMA = contractSummarySchema.extend({
   winningBidId: z.string(),
   amendmentsTotalMinor: minorUnits,
   employerSignedAt: utcInstant.nullable(),
@@ -81,13 +82,13 @@ const contractDetailSchema = contractSummarySchema.extend({
   version: z.number().int(),
 });
 
-export type ContractDetail = z.infer<typeof contractDetailSchema>;
+export type ContractDetail = z.infer<typeof CONTRACT_DETAIL_SCHEMA>;
 
 const contractPageSchema = pageSchema(contractSummarySchema);
 export type ContractPage = z.infer<typeof contractPageSchema>;
 
 /** An amendment's signature facts, like the contract's own. */
-const amendmentSchema = z.object({
+export const AMENDMENT_SCHEMA = z.object({
   id: z.string(),
   contractId: z.string(),
   organizationId: z.string(),
@@ -105,9 +106,9 @@ const amendmentSchema = z.object({
   version: z.number().int(),
 });
 
-export type Amendment = z.infer<typeof amendmentSchema>;
+export type Amendment = z.infer<typeof AMENDMENT_SCHEMA>;
 
-const amendmentPageSchema = pageSchema(amendmentSchema);
+const amendmentPageSchema = pageSchema(AMENDMENT_SCHEMA);
 export type AmendmentPage = z.infer<typeof amendmentPageSchema>;
 
 /**
@@ -117,7 +118,7 @@ export type AmendmentPage = z.infer<typeof amendmentPageSchema>;
  * date; Tehran is always ahead of UTC, so a date-only midnight never renders
  * as the previous day.
  */
-const milestoneSchema = z.object({
+export const MILESTONE_SCHEMA = z.object({
   id: z.string(),
   contractId: z.string(),
   organizationId: z.string(),
@@ -130,9 +131,9 @@ const milestoneSchema = z.object({
   version: z.number().int(),
 });
 
-export type Milestone = z.infer<typeof milestoneSchema>;
+export type Milestone = z.infer<typeof MILESTONE_SCHEMA>;
 
-const milestonePageSchema = pageSchema(milestoneSchema);
+const milestonePageSchema = pageSchema(MILESTONE_SCHEMA);
 export type MilestonePage = z.infer<typeof milestonePageSchema>;
 
 async function read<S extends z.ZodTypeAny>(
@@ -184,7 +185,7 @@ export function fetchContract(
   session: WebSession,
   contractId: string,
 ): Promise<ReadResult<ContractDetail>> {
-  return read(session, `/v1/contracts/${encodeURIComponent(contractId)}`, contractDetailSchema);
+  return read(session, `/v1/contracts/${encodeURIComponent(contractId)}`, CONTRACT_DETAIL_SCHEMA);
 }
 
 /** A contract's amendments, oldest first (amendment-service orders by `amendmentNumber`). */

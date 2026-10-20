@@ -155,6 +155,49 @@ describe('who is shown the Contracts link', () => {
   });
 });
 
+describe('who is drawn the contract command forms, and with which reasons', () => {
+  it("defaults to contract-service's own defaults", () => {
+    const env = loadWebServerEnv(REQUIRED);
+    expect(env.WEB_CONTRACT_CANCEL_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+    expect(env.WEB_CONTRACT_AMENDMENT_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+    expect(env.WEB_CONTRACT_MILESTONE_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+    expect(env.WEB_CONTRACT_CANCEL_AFTER_SIGNATURE).toBe(false);
+    expect(env.WEB_CONTRACT_CANCEL_REASON_CODES).toEqual([
+      'TERMS_NOT_AGREED',
+      'CONTRACTOR_WITHDREW',
+      'AWARD_ERROR',
+      'OTHER',
+    ]);
+    expect(env.WEB_CONTRACT_AMENDMENT_REASON_CODES).toEqual([
+      'SCOPE_CHANGE',
+      'PRICE_ADJUSTMENT',
+      'SCHEDULE_CHANGE',
+      'OTHER',
+    ]);
+  });
+
+  it('an empty role list means nobody, as there; AUDITOR refuses to start', () => {
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_CANCEL_ROLES: '' }).WEB_CONTRACT_CANCEL_ROLES,
+    ).toEqual([]);
+    expect(() =>
+      loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_MILESTONE_ROLES: 'AUDITOR' }),
+    ).toThrow(/WEB_CONTRACT_MILESTONE_ROLES/);
+  });
+
+  it('a reason list is closed codes, at least one, none twice', () => {
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_CANCEL_REASON_CODES: ' OTHER , CLIENT_CODE ' })
+        .WEB_CONTRACT_CANCEL_REASON_CODES,
+    ).toEqual(['OTHER', 'CLIENT_CODE']);
+    for (const refused of ['', 'lower_case', 'OTHER,OTHER']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_AMENDMENT_REASON_CODES: refused }),
+      ).toThrow(/WEB_CONTRACT_AMENDMENT_REASON_CODES/);
+    }
+  });
+});
+
 describe('the dispute replay deadline (PR 319 review 2, finding 2)', () => {
   it('defaults to economic-service’s floor, not its default, less ten minutes', () => {
     const env = loadWebServerEnv(REQUIRED);
@@ -265,5 +308,69 @@ describe('the statement replay deadline', () => {
         loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_REPLAY_MARGIN_SECONDS: value }),
       ).toThrow('WEB_CONTRACT_REPLAY_MARGIN_SECONDS');
     }
+  });
+});
+
+describe('the bid replay deadline', () => {
+  it('defaults to construction-service’s floor, not its default, less ten minutes', () => {
+    const env = loadWebServerEnv(REQUIRED);
+    expect(env.WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS).toBe(1);
+    expect(env.WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS).toBe(600);
+  });
+
+  it('mirrors the service’s bounds for the retention (1..168 hours) and bounds the margin', () => {
+    for (const value of ['0', '169', 'soon']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: value }),
+      ).toThrow('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+    }
+    for (const value of ['59', '1801']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: value }),
+      ).toThrow('WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS');
+    }
+  });
+});
+
+describe('the tender opening roles', () => {
+  it('default to none — the owner’s own role set — and refuse what never opens a bid', () => {
+    expect(loadWebServerEnv(REQUIRED).WEB_TENDER_OPEN_ROLES).toEqual([]);
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_TENDER_OPEN_ROLES: 'FLEET_MANAGER, ORGANIZATION_ADMIN' })
+        .WEB_TENDER_OPEN_ROLES,
+    ).toEqual(['FLEET_MANAGER', 'ORGANIZATION_ADMIN']);
+    for (const value of ['SYSTEM_ADMIN', 'CONTRACTOR', 'AUDITOR']) {
+      expect(() => loadWebServerEnv({ ...REQUIRED, WEB_TENDER_OPEN_ROLES: value })).toThrow(
+        'WEB_TENDER_OPEN_ROLES',
+      );
+    }
+  });
+});
+
+describe('the evaluation and award roles, and the conflict rules', () => {
+  it('evaluating and awarding default to the owner’s own role set, and refuse what never reads a bid', () => {
+    for (const name of ['WEB_TENDER_EVALUATE_ROLES', 'WEB_TENDER_AWARD_ROLES'] as const) {
+      expect(loadWebServerEnv(REQUIRED)[name]).toEqual([]);
+      expect(loadWebServerEnv({ ...REQUIRED, [name]: 'FLEET_MANAGER' })[name]).toEqual([
+        'FLEET_MANAGER',
+      ]);
+      for (const value of ['SYSTEM_ADMIN', 'CONTRACTOR', 'AUDITOR']) {
+        expect(() => loadWebServerEnv({ ...REQUIRED, [name]: value })).toThrow(name);
+      }
+    }
+  });
+
+  it('the conflict rules default to AWARDER_NOT_EVALUATOR, switch off when empty, and stop the portal on an unknown one', () => {
+    expect(loadWebServerEnv(REQUIRED).WEB_TENDER_COI_RULES).toEqual(['AWARDER_NOT_EVALUATOR']);
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_TENDER_COI_RULES: '' }).WEB_TENDER_COI_RULES,
+    ).toEqual([]);
+    expect(
+      loadWebServerEnv({
+        ...REQUIRED,
+        WEB_TENDER_COI_RULES: 'AWARDER_NOT_EVALUATOR, EVALUATOR_NOT_TENDER_AUTHOR',
+      }).WEB_TENDER_COI_RULES,
+    ).toEqual(['AWARDER_NOT_EVALUATOR', 'EVALUATOR_NOT_TENDER_AUTHOR']);
+    expect(() => loadWebServerEnv({ ...REQUIRED, WEB_TENDER_COI_RULES: 'MADE_UP' })).toThrow();
   });
 });
