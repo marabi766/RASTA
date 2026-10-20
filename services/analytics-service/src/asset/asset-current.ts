@@ -156,7 +156,8 @@ function nextCurrent(held: AssetCurrent | null, event: AssetEvent): AssetCurrent
     current = { ...current, organizationId: event.tenant, ownerSeq: event.seq };
   }
 
-  if (event.kind !== 'OTHER' && event.seq > current.statusSeq) {
+  // `OTHER` returned above: every event left states a status, a transfer REGISTERED.
+  if (event.seq > current.statusSeq) {
     current = { ...current, status: statusOf(event), statusSeq: event.seq };
   }
 
