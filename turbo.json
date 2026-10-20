@@ -95,7 +95,8 @@
         "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
         "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
         "ANALYTICS_*",
-        "CORS_ORIGINS"
+        "CORS_ORIGINS",
+        "PROCUREMENT_*"
       ]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
@@ -160,7 +161,8 @@
         "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
         "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
         "ANALYTICS_*",
-        "CORS_ORIGINS"
+        "CORS_ORIGINS",
+        "PROCUREMENT_*"
       ]
     },
     // identity-service's two 500-write aggregation proofs, run alone after the
@@ -272,6 +274,11 @@
     // CONTRACT_SERVICE_URL and ECONOMIC_STATEMENT_BUSINESS_LINE (CON-003 PR 6b):
     // economic-service's statement owner (A-13) and the line a statement's
     // obligation is recorded under (Q-130, unset by default); the same rule.
+    //
+    // PROCUREMENT_* and CORS_ORIGINS (COM-007 PR 1): procurement-service is new,
+    // so none of its settings may join the withheld list — its own settings and
+    // the CORS list every service reads are declared here, which takes
+    // CORS_ORIGINS off every other service's withheld entry too.
     "dev": {
       "cache": false,
       "persistent": true,
@@ -302,7 +309,8 @@
         "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
         "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
         "ANALYTICS_*",
-        "CORS_ORIGINS"
+        "CORS_ORIGINS",
+        "PROCUREMENT_*"
       ]
     },
     "clean": { "cache": false }

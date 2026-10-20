@@ -2059,11 +2059,13 @@
         "properties": {
           "windowHours": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 8760
           },
           "minQuantity": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "maximum": 2147483647
           },
           "shortfallPolicy": {
             "$ref": "#/components/schemas/ShortfallPolicy"
@@ -2076,10 +2078,14 @@
         "required": ["windowHours", "minQuantity", "shortfallPolicy", "settingVersion"],
         "properties": {
           "windowHours": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8760
           },
           "minQuantity": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
           },
           "shortfallPolicy": {
             "$ref": "#/components/schemas/ShortfallPolicy"

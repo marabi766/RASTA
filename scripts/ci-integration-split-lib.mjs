@@ -72,6 +72,7 @@ const SERVICES = [
   'CONTRACT',
   'INVENTORY',
   'ANALYTICS',
+  'PROCUREMENT',
   'NOTIFICATION',
   'AUDIT',
 ];
@@ -133,6 +134,7 @@ export const STEP_INVENTORY = Object.freeze({
   'Audit coverage gate': coverageGate('audit'),
   'Notification coverage gate': coverageGate('notification'),
   'Organization coverage gate': coverageGate('organization'),
+  'Procurement coverage gate': coverageGate('procurement'),
   'Test independence (F-25)': {
     run: withKafka('tests', 'pnpm run test:independence'),
     env: { ...KAFKA_TESTS, ...databases('MAINTENANCE') },

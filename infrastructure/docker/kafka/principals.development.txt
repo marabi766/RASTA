@@ -19,4 +19,5 @@ marketplace-service
 notification-service
 ops-replay
 organization-service
+procurement-service
 supplier-service
