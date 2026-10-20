@@ -6,6 +6,7 @@ import type { EventEnvelope } from '@rasta/contracts';
 import { EventConsumer, InternalTokenService, runUnscoped } from '@rasta/nest-common';
 import { StatementSettlementConsumer } from '../src/consumers/statement-settlement.consumer';
 import { SourceFactsClient } from '../src/provenance/source-facts.client';
+import { TransactionRepository } from '../src/transaction/transaction.repository';
 import { enrichOpenApiDocument, INTERNAL_TOKEN_SCHEME } from '../src/openapi/document';
 import {
   admin,
@@ -222,6 +223,56 @@ describe('GET /v1/internal/obligations/by-source/STATEMENT/{statementId} (ADR-06
         settledAt: settlement.settledAt.toISOString(),
       });
       expect(JSON.stringify(completed[0]?.payload)).not.toContain(statementId);
+    });
+
+    it('reads the obligation and its settlement from one snapshot when a settlement commits between the two reads (#340 r1)', async () => {
+      const { statementId, obligationId } = await approvedStatement('3100000');
+
+      // The read's second query is held until a real settlement of this very
+      // obligation — over HTTP, through SettlementService — has committed. Under
+      // READ COMMITTED that query would see the new settlement beside the
+      // PENDING_SETTLEMENT the first one read, and the answer would be a 500.
+      const repository = harness.app.get(TransactionRepository);
+      let settledBetween: request.Response | undefined;
+      const hooked = harness.prisma.client.$extends({
+        query: {
+          settlement: {
+            async findFirst({ args, query }) {
+              if (!settledBetween && args.where?.transactionId === obligationId) {
+                settledBetween = await settle(obligationId);
+              }
+              return query(args);
+            },
+          },
+        },
+      });
+      Object.defineProperty(repository, 'client', { configurable: true, get: () => hooked });
+      let during: request.Response;
+      try {
+        during = await read(statementId);
+      } finally {
+        delete (repository as unknown as Record<string, unknown>).client;
+      }
+
+      // The settlement did commit between the reads …
+      expect(settledBetween?.status).toBe(201);
+      // … and the answer is the moment before it, whole: not settled, no settlement.
+      expect(during.body).toMatchObject({
+        obligationId,
+        status: 'PENDING_SETTLEMENT',
+        settlementId: null,
+        settledAt: null,
+        settledAmountMinor: null,
+        fullySettled: false,
+      });
+      // The next read is the moment after it, whole.
+      const after = await read(statementId);
+      expect(after.body).toMatchObject({
+        status: 'SETTLED',
+        settlementId: settledBetween?.body.settlementId,
+        settledAmountMinor: '3100000',
+        fullySettled: true,
+      });
     });
 
     it('states a disputed one as not settled', async () => {

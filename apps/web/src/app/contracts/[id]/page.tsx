@@ -1,6 +1,9 @@
 import { redirect } from 'next/navigation';
 
 import { AppShell, Button, ButtonLink, PageHeader, TopBar } from '@/ui';
+import { CONTRACT_COMMANDS } from '@/lib/contract-command-fields';
+import { FLASH_PARAM } from '@/lib/form-fields';
+import { contractCallerOf } from '@/server/contract-commands';
 import {
   canDraftStatement,
   fetchStatements,
@@ -9,14 +12,16 @@ import {
 import { currentSession } from '@/server/current-session';
 import { fetchAmendments, fetchContract, fetchMilestones } from '@/server/contracts';
 import { webServerEnv } from '@/server/env';
+import { readFlash } from '@/server/flash';
 import { mintStatementSubmission } from '@/server/statement-replay';
 import { submissionBinding } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ContractDetailScreen } from './ContractDetailScreen';
+import { contractCommandOffers } from './contract-offers';
 
 /**
- * The `/contracts/[id]` route — جزئیات قرارداد (docs/16 § ۱۶٫۶, ADR-068). Read-only.
+ * The `/contracts/[id]` route — جزئیات قرارداد (docs/16 § ۱۶٫۶, ADR-068).
  *
  * **No role check here**, as on every portal route: contract-service decides
  * who may read — the employer's organization (configured roles) and the
@@ -31,7 +36,13 @@ import { ContractDetailScreen } from './ContractDetailScreen';
  *
  * The contractor's draft form is drawn when `canDraftStatement` — a copy of
  * contract-service's own checks, from the roles **the access token** carries —
- * says the service would accept it. UX only; the service decides again.
+ * says the service would accept it. The contract's own forms — signing,
+ * cancelling a draft, proposing and signing an amendment, planning and
+ * changing a milestone — are drawn the same way (`contract-offers.ts`). UX
+ * only; the service decides again.
+ *
+ * A confirmed command comes back here with a signed confirmation for this
+ * contract (`server/flash.ts`); a typed one shows nothing.
  */
 export const dynamic = 'force-dynamic';
 
@@ -56,6 +67,14 @@ export default async function ContractPage({
   const amendmentCursor = one(query.amendmentCursor);
   const statementCursor = one(query.statementCursor);
 
+  const flash = query[FLASH_PARAM];
+  const notice = readFlash(
+    session,
+    typeof flash === 'string' ? flash : undefined,
+    id,
+    CONTRACT_COMMANDS,
+  );
+
   const result = await fetchContract(session, id);
   const [amendments, milestones, statements] =
     result.kind === 'OK'
@@ -65,6 +84,17 @@ export default async function ContractPage({
           fetchStatements(session, id, statementCursor),
         ])
       : [null, null, null];
+
+  const commands =
+    result.kind === 'OK'
+      ? await contractCommandOffers(
+          session,
+          contractCallerOf(session.accessToken),
+          result.data,
+          amendments,
+          milestones,
+        )
+      : null;
 
   const draft =
     result.kind === 'OK' && canDraftStatement(statementCallerOf(session.accessToken), result.data)
@@ -118,6 +148,8 @@ export default async function ContractPage({
           milestones={milestones}
           statements={statements}
           draft={draft}
+          commands={commands}
+          notice={notice ?? null}
         />
       </div>
     </AppShell>

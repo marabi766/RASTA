@@ -367,7 +367,7 @@ describe('ingestion lag histogram', () => {
     expect(labelsOf(auditIngestionLagSeconds)).toEqual(['source_topic']);
   });
 
-  it('seeds exactly the fourteen domain topics, the trail topic and the replay record, derived from their constants', () => {
+  it('seeds exactly the fifteen domain topics, the trail topic and the replay record, derived from their constants', () => {
     expect(AUDIT_INGESTION_SOURCE_TOPICS).toEqual([
       ...DOMAIN_TOPICS,
       AUDIT_TRAIL_TOPIC,
@@ -388,10 +388,11 @@ describe('ingestion lag histogram', () => {
       'rasta.construction.v1',
       'rasta.contract.v1',
       'rasta.inventory.v1',
+      'rasta.procurement.v1',
       'rasta.audit.trail.v1',
       'rasta.ops.replay.v1',
     ]);
-    expect(new Set(AUDIT_INGESTION_SOURCE_TOPICS).size).toBe(16);
+    expect(new Set(AUDIT_INGESTION_SOURCE_TOPICS).size).toBe(17);
     expect(Object.isFrozen(AUDIT_INGESTION_SOURCE_TOPICS)).toBe(true);
   });
 
@@ -404,11 +405,11 @@ describe('ingestion lag histogram', () => {
     const buckets = lines.filter((line) => line.name === `${LAG}_bucket`);
     const sums = lines.filter((line) => line.name === `${LAG}_sum`);
     const counts = lines.filter((line) => line.name === `${LAG}_count`);
-    // Sixteen topics times nine bounds plus +Inf, and one _sum and _count each.
-    expect(buckets).toHaveLength(160);
-    expect(sums).toHaveLength(16);
-    expect(counts).toHaveLength(16);
-    expect(lines).toHaveLength(192);
+    // Seventeen topics times nine bounds plus +Inf, and one _sum and _count each.
+    expect(buckets).toHaveLength(170);
+    expect(sums).toHaveLength(17);
+    expect(counts).toHaveLength(17);
+    expect(lines).toHaveLength(204);
 
     for (const topic of topics) {
       const own = buckets.filter((line) => line.labels.source_topic === topic);
@@ -440,7 +441,7 @@ describe('ingestion lag histogram', () => {
 
     expect(observe).not.toHaveBeenCalled();
     const lines = await lagLines();
-    expect(lines).toHaveLength(192);
+    expect(lines).toHaveLength(204);
     expect(lines.filter((line) => line.value !== 0)).toEqual([]);
   });
 
@@ -462,7 +463,7 @@ describe('ingestion lag histogram', () => {
     const others = (await lagLines()).filter(
       (line) => line.labels.source_topic !== AUDIT_TRAIL_TOPIC,
     );
-    expect(others).toHaveLength(180);
+    expect(others).toHaveLength(192);
     expect(others.filter((line) => line.value !== 0)).toEqual([]);
   });
 });
@@ -547,14 +548,14 @@ describe('expected producer series', () => {
     expect(ingested.every((sample) => sample.value === 0)).toBe(true);
   });
 
-  it('bounds the whole configured exposition by the topology: fourteen producers, 48 tuples', async () => {
+  it('bounds the whole configured exposition by the topology: fifteen producers, 51 tuples', async () => {
     initializeExpectedProducerSeries(AUDIT_SOURCE_SERVICES);
 
     const info = await exposed(INFO);
     expect(info.map((sample) => sample.labels.source_service)).toEqual([...AUDIT_SOURCE_SERVICES]);
     const ingested = await exposed(INGESTED);
-    // Sixteen topics, each with exactly one owner, times three outcomes.
-    expect(ingested).toHaveLength(48);
+    // Seventeen topics, each with exactly one owner, times three outcomes.
+    expect(ingested).toHaveLength(51);
     expect(new Set(ingested.map((sample) => sample.labels.source_topic))).toEqual(
       new Set(AUDIT_INGESTION_SOURCE_TOPICS),
     );

@@ -121,6 +121,11 @@ const FOLDED_INITIAL_MIGRATION = {
     'as contract does. Its outbox objects are verified by ' +
     'scripts/verify-migration-reversible.mjs inventory, whose EXPECTED.inventory carries ' +
     'the same five claim constraints.',
+  procurement:
+    'Folds the domain schema, the idempotency store, ADR-050 and ADR-051 B1 into ' +
+    '20261016200000_init_procurement, as inventory does. Its outbox objects are verified by ' +
+    'scripts/verify-migration-reversible.mjs procurement, whose EXPECTED.procurement carries ' +
+    'the same five claim constraints.',
   notification:
     'Gained an outbox late — with NTF-002 audit events rather than at scaffold time — so its ' +
     'claim objects arrived in a migration of its own, 20260919060000_notification_outbox, and ' +

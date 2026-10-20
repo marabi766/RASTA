@@ -1,6 +1,15 @@
 import type { ReactNode } from 'react';
 
-import { EmptyState, ErrorState, Identifier, NoAccessState, Section, StatusBadge } from '@/ui';
+import {
+  Alert,
+  EmptyState,
+  ErrorState,
+  Identifier,
+  NoAccessState,
+  Section,
+  StatusBadge,
+} from '@/ui';
+import { BID_COMMAND_DONE, bidStatusLabel, type BidCommand } from '@/lib/bid-fields';
 import { formatJalaliDateLong, formatJalaliDateTime, toPersianDigits } from '@/lib/format';
 import {
   formatWeightBp,
@@ -17,6 +26,7 @@ import type {
   TenderCriterion,
   TenderDetail,
 } from '@/server/tenders';
+import type { BidNote, BidReceipt } from '@/server/tender-bids';
 
 /**
  * The tender detail (docs/16 § ۱۶٫۶, `/tenders/[id]`), read-only, in two forms
@@ -28,9 +38,12 @@ import type {
  * exist: a distinct "exists but not yours" would confirm the id to somebody who
  * should not learn it.
  *
- * Bids are not part of this screen at all — no content, no bidder, no count
- * (ADR-066). Placing or withdrawing a bid, opening, evaluation and award are
- * later slices.
+ * On the bidder's side the organization's **own** bid is shown — its
+ * receipt, revision and status, never its content (sealed; ADR-066 § 4) — with
+ * the forms to submit, replace or withdraw it where construction-service would
+ * accept them (`OwnBidSection`). Nothing of another bid, a bidder or a count
+ * is ever shown. Opening, evaluation and award are the owner's, and later
+ * slices.
  */
 
 const NOT_FOUND_TITLE = 'این مناقصه پیدا نشد';
@@ -142,9 +155,11 @@ export interface OwnTenderDetailScreenProps {
   readonly result: ReadResult<TenderDetail>;
   /** `null` when the tender itself could not be read, so criteria were not asked. */
   readonly criteria: ReadResult<TenderCriteria> | null;
+  /** The owner's sections — publication, opening, bids (`OwnerSections`) — when there are any. */
+  readonly owner?: ReactNode;
 }
 
-export function OwnTenderDetailScreen({ result, criteria }: OwnTenderDetailScreenProps) {
+export function OwnTenderDetailScreen({ result, criteria, owner }: OwnTenderDetailScreenProps) {
   if (result.kind !== 'OK') return <Failure result={result} />;
 
   const tender = result.data;
@@ -186,17 +201,108 @@ export function OwnTenderDetailScreen({ result, criteria }: OwnTenderDetailScree
       <ScopeSection scopeOfWork={tender.scopeOfWork} />
 
       {criteria ? <OwnCriteriaSection result={criteria} /> : null}
+
+      {owner}
     </div>
   );
 }
 
-/** The person's roles could not be read, so which door to knock on is unknown: none is. */
-export interface OpenTenderDetailScreenProps {
-  readonly result: ReadResult<OpenTenderDetail>;
+const BID_NOTES: Readonly<Record<Exclude<BidNote, null>, string>> = {
+  NOT_OPEN: 'بازهٔ پذیرش پیشنهاد هنوز آغاز نشده است؛ فرم پیشنهاد از زمان آغاز بازه عرضه می‌شود.',
+  CLOSED: 'مهلت پذیرش پیشنهاد گذشته است؛ پیشنهادی ثبت، جایگزین یا پس گرفته نمی‌شود.',
+  UNREAD:
+    'پیشنهاد سازمان شما برای این مناقصه خوانده نشد، پس معلوم نیست پیشنهادی ثبت شده یا نه و فرمی عرضه نمی‌شود. کمی بعد صفحه را تازه کنید.',
+  REFUSED: 'ثبت پیشنهاد برای این مناقصه در اختیار شما نیست.',
+};
+
+export interface OwnBidSectionProps {
+  /** The organization's own bid, as `…/bids/mine` answered; null when it was not asked. */
+  readonly bid: ReadResult<BidReceipt>;
+  readonly note: BidNote;
+  /** A command this session just confirmed (`server/flash.ts`). */
+  readonly done?: BidCommand;
+  /** The forms, drawn by `BidCommands` (a client component). */
+  readonly commands?: ReactNode;
 }
 
-export function OpenTenderDetailScreen({ result }: OpenTenderDetailScreenProps) {
-  if (result.kind !== 'OK') return <Failure result={result} />;
+/**
+ * The bidder's own bid on this tender: what construction-service holds of it —
+ * never its content — and the forms the page may offer. A bid that could not
+ * be read is said to be unknown, never absent.
+ */
+export function OwnBidSection({ bid, note, done, commands }: OwnBidSectionProps) {
+  return (
+    <Section headingId="tender-own-bid" title="پیشنهاد سازمان شما">
+      <div className="flex flex-col gap-4">
+        {done ? (
+          <Alert tone="success" title="انجام شد">
+            {BID_COMMAND_DONE[done]}
+          </Alert>
+        ) : null}
+        <OwnBid bid={bid} />
+        <p className="text-sm text-content-muted">
+          محتوای پیشنهاد در سرور به کلید همین مناقصه مهر و موم می‌شود و پیش از گشایش برای هیچ‌کس، از
+          جمله خود شما، خوانده نمی‌شود؛ این صفحه فقط رسید و وضعیت آن را نشان می‌دهد. صلاحیت
+          پیمانکاری سازمان شما را سرویس تأمین‌کنندگان هنگام ثبت یا جایگزینی بررسی می‌کند.
+        </p>
+        {note && note !== 'UNREAD' && note !== 'REFUSED' ? (
+          <Alert tone="info">{BID_NOTES[note]}</Alert>
+        ) : null}
+        {commands}
+      </div>
+    </Section>
+  );
+}
+
+function OwnBid({ bid }: { bid: ReadResult<BidReceipt> }) {
+  if (bid.kind === 'NOT_FOUND') {
+    return <p>سازمان شما برای این مناقصه پیشنهادی ثبت نکرده است.</p>;
+  }
+  if (bid.kind === 'FORBIDDEN') return <NoAccessState description={BID_NOTES.REFUSED} />;
+  if (bid.kind !== 'OK') {
+    return <ErrorState description={BID_NOTES.UNREAD} correlationId={bid.correlationId} />;
+  }
+  const receipt = bid.data;
+  return (
+    <dl className="grid gap-3 sm:grid-cols-2">
+      <Term label="وضعیت">
+        <StatusBadge status={receipt.status} label={bidStatusLabel(receipt.status)} />
+      </Term>
+      <Term label="نسخه">{toPersianDigits(String(receipt.revision))}</Term>
+      <Term label="دریافت در">{formatJalaliDateTime(receipt.receivedAt)}</Term>
+      {receipt.withdrawnAt ? (
+        <Term label="پس گرفته در">{formatJalaliDateTime(receipt.withdrawnAt)}</Term>
+      ) : null}
+      <Term label="شناسهٔ پیشنهاد">
+        <Identifier>{receipt.bidId}</Identifier>
+      </Term>
+      <div className="sm:col-span-2">
+        <dt className="text-sm text-content-muted">رسید (سر زنجیرهٔ رسیدهای مناقصه)</dt>
+        <dd className="break-all">
+          <Identifier>{receipt.receipt}</Identifier>
+        </dd>
+      </div>
+    </dl>
+  );
+}
+
+export interface OpenTenderDetailScreenProps {
+  readonly result: ReadResult<OpenTenderDetail>;
+  /** The bidder's own bid, when the caller bids at all (`OwnBidSection`). */
+  readonly ownBid?: ReactNode;
+}
+
+export function OpenTenderDetailScreen({ result, ownBid }: OpenTenderDetailScreenProps) {
+  // A tender no longer open for bids — closed, opened, awarded — is not behind
+  // the bidder's door any more; the organization's own bid on it still is.
+  if (result.kind !== 'OK') {
+    return (
+      <div className="flex flex-col gap-6">
+        <Failure result={result} />
+        {ownBid}
+      </div>
+    );
+  }
 
   const tender = result.data;
 
@@ -226,6 +332,8 @@ export function OpenTenderDetailScreen({ result }: OpenTenderDetailScreenProps) 
           <CriteriaList items={tender.criteria} />
         )}
       </Section>
+
+      {ownBid}
     </div>
   );
 }
