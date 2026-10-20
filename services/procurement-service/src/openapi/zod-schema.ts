@@ -38,6 +38,41 @@ export type JsonSchema = Record<string, unknown>;
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type AnyZod = z.ZodTypeAny & { _def: any };
 
+/** The bounds of each `codePointLength` refinement, by the refinement (a `.describe()` keeps it). */
+const CODE_POINT_BOUNDS = new WeakMap<object, { minLength: number; maxLength: number }>();
+
+/**
+ * `schema` of `minLength` to `maxLength` characters counted as JSON Schema's `minLength` and
+ * `maxLength` count them, and PostgreSQL's `char_length`: code points. Zod's `min`/`max` count
+ * UTF-16 code units, so a character outside the BMP counts twice there — "😀" × 4 passed `min(8)`
+ * and failed the database's CHECK (PR-338 r1 F3), "😀" × 300 failed `max(500)` though the CHECK
+ * takes it (PR-338 r2 F2). The issues are the ones `min`/`max` raise, and the bounds are published
+ * as `minLength`/`maxLength`.
+ */
+export function codePointLength(schema: z.ZodString, minLength: number, maxLength: number) {
+  const refinement = (value: string, context: z.RefinementCtx): void => {
+    const length = [...value].length;
+    if (length < minLength) {
+      context.addIssue({
+        code: z.ZodIssueCode.too_small,
+        minimum: minLength,
+        type: 'string',
+        inclusive: true,
+      });
+    }
+    if (length > maxLength) {
+      context.addIssue({
+        code: z.ZodIssueCode.too_big,
+        maximum: maxLength,
+        type: 'string',
+        inclusive: true,
+      });
+    }
+  };
+  CODE_POINT_BOUNDS.set(refinement, { minLength, maxLength });
+  return schema.superRefine(refinement);
+}
+
 export function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
   const def = (schema as AnyZod)._def;
   const description = def.description as string | undefined;
@@ -113,9 +148,12 @@ function convert(schema: z.ZodTypeAny, def: any): JsonSchema {
     // rules they carry — "at least one of hours or kilometres", "periodEnd
     // after periodStart" — cannot be expressed in JSON Schema, so the inner
     // shape is published and the rule stays in the endpoint description where
-    // a human will read it.
-    case z.ZodFirstPartyTypeKind.ZodEffects:
-      return toJsonSchema(def.schema);
+    // a human will read it. A `codePointLength` bound is the exception: it is
+    // exactly JSON Schema's `minLength`/`maxLength`, so it is published as them.
+    case z.ZodFirstPartyTypeKind.ZodEffects: {
+      const bounds = CODE_POINT_BOUNDS.get(def.effect?.refinement);
+      return bounds ? { ...toJsonSchema(def.schema), ...bounds } : toJsonSchema(def.schema);
+    }
 
     default:
       return {};

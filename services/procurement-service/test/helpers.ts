@@ -65,6 +65,69 @@ export function runtimeClient(): PrismaClient {
   return new PrismaClient({ datasources: { db: { url: databaseUrl() } } });
 }
 
+const HOUR_MS = 3_600_000;
+
+/**
+ * An OPEN window of `demands` live demands of one unit each, opened at `openedAt` for `hours`,
+ * seeded through the **owner** connection — for the suites that need a window far larger than a
+ * suite can submit one demand at a time. N inserts would each queue a rescan of the window at
+ * commit (an insert must be checked), so the seed lifts the demand table's totals trigger for its
+ * own transaction and, for a large seed, the demand row guard too (the rows are built valid: inside
+ * the window, SUBMITTED, version 1). The window's own insert still checks the seeded total against
+ * the seeded demands at commit. Everything after the seed is the real service.
+ */
+export async function seedOpenWindow(input: {
+  organizationId: string;
+  productId: string;
+  demands: number;
+  policy: 'EXTEND' | 'REFER' | 'CLOSE';
+  minQuantity: number;
+  openedAt: Date;
+  hours: number;
+}): Promise<{ aggregationId: string; demandIds: string[] }> {
+  const aggregationId = `AGG_${ulid()}`;
+  const demandIds = Array.from({ length: input.demands }, () => `DMD_${ulid()}`);
+  const { organizationId, productId, openedAt } = input;
+  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  const lifted = ['tg_demand_request_totals_check', 'tg_demand_request_guard'];
+  try {
+    await owner.$transaction(
+      async (tx) => {
+        for (const trigger of lifted) {
+          await tx.$executeRawUnsafe(`ALTER TABLE "demand_request" DISABLE TRIGGER "${trigger}"`);
+        }
+        await tx.$executeRaw`
+          INSERT INTO demand_aggregation
+            (id, organization_id, product_id, status, opened_at, closes_at, window_hours,
+             min_quantity, shortfall_policy, setting_version, total_quantity, demand_count,
+             extension_count, created_at, updated_at, version)
+          VALUES (${aggregationId}, ${organizationId}, ${productId}, 'OPEN', ${openedAt},
+                  ${new Date(openedAt.getTime() + input.hours * HOUR_MS)}, ${input.hours},
+                  ${input.minQuantity}, ${input.policy}, NULL, ${input.demands}, ${input.demands},
+                  0, ${openedAt}, ${openedAt}, 1)`;
+        // One millisecond apart from the opening, so every demand is inside [opened_at, closes_at).
+        await tx.$executeRaw`
+          INSERT INTO demand_request
+            (id, organization_id, aggregation_id, product_id, quantity, status, submitted_at,
+             submitted_by, submitted_correlation_id, created_at, updated_at, version)
+          SELECT d.id, ${organizationId}, ${aggregationId}, ${productId}, 1, 'SUBMITTED',
+                 ${openedAt}::timestamptz + make_interval(secs => d.n / 1000.0),
+                 'USR-SCALE-SEED', 'corr-scale-seed',
+                 ${openedAt}::timestamptz + make_interval(secs => d.n / 1000.0),
+                 ${openedAt}::timestamptz + make_interval(secs => d.n / 1000.0), 1
+            FROM unnest(${demandIds}::text[]) WITH ORDINALITY AS d(id, n)`;
+        for (const trigger of lifted) {
+          await tx.$executeRawUnsafe(`ALTER TABLE "demand_request" ENABLE TRIGGER "${trigger}"`);
+        }
+      },
+      { timeout: 600_000, maxWait: 10_000 },
+    );
+  } finally {
+    await owner.$disconnect();
+  }
+  return { aggregationId, demandIds };
+}
+
 /** The guards the cleanup lifts, by table, children first. */
 const GUARDED = [
   ['demand_request', ['tg_demand_request_guard', 'tg_demand_request_totals_check']],
@@ -81,20 +144,24 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
   if (organizationIds.length === 0) return;
   const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
   try {
-    await owner.$transaction(async (tx) => {
-      for (const [table, triggers] of GUARDED) {
-        for (const trigger of triggers) {
-          await tx.$executeRawUnsafe(`ALTER TABLE "${table}" DISABLE TRIGGER "${trigger}"`);
+    // Long enough for a suite that seeded a window of hundreds of thousands of demands.
+    await owner.$transaction(
+      async (tx) => {
+        for (const [table, triggers] of GUARDED) {
+          for (const trigger of triggers) {
+            await tx.$executeRawUnsafe(`ALTER TABLE "${table}" DISABLE TRIGGER "${trigger}"`);
+          }
+          await tx.$executeRawUnsafe(
+            `DELETE FROM "${table}" WHERE "organization_id" = ANY($1::text[])`,
+            organizationIds,
+          );
+          for (const trigger of triggers) {
+            await tx.$executeRawUnsafe(`ALTER TABLE "${table}" ENABLE TRIGGER "${trigger}"`);
+          }
         }
-        await tx.$executeRawUnsafe(
-          `DELETE FROM "${table}" WHERE "organization_id" = ANY($1::text[])`,
-          organizationIds,
-        );
-        for (const trigger of triggers) {
-          await tx.$executeRawUnsafe(`ALTER TABLE "${table}" ENABLE TRIGGER "${trigger}"`);
-        }
-      }
-    });
+      },
+      { timeout: 600_000, maxWait: 10_000 },
+    );
     await owner.idempotencyKey.deleteMany({ where: { organizationId: { in: organizationIds } } });
     await owner.outboxMessage.deleteMany({ where: { organizationId: { in: organizationIds } } });
   } finally {

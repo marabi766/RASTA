@@ -18,6 +18,7 @@ const DENIED = /Code: `42501`/;
 
 /** The guards this service keeps in the database, by table: none may vanish unnoticed. */
 const GUARDS = [
+  ['demand_aggregation', 'tg_demand_aggregation_born'],
   ['demand_aggregation', 'tg_demand_aggregation_guard'],
   ['demand_aggregation', 'tg_demand_aggregation_no_truncate'],
   ['demand_aggregation', 'tg_demand_aggregation_totals_check'],
