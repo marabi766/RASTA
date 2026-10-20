@@ -13,7 +13,7 @@
 -- before the one that refuses, and is applied before it refuses:
 --
 -- - transaction_source_quarantine keeps the key the row had — organization,
---   source type, source reference — with the recorded decision behind taking
+--   source type, source reference (NULL if the row had none) — with the recorded decision behind taking
 --   it, who took it and when. Append-only: one row per transaction, never
 --   changed, never deleted.
 -- - quarantine_transaction_source(id, decision) writes that row and clears the
@@ -32,7 +32,10 @@ CREATE TABLE "transaction_source_quarantine" (
     "transaction_id" TEXT NOT NULL,
     "organization_id" TEXT NOT NULL,
     "source_type" TEXT NOT NULL,
-    "source_reference" TEXT NOT NULL,
+    -- NULL as the row had it: the previous release let a caller name a
+    -- reserved source type with no reference, and 20261017130000's preflight
+    -- counts that row too (review of #334 round 3, F1).
+    "source_reference" TEXT,
     "decision" TEXT NOT NULL,
     "quarantined_by" TEXT NOT NULL,
     "quarantined_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -77,7 +80,9 @@ BEGIN
     RAISE EXCEPTION 'transaction %: no such transaction', p_transaction_id
       USING ERRCODE = 'no_data_found';
   END IF;
-  IF keyed."source_type" IS NULL OR keyed."source_reference" IS NULL THEN
+  -- A source type is the key's claim; its reference may be missing, as
+  -- the previous release accepted it. Every row the preflight counts has one.
+  IF keyed."source_type" IS NULL THEN
     RAISE EXCEPTION 'transaction %: holds no source key to quarantine', p_transaction_id
       USING ERRCODE = 'check_violation';
   END IF;

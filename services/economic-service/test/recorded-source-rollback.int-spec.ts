@@ -393,6 +393,22 @@ describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => 
       keys.forgedTopUp,
     );
 
+    // A reserved type with no reference at all: the previous release kept the
+    // two fields independent, and the preflight counts this row as well — the
+    // quarantine must take it too (review of #334 round 3, F1).
+    const unreferenced = id('TXN');
+    await db.$executeRawUnsafe(
+      `INSERT INTO "transaction" (id, organization_id, counterparty_organization_id,
+         transaction_type, status, gross_amount_minor, currency, occurred_at, source_type,
+         source_reference, idempotency_key, correlation_id, created_by, updated_at)
+       VALUES ($1, $2, $3, 'MARKETPLACE_ORDER', 'CREATED', 1, 'IRR', now(), 'ORDER', NULL,
+         $4, 'corr-unreferenced', 'USR-RSV-ADMIN', now())`,
+      unreferenced,
+      BUYER,
+      ACCOMPLICE,
+      id('rsv-unreferenced'),
+    );
+
     // The quarantine keys round 2's rename would have taken, each held already.
     const occupied = [
       await personRecords('ORDER_UNCONFIRMED', 'MARKETPLACE_ORDER', keys.order),
@@ -406,7 +422,8 @@ describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => 
     ];
     return {
       personOrder,
-      untrusted: [personOrder, personRepair, forgedRepair, forgedTopUp].sort(),
+      untrusted: [personOrder, personRepair, forgedRepair, forgedTopUp, unreferenced].sort(),
+      unreferenced,
       occupied,
     };
   }
@@ -419,14 +436,17 @@ describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => 
     await sagaRecordsOrder();
     runDown(url);
 
-    const { personOrder, untrusted, occupied } = await untrustedRows(db, personRecords);
+    const { personOrder, untrusted, unreferenced, occupied } = await untrustedRows(
+      db,
+      personRecords,
+    );
 
     const before = await shape(db);
-    expect(before.rows).toHaveLength(11);
+    expect(before.rows).toHaveLength(12);
 
     const refused = deploy(url);
     expect(refused.ok).toBe(false);
-    expect(REFUSAL.exec(refused.output)?.[1]).toBe('4');
+    expect(REFUSAL.exec(refused.output)?.[1]).toBe('5');
     expect(await shape(db)).toEqual({ ...UNGUARDED, rows: before.rows, quarantined: [] });
     resolveRolledBack(url);
 
@@ -439,19 +459,20 @@ describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => 
     expect(cancelled.rows.find((r) => r.id === personOrder)?.status).toBe('CANCELLED');
     const stillRefused = deploy(url);
     expect(stillRefused.ok).toBe(false);
-    expect(REFUSAL.exec(stillRefused.output)?.[1]).toBe('4');
+    expect(REFUSAL.exec(stillRefused.output)?.[1]).toBe('5');
     resolveRolledBack(url);
 
     // Round 2's HINT: rename to <type>_UNCONFIRMED. Each new key is held, so
-    // each rename is refused by the unique index, and nothing changes.
-    for (const transactionId of untrusted) {
+    // each rename is refused by the unique index, and nothing changes. (The
+    // unreferenced row holds no unique key, so it has nothing to collide with.)
+    for (const transactionId of untrusted.filter((t) => t !== unreferenced)) {
       await expect(db.$executeRawUnsafe(RENAME, transactionId)).rejects.toThrow(
         /Code: `23505`[\s\S]*\(organization_id, source_type, source_reference\)=[\s\S]*already exists/,
       );
     }
     expect(await shape(db)).toEqual(cancelled);
 
-    // The HINT now: its list — exactly the four — each quarantined, naming the
+    // The HINT now: its list — exactly the five — each quarantined, naming the
     // decision, then deploy again.
     const { list, quarantine } = hint();
     const listed = await db.$queryRawUnsafe<{ id: string }[]>(list);
@@ -493,7 +514,11 @@ describe(`${MIGRATION}: down, then up again, over rows already recorded`, () => 
         quarantined_at: expect.any(String),
       });
     }
-    expect(after.quarantined).toHaveLength(4);
+    expect(after.quarantined).toHaveLength(5);
+    expect(after.quarantined.find((q) => q.transaction_id === unreferenced)).toMatchObject({
+      source_type: 'ORDER',
+      source_reference: null,
+    });
   });
 
   it('the quarantine refuses what it cannot keep, and what it keeps is never changed', async () => {

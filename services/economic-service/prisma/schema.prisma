@@ -541,7 +541,8 @@ model TransactionSourceQuarantine {
   transactionId   String   @id @map("transaction_id")
   organizationId  String   @map("organization_id")
   sourceType      String   @map("source_type")
-  sourceReference String   @map("source_reference")
+  /// NULL when the row claimed a reserved type with no reference (#334 r3 F1).
+  sourceReference String?  @map("source_reference")
   decision        String
   quarantinedBy   String   @map("quarantined_by")
   quarantinedAt   DateTime @default(now()) @map("quarantined_at")
