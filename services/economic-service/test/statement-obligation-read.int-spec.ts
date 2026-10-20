@@ -347,7 +347,8 @@ describe('GET /v1/internal/obligations/by-source/STATEMENT/{statementId} (ADR-06
           counterpartyOrganizationId: contractor,
           grossAmountMinor: '5000',
           currency: 'IRR',
-          sourceType: 'ORDER',
+          // Any source type a person may record (ORDER is marketplace-service's alone since #334).
+          sourceType: 'E2E',
           sourceReference: reference,
           holdFunds: false,
         })
