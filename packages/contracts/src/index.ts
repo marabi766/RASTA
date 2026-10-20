@@ -176,6 +176,30 @@ export {
   shipmentDeliveredPayloadSchema,
 } from './events/inventory-shipments';
 export {
+  INVENTORY_RETURN_EVENTS,
+  INVENTORY_RETURN_EVENT_SCHEMAS,
+  RETURN_SHIPMENT_AGGREGATE,
+  returnShipmentLineSchema,
+  receivedReturnShipmentLineSchema,
+  returnShipmentDispatchedPayloadSchema,
+  returnShipmentReceivedPayloadSchema,
+  returnShipmentInspectedPayloadSchema,
+  returnShipmentResolvedPayloadSchema,
+  returnDispositionLineSchema,
+  RETURN_DISPOSITIONS,
+} from './events/inventory-returns';
+export type {
+  InventoryReturnEventName,
+  ReturnShipmentLine,
+  ReceivedReturnShipmentLine,
+  ReturnShipmentDispatchedPayload,
+  ReturnShipmentReceivedPayload,
+  ReturnShipmentInspectedPayload,
+  ReturnShipmentResolvedPayload,
+  ReturnDispositionLine,
+  ReturnDisposition,
+} from './events/inventory-returns';
+export {
   RETURN_REQUEST_EVENTS,
   RETURN_REQUEST_EVENT_SCHEMAS,
   RETURN_REQUEST_AGGREGATE,
@@ -184,6 +208,10 @@ export {
   returnAuthorizedPayloadSchema,
   returnRejectedPayloadSchema,
   returnCancelledPayloadSchema,
+  returnInTransitPayloadSchema,
+  returnReceivedPayloadSchema,
+  returnInspectedPayloadSchema,
+  returnResolvedPayloadSchema,
 } from './events/return-requests';
 export type {
   ReturnRequestEventName,
@@ -192,6 +220,10 @@ export type {
   ReturnAuthorizedPayload,
   ReturnRejectedPayload,
   ReturnCancelledPayload,
+  ReturnInTransitPayload,
+  ReturnReceivedPayload,
+  ReturnInspectedPayload,
+  ReturnResolvedPayload,
 } from './events/return-requests';
 export type {
   InventoryShipmentEventName,

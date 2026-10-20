@@ -17,11 +17,7 @@ import {
 } from '@/server/tenders';
 
 import { TendersScreen, formatBidWindow, type TendersView } from './TendersScreen';
-import {
-  IdentityUnavailableDetailScreen,
-  OpenTenderDetailScreen,
-  OwnTenderDetailScreen,
-} from './[id]/TenderDetailScreen';
+import { OpenTenderDetailScreen, OwnTenderDetailScreen } from './[id]/TenderDetailScreen';
 
 /**
  * What `/tenders` and `/tenders/[id]` render: every outcome the server read can
@@ -74,6 +70,8 @@ const OWN_DETAIL: TenderDetail = {
   statusReasonCode: null,
   publishedAt: '2026-10-19T08:00:00.000Z',
   createdAt: '2026-10-18T08:00:00.000Z',
+  version: 3,
+  statusChangedByCaller: false,
 };
 
 const OPEN_DETAIL: OpenTenderDetail = {
@@ -215,26 +213,6 @@ describe('the tender list, bidder side', () => {
   });
 });
 
-describe('the tender list, when the roles could not be read', () => {
-  it('asks nothing and says so', () => {
-    render(
-      <TendersScreen view={{ kind: 'IDENTITY_UNAVAILABLE', correlationId: 'corr-3' }} query={{}} />,
-    );
-    expect(screen.getByText(/نقش شما در این سازمان خوانده نشد/)).toBeInTheDocument();
-    expect(screen.getByText(/corr-3/)).toBeInTheDocument();
-    expect(screen.queryByRole('link')).not.toBeInTheDocument();
-  });
-});
-
-describe('the tender detail, when the roles could not be read', () => {
-  it('chooses no door, asks nothing and says so', async () => {
-    const { container } = render(<IdentityUnavailableDetailScreen correlationId="corr-4" />);
-    expect(screen.getByText(/نقش شما در این سازمان خوانده نشد/)).toBeInTheDocument();
-    expect(screen.getByText(/corr-4/)).toBeInTheDocument();
-    expect(await axe(container)).toHaveNoViolations();
-  });
-});
-
 // One test per state, here and in both detail screens below: each axe run gets
 // the whole default timeout to itself instead of sharing one across the states.
 describe('the tender list has no accessibility violations in any state', () => {
@@ -248,7 +226,6 @@ describe('the tender list has no accessibility violations in any state', () => {
   it.each<[string, TendersView]>([
     ['both sides, more to page', sides(ownPage([OWN], 'c2'), openPage([OPEN], 'b2'))],
     ['both sides empty', sides(ownPage([]), openPage([]))],
-    ['roles unread', { kind: 'IDENTITY_UNAVAILABLE', correlationId: 'corr-3' }],
     ...failures.flatMap((failure): [string, TendersView][] => [
       [`own side ${failure.kind}`, sides(failure, null)],
       [`open side ${failure.kind}`, sides(null, failure)],

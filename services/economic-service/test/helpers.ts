@@ -1,6 +1,6 @@
 import { withUtcSession } from '@rasta/config';
 import { ulid } from 'ulid';
-import { runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
+import { RastaError, runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { PrismaClient } from '../src/generated/prisma';
 import { LedgerRepository } from '../src/ledger/ledger.repository';
@@ -14,6 +14,10 @@ import { RewardService } from '../src/reward/reward.service';
 import { SettlementService } from '../src/settlement/settlement.service';
 import { PaymentReconciliationRepository } from '../src/payment/payment-reconciliation.repository';
 import { loadEconomicEnv, type EconomicEnv } from '../src/config/env';
+import type {
+  HierarchyQuestion,
+  OrganizationHierarchy,
+} from '../src/organization/organization-hierarchy';
 import type { Logger } from '@rasta/logging';
 
 /**
@@ -131,6 +135,7 @@ export function testEnv(): EconomicEnv {
     // (`source-facts.fake.ts`). A closed port, so a slip fails fast.
     MAINTENANCE_SERVICE_URL: 'http://127.0.0.1:9',
     FLEET_SERVICE_URL: 'http://127.0.0.1:9',
+    CONTRACT_SERVICE_URL: 'http://127.0.0.1:9',
     ...process.env,
     DATABASE_URL: databaseUrl(),
     ECONOMIC_PLATFORM_ORGANIZATION_ID: PLATFORM_ORGANIZATION_ID,
@@ -151,6 +156,10 @@ export const silentLogger = {
   trace: () => undefined,
   child: () => silentLogger,
 } as unknown as Logger;
+
+const unreachableHierarchy: HierarchyQuestion = {
+  withinVersion: () => Promise.reject(RastaError.upstreamUnavailable('organization-service')),
+};
 
 export interface Wiring {
   prisma: PrismaService;
@@ -180,6 +189,10 @@ export function wire(prisma: PrismaService): Wiring {
   const walletRepository = new WalletRepository(prisma);
   const wallets = new WalletService(walletRepository, ledger, prisma);
   const transactionRepository = new TransactionRepository(prisma);
+  // No suite built here asks the hierarchy: a union administrator acting for
+  // another organization is `union-admin-financial-authority.int-spec.ts`'s,
+  // over HTTP. Asked anyway, it fails closed as an unreachable owner would.
+  const hierarchy = unreachableHierarchy as unknown as OrganizationHierarchy;
   const commissions = new CommissionService(prisma, ledger);
   const transactions = new TransactionService(
     prisma,
@@ -189,6 +202,7 @@ export function wire(prisma: PrismaService): Wiring {
     env,
     ledger,
     commissions,
+    hierarchy,
   );
   const rewards = new RewardService(prisma, ledger, wallets, env);
   const settlements = new SettlementService(
@@ -198,6 +212,7 @@ export function wire(prisma: PrismaService): Wiring {
     walletRepository,
     transactionRepository,
     commissions,
+    hierarchy,
   );
 
   const paymentReconciliation = new PaymentReconciliationRepository(prisma, env);
@@ -610,6 +625,25 @@ export async function cleanup(
         // ISOLATION-ALLOW-UNBOUNDED: as above.
         await tx.$executeRawUnsafe(
           'ALTER TABLE "transaction" ENABLE TRIGGER trg_transaction_pricing_fixed',
+        );
+
+        // A statement obligation is never deleted (CON-003 PR 6b), so this
+        // run's own go here, with the guard lifted in this transaction only;
+        // their legs, settlements and commissions are already gone above.
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE "transaction" DISABLE TRIGGER trg_transaction_statement_obligation_fixed',
+        );
+        await tx.$executeRawUnsafe(
+          `DELETE FROM "transaction"
+            WHERE source_type = 'STATEMENT'
+              AND (organization_id LIKE ANY($1::text[])
+                   OR counterparty_organization_id LIKE ANY($1::text[]))`,
+          orgs,
+        );
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE "transaction" ENABLE TRIGGER trg_transaction_statement_obligation_fixed',
         );
 
         for (const [table, trigger] of [

@@ -10,6 +10,7 @@ import {
   AllExceptionsFilter,
   AuthGuard,
   AUTH_OPTIONS,
+  EventConsumer,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
   OutboxPurgeScheduler,
@@ -44,9 +45,17 @@ import { OrderController } from './order/order.controller';
 import { OrderReturnsController, ReturnController } from './returns/return.controller';
 import { ReturnRepository } from './returns/return.repository';
 import { ReturnService } from './returns/return.service';
+import {
+  MARKETPLACE_DEAD_LETTER_TOPIC,
+  RETURN_MIRROR_CONSUMED_TOPICS,
+  RETURN_MIRROR_CONSUMER,
+  ReturnMirrorConsumer,
+  returnMirrorConsumerFactory,
+} from './returns/return-mirror.consumer';
 import { CatalogueService } from './offer/catalogue.service';
 import { OfferController, ProductController } from './offer/catalogue.controller';
 import { EconomicClient } from './economic/economic.client';
+import { OrganizationHierarchy } from './organization/organization-hierarchy';
 import { OrderSagaClient } from './temporal/saga.client';
 import { OrderSagaWorker } from './temporal/worker';
 import { HealthController, MetricsController } from './health/health.controller';
@@ -56,15 +65,18 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
 /**
  * marketplace-service wiring.
  *
- * ## No Kafka consumer is registered, and that is a decision
+ * ## One Kafka consumer: the return mirror (RUN-005 PR 3)
  *
- * `docs/04` § 4.8 lists six consumed events. None is wired, and each has its
- * own reason (ADR-041 § 4): `PAYMENT_*` would be a second path for a fact the
- * saga already gets synchronously, and `SUPPLIER_*` / `STOCK_RESERVED` have no
- * producer at all. The `processed_event` table and the consumer machinery
- * exist so the first real consumer does not have to build its own plumbing —
- * but an empty handler that marks events processed is worse than none, because
- * it leaves a trail that looks like work (ADR-032).
+ * `ReturnMirrorConsumer` reads inventory-service's `RETURN_SHIPMENT_*` events
+ * on `rasta.inventory.v1` and moves the return request they name through
+ * IN_TRANSIT … RESOLVED, after checking each against the request (ADR-048,
+ * docs/23 D-058). Its effect is a state change with its own history and outbox
+ * event, so the `processed_event` marker it writes is true (ADR-032). Off by
+ * default and gated on an authenticated broker (`assertReturnMirrorMayStart`).
+ *
+ * `docs/04` § 4.8's six consumed events stay unwired, each for its own reason
+ * (ADR-041 § 4): `PAYMENT_*` would be a second path for a fact the saga already
+ * gets synchronously, and `SUPPLIER_*` / `STOCK_RESERVED` have no producer.
  */
 @Module({
   controllers: [
@@ -121,6 +133,48 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
     OrderSagaWorker,
 
     {
+      provide: ReturnMirrorConsumer,
+      inject: [ENV, LOGGER, PrismaService, ReturnRepository, EventPublisher],
+      useFactory: (
+        env: MarketplaceEnv,
+        logger: Logger,
+        prisma: PrismaService,
+        repository: ReturnRepository,
+        events: EventPublisher,
+      ) =>
+        new ReturnMirrorConsumer(
+          // Disabled by default, and refused at startup without an authenticated broker.
+          returnMirrorConsumerFactory(
+            env,
+            (handler) =>
+              new EventConsumer(
+                {
+                  ...kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-return-mirror`),
+                  groupId: RETURN_MIRROR_CONSUMER,
+                  topics: [...RETURN_MIRROR_CONSUMED_TOPICS],
+                  deadLetterTopic: MARKETPLACE_DEAD_LETTER_TOPIC,
+                  // A request authorized before the consumer first ran may already have its
+                  // shipment's events on the topic; the request's version makes a replay of
+                  // anything already applied a no-op.
+                  fromBeginning: true,
+                },
+                handler,
+                {
+                  log: (m) => logger.info(m),
+                  warn: (m) => logger.warn(m),
+                  error: (m, trace) => logger.error({ err: trace }, m),
+                },
+              ),
+          ),
+          prisma,
+          repository,
+          events,
+          { partialDispatchAllowed: env.MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED },
+          logger,
+        ),
+    },
+
+    {
       // The same secret and issuer the auth guard verifies with, so a token
       // this service mints for economic-service is one economic-service can
       // check (ADR-035).
@@ -135,6 +189,22 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
     },
 
     EconomicClient,
+
+    /**
+     * The owner of the organization hierarchy (A-13), asked whether a union
+     * administrator decides a dispute for an order whose buyer is within its
+     * union (docs/24 Q-136). Its token is minted by the service above.
+     */
+    {
+      provide: OrganizationHierarchy,
+      inject: [ENV, InternalTokenService],
+      useFactory: (env: MarketplaceEnv, tokens: InternalTokenService) =>
+        new OrganizationHierarchy({
+          baseUrl: env.ORGANIZATION_SERVICE_URL,
+          timeoutMs: env.MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS,
+          tokens,
+        }),
+    },
 
     {
       provide: OutboxRelay,
@@ -179,21 +249,30 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
         }),
     },
     {
-      // D-052: the relay, the purge and the Temporal worker stop together in
-      // the destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS.
+      // D-052: the relay, the purge, the Temporal worker and the return mirror
+      // stop together in the destroy phase, by one deadline inside
+      // SHUTDOWN_TIMEOUT_MS.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OutboxPurgeScheduler, OrderSagaWorker, KafkaEventPublisher, ENV],
+      inject: [
+        OutboxRelay,
+        OutboxPurgeScheduler,
+        OrderSagaWorker,
+        ReturnMirrorConsumer,
+        KafkaEventPublisher,
+        ENV,
+      ],
       useFactory: (
         relay: OutboxRelay,
         purge: OutboxPurgeScheduler,
         saga: OrderSagaWorker,
+        mirror: ReturnMirrorConsumer,
         publisher: KafkaEventPublisher,
         env: MarketplaceEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
-          workers: [saga],
+          workers: [saga, mirror],
           // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
@@ -234,6 +313,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly outboxShutdown: OutboxShutdown,
     private readonly store: PrismaOutboxStore,
     private readonly idempotency: IdempotencyStore,
+    private readonly mirror: ReturnMirrorConsumer,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -249,6 +329,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
     this.relay.start();
     this.purge.start();
+    await this.mirror.start();
 
     const sample = async () => {
       try {

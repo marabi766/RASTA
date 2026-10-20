@@ -1,3 +1,4 @@
+import type { SessionRefusal } from '@/lib/session-refusal';
 import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type {
   RevokeMembershipField,
@@ -27,7 +28,7 @@ import type {
 
 interface RefusedState {
   readonly kind: 'REFUSED';
-  readonly reason: 'NO_SESSION' | 'CSRF' | 'SUBMISSION';
+  readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION';
 }
 
 interface ForbiddenState {

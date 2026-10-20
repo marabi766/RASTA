@@ -9,6 +9,7 @@ import {
 import { InMemoryEventPublisher } from '../src/outbox/kafka.publisher';
 import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { SettlementAuthorityConsumer } from '../src/consumers/settlement-authority.consumer';
+import { StatementSettlementConsumer } from '../src/consumers/statement-settlement.consumer';
 import { RewardTriggerConsumer } from '../src/consumers/reward-trigger.consumer';
 import { AppModule } from '../src/app.module';
 import { PAYMENT_PROVIDER } from '../src/tokens';
@@ -133,9 +134,14 @@ export function auditor(organizationId: string): string {
   return admin(organizationId, ['AUDITOR']);
 }
 
-/** A platform administrator — cross-tenant reads and journal reversal. */
+/**
+ * A platform administrator — the system administrator, who acts for any
+ * organization. A union administrator acts for another organization only
+ * within its union's subtree (docs/24 Q-136), which needs organization-service:
+ * `union-admin-financial-authority.int-spec.ts` stands one up.
+ */
 export function platformAdmin(organizationId = 'ORG-APITEST-PLATFORM-SCOPE'): string {
-  return admin(organizationId, ['UNION_ADMIN']);
+  return admin(organizationId, ['SYSTEM_ADMIN']);
 }
 
 const decodeClaims = (token: string): TestClaims => {
@@ -170,6 +176,11 @@ function applyEnvironment(): void {
   // The consumers are replaced below, so nothing dials these (ADR-061 § 4).
   process.env.MAINTENANCE_SERVICE_URL ??= 'http://127.0.0.1:9';
   process.env.FLEET_SERVICE_URL ??= 'http://127.0.0.1:9';
+  process.env.CONTRACT_SERVICE_URL ??= 'http://127.0.0.1:9';
+  // Nothing listens here: a suite that does not stand organization-service up
+  // and still asks it (a union administrator acting for another organization,
+  // docs/24 Q-136) gets the fail-closed 503, never a stray answer.
+  process.env.ORGANIZATION_SERVICE_URL ??= 'http://127.0.0.1:9';
   process.env.ECONOMIC_PLATFORM_ORGANIZATION_ID = PLATFORM_ORGANIZATION_ID;
   // The reconciliation is a timer that reports and never repairs; it has its
   // own suite and only adds noise here.
@@ -242,6 +253,14 @@ export function internalToken(
   );
 }
 
+/**
+ * Verifies an internal token this service minted — what organization-service's
+ * guard does. For a suite that stands organization-service up (docs/24 Q-136).
+ */
+export function verifyInternalToken(token: string, audience: string) {
+  return new InternalTokenService(INTERNAL_SECRET, 'rasta-internal', 300).verify(token, audience);
+}
+
 export interface StartApiOptions {
   /**
    * Replaces the payment provider bound at `PAYMENT_PROVIDER`.
@@ -276,6 +295,8 @@ export async function startApi(options: StartApiOptions = {}): Promise<ApiHarnes
     .overrideProvider(KafkaEventPublisher)
     .useValue(publisher)
     .overrideProvider(SettlementAuthorityConsumer)
+    .useValue(inertConsumer)
+    .overrideProvider(StatementSettlementConsumer)
     .useValue(inertConsumer)
     .overrideProvider(RewardTriggerConsumer)
     .useValue(inertConsumer)

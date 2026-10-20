@@ -4,9 +4,8 @@ import { AppShell, Button, PageHeader, TopBar } from '@/ui';
 import { isTenderStatus } from '@/lib/tender-fields';
 import { currentSession } from '@/server/current-session';
 import { webServerEnv } from '@/server/env';
-import { fetchCurrentUser } from '@/server/identity';
 import { tenderDoorsFor } from '@/server/portal-nav';
-import { requestRoles } from '@/server/realm-roles';
+import { tokenRoles } from '@/server/realm-roles';
 import { fetchOpenTenders, fetchTenders } from '@/server/tenders';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
@@ -18,8 +17,9 @@ import { TendersScreen, type TendersQuery, type TendersView } from './TendersScr
  * **No access decision here**, as on every portal route: the roles only choose
  * which gateway door to ask (the owner's list, the bidder's list, or both), and
  * construction-service decides what each answers; a refusal is rendered as an
- * outcome (`docs/16` § ۱۶٫۱۱). When the roles themselves cannot be read nothing
- * is asked, and the person is told so.
+ * outcome (`docs/16` § ۱۶٫۱۱). The roles are the access token's
+ * (`tokenRoles`); when they cannot be read the owner's door is asked, and its
+ * answer — a refusal, then — is what is shown.
  */
 export const dynamic = 'force-dynamic';
 
@@ -47,22 +47,16 @@ export default async function TendersPage({
     openCursor: one(params.openCursor),
   };
 
-  const current = await fetchCurrentUser(session);
-
-  let view: TendersView;
-  if (current.kind === 'USER') {
-    const doors = tenderDoorsFor(
-      requestRoles(current.user.effectiveRoles, session.accessToken),
-      webServerEnv(),
-    );
-    const [own, open] = await Promise.all([
-      doors.own ? fetchTenders(session, query) : null,
-      doors.open ? fetchOpenTenders(session, { cursor: query.openCursor }) : null,
-    ]);
-    view = { kind: 'SIDES', own, open };
-  } else {
-    view = { kind: 'IDENTITY_UNAVAILABLE', correlationId: current.correlationId };
-  }
+  // The doors come from the token's own roles, the set construction-service
+  // decides on — not `/v1/users/me`, which runs ahead of the token until it is
+  // refreshed. A token that cannot be read is no bidder: the owner's door is
+  // asked and its own answer shown.
+  const doors = tenderDoorsFor(tokenRoles(session.accessToken) ?? [], webServerEnv());
+  const [own, open] = await Promise.all([
+    doors.own ? fetchTenders(session, query) : null,
+    doors.open ? fetchOpenTenders(session, { cursor: query.openCursor }) : null,
+  ]);
+  const view: TendersView = { kind: 'SIDES', own, open };
 
   return (
     <AppShell
@@ -76,7 +70,7 @@ export default async function TendersPage({
           </form>
         </TopBar>
       }
-      sidebar={<PortalSidebar session={session} currentHref="/tenders" current={current} />}
+      sidebar={<PortalSidebar session={session} currentHref="/tenders" />}
     >
       <PageHeader
         title="مناقصه‌ها"

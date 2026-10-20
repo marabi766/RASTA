@@ -68,6 +68,7 @@ const WIRE = {
   sourceReference: 'ref-1',
   disputedAt: null,
   disputeReason: null,
+  disputeId: null,
   settledAt: null,
   failureReason: null,
   createdAt: '2026-10-01T08:00:01.000Z',
@@ -205,6 +206,7 @@ describe('which commands are offered', () => {
     transactionType,
     sourceType: transactionType === 'MARKETPLACE_ORDER' ? 'ORDER' : null,
     sourceReference: transactionType === 'MARKETPLACE_ORDER' ? 'ORD_1' : null,
+    disputeId: status === 'DISPUTED' ? 'TXD_A' : null,
   });
 
   it('offers the payer’s administrator a dispute from HELD and PENDING_SETTLEMENT only', () => {
@@ -234,6 +236,11 @@ describe('which commands are offered', () => {
       expect(disputeCommandsFor(tx('HELD'), viewer)).toEqual(['DISPUTE']);
     },
   );
+
+  it('offers no resolution for a disputed view that names no dispute: there is nothing to bind it to (D-053)', () => {
+    const viewer = { roles: ['UNION_ADMIN'], organizationId: 'ORG-UNION-YAZD' };
+    expect(disputeCommandsFor({ ...tx('DISPUTED'), disputeId: null }, viewer)).toEqual([]);
+  });
 
   it.each(['PROCUREMENT_USER', 'FLEET_MANAGER', 'SUPPLIER', 'OPERATOR', 'DRIVER'])(
     'offers %s nothing — the route’s @Roles does not admit it',
@@ -279,6 +286,7 @@ describe('which commands are offered, from the token the service will see (revie
     transactionType: 'MAINTENANCE_SERVICE',
     sourceType: null,
     sourceReference: null,
+    disputeId: null,
   };
 
   it('a role removed after the token was minted still counts: the payer’s dispute stays offered', () => {
@@ -295,7 +303,9 @@ describe('which commands are offered, from the token the service will see (revie
   it('a role added after the token was minted does not count yet: no resolution form for a 403', () => {
     // The rows now hold UNION_ADMIN; the token does not, so the service refuses.
     const token = jwt({ org_id: PAYER, org_ids: [PAYER], org_roles: [`${PAYER}:FLEET_MANAGER`] });
-    expect(disputeCommandsFor({ ...held, status: 'DISPUTED' }, viewerOf(token))).toEqual([]);
+    expect(
+      disputeCommandsFor({ ...held, status: 'DISPUTED', disputeId: 'TXD_A' }, viewerOf(token)),
+    ).toEqual([]);
   });
 });
 

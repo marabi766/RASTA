@@ -32,7 +32,7 @@ initTelemetry({
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { VersioningType } from '@nestjs/common';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { SwaggerModule } from '@nestjs/swagger';
 import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
 import {
@@ -44,6 +44,7 @@ import {
 } from '@rasta/nest-common';
 import { PrismaClient } from './generated/prisma';
 import { AppModule } from './app.module';
+import { identityDocumentConfig } from './openapi-config';
 
 async function bootstrap(): Promise<void> {
   // D-045: refuse to start as anything but the runtime role before Nest builds a
@@ -100,18 +101,7 @@ async function bootstrap(): Promise<void> {
   app.useBodyParser('json', { limit: '256kb' });
 
   if (allowsDeveloperTooling(env)) {
-    const document = SwaggerModule.createDocument(
-      app,
-      new DocumentBuilder()
-        .setTitle('Rasta — Identity Service')
-        .setDescription(
-          'Source of truth for who you are and what role you hold in which organization. ' +
-            'Keycloak owns authentication; this service owns membership.',
-        )
-        .setVersion(env.SERVICE_VERSION)
-        .addBearerAuth()
-        .build(),
-    );
+    const document = SwaggerModule.createDocument(app, identityDocumentConfig(env.SERVICE_VERSION));
     SwaggerModule.setup('docs', app, document);
   }
 

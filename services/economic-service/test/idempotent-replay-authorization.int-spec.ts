@@ -259,10 +259,10 @@ describe('who an idempotent economic answer is replayed to (HTTP)', () => {
   });
 
   it('settlement: another person in the paying organization is refused, the settler is answered', async () => {
-    // Settled by a platform administrator acting for the payer: a settlement
-    // posts the payer's journals, which a platform administrator acting for a
-    // non-party organization cannot (a cross-tenant write, refused before any
-    // answer is stored). Everyone acting for B is a party, so here the actor
+    // Settled by a platform administrator acting for the payer. One acting for
+    // a non-party organization — `SYSTEM_ADMIN` only (docs/24 Q-136), its
+    // replay included — is `platform-admin-settlement.int-spec.ts`'s subject
+    // (docs/23 D-054). Everyone acting for B is a party, so here the actor
     // binding is the whole of the protection; the replay guard re-runs the
     // settlement's own check (visible + may commit B) all the same.
     const transactionId = await transaction('authorised');

@@ -37,14 +37,6 @@ export function globalRealmRoles(accessToken: string): string[] {
   }
 }
 
-/** The service's view of a request: the membership's roles plus the global realm roles. */
-export function requestRoles(
-  membershipRoles: readonly string[],
-  accessToken: string,
-): readonly string[] {
-  return [...new Set([...membershipRoles, ...globalRealmRoles(accessToken)])];
-}
-
 /** Mirrors `PLATFORM_ROLES` in `packages/nest-common` (`auth/tenant-roles.ts`): a pair naming any other role is refused. */
 const KNOWN_ROLES: ReadonlySet<string> = new Set([
   'SYSTEM_ADMIN',
@@ -132,4 +124,75 @@ export function tokenAuthority(accessToken: string): TokenAuthority | null {
     organizationId,
     roles: [...new Set([...granted, ...globalRealmRoles(accessToken)])],
   };
+}
+
+/**
+ * The roles every screen in this portal draws from: the token's own role set
+ * for the organization it resolves to ({@link tokenAuthority}) — never the
+ * membership rows `/v1/users/me` reports, which disagree with what the service
+ * decides on until the token is refreshed. Null when the token cannot be read
+ * or the guard would refuse it outright; a screen then offers nothing gated.
+ */
+export function tokenRoles(accessToken: string): readonly string[] | null {
+  return tokenAuthority(accessToken)?.roles ?? null;
+}
+
+/**
+ * The roles a write form is offered on: {@link tokenRoles}, but only for a
+ * token that resolves to an organization. Every write the portal sends is
+ * tenant-scoped — the service acts for the request's organization
+ * (`getOrganizationId`) and cannot act for none — so a token with no `org_id`,
+ * a platform administrator's included, is offered no write form; the role rule
+ * itself is `rolesGuardAdmits`.
+ */
+export function tokenWriteRoles(accessToken: string): readonly string[] | null {
+  const authority = tokenAuthority(accessToken);
+  return authority?.organizationId ? authority.roles : null;
+}
+
+/**
+ * What else a command's separation-of-duties checks read from the token, as
+ * the platform's `AuthGuard` puts it in the request context: the
+ * organizations the person is a member of (`org_ids`, deduplicated, blanks
+ * dropped — `organizationIds`), and whether it names a platform user
+ * (`rasta_uid`), which a route marked `@RequirePlatformUserId` demands.
+ * Not verified here; it only chooses what to draw. Null when the token cannot
+ * be read.
+ */
+export interface TokenPerson {
+  readonly memberships: readonly string[];
+  readonly platformUser: boolean;
+  /**
+   * The actor a service records for this person: `rasta_uid`, else the
+   * subject — `AuthGuard`'s `userId` — so a page can tell "the person who made
+   * this request" from someone else, as a separation-of-duties check does.
+   * Null when the token names neither.
+   */
+  readonly actorId: string | null;
+}
+
+export function tokenPerson(accessToken: string): TokenPerson | null {
+  const payload = accessToken.split('.')[1];
+  if (!payload) return null;
+  let claims: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    claims = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const listed = Array.isArray(claims['org_ids']) ? (claims['org_ids'] as unknown[]) : [];
+  const memberships = [
+    ...new Set(listed.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)),
+  ];
+  const uid = claims['rasta_uid'];
+  const sub = claims['sub'];
+  const platformUser = typeof uid === 'string' && uid.length > 0;
+  const actorId = platformUser
+    ? (uid as string)
+    : typeof sub === 'string' && sub.length > 0
+      ? sub
+      : null;
+  return { memberships, platformUser, actorId };
 }

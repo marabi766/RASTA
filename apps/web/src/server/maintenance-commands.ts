@@ -21,6 +21,7 @@ import { localDateToIso } from './drivers';
 import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
+import { rolesGuardAdmits } from './roles-guard';
 
 /**
  * Writing to maintenance-service through the gateway (ADR-058 § 3, ADR-059 § 3).
@@ -55,8 +56,8 @@ const REPORTER_ROLES: readonly string[] = [
   'DRIVER',
 ];
 
-export function canReportMaintenance(effectiveRoles: readonly string[]): boolean {
-  return effectiveRoles.some((role) => REPORTER_ROLES.includes(role));
+export function canReportMaintenance(roles: readonly string[]): boolean {
+  return rolesGuardAdmits(roles, REPORTER_ROLES);
 }
 
 // ---------------------------------------------------------------------------
@@ -228,8 +229,8 @@ export function reportMaintenanceRequest(
  */
 const MANAGER_ROLES: readonly string[] = ['ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN'];
 
-export function canManageMaintenance(effectiveRoles: readonly string[]): boolean {
-  return effectiveRoles.some((role) => MANAGER_ROLES.includes(role));
+export function canManageMaintenance(roles: readonly string[]): boolean {
+  return rolesGuardAdmits(roles, MANAGER_ROLES);
 }
 
 /**

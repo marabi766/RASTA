@@ -11,6 +11,7 @@ import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { SettlementAuthorityConsumer } from '../src/consumers/settlement-authority.consumer';
 import { RewardTriggerConsumer } from '../src/consumers/reward-trigger.consumer';
+import { StatementSettlementConsumer } from '../src/consumers/statement-settlement.consumer';
 import { ECONOMIC_TOPIC } from '../src/config/env';
 import {
   asActor,
@@ -65,6 +66,7 @@ if (!brokerList) {
 }
 
 const MAINTENANCE_TOPIC = 'rasta.maintenance.v1';
+const CONTRACT_TOPIC = 'rasta.contract.v1';
 
 describeWithKafka('economic event flow over Kafka', () => {
   const org = tenants();
@@ -78,6 +80,8 @@ describeWithKafka('economic event flow over Kafka', () => {
   let maintenanceProducer: Producer;
   let settlementAuthority: SettlementAuthorityConsumer;
   let rewardTrigger: RewardTriggerConsumer;
+  let statementSettlement: StatementSettlementConsumer;
+  let contractProducer: Producer;
 
   const publishedToEconomic: EventEnvelope[] = [];
 
@@ -193,6 +197,37 @@ describeWithKafka('economic event flow over Kafka', () => {
     );
     await rewardTrigger.onModuleInit();
 
+    // CON-003 PR 6b: economic-service reads rasta.contract.v1 under its own
+    // principal (TOPIC_CONSUMERS → the broker's ACLs); a producer stands in for
+    // contract-service, as contract-service.
+    const contractKafka = new Kafka({
+      ...kafkaClientConfig(
+        kafkaConnectionFor('contract-service', `economic-itest-contract-${suffix}`),
+      ),
+      logLevel: 1,
+    });
+    contractProducer = contractKafka.producer({ idempotent: true, maxInFlightRequests: 1 });
+    await contractProducer.connect();
+    statementSettlement = new StatementSettlementConsumer(
+      (handler) =>
+        new EventConsumer(
+          {
+            ...kafkaConnectionFor('economic-service', `economic-itest-statement-${suffix}`),
+            groupId: `economic-service.itest-statement-${suffix}`,
+            topics: [CONTRACT_TOPIC],
+            deadLetterTopic: 'rasta.economic.v1.dlq',
+            fromBeginning: false,
+          },
+          handler,
+          { log: () => undefined, warn: () => undefined, error: () => undefined },
+        ),
+      prisma,
+      wiring.transactions,
+      sources,
+      null,
+    );
+    await statementSettlement.onModuleInit();
+
     // Give both groups a moment to settle before the first publish.
     await new Promise((resolve) => setTimeout(resolve, 3000));
   }, 120_000);
@@ -201,6 +236,8 @@ describeWithKafka('economic event flow over Kafka', () => {
     await relay?.stop();
     await settlementAuthority?.onApplicationShutdown();
     await rewardTrigger?.onApplicationShutdown();
+    await statementSettlement?.onApplicationShutdown();
+    await contractProducer?.disconnect();
     await maintenanceProducer?.disconnect();
     await economicConsumer?.disconnect();
     await publisher?.stop();
@@ -260,6 +297,88 @@ describeWithKafka('economic event flow over Kafka', () => {
 
     return envelope;
   }
+
+  describe('contract → economic: an approved statement becomes a settleable obligation (CON-003 PR 6b)', () => {
+    it('records it from the owner’s answer over the authenticated broker, moving no money', async () => {
+      const statementId = `STM_ITEST_${ulid()}`;
+      const contractId = `CTR_ITEST_${ulid()}`;
+      const approvedAt = new Date().toISOString();
+      // contract-service's internal read, recorded before the event as the owner commits both.
+      sources.statements.set(statementId, {
+        statementId,
+        contractId,
+        status: 'APPROVED',
+        netMinor: '6400000',
+        currency: 'IRR',
+        payerOrganizationId: org.a,
+        beneficiaryOrganizationId: org.c,
+        approvedAt,
+      });
+      await fundWallet(wiring, org.a, 1_000_000n);
+      const walletBefore = await readBalances(prisma, await walletId(org.a));
+
+      // As contract-service publishes it: identifiers and the instant, no amount.
+      const envelope: EventEnvelope = {
+        eventId: ulid(),
+        eventName: 'STATEMENT_APPROVED',
+        eventVersion: 1,
+        occurredAt: approvedAt,
+        producer: 'contract-service',
+        producerVersion: '0.1.0',
+        aggregateType: 'Contract',
+        aggregateId: contractId,
+        tenantId: org.a,
+        correlationId: `itest-corr-${ulid()}`,
+        actor: { type: 'USER', id: `USR-ITEST-${suffix}` },
+        payload: {
+          contractId,
+          statementId,
+          statementNumber: 1,
+          organizationId: org.a,
+          contractorOrganizationId: org.c,
+          approvedAt,
+        },
+      };
+      await contractProducer.send({
+        topic: CONTRACT_TOPIC,
+        messages: [
+          {
+            key: contractId,
+            value: JSON.stringify(envelope),
+            headers: {
+              [EVENT_HEADERS.eventId]: envelope.eventId,
+              [EVENT_HEADERS.eventName]: envelope.eventName,
+              [EVENT_HEADERS.correlationId]: envelope.correlationId,
+              [EVENT_HEADERS.tenantId]: org.a,
+              [EVENT_HEADERS.producer]: envelope.producer,
+            },
+          },
+        ],
+      });
+
+      const obligation = await waitFor('the statement obligation to be recorded', () =>
+        asActor({ organizationId: org.a }, () =>
+          prisma.client.transaction.findFirst({
+            where: { sourceType: 'STATEMENT', sourceReference: statementId },
+          }),
+        ),
+      );
+      expect(obligation).toMatchObject({
+        status: 'PENDING_SETTLEMENT',
+        transactionType: 'CONSTRUCTION_STATEMENT',
+        grossAmountMinor: 6_400_000n,
+        counterpartyOrganizationId: org.c,
+        causationId: envelope.eventId,
+        correlationId: envelope.correlationId,
+      });
+      expect(sources.calls).toContainEqual({
+        owner: 'contract',
+        organizationId: org.a,
+        id: statementId,
+      });
+      expect(await readBalances(prisma, await walletId(org.a))).toEqual(walletBefore);
+    }, 90_000);
+  });
 
   describe('maintenance → economic: an approval becomes a settleable obligation', () => {
     const requestId = `MNT_ITEST_${ulid()}`;

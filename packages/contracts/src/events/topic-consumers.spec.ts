@@ -39,8 +39,9 @@ describe('TOPIC_CONSUMERS', () => {
         subscribes: ['rasta.fleet.v1', 'rasta.asset.v1'],
         deadLetterTopic: 'rasta.maintenance.v1.dlq',
       },
+      // CON-003 PR 6b: STATEMENT_APPROVED, confirmed by contract-service before any obligation.
       'economic-service': {
-        subscribes: ['rasta.maintenance.v1', 'rasta.fleet.v1'],
+        subscribes: ['rasta.maintenance.v1', 'rasta.fleet.v1', 'rasta.contract.v1'],
         deadLetterTopic: 'rasta.economic.v1.dlq',
       },
       'notification-service': {
@@ -58,6 +59,11 @@ describe('TOPIC_CONSUMERS', () => {
       'contract-service': {
         subscribes: ['rasta.construction.v1', 'rasta.organization.v1'],
         deadLetterTopic: 'rasta.contract.v1.dlq',
+      },
+      // RUN-005: the physical half of a return, mirrored onto marketplace's own request.
+      'marketplace-service': {
+        subscribes: ['rasta.inventory.v1'],
+        deadLetterTopic: 'rasta.marketplace.v1.dlq',
       },
       'supplier-service': {
         subscribes: ['rasta.marketplace.v1'],
@@ -148,11 +154,11 @@ describe('consumerDeclarationProblem', () => {
 
   it('refuses an undeclared service', () => {
     expect(
-      consumerDeclarationProblem('marketplace-service', {
+      consumerDeclarationProblem('organization-service', {
         ...fleet,
-        groupId: 'marketplace-service.x',
+        groupId: 'organization-service.x',
       }),
-    ).toMatch(/marketplace-service is not declared/);
+    ).toMatch(/organization-service is not declared/);
     expect(isDeclaredConsumer('toString')).toBe(false);
   });
 

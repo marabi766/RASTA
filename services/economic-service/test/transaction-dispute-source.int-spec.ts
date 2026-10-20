@@ -32,7 +32,9 @@ describe('transaction disputes follow the source (Q-138) and keep the reason', (
   const asPayer = () => `Bearer ${admin(payer)}`;
   const asPayee = () => `Bearer ${admin(payee)}`;
   const asStranger = () => `Bearer ${admin(stranger)}`;
-  const asUnionAdmin = () => `Bearer ${admin(platform, ['UNION_ADMIN'])}`;
+  // A union administrator acting for another organization needs organization-
+  // service (docs/24 Q-136); its refusal here, within its subtree, is
+  // `union-admin-financial-authority.int-spec.ts`'s.
   const asSystemAdmin = () => `Bearer ${admin(platform, ['SYSTEM_ADMIN'])}`;
   /** A system administrator acting as the payer itself. */
   const asSystemAdminOfPayer = () => `Bearer ${admin(payer, ['SYSTEM_ADMIN'])}`;
@@ -149,7 +151,6 @@ describe('transaction disputes follow the source (Q-138) and keep the reason', (
   describe('an order’s obligation', () => {
     it.each([
       ['the payer’s administrator', asPayer],
-      ['a union administrator', asUnionAdmin],
       ['a system administrator', asSystemAdmin],
       ['a system administrator acting as the payer', asSystemAdminOfPayer],
     ])('refuses a dispute by %s — 422, nothing moved', async (_, as) => {
@@ -177,7 +178,6 @@ describe('transaction disputes follow the source (Q-138) and keep the reason', (
     });
 
     it.each([
-      ['a union administrator', asUnionAdmin, 422],
       ['a system administrator', asSystemAdmin, 422],
       ['a system administrator acting as the payer', asSystemAdminOfPayer, 422],
       // The route's roles already exclude an organization administrator.
@@ -348,10 +348,7 @@ describe('transaction disputes follow the source (Q-138) and keep the reason', (
   // -------------------------------------------------------------------------
 
   describe('any other source', () => {
-    it.each([
-      ['a union administrator', asUnionAdmin],
-      ['a system administrator', asSystemAdmin],
-    ])(
+    it.each([['a system administrator', asSystemAdmin]])(
       'is disputed by its payer and resolved by %s, keeping the reason beside the resolution',
       async (_, resolver) => {
         const transactionId = await logisticsObligation();

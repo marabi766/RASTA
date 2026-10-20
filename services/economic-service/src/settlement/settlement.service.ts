@@ -26,6 +26,14 @@ import {
 import { SERVICE_NAME } from '../config/env';
 import type { DraftEntry } from '../ledger/journal';
 import type { IdempotentAnswer } from '../shared/idempotency';
+import {
+  recordFinancialCommand,
+  reconfirmFinancialAuthority,
+  settlementBooks,
+  type FinancialAuthority,
+  type SettlementBooks,
+} from '../access/access';
+import { OrganizationHierarchy } from '../organization/organization-hierarchy';
 
 /**
  * Settlement — the one operation this whole service is arranged around
@@ -84,6 +92,7 @@ export class SettlementService {
     private readonly walletRepository: WalletRepository,
     private readonly transactions: TransactionRepository,
     private readonly commissions: CommissionService,
+    private readonly hierarchy: OrganizationHierarchy,
   ) {}
 
   /**
@@ -105,14 +114,15 @@ export class SettlementService {
     });
 
     try {
-      const result = await withFinancialSpan('economic.settle', () =>
+      const { settled: result, authority } = await withFinancialSpan('economic.settle', () =>
         this.prisma.transaction(async (tx) => {
-          const settled = await this.settleWithin(tx, transactionId, settledBy);
-          await answer?.respond(tx, settled);
-          return settled;
+          const within = await this.settleWithin(tx, transactionId, settledBy);
+          await answer?.respond(tx, within.settled);
+          return within;
         }),
       );
       settlementsCompletedTotal.inc({ service: SERVICE_NAME, type: result.transactionType });
+      recordFinancialCommand(transactionId, authority);
       return result;
     } catch (error) {
       settlementFailuresTotal.inc({ service: SERVICE_NAME, reason: reasonOf(error) });
@@ -131,7 +141,7 @@ export class SettlementService {
     tx: ExtendedPrismaClient,
     transactionId: string,
     settledBy: string,
-  ): Promise<SettlementResult> {
+  ): Promise<{ settled: SettlementResult; authority: FinancialAuthority }> {
     const transaction = await this.transactions.lockForUpdate(tx, transactionId);
     if (!transaction) throw RastaError.notFound('Transaction', transactionId);
 
@@ -139,6 +149,17 @@ export class SettlementService {
     // once the authorising fact arrived, and `DISPUTED` has no edge to
     // `SETTLED` at all (docs/10 § 10.5, § 10.12).
     const target = nextStatus(transactionId, transaction.status, 'SETTLE');
+
+    // Whose books the journal goes on, when that is not the organization the
+    // request acts for: a system administrator acting for another one, or a
+    // union administrator for an organization of its union's subtree
+    // (docs/23 D-054, docs/24 Q-136). Decided here, under the row lock — the
+    // hierarchy question included — against the payer the journal will name;
+    // anyone else is refused before anything is written.
+    const { authority: lockedRowAuthority, books } = await settlementBooks(
+      transaction.organizationId,
+      this.hierarchy,
+    );
 
     // Hoisted to a local so the narrowing survives the awaits below. A
     // top-up has no counterparty and never reaches settlement; anything else
@@ -203,6 +224,12 @@ export class SettlementService {
       throw RastaError.businessRule('Commission exceeds the transaction amount', { transactionId });
     }
 
+    // Every lock this settlement takes is held, and nothing below waits on
+    // another: ask the hierarchy again, so a union administrator's authority
+    // is the one confirmed after the wallet wait above, immediately before the
+    // journal posts (docs/23 D-054; Codex on #314 round 3, F2).
+    const authority = await reconfirmFinancialAuthority(lockedRowAuthority, this.hierarchy);
+
     const settledAt = new Date();
     const journal = await this.postSettlementJournal(tx, {
       transaction,
@@ -212,6 +239,7 @@ export class SettlementService {
       netAmountMinor,
       settledBy,
       settledAt,
+      books,
     });
 
     if (hold) {
@@ -261,6 +289,9 @@ export class SettlementService {
           currency: transaction.currency,
           settledAt,
           settledBy,
+          // Who acted is `settledBy`; this is whom for. The payer itself, or
+          // the organization a platform administrator acted for (D-054, Q-136).
+          actingOrganizationId: authority.actingOrganizationId,
         },
       }),
     );
@@ -302,19 +333,22 @@ export class SettlementService {
     });
 
     return {
-      settlementId,
-      transactionId: transaction.id,
-      transactionType: transaction.transactionType,
-      journalId: journal.id,
-      grossAmountMinor: transaction.grossAmountMinor,
-      commissionAmountMinor: decision.amountMinor,
-      netAmountMinor,
-      currency: transaction.currency,
-      commissionMatched: decision.matched,
-      commissionOutcome: decision.outcome,
-      businessLine: transaction.businessLine,
-      payeeOrganizationId,
-      settledAt,
+      settled: {
+        settlementId,
+        transactionId: transaction.id,
+        transactionType: transaction.transactionType,
+        journalId: journal.id,
+        grossAmountMinor: transaction.grossAmountMinor,
+        commissionAmountMinor: decision.amountMinor,
+        netAmountMinor,
+        currency: transaction.currency,
+        commissionMatched: decision.matched,
+        commissionOutcome: decision.outcome,
+        businessLine: transaction.businessLine,
+        payeeOrganizationId,
+        settledAt,
+      },
+      authority,
     };
   }
 
@@ -348,6 +382,7 @@ export class SettlementService {
       netAmountMinor: bigint;
       settledBy: string;
       settledAt: Date;
+      books: SettlementBooks | undefined;
     },
   ) {
     const { transaction } = input;
@@ -416,6 +451,7 @@ export class SettlementService {
         postedAt: input.settledAt,
       },
       input.settledBy,
+      input.books,
     );
   }
 

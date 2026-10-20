@@ -20,7 +20,7 @@ import {
   type FileFingerprint,
 } from '@/server/asset-documents';
 import { verifyCsrf } from '@/server/csrf';
-import { currentSession } from '@/server/current-session';
+import { currentSession, missingSessionReason } from '@/server/current-session';
 import { mintFlash } from '@/server/flash';
 import { isBoundSubmissionId, mintSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 
@@ -96,7 +96,7 @@ export async function runAttachDocument(
   form: FormData,
 ): Promise<DocumentFormState> {
   const session = await currentSession();
-  if (!session) return { kind: 'REFUSED', reason: 'NO_SESSION' };
+  if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
   const csrf = verifyCsrf(session, form);
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };

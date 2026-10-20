@@ -11,9 +11,14 @@ import {
   assertMayDisputeDirectly,
   assertMayRefund,
   assertTransactionVisible,
-  canCommitOrganization,
+  canActFinanciallyFor,
+  reconfirmFinancialAuthority,
+  recordFinancialCommand,
+  type FinancialAuthority,
+  type FinancialCommand,
   type RefundableTransaction,
 } from '../access/access';
+import { OrganizationHierarchy } from '../organization/organization-hierarchy';
 import { formatMinor, parseMinor } from '../shared/money';
 import { isUniqueViolation } from '../ledger/ledger.repository';
 import { LedgerService } from '../ledger/ledger.service';
@@ -24,7 +29,12 @@ import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { ENV } from '../tokens';
 import type { IdempotentAnswer } from '../shared/idempotency';
 import type { BusinessLine, Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
-import type { CreateTransactionDto, DisputeTransactionDto, ResolveDisputeDto } from './dto';
+import {
+  STATEMENT_SOURCE_TYPE,
+  type CreateTransactionDto,
+  type DisputeTransactionDto,
+  type ResolveDisputeDto,
+} from './dto';
 
 /**
  * Transactions — the obligations everything else in this service acts on.
@@ -49,6 +59,7 @@ export class TransactionService {
     @Inject(ENV) private readonly env: EconomicEnv,
     private readonly ledger: LedgerService,
     private readonly commissions: CommissionService,
+    private readonly hierarchy: OrganizationHierarchy,
   ) {}
 
   // ==========================================================================
@@ -250,8 +261,12 @@ export class TransactionService {
       organizationId: string;
       counterpartyOrganizationId: string;
       transactionType: TransactionType;
-      /** Stated by the consumer that knows what the fact is (ADR-045 § 4). */
-      businessLine: BusinessLine;
+      /**
+       * Stated by the consumer that knows what the fact is (ADR-045 § 4), or
+       * null where the line is an open question (docs/24 Q-130): priced then
+       * by the type-only rules alone.
+       */
+      businessLine: BusinessLine | null;
       grossAmountMinor: bigint;
       currency: string;
       occurredAt: Date;
@@ -522,10 +537,10 @@ export class TransactionService {
     });
 
     try {
-      return await this.prisma.transaction(async (tx) => {
+      const { detail, authority } = await this.prisma.transaction(async (tx) => {
         const transaction = await this.repository.lockForUpdate(tx, transactionId);
         if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-        this.authorizeAct(transaction, 'REFUND');
+        const lockedRowAuthority = await this.authorizeAct(transaction, 'REFUND');
 
         const target = nextStatus(transactionId, transaction.status, 'REFUND');
 
@@ -540,6 +555,13 @@ export class TransactionService {
         if (!locked) throw RastaError.internal('Wallet vanished while locking it');
 
         const hold = await this.walletRepository.findActiveHold(tx, wallet.id, transactionId);
+
+        // The wallet lock was the last lock this refund takes: ask the
+        // hierarchy again, so a union administrator's authority is the one
+        // confirmed after that wait, immediately before the refund journal
+        // (docs/23 D-054; Codex on #314 round 3, F2).
+        const authority = await reconfirmFinancialAuthority(lockedRowAuthority, this.hierarchy);
+
         if (hold) {
           // The refund journal is the payer's — it moves the payer's escrow back
           // into the payer's wallet — but the caller may be another party: the
@@ -579,8 +601,10 @@ export class TransactionService {
           at: refundedAt,
         });
 
-        return this.answered(tx, transactionId, answer);
+        return { detail: await this.answered(tx, transactionId, answer), authority };
       });
+      recordFinancialCommand(transactionId, authority);
+      return detail;
     } finally {
       stop();
     }
@@ -628,10 +652,15 @@ export class TransactionService {
     answer?: IdempotentAnswer<TransactionDetail>,
     heldDispute?: string,
   ): Promise<TransactionDetail> {
-    return this.prisma.transaction(async (tx) => {
+    const { detail, authority } = await this.prisma.transaction(async (tx) => {
       const transaction = await this.repository.lockForUpdate(tx, transactionId);
       if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-      this.authorizeAct(transaction, actOf(event));
+      // Judged here, under the row lock and in the transaction that commits the
+      // move, so the authority and the state it moves are read together; the
+      // hierarchy question, when there is one, is asked here too (Q-136). No
+      // lock is taken after the row's, so this answer is already the last
+      // thing read before the write — nothing to ask again (docs/23 D-054).
+      const authority = await this.authorizeAct(transaction, event);
 
       const target = nextStatus(transactionId, transaction.status, event);
       if (heldDispute !== undefined && transaction.disputeId !== heldDispute) {
@@ -660,34 +689,50 @@ export class TransactionService {
         at,
       });
 
-      return this.answered(tx, transactionId, answer);
+      return { detail: await this.answered(tx, transactionId, answer), authority };
     });
+    recordFinancialCommand(transactionId, authority);
+    return detail;
   }
 
   /**
-   * Who may act on this transaction, as a command asks it: `COMMIT` for a
-   * lifecycle move, `DISPUTE` for a dispute or its resolution (docs/24 Q-138),
-   * `REFUND` for a refund (docs/24 Q-62), `READ` for what only shows it. A
-   * non-party learns nothing — `NOT_FOUND` first, always.
+   * Who may make one of the five transaction commands on this transaction, and
+   * on what authority: a refund by its own rule (docs/24 Q-62), the other four
+   * by {@link canActFinanciallyFor} — and both, for acting from another
+   * organization, by that one rule of docs/24 Q-136. A non-party learns
+   * nothing — `NOT_FOUND` first, always.
+   *
+   * A statement's obligation is never refunded or cancelled, by anyone
+   * ({@link refuseStatementWithdrawal}): judged after visibility and before
+   * any role, so every party gets the same refusal.
+   *
+   * An order's obligation is disputed and resolved only by the order saga
+   * ({@link assertMayDisputeDirectly}, docs/24 Q-138): judged after the
+   * authority to act at all, so a caller who could not act on the
+   * transaction is refused exactly as before.
    */
-  private authorizeAct(transaction: ActedTransaction, act: TransactionAct): void {
-    switch (act) {
-      case 'READ':
-        assertTransactionVisible(transaction);
-        return;
-      case 'COMMIT':
-        assertTransactionVisible(transaction);
-        canCommitOrganization(transaction.organizationId);
-        return;
-      case 'DISPUTE':
-        assertTransactionVisible(transaction);
-        canCommitOrganization(transaction.organizationId);
-        assertMayDisputeDirectly(transaction);
-        return;
-      case 'REFUND':
-        assertMayRefund(transaction, { payeeMayRefund: this.env.ECONOMIC_REFUND_BY_PAYEE_ENABLED });
-        return;
+  private async authorizeAct(
+    transaction: ActedTransaction,
+    command: TransactionCommand,
+  ): Promise<FinancialAuthority> {
+    assertTransactionVisible(transaction);
+    refuseStatementWithdrawal(transaction, command);
+    if (command === 'REFUND') {
+      return assertMayRefund(
+        transaction,
+        { payeeMayRefund: this.env.ECONOMIC_REFUND_BY_PAYEE_ENABLED },
+        this.hierarchy,
+      );
     }
+    const authority = await canActFinanciallyFor(
+      command,
+      transaction.organizationId,
+      this.hierarchy,
+    );
+    if (command === 'DISPUTE' || command === 'RESOLVE_DISPUTE') {
+      assertMayDisputeDirectly(transaction);
+    }
+    return authority;
   }
 
   /**
@@ -700,7 +745,8 @@ export class TransactionService {
   async assertMayReplay(transactionId: string, act: TransactionAct): Promise<void> {
     const transaction = await this.repository.findByIdForParty(transactionId);
     if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-    this.authorizeAct(transaction, act);
+    if (act === 'READ') assertTransactionVisible(transaction);
+    else await this.authorizeAct(transaction, act);
   }
 
   /**
@@ -803,16 +849,48 @@ export class TransactionService {
  */
 const UNPRICED = { pricingOutcome: null, pricingRuleId: null } as const;
 
+/**
+ * Refuses a refund or a cancellation of a contract statement's obligation —
+ * to every caller, from every state (docs/24 Q-97, temporary decision of
+ * 2026-10-17).
+ *
+ * Nothing was held for such an obligation, so either command moves no money
+ * and only ends it: `REFUNDED` and `CANCELLED` are terminal, and a replay of
+ * the approval finds the ended row and records nothing. The statement would
+ * stay approved and never be paid — a waiver of an approved payable, where
+ * ADR-068 § 6 (I3) corrects an approved statement only by a compensating
+ * statement, never by withdrawing it (review of #329 round 1, finding 1).
+ * Until a statement-specific policy exists, neither command applies.
+ *
+ * A dispute still does: it only freezes. `DISPUTED` leaves by
+ * `RESOLVE_DISPUTE` back to `PENDING_SETTLEMENT`, or by `REFUND` — refused
+ * here — so for this obligation it is a freeze a platform decision lifts.
+ *
+ * Fixed words, no identifiers (S-09).
+ */
+function refuseStatementWithdrawal(
+  transaction: { sourceType: string | null },
+  command: TransactionCommand,
+): void {
+  if (transaction.sourceType !== STATEMENT_SOURCE_TYPE) return;
+  if (command !== 'REFUND' && command !== 'CANCEL') return;
+  throw RastaError.businessRule(STATEMENT_WITHDRAWAL_REFUSED);
+}
+
+export const STATEMENT_WITHDRAWAL_REFUSED =
+  "An approved statement's obligation is not refunded or cancelled; the statement is corrected only by a compensating statement";
+
 /** What a caller asks to do to a transaction — see `TransactionService.authorizeAct`. */
-export type TransactionAct = 'READ' | 'COMMIT' | 'DISPUTE' | 'REFUND';
+export type TransactionAct = 'READ' | TransactionCommand;
 
 /** The facts `authorizeAct` reads off a transaction. */
-type ActedTransaction = RefundableTransaction & { transactionType: string };
+type ActedTransaction = RefundableTransaction & {
+  sourceType: string | null;
+  transactionType: string;
+};
 
-/** The act a lifecycle move asks to make. */
-function actOf(event: 'AUTHORISE_SETTLEMENT' | 'DISPUTE' | 'RESOLVE_DISPUTE' | 'CANCEL') {
-  return event === 'DISPUTE' || event === 'RESOLVE_DISPUTE' ? 'DISPUTE' : 'COMMIT';
-}
+/** The five financial commands made on `/v1/transactions/:id` (settlement is its own resource). */
+export type TransactionCommand = Exclude<FinancialCommand, 'SETTLE'>;
 
 type StatusChangeAction =
   | 'CREATE'

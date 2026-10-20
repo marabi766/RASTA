@@ -158,6 +158,16 @@ describe('what the person sees', () => {
     expect(getByText(/نشست شما پایان یافته است/)).toBeInTheDocument();
   });
 
+  it('a session only unavailable: says so, not "ended", with no accessibility violations', async () => {
+    const { container, getByText, queryByText } = renderForm({
+      kind: 'REFUSED',
+      reason: 'SESSION_UNAVAILABLE',
+    });
+    expect(getByText(/همین حالا در دسترس نیست/)).toBeInTheDocument();
+    expect(queryByText(/پایان یافته/)).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it('answers a refused CSRF check without pretending anything was saved', () => {
     const { getByText, queryByText } = renderForm({ kind: 'REFUSED', reason: 'CSRF' });
     expect(getByText(/این درخواست معتبر شناخته نشد/)).toBeInTheDocument();

@@ -497,6 +497,8 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 | `JOURNAL_POSTED`                         | economic | audit · analytics                                   |
 | `COMMISSION_RULE_CHANGED`                | economic | audit                                               |
 | `REWARD_RULE_CHANGED`                    | economic | audit                                               |
+| `PARTICIPATION_RULE_CHANGED`             | economic | audit                                               |
+| `RECOGNITION_RULE_CHANGED`               | economic | audit                                               |
 | `TRANSACTION_STATUS_CHANGED`             | economic | audit                                               |
 
 > **افزوده (2026-09-26).** `TRANSACTION_STATUS_CHANGED` رکورد Audit هر گام چرخهٔ
@@ -510,6 +512,17 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 > نمی‌کند — نرخ تازه یعنی قاعدهٔ تازه (`docs/10` § ۱۰٫۷) — پس رکورد `UPDATED` فقط
 > بستن، غیرفعال‌کردن یا برچسب را نشان می‌دهد. پیاده‌سازی و تست در همان تاریخ؛
 > زنده‌بودنِ آن روی Broker با اجرای CI سنجیده می‌شود، نه با این سند.
+
+> **افزوده (2026-10-16، COM-012).** `PARTICIPATION_RULE_CHANGED` رکورد Audit ساخت هر نسخهٔ
+> قاعدهٔ امتیاز مشارکت (ADR-047، Q-139) است: چه کسی، کِی، و شرایط نسخهٔ جایگزین‌شده (`before`)
+> و نسخهٔ تازه (`after`). نسخه هرگز ویرایش نمی‌شود، پس `change` همیشه `CREATED` است.
+> `PARTICIPATION_SCORE_UPDATED` (جدول هدف بالا) هنوز منتشر نمی‌شود: امتیاز هنگام خواندن از
+> واقعیت‌های تأییدشده و نسخهٔ جاری محاسبه می‌شود و رویداد «به‌روزرسانی» ندارد.
+
+> **افزوده (2026-10-17، COM-012 PR 2).** `RECOGNITION_RULE_CHANGED` رکورد Audit ساخت هر نسخهٔ
+> سطح و نشان (Q-140) است، به همان شکل: کنشگر، زمان، `before` (نسخهٔ جایگزین‌شده) و `after` — `basis`،
+> `levels[]` و `badges[]`. رسیدن یک شخص به سطح یا نشان **رویداد ندارد**: هنگام خواندن از مبنای نسخه محاسبه
+> می‌شود، چیزی به‌ازای شخص ذخیره نمی‌شود و هیچ اعلان یا جشنی در کار نیست (docs/10 § ۱۰٫۸).
 
 > **وضعیت (2026-08-29).** `economic` تولیدکننده واقعی است: هر یازده رویداد بالا
 > پیاده، تست قرارداد شده و روی `rasta.economic.v1` زنده مشاهده شده‌اند. مصرف

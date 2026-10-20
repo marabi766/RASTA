@@ -2,7 +2,7 @@
 
 import { redirect } from 'next/navigation';
 
-import { currentSession } from '@/server/current-session';
+import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import {
@@ -50,7 +50,7 @@ export async function submitUpdateDriver(
   form: FormData,
 ): Promise<UpdateDriverFormState> {
   const session = await currentSession();
-  if (!session) return { kind: 'REFUSED', reason: 'NO_SESSION' };
+  if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
   const csrf = verifyCsrf(session, form);
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };
@@ -109,7 +109,7 @@ export async function submitChangeStatus(
   form: FormData,
 ): Promise<ChangeStatusFormState> {
   const session = await currentSession();
-  if (!session) return { kind: 'REFUSED', reason: 'NO_SESSION' };
+  if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
   const csrf = verifyCsrf(session, form);
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };
@@ -165,7 +165,7 @@ export async function submitAssign(
   form: FormData,
 ): Promise<AssignFormState> {
   const session = await currentSession();
-  if (!session) return { kind: 'REFUSED', reason: 'NO_SESSION' };
+  if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
   const csrf = verifyCsrf(session, form);
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };
@@ -225,7 +225,7 @@ export async function submitEndAssignment(
   form: FormData,
 ): Promise<EndAssignmentFormState> {
   const session = await currentSession();
-  if (!session) return { kind: 'REFUSED', reason: 'NO_SESSION' };
+  if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
   const csrf = verifyCsrf(session, form);
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };

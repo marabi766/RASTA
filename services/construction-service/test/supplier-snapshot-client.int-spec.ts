@@ -27,6 +27,7 @@ type Behaviour =
   | 'contract'
   | 'error'
   | 'extra-field'
+  | 'goods-supply'
   | 'bad-instant'
   | 'slow'
   | 'oversized'
@@ -95,6 +96,10 @@ describe('SupplierSnapshotClient against the supplier-service contract', () => {
               behaviour === 'wrong-org' ? 'ORG-SOMEBODY-ELSE' : decodeURIComponent(asked[1]!),
             asOf: '2026-10-01T09:05:00.000Z',
             ...(behaviour === 'extra-field' ? { reason: 'Suspended for a failed audit' } : {}),
+            // What supplier-service answers since ADR-070 PR 5: procurement-service's field too.
+            ...(behaviour === 'goods-supply'
+              ? { goodsSupplyApprovedAt: '2026-05-01T08:00:00.000Z' }
+              : {}),
           };
           res.writeHead(200, { 'content-type': 'application/json' });
           res.end(JSON.stringify(one));
@@ -178,6 +183,18 @@ describe('SupplierSnapshotClient against the supplier-service contract', () => {
       expect(seen[0]!.url).toBe('/v1/suppliers/standing-snapshot/ORG%20A%2F1');
       expect(seen[0]!.claims).toMatchObject({ callerService: 'construction-service' });
       expect(seen[0]!.claims!.organizationId).toBeUndefined();
+    });
+
+    it('reads the answer that also carries the GOODS_SUPPLY approval (ADR-070 § 7), standing unchanged', async () => {
+      behaviour = 'goods-supply';
+      const standing = await client().fetchStanding('ORG-A');
+
+      expect(standing).toMatchObject({
+        organizationId: 'ORG-A',
+        contractingApprovedAt: '2026-03-01T08:00:00.000Z',
+        suspensions: PAGE.items[0]!.suspensions,
+        asOf: '2026-10-01T09:05:00.000Z',
+      });
     });
 
     it.each([

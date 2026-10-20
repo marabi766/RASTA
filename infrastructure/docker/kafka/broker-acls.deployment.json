@@ -16,6 +16,7 @@
     "notification-service",
     "ops-replay",
     "organization-service",
+    "procurement-service",
     "supplier-service"
   ],
   "acls": [
@@ -344,6 +345,20 @@
     {
       "principal": "audit-service",
       "resourceType": "TOPIC",
+      "resourceName": "rasta.procurement.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.procurement.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
       "resourceName": "rasta.supplier.v1.retry",
       "patternType": "LITERAL",
       "operation": "READ"
@@ -465,6 +480,20 @@
       "resourceType": "GROUP",
       "resourceName": "economic-service.",
       "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "economic-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.contract.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "economic-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.contract.v1",
+      "patternType": "LITERAL",
       "operation": "READ"
     },
     {
@@ -667,6 +696,34 @@
       "principal": "maintenance-service",
       "resourceType": "TOPIC",
       "resourceName": "rasta.maintenance.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "marketplace-service",
+      "resourceType": "GROUP",
+      "resourceName": "marketplace-service.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "marketplace-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "marketplace-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "marketplace-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.marketplace.v1.dlq",
       "patternType": "LITERAL",
       "operation": "WRITE"
     },
@@ -1002,6 +1059,13 @@
     {
       "principal": "ops-replay",
       "resourceType": "TOPIC",
+      "resourceName": "rasta.marketplace.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
       "resourceName": "rasta.marketplace.v1.retry",
       "patternType": "LITERAL",
       "operation": "READ"
@@ -1100,6 +1164,27 @@
     {
       "principal": "ops-replay",
       "resourceType": "TOPIC",
+      "resourceName": "rasta.procurement.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.procurement.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.procurement.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
       "resourceName": "rasta.supplier.v1.dlq",
       "patternType": "LITERAL",
       "operation": "READ"
@@ -1136,6 +1221,13 @@
       "principal": "organization-service",
       "resourceType": "TOPIC",
       "resourceName": "rasta.organization.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "procurement-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.procurement.v1",
       "patternType": "LITERAL",
       "operation": "WRITE"
     },

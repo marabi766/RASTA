@@ -184,6 +184,13 @@ describe('RegisterAssetForm', () => {
       expect(await axe(container)).toHaveNoViolations();
     });
 
+    it('a session only unavailable: says so, not "ended", with no accessibility violations', async () => {
+      const { container } = renderForm({ kind: 'REFUSED', reason: 'SESSION_UNAVAILABLE' });
+      expect(screen.getByRole('alert')).toHaveTextContent(/همین حالا در دسترس نیست/);
+      expect(screen.getByRole('alert')).not.toHaveTextContent(/پایان یافته/);
+      expect(await axe(container)).toHaveNoViolations();
+    });
+
     it('never tells the person nothing was saved when that is not known', () => {
       renderForm({ kind: 'UNCONFIRMED', correlationId: 'corr-unk' });
       expect(screen.getByRole('alert').textContent).not.toMatch(/چیزی ذخیره نشد/);
@@ -291,6 +298,13 @@ describe('UpdateAssetForm', () => {
   ])('says so in Persian for %j', (state, expected) => {
     renderForm(state);
     expect(screen.getByRole('alert')).toHaveTextContent(expected);
+  });
+
+  it('a session only unavailable: says so, not "ended", with no accessibility violations', async () => {
+    const { container } = renderForm({ kind: 'REFUSED', reason: 'SESSION_UNAVAILABLE' });
+    expect(screen.getByRole('alert')).toHaveTextContent(/همین حالا در دسترس نیست/);
+    expect(screen.getByRole('alert')).not.toHaveTextContent(/پایان یافته/);
+    expect(await axe(container)).toHaveNoViolations();
   });
 
   it('disables the button while a submit is in flight', () => {

@@ -174,7 +174,7 @@ export class TransactionController {
       targeted(id),
       200,
       (answer) => this.transactions.authoriseSettlement(id, answer.map(detailView), key),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'COMMIT') },
+      { mayReplay: () => this.transactions.assertMayReplay(id, 'AUTHORISE_SETTLEMENT') },
     );
   }
 
@@ -243,7 +243,7 @@ export class TransactionController {
       targeted(id, dto),
       200,
       (answer) => this.transactions.resolveDispute(id, dto, answer.map(detailView)),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'DISPUTE') },
+      { mayReplay: () => this.transactions.assertMayReplay(id, 'RESOLVE_DISPUTE') },
     );
   }
 
@@ -258,10 +258,12 @@ export class TransactionController {
       'rather than reversing the hold: the hold really happened and was then cancelled, and an ' +
       'auditor needs to be able to tell those apart. Requires an `Idempotency-Key`. ' +
       'Never available to the payer, from any state (403): a payer that could refund its own ' +
-      'escrow could step around the dispute resolution. Available to platform scope, to ' +
+      'escrow could step around the dispute resolution. Available to a system administrator, ' +
+      'to a union administrator for a payer within its union’s subtree (docs/24 Q-136), to ' +
       'marketplace-service as its order saga, and to the payee’s financial administrator — ' +
-      'except while DISPUTED, which needs platform scope (docs/24 Q-62). A caller that is ' +
-      'not a party gets 404.',
+      'except while DISPUTED, which needs one of the first two (docs/24 Q-62). A caller that ' +
+      'is not a party gets 404. An approved contract statement’s obligation ' +
+      '(`sourceType = STATEMENT`) is never refunded, by anyone (422, docs/24 Q-97).',
   })
   async refund(
     @Param('id') id: string,
@@ -289,7 +291,9 @@ export class TransactionController {
     summary: 'Abandon a transaction nothing has moved against',
     description:
       'Only from CREATED. Once funds are held the correct act is a refund, which returns them ' +
-      'explicitly rather than leaving them in escrow behind a cancelled obligation.',
+      'explicitly rather than leaving them in escrow behind a cancelled obligation. An ' +
+      'approved contract statement’s obligation (`sourceType = STATEMENT`) is never ' +
+      'cancelled, by anyone (422, docs/24 Q-97).',
   })
   async cancel(
     @Param('id') id: string,
@@ -305,7 +309,7 @@ export class TransactionController {
       targeted(id, dto),
       200,
       (answer) => this.transactions.cancel(id, dto.reason, answer.map(detailView)),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'COMMIT') },
+      { mayReplay: () => this.transactions.assertMayReplay(id, 'CANCEL') },
     );
   }
 }

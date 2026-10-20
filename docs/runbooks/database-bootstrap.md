@@ -510,6 +510,37 @@ SELECT conname, convalidated FROM pg_constraint WHERE conname LIKE 'ck\_%\_non\_
 قفل زیر `NOT VALID` می‌ماند — و پاسخ هر سه مسیر به ردیف منفیِ ذخیره‌شده در
 `services/asset-service/test/insurance-money-stored.int-spec.ts`.
 
+### procurement: نخستین Migration (COM-007 PR 1، ADR-070)
+
+پایگاه داده `rasta_procurement` و هر دو نقشش از روز اول در `00-init-databases.sh` ساخته می‌شوند (`procurement` در
+`PRIVILEGE_SPLIT_SERVICES`)؛ تا این برش هیچ جدولی نداشت. نخستین Migration
+(`services/procurement-service/prisma/migrations/20261016200000_init_procurement`) دو جدول دامنه
+(`demand_aggregation`، `demand_request`)، انبار Idempotency و Outbox را می‌سازد. هیچ Enum ای ندارد (وضعیت‌ها متن زیر
+`CHECK`)، هیچ افزونه‌ای لازم ندارد و هیچ سرویس دیگری را صدا نمی‌زند.
+
+**Volume ای که پیش از D-045 ساخته شده** (نقش زمان‌اجرا هنوز مالک پایگاه داده است — `pg_database.datdba` برابر
+`rasta_procurement`): پیش از نخستین Migration جداسازی را اعمال کن، چون پس از آن جدول‌ها مال نقش زمان‌اجرا می‌شوند و
+محافظ‌ها برداشتنی می‌مانند:
+
+```bash
+POSTGRES_PASSWORD_PROCUREMENT=… POSTGRES_PASSWORD_PROCUREMENT_MIGRATOR=… pnpm db:privilege-split procurement
+```
+
+سپس، با `DATABASE_URL_PROCUREMENT_MIGRATOR` (`.env.migrator`) و نه نشانی زمان‌اجرا:
+
+```bash
+pnpm --filter @rasta/procurement-service run db:migrate
+pnpm --filter @rasta/procurement-service exec node ../../scripts/prisma.mjs migrate status   # «Database schema is up to date!»
+```
+
+**تأیید.** سرویس با نقش مالک بالا نمی‌آید (`startup-role.int-spec.ts`) و نقش زمان‌اجرا هیچ Trigger ای را برنمی‌دارد
+(`runtime-privileges.int-spec.ts`). برگشت‌پذیری روی Schema دورریختنی: `node scripts/verify-migration-reversible.mjs procurement`
+(همان `pnpm test:migration` در CI).
+
+**بازگرداندن** با `down.sql` همان Migration (مسیر بالا، «اجرای `down.sql`»): **همهٔ نیازها و تجمیع‌ها حذف می‌شوند** و
+هیچ سرویس دیگری نسخه‌ای از آن‌ها ندارد (audit-service فقط رویدادها را دارد) — روی پایگاه دادهٔ دارای دادهٔ واقعی، بازیابی
+از پشتیبان است، نه این فایل.
+
 ---
 
 ## بازسازی کامل محیط توسعه

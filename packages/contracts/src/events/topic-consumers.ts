@@ -35,7 +35,7 @@ import {
  * declared here, and — once it authenticates to the broker — one whose group
  * is outside its own principal's namespace.
  *
- * A service with no consumer (organization, marketplace, document today) is
+ * A service with no consumer (organization, document today) is
  * absent. Adding a consumer means declaring it here;
  * `topic-consumers.repo.spec.ts` fails the build for one that is not.
  */
@@ -72,8 +72,14 @@ export const TOPIC_CONSUMERS = Object.freeze({
     subscribes: Object.freeze(['rasta.fleet.v1', 'rasta.asset.v1'] as const),
     deadLetterTopic: 'rasta.maintenance.v1.dlq',
   }),
+  // CON-003 PR 6b (ADR-068 § 6): STATEMENT_APPROVED, as a trigger only — the statement, and its
+  // amount, which is on no event, are asked of contract-service before any obligation (A-13).
   'economic-service': Object.freeze({
-    subscribes: Object.freeze(['rasta.maintenance.v1', 'rasta.fleet.v1'] as const),
+    subscribes: Object.freeze([
+      'rasta.maintenance.v1',
+      'rasta.fleet.v1',
+      'rasta.contract.v1',
+    ] as const),
     deadLetterTopic: 'rasta.economic.v1.dlq',
   }),
   'notification-service': Object.freeze({
@@ -99,6 +105,14 @@ export const TOPIC_CONSUMERS = Object.freeze({
   'contract-service': Object.freeze({
     subscribes: Object.freeze(['rasta.construction.v1', 'rasta.organization.v1'] as const),
     deadLetterTopic: 'rasta.contract.v1.dlq',
+  }),
+  // RUN-005 (ADR-048 § 2, § 3): mirrors the physical half of a return onto the return request
+  // marketplace owns. Reads only the RETURN_SHIPMENT_* events of inventory-service, each as a
+  // claim about goods that is checked against the request before anything is written; it
+  // creates no money effect (ADR-061 § 4 needs no source read) and asks for none.
+  'marketplace-service': Object.freeze({
+    subscribes: Object.freeze(['rasta.inventory.v1'] as const),
+    deadLetterTopic: 'rasta.marketplace.v1.dlq',
   }),
   'supplier-service': Object.freeze({
     subscribes: Object.freeze(['rasta.marketplace.v1'] as const),

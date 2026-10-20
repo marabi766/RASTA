@@ -99,4 +99,15 @@ export interface ReturnRequestView {
   cancelledAt: string | null;
   cancelledBy: string | null;
   cancelledFrom: string | null;
+  /**
+   * The physical half, as inventory-service reported it and this service checked it (RUN-005 PR
+   * 3): the shipment and when each step happened. What arrived per line and what became of it are
+   * inventory's facts, read there.
+   */
+  returnShipmentId: string | null;
+  inTransitAt: string | null;
+  receivedAt: string | null;
+  inspectedAt: string | null;
+  inspectionReportDocumentId: string | null;
+  resolvedAt: string | null;
 }

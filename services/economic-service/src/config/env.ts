@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { businessLineSchema } from '@rasta/contracts';
 import {
   EnvValidationError,
   authEnvSchema,
@@ -198,9 +199,49 @@ export const economicEnvSchema = baseEnvSchema
      */
     MAINTENANCE_SERVICE_URL: z.string().url(),
     FLEET_SERVICE_URL: z.string().url(),
+    /** The owner of an approved contract statement (ADR-068 § 6 (2)); required for the same reason. */
+    CONTRACT_SERVICE_URL: z.string().url(),
+
+    /**
+     * The business line a contract statement's obligation is recorded under
+     * (ADR-045 § 1), or none.
+     *
+     * Unset by default, and that default is the temporary decision of docs/24
+     * Q-130 (D-057), not a guess: only a source that knows its line sends one,
+     * and whether a statement is always `CONSTRUCTION` is exactly what Q-130
+     * asks. Unset, a statement is priced by the type-only rules for
+     * `CONSTRUCTION_STATEMENT` and, with none, recorded `NO_ACTIVE_RULE`. The
+     * answer is this setting, not a code change (Q-97 note, CON-003 PR 6b).
+     * Read when an obligation is recorded; the line it was recorded under never
+     * changes afterwards.
+     */
+    ECONOMIC_STATEMENT_BUSINESS_LINE: z.preprocess(
+      (value) => (value === '' ? undefined : value),
+      businessLineSchema.optional(),
+    ),
 
     /** One source read, body included. A timeout is retried, never acted on. */
     ECONOMIC_SOURCE_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
+
+    /**
+     * Where a union administrator's subtree is confirmed (docs/24 Q-136):
+     * organization-service, the owner of the hierarchy (A-13), asked as
+     * construction-service and contract-service ask it.
+     */
+    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+
+    /**
+     * How long that question may take, body included. It is asked under the
+     * transaction's row lock, so it is kept far below the transaction's own
+     * timeout (`CONTENTION_TRANSACTION_TIMEOUT_MS`); no answer in time refuses
+     * the command with 504 and nothing is written (fail closed).
+     */
+    ECONOMIC_ORGANIZATION_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(30_000)
+      .default(3000),
 
     /** How long a stored idempotency key is honoured (docs/06 § 6.8). */
     ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),

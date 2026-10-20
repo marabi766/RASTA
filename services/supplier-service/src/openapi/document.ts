@@ -142,8 +142,9 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
     in: 'header',
     name: 'x-internal-token',
     description:
-      'A signed internal service token minted by construction-service for supplier-service ' +
-      'and for no tenant. The standing snapshot routes accept it and nothing else.',
+      'A signed internal service token minted for supplier-service and for no tenant: by ' +
+      'construction-service for the standing snapshot routes, or by procurement-service for ' +
+      'the single-organization one. Those routes accept it and nothing else.',
   } as never;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {

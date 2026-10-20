@@ -8,7 +8,13 @@ import {
   validateEconomicPayload,
   type EconomicEventName,
 } from './events';
-import { CONSUMED_EVENTS, DEFERRED_CONSUMPTION, maintenanceApprovedSchema } from './consumed';
+import {
+  CONSUMED_EVENTS,
+  DEFERRED_CONSUMPTION,
+  maintenanceApprovedSchema,
+  STATEMENT_APPROVED_FIELDS,
+  statementApprovedSchema,
+} from './consumed';
 
 /**
  * The event contract (docs/07 § 7.8, docs/events/README.md § Economic).
@@ -22,7 +28,7 @@ import { CONSUMED_EVENTS, DEFERRED_CONSUMPTION, maintenanceApprovedSchema } from
 const EVENT_NAMES = Object.values(ECONOMIC_EVENTS) as EconomicEventName[];
 
 describe('the catalogue', () => {
-  it('publishes exactly the twenty-one events docs/07 § 7.5 lists', () => {
+  it('publishes exactly the twenty-three events docs/07 § 7.5 lists', () => {
     expect(EVENT_NAMES.sort()).toEqual(
       [
         'COMMISSION_APPLIED',
@@ -40,6 +46,8 @@ describe('the catalogue', () => {
         'PAYMENT_RECONCILIATION_ESCALATED',
         'PAYMENT_RECONCILIATION_RESOLVED',
         'PAYMENT_RECONCILIATION_OPERATOR_ACTION',
+        'PARTICIPATION_RULE_CHANGED',
+        'RECOGNITION_RULE_CHANGED',
         'REWARD_GRANTED',
         'REWARD_LEVEL_CHANGED',
         'REWARD_RULE_CHANGED',
@@ -389,12 +397,13 @@ describe('FUNDS_RELEASED', () => {
 });
 
 describe('consumed events', () => {
-  it('consumes only the three contracts that are real', () => {
+  it('consumes only the four contracts that are real', () => {
     // ADR-032. The rest are deferred because their contracts are sketches, and
     // writing them would mean this service defining another service's payload.
     expect(Object.values(CONSUMED_EVENTS).sort()).toEqual([
       'MAINTENANCE_APPROVED',
       'MAINTENANCE_COMPLETED',
+      'STATEMENT_APPROVED',
       'USAGE_RECORDED',
     ]);
   });
@@ -404,7 +413,9 @@ describe('consumed events', () => {
     // `processed_event` row and looks exactly like one that worked.
     expect(DEFERRED_CONSUMPTION).toContain('ORDER_CREATED');
     expect(DEFERRED_CONSUMPTION).toContain('ORDER_RECEIPT_CONFIRMED');
-    expect(DEFERRED_CONSUMPTION).toContain('STATEMENT_APPROVED');
+    // Consumed since CON-003 PR 6b, from the owner's answer (ADR-068 § 6).
+    expect(DEFERRED_CONSUMPTION).not.toContain('STATEMENT_APPROVED');
+    expect(Object.values(CONSUMED_EVENTS)).toContain('STATEMENT_APPROVED');
 
     for (const deferred of DEFERRED_CONSUMPTION) {
       expect(Object.values(CONSUMED_EVENTS)).not.toContain(deferred);
@@ -432,6 +443,31 @@ describe('consumed events', () => {
 
     expect(payload.totalCostMinor).toBe('11850000');
     expect(payload.workshopOrganizationId).toBe('ORG-WORKSHOP');
+  });
+
+  it('parses the exact STATEMENT_APPROVED contract-service publishes, which carries no amount', () => {
+    // contract-service's `statementApprovedPayload` (statementFacts + approvedAt), built by hand
+    // because importing across services is forbidden (A-02): a change there fails here.
+    const published = {
+      contractId: 'CTR_01JBQ8',
+      statementId: 'STM_01JBQ8',
+      statementNumber: 3,
+      organizationId: 'ORG-EMPLOYER',
+      contractorOrganizationId: 'ORG-CONTRACTOR',
+      approvedAt: '2026-10-16T11:00:00.000Z',
+    };
+    const payload = statementApprovedSchema.parse(published);
+
+    expect(payload.statementId).toBe('STM_01JBQ8');
+    expect(payload.contractorOrganizationId).toBe('ORG-CONTRACTOR');
+    expect(Object.keys(published).some((key) => /amount|net|minor/i.test(key))).toBe(false);
+    expect([...STATEMENT_APPROVED_FIELDS].sort()).toEqual([
+      'approvedAt',
+      'contractId',
+      'contractorOrganizationId',
+      'organizationId',
+      'statementId',
+    ]);
   });
 
   it('accepts an approval with no workshop, which is a real case', () => {

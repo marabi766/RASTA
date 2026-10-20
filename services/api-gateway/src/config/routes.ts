@@ -166,6 +166,8 @@ export const ROUTES: readonly RouteRule[] = [
   { prefix: 'warehouses', service: 'inventory', requiresIdempotencyKey: true },
   { prefix: 'stock', service: 'inventory', requiresIdempotencyKey: true },
   { prefix: 'shipments', service: 'inventory', requiresIdempotencyKey: true },
+  // RUN-005 (ADR-048): goods coming BACK. Not under `returns`, which is marketplace's request.
+  { prefix: 'return-shipments', service: 'inventory', requiresIdempotencyKey: true },
 
   // ---- civil works -------------------------------------------------------
   { prefix: 'projects', service: 'construction' },

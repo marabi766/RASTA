@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { runUnscoped } from '@rasta/nest-common';
+import { getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { AccountPurpose, Prisma } from '../generated/prisma';
 import { after, resolveCursor } from '../shared/cursor';
+import { isIssuedSettlementBooks, type SettlementBooks } from '../access/access';
 
 /**
  * Ledger persistence.
@@ -22,7 +23,8 @@ import { after, resolveCursor } from '../shared/cursor';
  * (`applyTenant`), which is the right default — so the one place that
  * legitimately spans tenants says so, with a written reason, and is greppable.
  * The database still refuses a leg whose organization does not match its
- * account, through `fk_ledger_entry_account_identity`.
+ * account, through `fk_ledger_entry_account_identity`. The journal header
+ * crosses in one case only, on an issued leave (`createJournal`).
  */
 @Injectable()
 export class LedgerRepository {
@@ -160,10 +162,30 @@ export class LedgerRepository {
       reversalReason?: string | null;
       correlationId: string;
     },
+    books?: SettlementBooks,
   ) {
     // The journal header carries the initiating tenant, so this one is scoped
     // normally — the guard will inject the same value the caller passed.
-    return tx.journal.create({ data });
+    if (!books) return tx.journal.create({ data });
+
+    // The one exception: a settlement journal on the payer's books, posted by
+    // a platform administrator acting for another organization — a system
+    // administrator, or a union administrator for an organization of its
+    // union's subtree (`access.ts` `settlementBooks`, docs/24 Q-136). Only this row crosses, only for this journal type,
+    // only onto the organization the leave names, and only within the request
+    // it was issued for; anything else is refused here rather than written.
+    if (
+      !isIssuedSettlementBooks(books) ||
+      data.journalType !== 'SETTLEMENT' ||
+      data.organizationId !== books.organizationId ||
+      getOrganizationId() !== books.actingOrganizationId
+    ) {
+      throw new Error('A journal may cross the tenant boundary only as an issued settlement');
+    }
+    return runUnscoped(
+      "a platform administrator's settlement posts the payer's journal while acting for another organization",
+      () => tx.journal.create({ data }),
+    );
   }
 
   createEntries(
