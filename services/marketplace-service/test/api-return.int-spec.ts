@@ -448,7 +448,11 @@ describe('return request API', () => {
       await decide(id, 'reject', supplier(supplierOrg)).expect(200);
 
       await decide(id, 'authorize', supplier(supplierOrg)).expect(422);
-      await decide(id, 'cancel', buyer(buyerOrg)).expect(422);
+      // The buyer saw it REQUESTED; it is not any more: a stale command, 409 — before the
+      // transition is judged at all (Codex r2 on #339, finding 2).
+      const stale = await decide(id, 'cancel', buyer(buyerOrg)).expect(409);
+      expect(stale.body.code).toBe('OPTIMISTIC_LOCK_FAILED');
+      expect((await eventsOf(buyerOrg, id)).length).toBe(2);
     });
 
     it('an AUTHORIZED return cannot be rejected, but the buyer may withdraw it (version 3)', async () => {
@@ -469,7 +473,8 @@ describe('return request API', () => {
         version: 3,
         cancelledFrom: 'AUTHORIZED',
       });
-      await decide(id, 'cancel', buyer(buyerOrg)).expect(422);
+      // A second cancellation names a status the request no longer has: stale, 409.
+      await decide(id, 'cancel', buyer(buyerOrg)).expect(409);
     });
 
     it('a cancelled quantity is free to be asked for again', async () => {

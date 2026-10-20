@@ -399,6 +399,15 @@ export class ReturnService {
       assertReturnVisible(locked);
       RETURN_AUTHORISATION[command](locked);
 
+      // Conditional: the status the buyer saw, judged here, under the lock — not by a read the
+      // supplier's authorization can overtake (Codex r1 on #339, finding 1). Before the transition
+      // check: a request the buyer saw REQUESTED and the supplier has since rejected — or saw
+      // AUTHORIZED and its goods have since moved it IN_TRANSIT — is a stale command, 409, not an
+      // illegal one, 422 (Codex r2 on #339, finding 2).
+      if (cancellation && locked.status !== cancellation.expectedStatus) {
+        returnRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'STALE_EXPECTED_STATUS' });
+        throw RastaError.optimisticLockFailed('ReturnRequest', id);
+      }
       try {
         assertReturnTransition(locked.id, locked.status, to);
       } catch (error) {
@@ -406,12 +415,6 @@ export class ReturnService {
         throw error;
       }
       if (cancellation) {
-        // Conditional: the status the buyer saw, judged here, under the lock — not by a read the
-        // supplier's authorization can overtake (Codex r1 on #339, finding 1).
-        if (locked.status !== cancellation.expectedStatus) {
-          returnRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'STALE_EXPECTED_STATUS' });
-          throw RastaError.optimisticLockFailed('ReturnRequest', id);
-        }
         // The goods may be on the road while the request still reads AUTHORIZED: inventory
         // reserved the dispatch here before recording its shipment, and the shipment's own event
         // moves the request on later — or not at all while the mirror is off (Q-133 (5)). Read

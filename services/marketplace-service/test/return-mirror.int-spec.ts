@@ -265,6 +265,18 @@ describe('return mirror (RUN-005 PR 3)', () => {
   }
 
   describe('the four steps, in order', () => {
+    it('answers a cancellation the buyer made from AUTHORIZED, once its goods moved it IN_TRANSIT, 409 — stale, not illegal (Codex r2 on #339, finding 2)', async () => {
+      const f = await authorizedReturn();
+      await expect(deliver(event(f, 'DISPATCHED'))).resolves.toBeUndefined();
+
+      await expect(
+        asActor({ organizationId: f.buyer, roles: ['PROCUREMENT_USER'], userId: 'USR-B' }, () =>
+          wiring.returns.cancel(f.requestId, { expectedStatus: 'AUTHORIZED' }, key('mir-cancel')),
+        ),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+      expect(await stored(f)).toMatchObject({ status: 'IN_TRANSIT', version: 3 });
+    });
+
     it('moves an AUTHORIZED request IN_TRANSIT → RECEIVED → INSPECTED → RESOLVED, each with its history and event', async () => {
       const f = await authorizedReturn();
       const inspected = event(f, 'INSPECTED');
