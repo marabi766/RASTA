@@ -72,8 +72,14 @@ export const TOPIC_CONSUMERS = Object.freeze({
     subscribes: Object.freeze(['rasta.fleet.v1', 'rasta.asset.v1'] as const),
     deadLetterTopic: 'rasta.maintenance.v1.dlq',
   }),
+  // CON-003 PR 6b (ADR-068 § 6): STATEMENT_APPROVED, as a trigger only — the statement, and its
+  // amount, which is on no event, are asked of contract-service before any obligation (A-13).
   'economic-service': Object.freeze({
-    subscribes: Object.freeze(['rasta.maintenance.v1', 'rasta.fleet.v1'] as const),
+    subscribes: Object.freeze([
+      'rasta.maintenance.v1',
+      'rasta.fleet.v1',
+      'rasta.contract.v1',
+    ] as const),
     deadLetterTopic: 'rasta.economic.v1.dlq',
   }),
   'notification-service': Object.freeze({

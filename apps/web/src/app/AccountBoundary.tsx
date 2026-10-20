@@ -18,19 +18,38 @@ import {
   purgeForeignUnresolvedReturns,
 } from '@/lib/unresolved-return';
 import {
+  markContractCommandsOpen,
+  purgeAllUnresolvedContractCommands,
+  purgeForeignUnresolvedContractCommands,
+} from '@/lib/unresolved-contract-command';
+import {
   markStatementsOpen,
   purgeAllUnresolvedStatements,
   purgeForeignUnresolvedStatements,
 } from '@/lib/unresolved-statement';
+import {
+  markBidsOpen,
+  purgeAllUnresolvedBids,
+  purgeForeignUnresolvedBids,
+} from '@/lib/unresolved-bid';
+import {
+  markOwnerCommandsOpen,
+  purgeAllUnresolvedOwnerCommands,
+  purgeForeignUnresolvedOwnerCommands,
+} from '@/lib/unresolved-tender-command';
 
 /**
  * The browser's side of an account boundary: what an unresolved order,
- * dispute command, statement command or return command left in
- * `sessionStorage` (`lib/unresolved-order.ts`, `lib/unresolved-dispute.ts`,
- * `lib/unresolved-statement.ts`, `lib/unresolved-return.ts`) must not outlive.
- * All follow the same rules; a statement or return command is reduced to a
- * marker at logout like a dispute command (a draft or a request repeated under
- * a fresh key is a second statement, or a second request for the same goods).
+ * dispute command, statement command, return command or contract command left
+ * in `sessionStorage` (`lib/unresolved-order.ts`, `lib/unresolved-dispute.ts`,
+ * `lib/unresolved-statement.ts`, `lib/unresolved-return.ts`,
+ * `lib/unresolved-contract-command.ts`) must not outlive. All follow the same
+ * rules; a statement, return or contract command is reduced to a marker at
+ * logout like a dispute command (a draft, a request, an amendment or a
+ * milestone repeated under a fresh key is a second one). A bid command's
+ * record (`lib/unresolved-bid.ts`), and a tender owner's command's
+ * (`lib/unresolved-tender-command.ts`), are markers from the start — they never
+ * hold what was sent — so a logout only stops them being written again.
  *
  * - **Logout.** Any form posting to `/auth/logout` — every portal page has its
  *   own — empties every remembered order before the navigation leaves. A capture
@@ -63,10 +82,16 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
     markDisputesOpen();
     markReturnsOpen();
     markStatementsOpen();
+    markContractCommandsOpen();
+    markBidsOpen();
+    markOwnerCommandsOpen();
     purgeForeignUnresolvedOrders(owner);
     purgeForeignUnresolvedDisputes(owner);
     purgeForeignUnresolvedReturns(owner);
     purgeForeignUnresolvedStatements(owner);
+    purgeForeignUnresolvedContractCommands(owner);
+    purgeForeignUnresolvedBids(owner);
+    purgeForeignUnresolvedOwnerCommands(owner);
   }, [owner]);
 
   useEffect(() => {
@@ -77,6 +102,9 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
         purgeAllUnresolvedDisputes();
         purgeAllUnresolvedReturns();
         purgeAllUnresolvedStatements();
+        purgeAllUnresolvedContractCommands();
+        purgeAllUnresolvedBids();
+        purgeAllUnresolvedOwnerCommands();
       }
     };
     document.addEventListener('submit', onSubmit, true);

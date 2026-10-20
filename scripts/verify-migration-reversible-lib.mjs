@@ -1813,6 +1813,8 @@ export const EXPECTED = {
       'trg_commission_rule_effective_dated',
       'trg_commission_pricing_cutover_fixed',
       'trg_transaction_pricing_fixed',
+      // A statement's obligation is never changed nor deleted (ADR-068 § 6).
+      'trg_transaction_statement_obligation_fixed',
       // A participation rule version is never edited: the next one replaces it.
       'trg_participation_rule_append_only',
       'trg_participation_rule_no_truncate',
@@ -1831,6 +1833,7 @@ export const EXPECTED = {
       'commission_pricing_scope_lock',
       'reject_commission_pricing_cutover_mutation',
       'reject_transaction_repricing',
+      'reject_statement_obligation_change',
       'reject_participation_rule_mutation',
       'reject_recognition_rule_mutation',
     ],
@@ -1855,6 +1858,8 @@ export const EXPECTED = {
       'ck_payment_resolution_four_eyes',
       // The creator's stable identity: both or neither (ADR-064 § 6).
       'ck_payment_intent_creator_identity',
+      // Only the STATEMENT_APPROVED consumer records a statement's obligation (ADR-068 § 6).
+      'ck_transaction_statement_obligation',
       // A participation subject is a person with an instant; versions are numbered once.
       'ck_reward_source_evaluation_subject',
       'ck_participation_rule_contributions',
@@ -2734,6 +2739,81 @@ export const EXPECTED = {
       'ck_return_shipment_inspection',
       'ck_return_disposition_value',
       'ck_return_disposition_quantity_positive',
+      'ck_idempotency_state',
+      'ck_idempotency_completed_has_response',
+      'ck_outbox_claim_triple',
+      'ck_outbox_claim_count_nonneg',
+      'ck_outbox_attempts_nonneg',
+      'ck_outbox_next_attempt_requires_failure',
+      'ck_outbox_published_is_clean',
+    ],
+  },
+  /**
+   * procurement-service (COM-007 PR 1, ADR-070). One initial migration that folds the domain
+   * schema, the idempotency store and the outbox together, as inventory's does, so its outbox
+   * objects are verified here rather than by the by-name outbox verifiers
+   * (`verify-outbox-claim-migration.mjs` lists it as folded).
+   *
+   * The domain objects listed are the ones carrying a claim a reader would otherwise take on
+   * trust: one OPEN window per (organization, product), a demand only in a window of its own
+   * organization and product and only inside it, a window that ended keeps its contents, its
+   * totals are always its demands', and neither table is ever erased. Every status is text under
+   * a CHECK: there is no type to list.
+   */
+  procurement: {
+    // D-045: the runtime role owns nothing and lost CREATEDB, so the scratch schema is
+    // created — and migrated — as the migrator, which owns rasta_procurement.
+    connectAs: 'migrator',
+    tables: [
+      'demand_aggregation',
+      'demand_request',
+      'idempotency_key',
+      'outbox_message',
+      'outbox_stream_sequence',
+    ],
+    types: [],
+    triggers: [
+      'tg_demand_aggregation_guard',
+      'tg_demand_aggregation_no_truncate',
+      'tg_demand_aggregation_totals_check',
+      'tg_demand_request_guard',
+      'tg_demand_request_no_truncate',
+      'tg_demand_request_totals_check',
+    ],
+    functions: [
+      'demand_aggregation_guard',
+      'demand_request_guard',
+      'demand_aggregation_totals_check',
+    ],
+    indexes: [
+      'ux_demand_aggregation_org_id',
+      'ux_demand_aggregation_open',
+      'ux_demand_aggregation_org_id_product',
+      'ix_demand_aggregation_org_status',
+      'ux_demand_request_org_id',
+      'ix_demand_request_org_status',
+      'ix_demand_request_aggregation',
+    ],
+    constraints: [
+      'fk_demand_request_aggregation',
+      'ck_demand_aggregation_status',
+      'ck_demand_aggregation_identifiers',
+      'ck_demand_aggregation_window',
+      'ck_demand_aggregation_snapshot',
+      'ck_demand_aggregation_counts',
+      'ck_demand_aggregation_closed',
+      'ck_demand_aggregation_rfq',
+      'ck_demand_aggregation_version_positive',
+      'ck_demand_aggregation_timestamps_ordered',
+      'ck_demand_request_status',
+      'ck_demand_request_identifiers',
+      'ck_demand_request_quantity_positive',
+      'ck_demand_request_note',
+      'ck_demand_request_actor_recorded',
+      'ck_demand_request_withdrawal',
+      'ck_demand_request_closed',
+      'ck_demand_request_version_positive',
+      'ck_demand_request_timestamps_ordered',
       'ck_idempotency_state',
       'ck_idempotency_completed_has_response',
       'ck_outbox_claim_triple',

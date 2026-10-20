@@ -135,6 +135,7 @@ export function testEnv(): EconomicEnv {
     // (`source-facts.fake.ts`). A closed port, so a slip fails fast.
     MAINTENANCE_SERVICE_URL: 'http://127.0.0.1:9',
     FLEET_SERVICE_URL: 'http://127.0.0.1:9',
+    CONTRACT_SERVICE_URL: 'http://127.0.0.1:9',
     ...process.env,
     DATABASE_URL: databaseUrl(),
     ECONOMIC_PLATFORM_ORGANIZATION_ID: PLATFORM_ORGANIZATION_ID,
@@ -624,6 +625,25 @@ export async function cleanup(
         // ISOLATION-ALLOW-UNBOUNDED: as above.
         await tx.$executeRawUnsafe(
           'ALTER TABLE "transaction" ENABLE TRIGGER trg_transaction_pricing_fixed',
+        );
+
+        // A statement obligation is never deleted (CON-003 PR 6b), so this
+        // run's own go here, with the guard lifted in this transaction only;
+        // their legs, settlements and commissions are already gone above.
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE "transaction" DISABLE TRIGGER trg_transaction_statement_obligation_fixed',
+        );
+        await tx.$executeRawUnsafe(
+          `DELETE FROM "transaction"
+            WHERE source_type = 'STATEMENT'
+              AND (organization_id LIKE ANY($1::text[])
+                   OR counterparty_organization_id LIKE ANY($1::text[]))`,
+          orgs,
+        );
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE "transaction" ENABLE TRIGGER trg_transaction_statement_obligation_fixed',
         );
 
         for (const [table, trigger] of [

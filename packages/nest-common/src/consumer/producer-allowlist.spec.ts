@@ -254,14 +254,14 @@ describe('what the check is judged against', () => {
 
 describe('subscribing to an undeclared topic', () => {
   it('fails at construction, naming the topic', () => {
-    expect(() => build(['rasta.procurement.v1'], async () => undefined)).toThrow(
-      /rasta\.procurement\.v1.*no producer declared in TOPIC_PRODUCERS/,
+    expect(() => build(['rasta.analytics.v1'], async () => undefined)).toThrow(
+      /rasta\.analytics\.v1.*no producer declared in TOPIC_PRODUCERS/,
     );
   });
 
   it('fails even when only one of several topics is undeclared', () => {
-    expect(() => build(['rasta.asset.v1', 'rasta.procurement.v1'], async () => undefined)).toThrow(
-      /rasta\.procurement\.v1/,
+    expect(() => build(['rasta.asset.v1', 'rasta.analytics.v1'], async () => undefined)).toThrow(
+      /rasta\.analytics\.v1/,
     );
   });
 });

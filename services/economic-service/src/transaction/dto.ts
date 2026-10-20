@@ -41,6 +41,22 @@ export const TRANSACTION_STATUSES = [
   'FAILED',
 ] as const;
 
+/**
+ * The source type of a contract statement's obligation (ADR-068 § 6 (2)):
+ * `(STATEMENT, statementId)` is its unique key, and only the
+ * `STATEMENT_APPROVED` consumer records one, from contract-service's answer.
+ */
+export const STATEMENT_SOURCE_TYPE = 'STATEMENT';
+
+/**
+ * Source types no HTTP caller may claim. A caller who recorded
+ * `STATEMENT/<id>` first would hold the key the consumer needs, and the real
+ * approval would then find that row — with the caller's amount — and record
+ * nothing (I4). `ck_transaction_statement_obligation` refuses it at the
+ * database as well.
+ */
+export const CONSUMER_RECORDED_SOURCE_TYPES: readonly string[] = [STATEMENT_SOURCE_TYPE];
+
 export const createTransactionSchema = z
   .object({
     /**
@@ -72,7 +88,15 @@ export const createTransactionSchema = z
      */
     occurredAt: z.string().datetime().optional(),
     /** The owning service's identifier space — an order id, a statement id. */
-    sourceType: z.string().trim().min(1).max(64).optional(),
+    sourceType: z
+      .string()
+      .trim()
+      .min(1)
+      .max(64)
+      .refine((value) => !CONSUMER_RECORDED_SOURCE_TYPES.includes(value), {
+        message: 'This source type is recorded only from its owning service',
+      })
+      .optional(),
     sourceReference: z.string().trim().min(1).max(128).optional(),
     /**
      * Reserve the funds immediately.

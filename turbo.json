@@ -85,13 +85,17 @@
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
+        "CONTRACT_SERVICE_URL",
+        "ECONOMIC_STATEMENT_BUSINESS_LINE",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",
         "INVENTORY_RETURN_DISPOSITIONS_ALLOWED",
         "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
         "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
-        "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED"
+        "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
+        "CORS_ORIGINS",
+        "PROCUREMENT_*"
       ]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
@@ -146,13 +150,17 @@
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
+        "CONTRACT_SERVICE_URL",
+        "ECONOMIC_STATEMENT_BUSINESS_LINE",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",
         "INVENTORY_RETURN_DISPOSITIONS_ALLOWED",
         "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
         "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
-        "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED"
+        "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
+        "CORS_ORIGINS",
+        "PROCUREMENT_*"
       ]
     },
     // identity-service's two 500-write aggregation proofs, run alone after the
@@ -254,6 +262,15 @@
     // likewise: false by default, and refused without an authenticated broker.
     // MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED (Q-133 (8)): false by default —
     // a return shipment names exactly what was authorized.
+    //
+    // CONTRACT_SERVICE_URL and ECONOMIC_STATEMENT_BUSINESS_LINE (CON-003 PR 6b):
+    // economic-service's statement owner (A-13) and the line a statement's
+    // obligation is recorded under (Q-130, unset by default); the same rule.
+    //
+    // PROCUREMENT_* and CORS_ORIGINS (COM-007 PR 1): procurement-service is new,
+    // so none of its settings may join the withheld list — its own settings and
+    // the CORS list every service reads are declared here, which takes
+    // CORS_ORIGINS off every other service's withheld entry too.
     "dev": {
       "cache": false,
       "persistent": true,
@@ -274,13 +291,17 @@
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
+        "CONTRACT_SERVICE_URL",
+        "ECONOMIC_STATEMENT_BUSINESS_LINE",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",
         "INVENTORY_RETURN_DISPOSITIONS_ALLOWED",
         "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
         "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
-        "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED"
+        "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
+        "CORS_ORIGINS",
+        "PROCUREMENT_*"
       ]
     },
     "clean": { "cache": false }

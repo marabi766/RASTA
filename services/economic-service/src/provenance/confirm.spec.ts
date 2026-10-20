@@ -1,13 +1,16 @@
 import {
   confirmApproval,
+  confirmStatementApproval,
   confirmCompletion,
   confirmTenant,
   confirmUsage,
   noObligationReason,
   rewardSubject,
+  statementNoObligationReason,
   type ApprovalClaim,
+  type StatementApprovalClaim,
 } from './confirm';
-import type { MaintenanceRequestFact, UsageRecordFact } from './source-facts.client';
+import type { MaintenanceRequestFact, StatementFact, UsageRecordFact } from './source-facts.client';
 
 /**
  * Every branch that decides whether an event may make money (ADR-061 § 4).
@@ -171,6 +174,67 @@ describe('confirming an event against its owner', () => {
         confirmed: false,
         mismatch: 'not_found',
       });
+    });
+  });
+
+  describe('an approved contract statement (ADR-068 § 6 (2))', () => {
+    const announced: StatementApprovalClaim = {
+      statementId: 'STM_1',
+      contractId: 'CTR_1',
+      organizationId: 'ORG-EMPLOYER',
+      contractorOrganizationId: 'ORG-CONTRACTOR',
+      approvedAt: '2026-10-16T11:00:00.000Z',
+    };
+    const stated: StatementFact = {
+      statementId: 'STM_1',
+      contractId: 'CTR_1',
+      status: 'APPROVED',
+      netMinor: '7350000',
+      currency: 'IRR',
+      payerOrganizationId: 'ORG-EMPLOYER',
+      beneficiaryOrganizationId: 'ORG-CONTRACTOR',
+      approvedAt: '2026-10-16T11:00:00.000+00:00',
+    };
+
+    it('is confirmed when the owner states what the event claims, the same instant in any notation', () => {
+      expect(confirmStatementApproval(announced, stated)).toEqual({ confirmed: true });
+    });
+
+    it.each<[string, Partial<StatementFact> | null, string]>([
+      ['no such statement for that employer', null, 'not_found'],
+      ['another payer', { payerOrganizationId: 'ORG-OTHER' }, 'organization_mismatch'],
+      ['another contract', { contractId: 'CTR_2' }, 'contract_mismatch'],
+      ['a draft', { status: 'DRAFT', approvedAt: null }, 'status_mismatch'],
+      ['a submitted statement', { status: 'SUBMITTED', approvedAt: null }, 'status_mismatch'],
+      [
+        'a technically approved one',
+        { status: 'TECHNICALLY_APPROVED', approvedAt: null },
+        'status_mismatch',
+      ],
+      ['a rejected one', { status: 'REJECTED', approvedAt: null }, 'status_mismatch'],
+      ['a status this side does not know', { status: 'SETTLED' }, 'status_mismatch'],
+      ['another contractor', { beneficiaryOrganizationId: 'ORG-ELSE' }, 'beneficiary_mismatch'],
+      ['another approval instant', { approvedAt: '2026-10-16T11:00:00.001Z' }, 'approval_mismatch'],
+      ['an approval with no instant', { approvedAt: null }, 'approval_mismatch'],
+      ['a currency no wallet is kept in', { currency: 'USD' }, 'currency_mismatch'],
+    ])('refuses %s', (_case, override, mismatch) => {
+      const fact = override === null ? null : { ...stated, ...override };
+      expect(confirmStatementApproval(announced, fact)).toEqual({ confirmed: false, mismatch });
+    });
+
+    it('refuses an employer that is its own contractor, even when the event claims the same', () => {
+      const self = { ...stated, beneficiaryOrganizationId: 'ORG-EMPLOYER' };
+      expect(
+        confirmStatementApproval({ ...announced, contractorOrganizationId: 'ORG-EMPLOYER' }, self),
+      ).toEqual({ confirmed: false, mismatch: 'beneficiary_mismatch' });
+    });
+
+    it('creates no obligation only for a net of zero, decided from the owner’s figure', () => {
+      expect(statementNoObligationReason({ ...stated, netMinor: '0' })).toBe('no_cost');
+      expect(statementNoObligationReason({ ...stated, netMinor: '1' })).toBeNull();
+      expect(
+        statementNoObligationReason({ ...stated, netMinor: '9223372036854775807' }),
+      ).toBeNull();
     });
   });
 
