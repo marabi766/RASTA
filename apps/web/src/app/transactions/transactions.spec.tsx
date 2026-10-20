@@ -89,6 +89,10 @@ const DISPUTED: Transaction = {
 
 const ok = (data: Transaction): ReadResult<Transaction> => ({ kind: 'OK', data });
 
+/** The labels of the screen's description rows. */
+const terms = (container: HTMLElement): string[] =>
+  [...container.querySelectorAll('dt')].map((term) => term.textContent ?? '');
+
 function renderScreen(
   result: ReadResult<Transaction>,
   commands: readonly DisputeCommand[] = [],
@@ -252,7 +256,8 @@ describe('the dispute state, as the record says it', () => {
     expect(text).toContain('تحویل تأیید شد');
     expect(text).toContain('آخرین متن ثبت‌شده برای اعتراض');
     expect(text).toContain('نمی‌تواند بگوید کدام است');
-    expect(text).not.toContain('شرح تصمیم');
+    // No row names a decision: the caveat says why there is none to show.
+    expect(terms(container)).not.toContain('شرح تصمیم');
     await expectAccessible(container);
   });
 
@@ -268,7 +273,7 @@ describe('the dispute state, as the record says it', () => {
     const text = container.textContent ?? '';
     expect(text).toContain(REASON);
     expect(text).not.toContain('یک تصمیم قدیمی');
-    expect(text).not.toContain('شرح تصمیم');
+    expect(terms(container)).not.toContain('شرح تصمیم');
   });
 
   it.each([

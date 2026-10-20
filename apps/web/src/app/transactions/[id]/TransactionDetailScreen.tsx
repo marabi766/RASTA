@@ -222,7 +222,7 @@ export function TransactionDetailScreen({
  * The dispute, as the record says it is.
  *
  * `disputeReason` is the reason the last dispute was raised with, and a
- * resolution has its own fields (#322, docs/23 D-060). A resolution counts for
+ * resolution has its own fields (PR 322, docs/23 D-060). A resolution counts for
  * the dispute shown only when it was decided at or after that dispute: one
  * from an earlier dispute is not this one's. A row resolved before D-060 holds
  * the resolution in `disputeReason` with `disputeResolution` null — there the
