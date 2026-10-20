@@ -57,8 +57,10 @@ const PRODUCER_STATE = {
     ownerKnown: true,
     ownerSeq: 11,
     ownerGeneration: 2,
-    status: 'ACTIVE',
-    statusSeq: 2,
+    // The last transfer reset it, as asset-service does in the transfer's own transaction
+    // (#335 review round 3, F1): the same in every arrival order, and the producer's value.
+    status: 'REGISTERED',
+    statusSeq: 11,
     type: 'TRUCK',
   },
   ownership: [
@@ -135,11 +137,11 @@ describe('activation before creation (the review’s second case)', () => {
 });
 
 describe('a predecessor that never arrives', () => {
-  it('takes B→C alone: owner C, type unknown, nothing dead-lettered', () => {
+  it('takes B→C alone: owner C, type unknown, status the transfer’s, nothing dead-lettered', () => {
     const { state, outcomes } = run([bToC]);
 
     expect(outcomes.map((o) => o.outcome)).toEqual(['APPLIED']);
-    expect(state.current).toMatchObject({ organizationId: C, type: null, status: null });
+    expect(state.current).toMatchObject({ organizationId: C, type: null, status: 'REGISTERED' });
   });
 });
 
@@ -242,5 +244,39 @@ describe('what is invalid before anything is compared', () => {
     ['an event with a fractional sequence', { ...activated, seq: 2.5 }],
   ])('refuses %s', (_label, event) => {
     expect(applyAssetEvent(EMPTY_ASSET_STATE, event as AssetEvent).outcome).toBe('INVALID');
+  });
+});
+
+describe('the status after a transfer (#335 review round 3, F1)', () => {
+  it.each(permutations([created, activated, aToB]).map((o) => [o.map((e) => e.seq).join('→'), o]))(
+    'is REGISTERED under the new owner, as the producer holds it — arrival order %s',
+    (_label, order) => {
+      expect(run(order as AssetEvent[]).state.current).toMatchObject({
+        organizationId: B,
+        status: 'REGISTERED',
+        statusSeq: 10,
+      });
+    },
+  );
+
+  it('a late activation from before the transfer does not bring its status back', () => {
+    expect(run([created, aToB, activated]).state.current).toMatchObject({
+      organizationId: B,
+      status: 'REGISTERED',
+    });
+  });
+
+  it('a reactivation after the transfer is ACTIVE again, in either arrival order', () => {
+    const reactivated: AssetEvent = { kind: 'STATUS', seq: 11, tenant: B, status: 'ACTIVE' };
+    for (const order of [
+      [created, activated, aToB, reactivated],
+      [created, reactivated, activated, aToB],
+    ]) {
+      expect(run(order).state.current).toMatchObject({
+        organizationId: B,
+        status: 'ACTIVE',
+        statusSeq: 11,
+      });
+    }
   });
 });

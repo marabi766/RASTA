@@ -17,7 +17,9 @@
  *     never compared with the row's owner — it may rightly be the owner of a transfer that has
  *     not arrived yet. With no ownership event known, the owner is provisional: the tenant of
  *     the highest-sequenced status event, replaced by any ownership event, old or new;
- *   - the status: from the creation and the three status events;
+ *   - the status: from the creation, the three status events and a transfer, which states
+ *     REGISTERED — asset-service resets the status in the transfer's own transaction and sends no
+ *     status event for it (review of #335 round 3, F1);
  *   - the type: from the creation alone, and immutable.
  *
  * Ownership history is a set of statements "generation g belonged to X", one per side of each
@@ -154,8 +156,8 @@ function nextCurrent(held: AssetCurrent | null, event: AssetEvent): AssetCurrent
     current = { ...current, organizationId: event.tenant, ownerSeq: event.seq };
   }
 
-  if ((event.kind === 'CREATED' || event.kind === 'STATUS') && event.seq > current.statusSeq) {
-    current = { ...current, status: event.status, statusSeq: event.seq };
+  if (event.kind !== 'OTHER' && event.seq > current.statusSeq) {
+    current = { ...current, status: statusOf(event), statusSeq: event.seq };
   }
 
   if (event.kind === 'CREATED' && current.type === null) {
@@ -163,6 +165,13 @@ function nextCurrent(held: AssetCurrent | null, event: AssetEvent): AssetCurrent
   }
 
   return current;
+}
+
+/** The status the producer holds after a transfer: the new owner re-commissions it (ADR-071). */
+export const STATUS_AFTER_TRANSFER = 'REGISTERED';
+
+function statusOf(event: Exclude<AssetEvent, { kind: 'OTHER' }>): string {
+  return event.kind === 'TRANSFERRED' ? STATUS_AFTER_TRANSFER : event.status;
 }
 
 function ownershipStatementsOf(event: AssetEvent): OwnershipStatement[] {
