@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
 import type { InventoryEnv } from '../config/env';
 import { commandTransactionTimeoutMs } from '../config/operation-budgets';
-import { ID_PREFIX, newId } from '../events/publisher';
+import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { PrismaService } from '../prisma/prisma.service';
 import { transactionNow } from '../shared/clock';
 import { boundLockWaits, translateCommandError } from '../shared/command';
@@ -59,6 +59,7 @@ export class ReturnDispatchFenceService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly shipments: ReturnShipmentRepository,
+    private readonly publisher: EventPublisher,
     @Inject(ENV) private readonly env: InventoryEnv,
   ) {}
 
@@ -119,17 +120,36 @@ export class ReturnDispatchFenceService {
               { returnRequestId: id },
             );
           }
-          const withdrawal =
-            existing ??
-            (await this.shipments.insertWithdrawal(tx, {
+          let withdrawal = existing;
+          if (!withdrawal) {
+            const at = await transactionNow(tx);
+            const by = context.callerService ?? DISPATCH_FENCE_CALLER;
+            withdrawal = await this.shipments.insertWithdrawal(tx, {
               id: newId(ID_PREFIX.returnDispatchWithdrawal),
               organizationId,
               returnRequestId: id,
               reservationId: dto.reservationId,
-              at: await transactionNow(tx),
-              by: context.callerService ?? DISPATCH_FENCE_CALLER,
+              at,
+              by,
               correlationId: context.correlationId,
-            }));
+            });
+            // Its audit record, with the row, once (AGENTS.md S-06; Codex r2 on #339, finding 1):
+            // a repeat that finds the row above writes neither.
+            await this.publisher.enqueue(tx, {
+              eventName: 'RETURN_DISPATCH_WITHDRAWN',
+              aggregateId: withdrawal.id,
+              organizationId,
+              occurredAt: at,
+              payload: {
+                withdrawalId: withdrawal.id,
+                organizationId,
+                returnRequestId: id,
+                reservationId: withdrawal.reservationId,
+                withdrawnBy: by,
+                withdrawnAt: withdrawal.withdrawnAt.toISOString(),
+              },
+            });
+          }
           return {
             outcome: 'WITHDRAWN' as const,
             returnRequestId: id,

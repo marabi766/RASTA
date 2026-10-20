@@ -76,6 +76,11 @@ describe('the dispatch fence: what marketplace asks before a cancellation or a r
     raw.returnShipment.findMany({ where: { organizationId } });
   const outboxOf = (organizationId: string) =>
     raw.outboxMessage.count({ where: { organizationId, aggregateType: 'ReturnShipment' } });
+  /** The withdrawals' audit records (Codex r2 on #339, finding 1). */
+  const withdrawalEventsOf = (organizationId: string) =>
+    raw.outboxMessage.findMany({
+      where: { organizationId, eventName: 'RETURN_DISPATCH_WITHDRAWN' },
+    });
 
   const hex = (seed: string) => createHash('sha256').update(seed).digest('hex');
 
@@ -279,6 +284,21 @@ describe('the dispatch fence: what marketplace asks before a cancellation or a r
         withdrawnBy: 'marketplace-service',
       }),
     ]);
+    // One withdrawal, one audit record, written with it: the two repeats wrote neither.
+    const events = await withdrawalEventsOf(s.supplier);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      aggregateType: 'ReturnDispatchWithdrawal',
+      aggregateId: expect.stringMatching(/^RDW_/),
+    });
+    expect((events[0]!.payload as { payload: Record<string, unknown> }).payload).toEqual({
+      withdrawalId: events[0]!.aggregateId,
+      organizationId: s.supplier,
+      returnRequestId: s.body.returnRequestId,
+      reservationId,
+      withdrawnBy: 'marketplace-service',
+      withdrawnAt: first.body.withdrawnAt,
+    });
 
     // The dispatch is retried — marketplace still answers R, its reservation not yet released.
     const delayed = await s.ops.post('/v1/return-shipments', s.body);
@@ -360,6 +380,7 @@ describe('the dispatch fence: what marketplace asks before a cancellation or a r
       });
     }
     expect(await withdrawalsOf(s.supplier)).toEqual([]);
+    expect(await withdrawalEventsOf(s.supplier)).toEqual([]);
   });
 
   it('refuses a reservation already withdrawn for another request, and a malformed one', async () => {

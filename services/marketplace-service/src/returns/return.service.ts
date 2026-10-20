@@ -349,6 +349,7 @@ export class ReturnService {
       }
 
       const at = new Date(Math.max(Date.now(), locked.updatedAt.getTime()));
+      const releaseId = newId(ID_PREFIX.returnDispatchRelease);
       const released = await this.repository.releaseDispatch(
         tx,
         {
@@ -359,7 +360,7 @@ export class ReturnService {
           dispatchReservedCorrelationId: locked.dispatchReservedCorrelationId,
         },
         {
-          id: newId(ID_PREFIX.returnDispatchRelease),
+          id: releaseId,
           withdrawnAt: answer.withdrawnAt,
           at,
           by: actor,
@@ -368,6 +369,26 @@ export class ReturnService {
         },
       );
       if (!released) throw RastaError.optimisticLockFailed('ReturnRequest', id);
+      // The release's audit record, with it (AGENTS.md S-06; Codex r2 on #339, finding 1): the
+      // person who reconciled, inventory's withdrawal, the reservation that ended. The request's
+      // status and version do not move.
+      await this.events.enqueue(tx, {
+        aggregateId: locked.id,
+        organizationId: locked.organizationId,
+        eventName: MARKETPLACE_EVENTS.RETURN_DISPATCH_RELEASED,
+        payload: {
+          returnRequestId: locked.id,
+          orderId: locked.orderId,
+          buyerOrganizationId: locked.organizationId,
+          supplierOrganizationId: locked.supplierOrganizationId,
+          releaseId,
+          reservationId,
+          reservedAt: locked.dispatchReservedAt.toISOString(),
+          withdrawnAt: answer.withdrawnAt.toISOString(),
+          releasedBy: actor,
+          releasedAt: at.toISOString(),
+        },
+      });
       returnTransitionsTotal.inc({ service: SERVICE_NAME, to: 'DISPATCH_RELEASED' });
 
       const after = await this.repository.findWithLines(id, tx);

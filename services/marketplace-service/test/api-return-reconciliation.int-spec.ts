@@ -435,11 +435,36 @@ describe('return request: conditional cancellation and reconciliation of a dispa
         history: 2,
         releases: 1,
       });
+      // Its audit record, in the release's transaction (Codex r2 on #339, finding 1): who, when,
+      // inventory's withdrawal, the reservation that ended — and the request's version unmoved.
+      const announced = (await eventsOf(returnId)).filter(
+        (event) => event.eventName === 'RETURN_DISPATCH_RELEASED',
+      );
+      expect(announced).toHaveLength(1);
+      expect((announced[0]!.payload as { payload: Record<string, unknown> }).payload).toEqual({
+        returnRequestId: returnId,
+        orderId: expect.stringMatching(/^ORD_/),
+        buyerOrganizationId: buyerOrg,
+        supplierOrganizationId: supplierOrg,
+        releaseId: release!.id,
+        reservationId,
+        reservedAt: expect.any(String),
+        withdrawnAt: new Date(
+          harness.inventory.withdrawals.get(reservationId)!.withdrawnAt,
+        ).toISOString(),
+        releasedBy: release!.releasedBy,
+        releasedAt: expect.any(String),
+      });
 
       // Exactly once: nothing is reserved any more.
       const again = await reconcile(returnId).expect(422);
       expect(again.body.details?.[0]?.code).toBe('RETURN_DISPATCH_NOT_RESERVED');
       expect((await stored(returnId))?.releases).toBe(1);
+      expect(
+        (await eventsOf(returnId)).filter(
+          (event) => event.eventName === 'RETURN_DISPATCH_RELEASED',
+        ),
+      ).toHaveLength(1);
 
       // The buyer may now cancel — inventory is asked again, and holds nothing.
       await cancel(returnId, { expectedStatus: 'AUTHORIZED' }).expect(200);
@@ -607,6 +632,12 @@ describe('return request: conditional cancellation and reconciliation of a dispa
 
       expect(replay.body).toEqual(first.body);
       expect((await stored(returnId))?.releases).toBe(1);
+      // One release, one audit record: the replay writes neither.
+      expect(
+        (await eventsOf(returnId)).filter(
+          (event) => event.eventName === 'RETURN_DISPATCH_RELEASED',
+        ),
+      ).toHaveLength(1);
     });
   });
 

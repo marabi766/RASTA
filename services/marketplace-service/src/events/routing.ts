@@ -47,6 +47,7 @@ export const AGGREGATE_OF = {
   RETURN_RECEIVED: 'ReturnRequest',
   RETURN_INSPECTED: 'ReturnRequest',
   RETURN_RESOLVED: 'ReturnRequest',
+  RETURN_DISPATCH_RELEASED: 'ReturnRequest',
 } as const satisfies Record<MarketplaceEventName, string>;
 
 export const PARTITION_SCOPES = {
@@ -142,6 +143,11 @@ export const PARTITION_KEY_POLICY: { [N in MarketplaceEventName]: PartitionRule<
   RETURN_RECEIVED: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
   RETURN_INSPECTED: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
   RETURN_RESOLVED: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
+  // A reservation's release is the request's too, beside the steps it sits between.
+  RETURN_DISPATCH_RELEASED: (payload) => ({
+    scope: 'RETURN_REQUEST',
+    key: payload.returnRequestId,
+  }),
 
   /** A product is its own lifecycle; nothing else is ordered against it (L7-14). */
   PRODUCT_CREATED: (payload) => ({ scope: 'PRODUCT', key: payload.productId }),

@@ -258,6 +258,18 @@ const PAYLOADS = {
     outcomes: [{ orderLineId: 'OLN_1', disposition: 'SCRAP' as const, quantity: 1 }],
     resolvedAt: '2026-10-16T00:00:06.000Z',
   },
+  RETURN_DISPATCH_RELEASED: {
+    returnRequestId: RETURN,
+    orderId: 'ORD_01JBQ0000000000000000000CD',
+    buyerOrganizationId: BUYER,
+    supplierOrganizationId: SUPPLIER,
+    releaseId: 'RDL_01JBQ0000000000000000000GH',
+    reservationId: 'RDR_01JBQ0000000000000000000JK',
+    reservedAt: '2026-10-16T00:00:02.000Z',
+    withdrawnAt: '2026-10-16T00:00:03.000Z',
+    releasedBy: 'USR_1',
+    releasedAt: '2026-10-16T00:00:04.000Z',
+  },
 } satisfies { [N in MarketplaceEventName]: Parameters<(typeof PARTITION_KEY_POLICY)[N]>[0] };
 
 const EXPECTED: { [N in MarketplaceEventName]: { scope: PartitionScope; key: string } } = {
@@ -286,6 +298,7 @@ const EXPECTED: { [N in MarketplaceEventName]: { scope: PartitionScope; key: str
   RETURN_RECEIVED: { scope: 'RETURN_REQUEST', key: RETURN },
   RETURN_INSPECTED: { scope: 'RETURN_REQUEST', key: RETURN },
   RETURN_RESOLVED: { scope: 'RETURN_REQUEST', key: RETURN },
+  RETURN_DISPATCH_RELEASED: { scope: 'RETURN_REQUEST', key: RETURN },
 };
 
 const NAMES = Object.values(MARKETPLACE_EVENTS);
@@ -406,6 +419,7 @@ describe('aggregate identity is separate from partition ordering', () => {
       RETURN_RECEIVED: 'ReturnRequest',
       RETURN_INSPECTED: 'ReturnRequest',
       RETURN_RESOLVED: 'ReturnRequest',
+      RETURN_DISPATCH_RELEASED: 'ReturnRequest',
     });
   });
 
