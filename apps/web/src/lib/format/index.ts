@@ -29,6 +29,8 @@ export type { DateFormatOptions } from './datetime';
 export { IRR, MoneyInputError, formatMoney, parseMoneyInput } from './money';
 export type { CurrencyFormat, FormatMoneyOptions } from './money';
 
+export { formatScaledDecimal, parseScaledDecimalInput } from './decimal';
+
 export {
   BIDI_CONTROL,
   collapseWhitespace,

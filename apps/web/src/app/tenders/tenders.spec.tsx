@@ -70,6 +70,8 @@ const OWN_DETAIL: TenderDetail = {
   statusReasonCode: null,
   publishedAt: '2026-10-19T08:00:00.000Z',
   createdAt: '2026-10-18T08:00:00.000Z',
+  version: 3,
+  statusChangedByCaller: false,
 };
 
 const OPEN_DETAIL: OpenTenderDetail = {
