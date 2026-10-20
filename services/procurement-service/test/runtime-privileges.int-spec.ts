@@ -134,6 +134,7 @@ describe('the runtime role cannot lift an integrity guard (D-045)', () => {
        ORDER BY 1`;
     expect(rows.map((row) => row.table)).toEqual([
       '_prisma_migrations',
+      'aggregation_setting',
       'demand_aggregation',
       'demand_request',
       'idempotency_key',

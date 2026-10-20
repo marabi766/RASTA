@@ -269,6 +269,9 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         if (status === '400' && !query && !body) continue;
         // 409 and 422 are a command's: a read has no state to move and no rule to refuse.
         if ((status === '409' || status === '422') && !body) continue;
+        // 422 is a business rule's: a command with no closed refusal reason has none to answer
+        // (recording a setting: its bounds are 400, a stale version 409).
+        if (status === '422' && !REFUSAL_AREA_OF[key]) continue;
         operation.responses[status] ??= {
           description,
           ...(status === '409' && idempotent

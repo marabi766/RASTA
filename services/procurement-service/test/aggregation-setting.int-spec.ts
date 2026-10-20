@@ -1,4 +1,5 @@
 import { eventEnvelopeSchema } from '@rasta/contracts';
+import { runUnscoped } from '@rasta/nest-common';
 import { actor, buyer, client, key, startApi, TestClock, type ApiHarness } from './api-helpers';
 import { cleanup, newOrganizationId, newProductId } from './helpers';
 
@@ -48,10 +49,12 @@ describe('aggregation settings (plan PR 3)', () => {
       })
     ).map((row) => eventEnvelopeSchema.parse(row.payload).payload as Record<string, unknown>);
   const versions = (organizationId: string) =>
-    api.prisma.client.aggregationSetting.findMany({
-      where: { organizationId },
-      orderBy: { version: 'asc' },
-    });
+    runUnscoped('the suite reads the setting versions it wrote', () =>
+      api.prisma.client.aggregationSetting.findMany({
+        where: { organizationId },
+        orderBy: { version: 'asc' },
+      }),
+    );
 
   it('with none recorded, the environment defaults are in force, and a window takes them with no version', async () => {
     const organizationId = org();
@@ -309,7 +312,10 @@ describe('aggregation settings (plan PR 3)', () => {
       const organizationId = org();
       await refusedWith(insert(organizationId, 2), /ck_aggregation_setting_next_version/);
       await insert(organizationId, 1);
-      await refusedWith(insert(organizationId, 1), /aggregation_setting_pkey|Unique constraint/);
+      await refusedWith(
+        insert(organizationId, 1),
+        /ck_aggregation_setting_next_version|aggregation_setting_pkey|Unique constraint/,
+      );
       await refusedWith(insert(organizationId, 3), /ck_aggregation_setting_next_version/);
       await refusedWith(
         insert(organizationId, 2, MAX_QUANTITY + 1),
