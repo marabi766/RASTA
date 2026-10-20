@@ -142,6 +142,21 @@ describe('settlementCompletedConsumerFactory', () => {
     expect(factory(async () => undefined)).toBeInstanceOf(EventConsumer);
   });
 
+  it('starts a new group at the oldest retained message, so a settlement published before its first start is delivered (#343 r1 F1)', () => {
+    const factory = settlementCompletedConsumerFactory(
+      { brokers: ['localhost:19092'], clientId: 'test' },
+      { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+      { maxRetries: 3, retryBackoffMs: 50 },
+    );
+    const built = factory(async () => undefined) as unknown as {
+      options: { fromBeginning?: boolean; groupId: string };
+    };
+    expect(built.options).toMatchObject({
+      groupId: 'contract-service.settlement-completed',
+      fromBeginning: true,
+    });
+  });
+
   it('names exactly the fields the payload schema declares, for a dead-letter message', () => {
     expect([...SETTLEMENT_COMPLETED_FIELDS].sort()).toEqual(
       [

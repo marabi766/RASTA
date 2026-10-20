@@ -7,6 +7,7 @@ import {
   invalidPayloadError,
   kafkaConnection,
   runWithContext,
+  type EventDelivery,
   type HandlerOutcome,
   type OutboxStopOptions,
 } from '@rasta/nest-common';
@@ -19,7 +20,6 @@ import { PrismaService } from '../prisma/prisma.service';
 import {
   confirmSettlement,
   confirmSettlementTenant,
-  contractSettlementDue,
   isObligationOf,
   minorOf,
   type ConfirmedSettlement,
@@ -31,8 +31,7 @@ import {
   SettlementRepository,
   type SettlementCandidate,
 } from '../settlement/settlement.repository';
-import { transactionNow } from '../shared/clock';
-import { isUniqueViolation } from '../shared/prisma-errors';
+import { StatementSettler } from '../settlement/statement-settler';
 import type { Statement } from '../generated/prisma';
 import { EventPublisher } from './publisher';
 import type { EventConsumerFactory } from './tender-awarded.consumer';
@@ -45,8 +44,7 @@ export const SETTLEMENT_COMPLETED_TOPICS = ['rasta.economic.v1'] as const;
 
 export const SETTLEMENT_COMPLETED = 'SETTLEMENT_COMPLETED';
 
-/** The actor recorded on a contract the settlement settles: the system, never a person. */
-export const SETTLING_ACTOR = `service:${SERVICE_NAME}`;
+export { SETTLING_ACTOR } from '../settlement/statement-settler';
 
 /**
  * Only the fields this service uses. economic-service owns the full schema and this service does not
@@ -86,6 +84,12 @@ export function settlementCompletedConsumerFactory(
         ...connection,
         groupId: SETTLEMENT_COMPLETED_CONSUMER,
         topics: [...SETTLEMENT_COMPLETED_TOPICS],
+        // A new group starts at the oldest retained message, not at the end (review of #343
+        // round 1, F1): a settlement published before this consumer's first start — the
+        // obligation settled through economic's existing endpoint — is still delivered. Older than
+        // the topic's retention, `SettlementReconciliationSweeper` finds it by asking economic.
+        // Replays are harmless: a statement already settled by the same settlement is SKIPPED.
+        fromBeginning: true,
         deadLetterTopic: CONTRACT_DEAD_LETTER_TOPIC,
         maxRetries: options.maxRetries,
         retryBackoffMs: options.retryBackoffMs,
@@ -140,19 +144,22 @@ export function settlementCompletedConsumerFactory(
  */
 export class SettlementCompletedConsumer {
   private consumer?: EventConsumer;
+  private readonly settler: StatementSettler;
 
   constructor(
     private readonly consumerFactory: EventConsumerFactory,
-    private readonly prisma: PrismaService,
-    private readonly contracts: ContractRepository,
+    prisma: PrismaService,
+    contracts: ContractRepository,
     private readonly settlements: SettlementRepository,
-    private readonly publisher: EventPublisher,
+    publisher: EventPublisher,
     private readonly obligations: ObligationSource,
     private readonly logger: Pick<Logger, 'info' | 'warn' | 'debug'>,
-  ) {}
+  ) {
+    this.settler = new StatementSettler(prisma, contracts, settlements, publisher);
+  }
 
   async start(): Promise<void> {
-    this.consumer = this.consumerFactory((envelope) => this.handle(envelope));
+    this.consumer = this.consumerFactory((envelope, delivery) => this.handle(envelope, delivery));
     await this.consumer.start();
   }
 
@@ -165,8 +172,15 @@ export class SettlementCompletedConsumer {
     return this.consumer?.stop(options) ?? Promise.resolve();
   }
 
-  /** One event. Public so a test can drive it without a broker. */
-  async handle(envelope: EventEnvelope): Promise<HandlerOutcome> {
+  /**
+   * One event. Public so a test can drive it without a broker.
+   *
+   * `delivery.heartbeat` is called before and after each question to economic-service (review of
+   * #343 round 1, F2): kafkajs heartbeats between messages, not during one, so a scan of many
+   * candidates — each answered within `CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS`, at most half the
+   * session timeout — keeps this member in its group however long the scan as a whole takes.
+   */
+  async handle(envelope: EventEnvelope, delivery?: EventDelivery): Promise<HandlerOutcome> {
     if (envelope.eventName !== SETTLEMENT_COMPLETED) return 'SKIPPED';
 
     // A known event whose payload fails its schema is a producer defect no retry fixes:
@@ -213,6 +227,7 @@ export class SettlementCompletedConsumer {
       for (const candidate of candidates) {
         // Throws on an owner that cannot be asked: retried, never acted on.
         let fact;
+        delivery?.heartbeat?.();
         try {
           fact = await this.obligations.obligation(tenant, candidate.id);
         } catch (error) {
@@ -220,6 +235,8 @@ export class SettlementCompletedConsumer {
             statementSettlementsTotal.inc({ service: SERVICE_NAME, outcome: 'unavailable' });
           }
           throw error;
+        } finally {
+          delivery?.heartbeat?.();
         }
         if (!fact || !isObligationOf(claim, fact)) continue;
 
@@ -257,94 +274,16 @@ export class SettlementCompletedConsumer {
     candidate: SettlementCandidate,
     settlement: ConfirmedSettlement,
   ): Promise<HandlerOutcome> {
-    const tenant = candidate.organizationId;
-    let outcome: 'settled' | 'contract_settled';
-    try {
-      outcome = await this.prisma.transaction(async (tx) => {
-        const contract = await this.contracts.lockContract(tx, tenant, candidate.contractId);
-        if (!contract) throw new Error(`statement ${candidate.id} has no contract`);
-        const statement = await this.settlements.lock(tx, tenant, contract.id, candidate.id);
-        if (!statement) throw new Error(`statement ${candidate.id} vanished`);
-        // A concurrent delivery settled it first: judged as a redelivery, outside the transaction.
-        if (statement.status === 'SETTLED') throw new AlreadySettled(statement);
-        // I3: an APPROVED statement changes only to SETTLED, so it is still APPROVED here.
-        if (statement.status !== 'APPROVED') {
-          throw new Error(`statement ${statement.id} is ${statement.status}, not APPROVED`);
-        }
+    const result = await this.settler.settle(candidate, claim, settlement, {
+      reference: envelope.eventId,
+      causationId: envelope.eventId,
+    });
+    // A concurrent delivery (or the reconciliation) settled it first: judged as a redelivery.
+    if (result.outcome === 'already') return this.judgeRecorded(envelope, claim, result.statement);
 
-        const at = await transactionNow(tx);
-        const moved = await this.settlements.settle(tx, {
-          organizationId: tenant,
-          id: statement.id,
-          version: statement.version,
-          settlement,
-          eventId: envelope.eventId,
-          at,
-        });
-        // Under both locks nothing else moves it; a miss is a defect, retried and never acted on.
-        if (!moved) throw new Error(`statement ${statement.id} moved under its lock`);
-        await this.publisher.enqueue(tx, {
-          eventName: 'STATEMENT_SETTLED',
-          aggregateId: contract.id,
-          organizationId: tenant,
-          causationId: envelope.eventId,
-          occurredAt: at,
-          payload: {
-            contractId: contract.id,
-            statementId: statement.id,
-            statementNumber: statement.statementNumber,
-            organizationId: tenant,
-            contractorOrganizationId: contract.contractorOrganizationId,
-            obligationId: settlement.obligationId,
-            settlementId: settlement.settlementId,
-            settledAt: settlement.settledAt.toISOString(),
-          },
-        });
-
-        // ADR-068 § 6 (3): the contract, once COMPLETED, with no statement open and every approved
-        // one settled in full.
-        const totals = await this.settlements.totals(tx, tenant, contract.id);
-        if (!contractSettlementDue(contract.status, totals)) return 'settled';
-        const settled = await this.contracts.transition(tx, {
-          organizationId: tenant,
-          id: contract.id,
-          from: 'COMPLETED',
-          to: 'SETTLED',
-          version: contract.version,
-          actor: SETTLING_ACTOR,
-          at,
-        });
-        if (!settled) throw new Error(`contract ${contract.id} moved under its lock`);
-        await this.publisher.enqueue(tx, {
-          eventName: 'CONTRACT_SETTLED',
-          aggregateId: contract.id,
-          organizationId: tenant,
-          causationId: envelope.eventId,
-          occurredAt: at,
-          payload: {
-            contractId: contract.id,
-            projectId: contract.projectId,
-            organizationId: tenant,
-            contractorOrganizationId: contract.contractorOrganizationId,
-            settledAt: at.toISOString(),
-          },
-        });
-        return 'contract_settled';
-      });
-    } catch (error) {
-      const winner =
-        error instanceof AlreadySettled
-          ? error.statement
-          : isUniqueViolation(error)
-            ? await this.settlements.findSettledBy(tenant, claim.transactionId)
-            : null;
-      if (!winner) throw error;
-      return this.judgeRecorded(envelope, claim, winner);
-    }
-
-    statementSettlementsTotal.inc({ service: SERVICE_NAME, outcome });
+    statementSettlementsTotal.inc({ service: SERVICE_NAME, outcome: result.outcome });
     this.logger.info(
-      outcome === 'contract_settled'
+      result.outcome === 'contract_settled'
         ? `Settled statement ${candidate.id} and its contract ${candidate.contractId}`
         : `Settled statement ${candidate.id}`,
     );
@@ -393,12 +332,5 @@ export class SettlementCompletedConsumer {
       DLQ_REASONS.SOURCE_UNCONFIRMED,
       `economic-service does not confirm SETTLEMENT_COMPLETED for ${transactionId}: ${mismatch}`,
     );
-  }
-}
-
-/** Thrown inside the transaction when a concurrent delivery settled the statement first. */
-class AlreadySettled extends Error {
-  constructor(readonly statement: Statement) {
-    super('statement already settled');
   }
 }

@@ -147,7 +147,14 @@ function optionalRoleList(name: string) {
  *   CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS
  *                                       How long that read may take, headers and body
  *                                       included; no answer in time is "unavailable", never
- *                                       "not paid" and never "paid".
+ *                                       "not paid" and never "paid". At most 30 s: half the
+ *                                       consumer's session timeout (#343 r1 F2).
+ *   CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS / _BATCH_SIZE
+ *                                       The settlement reconciliation (#343 r1 F1): every
+ *                                       interval (default 10 min) it asks economic-service about
+ *                                       one page (default 50) of APPROVED statements and settles
+ *                                       those economic confirms settled — what the consumer
+ *                                       never heard of. Technical cadence, not a business rule.
  *   CONTRACT_CONSUMER_MAX_RETRIES / _RETRY_BACKOFF_MS
  *                                       How often the `TENDER_AWARDED` and
  *                                       `SETTLEMENT_COMPLETED` consumers retry an owner that
@@ -267,12 +274,23 @@ export const contractEnvSchema = baseEnvSchema
 
     ECONOMIC_SERVICE_URL: z.string().url().default('http://localhost:3112'),
 
+    // At most half the consumer's session timeout (60 s): one question to economic-service never
+    // outlasts the heartbeats around it (review of #343 round 1, F2).
     CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS: z.coerce
       .number()
       .int()
       .min(100)
-      .max(60_000)
+      .max(30_000)
       .default(5000),
+    // The settlement reconciliation (#343 r1 F1): how often, and how many APPROVED statements a
+    // pass asks economic-service about.
+    CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(10_000)
+      .max(86_400_000)
+      .default(600_000),
+    CONTRACT_SETTLEMENT_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(50),
 
     CONTRACT_CONSUMER_MAX_RETRIES: z.coerce.number().int().min(1).max(20).default(5),
     CONTRACT_CONSUMER_RETRY_BACKOFF_MS: z.coerce.number().int().min(10).max(60_000).default(1000),

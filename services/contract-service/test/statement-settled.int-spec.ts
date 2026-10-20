@@ -23,6 +23,8 @@ import {
 import type { ObligationFact } from '../src/settlement/obligation-confirm';
 import { ObligationSourceClient } from '../src/settlement/obligation-source.client';
 import { SettlementRepository } from '../src/settlement/settlement.repository';
+import { SettlementReconciliationSweeper } from '../src/settlement/settlement-reconciliation.sweeper';
+import { StatementSettler } from '../src/settlement/statement-settler';
 import { http, idemKey, seedSigned, type SignedContract } from './amendment-helpers';
 import { internalToken, person, startApi, type ApiHarness } from './api-helpers';
 import { StubEconomicService } from './economic-service.stub';
@@ -826,6 +828,132 @@ describe('a statement settled on economic-service’s confirmation (CON-003 PR 6
         )
         .expect(200);
       expect(res.body).toMatchObject({ status: 'SETTLED', approvedAt: null, netMinor: '2600' });
+    });
+  });
+  describe('a long scan keeps the consumer in its group (review of #343 round 1, F2)', () => {
+    it('heartbeats before and after every question to economic-service, however many candidates there are', async () => {
+      const c = await contract();
+      // Four APPROVED statements to the same contractor, the same net: every one is a candidate,
+      // and the event's obligation is the last one's.
+      const ids: string[] = [];
+      for (let i = 0; i < 4; i += 1) ids.push(await approved(c, '1400'));
+      const last = [...ids].sort().at(-1)!;
+      for (const id of ids) {
+        if (id !== last)
+          economic.record({
+            ...settledObligation(c, id, '1400'),
+            status: 'HELD',
+            fullySettled: false,
+            settlementId: null,
+            settledAt: null,
+            settledAmountMinor: null,
+          });
+      }
+      const event = eventOf(settledObligation(c, last, '1400'));
+      const heartbeat = jest.fn();
+
+      expect(
+        await consumer.handle(event, { topic: 'rasta.economic.v1', partition: 0, heartbeat }),
+      ).toBeUndefined();
+
+      const questions = ids.reduce((sum, id) => sum + economic.askedFor(id), 0);
+      expect(questions).toBe(4);
+      expect(heartbeat.mock.calls.length).toBe(2 * questions);
+      expect((await statementRow(last))!.status).toBe('SETTLED');
+    });
+  });
+
+  describe('the settlement reconciliation: what the consumer never heard of (review of #343 round 1, F1)', () => {
+    const sweeper = () =>
+      new SettlementReconciliationSweeper(
+        new StatementSettler(
+          w.prisma,
+          new ContractRepository(w.prisma),
+          new SettlementRepository(w.prisma),
+          new EventPublisher(w.env),
+        ),
+        new SettlementRepository(w.prisma),
+        new ObligationSourceClient({
+          baseUrl: economic.url,
+          timeoutMs: REQUEST_TIMEOUT_MS,
+          tokens,
+        }),
+        { intervalMs: 60_000, batchSize: 7 },
+      );
+    /** Passes until every APPROVED statement of every organization was asked about once. */
+    const fullCircle = async (s: SettlementReconciliationSweeper) => {
+      const total = { asked: 0, settled: 0, already: 0, unpaid: 0, refused: 0, unavailable: 0 };
+      for (let pass = 0; pass < 1000; pass += 1) {
+        const outcome = await s.runOnce();
+        for (const key of Object.keys(total) as (keyof typeof total)[]) total[key] += outcome[key];
+        if (outcome.asked < 7) return total;
+      }
+      throw new Error('the reconciliation never came full circle');
+    };
+
+    it('settles a statement economic settled before the consumer existed — on economic’s answer, once, with its event and no event cited', async () => {
+      const c = await contract();
+      const id = await approved(c, '1500');
+      const fact = settledObligation(c, id, '1500');
+
+      const first = await fullCircle(sweeper());
+      expect(first.settled).toBeGreaterThanOrEqual(1);
+      const row = (await statementRow(id))!;
+      expect(row).toMatchObject({
+        status: 'SETTLED',
+        settlementObligationId: fact.obligationId,
+        settlementId: fact.settlementId,
+        settledAmountMinor: 1500n,
+      });
+      expect(row.settlementEventId).toMatch(/^reconciliation:/);
+      const settled = await envelopesOf(c.employer, 'STATEMENT_SETTLED');
+      expect(settled).toHaveLength(1);
+      // No event caused it: none is cited.
+      expect(settled[0]!.causationId ?? null).toBeNull();
+
+      // Another pass: nothing APPROVED of it is left to ask about, nothing written again.
+      await fullCircle(sweeper());
+      expect(await envelopesOf(c.employer, 'STATEMENT_SETTLED')).toHaveLength(1);
+      // The event arriving after all is the same settlement: skipped.
+      expect(await consumer.handle(eventOf(fact))).toBe('SKIPPED');
+    });
+
+    it('leaves alone what economic has not settled, what it cannot confirm, and everything while it cannot be asked', async () => {
+      const c = await contract();
+      const unpaid = await approved(c, '1501');
+      const mismatched = await approved(c, '1502');
+      const unknown = await approved(c, '1503');
+      economic.record({
+        ...settledObligation(c, unpaid, '1501'),
+        status: 'HELD',
+        fullySettled: false,
+        settlementId: null,
+        settledAt: null,
+        settledAmountMinor: null,
+      });
+      settledObligation(c, mismatched, '1502', { amountMinor: '1599', settledAmountMinor: '1599' });
+      const before = await snapshot(c, [unpaid, mismatched, unknown]);
+
+      economic.mode = 'down';
+      const down = await fullCircle(sweeper());
+      expect(down.unavailable).toBeGreaterThanOrEqual(3);
+      expect(await snapshot(c, [unpaid, mismatched, unknown])).toEqual(before);
+
+      economic.mode = 'up';
+      const up = await fullCircle(sweeper());
+      expect(up.refused).toBeGreaterThanOrEqual(1);
+      expect(await snapshot(c, [unpaid, mismatched, unknown])).toEqual(before);
+    });
+
+    it('the consumer first, then the reconciliation: settled once, the pass finds it already done', async () => {
+      const c = await contract();
+      const id = await approved(c, '1504');
+      const fact = settledObligation(c, id, '1504');
+      expect(await consumer.handle(eventOf(fact))).toBeUndefined();
+
+      await fullCircle(sweeper());
+      expect((await statementRow(id))!.settlementEventId).not.toMatch(/^reconciliation:/);
+      expect(await envelopesOf(c.employer, 'STATEMENT_SETTLED')).toHaveLength(1);
     });
   });
 });

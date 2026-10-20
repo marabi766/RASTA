@@ -50,6 +50,8 @@ import {
   settlementCompletedConsumerFactory,
 } from './events/settlement-completed.consumer';
 import { ObligationSourceClient } from './settlement/obligation-source.client';
+import { SettlementReconciliationSweeper } from './settlement/settlement-reconciliation.sweeper';
+import { StatementSettler } from './settlement/statement-settler';
 import { SettlementRepository } from './settlement/settlement.repository';
 import { PolicyReconciliationRepository } from './policy/policy-reconciliation.repository';
 import { PolicyReconciliationSweeper } from './policy/policy-reconciliation.sweeper';
@@ -316,6 +318,37 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
     },
 
     {
+      // #343 r1 F1: settles the APPROVED statements economic-service settled whose event never
+      // arrived — on economic's own answer, through the consumer's one write.
+      provide: SettlementReconciliationSweeper,
+      inject: [
+        ENV,
+        PrismaService,
+        ContractRepository,
+        SettlementRepository,
+        EventPublisher,
+        OBLIGATION_SOURCE,
+      ],
+      useFactory: (
+        env: ContractEnv,
+        prisma: PrismaService,
+        contracts: ContractRepository,
+        settlements: SettlementRepository,
+        publisher: EventPublisher,
+        obligations: ObligationSourceClient,
+      ) =>
+        new SettlementReconciliationSweeper(
+          new StatementSettler(prisma, contracts, settlements, publisher),
+          settlements,
+          obligations,
+          {
+            intervalMs: env.CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS,
+            batchSize: env.CONTRACT_SETTLEMENT_RECONCILE_BATCH_SIZE,
+          },
+        ),
+    },
+
+    {
       provide: OutboxRelay,
       inject: [PrismaOutboxStore, KafkaEventPublisher, ENV, LOGGER],
       useFactory: (
@@ -371,6 +404,7 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
         TenderAwardedConsumer,
         OrganizationMovedConsumer,
         SettlementCompletedConsumer,
+        SettlementReconciliationSweeper,
         KafkaEventPublisher,
         ENV,
       ],
@@ -381,13 +415,14 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
         awarded: TenderAwardedConsumer,
         moves: OrganizationMovedConsumer,
         settlements: SettlementCompletedConsumer,
+        settlementReconciliation: SettlementReconciliationSweeper,
         publisher: KafkaEventPublisher,
         env: ContractEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
-          workers: [reconciliation, awarded, moves, settlements],
+          workers: [reconciliation, awarded, moves, settlements, settlementReconciliation],
           // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
@@ -427,6 +462,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly moves: OrganizationMovedConsumer,
     private readonly settlements: SettlementCompletedConsumer,
     private readonly sweeper: PolicyReconciliationSweeper,
+    private readonly settlementReconciliation: SettlementReconciliationSweeper,
     private readonly reconciliations: PolicyReconciliationRepository,
     private readonly store: PrismaOutboxStore,
     private readonly idempotency: IdempotencyStore,
@@ -450,6 +486,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.moves.start();
     await this.settlements.start();
     this.sweeper.start();
+    this.settlementReconciliation.start();
     this.relay.start();
     this.purge.start();
 

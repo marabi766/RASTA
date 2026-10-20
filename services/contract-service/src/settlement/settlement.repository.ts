@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { runUnscoped } from '@rasta/nest-common';
 import type { Statement } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import {
@@ -55,6 +56,25 @@ export class SettlementRepository {
     });
     const first = (row: Statement) => (row.netMinor === amountMinor ? 0 : 1);
     return rows.sort((a, b) => first(a) - first(b));
+  }
+
+  /**
+   * One page of APPROVED statements of every organization, by id after `afterId` — what the
+   * settlement reconciliation asks economic-service about, one statement at a time and each for
+   * its own tenant (`SettlementReconciliationSweeper`). Read across tenants on purpose and nothing
+   * is written here: every write that follows names the statement's own organization.
+   */
+  findApprovedPage(afterId: string | null, limit: number): Promise<SettlementCandidate[]> {
+    return runUnscoped(
+      'the settlement reconciliation lists APPROVED statements of every organization, to ask economic-service about each for its own tenant',
+      () =>
+        this.prisma.client.statement.findMany({
+          where: { status: 'APPROVED', ...(afterId ? { id: { gt: afterId } } : {}) },
+          include: { contract: { select: { contractorOrganizationId: true } } },
+          orderBy: { id: 'asc' },
+          take: limit,
+        }),
+    );
   }
 
   /** Takes the statement's row lock and reads it as it now stands (after the contract's lock). */
