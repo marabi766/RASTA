@@ -244,13 +244,16 @@ describe('through the gateway', () => {
     expect(new Headers(calls[0]!.init.headers).get('idempotency-key')).toBe('sub_KEYKEYKEYKEY');
   });
 
-  it('decides with one word and withdraws with none', async () => {
+  it('decides with one word and withdraws naming the status it saw', async () => {
     answer = () => json(200, AUTHORIZED);
     await issueReturnCommand(SESSION, RETURN_ID, 'REJECT', 'sub_KEYKEYKEYKEY');
     await issueReturnCommand(SESSION, RETURN_ID, 'CANCEL', 'sub_KEYKEYKEYKEY');
     expect(calls.map((call) => [call.url, JSON.parse(String(call.init.body))])).toEqual([
       [`http://gateway.test:3000/v1/returns/${RETURN_ID}/decisions`, { decision: 'REJECT' }],
-      [`http://gateway.test:3000/v1/returns/${RETURN_ID}/cancellation`, {}],
+      [
+        `http://gateway.test:3000/v1/returns/${RETURN_ID}/cancellation`,
+        { expectedStatus: 'REQUESTED' },
+      ],
     ]);
   });
 

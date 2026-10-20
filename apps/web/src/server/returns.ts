@@ -761,8 +761,11 @@ export const RETURN_COMMAND_REQUESTS: Readonly<
 > = {
   AUTHORIZE: { path: 'decisions', body: { decision: 'AUTHORIZE' } },
   REJECT: { path: 'decisions', body: { decision: 'REJECT' } },
-  // The cancellation takes no body; `{}` keeps every post a JSON post.
-  CANCEL: { path: 'cancellation', body: {} },
+  // Conditional (PR 336 review 3; marketplace #339): the one status the portal withdraws from
+  // (`PORTAL_CANCEL_FROM`), judged by marketplace under the request's lock. Authorized between
+  // the action's read and this post, it is 409 OPTIMISTIC_LOCK_FAILED and nothing is written —
+  // said as `TEXT.CHANGED`.
+  CANCEL: { path: 'cancellation', body: { expectedStatus: 'REQUESTED' } },
 };
 
 /** Authorize, reject or cancel `returnId`. */

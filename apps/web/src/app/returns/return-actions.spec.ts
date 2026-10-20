@@ -211,13 +211,13 @@ describe('a decision', () => {
     });
   });
 
-  it('a withdrawal posts to …/cancellation with no body of its own', async () => {
+  it('a withdrawal posts to …/cancellation naming the status it saw', async () => {
     await expect(decide(form({}, { command: 'CANCEL', returnId: RETURN_ID }))).rejects.toThrow(
       'NEXT_REDIRECT',
     );
     expect(sent[0]).toMatchObject({
       url: `http://gateway.test:3000/v1/returns/${RETURN_ID}/cancellation`,
-      body: {},
+      body: { expectedStatus: 'REQUESTED' },
     });
   });
 });
@@ -259,6 +259,22 @@ describe('a withdrawal, re-read before it is sent', () => {
       expect(sent).toHaveLength(0);
     },
   );
+
+  it('authorized between the read and the post (PR 336 review 3): the service refuses it under its lock — 409, said as changed, nothing confirmed', async () => {
+    // The read sees REQUESTED; the supplier authorizes; the post names REQUESTED.
+    current = () => json(200, REQUESTED);
+    answer = () => problem(409, 'OPTIMISTIC_LOCK_FAILED');
+    const state = await decide(form({}, CANCEL));
+    expect(reads).toEqual([REQUEST_URL]);
+    expect(sent).toEqual([
+      expect.objectContaining({
+        url: `${REQUEST_URL}/cancellation`,
+        body: { expectedStatus: 'REQUESTED' },
+      }),
+    ]);
+    expect(redirect).not.toHaveBeenCalled();
+    expect(JSON.stringify(state)).toContain(RETURN_REFUSAL_TEXT.CHANGED);
+  });
 
   it('a request that cannot be re-read is not withdrawn: refused, or not found — nothing sent', async () => {
     for (const [status, code] of [
