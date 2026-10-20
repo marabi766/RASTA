@@ -22,7 +22,7 @@ import type { ProvisionedPerson } from './live-session';
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
-  if (!value) throw new Error(`The live statement scenarios require ${name}`);
+  if (!value) throw new Error(`The live scenarios require ${name}`);
   return value;
 }
 
@@ -94,36 +94,52 @@ async function enableSignIn(username: string, password: string): Promise<void> {
 
 const TOKEN_WAIT_MS = 30_000;
 
+/** One password grant for `person`: its access token, or why there is none. */
+async function passwordGrant(person: ProvisionedPerson): Promise<string | number> {
+  const issuer = requiredEnv('OIDC_ISSUER_URL').replace(/\/+$/, '');
+  const response = await fetch(`${issuer}/protocol/openid-connect/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'password',
+      client_id: requiredEnv('OIDC_CLIENT_ID'),
+      username: person.username,
+      password: person.password,
+      scope: 'openid',
+    }),
+  });
+  if (!response.ok) return response.status;
+  return z.object({ access_token: z.string() }).parse(await response.json()).access_token;
+}
+
 /** Until a password grant gives a token naming the person and the organization. */
 async function untilSignedIn(person: ProvisionedPerson): Promise<void> {
-  const issuer = requiredEnv('OIDC_ISSUER_URL').replace(/\/+$/, '');
   const deadline = Date.now() + TOKEN_WAIT_MS;
   let last = 'no answer';
   while (Date.now() < deadline) {
-    const response = await fetch(`${issuer}/protocol/openid-connect/token`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'password',
-        client_id: requiredEnv('OIDC_CLIENT_ID'),
-        username: person.username,
-        password: person.password,
-        scope: 'openid',
-      }),
-    });
-    if (response.ok) {
-      const { access_token: token } = z
-        .object({ access_token: z.string() })
-        .parse(await response.json());
+    const token = await passwordGrant(person);
+    if (typeof token === 'string') {
       const claims = decodeJwt(token);
       if (claims.rasta_uid === person.userId && claims.org_id === person.organizationId) return;
       last = 'token without the membership yet';
     } else {
-      last = `token endpoint ${response.status}`;
+      last = `token endpoint ${token}`;
     }
     await new Promise((done) => setTimeout(done, 1000));
   }
   throw new Error(`${person.username} could not sign in with its membership (${last})`);
+}
+
+/**
+ * A provisioned person's access token, for a scenario's own gateway calls
+ * (as `liveAccessToken` is for a realm persona) — no browser session is made.
+ */
+export async function provisionedAccessToken(person: ProvisionedPerson): Promise<string> {
+  const token = await passwordGrant(person);
+  if (typeof token !== 'string') {
+    throw new Error(`${person.username} could not sign in (token endpoint ${token})`);
+  }
+  return token;
 }
 
 /**

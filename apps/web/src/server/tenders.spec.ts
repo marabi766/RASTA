@@ -118,15 +118,22 @@ describe('the owner’s side', () => {
     expect(bare.urls[0]).toBe('http://gateway.test:3000/v1/tenders?limit=20');
   });
 
-  it('never lets an actor id, the owner organization or the version into what the screen receives', async () => {
+  it('never lets an actor id or the owner organization into what the screen receives', async () => {
     const { impl } = answering(TENDER);
     const result = await withFetch(impl, () => fetchTender(SESSION, 'TND_1'));
 
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain('USR_ACTOR_SECRET');
     expect(serialized).not.toContain('ORG_OWNER');
-    expect(serialized).not.toContain('version');
     expect(result.kind === 'OK' && result.data.projectId).toBe('PRJ_1');
+    // The owner's publication is bound to the version the page read (`tender-owner.ts`).
+    expect(result.kind === 'OK' && result.data.version).toBe(3);
+  });
+
+  it('keeps the version out of the list, where no command is bound to it', async () => {
+    const { impl } = answering({ items: [TENDER] });
+    const result = await withFetch(impl, () => fetchTenders(SESSION));
+    expect(JSON.stringify(result)).not.toContain('version');
   });
 
   it('keeps the scope prose out of the list, which the screen does not render', async () => {

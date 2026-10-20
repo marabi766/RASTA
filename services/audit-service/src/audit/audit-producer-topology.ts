@@ -51,10 +51,10 @@ type DomainTopicOwner = TopicProducerMap[AuditDomainTopic][number];
  * this service subscribes to and labels, and a topic declared there is audited
  * here without a second edit (AGENTS.md S-06). Codex review of #124, finding 2.
  *
- * Fourteen topics, thirteen owners today — `asset-service` publishes both
- * `rasta.asset.v1` and `rasta.insurance.v1`. A topic with no producer yet
- * (`procurement`) is absent from `TOPIC_PRODUCERS`, and so from here. The
- * order is `TOPIC_PRODUCERS`' order.
+ * Fifteen topics, fourteen owners today — `asset-service` publishes both
+ * `rasta.asset.v1` and `rasta.insurance.v1`. A topic with no producer is
+ * absent from `TOPIC_PRODUCERS`, and so from here. The order is
+ * `TOPIC_PRODUCERS`' order.
  *
  * A domain topic has exactly one owner — the label below is "the owner, or
  * unknown" — so a declaration with two refuses to load rather than labelling

@@ -174,6 +174,50 @@ const schema = z.object({
   WEB_PROJECT_READER_ROLES: roleList('WEB_PROJECT_READER_ROLES', ''),
 
   /**
+   * Who may open a tender's bids and read them afterwards
+   * (`server/tender-owner.ts`). This **mirrors** construction-service's
+   * `CONSTRUCTION_TENDER_OPEN_ROLES` and must be changed together with it:
+   * empty (the default) means the owner's own role set, `WEB_PROJECT_ROLES`,
+   * as there. `SYSTEM_ADMIN` and `CONTRACTOR` are refused here as they are
+   * there — neither opens or reads a bid (ADR-066 § 4). It decides only which
+   * forms are drawn; the service decides again.
+   */
+  WEB_TENDER_OPEN_ROLES: roleList('WEB_TENDER_OPEN_ROLES', '', ['SYSTEM_ADMIN', 'CONTRACTOR']),
+
+  /**
+   * Who may evaluate a tender's opened bids and read the matrix, and who may
+   * award an evaluated tender (`server/tender-evaluation.ts`). These **mirror**
+   * construction-service's `CONSTRUCTION_TENDER_EVALUATE_ROLES` and
+   * `CONSTRUCTION_TENDER_AWARD_ROLES` and must be changed together with them:
+   * empty (the default) means the owner's own role set, `WEB_PROJECT_ROLES`,
+   * as there. `SYSTEM_ADMIN` and `CONTRACTOR` are refused as they are there.
+   */
+  WEB_TENDER_EVALUATE_ROLES: roleList('WEB_TENDER_EVALUATE_ROLES', '', [
+    'SYSTEM_ADMIN',
+    'CONTRACTOR',
+  ]),
+  WEB_TENDER_AWARD_ROLES: roleList('WEB_TENDER_AWARD_ROLES', '', ['SYSTEM_ADMIN', 'CONTRACTOR']),
+
+  /**
+   * The optional conflict-of-interest rules in force (`server/tender-evaluation.ts`).
+   * This **mirrors** construction-service's `CONSTRUCTION_COI_RULES` — the same
+   * closed set, the same default (`AWARDER_NOT_EVALUATOR`, on unless switched
+   * off; an empty value switches every rule off) — and must be changed together
+   * with it. A name outside the set stops the portal at boot, as it stops the
+   * service. It decides only which forms are drawn; the service decides again.
+   */
+  WEB_TENDER_COI_RULES: z
+    .string()
+    .default('AWARDER_NOT_EVALUATOR')
+    .transform((raw) =>
+      raw
+        .split(',')
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0),
+    )
+    .pipe(z.array(z.enum(['AWARDER_NOT_EVALUATOR', 'EVALUATOR_NOT_TENDER_AUTHOR']))),
+
+  /**
    * Which roles are shown the Inventory link (`server/portal-nav.ts`).
    *
    * These **mirror** inventory-service's `INVENTORY_OPERATOR_ROLES` and
@@ -300,6 +344,29 @@ const schema = z.object({
    * contract-service. Same bounds as the dispute margin.
    */
   WEB_CONTRACT_REPLAY_MARGIN_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .max(30 * 60)
+    .default(10 * 60),
+
+  /**
+   * How long construction-service keeps an idempotency record, in hours — the
+   * window in which a bid re-sent under its original key is answered with its
+   * stored receipt rather than run again (`server/bid-replay.ts`).
+   *
+   * This **mirrors** construction-service's `CONSTRUCTION_IDEMPOTENCY_TTL_HOURS`
+   * (same bounds, 1..168) and must be changed together with it, or set lower.
+   * The default is that setting's floor, as for economic-service's above.
+   */
+  WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+
+  /**
+   * How much earlier than that retention the portal stops re-sending a bid
+   * command, in seconds: room for the request to reach construction-service.
+   * Same bounds as the dispute margin.
+   */
+  WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: z.coerce
     .number()
     .int()
     .min(60)
