@@ -64,7 +64,7 @@ describe('the committed OpenAPI document', () => {
     expect(published.map((o) => o.key).sort()).toEqual(Object.keys(RESPONSE_BODIES).sort());
     for (const { key, operation } of published) {
       expect({ key, security: operation.security }).toEqual({ key, security: [{ bearer: [] }] });
-      const created = key === 'POST /v1/demand-requests';
+      const created = ['POST /v1/demand-requests', 'POST /v1/aggregation-settings'].includes(key);
       expect(operation.responses['200'] !== undefined).toBe(!created);
       expect(operation.responses['201'] !== undefined).toBe(created);
     }
