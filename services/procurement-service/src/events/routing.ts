@@ -15,6 +15,7 @@ import type { ProcurementEventName } from './events';
 
 export const DEMAND_AGGREGATE_TYPE = 'DemandRequest';
 export const AGGREGATION_AGGREGATE_TYPE = 'DemandAggregation';
+export const SETTING_AGGREGATE_TYPE = 'AggregationSetting';
 
 export const AGGREGATE_OF = {
   DEMAND_SUBMITTED: DEMAND_AGGREGATE_TYPE,
@@ -24,6 +25,7 @@ export const AGGREGATE_OF = {
   AGGREGATION_REFERRED: AGGREGATION_AGGREGATE_TYPE,
   AGGREGATION_LAPSED: AGGREGATION_AGGREGATE_TYPE,
   AGGREGATION_CANCELLED: AGGREGATION_AGGREGATE_TYPE,
+  AGGREGATION_SETTING_CHANGED: SETTING_AGGREGATE_TYPE,
 } as const satisfies Record<ProcurementEventName, string>;
 
 export interface PartitionDecision {
@@ -37,8 +39,19 @@ export interface PartitionDecision {
  */
 export function resolvePartitionKey(
   eventName: ProcurementEventName,
-  payload: { aggregationId?: string },
+  payload: { aggregationId?: string; organizationId?: string },
 ): PartitionDecision {
+  if (eventName === 'AGGREGATION_SETTING_CHANGED') {
+    if (!payload.organizationId) {
+      throw new Error(`${eventName} carries no organizationId to partition by`);
+    }
+    return {
+      key: payload.organizationId,
+      reason:
+        `${eventName} is keyed by the organization whose settings it versions: its versions are ` +
+        'one stream, in order (docs/07 § 7.7)',
+    };
+  }
   if (!payload.aggregationId) {
     throw new Error(`${eventName} carries no aggregationId to partition by`);
   }

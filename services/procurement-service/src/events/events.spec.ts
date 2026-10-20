@@ -78,6 +78,16 @@ const PUBLISHED: Record<ProcurementEventName, Record<string, unknown>> = {
     cancelledBy: 'USR_1',
     cancelledAt: AT,
   },
+  AGGREGATION_SETTING_CHANGED: {
+    organizationId: 'ORG_BUYER',
+    settingVersion: 2,
+    previousVersion: 1,
+    windowHours: 72,
+    minQuantity: 500,
+    shortfallPolicy: 'REFER',
+    recordedBy: 'USR_1',
+    recordedAt: AT,
+  },
 };
 
 describe('the procurement events (ADR-070 § 9, PRs 1 and 2)', () => {
@@ -90,6 +100,7 @@ describe('the procurement events (ADR-070 § 9, PRs 1 and 2)', () => {
       'AGGREGATION_REFERRED',
       'AGGREGATION_LAPSED',
       'AGGREGATION_CANCELLED',
+      'AGGREGATION_SETTING_CHANGED',
     ];
     expect(Object.keys(PROCUREMENT_EVENTS)).toEqual(names);
     expect(Object.keys(PROCUREMENT_EVENT_SCHEMAS)).toEqual(names);
@@ -97,10 +108,12 @@ describe('the procurement events (ADR-070 § 9, PRs 1 and 2)', () => {
   });
 
   it.each(Object.keys(PUBLISHED) as ProcurementEventName[])(
-    '%s accepts its payload as published and is keyed by the aggregation',
+    '%s accepts its payload as published and is keyed by the aggregation — a setting by its organization',
     (name) => {
       const payload = validateProcurementPayload(name, PUBLISHED[name]);
-      expect(resolvePartitionKey(name, payload).key).toBe('AGG_1');
+      expect(resolvePartitionKey(name, payload).key).toBe(
+        name === 'AGGREGATION_SETTING_CHANGED' ? 'ORG_BUYER' : 'AGG_1',
+      );
     },
   );
 
@@ -218,5 +231,39 @@ describe('routing', () => {
 
   it('refuses an event that names no aggregation to key it by', () => {
     expect(() => resolvePartitionKey('DEMAND_SUBMITTED', {})).toThrow(/no aggregationId/);
+  });
+
+  it('keys a setting version by its organization, and refuses one that names none (plan PR 3)', () => {
+    expect(AGGREGATE_OF.AGGREGATION_SETTING_CHANGED).toBe('AggregationSetting');
+    expect(
+      resolvePartitionKey('AGGREGATION_SETTING_CHANGED', { organizationId: 'ORG_1' }).key,
+    ).toBe('ORG_1');
+    expect(() => resolvePartitionKey('AGGREGATION_SETTING_CHANGED', {})).toThrow(
+      /no organizationId/,
+    );
+  });
+
+  it('a setting version names the one before it, null before the first, and no free text', () => {
+    const first = {
+      ...PUBLISHED.AGGREGATION_SETTING_CHANGED,
+      settingVersion: 1,
+      previousVersion: null,
+    };
+    expect(validateProcurementPayload('AGGREGATION_SETTING_CHANGED', first)).toEqual(first);
+    for (const wrong of [
+      { settingVersion: 1, previousVersion: 1 },
+      { settingVersion: 3, previousVersion: 1 },
+      { settingVersion: 2, previousVersion: null },
+      { minQuantity: 2_147_483_648 },
+      { windowHours: 8761 },
+      { shortfallPolicy: 'WAIT' },
+    ]) {
+      expect(() =>
+        validateProcurementPayload('AGGREGATION_SETTING_CHANGED', {
+          ...PUBLISHED.AGGREGATION_SETTING_CHANGED,
+          ...wrong,
+        }),
+      ).toThrow(/does not match its published contract/);
+    }
   });
 });
