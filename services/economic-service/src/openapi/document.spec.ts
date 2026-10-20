@@ -135,7 +135,8 @@ describe('enrichOpenApiDocument', () => {
     'publishes %s version creation as idempotent and preconditioned (#328 r1)',
     (path) => {
       const document = emptyDocument();
-      document.paths = { [path]: { post: { responses: {} } } } as never;
+      // As Nest emits it: the route's `@HttpCode(201)` (#322 documents only the declared status).
+      document.paths = { [path]: { post: nest('201') } } as never;
 
       const enriched = enrichOpenApiDocument(document);
       const create = (enriched.paths[path] as Record<string, never>).post as unknown as {
