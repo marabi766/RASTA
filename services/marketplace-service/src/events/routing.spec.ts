@@ -312,10 +312,10 @@ describe('every published marketplace event has a partition decision', () => {
     expect(resolve(name)).toEqual(EXPECTED[name]);
   });
 
-  it('covers exactly the twenty-five events this service publishes', () => {
+  it('covers exactly the twenty-six events this service publishes', () => {
     expect(Object.keys(EXPECTED).sort()).toEqual([...NAMES].sort());
     expect(Object.keys(PARTITION_KEY_POLICY).sort()).toEqual([...NAMES].sort());
-    expect(NAMES).toHaveLength(25);
+    expect(NAMES).toHaveLength(26);
   });
 });
 
