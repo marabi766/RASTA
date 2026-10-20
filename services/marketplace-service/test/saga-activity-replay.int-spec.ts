@@ -79,7 +79,20 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       dispute: method('dispute', async () => ({ disputeId: 'TXD_STUB' })),
       resolveDispute: method('resolveDispute', async () => undefined),
       findObligations: method('findObligations', async () => []),
-      // JUSTIFIED-ANY: the activities call only these eight methods, and the
+      // The obligation as economic-service has it now — this order's, HELD —
+      // which `createObligation` reads before answering.
+      readObligation: async (input: { orderId: string; transactionId: string }) => {
+        expect(getContext().organizationId).toBe(org.buyer);
+        calls.push('readObligation');
+        return {
+          id: input.transactionId,
+          organizationId: org.buyer,
+          transactionType: 'MARKETPLACE_ORDER',
+          status: 'HELD',
+          sourceReference: input.orderId,
+        };
+      },
+      // JUSTIFIED-ANY: the activities call only these nine methods, and the
       // client's own HTTP behaviour has its own spec.
     } as any as EconomicClient;
     return { calls, economic };
@@ -468,6 +481,25 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     expect((await rowOf(orderId)).economicSettlementId).toBe(SETTLED.settlementId);
   });
 
+  it('a retried hold whose funds were refunded since its first attempt is not adopted (#334 r3 F2)', async () => {
+    // The first attempt committed the hold and recorded it; its completion
+    // never reached Temporal; the supplier refunded before the retry. The
+    // retry answers from the step's record (D-053) — and that record is
+    // history: the funds are read again, and the hold is not adopted.
+    const econ = expiredEconomic();
+    const orderId = await placeOrder();
+    const saga = sagaRun(orderId, econ.economic);
+    await saga.run(2, 1, (a) => a.createObligation(orderId));
+    econ.obligation.status = 'REFUNDED';
+
+    await expect(saga.run(2, 2, (a) => a.createObligation(orderId))).rejects.toMatchObject({
+      type: 'OBLIGATION_NOT_HELD',
+      nonRetryable: true,
+    });
+    expect(econ.calls).toEqual(['createObligation', 'readObligation', 'readObligation']);
+    expect((await rowOf(orderId)).status).toBe('PENDING');
+  });
+
   it('every economic step is asked once per scheduled activity', async () => {
     const { calls, economic } = stubEconomic();
     const { orderId, saga, transactionId } = await receiptConfirmed(economic);
@@ -493,6 +525,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
 
     expect(calls).toEqual([
       'createObligation',
+      'readObligation',
       'authoriseSettlement',
       'dispute',
       'resolveDispute',
@@ -564,7 +597,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
 
       // Recorded: a third attempt asks nobody.
       await saga.run(4, 3, (a) => a.authoriseSettlement(orderId, transactionId));
-      expect(econ.calls.slice(1)).toEqual([
+      expect(econ.calls.slice(2)).toEqual([
         'authoriseSettlement',
         'authoriseSettlement',
         'readObligation',
@@ -595,7 +628,8 @@ describe('a retried saga activity answers what its first attempt answered (D-053
         SETTLED,
       );
       expect(econ.calls.filter((c) => c === 'settle')).toHaveLength(2);
-      expect(econ.calls.filter((c) => c === 'readObligation')).toHaveLength(1);
+      // The hold's funding check, and the settlement's read back.
+      expect(econ.calls.filter((c) => c === 'readObligation')).toHaveLength(2);
 
       // Without it: SETTLEMENT_EXHAUSTED, "funds remain held", on a paid order.
       await expect(
@@ -614,7 +648,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       await expect(
         saga.run(4, 1, (a) => a.authoriseSettlement(orderId, transactionId)),
       ).rejects.toMatchObject({ type: 'INVALID_STATE_TRANSITION' });
-      expect(econ.calls.slice(1)).toEqual(['authoriseSettlement', 'readObligation']);
+      expect(econ.calls.slice(2)).toEqual(['authoriseSettlement', 'readObligation']);
       expect(await recordsOf(orderId)).not.toContainEqual({ activity: 'authoriseSettlement' });
     });
 
@@ -641,7 +675,8 @@ describe('a retried saga activity answers what its first attempt answered (D-053
         type: 'BUSINESS_RULE_VIOLATION',
         nonRetryable: true,
       });
-      expect(calls).not.toContain('readObligation');
+      // The one read is the hold's funding check; the refusal is not read back.
+      expect(calls.slice(calls.indexOf('settle'))).not.toContain('readObligation');
     });
   });
 
@@ -680,7 +715,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       await expect(
         saga.run(4, 3, (a) => a.authoriseSettlement(orderId, transactionId)),
       ).resolves.toEqual({ disputed: true, reason: OBJECTION, economicDisputeId: 'TXD_1' });
-      expect(econ.calls.slice(1)).toEqual([
+      expect(econ.calls.slice(2)).toEqual([
         'authoriseSettlement',
         'authoriseSettlement',
         'readObligation',
@@ -947,7 +982,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       await expect(
         saga.run(4, 1, (a) => a.authoriseSettlement(orderId, transactionId)),
       ).rejects.toMatchObject({ type: 'INVALID_STATE_TRANSITION' });
-      expect(econ.calls.slice(1)).toEqual(['authoriseSettlement', 'readObligation']);
+      expect(econ.calls.slice(2)).toEqual(['authoriseSettlement', 'readObligation']);
       expect(await recordsOf(orderId)).not.toContainEqual({ activity: 'authoriseSettlement' });
       expect((await rowOf(orderId)).status).toBe('RECEIPT_CONFIRMED');
     });

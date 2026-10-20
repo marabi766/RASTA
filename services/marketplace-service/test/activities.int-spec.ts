@@ -82,7 +82,9 @@ describe('order saga activities (real database)', () => {
         });
         const override = overrides[name];
         if (override) return override();
-        return result;
+        return typeof result === 'function'
+          ? (result as (i: typeof input) => unknown)(input)
+          : result;
       };
 
     const economic = {
@@ -98,7 +100,12 @@ describe('order saga activities (real database)', () => {
       dispute: method('dispute', { disputeId: 'TXD_STUB' }),
       resolveDispute: method('resolveDispute', undefined),
       findObligations: method('findObligations', []),
-      // JUSTIFIED-ANY: only the eight methods the activities call are needed,
+      // The obligation as economic-service has it now: the one asked about,
+      // this order's, HELD — what `createObligation` checks before answering.
+      readObligation: method('readObligation', (input: Record<string, unknown>) =>
+        obligation(String(input.orderId), { id: input.transactionId }),
+      ),
+      // JUSTIFIED-ANY: only the nine methods the activities call are needed,
       // and naming the class would drag its HTTP internals into a suite about
       // the activities. The client's own behaviour has its own spec.
     } as any as EconomicClient;
@@ -142,8 +149,9 @@ describe('order saga activities (real database)', () => {
 
       await activitiesWith(economic).createObligation(orderId);
 
-      expect(calls).toHaveLength(1);
-      expect(calls[0].contextOrganizationId).toBe(org.buyer);
+      // The creation and the read of its funds, both for the buyer.
+      expect(calls).toHaveLength(2);
+      expect(calls.map((c) => c.contextOrganizationId)).toEqual([org.buyer, org.buyer]);
       expect(calls[0].input.buyerOrganizationId).toBe(org.buyer);
       expect(calls[0].input.supplierOrganizationId).toBe(org.supplier);
     });
@@ -180,8 +188,9 @@ describe('order saga activities (real database)', () => {
       const held = await activitiesWith(economic).createObligation(orderId);
 
       expect(held.transactionId).toMatch(/^TXN_/);
-      expect(calls.map((c) => c.method)).toEqual(['createObligation']);
+      expect(calls.map((c) => c.method)).toEqual(['createObligation', 'readObligation']);
       expect(calls[0].input.totalAmountMinor).toBe(500000n);
+      expect(calls[1].input.transactionId).toBe(held.transactionId);
       expect(calls[0].input.currency).toBe('IRR');
     });
 
@@ -200,7 +209,59 @@ describe('order saga activities (real database)', () => {
       const replay = await activitiesWith(second.economic).createObligation(orderId);
 
       expect(replay.transactionId).toBe(held.transactionId);
-      expect(second.calls).toHaveLength(0);
+      // Not created again — only read, to see the funds are still held.
+      expect(second.calls.map((c) => c.method)).toEqual(['readObligation']);
+    });
+
+    it.each(['REFUNDED', 'SETTLED', 'CANCELLED', 'PENDING_SETTLEMENT'])(
+      'the exact case (#334 r3 F2): the stored answer of a hold the supplier then left %s is not adopted',
+      async (status) => {
+        // The hold committed, its answer was lost, the supplier refunded it,
+        // and the retry got economic-service's stored answer: the same id.
+        const { orderId } = await placeOrder();
+        const { calls, economic } = stubEconomic({
+          // The stored answer, as it was when the hold committed.
+          createObligation: async () => ({ id: 'TXN_REPLAYED', status: 'HELD' }),
+          readObligation: async () => obligation(orderId, { id: 'TXN_REPLAYED', status }),
+        });
+
+        await expect(activitiesWith(economic).createObligation(orderId)).rejects.toMatchObject({
+          type: 'OBLIGATION_NOT_HELD',
+          nonRetryable: true,
+        });
+        expect(calls.map((c) => c.method)).toEqual(['createObligation', 'readObligation']);
+        const row = await runUnscoped('the suite reads the order', () =>
+          prisma.client.order.findUniqueOrThrow({ where: { id: orderId } }),
+        );
+        expect(row.status).toBe('PENDING');
+        expect(row.economicTransactionId).toBeNull();
+      },
+    );
+
+    it('checks the funds on the shortcut too: an order that carries a refunded obligation is not re-adopted', async () => {
+      const { orderId } = await placeOrder();
+      const first = stubEconomic();
+      const held = await activitiesWith(first.economic).createObligation(orderId);
+      await activitiesWith(first.economic).markFundsHeld(orderId, held.transactionId);
+
+      const second = stubEconomic({
+        readObligation: async () =>
+          obligation(orderId, { id: held.transactionId, status: 'REFUNDED' }),
+      });
+      await expect(activitiesWith(second.economic).createObligation(orderId)).rejects.toMatchObject(
+        { type: 'OBLIGATION_NOT_HELD', nonRetryable: true },
+      );
+      expect(second.calls.map((c) => c.method)).toEqual(['readObligation']);
+    });
+
+    it('does not adopt an id economic-service does not answer as this order’s own', async () => {
+      const { orderId } = await placeOrder();
+      const { economic } = stubEconomic({ readObligation: async () => null });
+
+      await expect(activitiesWith(economic).createObligation(orderId)).rejects.toMatchObject({
+        type: 'OBLIGATION_NOT_HELD',
+        nonRetryable: true,
+      });
     });
   });
 
@@ -332,6 +393,7 @@ describe('order saga activities (real database)', () => {
       expect(payload.netAmountMinor).toBe('487500');
       expect(calls.map((c) => c.method)).toEqual([
         'createObligation',
+        'readObligation',
         'authoriseSettlement',
         'settle',
       ]);
@@ -414,12 +476,17 @@ describe('order saga activities (real database)', () => {
         'RELEASE_TO_SUPPLIER',
       );
 
-      expect(calls.map((c) => c.method)).toEqual(['createObligation', 'dispute', 'resolveDispute']);
-      expect(calls[1].input.reason).toBe('the part does not fit');
-      expect(calls[2].input.resolution).toBe('RELEASE_TO_SUPPLIER');
+      expect(calls.map((c) => c.method)).toEqual([
+        'createObligation',
+        'readObligation',
+        'dispute',
+        'resolveDispute',
+      ]);
+      expect(calls[2].input.reason).toBe('the part does not fit');
+      expect(calls[3].input.resolution).toBe('RELEASE_TO_SUPPLIER');
       // Keyed by the dispute, so a second dispute on this order is its own call.
-      expect(calls[1].input.disputeId).toBe(dispute!.id);
       expect(calls[2].input.disputeId).toBe(dispute!.id);
+      expect(calls[3].input.disputeId).toBe(dispute!.id);
     });
 
     it('records a settlement that will not complete, without moving money', async () => {
@@ -476,7 +543,7 @@ describe('order saga activities (real database)', () => {
         prisma.client.order.findUniqueOrThrow({ where: { id: orderId } }),
       );
       expect(row.status).toBe('FUNDS_HELD');
-      expect(calls.map((c) => c.method)).toEqual(['createObligation']);
+      expect(calls.map((c) => c.method)).toEqual(['createObligation', 'readObligation']);
     });
   });
 

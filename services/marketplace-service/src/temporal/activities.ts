@@ -256,9 +256,24 @@ export function createActivities(deps: ActivityDependencies) {
   }
 
   return {
-    /** Creates the obligation and holds the funds, in one call (ADR-040). */
+    /**
+     * Creates the obligation and holds the funds, in one call (ADR-040) —
+     * and answers only while economic-service holds them now.
+     *
+     * Every way this answers can be history: the transaction id already on
+     * the order, the step's own record of a first attempt (D-053), and
+     * economic-service's stored answer to an idempotent retry, which it
+     * replays without reading the row again. The hold committed, its answer
+     * was lost, the supplier refunded it, and the retry got the stored
+     * answer: adopting that id recorded FUNDS_HELD and published
+     * ORDER_FUNDS_HELD for money back with the buyer (review of #334
+     * round 3, F2). So whatever the step answers is checked against the
+     * obligation as economic-service has it now, outside the step's record,
+     * on every attempt. Not HELD: a non-retryable `OBLIGATION_NOT_HELD`, and
+     * the workflow's recovery (`findObligation`) names the status and stops.
+     */
     async createObligation(orderId: string): Promise<HeldResult> {
-      return economicStep(orderId, 'createObligation', async (order) => {
+      const held = await economicStep(orderId, 'createObligation', async (order) => {
         if (order.economicTransactionId) {
           // A retry after the call succeeded but the recording did not. The
           // obligation exists; do not create a second one.
@@ -271,6 +286,25 @@ export function createActivities(deps: ActivityDependencies) {
         });
         return { transactionId: transaction.id };
       });
+      await asSystemFor(orderId, async (order) => {
+        const now = await deps.economic.readObligation({
+          orderId: order.id,
+          transactionId: held.transactionId,
+          buyerOrganizationId: order.buyerOrganizationId,
+          correlationId: order.correlationId,
+        });
+        const funds = now ? fundsOf(now.status) : 'UNPROVEN';
+        if (funds === 'HELD') return;
+        logger.error(
+          `Order ${order.id}: its obligation ${held.transactionId} is ${now?.status ?? 'not found as its own'} ` +
+            `at economic-service (funds ${funds}); the hold is not adopted`,
+        );
+        throw ApplicationFailure.nonRetryable(
+          `economic-service does not hold order ${order.id}'s obligation now (funds ${funds})`,
+          'OBLIGATION_NOT_HELD',
+        );
+      });
+      return held;
     },
 
     /**
