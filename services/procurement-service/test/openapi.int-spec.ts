@@ -231,17 +231,18 @@ describe('the published OpenAPI contract (real application)', () => {
     const CLOSE = '/v1/rfqs/{id}/close';
     const CANCEL_RFQ = '/v1/rfqs/{id}/cancel';
     const rfqProduct = newProductId();
-    clock.set(new Date('2033-01-01T08:00:00.000Z'));
+    // In the past: the database judges a close's deadline on its own clock (`ck_rfq_deadline`).
+    clock.set(new Date('2021-01-01T08:00:00.000Z'));
     const opening = (await as.submit({ productId: rfqProduct, quantity: 4 })).body;
-    clock.set(new Date('2033-01-08T08:00:00.000Z'));
+    clock.set(new Date('2021-01-08T08:00:00.000Z'));
     await as.submit({ productId: rfqProduct, quantity: 1 });
-    clock.set(new Date('2033-01-09T08:00:00.000Z'));
+    clock.set(new Date('2021-01-09T08:00:00.000Z'));
     const forRfq = (await as.aggregation(opening.aggregationId as string)).body;
     expect(forRfq.status).toBe('READY');
     const issueBody = (overrides: Record<string, unknown> = {}) => ({
       expectedVersion: forRfq.version,
       procurementNature: 'INQUIRY',
-      quotationClosingAt: '2033-01-10T08:00:00.000Z',
+      quotationClosingAt: '2021-01-10T08:00:00.000Z',
       criteria: [
         {
           code: 'Q',
@@ -303,7 +304,7 @@ describe('the published OpenAPI contract (real application)', () => {
     );
     documentedAs('POST', CLOSE, await as.closeRfq(rfqId));
     documentedAs('POST', CLOSE, await issuer.closeRfq(missing.rfq));
-    clock.set(new Date('2033-01-10T08:00:00.000Z'));
+    clock.set(new Date('2021-01-10T08:00:00.000Z'));
     const closeKey = key();
     documentedAs('POST', CLOSE, await issuer.closeRfq(rfqId, closeKey));
     documentedAs('POST', CLOSE, await issuer.closeRfq(missing.rfq, closeKey));

@@ -257,6 +257,26 @@ describe('the RFQ settings (ADR-070 § 3, § 4; plan PR 6)', () => {
     }
   });
 
+  it('cancels for BUYER_REQUEST by default; the closed list is the client’s (the planned CancelRfq)', () => {
+    expect(load().PROCUREMENT_RFQ_CANCELLATION_CODES).toEqual(['BUYER_REQUEST']);
+    expect(
+      load({ PROCUREMENT_RFQ_CANCELLATION_CODES: ' BUYER_REQUEST , BUDGET_WITHDRAWN ' })
+        .PROCUREMENT_RFQ_CANCELLATION_CODES,
+    ).toEqual(['BUYER_REQUEST', 'BUDGET_WITHDRAWN']);
+  });
+
+  it.each([
+    ['', /at least one code/],
+    ['buyer_request', /upper-case words/],
+    ['BUYER REQUEST', /upper-case words/],
+    [`B${'X'.repeat(64)}`, /upper-case words/],
+    ['BUYER_REQUEST,BUYER_REQUEST', /names a code twice/],
+    // Before evaluation (plan PR 10) nothing checks that no quotation qualified.
+    ['BUYER_REQUEST,NO_QUALIFIED_QUOTATION', /NO_QUALIFIED_QUOTATION/],
+  ])('refuses PROCUREMENT_RFQ_CANCELLATION_CODES=%p at startup', (codes, message) => {
+    expect(() => load({ PROCUREMENT_RFQ_CANCELLATION_CODES: codes })).toThrow(message);
+  });
+
   it.each(['AUDITOR', 'SYSTEM_ADMIN'])('refuses %s on the supplier side at startup', (role) => {
     expect(() => load({ PROCUREMENT_SUPPLIER_ROLES: `SUPPLIER,${role}` })).toThrow(
       /PROCUREMENT_SUPPLIER_ROLES/,

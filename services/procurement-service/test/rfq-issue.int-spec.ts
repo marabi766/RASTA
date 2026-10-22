@@ -1,9 +1,14 @@
 import { createPublicKey, createPrivateKey } from 'node:crypto';
 import request from 'supertest';
 import { rfqIssuedPayloadSchema } from '@rasta/contracts';
+import { runUnscoped } from '@rasta/nest-common';
 import { DemandRepository } from '../src/demand/demand.repository';
+import { ID_PREFIX, newId } from '../src/events/publisher';
+import type { ExtendedPrismaClient } from '../src/prisma/prisma.service';
 import { EnvKekProvider } from '../src/rfq/key-provider';
-import { RfqRepository } from '../src/rfq/rfq.repository';
+import { RfqRepository, type NewRfq } from '../src/rfq/rfq.repository';
+import { isLostIssueRace } from '../src/rfq/rfq.service';
+import { isUniqueViolation } from '../src/shared/prisma-errors';
 import { criteriaDigest } from '../src/rfq/dto';
 import { actor, buyer, client, internalToken, key } from './api-helpers';
 import {
@@ -401,7 +406,7 @@ describe('issuing an RFQ', () => {
     await nothingIssued(organizationId, aggregation);
   });
 
-  describe('a precondition another command broke is 409, in every interleaving', () => {
+  describe('a precondition another command broke is 409, in every interleaving of an issue', () => {
     /** The first call of `method` waits at a barrier, holding whatever it holds, then goes on. */
     function parkFirst<T extends object, K extends keyof T>(target: T, method: K) {
       const gate = barrier();
@@ -508,6 +513,90 @@ describe('issuing an RFQ', () => {
       expect([second.status, a.status]).toEqual([201, 409]);
       expect(a.body.code).toBe('OPTIMISTIC_LOCK_FAILED');
       expect(await rfqRows(aggregation.id)).toEqual([{ id: second.body.id }]);
+    });
+
+    describe('only the aggregation’s own refusals are a lost race (PR-349 r1 F1)', () => {
+      /** The issue's transaction failing as `fail` makes it, and the error the database raised. */
+      async function issueFailingWith(
+        fail: (tx: never, input: NewRfq, original: RfqRepository['insertRfq']) => Promise<void>,
+      ) {
+        const { organizationId, aggregation } = await h.readyAggregation();
+        const repository = h.api.get(RfqRepository);
+        const original = repository.insertRfq.bind(repository);
+        const raised: unknown[] = [];
+        jest.spyOn(repository, 'insertRfq').mockImplementationOnce(async (tx, input) => {
+          try {
+            await fail(tx as never, input, original);
+          } catch (error) {
+            raised.push(error);
+            throw error;
+          }
+        });
+        const response = await h
+          .admin(organizationId)
+          .issueRfq(aggregation.id, h.issueBody(aggregation));
+        await nothingIssued(organizationId, aggregation);
+        expect(raised).toHaveLength(1);
+        return { response, error: raised[0] };
+      }
+
+      it('a second RFQ of the aggregation (`ux_rfq_aggregation`): 409, the race it is', async () => {
+        const { response, error } = await issueFailingWith(async (tx, input, original) => {
+          await original(tx, input);
+          await original(tx, {
+            ...input,
+            id: newId(ID_PREFIX.rfq),
+            key: { ...input.key, keyId: newId(ID_PREFIX.rfqKey) },
+          });
+        });
+        expect(isUniqueViolation(error)).toBe(true);
+        expect(isLostIssueRace(error)).toBe(true);
+        expect(response.status).toBe(409);
+        expect(response.body.code).toBe('OPTIMISTIC_LOCK_FAILED');
+      });
+
+      it('a duplicate `rfq.key_id`: not the aggregation’s refusal — the 500 it is, not 409', async () => {
+        const other = await h.readyAggregation();
+        const issued = await h
+          .admin(other.organizationId)
+          .issueRfq(other.aggregation.id, h.issueBody(other.aggregation));
+        const taken = (
+          await h.api.prisma.client.$queryRaw<{ key_id: string }[]>`
+          SELECT key_id FROM rfq WHERE id = ${issued.body.id as string}`
+        )[0]!.key_id;
+
+        const { response, error } = await issueFailingWith((tx, input, original) =>
+          original(tx, { ...input, key: { ...input.key, keyId: taken } }),
+        );
+        expect(isUniqueViolation(error)).toBe(true);
+        expect(isLostIssueRace(error)).toBe(false);
+        expect(response.status).toBe(500);
+        expect(response.body.code).not.toBe('OPTIMISTIC_LOCK_FAILED');
+      });
+
+      it('a duplicate outbox id: not the aggregation’s refusal — the 500 it is, not 409', async () => {
+        const { response, error } = await issueFailingWith(async (tx, input, original) => {
+          await original(tx, input);
+          const [row] = await runUnscoped('test: an outbox row to copy', () =>
+            h.api.prisma.client.outboxMessage.findMany({ take: 1 }),
+          );
+          await runUnscoped('test: a duplicate outbox id', () =>
+            (tx as ExtendedPrismaClient).outboxMessage.create({
+              // Only the id is a duplicate: no stream position, so no other unique index is met.
+              data: {
+                ...row!,
+                payload: row!.payload as object,
+                headers: row!.headers as object,
+                streamSeq: null,
+              },
+            }),
+          );
+        });
+        expect(isUniqueViolation(error)).toBe(true);
+        expect(isLostIssueRace(error)).toBe(false);
+        expect(response.status).toBe(500);
+        expect(response.body.code).not.toBe('OPTIMISTIC_LOCK_FAILED');
+      });
     });
   });
 

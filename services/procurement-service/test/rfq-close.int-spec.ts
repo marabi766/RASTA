@@ -6,6 +6,8 @@ import { actor, buyer, client, key } from './api-helpers';
 import {
   AFTER_READY,
   HOUR,
+  PAST,
+  T0,
   barrier,
   startRfqApi,
   waitForLockWaiter,
@@ -16,7 +18,8 @@ import {
  * Closing an RFQ at its deadline and cancelling it (ADR-070 § 3, plan PR 6): the close only at or
  * after `quotationClosingAt` on the database clock read under the RFQ's lock — by the leased,
  * fenced close sweeper or by the buyer's issuer role, the same command, idempotent, one event; the
- * cancel from any status but AWARDED, with a closed code and a reason that never reaches an event.
+ * cancel from any status but AWARDED, with a code from the configured list and an optional text that
+ * never reaches an event.
  * A supplier and a third organization find nothing to close or cancel (404); another buyer role is
  * 403.
  */
@@ -24,7 +27,8 @@ describe('closing and cancelling an RFQ', () => {
   let h: RfqHarness;
 
   beforeAll(async () => {
-    h = await startRfqApi();
+    // A closed list of two: the planned CancelRfq's "closed list from configuration".
+    h = await startRfqApi({ PROCUREMENT_RFQ_CANCELLATION_CODES: 'BUYER_REQUEST,BUDGET_WITHDRAWN' });
   });
 
   afterAll(async () => {
@@ -35,10 +39,13 @@ describe('closing and cancelling an RFQ', () => {
     jest.restoreAllMocks();
   });
 
-  /** An RFQ issued at AFTER_READY, its deadline `hours` later. */
-  async function issued(hours = 24) {
-    const { organizationId, aggregation } = await h.readyAggregation();
-    const deadline = new Date(AFTER_READY.getTime() + hours * HOUR);
+  /**
+   * An RFQ issued 12 hours into the timeline `t0`, its deadline `hours` later. One a test closes is
+   * on PAST: the database refuses a close before the deadline on its own clock (`ck_rfq_deadline`).
+   */
+  async function issued(hours = 24, t0 = T0) {
+    const { organizationId, aggregation } = await h.readyAggregation(undefined, t0);
+    const deadline = new Date(t0.getTime() + 12 * HOUR + hours * HOUR);
     const body = h.issueBody(aggregation, { quotationClosingAt: deadline.toISOString() });
     const rfq = (await h.admin(organizationId).issueRfq(aggregation.id, body)).body;
     expect(rfq.status).toBe('PUBLISHED');
@@ -58,7 +65,7 @@ describe('closing and cancelling an RFQ', () => {
     };
 
   it('the deadline is half-open: one millisecond before it the close is 422, at it the RFQ closes — one RFQ_CLOSED naming who', async () => {
-    const { organizationId, rfq, deadline } = await issued();
+    const { organizationId, rfq, deadline } = await issued(24, PAST);
     const admin = h.admin(organizationId, 'USR-CLOSER');
 
     h.clock.set(new Date(deadline.getTime() - 1));
@@ -89,11 +96,12 @@ describe('closing and cancelling an RFQ', () => {
       trigger: 'MANUAL',
       closedBy: 'USR-CLOSER',
       closedAt: deadline.toISOString(),
+      quotationCount: 0,
     });
   });
 
   it('is idempotent: a second close — another key, another person — answers the closed RFQ, with no second event', async () => {
-    const { organizationId, rfq, deadline } = await issued();
+    const { organizationId, rfq, deadline } = await issued(24, PAST);
     h.clock.set(new Date(deadline.getTime() + HOUR));
     const first = await h.admin(organizationId).closeRfq(rfq.id);
     const second = await h.admin(organizationId).closeRfq(rfq.id, key());
@@ -131,9 +139,6 @@ describe('closing and cancelling an RFQ', () => {
   });
 
   describe('the close sweeper (on the database clock itself)', () => {
-    /** A timeline whose deadlines the real database clock has already passed. */
-    const PAST = new Date('2020-02-01T08:00:00.000Z');
-
     /** An RFQ issued on the PAST timeline, its deadline an hour after the issue: due now. */
     async function dueRfq() {
       const { organizationId, aggregation } = await h.readyAggregation(undefined, PAST);
@@ -161,7 +166,12 @@ describe('closing and cancelling an RFQ', () => {
       });
       const [event, ...more] = await h.events(due.organizationId, 'RFQ_CLOSED');
       expect(more).toEqual([]);
-      expect(event).toMatchObject({ trigger: 'SWEEPER', closedBy: null, rfqVersion: 2 });
+      expect(event).toMatchObject({
+        trigger: 'SWEEPER',
+        closedBy: null,
+        rfqVersion: 2,
+        quotationCount: 0,
+      });
       const [row] = await h.api.prisma.client.$queryRaw<
         { closed_by: string | null; sweep_fence: string | null; sweep_attempts: number }[]
       >`SELECT closed_by, sweep_fence, sweep_attempts FROM rfq WHERE id = ${due.rfq.id as string}`;
@@ -311,8 +321,8 @@ describe('closing and cancelling an RFQ', () => {
     expect(again.body.details[0].code).toBe('RFQ_NOT_CANCELLABLE');
   });
 
-  it('cancels a CLOSED RFQ too, keeping its close; a stale version is 409; the reason is required', async () => {
-    const { organizationId, rfq, deadline } = await issued();
+  it('cancels a CLOSED RFQ too, keeping its close; a stale version is 409', async () => {
+    const { organizationId, rfq, deadline } = await issued(24, PAST);
     const admin = h.admin(organizationId);
     h.clock.set(deadline);
     expect((await admin.closeRfq(rfq.id)).status).toBe(200);
@@ -320,23 +330,102 @@ describe('closing and cancelling an RFQ', () => {
     const stale = await admin.cancelRfq(rfq.id, 1);
     expect(stale.status).toBe(409);
     expect(stale.body.code).toBe('OPTIMISTIC_LOCK_FAILED');
-    const noReason = await admin.post(`/v1/rfqs/${rfq.id as string}/cancel`, {
-      expectedVersion: 2,
-      reasonCode: 'BUYER_REQUEST',
-    });
-    expect(noReason.status).toBe(400);
-    const unknownCode = await admin.post(`/v1/rfqs/${rfq.id as string}/cancel`, {
-      expectedVersion: 2,
-      reasonCode: 'NO_QUALIFIED_QUOTATION',
-      reason: 'nobody qualified at all',
-    });
-    expect(unknownCode.status).toBe(400);
 
     const cancelled = await admin.cancelRfq(rfq.id, 2);
     expect(cancelled.status).toBe(200);
     expect(cancelled.body).toMatchObject({ status: 'CANCELLED', closedAt: deadline.toISOString() });
     const [event] = await h.events(organizationId, 'RFQ_CANCELLED');
     expect(event).toMatchObject({ previousStatus: 'CLOSED', rfqVersion: 3 });
+  });
+
+  describe('the planned CancelRfq (PR-349 r1 F2): a code from the configured list, an optional text', () => {
+    const cancel = (organizationId: string, id: string, body: Record<string, unknown>) =>
+      h.admin(organizationId).post(`/v1/rfqs/${id}/cancel`, body);
+
+    it('`{expectedVersion, reasonCode: "BUYER_REQUEST"}` and nothing else cancels: no text kept, the event carries the code', async () => {
+      const { organizationId, rfq } = await issued();
+
+      const response = await cancel(organizationId, rfq.id, {
+        expectedVersion: 1,
+        reasonCode: 'BUYER_REQUEST',
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        status: 'CANCELLED',
+        cancelReasonCode: 'BUYER_REQUEST',
+        cancelReason: null,
+        version: 2,
+      });
+      const [event] = await h.events(organizationId, 'RFQ_CANCELLED');
+      expect(rfqCancelledPayloadSchema.parse(event)).toMatchObject({ reasonCode: 'BUYER_REQUEST' });
+      const [row] = await h.api.prisma.client.$queryRaw<{ cancel_reason: string | null }[]>`
+        SELECT cancel_reason FROM rfq WHERE id = ${rfq.id as string}`;
+      expect(row).toEqual({ cancel_reason: null });
+    });
+
+    it('another configured code cancels too, and is what the event carries; an empty text is none', async () => {
+      const { organizationId, rfq } = await issued();
+
+      const response = await cancel(organizationId, rfq.id, {
+        expectedVersion: 1,
+        reasonCode: 'BUDGET_WITHDRAWN',
+        reason: '   ',
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        cancelReasonCode: 'BUDGET_WITHDRAWN',
+        cancelReason: null,
+      });
+      const [event] = await h.events(organizationId, 'RFQ_CANCELLED');
+      expect(rfqCancelledPayloadSchema.parse(event)).toMatchObject({
+        reasonCode: 'BUDGET_WITHDRAWN',
+      });
+    });
+
+    it('a code of the right form but not on the list is 422 CANCELLATION_CODE_NOT_ALLOWED — NO_QUALIFIED_QUOTATION too, until evaluation checks it; nothing moves', async () => {
+      const { organizationId, rfq } = await issued();
+
+      for (const reasonCode of ['NO_QUALIFIED_QUOTATION', 'SUPPLIER_REQUEST']) {
+        const response = await cancel(organizationId, rfq.id, { expectedVersion: 1, reasonCode });
+        expect(response.status).toBe(422);
+        expect(response.body.details).toEqual([
+          {
+            path: 'rfqCancellation',
+            code: 'CANCELLATION_CODE_NOT_ALLOWED',
+            message: expect.any(String),
+          },
+        ]);
+      }
+      expect(await status(organizationId, rfq.id)).toMatchObject({
+        status: 'PUBLISHED',
+        version: 1,
+      });
+      expect(await h.events(organizationId, 'RFQ_CANCELLED')).toEqual([]);
+    });
+
+    it('the planned bounds: no code, a code not of the form, a text over 500 characters or with a bidirectional control is 400', async () => {
+      const { organizationId, rfq } = await issued();
+
+      for (const body of [
+        { expectedVersion: 1 },
+        { expectedVersion: 1, reasonCode: 'buyer_request' },
+        { expectedVersion: 1, reasonCode: 'BUYER_REQUEST', reason: 'x'.repeat(501) },
+        { expectedVersion: 1, reasonCode: 'BUYER_REQUEST', reason: 'a\u202Eb' },
+        { expectedVersion: 1, reasonCode: 'BUYER_REQUEST', note: 'not a field' },
+      ]) {
+        expect((await cancel(organizationId, rfq.id, body)).status).toBe(400);
+      }
+      // 500 characters — counted as code points, as the database counts them — is within them.
+      const longest = await cancel(organizationId, rfq.id, {
+        expectedVersion: 1,
+        reasonCode: 'BUYER_REQUEST',
+        reason: '😀'.repeat(500),
+      });
+      expect(longest.status).toBe(200);
+      expect(longest.body.cancelReason).toBe('😀'.repeat(500));
+    });
   });
 
   it('a cancel is idempotent under its key; another role is 403; a supplier and a third organization 404', async () => {
@@ -361,7 +450,7 @@ describe('closing and cancelling an RFQ', () => {
     expect(await h.events(organizationId, 'RFQ_CANCELLED')).toHaveLength(1);
   });
 
-  describe('a close and a cancel at once: each order has one outcome', () => {
+  describe('a close and a cancel at once — a person’s or the sweeper’s: each order has one outcome', () => {
     const LOCK = /FROM rfq WHERE organization_id/;
     const started = (test: request.Test) => test.then((response) => response);
 
@@ -378,7 +467,7 @@ describe('closing and cancelling an RFQ', () => {
     }
 
     it('the close first: the cancel waits on the RFQ’s lock, then finds its version moved — 409', async () => {
-      const { organizationId, rfq, deadline } = await issued();
+      const { organizationId, rfq, deadline } = await issued(24, PAST);
       h.clock.set(deadline);
       const gate = parkFirstMove();
 
@@ -394,8 +483,10 @@ describe('closing and cancelling an RFQ', () => {
       expect(await status(organizationId, rfq.id)).toMatchObject({ status: 'CLOSED' });
     });
 
+    // The one order that is not 409: a close names no version, so it is not stale — the RFQ it finds
+    // is cancelled, which no close ever moves on (422), whoever cancelled it and when.
     it('the cancel first: the close waits on the lock, then finds it cancelled — 422 RFQ_CANCELLED', async () => {
-      const { organizationId, rfq, deadline } = await issued();
+      const { organizationId, rfq, deadline } = await issued(24, PAST);
       h.clock.set(deadline);
       const gate = parkFirstMove();
 
@@ -409,6 +500,92 @@ describe('closing and cancelling an RFQ', () => {
       expect([x.status, c.status]).toEqual([200, 422]);
       expect(c.body.details[0].code).toBe('RFQ_CANCELLED');
       expect(await h.events(organizationId, 'RFQ_CLOSED')).toEqual([]);
+    });
+
+    describe('the sweeper and a person, each order', () => {
+      /** A due RFQ the sweeper has claimed under `fence`, and the sweep of it — not yet started. */
+      async function claimed(fence: string) {
+        const due = await issued(1, PAST);
+        h.clock.set(null);
+        await h.api.prisma.client.$executeRaw`
+          UPDATE rfq SET sweep_lease_until = clock_timestamp() + interval '1 minute',
+                 sweep_fence = ${fence} WHERE id = ${due.rfq.id as string}`;
+        const sweep = () =>
+          h.api.get(RfqCloseService).close({
+            organizationId: due.organizationId,
+            rfqId: due.rfq.id as string,
+            fence,
+          });
+        return { ...due, sweep };
+      }
+
+      it('the sweeper first: the person’s close waits on the lock, then answers the closed RFQ — one RFQ_CLOSED, the sweeper’s', async () => {
+        const { organizationId, rfq, sweep } = await claimed('FENCE-S1');
+        const gate = parkFirstMove();
+
+        const swept = sweep();
+        await gate.reached;
+        const close = started(h.admin(organizationId).closeRfq(rfq.id));
+        await waitForLockWaiter(h.api, LOCK);
+        gate.release();
+
+        const [result, c] = await Promise.all([swept, close]);
+        expect([result, c.status]).toEqual(['CLOSED', 200]);
+        expect(c.body).toMatchObject({ status: 'CLOSED', version: 2 });
+        const events = await h.events(organizationId, 'RFQ_CLOSED');
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({ trigger: 'SWEEPER', closedBy: null });
+      });
+
+      it('the person first: the sweep waits on the lock, then finds nothing to do — one RFQ_CLOSED, the person’s', async () => {
+        const { organizationId, rfq, sweep } = await claimed('FENCE-S2');
+        const gate = parkFirstMove();
+
+        const close = started(h.admin(organizationId, 'USR-FIRST').closeRfq(rfq.id));
+        await gate.reached;
+        const swept = sweep();
+        await waitForLockWaiter(h.api, LOCK);
+        gate.release();
+
+        const [c, result] = await Promise.all([close, swept]);
+        expect([c.status, result]).toEqual([200, 'NOOP']);
+        const events = await h.events(organizationId, 'RFQ_CLOSED');
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({ trigger: 'MANUAL', closedBy: 'USR-FIRST' });
+      });
+
+      it('the sweeper first, a cancel waiting: the cancel finds the version moved — 409, the RFQ CLOSED', async () => {
+        const { organizationId, rfq, sweep } = await claimed('FENCE-S3');
+        const gate = parkFirstMove();
+
+        const swept = sweep();
+        await gate.reached;
+        const cancel = started(h.admin(organizationId).cancelRfq(rfq.id, 1));
+        await waitForLockWaiter(h.api, LOCK);
+        gate.release();
+
+        const [result, x] = await Promise.all([swept, cancel]);
+        expect([result, x.status]).toEqual(['CLOSED', 409]);
+        expect(x.body.code).toBe('OPTIMISTIC_LOCK_FAILED');
+        expect(await status(organizationId, rfq.id)).toMatchObject({ status: 'CLOSED' });
+        expect(await h.events(organizationId, 'RFQ_CANCELLED')).toEqual([]);
+      });
+
+      it('a cancel first, the sweep waiting: the sweep finds it cancelled and closes nothing', async () => {
+        const { organizationId, rfq, sweep } = await claimed('FENCE-S4');
+        const gate = parkFirstMove();
+
+        const cancel = started(h.admin(organizationId).cancelRfq(rfq.id, 1));
+        await gate.reached;
+        const swept = sweep();
+        await waitForLockWaiter(h.api, LOCK);
+        gate.release();
+
+        const [x, result] = await Promise.all([cancel, swept]);
+        expect([x.status, result]).toEqual([200, 'NOOP']);
+        expect(await status(organizationId, rfq.id)).toMatchObject({ status: 'CANCELLED' });
+        expect(await h.events(organizationId, 'RFQ_CLOSED')).toEqual([]);
+      });
     });
   });
 });

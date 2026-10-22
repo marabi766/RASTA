@@ -115,6 +115,7 @@ const PUBLISHED: Record<ProcurementEventName, Record<string, unknown>> = {
     trigger: 'SWEEPER',
     closedBy: null,
     closedAt: '2026-10-30T10:00:01.000Z',
+    quotationCount: 0,
   },
   RFQ_CANCELLED: {
     rfqId: RFQ,

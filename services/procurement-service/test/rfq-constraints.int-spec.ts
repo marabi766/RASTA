@@ -1,7 +1,7 @@
 import { ulid } from 'ulid';
 import type { PrismaClient } from '../src/generated/prisma';
 import { runtimeClient } from './helpers';
-import { AFTER_READY, HOUR, startRfqApi, type RfqHarness } from './rfq-helpers';
+import { AFTER_READY, HOUR, PAST, T0, startRfqApi, type RfqHarness } from './rfq-helpers';
 
 /**
  * What the database itself keeps of an RFQ (plan PR 6), refused as the **runtime** role from any
@@ -23,10 +23,15 @@ describe('the RFQ guards (database)', () => {
     await h.close();
   });
 
-  async function issued() {
-    const { organizationId, aggregation } = await h.readyAggregation();
-    const rfq = (await h.admin(organizationId).issueRfq(aggregation.id, h.issueBody(aggregation)))
-      .body;
+  /** An RFQ issued 12 hours into `t0`, its deadline 24 hours after that: due now on PAST. */
+  async function issued(t0 = T0) {
+    const { organizationId, aggregation } = await h.readyAggregation(undefined, t0);
+    const quotationClosingAt = new Date(t0.getTime() + 36 * HOUR).toISOString();
+    const rfq = (
+      await h
+        .admin(organizationId)
+        .issueRfq(aggregation.id, h.issueBody(aggregation, { quotationClosingAt }))
+    ).body;
     expect(rfq.status).toBe('PUBLISHED');
     return { organizationId, aggregation, rfq: rfq as { id: string; quotationClosingAt: string } };
   }
@@ -70,7 +75,7 @@ describe('the RFQ guards (database)', () => {
   });
 
   it('once the RFQ moved on, nothing is added to it at all', async () => {
-    const { organizationId, rfq } = await issued();
+    const { organizationId, rfq } = await issued(PAST);
     h.clock.set(new Date(rfq.quotationClosingAt));
     expect((await h.admin(organizationId).closeRfq(rfq.id)).status).toBe(200);
 
@@ -82,21 +87,14 @@ describe('the RFQ guards (database)', () => {
     );
   });
 
-  it('what an RFQ was issued with never changes; a close before the deadline and a skipped transition are refused; the sweeper’s bookkeeping moves no version', async () => {
+  it('what an RFQ was issued with never changes; a skipped transition is refused; the sweeper’s bookkeeping moves no version', async () => {
     const { rfq } = await issued();
-    const deadline = new Date(rfq.quotationClosingAt);
 
     await refused(
       (tx) => tx.$executeRaw`
         UPDATE rfq SET quotation_closing_at = quotation_closing_at + interval '1 day', version = version + 1
          WHERE id = ${rfq.id}`,
       /ck_rfq_origin_immutable/,
-    );
-    await refused(
-      (tx) => tx.$executeRaw`
-        UPDATE rfq SET status = 'CLOSED', closed_at = ${new Date(deadline.getTime() - 1)},
-               version = version + 1 WHERE id = ${rfq.id}`,
-      /ck_rfq_deadline|ck_rfq_closed/,
     );
     await refused(
       (tx) => tx.$executeRaw`
@@ -114,11 +112,68 @@ describe('the RFQ guards (database)', () => {
     const [row] = await db.$queryRaw<{ version: number; status: string }[]>`
       SELECT version, status FROM rfq WHERE id = ${rfq.id}`;
     expect(row).toEqual({ version: 1, status: 'PUBLISHED' });
+  });
 
-    // At the deadline exactly, the close is the RFQ's.
-    await db.$executeRaw`
-      UPDATE rfq SET status = 'CLOSED', closed_at = ${deadline}, updated_at = ${deadline},
-             version = version + 1 WHERE id = ${rfq.id}`;
+  it('the deadline is judged on the database clock at the close, not on the instant the writer states (PR-349 r1 F3)', async () => {
+    const close = (id: string, closedAt: Date | string) => (tx: PrismaClient) =>
+      typeof closedAt === 'string'
+        ? tx.$executeRawUnsafe(
+            `UPDATE rfq SET status = 'CLOSED', closed_at = ${closedAt}, updated_at = ${closedAt},
+                    version = version + 1 WHERE id = $1`,
+            id,
+          )
+        : tx.$executeRaw`
+            UPDATE rfq SET status = 'CLOSED', closed_at = ${closedAt}, updated_at = ${closedAt},
+                   version = version + 1 WHERE id = ${id}`;
+
+    // Before the deadline on the database's clock: refused whatever it states — the deadline
+    // itself, a later instant, an earlier one.
+    const early = await issued();
+    const deadline = new Date(early.rfq.quotationClosingAt);
+    for (const closedAt of [
+      deadline,
+      new Date(deadline.getTime() + HOUR),
+      new Date(deadline.getTime() - 1),
+    ]) {
+      await refused(close(early.rfq.id, closedAt), /ck_rfq_deadline/);
+    }
+
+    // Past it: never before the deadline, never after the database's clock.
+    const due = await issued(PAST);
+    const dueAt = new Date(due.rfq.quotationClosingAt);
+    await refused(close(due.rfq.id, new Date(dueAt.getTime() - 1)), /ck_rfq_deadline/);
+    await refused(close(due.rfq.id, "clock_timestamp() + interval '1 second'"), /ck_rfq_deadline/);
+    // At the deadline exactly, once the clock has passed it, and at the clock itself: the RFQ's.
+    await db.$transaction(async (tx) => {
+      await close(due.rfq.id, dueAt)(tx as unknown as PrismaClient);
+    });
+    const now = await issued(PAST);
+    await db.$transaction(async (tx) => {
+      await close(now.rfq.id, 'clock_timestamp()::timestamptz(3)')(tx as unknown as PrismaClient);
+    });
+    const closed = await db.$queryRaw<{ status: string }[]>`
+      SELECT status FROM rfq WHERE id IN (${due.rfq.id}, ${now.rfq.id})`;
+    expect(closed).toEqual([{ status: 'CLOSED' }, { status: 'CLOSED' }]);
+  });
+
+  it('a cancellation keeps the code’s form, not a list the database cannot read; its text is optional (PR-349 r1 F2)', async () => {
+    const cancel = (id: string, code: string, reason: string | null) => (tx: PrismaClient) =>
+      tx.$executeRaw`
+        UPDATE rfq SET status = 'CANCELLED', cancelled_at = issued_at, cancelled_by = 'USR-RAW',
+               cancel_reason_code = ${code}, cancel_reason = ${reason}, version = version + 1
+         WHERE id = ${id}`;
+    const { rfq } = await issued();
+
+    for (const code of ['buyer_request', 'B', 'BUYER REQUEST', 'NO_QUALIFIED_QUOTATION']) {
+      await refused(cancel(rfq.id, code, null), /ck_rfq_cancelled/);
+    }
+    for (const reason of ['', '   ', 'x'.repeat(501)]) {
+      await refused(cancel(rfq.id, 'BUYER_REQUEST', reason), /ck_rfq_cancelled/);
+    }
+    // A configured code the database never heard of, with no text: accepted.
+    await db.$transaction(async (tx) => {
+      await cancel(rfq.id, 'BUDGET_WITHDRAWN', null)(tx as unknown as PrismaClient);
+    });
   });
 
   it('an RFQ is born only PUBLISHED, of a READY aggregation, with that aggregation moving to RFQ_ISSUED in the same transaction', async () => {

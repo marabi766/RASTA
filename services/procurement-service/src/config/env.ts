@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
 import {
+  DEFAULT_RFQ_CANCELLATION_CODES,
+  RESERVED_RFQ_CANCELLATION_CODES,
+  RFQ_CANCELLATION_CODE_PATTERN,
+} from '@rasta/contracts';
+import {
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
@@ -136,6 +141,13 @@ function roleList(name: string, options: { min: number }) {
  *                                      supplier's own organization read the RFQs it is invited to.
  *                                      Default `SUPPLIER`. AUDITOR or SYSTEM_ADMIN here stops
  *                                      startup: neither is ever on the supplier side.
+ *   PROCUREMENT_RFQ_CANCELLATION_CODES ADR-070 § 3 (plan PR 6, the planned `CancelRfq`). The
+ *                                      closed list of reason codes an RFQ is cancelled for; the
+ *                                      request names one (another is 422
+ *                                      CANCELLATION_CODE_NOT_ALLOWED). Default `BUYER_REQUEST`.
+ *                                      Upper-case words, 2 to 64 characters, each once.
+ *                                      `NO_QUALIFIED_QUOTATION` stops startup until evaluation
+ *                                      (plan PR 10) can check the fact it states.
  *   PROCUREMENT_RFQ_MAX_INVITEES       Q-121 (1). The most suppliers one RFQ invites: default 200,
  *                                      at most 500 — protection of the service (each is asked of
  *                                      supplier-service before the issue), not a business rule.
@@ -216,6 +228,43 @@ export const procurementEnvSchema = baseEnvSchema
       .string()
       .default('SUPPLIER')
       .pipe(roleList('PROCUREMENT_SUPPLIER_ROLES', { min: 1 })),
+
+    /**
+     * ADR-070 § 3: the closed list of reason codes an RFQ is cancelled for — the client's, as the
+     * planned `CancelRfq` says ("closed list from configuration"). A code that states a fact the
+     * service must check (`RESERVED_RFQ_CANCELLATION_CODES`) is refused here until it can.
+     */
+    PROCUREMENT_RFQ_CANCELLATION_CODES: z
+      .string()
+      .default(DEFAULT_RFQ_CANCELLATION_CODES.join(','))
+      .pipe(
+        commaList().pipe(
+          z
+            .array(
+              z
+                .string()
+                .regex(
+                  RFQ_CANCELLATION_CODE_PATTERN,
+                  'A cancellation code is upper-case words, 2 to 64 characters',
+                ),
+            )
+            .min(1, 'PROCUREMENT_RFQ_CANCELLATION_CODES must name at least one code')
+            .refine((codes) => new Set(codes).size === codes.length, {
+              message: 'PROCUREMENT_RFQ_CANCELLATION_CODES names a code twice',
+            })
+            .refine(
+              (codes) =>
+                !codes.some((code) =>
+                  (RESERVED_RFQ_CANCELLATION_CODES as readonly string[]).includes(code),
+                ),
+              {
+                message:
+                  'PROCUREMENT_RFQ_CANCELLATION_CODES may not name NO_QUALIFIED_QUOTATION: it ' +
+                  'arrives with evaluation (plan PR 10), which checks it',
+              },
+            ),
+        ),
+      ),
 
     /** Q-121 (1): protection of the service, not a business rule. */
     PROCUREMENT_RFQ_MAX_INVITEES: z.coerce

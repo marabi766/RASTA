@@ -199,7 +199,8 @@ model Rfq {
   closedAt DateTime? @map("closed_at") @db.Timestamptz(3)
   closedBy String?   @map("closed_by")
 
-  /// → CANCELLED: when, who, the closed code and the buyer's reason (API only, never an event).
+  /// → CANCELLED: when, who, the reason code (from the configured list) and the buyer's optional text
+  /// (API only, never an event).
   cancelledAt      DateTime? @map("cancelled_at") @db.Timestamptz(3)
   cancelledBy      String?   @map("cancelled_by")
   cancelReasonCode String?   @map("cancel_reason_code")

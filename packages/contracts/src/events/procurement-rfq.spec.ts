@@ -1,6 +1,8 @@
 import {
+  DEFAULT_RFQ_CANCELLATION_CODES,
   PROCUREMENT_RFQ_EVENTS,
   PROCUREMENT_RFQ_EVENT_SCHEMAS,
+  RFQ_CANCELLATION_CODE_PATTERN,
   RFQ_MAX_INVITEES_LIMIT,
   rfqCancelledPayloadSchema,
   rfqClosedPayloadSchema,
@@ -50,6 +52,7 @@ describe('procurement RFQ event contracts', () => {
         trigger: 'SWEEPER',
         closedBy: null,
         closedAt: '2026-11-01T08:00:01.000Z',
+        quotationCount: 0,
       }).success,
     ).toBe(true);
     expect(
@@ -105,6 +108,7 @@ describe('procurement RFQ event contracts', () => {
       rfqVersion: 2,
       quotationClosingAt: issued.quotationClosingAt,
       closedAt: '2026-11-01T08:00:01.000Z',
+      quotationCount: 0,
     };
     expect(
       rfqClosedPayloadSchema.safeParse({ ...closed, trigger: 'SWEEPER', closedBy: 'USR-X' })
@@ -117,5 +121,43 @@ describe('procurement RFQ event contracts', () => {
       rfqClosedPayloadSchema.safeParse({ ...closed, trigger: 'MANUAL', closedBy: 'USR-X' }).success,
     ).toBe(true);
     expect(rfqIssuedPayloadSchema.safeParse({ ...issued, rfqVersion: 2 }).success).toBe(false);
+  });
+
+  it('a close counts its quotations (ADR-070 § 9): a whole number, never absent', () => {
+    const closed = {
+      ...facts,
+      rfqVersion: 2,
+      quotationClosingAt: issued.quotationClosingAt,
+      trigger: 'SWEEPER',
+      closedBy: null,
+      closedAt: '2026-11-01T08:00:01.000Z',
+    };
+    expect(rfqClosedPayloadSchema.safeParse({ ...closed, quotationCount: 3 }).success).toBe(true);
+    expect(rfqClosedPayloadSchema.safeParse(closed).success).toBe(false);
+    expect(rfqClosedPayloadSchema.safeParse({ ...closed, quotationCount: -1 }).success).toBe(false);
+    expect(rfqClosedPayloadSchema.safeParse({ ...closed, quotationCount: 1.5 }).success).toBe(
+      false,
+    );
+  });
+
+  it('a cancellation carries a code of the configured form, never a free text', () => {
+    const cancelled = (reasonCode: string) =>
+      rfqCancelledPayloadSchema.safeParse({
+        ...facts,
+        rfqVersion: 2,
+        previousStatus: 'CLOSED',
+        reasonCode,
+        cancelledBy: issued.issuedBy,
+        cancelledAt: '2026-10-23T08:00:00.000Z',
+      }).success;
+    expect(cancelled('BUYER_REQUEST')).toBe(true);
+    expect(cancelled('BUDGET_WITHDRAWN')).toBe(true);
+    expect(cancelled('buyer_request')).toBe(false);
+    expect(cancelled('the budget was withdrawn')).toBe(false);
+    expect(cancelled('B')).toBe(false);
+    expect(cancelled(`B${'X'.repeat(64)}`)).toBe(false);
+    expect(
+      DEFAULT_RFQ_CANCELLATION_CODES.every((code) => RFQ_CANCELLATION_CODE_PATTERN.test(code)),
+    ).toBe(true);
   });
 });

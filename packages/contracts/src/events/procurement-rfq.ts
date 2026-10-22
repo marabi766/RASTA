@@ -52,11 +52,21 @@ export const RFQ_STATES = [
 ] as const;
 
 /**
- * The closed reasons an RFQ is cancelled for. `BUYER_REQUEST` is the buyer's own decision, with
- * the text kept by procurement-service; `NO_QUALIFIED_QUOTATION` (ADR-070 § 3) arrives with
- * evaluation (plan PR 10), which is where it can be checked.
+ * The form of a reason code an RFQ is cancelled for: upper-case words, 2 to 64 characters. Which
+ * codes are accepted is procurement-service's configuration (`PROCUREMENT_RFQ_CANCELLATION_CODES`,
+ * a closed list, `BUYER_REQUEST` by default — the planned `CancelRfq`), so a consumer reads the
+ * code as data and never as a closed enum of its own.
  */
-export const RFQ_CANCELLATION_CODES = ['BUYER_REQUEST'] as const;
+export const RFQ_CANCELLATION_CODE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+/** The codes procurement-service accepts when its configuration names none. */
+export const DEFAULT_RFQ_CANCELLATION_CODES = ['BUYER_REQUEST'] as const;
+
+/**
+ * Codes ADR-070 § 3 names whose fact the service must check itself, so no configuration may offer
+ * them before that check exists: `NO_QUALIFIED_QUOTATION` arrives with evaluation (plan PR 10).
+ */
+export const RESERVED_RFQ_CANCELLATION_CODES = ['NO_QUALIFIED_QUOTATION'] as const;
 
 /** How an RFQ was closed: by the close sweeper at its deadline, or by a person after it. */
 export const RFQ_CLOSE_TRIGGERS = ['SWEEPER', 'MANUAL'] as const;
@@ -116,7 +126,9 @@ export const rfqIssuedPayloadSchema = z
 
 /**
  * PUBLISHED → CLOSED, at or after `quotationClosingAt` by the database clock: by the close sweeper
- * (`closedBy` null) or by a person of the buyer (`MANUAL`).
+ * (`closedBy` null) or by a person of the buyer (`MANUAL`). `quotationCount` is the count ADR-070
+ * § 9 promises: the sealed quotations the RFQ holds at its close — 0 until quotations arrive (plan
+ * PR 8).
  */
 export const rfqClosedPayloadSchema = z
   .object({
@@ -125,6 +137,7 @@ export const rfqClosedPayloadSchema = z
     trigger: z.enum(RFQ_CLOSE_TRIGGERS),
     closedBy: id.nullable(),
     closedAt: instant,
+    quotationCount: z.number().int().min(0),
   })
   .strict()
   .refine((payload) => (payload.trigger === 'SWEEPER') === (payload.closedBy === null), {
@@ -132,14 +145,15 @@ export const rfqClosedPayloadSchema = z
   });
 
 /**
- * Any status but AWARDED → CANCELLED, with a closed reason code. The aggregation stays RFQ_ISSUED
- * (Q-121 (4)). The text the buyer gave stays in procurement-service.
+ * Any status but AWARDED → CANCELLED, with a reason code from the producer's closed list
+ * (`RFQ_CANCELLATION_CODE_PATTERN`). The aggregation stays RFQ_ISSUED (Q-121 (4)). The text the
+ * buyer may give stays in procurement-service.
  */
 export const rfqCancelledPayloadSchema = z
   .object({
     ...rfqFacts,
     previousStatus: z.enum(['PUBLISHED', 'CLOSED', 'EVALUATING', 'EVALUATED']),
-    reasonCode: z.enum(RFQ_CANCELLATION_CODES),
+    reasonCode: z.string().regex(RFQ_CANCELLATION_CODE_PATTERN),
     cancelledBy: id,
     cancelledAt: instant,
   })

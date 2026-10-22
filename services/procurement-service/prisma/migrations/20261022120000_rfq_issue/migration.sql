@@ -11,7 +11,8 @@
 --    The total quantity is the aggregation's, frozen; the procurement nature is
 --    required, with no default (ADR-023, Q-03). The deadline is a column, read
 --    against the database clock after the RFQ's lock (ADR-065 § 2): the close is
---    refused before it, whatever writes it (`rfq_guard`). The sealing key: the
+--    refused before it on the database's own clock, whatever writes it and
+--    whatever `closed_at` it states (`rfq_guard`). The sealing key: the
 --    public half in the clear, the private half only wrapped by a KEK of
 --    PROCUREMENT_RFQ_KEKS (ADR-066 § 2) — never unwrapped before the opening of
 --    plan PR 9. The close sweeper's lease, fence and backoff are bookkeeping:
@@ -166,13 +167,21 @@ ALTER TABLE "rfq" ADD CONSTRAINT "ck_rfq_closed"
          AND ("closed_by" IS NULL OR ("closed_at" IS NOT NULL AND btrim("closed_by") <> ''))
          AND ("closed_at" IS NULL OR "closed_at" >= "quotation_closing_at"));
 
--- A cancellation names when, who, the closed code and why — all four, only on a CANCELLED RFQ.
+-- A cancellation names when, who and its reason code — all three, only on a CANCELLED RFQ — and
+-- may give a text. Which codes are accepted is configuration (PROCUREMENT_RFQ_CANCELLATION_CODES,
+-- the planned CancelRfq's "closed list from configuration"), which the database cannot read: it
+-- keeps the code's form (the event contract's RFQ_CANCELLATION_CODE_PATTERN), and the service the
+-- list. NO_QUALIFIED_QUOTATION is refused here as at startup until evaluation (plan PR 10) can
+-- check it: a code that states a fact is never written unchecked, whatever writes it.
 ALTER TABLE "rfq" ADD CONSTRAINT "ck_rfq_cancelled"
   CHECK ((("status" = 'CANCELLED') = ("cancelled_at" IS NOT NULL))
-         AND num_nonnulls("cancelled_at", "cancelled_by", "cancel_reason_code", "cancel_reason") IN (0, 4)
+         AND num_nonnulls("cancelled_at", "cancelled_by", "cancel_reason_code") IN (0, 3)
+         AND ("cancel_reason" IS NULL OR "cancelled_at" IS NOT NULL)
          AND ("cancelled_by" IS NULL OR btrim("cancelled_by") <> '')
-         AND ("cancel_reason_code" IS NULL OR "cancel_reason_code" IN ('BUYER_REQUEST'))
-         AND ("cancel_reason" IS NULL OR char_length(btrim("cancel_reason")) BETWEEN 8 AND 500)
+         AND ("cancel_reason_code" IS NULL
+              OR ("cancel_reason_code" ~ '^[A-Z][A-Z0-9_]{1,63}$'
+                  AND "cancel_reason_code" <> 'NO_QUALIFIED_QUOTATION'))
+         AND ("cancel_reason" IS NULL OR char_length(btrim("cancel_reason")) BETWEEN 1 AND 500)
          AND ("cancelled_at" IS NULL OR "cancelled_at" >= "issued_at"));
 
 -- The close sweeper's claim is a lease and its fence together, or neither.
@@ -307,10 +316,19 @@ BEGIN
       RAISE EXCEPTION 'ck_rfq_closed: a close is written only by PUBLISHED -> CLOSED'
         USING ERRCODE = 'check_violation';
     END IF;
+    -- The deadline is judged on the database's own clock, read now, at the transition — not on
+    -- the instant the writer supplies (PR-349 r1 F3): a close written before the deadline is
+    -- refused even if it states the deadline itself, or any later instant, as its `closed_at`.
+    -- `closed_at` is then the deadline or later and never after the clock — the value the
+    -- service reads under the RFQ's lock (`clock_timestamp()::timestamptz(3)`, src/shared/clock.ts)
+    -- is earlier than this read, rounded the same way.
     IF OLD."status" = 'PUBLISHED' AND NEW."status" = 'CLOSED'
-       AND (NEW."closed_at" IS NULL OR NEW."closed_at" < NEW."quotation_closing_at")
+       AND (NEW."closed_at" IS NULL
+            OR clock_timestamp()::timestamptz(3) < NEW."quotation_closing_at"
+            OR NEW."closed_at" < NEW."quotation_closing_at"
+            OR NEW."closed_at" > clock_timestamp()::timestamptz(3))
     THEN
-      RAISE EXCEPTION 'ck_rfq_deadline: an RFQ is closed only at or after its quotation deadline'
+      RAISE EXCEPTION 'ck_rfq_deadline: an RFQ is closed only once the database clock reaches its quotation deadline, at an instant between the two'
         USING ERRCODE = 'check_violation';
     END IF;
     IF (NEW."cancelled_at" IS DISTINCT FROM OLD."cancelled_at"

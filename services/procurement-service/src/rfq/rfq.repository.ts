@@ -259,7 +259,7 @@ export class RfqRepository {
       cancelledAt?: Date;
       cancelledBy?: string;
       cancelReasonCode?: string;
-      cancelReason?: string;
+      cancelReason?: string | null;
       updatedAt: Date;
     },
   ): Promise<Rfq> {

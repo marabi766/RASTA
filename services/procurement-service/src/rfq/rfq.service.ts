@@ -7,7 +7,7 @@ import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.servi
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { DatabaseClock } from '../shared/clock';
 import type { ClaimFence } from '../shared/idempotency';
-import { isGuardRefusal, isUniqueViolation } from '../shared/prisma-errors';
+import { isGuardRefusal, isUniqueViolationOf, type UniqueIndex } from '../shared/prisma-errors';
 import { ruleRefusal } from '../shared/refusal';
 import { ENV, RFQ_KEY_PROVIDER, SUPPLIER_STANDING } from '../tokens';
 import { SERVICE_NAME, type ProcurementEnv } from '../config/env';
@@ -52,14 +52,18 @@ export const STANDING_CONCURRENCY = 10;
  * the lock, and the RFQ, its frozen criteria and invitations, the aggregation's READY → RFQ_ISSUED
  * and `RFQ_ISSUED` written together.
  *
- * ## A precondition that moved is 409, in every interleaving
+ * ## A version that moved is 409, whichever command won
  *
- * `expectedVersion` is judged before the status: a caller whose aggregation or RFQ another command
+ * Every command that names a version — the issue (the aggregation's), the cancel (the RFQ's) —
+ * judges `expectedVersion` before the status: a caller whose aggregation or RFQ another command
  * moved since it read it is told its view is stale (409 OPTIMISTIC_LOCK_FAILED), whichever command
  * won — not the rule the winner's state would break (the lesson of PR-348 r1 F1). A caller that
  * read the current version and still asks for a transition the lifecycle does not have is 422. The
- * aggregation's and the RFQ's row locks serialise every pair of commands; should a write ever race
- * past them, the database's own refusal of the loser is answered the same 409 ({@link isLostIssueRace}).
+ * close names no version, so it is never stale: one that finds the RFQ already closed answers it as
+ * it is (idempotent), one that finds it cancelled is 422 RFQ_CANCELLED — the one interleaving
+ * whose loser is not 409. The aggregation's and the RFQ's row locks serialise every pair of
+ * commands, the close sweeper's included; should an issue ever race past them, the database's own
+ * refusal of the loser is answered the same 409 ({@link isLostIssueRace}).
  */
 @Injectable()
 export class RfqService {
@@ -237,9 +241,14 @@ export class RfqService {
   }
 
   /**
-   * Any status but AWARDED → CANCELLED, with a closed code and the buyer's reason (ADR-070 § 3).
-   * The aggregation stays RFQ_ISSUED (Q-121 (4)): its requesters register new demands. The reason
-   * stays here; RFQ_CANCELLED carries the code.
+   * Any status but AWARDED → CANCELLED, for a code from the configured closed list
+   * (`PROCUREMENT_RFQ_CANCELLATION_CODES`) and an optional text (ADR-070 § 3, the planned
+   * `CancelRfq`). The aggregation stays RFQ_ISSUED (Q-121 (4)): its requesters register new
+   * demands. The text stays here; RFQ_CANCELLED carries the code.
+   *
+   * Once the RFQ is found to be the caller's (404/403 first): a code not on the list is 422 in any
+   * state of the RFQ — it does not depend on what another command did — then the version (409),
+   * then the transition (422).
    */
   async cancel(id: string, dto: CancelRfqDto, fence: ClaimFence<RfqView>): Promise<RfqView> {
     const caller = this.access.assertRfqCaller();
@@ -249,6 +258,13 @@ export class RfqService {
       await fence.hold(tx);
       const rfq = await this.lockOwnRfq(tx, caller, id);
 
+      if (!this.env.PROCUREMENT_RFQ_CANCELLATION_CODES.includes(dto.reasonCode)) {
+        throw ruleRefusal(
+          'This reason code is not one an RFQ may be cancelled for',
+          'rfqCancellation',
+          ['CANCELLATION_CODE_NOT_ALLOWED'],
+        );
+      }
       if (rfq.version !== dto.expectedVersion) throw RastaError.optimisticLockFailed('Rfq', id);
       const previousStatus = rfq.status as RfqStateName;
       if (rfqTransition(previousStatus, 'cancel') === null) {
@@ -262,7 +278,8 @@ export class RfqService {
         cancelledAt: now,
         cancelledBy: actor.userId,
         cancelReasonCode: dto.reasonCode,
-        cancelReason: dto.reason,
+        // Empty after trimming is no text at all.
+        cancelReason: dto.reason || null,
         updatedAt: now,
       });
       await this.publisher.enqueue(tx, {
@@ -448,17 +465,25 @@ function assertIssuable(window: DemandAggregation, expectedVersion: number): voi
   }
 }
 
+/** One RFQ per aggregation (migration `20261022120000_rfq_issue`). */
+const UX_RFQ_AGGREGATION: UniqueIndex = {
+  name: 'ux_rfq_aggregation',
+  model: 'Rfq',
+  columns: ['organization_id', 'aggregation_id'],
+};
+
 /**
  * The database refusing an issue whose aggregation another command moved after this one's checks:
  * the RFQ's unique aggregation (`ux_rfq_aggregation`, P2002), an RFQ born of an aggregation no
  * longer READY (`ck_rfq_from_ready_aggregation`), or the aggregation's own transition guard. The
  * aggregation's row lock makes each unreachable for this service's writes; should one be reached,
- * it means the caller's precondition no longer holds — 409, never 500. Nothing else is: any other
- * refusal stays the 500 it is.
+ * it means the caller's precondition no longer holds — 409, never 500. Nothing else is: another
+ * unique violation in the issue's transaction (the RFQ's key id, an outbox id, an idempotency
+ * record) or any other refusal stays the failure it is (PR-349 r1 F1).
  */
 export function isLostIssueRace(error: unknown): boolean {
   return (
-    isUniqueViolation(error) ||
+    isUniqueViolationOf(error, UX_RFQ_AGGREGATION) ||
     isGuardRefusal(error, 'ck_rfq_from_ready_aggregation') ||
     isGuardRefusal(error, 'ck_demand_aggregation_transition')
   );

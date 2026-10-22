@@ -92,6 +92,11 @@ export const REFUSAL_REASONS = {
   },
   /** Cancelling an RFQ (ADR-070 § 3, plan PR 6). */
   rfqCancellation: {
+    /**
+     * `reasonCode` is not on `PROCUREMENT_RFQ_CANCELLATION_CODES`, the configured closed list
+     * (the planned `CancelRfq`). Judged once the RFQ is found to be the caller's, in any state.
+     */
+    CANCELLATION_CODE_NOT_ALLOWED: 422,
     /** AWARDED and CANCELLED are final. */
     RFQ_NOT_CANCELLABLE: 422,
   },

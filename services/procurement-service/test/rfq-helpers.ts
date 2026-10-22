@@ -15,6 +15,12 @@ export const HOUR = 3_600_000;
 export const T0 = new Date('2031-03-01T08:00:00.000Z');
 /** When `readyAggregation` leaves the clock: after the window it made READY ended (T0 + 10 h). */
 export const AFTER_READY = new Date(T0.getTime() + 12 * HOUR);
+/**
+ * A timeline whose deadlines the real database clock has already passed. A close needs one: the
+ * database judges the deadline on its own clock at the transition (`ck_rfq_deadline`, PR-349 r1
+ * F3), whatever instant a test pins the service's clock to. On T0's timeline nothing is ever due.
+ */
+export const PAST = new Date('2020-02-01T08:00:00.000Z');
 
 /** A KEK for this run only, in the environment's shape. */
 export function kekEnvironment(): Record<string, string> {

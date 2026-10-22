@@ -9,7 +9,8 @@ import { RfqRepository } from './rfq.repository';
  * person of the buyer both make — the same command, so they cannot disagree on what a close is.
  *
  * The caller holds the RFQ's lock and has judged, on the database clock read after it, that the
- * deadline has passed; `rfq_guard` refuses a close before `quotation_closing_at` whatever writes it.
+ * deadline has passed; `rfq_guard` refuses a close before `quotation_closing_at` on the database's
+ * own clock, whatever writes it.
  * `closedBy` is the person, or null for the sweeper.
  */
 @Injectable()
@@ -44,6 +45,9 @@ export class RfqClose {
         trigger: closedBy === null ? 'SWEEPER' : 'MANUAL',
         closedBy,
         closedAt: now.toISOString(),
+        // ADR-070 § 9: the sealed quotations it holds at its close. None exist before quotations
+        // arrive (plan PR 8), which counts them here.
+        quotationCount: 0,
       },
     });
     return closed;

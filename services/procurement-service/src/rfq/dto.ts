@@ -2,14 +2,14 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
   PROCUREMENT_NATURES,
-  RFQ_CANCELLATION_CODES,
+  RFQ_CANCELLATION_CODE_PATTERN,
   cursorPaginationSchema,
   organizationIdSchema,
   plainText,
 } from '@rasta/contracts';
 import { canonicalize } from '@rasta/sealing';
 import { MAX_INVITEES_LIMIT } from '../config/env';
-import { MAX_QUANTITY, MAX_REASON_LENGTH, MIN_REASON_LENGTH } from '../demand/dto';
+import { MAX_QUANTITY, MAX_REASON_LENGTH } from '../demand/dto';
 import { codePointLength } from '../openapi/zod-schema';
 import { RFQ_STATES } from './rfq.state-machine';
 
@@ -119,7 +119,10 @@ export const issueRfqSchema = z
   .strict();
 export type IssueRfqDto = z.infer<typeof issueRfqSchema>;
 
-/** `POST /v1/rfqs/{id}/cancel`: any status but AWARDED → CANCELLED, with a closed code and a reason. */
+/**
+ * `POST /v1/rfqs/{id}/cancel`: any status but AWARDED → CANCELLED, for a reason code from the
+ * configured closed list, with an optional text (the planned `CancelRfq`).
+ */
 export const cancelRfqSchema = z
   .object({
     expectedVersion: z
@@ -128,15 +131,20 @@ export const cancelRfqSchema = z
       .min(1)
       .describe('The `version` of the RFQ the caller read (409 OPTIMISTIC_LOCK_FAILED otherwise).'),
     reasonCode: z
-      .enum(RFQ_CANCELLATION_CODES)
+      .string()
+      .regex(RFQ_CANCELLATION_CODE_PATTERN, 'A reason code is upper-case words, 2 to 64 characters')
       .describe(
-        'The closed reason the event carries: BUYER_REQUEST. NO_QUALIFIED_QUOTATION arrives with ' +
-          'evaluation (plan PR 10), where it can be checked.',
+        'One of the codes PROCUREMENT_RFQ_CANCELLATION_CODES names (a closed list from ' +
+          'configuration, BUYER_REQUEST by default; another is 422 ' +
+          'CANCELLATION_CODE_NOT_ALLOWED). The event carries it.',
       ),
-    reason: codePointLength(plainText(), MIN_REASON_LENGTH, MAX_REASON_LENGTH).describe(
-      'Why, 8 to 500 characters, trimmed, without bidirectional control characters. Kept with ' +
-        'the RFQ and read by the buyer through this API; never on an event.',
-    ),
+    reason: codePointLength(plainText(), 0, MAX_REASON_LENGTH)
+      .optional()
+      .describe(
+        'Optional: why, up to 500 characters, trimmed, without bidirectional control ' +
+          'characters (empty is none). Kept with the RFQ and read by the buyer through this ' +
+          'API; never on an event.',
+      ),
   })
   .strict();
 export type CancelRfqDto = z.infer<typeof cancelRfqSchema>;
@@ -193,7 +201,10 @@ export const rfqViewSchema = z
       .string()
       .nullable()
       .describe('When it was cancelled (UTC, ISO 8601 with Z), or null.'),
-    cancelReasonCode: z.enum(RFQ_CANCELLATION_CODES).nullable(),
+    cancelReasonCode: z
+      .string()
+      .nullable()
+      .describe('The reason code it was cancelled for, or null.'),
     cancelReason: z
       .string()
       .nullable()

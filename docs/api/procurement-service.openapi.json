@@ -141,7 +141,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, an AWARDED or CANCELLED RFQ (RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (submission: AGGREGATION_QUANTITY_LIMIT_EXCEEDED, AGGREGATION_DEMAND_LIMIT_REACHED)",
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, a reason code not on PROCUREMENT_RFQ_CANCELLATION_CODES or an AWARDED or CANCELLED RFQ (CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (submission: AGGREGATION_QUANTITY_LIMIT_EXCEEDED, AGGREGATION_DEMAND_LIMIT_REACHED)",
             "content": {
               "application/json": {
                 "schema": {
@@ -709,7 +709,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, an AWARDED or CANCELLED RFQ (RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (withdrawal: DEMAND_NOT_SUBMITTED, AGGREGATION_WINDOW_ENDED)",
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, a reason code not on PROCUREMENT_RFQ_CANCELLATION_CODES or an AWARDED or CANCELLED RFQ (CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (withdrawal: DEMAND_NOT_SUBMITTED, AGGREGATION_WINDOW_ENDED)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1421,7 +1421,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, an AWARDED or CANCELLED RFQ (RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (cancellation: AGGREGATION_NOT_READY)",
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, a reason code not on PROCUREMENT_RFQ_CANCELLATION_CODES or an AWARDED or CANCELLED RFQ (CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (cancellation: AGGREGATION_NOT_READY)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1657,8 +1657,8 @@
                     },
                     "cancelReasonCode": {
                       "type": "string",
-                      "enum": ["BUYER_REQUEST"],
-                      "nullable": true
+                      "nullable": true,
+                      "description": "The reason code it was cancelled for, or null."
                     },
                     "cancelReason": {
                       "type": "string",
@@ -1753,7 +1753,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, an AWARDED or CANCELLED RFQ (RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (rfqIssue: AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED)",
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, a reason code not on PROCUREMENT_RFQ_CANCELLATION_CODES or an AWARDED or CANCELLED RFQ (CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (rfqIssue: AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2115,8 +2115,8 @@
                           },
                           "cancelReasonCode": {
                             "type": "string",
-                            "enum": ["BUYER_REQUEST"],
-                            "nullable": true
+                            "nullable": true,
+                            "description": "The reason code it was cancelled for, or null."
                           },
                           "cancelReason": {
                             "type": "string",
@@ -2335,8 +2335,8 @@
                     },
                     "cancelReasonCode": {
                       "type": "string",
-                      "enum": ["BUYER_REQUEST"],
-                      "nullable": true
+                      "nullable": true,
+                      "description": "The reason code it was cancelled for, or null."
                     },
                     "cancelReason": {
                       "type": "string",
@@ -2557,8 +2557,8 @@
                     },
                     "cancelReasonCode": {
                       "type": "string",
-                      "enum": ["BUYER_REQUEST"],
-                      "nullable": true
+                      "nullable": true,
+                      "description": "The reason code it was cancelled for, or null."
                     },
                     "cancelReason": {
                       "type": "string",
@@ -2653,7 +2653,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, an AWARDED or CANCELLED RFQ (RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (rfqClose: QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED)",
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, a reason code not on PROCUREMENT_RFQ_CANCELLATION_CODES or an AWARDED or CANCELLED RFQ (CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (rfqClose: QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2863,8 +2863,8 @@
                     },
                     "cancelReasonCode": {
                       "type": "string",
-                      "enum": ["BUYER_REQUEST"],
-                      "nullable": true
+                      "nullable": true,
+                      "description": "The reason code it was cancelled for, or null."
                     },
                     "cancelReason": {
                       "type": "string",
@@ -2959,7 +2959,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, an AWARDED or CANCELLED RFQ (RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (rfqCancellation: RFQ_NOT_CANCELLABLE)",
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, a reason code not on PROCUREMENT_RFQ_CANCELLATION_CODES or an AWARDED or CANCELLED RFQ (CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (rfqCancellation: CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2981,7 +2981,7 @@
                           },
                           "code": {
                             "type": "string",
-                            "enum": ["RFQ_NOT_CANCELLABLE"]
+                            "enum": ["CANCELLATION_CODE_NOT_ALLOWED", "RFQ_NOT_CANCELLABLE"]
                           },
                           "message": {
                             "type": "string"
@@ -3043,18 +3043,18 @@
                   },
                   "reasonCode": {
                     "type": "string",
-                    "enum": ["BUYER_REQUEST"],
-                    "description": "The closed reason the event carries: BUYER_REQUEST. NO_QUALIFIED_QUOTATION arrives with evaluation (plan PR 10), where it can be checked."
+                    "pattern": "^[A-Z][A-Z0-9_]{1,63}$",
+                    "description": "One of the codes PROCUREMENT_RFQ_CANCELLATION_CODES names (a closed list from configuration, BUYER_REQUEST by default; another is 422 CANCELLATION_CODE_NOT_ALLOWED). The event carries it."
                   },
                   "reason": {
                     "type": "string",
                     "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 8,
+                    "minLength": 0,
                     "maxLength": 500,
-                    "description": "Why, 8 to 500 characters, trimmed, without bidirectional control characters. Kept with the RFQ and read by the buyer through this API; never on an event."
+                    "description": "Optional: why, up to 500 characters, trimmed, without bidirectional control characters (empty is none). Kept with the RFQ and read by the buyer through this API; never on an event."
                   }
                 },
-                "required": ["expectedVersion", "reasonCode", "reason"],
+                "required": ["expectedVersion", "reasonCode"],
                 "additionalProperties": false
               }
             }
