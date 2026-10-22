@@ -73,11 +73,16 @@ it('a decision’s stamps bind the step and its version, each its own key', () =
   }
 });
 
-it('the opening’s three bind the tender alone, under the opening, not the publication', () => {
+it('the opening’s three bind the tender, under the opening, not the publication — a withdrawal the proposal it names too', () => {
+  const proposedAt = '2026-10-20T07:00:00.000Z';
   const { publication, opening } = ownerCommandOffers(
     SESSION,
     TENDER_ID,
-    [{ command: 'PROPOSE_OPENING' }, { command: 'OPEN_BIDS' }, { command: 'WITHDRAW_PROPOSAL' }],
+    [
+      { command: 'PROPOSE_OPENING' },
+      { command: 'OPEN_BIDS' },
+      { command: 'WITHDRAW_PROPOSAL', proposedAt },
+    ],
     NOW,
   );
   expect(publication).toEqual([]);
@@ -91,6 +96,8 @@ it('the opening’s three bind the tender alone, under the opening, not the publ
       command,
       approvalId: null,
       expectedVersion: null,
+      // Signed with the form (PR-350 r1 F1): what the withdrawal sends, on every send of it.
+      proposedAt: command === 'WITHDRAW_PROPOSAL' ? proposedAt : null,
     });
   }
 });

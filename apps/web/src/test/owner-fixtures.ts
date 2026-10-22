@@ -76,12 +76,16 @@ export const CLOSED_TENDER: TenderDetail = {
   version: 6,
 };
 
+/** When the proposal to open standing in `UNOPENED_BIDS` was made: what its withdrawal names. */
+export const PROPOSED_AT = '2026-10-20T07:00:00.000Z';
+
 export const UNOPENED_BIDS: OwnerBids = {
   tenderId: TENDER_ID,
   opened: false,
   bidCount: 2,
   receivedAt: ['2026-10-19T08:00:00.000Z', '2026-10-19T09:00:00.000Z'],
   bids: [],
+  proposal: { proposedBy: AUTHOR, proposedAt: PROPOSED_AT },
 };
 
 export const OPENED_BIDS: OwnerBids = {

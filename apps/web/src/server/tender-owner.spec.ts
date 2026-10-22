@@ -15,6 +15,7 @@ import {
   OPENED_BIDS,
   OWNER,
   PENDING_REQUEST,
+  PROPOSED_AT,
   TENDER_ID,
   UNOPENED_BIDS,
   jwt,
@@ -215,7 +216,7 @@ describe('an opener who may not read the tender — `assertCanOpenBids` without 
     expect(openingOnlyOffers(fleet, { kind: 'OK', data: UNOPENED_BIDS }, OPENING_ONLY)).toEqual([
       { command: 'PROPOSE_OPENING' },
       { command: 'OPEN_BIDS' },
-      { command: 'WITHDRAW_PROPOSAL' },
+      { command: 'WITHDRAW_PROPOSAL', proposedAt: PROPOSED_AT },
     ]);
     expect(openingOnlyOffers(fleet, { kind: 'OK', data: OPENED_BIDS }, OPENING_ONLY)).toEqual([]);
     expect(openingOnlyOffers(fleet, { kind: 'NOT_FOUND' }, OPENING_ONLY)).toEqual([]);
@@ -376,14 +377,21 @@ describe('which forms are offered', () => {
     ).toEqual(['PUBLICATION_PENDING', 'STEP_UNREAD']);
   });
 
-  it('a closed tender: the opening’s three, to an opener only', () => {
-    expect(
-      ownerOffers(ADMIN, state({ tender: CLOSED_TENDER, publication: null }), SETTINGS, NOW).offers,
-    ).toEqual([
+  it('a closed tender: the opening’s three, to an opener only — the withdrawal bound to the proposal the bids view shows', () => {
+    const closed = (bids: OwnerState['bids']) =>
+      ownerOffers(ADMIN, state({ tender: CLOSED_TENDER, publication: null, bids }), SETTINGS, NOW)
+        .offers;
+    expect(closed({ kind: 'OK', data: UNOPENED_BIDS })).toEqual([
       { command: 'PROPOSE_OPENING' },
       { command: 'OPEN_BIDS' },
-      { command: 'WITHDRAW_PROPOSAL' },
+      { command: 'WITHDRAW_PROPOSAL', proposedAt: PROPOSED_AT },
     ]);
+    // No proposal standing, or none the page could read: nothing to name, so no withdrawal (PR-350 r1 F1).
+    const two = [{ command: 'PROPOSE_OPENING' }, { command: 'OPEN_BIDS' }];
+    expect(closed({ kind: 'OK', data: { ...UNOPENED_BIDS, proposal: null } })).toEqual(two);
+    expect(closed({ kind: 'OK', data: { ...UNOPENED_BIDS, proposal: undefined } })).toEqual(two);
+    expect(closed({ kind: 'UNAVAILABLE', status: 503, correlationId: 'c' })).toEqual(two);
+    expect(closed(null)).toEqual(two);
     const auditor = person(['ORGANIZATION_ADMIN', 'AUDITOR']);
     expect(
       ownerOffers(auditor, state({ tender: CLOSED_TENDER, publication: null }), SETTINGS, NOW)
@@ -421,7 +429,8 @@ describe('what each command sends — from the stamp', () => {
     command: OwnerBinding['command'],
     approvalId: string | null,
     expectedVersion: number | null,
-  ): OwnerBinding => ({ command, approvalId, expectedVersion });
+    proposedAt: string | null = null,
+  ): OwnerBinding => ({ command, approvalId, expectedVersion, proposedAt });
 
   it('a publication is the version read', () => {
     expect(ownerRequest(TENDER_ID, bind('PUBLISH', null, 4), {})).toMatchObject({
@@ -443,7 +452,7 @@ describe('what each command sends — from the stamp', () => {
     });
   });
 
-  it('the opening’s three carry nothing', () => {
+  it('proposing and opening carry nothing; a withdrawal names the proposal its binding read (PR-350 r1 F1)', () => {
     expect(ownerRequest(TENDER_ID, bind('PROPOSE_OPENING', null, null), {})?.path).toBe(
       `/v1/tenders/${TENDER_ID}/open-bids/proposal`,
     );
@@ -451,9 +460,17 @@ describe('what each command sends — from the stamp', () => {
       path: `/v1/tenders/${TENDER_ID}/open-bids`,
       body: {},
     });
-    expect(ownerRequest(TENDER_ID, bind('WITHDRAW_PROPOSAL', null, null), {})?.path).toBe(
-      `/v1/tenders/${TENDER_ID}/open-bids/proposal/withdraw`,
-    );
+    expect(
+      ownerRequest(TENDER_ID, bind('WITHDRAW_PROPOSAL', null, null, PROPOSED_AT), {}),
+    ).toMatchObject({
+      path: `/v1/tenders/${TENDER_ID}/open-bids/proposal/withdraw`,
+      body: { proposedAt: PROPOSED_AT },
+    });
+    // A withdrawal that names no proposal is not made — never `{}`, which the service refuses 400.
+    expect(ownerRequest(TENDER_ID, bind('WITHDRAW_PROPOSAL', null, null), {})).toBeNull();
+    // Nor does any other command carry one.
+    expect(ownerRequest(TENDER_ID, bind('OPEN_BIDS', null, null, PROPOSED_AT), {})).toBeNull();
+    expect(ownerRequest(TENDER_ID, bind('PUBLISH', null, 4, PROPOSED_AT), {})).toBeNull();
   });
 
   it('a binding that does not fit its command carries nothing', () => {
@@ -624,6 +641,7 @@ describe('what every answer becomes', () => {
       command: 'WITHDRAW_PROPOSAL',
       approvalId: null,
       expectedVersion: null,
+      proposedAt: PROPOSED_AT,
     };
     const proposed = { tenderId: TENDER_ID, proposedBy: 'U', alreadyProposed: false };
     const withdrawn = { tenderId: TENDER_ID, withdrawnProposal: 'U' };

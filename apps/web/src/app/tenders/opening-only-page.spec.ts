@@ -284,3 +284,44 @@ it('an owner who reads the tender keeps the owner’s page; a reader who does no
   await run('own');
   expect(mockFetched).toEqual(['fetchTender', 'fetchAuthoritySteps']);
 });
+
+it('the owner’s page draws the withdrawal of the proposal the bids view shows, bound to it, and none when none stands (PR-350 r1 F1)', async () => {
+  const { CLOSED_TENDER, PROPOSED_AT } =
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('@/test/owner-fixtures') as typeof import('@/test/owner-fixtures');
+  const { verifyOwnerStamp } =
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('@/server/tender-owner-replay') as typeof import('@/server/tender-owner-replay');
+  // Reads the tender (a project role) and opens its bids (this suite's opening role).
+  const session = signedInWith(['ORGANIZATION_ADMIN', 'FLEET_MANAGER']);
+  mockSession.current = session;
+  mockAnswers.fetchTender = { kind: 'OK', data: { ...CLOSED_TENDER, id: 'TND_1' } };
+  mockAnswers.fetchOwnerBids = { kind: 'OK', data: { ...UNOPENED_BIDS, tenderId: 'TND_1' } };
+
+  const tree = await run('own');
+  expect(offered(tree)).toEqual(['PROPOSE_OPENING', 'OPEN_BIDS', 'WITHDRAW_PROPOSAL']);
+  const withdrawal = ofType(tree, OwnerCommands)
+    .flatMap(
+      (element) =>
+        (
+          element.props as {
+            offered: { command: string; submission: { id: string; replay: { token: string } } }[];
+          }
+        ).offered,
+    )
+    .find(({ command }) => command === 'WITHDRAW_PROPOSAL')!;
+  expect(
+    verifyOwnerStamp(
+      session as never,
+      withdrawal.submission.replay.token,
+      'TND_1',
+      withdrawal.submission.id,
+    ),
+  ).toMatchObject({ command: 'WITHDRAW_PROPOSAL', proposedAt: PROPOSED_AT });
+
+  mockAnswers.fetchOwnerBids = {
+    kind: 'OK',
+    data: { ...UNOPENED_BIDS, tenderId: 'TND_1', proposal: null },
+  };
+  expect(offered(await run('own'))).toEqual(['PROPOSE_OPENING', 'OPEN_BIDS']);
+});

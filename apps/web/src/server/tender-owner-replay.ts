@@ -7,6 +7,7 @@ import type { OwnerSubmission, ReplayStamp } from '@/lib/unresolved-tender-comma
 
 import { bidReplayWindowSeconds } from './bid-replay';
 import { webServerEnv, type WebServerEnv } from './env';
+import { utcInstant } from './instant';
 import { signPayload, verifyPayload } from './signed-payload';
 import type { WebSession } from './session';
 import { mintSubmissionId } from './submission';
@@ -22,9 +23,12 @@ import type { AwardTerms, OwnerBinding } from './tender-owner';
  * the page read, or for a decision the step and its version: the action builds
  * the body from the stamp alone, so a form drawn before the tender or the step
  * moved is refused by the service (`409`) rather than publishing or deciding
- * something its author never saw. The opening's three commands and the
- * completion of the evaluation carry no body; the stamp binds only the tender
- * and the command. A bid's commands bind the bid.
+ * something its author never saw. Proposing, opening and the completion of the
+ * evaluation carry no body; the stamp binds only the tender and the command. A
+ * withdrawal of the proposal to open binds the proposal the page read
+ * (`proposedAt`, task 060, PR-350 r1 F1): the body is that instant, from the
+ * stamp alone, on every send of the form — never the proposal standing when it
+ * is sent, which may be another one. A bid's commands bind the bid.
  *
  * ## A bound body travels beside the stamp, not in it (PR 346 review 1, finding 1)
  *
@@ -121,6 +125,8 @@ const replaySchema = z.object({
   bindingDigest: z.string().length(43).nullable().default(null),
   /** Which body is bound: a score's criteria, or an award's terms. */
   bound: z.enum(['SCORING', 'AWARD']).nullable().default(null),
+  /** The proposal a withdrawal takes back, as the page read it; null otherwise. */
+  proposedAt: utcInstant.nullable().default(null),
 });
 
 type ReplayPayload = z.infer<typeof replaySchema>;
@@ -137,20 +143,23 @@ export interface OwnerTarget extends OwnerBinding {
 /**
  * Whether a binding fits its command: a step and its version only for a
  * decision, a version for a publication, a bid for a bid's commands — with
- * its criteria for a score and its award terms for an award — and nothing
- * for the rest.
+ * its criteria for a score and its award terms for an award — a proposal for
+ * a withdrawal of it, and nothing for the rest.
  */
 function fits(
   binding: Pick<OwnerBinding, 'command' | 'approvalId' | 'expectedVersion'> & {
     readonly bidId: string | null;
     readonly scores: boolean;
     readonly terms: boolean;
+    readonly proposedAt: string | null;
   },
 ): boolean {
   const { command, approvalId, expectedVersion, bidId, scores, terms } = binding;
   const step = approvalId !== null;
   const version = expectedVersion !== null;
   const bid = bidId !== null;
+  // Only a withdrawal names a proposal, and a withdrawal always names one.
+  if ((command === 'WITHDRAW_PROPOSAL') !== (binding.proposedAt !== null)) return false;
   if (DECISION_COMMANDS.includes(command)) return step && version && !bid && !scores && !terms;
   switch (command) {
     case 'PUBLISH':
@@ -185,6 +194,7 @@ export function mintOwnerStamp(
     bidId: target.bidId ?? null,
     bindingDigest: bound === null ? null : digestOf(bound),
     bound: target.scoring ? 'SCORING' : target.award ? 'AWARD' : null,
+    proposedAt: target.proposedAt ?? null,
     submissionId,
     issuedAt: now,
     until,
@@ -268,5 +278,6 @@ export function verifyOwnerStamp(
     bidId: payload.bidId,
     scoring: body.scoring,
     award: body.award as AwardTerms | null,
+    proposedAt: payload.proposedAt,
   };
 }

@@ -90,6 +90,40 @@ it('refuses a binding that does not fit its command', () => {
   }
 });
 
+it('binds a withdrawal of the proposal to open to the proposal the page read; no other command names one (PR-350 r1 F1)', () => {
+  const proposedAt = '2026-10-20T07:00:00.000Z';
+  const opening = { approvalId: null, expectedVersion: null } as const;
+  const withdraw = mintOwnerStamp(
+    SESSION,
+    target({ command: 'WITHDRAW_PROPOSAL', ...opening, proposedAt }),
+    SUB,
+    NOW,
+    ENV,
+  );
+  // What the action sends — on the first send and on any re-send of the same form, whatever stands by then.
+  expect(verifyOwnerStamp(SESSION, withdraw.token, 'TND_1', SUB, NOW, ENV)).toMatchObject({
+    command: 'WITHDRAW_PROPOSAL',
+    proposedAt,
+  });
+  expect(
+    verifyOwnerStamp(SESSION, withdraw.token, 'TND_1', SUB, NOW + 60_000, ENV)?.proposedAt,
+  ).toBe(proposedAt);
+  for (const wrong of [
+    // A withdrawal naming nothing — a stamp minted before this binding included.
+    target({ command: 'WITHDRAW_PROPOSAL', ...opening }),
+    target({ command: 'WITHDRAW_PROPOSAL', ...opening, proposedAt: 'not an instant' }),
+    target({ command: 'OPEN_BIDS', ...opening, proposedAt }),
+    target({ command: 'PROPOSE_OPENING', ...opening, proposedAt }),
+    target({ proposedAt }),
+  ]) {
+    const { token } = mintOwnerStamp(SESSION, wrong, SUB, NOW, ENV);
+    expect(verifyOwnerStamp(SESSION, token, 'TND_1', SUB, NOW, ENV)).toBeNull();
+  }
+  // Every other command's stamp names none.
+  const open = mintOwnerStamp(SESSION, target({ command: 'OPEN_BIDS', ...opening }), SUB, NOW, ENV);
+  expect(verifyOwnerStamp(SESSION, open.token, 'TND_1', SUB, NOW, ENV)?.proposedAt).toBeNull();
+});
+
 it('refuses another tender, another submission, another login, and a passed deadline', () => {
   const { token } = mintOwnerStamp(SESSION, target({}), SUB, NOW, ENV);
   expect(verifyOwnerStamp(SESSION, token, 'TND_2', SUB, NOW, ENV)).toBeNull();

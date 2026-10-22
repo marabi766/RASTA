@@ -24,8 +24,9 @@ export interface OwnerForms {
 /**
  * The owner's forms, each with a fresh submission whose stamp binds what the
  * page read: the tender's version for a publication, the step and its version
- * for a decision, the tender alone for the opening's three and the completion
- * of the evaluation, the bid for a bid's commands — with each criterion's
+ * for a decision, the tender alone for proposing, opening and the completion
+ * of the evaluation, the proposal it names for a withdrawal of it (task 060),
+ * the bid for a bid's commands — with each criterion's
  * maximum and the revision of the caller's own cell for a score, and an
  * award's terms for an award. Which forms is `ownerOffers`, `evaluationOffers`
  * and `awardOffers`, copies of construction-service's checks.
@@ -137,6 +138,17 @@ export function ownerCommandOffers(
         forms.evaluation.push({
           command: 'EVALUATE',
           submission: mint({ command: 'EVALUATE', approvalId: null, expectedVersion: null }),
+        });
+        break;
+      case 'WITHDRAW_PROPOSAL':
+        forms.opening.push({
+          command: 'WITHDRAW_PROPOSAL',
+          submission: mint({
+            command: 'WITHDRAW_PROPOSAL',
+            approvalId: null,
+            expectedVersion: null,
+            proposedAt: offer.proposedAt,
+          }),
         });
         break;
       default:
