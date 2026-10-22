@@ -185,15 +185,17 @@ describe('the bodies', () => {
     expect(squash(text)).toContain("@Post(':id/decisions')");
     expect(squash(text)).toContain("@Post(':id/cancellation')");
     expect(RETURN_COMMAND_REQUESTS.CANCEL.path).toBe('cancellation');
+    // Prettier may leave a trailing comma after the last parameter; the parameters are what matter.
     expect(squash(text)).toContain(
-      "cancel(@Param('id')id:string,@Body(zodPipe(cancelReturnSchema))dto:CancelReturnDto,@Headers('idempotency-key')idempotencyKey?:string)",
+      "cancel(@Param('id')id:string,@Body(zodPipe(cancelReturnSchema))dto:CancelReturnDto,@Headers('idempotency-key')idempotencyKey?:string",
     );
+    expect(squash(text)).toMatch(/idempotencyKey\?:string,?\)\{constkey=requireIdempotencyKey/);
     // The one field, required, a status the service cancels from — and the portal's is one of them.
     expect(squash(topLevelConst(dto, 'cancelReturnSchema').getText())).toBe(
-      'cancelReturnSchema=z.object({expectedStatus:z.enum(CANCELLABLE_STATUSES)}).strict()',
+      'z.object({expectedStatus:z.enum(CANCELLABLE_STATUSES)}).strict()',
     );
     expect(squash(topLevelConst(dto, 'CANCELLABLE_STATUSES').getText())).toBe(
-      "CANCELLABLE_STATUSES=['REQUESTED','AUTHORIZED']asconst",
+      "['REQUESTED','AUTHORIZED']asconst",
     );
     expect(RETURN_COMMAND_REQUESTS.CANCEL.body).toEqual({ expectedStatus: PORTAL_CANCEL_FROM[0] });
     expect(PORTAL_CANCEL_FROM).toEqual(['REQUESTED']);
