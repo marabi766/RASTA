@@ -278,6 +278,14 @@ Consumer Group: `fleet-service.asset-sync`. Topicها: `rasta.asset.v1` ·
 | `REPAIR_LABOUR_RECORDED`       | RepairOrder         | **audit** · analytics                        | پایهٔ سطر هزینه + `laborEntryId`, `hours`, **`hourlyRateMinor`**, **`totalCostMinor`**, `performedAt`                                               |
 | `REPAIR_COST_RECORDED`         | RepairOrder         | **audit** · analytics                        | پایهٔ سطر هزینه + `category`, **`amountMinor`**                                                                                                     |
 
+**analytics در این جدول (RUN-001، ADR-071).** از میان ستون «مصرف‌کنندگان»، فقط `MAINTENANCE_COMPLETED` امروز واقعاً به
+analytics می‌رسد (PR 1): گروه `analytics-service.maintenance-facts`، DLQ ـِ `rasta.analytics.v1.dlq`، هر تکمیل یک ردیف
+`fact_maintenance` با کلید (سازمان، `requestId`)، مستأجر فقط از Envelope. تحویل دوباره بی‌اثر است؛ رویداد دیگری با همان
+واقعیت بی‌اثر و با نشانگر؛ رویدادی که با واقعیت ثبت‌شده نمی‌خواند `BUSINESS_RULE_VIOLATION` (واقعیت نخست می‌ماند). analytics
+از maintenance-service هیچ نمی‌پرسد (اثر مالی ندارد، ADR-071 § ۱). مصرف‌کننده پیش‌فرض خاموش است و فقط با اتصال احرازشده به
+بروکر روشن می‌شود (`ANALYTICS_MAINTENANCE_FACTS_CONSUMER_ENABLED`). بقیهٔ «analytics»های این جدول و جدول‌های دیگر هنوز مقصد
+معماری‌اند و هرکدام با PR خودش می‌آید (ADR-071 § ۳).
+
 **`MAINTENANCE_SCHEDULE_CHANGED` رویداد دهم است و برای بستن `D-011` اضافه شد.**
 برنامهٔ سرویس تعیین می‌کند دستگاهی هر چند وقت سرویس می‌شود؛ تا پیش از این،
 ساخت، ویرایش و خاموش‌کردن آن هیچ رویدادی تولید نمی‌کرد و دلیلش فقط به ستون

@@ -2775,6 +2775,26 @@ Point، نزولی‌نشدنی مگر با پیکربندی)، پایان با 
 
 ---
 
+## ۷-ح. analytics-service — ورودی کامل حافظه
+
+> **وضعیت (2026-10-17):** **SKELETON + FIRST PROJECTION** — RUN-001 PR 1 (شاخهٔ `feat/analytics-skeleton`، انباشته روی گام ۰
+> `docs/analytics-design`). پورت **۳۱۱۶**، پایگاه داده `rasta_analytics` (تقسیم نقش D-045)، **بی Topic اصلی و بی Outbox** — فقط
+> `rasta.analytics.v1.dlq`. تصمیم: [ADR-071](docs/adr/ADR-071-analytics-read-models-and-governed-views.md) (`Proposed`) و برنامه‌اش؛
+> پرسش‌های باز **Q-141** (محدودهٔ حاکمیتی و گروه کوچک) و **Q-142** (خط مبنا و افق نگهداشت).
+
+**آنچه ساخته شد:** `fact_maintenance` (یکتا به‌ازای سازمان و `requestId`، فقط‌الحاقی با دو Trigger، پول bigint با ارز، `CHECK`ها) و
+`processed_event`؛ Consumer ‏`analytics-service.maintenance-facts` روی `rasta.maintenance.v1` برای `MAINTENANCE_COMPLETED` (Zod محلی، مستأجر
+فقط از Envelope، نشانگر و Fact در یک تراکنش؛ تکرار بی‌اثر، رویداد هم‌محتوا بی‌اثر با نشانگر، متناقض `BUSINESS_RULE_VIOLATION` بی نشانگر)،
+**پیش‌فرض خاموش** و فقط با اتصال احرازشده به بروکر؛ `GET /v1/dashboards/fleet?from&to` برای سازمان فعال (شمارش به‌ازای نوع، مدت توقف فقط
+روی رکوردهای معلوم، هزینه به‌تفکیک ارز، `earliestCompletionAt`؛ **بی نسبت**)، نقش‌ها از `ANALYTICS_FLEET_DASHBOARD_ROLES`، `AUDITOR` در
+سه لایه رد؛ OpenAPI ‏`docs/api/analytics-service.openapi.json`؛ Dockerfile؛ ACL و Principal بروکر؛ CI (Migration، یکپارچگی، جداسازی).
+
+**ساخته نشده (صادقانه):** `baseline_metric` و KPIها (PR 2)، نمای حاکمیتی و قاعدهٔ گروه کوچک (PR 3)، Factهای دیگر (PR 4 تا 6)،
+`kpi_snapshot` و پاک‌کنندهٔ `processed_event` (PR 7)، دروازهٔ پوشش CI (آستانهٔ ۷۵٪ `docs/14` در `jest.config.js` هست، Step آن نه)،
+صفحه‌های پورتال. `RUN-001` `READY` می‌ماند.
+
+---
+
 ## ۸. Domain Ownership
 
 | دامنه                                   | سرویس مالک             | یادداشت                                                 |

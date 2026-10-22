@@ -2922,6 +2922,38 @@ export const EXPECTED = {
     ],
   },
   /**
+   * analytics-service (RUN-001 PR 1, ADR-071). The first fact and the consumer's idempotency
+   * marker; no outbox — the service publishes nothing — so `verify-outbox-claim-migration.mjs`
+   * has nothing of it to fold.
+   *
+   * The objects listed carry the claims a dashboard rests on: one fact per completion
+   * (`fact_maintenance_pkey` on organization + request), a fact is never changed or erased (both
+   * halves of the append-only control, since a row trigger does not cover TRUNCATE), and nothing
+   * stored is a negative cost or downtime, a non-code type or a non-ISO currency.
+   */
+  analytics: {
+    // D-045: the runtime role owns nothing and lost CREATEDB, so the scratch schema is created —
+    // and migrated — as the migrator, which owns rasta_analytics.
+    connectAs: 'migrator',
+    tables: ['fact_maintenance', 'processed_event'],
+    types: [],
+    triggers: [
+      'tg_fact_maintenance_append_only',
+      'tg_fact_maintenance_no_truncate',
+      'tg_fact_maintenance_recorded_at',
+    ],
+    functions: ['fact_maintenance_append_only', 'fact_recorded_at_now'],
+    indexes: ['fact_maintenance_pkey', 'ix_fact_maintenance_org_completed', 'processed_event_pkey'],
+    constraints: [
+      'ck_processed_event_ids',
+      'ck_fact_maintenance_ids',
+      'ck_fact_maintenance_type',
+      'ck_fact_maintenance_downtime_nonneg',
+      'ck_fact_maintenance_cost_nonneg',
+      'ck_fact_maintenance_currency',
+    ],
+  },
+  /**
    * procurement-service (COM-007 PR 1, ADR-070). One initial migration that folds the domain
    * schema, the idempotency store and the outbox together, as inventory's does, so its outbox
    * objects are verified here rather than by the by-name outbox verifiers
