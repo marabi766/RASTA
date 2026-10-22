@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { AllowService, RastaError, Roles, zodPipe } from '@rasta/nest-common';
+import { AllowService, RastaError, Roles, getContext, zodPipe } from '@rasta/nest-common';
+import { mayRecordSource, RECORDED_SOURCE_REFUSAL } from './recorded-sources';
 import { TransactionService, type TransactionDetail } from './transaction.service';
 import { IdempotencyStore, targeted } from '../shared/idempotency';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
@@ -83,7 +84,7 @@ export class TransactionController {
     summary: 'List transactions, newest first',
     description:
       'By default the transactions this organization owes. Set `includeIncoming=true` for the ' +
-      'payee view — what it is owed. Filter by status, type, source reference and an ' +
+      'payee view — what it is owed. Filter by status, type, source type, source reference and an ' +
       '`occurredAt` window. Cursor-paginated.',
   })
   async list(@Query(zodPipe(listTransactionsQuerySchema)) query: ListTransactionsQuery) {
@@ -130,13 +131,23 @@ export class TransactionController {
       'With `holdFunds=true` the money is moved into escrow in the same transaction, so there ' +
       'is no window in which the obligation exists and the funds are still spendable. ' +
       'Refused with 422 INSUFFICIENT_BALANCE if the wallet cannot cover it — and the whole ' +
-      'request rolls back, leaving no orphaned obligation. Requires an `Idempotency-Key`.',
+      'request rolls back, leaving no orphaned obligation. Requires an `Idempotency-Key`. ' +
+      '`sourceType` `MAINTENANCE_REQUEST`, `PAYMENT_INTENT` and `STATEMENT` are refused to every ' +
+      'caller, and `ORDER` to everyone but marketplace-service recording a `MARKETPLACE_ORDER` ' +
+      '(400 VALIDATION_FAILED on `sourceType`).',
   })
   async create(
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body(zodPipe(createTransactionSchema)) dto: CreateTransactionDto,
   ) {
     assertNotAuditor();
+    // With the schema's rule, and like it before any replay: a source type
+    // its owner records (`ORDER`) is that owner's alone (recorded-sources.ts).
+    if (!mayRecordSource(getContext(), dto.sourceType, dto.transactionType)) {
+      throw RastaError.validation([
+        { path: 'sourceType', code: 'custom', message: RECORDED_SOURCE_REFUSAL },
+      ]);
+    }
     const key = requireIdempotencyKey(idempotencyKey);
 
     return this.idempotency.run(

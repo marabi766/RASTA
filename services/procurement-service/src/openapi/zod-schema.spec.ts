@@ -1,6 +1,11 @@
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
-import { aggregationViewSchema, listDemandsQuerySchema } from '../demand/dto';
+import { codePointLength, toJsonSchema, type JsonSchema } from './zod-schema';
+import {
+  aggregationViewSchema,
+  cancelAggregationSchema,
+  listDemandsQuerySchema,
+  withdrawDemandSchema,
+} from '../demand/dto';
 
 /**
  * The bridge between what the service validates with and what it publishes.
@@ -99,6 +104,21 @@ describe('the constructs the demand DTOs are built from', () => {
     });
   });
 
+  it('publishes a length counted in code points as minLength/maxLength, described or not', () => {
+    // JSON Schema counts a string's length in code points, as codePointLength does.
+    expect(toJsonSchema(codePointLength(z.string(), 2, 3))).toEqual({
+      type: 'string',
+      minLength: 2,
+      maxLength: 3,
+    });
+    expect(toJsonSchema(codePointLength(z.string(), 2, 3).describe('why'))).toEqual({
+      type: 'string',
+      minLength: 2,
+      maxLength: 3,
+      description: 'why',
+    });
+  });
+
   it('publishes the inner shape of a refined schema', () => {
     // A cross-field rule cannot be expressed in JSON Schema. The shape is
     // published and the rule stays in the endpoint description, which is
@@ -151,6 +171,37 @@ describe('the real demand DTOs', () => {
     expect(properties.status?.enum).toEqual(['SUBMITTED', 'WITHDRAWN', 'REFERRED', 'LAPSED']);
     expect(properties.limit).toBeDefined();
   });
+
+  // PR-338 r1 F3 / r2 F2: both bounds of a reason in characters, as the CHECK and JSON Schema count
+  // them — 4 emoji are 8 code units, 500 emoji 1000.
+  it.each([
+    ['withdrawal', withdrawDemandSchema, { expectedVersion: 1 }],
+    ['cancellation', cancelAggregationSchema, { expectedVersion: 1 }],
+  ])(
+    'counts a %s reason in characters at both bounds, and publishes 8..500',
+    (_l, schema, rest) => {
+      const issues = (reason: string) => {
+        const parsed = schema.safeParse({ ...rest, reason });
+        return parsed.success ? [] : parsed.error.issues.map(({ code, path }) => ({ code, path }));
+      };
+      const emoji = (n: number) => '\u{1F600}'.repeat(n);
+
+      expect(issues(emoji(4))).toEqual([{ code: 'too_small', path: ['reason'] }]);
+      expect(schema.safeParse({ ...rest, reason: emoji(4) }).error?.issues).toEqual(
+        schema.safeParse({ ...rest, reason: 'abcdefg' }).error?.issues,
+      );
+      expect(issues(emoji(8))).toEqual([]);
+      expect(issues(emoji(300))).toEqual([]);
+      expect(issues(emoji(500))).toEqual([]);
+      expect(issues(emoji(501))).toEqual([{ code: 'too_big', path: ['reason'] }]);
+      expect(schema.safeParse({ ...rest, reason: emoji(501) }).error?.issues).toEqual(
+        schema.safeParse({ ...rest, reason: 'a'.repeat(501) }).error?.issues,
+      );
+      expect(issues('a'.repeat(500))).toEqual([]);
+      const properties = toJsonSchema(schema).properties as Record<string, JsonSchema>;
+      expect(properties.reason).toMatchObject({ type: 'string', minLength: 8, maxLength: 500 });
+    },
+  );
 
   it('publishes the aggregation view as strict, with the total an integer up to MAX_QUANTITY', () => {
     const schema = toJsonSchema(aggregationViewSchema);

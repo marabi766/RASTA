@@ -90,6 +90,51 @@ describe('ProcurementAccess.assertBuyer', () => {
   });
 });
 
+describe('ProcurementAccess.assertRfqIssuer (cancelling an aggregation, ADR-070 plan PR 2)', () => {
+  const issuer = (access: ProcurementAccess, overrides: Partial<RequestContext>) =>
+    runWithContext(context(overrides), () => {
+      try {
+        return { acting: access.assertRfqIssuer() };
+      } catch (error) {
+        if (!isRastaError(error)) throw error;
+        return { code: error.code };
+      }
+    });
+  const access = new ProcurementAccess(env());
+
+  it('lets the buyer’s ORGANIZATION_ADMIN act by default, and not its PROCUREMENT_USER (docs/09: rfq:read only)', () => {
+    expect(issuer(access, { roles: ['ORGANIZATION_ADMIN'] })).toEqual({
+      acting: { organizationId: ORG },
+    });
+    expect(issuer(access, { roles: ['PROCUREMENT_USER'] })).toEqual({ code: 'INSUFFICIENT_ROLE' });
+  });
+
+  it.each([
+    ['the oversight role', { roles: ['AUDITOR', 'ORGANIZATION_ADMIN'] }, 'FORBIDDEN'],
+    ['the platform administrator', { roles: ['SYSTEM_ADMIN', 'ORGANIZATION_ADMIN'] }, 'FORBIDDEN'],
+    ['a service token', { authType: 'SERVICE', roles: ['ORGANIZATION_ADMIN'] }, 'FORBIDDEN'],
+    [
+      'an issuer role acting for no organization',
+      { roles: ['ORGANIZATION_ADMIN'], organizationId: undefined },
+      'FORBIDDEN',
+    ],
+  ] as const)('refuses %s', (_label, overrides, code) => {
+    expect(issuer(access, overrides as Partial<RequestContext>)).toEqual({ code });
+  });
+
+  it('follows its own configuration, apart from the demand roles', () => {
+    const configured = new ProcurementAccess(
+      env({ PROCUREMENT_RFQ_ISSUER_ROLES: 'PROCUREMENT_USER' }),
+    );
+    expect(issuer(configured, { roles: ['PROCUREMENT_USER'] })).toEqual({
+      acting: { organizationId: ORG },
+    });
+    expect(issuer(configured, { roles: ['ORGANIZATION_ADMIN'] })).toEqual({
+      code: 'INSUFFICIENT_ROLE',
+    });
+  });
+});
+
 describe('assertOwnedBy', () => {
   it('passes the buyer’s own row and answers 404 — never 403 — for another organization’s', () => {
     expect(() =>

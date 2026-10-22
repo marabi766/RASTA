@@ -45,6 +45,7 @@ export interface TransactionView {
   commissionAmountMinor: string;
   netAmountMinor: string;
   currency: string;
+  sourceType: string | null;
   sourceReference: string | null;
 }
 
@@ -114,6 +115,108 @@ export interface SettlementView {
 /** The economic transaction type an order's obligation is recorded as. */
 const OBLIGATION_TYPE = 'MARKETPLACE_ORDER';
 
+/** The source type it is recorded under, with the order id as the reference. */
+const OBLIGATION_SOURCE_TYPE = 'ORDER';
+
+/** What the saga records an order's obligation with: read from the order alone. */
+export interface ObligationTerms {
+  orderId: string;
+  buyerOrganizationId: string;
+  supplierOrganizationId: string;
+  totalAmountMinor: bigint;
+  currency: string;
+}
+
+/**
+ * Which of the terms `createObligation` sends `transaction` does not carry,
+ * by name; empty when it is exactly the obligation the saga records.
+ *
+ * Every term, not the key: payer, payee, amount, currency, type, source type
+ * and reference. A row under the order's key on other terms is somebody
+ * else's — 1 rial to an accomplice, recorded first by the buyer's
+ * administrator, was settled as the order's payment (review of #334 round 1,
+ * F1). Amounts compare as economic-service writes them, decimal minor units.
+ */
+export function termsDiffer(terms: ObligationTerms, transaction: TransactionView): string[] {
+  const differ: string[] = [];
+  if (transaction.organizationId !== terms.buyerOrganizationId) differ.push('payer');
+  if (transaction.counterpartyOrganizationId !== terms.supplierOrganizationId) {
+    differ.push('payee');
+  }
+  if (transaction.grossAmountMinor !== terms.totalAmountMinor.toString()) differ.push('amount');
+  if (transaction.currency !== terms.currency) differ.push('currency');
+  if (transaction.transactionType !== OBLIGATION_TYPE) differ.push('transactionType');
+  if (transaction.sourceType !== OBLIGATION_SOURCE_TYPE) differ.push('sourceType');
+  if (transaction.sourceReference !== terms.orderId) differ.push('sourceReference');
+  return differ;
+}
+
+/**
+ * What a found obligation's status says about the buyer's money.
+ *
+ * - `HELD`: in escrow now. The only status that proves it: economic-service
+ *   places the hold and moves the obligation to HELD in one transaction, and
+ *   every way the money leaves escrow moves it on.
+ * - `UNPROVEN`: PENDING_SETTLEMENT or DISPUTED. Reached from HELD with the
+ *   hold still in place, but also from CREATED with none (an obligation with
+ *   no escrow, ADR-032) — and a status the saga's own creation never leaves
+ *   it in, so somebody else moved it.
+ * - `RETURNED`: REFUNDED — back with the buyer.
+ * - `PAID_OUT`: SETTLED.
+ * - `NEVER_HELD`: CREATED, CANCELLED, FAILED.
+ *
+ * A status this service does not know is `UNPROVEN`, never `HELD`.
+ */
+export type ObligationFunds = 'HELD' | 'UNPROVEN' | 'RETURNED' | 'PAID_OUT' | 'NEVER_HELD';
+
+export function fundsOf(status: string): ObligationFunds {
+  switch (status) {
+    case 'HELD':
+      return 'HELD';
+    case 'REFUNDED':
+      return 'RETURNED';
+    case 'SETTLED':
+      return 'PAID_OUT';
+    case 'CREATED':
+    case 'CANCELLED':
+    case 'FAILED':
+      return 'NEVER_HELD';
+    default:
+      return 'UNPROVEN';
+  }
+}
+
+/** One page of `GET /v1/transactions`. */
+interface TransactionPage {
+  items: TransactionView[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+/** The lookup's page: economic-service's largest. */
+const OBLIGATION_LOOKUP_PAGE_SIZE = 100;
+
+/**
+ * Pages the lookup reads before it gives up on a complete answer. The exact
+ * key has at most one row per payer, so a second page already means
+ * economic-service is not answering the question asked.
+ */
+export const OBLIGATION_LOOKUP_PAGES = 10;
+
+/**
+ * The lookup did not reach the end of economic-service's answer. Nothing can
+ * be concluded from part of it — not "nothing is held", not "only somebody
+ * else's row" — so the saga stops instead (`OBLIGATION_LOOKUP_INCOMPLETE`).
+ */
+export class ObligationLookupIncomplete extends Error {
+  constructor(readonly pagesRead: number) {
+    super(
+      `economic-service's answer to the obligation lookup did not end within ${pagesRead} page(s)`,
+    );
+    this.name = 'ObligationLookupIncomplete';
+  }
+}
+
 /** Keys derived from identity, so a retry is a replay rather than a new act. */
 export const idempotencyKeyFor = {
   hold: (orderId: string) => `order:${orderId}:hold`,
@@ -153,14 +256,9 @@ export class EconomicClient {
    * hold itself, and a separate check would be a TOCTOU: between the check and
    * the hold the money can go.
    */
-  async createObligation(input: {
-    orderId: string;
-    buyerOrganizationId: string;
-    supplierOrganizationId: string;
-    totalAmountMinor: bigint;
-    currency: string;
-    correlationId: string;
-  }): Promise<TransactionView> {
+  async createObligation(
+    input: ObligationTerms & { correlationId: string },
+  ): Promise<TransactionView> {
     return this.call<TransactionView>('createObligation', {
       method: 'POST',
       path: '/v1/transactions',
@@ -172,7 +270,7 @@ export class EconomicClient {
         counterpartyOrganizationId: input.supplierOrganizationId,
         grossAmountMinor: input.totalAmountMinor.toString(),
         currency: input.currency,
-        sourceType: 'ORDER',
+        sourceType: OBLIGATION_SOURCE_TYPE,
         sourceReference: input.orderId,
         holdFunds: true,
       },
@@ -180,7 +278,8 @@ export class EconomicClient {
   }
 
   /**
-   * The obligation recorded for this order, if there is one.
+   * Every transaction economic-service holds for the buyer under the order's
+   * source key — `ORDER/<order id>` — as an order's obligation type.
    *
    * The saga's answer to "did the hold happen?" when `createObligation` ended
    * without a definite reply. A timeout, an exhausted retry or a lost response
@@ -189,28 +288,57 @@ export class EconomicClient {
    * buyer's money stayed held. economic-service keeps at most one obligation
    * per payer and source fact (`ux_transaction_source_fact`), so this read is
    * a complete answer, not a best guess.
+   *
+   * The exact key, not the reference alone: rows naming the order under any
+   * other source type are not candidates, and are not read. Asked by
+   * reference and type only, the list's first page — 25 rows, newest first —
+   * was all the saga saw, and 25 newer rows under other source types, which
+   * the buyer's administrator may record freely, hid the genuine obligation
+   * behind them: the saga stopped on a mismatch with the funds held (review
+   * of #334 round 2, F2). Every page is still read, to `OBLIGATION_LOOKUP_PAGES`;
+   * an answer that does not end by then is not taken as complete
+   * (`ObligationLookupIncomplete`).
+   *
+   * Every candidate, not the first: a row under the order's key is not the
+   * order's obligation because of the key. Which one is — if any — is decided
+   * on its terms (`termsDiffer`) and its status (`fundsOf`), by the caller
+   * that knows them.
    */
-  async findObligation(input: {
+  async findObligations(input: {
     orderId: string;
     buyerOrganizationId: string;
     correlationId: string;
-  }): Promise<TransactionView | null> {
-    const query = new URLSearchParams({
-      sourceReference: input.orderId,
-      transactionType: OBLIGATION_TYPE,
-    });
-    const page = await this.call<{ items: TransactionView[] }>('findObligation', {
-      method: 'GET',
-      path: `/v1/transactions?${query.toString()}`,
-      organizationId: input.buyerOrganizationId,
-      correlationId: input.correlationId,
-    });
-    return (
-      page.items.find(
-        (item) =>
-          item.sourceReference === input.orderId && item.transactionType === OBLIGATION_TYPE,
-      ) ?? null
-    );
+  }): Promise<TransactionView[]> {
+    const found: TransactionView[] = [];
+    let cursor: string | null = null;
+    for (let page = 1; ; page += 1) {
+      const query = new URLSearchParams({
+        transactionType: OBLIGATION_TYPE,
+        sourceType: OBLIGATION_SOURCE_TYPE,
+        sourceReference: input.orderId,
+        limit: String(OBLIGATION_LOOKUP_PAGE_SIZE),
+        ...(cursor === null ? {} : { cursor }),
+      });
+      const answer: TransactionPage = await this.call<TransactionPage>('findObligation', {
+        method: 'GET',
+        path: `/v1/transactions?${query.toString()}`,
+        organizationId: input.buyerOrganizationId,
+        correlationId: input.correlationId,
+      });
+      found.push(
+        ...answer.items.filter(
+          (item) =>
+            item.sourceType === OBLIGATION_SOURCE_TYPE &&
+            item.sourceReference === input.orderId &&
+            item.transactionType === OBLIGATION_TYPE,
+        ),
+      );
+      if (!answer.hasMore) return found;
+      if (page === OBLIGATION_LOOKUP_PAGES || !answer.nextCursor) {
+        throw new ObligationLookupIncomplete(page);
+      }
+      cursor = answer.nextCursor;
+    }
   }
 
   /**

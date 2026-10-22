@@ -17,7 +17,8 @@ import type { ProcurementEnv } from '../config/env';
  *
  * ## Who, from configuration
  *
- * The roles come from `PROCUREMENT_DEMAND_ROLES`, so no controller carries a static `@Roles(...)`:
+ * The roles come from `PROCUREMENT_DEMAND_ROLES` (and, for cancelling an aggregation,
+ * `PROCUREMENT_RFQ_ISSUER_ROLES`), so no controller carries a static `@Roles(...)`:
  * a decorator is fixed at compile time and would either ignore the configuration or silently
  * disagree with it (Q-64, ADR-068 § 7). The routes stay closed: `AuthGuard` demands a token,
  * `RolesGuard` refuses `AUDITOR` on any handler that does not name it, and this class refuses every
@@ -43,9 +44,11 @@ export interface Acting {
 @Injectable()
 export class ProcurementAccess {
   private readonly demandRoles: readonly string[];
+  private readonly rfqIssuerRoles: readonly string[];
 
   constructor(@Inject(ENV) env: ProcurementEnv) {
     this.demandRoles = env.PROCUREMENT_DEMAND_ROLES;
+    this.rfqIssuerRoles = env.PROCUREMENT_RFQ_ISSUER_ROLES;
   }
 
   /**
@@ -54,6 +57,19 @@ export class ProcurementAccess {
    * oversight role, a service or the platform operator.
    */
   assertBuyer(): Acting {
+    return this.assertBuyerRole(this.demandRoles);
+  }
+
+  /**
+   * The caller of a command on the buyer's aggregation as a whole — cancelling a READY one (plan
+   * PR 2; issuing its RFQ from PR 6): the same buyer side, holding a role
+   * `PROCUREMENT_RFQ_ISSUER_ROLES` names (ADR-070 § 3, default `ORGANIZATION_ADMIN`).
+   */
+  assertRfqIssuer(): Acting {
+    return this.assertBuyerRole(this.rfqIssuerRoles);
+  }
+
+  private assertBuyerRole(granted: readonly string[]): Acting {
     assertNotAuditor();
     assertNotServiceCaller();
     const context = getContext();
@@ -62,8 +78,8 @@ export class ProcurementAccess {
         'The platform administrator does not register, withdraw or read a buyer’s demands',
       );
     }
-    if (!this.demandRoles.some((role) => context.roles.includes(role))) {
-      throw RastaError.insufficientRole(this.demandRoles, context.roles);
+    if (!granted.some((role) => context.roles.includes(role))) {
+      throw RastaError.insufficientRole(granted, context.roles);
     }
     if (!context.organizationId) {
       throw RastaError.forbidden('A demand is registered and read for an organization');

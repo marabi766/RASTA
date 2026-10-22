@@ -7,9 +7,10 @@ import { z } from 'zod';
  * COM-007 PR 1 publishes the demand's two (`DEMAND_SUBMITTED`, `DEMAND_WITHDRAWN`) and the four of
  * a window's end — `DEMAND_AGGREGATED` (OPEN → READY), `AGGREGATION_WINDOW_EXTENDED`,
  * `AGGREGATION_REFERRED` and `AGGREGATION_LAPSED` — because a demand that arrives after
- * `closes_at` ends the window itself, in its own transaction (ADR-070 § 2; the sweeper of plan PR 2
- * reuses the same events). Every state change has its event, and so its audit record. The names
- * marked new in ADR-070 § 9 are the project manager's to confirm.
+ * `closes_at` ends the window itself, in its own transaction (ADR-070 § 2). The sweeper of plan
+ * PR 2 ends windows with the same four, and PR 2 adds `AGGREGATION_CANCELLED` (READY →
+ * CANCELLED). Every state change has its event, and so its audit record. The names marked new in
+ * ADR-070 § 9 are the project manager's to confirm.
  *
  * The payloads are defined here because this service owns them (ADR-032); the only cross-service
  * contract in `packages/contracts` is the audit trail.
@@ -29,6 +30,7 @@ export const PROCUREMENT_EVENTS = {
   AGGREGATION_WINDOW_EXTENDED: 'AGGREGATION_WINDOW_EXTENDED',
   AGGREGATION_REFERRED: 'AGGREGATION_REFERRED',
   AGGREGATION_LAPSED: 'AGGREGATION_LAPSED',
+  AGGREGATION_CANCELLED: 'AGGREGATION_CANCELLED',
 } as const;
 
 export type ProcurementEventName = keyof typeof PROCUREMENT_EVENTS;
@@ -149,6 +151,22 @@ export const aggregationLapsedPayload = z
   })
   .strict();
 
+/**
+ * A READY aggregation was cancelled with a reason by a role of the RFQ issuer (READY → CANCELLED,
+ * ADR-070 § 2; Q-119 (4): the way out for its requesters). Its demands are the ones it ended READY
+ * with, by count and digest; they stay as they are, final with it. The reason is free text and stays
+ * in this service's database, read through the API.
+ */
+export const aggregationCancelledPayload = z
+  .object({
+    ...windowFacts,
+    demandCount: demandCount.min(1),
+    demandIdsSha256,
+    cancelledBy: id,
+    cancelledAt: instant,
+  })
+  .strict();
+
 export const PROCUREMENT_EVENT_SCHEMAS = {
   DEMAND_SUBMITTED: demandSubmittedPayload,
   DEMAND_WITHDRAWN: demandWithdrawnPayload,
@@ -156,6 +174,7 @@ export const PROCUREMENT_EVENT_SCHEMAS = {
   AGGREGATION_WINDOW_EXTENDED: aggregationWindowExtendedPayload,
   AGGREGATION_REFERRED: aggregationReferredPayload,
   AGGREGATION_LAPSED: aggregationLapsedPayload,
+  AGGREGATION_CANCELLED: aggregationCancelledPayload,
 } as const satisfies Record<ProcurementEventName, z.ZodTypeAny>;
 
 export type ProcurementEventPayload<N extends ProcurementEventName> = z.infer<

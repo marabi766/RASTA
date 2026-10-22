@@ -202,6 +202,7 @@ const ERRORS: Record<string, readonly number[]> = {
   'POST /v1/payment-intents/{id}/reconciliation/resolutions': WRITE,
   'POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/approve': WRITE,
   'POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/reject': WRITE,
+  'GET /v1/internal/obligations/by-source/STATEMENT/{statementId}': READ_ONE,
 };
 
 const STATUS_TEXT: Record<number, string> = {
@@ -213,6 +214,33 @@ const STATUS_TEXT: Record<number, string> = {
   422: 'The request is well-formed but a business rule refuses it — INSUFFICIENT_BALANCE, LEDGER_UNBALANCED, or a domain rule',
   500: 'Unexpected server error',
 };
+
+/**
+ * The same statuses on the internal routes (`/v1/internal/…`, ADR-061 § 4),
+ * which answer one named service and no user at all.
+ */
+const INTERNAL_STATUS_TEXT: Record<number, string> = {
+  403: 'Authenticated, but not the service this route answers: any user token (whatever its roles), another service’s internal token, or an internal token signed for no organization',
+  404: 'Not found — also returned for a record of any organization but the one the internal token is signed for, so its existence is never disclosed',
+};
+
+/**
+ * The internal routes' credential: a service's internal token in
+ * `X-Internal-Token` and nothing else. `AuthGuard` judges a request that also
+ * carries `Authorization` on that bearer token, as a user — so the internal
+ * routes cannot be described by the bearer scheme.
+ */
+export const INTERNAL_TOKEN_SCHEME = 'internalToken';
+
+const INTERNAL_TOKEN_SECURITY_SCHEME = {
+  type: 'apiKey',
+  in: 'header',
+  name: 'X-Internal-Token',
+  description:
+    'A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user.',
+} as const;
+
+const isInternalPath = (path: string): boolean => path.startsWith('/v1/internal/');
 
 /**
  * `Retry-After` on an idempotent route's 409 (docs/06 § 6.8). Optional: only
@@ -237,12 +265,19 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   for (const [name, schema] of Object.entries(TRANSACTION_VIEW_SCHEMAS)) {
     document.components.schemas[name] = schema as never;
   }
+  document.components.securitySchemes ??= {};
+  document.components.securitySchemes[INTERNAL_TOKEN_SCHEME] = INTERNAL_TOKEN_SECURITY_SCHEME;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {
       if (!isOperation(operation)) continue;
 
       const key = `${method.toUpperCase()} ${path}`;
+      const internal = isInternalPath(path);
+
+      // Only the internal token reaches an internal route; a bearer token there
+      // is a user, and refused.
+      if (internal) operation.security = [{ [INTERNAL_TOKEN_SCHEME]: [] }];
 
       const body = REQUEST_BODIES[key];
       if (body) {
@@ -287,7 +322,8 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       for (const status of ERRORS[key] ?? []) {
         operation.responses[String(status)] = {
-          description: STATUS_TEXT[status] ?? 'Error',
+          description:
+            (internal ? INTERNAL_STATUS_TEXT[status] : undefined) ?? STATUS_TEXT[status] ?? 'Error',
           ...(status === 409 && IDEMPOTENT_ROUTES.has(key)
             ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } }
             : {}),
@@ -348,6 +384,7 @@ function toQueryParameters(schema: JsonSchema): Record<string, unknown>[] {
 }
 
 interface MutableOperation {
+  security?: Record<string, string[]>[];
   requestBody?: unknown;
   parameters?: unknown[];
   responses?: Record<string, unknown>;

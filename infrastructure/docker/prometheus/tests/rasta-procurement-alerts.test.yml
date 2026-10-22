@@ -1,0 +1,144 @@
+# Behaviour tests for rules/rasta-procurement-alerts.yml.
+#
+#   docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
+#     --entrypoint promtool prom/prometheus:v3.1.0 \
+#     test rules /etc/prometheus/tests/rasta-procurement-alerts.test.yml
+#
+# Inputs carry the scrape's job/instance/environment labels so the expected alert also
+# proves which labels the rule keeps (none) and which it drops.
+
+rule_files:
+  - ../rules/rasta-procurement-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------------------
+  # RastaProcurementWindowSweepRetriesHigh
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Climbs past 5 and stays there, then the window is swept (back to 0).
+      - series: 'rasta_procurement_window_sweep_max_attempts{service="procurement-service",job="procurement-service",instance="host.docker.internal:3107",environment="local"}'
+        values: '0 1 3 5 6 7 7 7 0 0 0'
+    alert_rule_test:
+      # Exactly 5 is not enough.
+      - eval_time: 3m
+        alertname: RastaProcurementWindowSweepRetriesHigh
+        exp_alerts: []
+      # Above 5, but not yet for 2 minutes.
+      - eval_time: 5m
+        alertname: RastaProcurementWindowSweepRetriesHigh
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: RastaProcurementWindowSweepRetriesHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'An aggregation window cannot be swept (7 failed attempts)'
+              description: 'At least one aggregation window past its end, or ended with its digest (and so its end event) or demands still to follow it, has failed more than 5 sweep attempts. No demand joins it, but it stays OPEN (not READY, so no RFQ can be issued from it), its end event is not out, or its demands keep reading SUBMITTED. The sweeper keeps retrying with a growing backoff; the procurement-service log names the window and the closed error code. This alert deliberately carries neither.'
+              runbook: docs/runbooks/aggregation-window-sweep-stuck.md
+      - eval_time: 9m
+        alertname: RastaProcurementWindowSweepRetriesHigh
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaProcurementWindowSweepOverdue
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Ageing by a minute a minute from 14 minutes; ended at the 12th sample.
+      - series: 'rasta_procurement_window_sweep_oldest_due_age_seconds{service="procurement-service",job="procurement-service",instance="host.docker.internal:3107",environment="local"}'
+        values: '840 900 960 1020 1080 1140 1200 1260 1320 1380 1440 0 0'
+    alert_rule_test:
+      # Exactly 15 minutes is not overdue.
+      - eval_time: 1m
+        alertname: RastaProcurementWindowSweepOverdue
+        exp_alerts: []
+      # Overdue from 2m, but not yet for 5 minutes.
+      - eval_time: 6m
+        alertname: RastaProcurementWindowSweepOverdue
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: RastaProcurementWindowSweepOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'An aggregation window has been past its end for 21m 0s without being ended'
+              description: 'The oldest OPEN aggregation window past its closesAt has not been ended for more than 15 minutes. Demands are already kept out of it by the database clock, but it is not READY, REFERRED or LAPSED until it is swept or another demand for its product arrives. Either the window sweeper is not running in any procurement-service instance or every attempt fails. The procurement-service log says which; this alert deliberately carries no window or tenant.'
+              runbook: docs/runbooks/aggregation-window-sweep-stuck.md
+      # Swept: the gauge is back to 0.
+      - eval_time: 12m
+        alertname: RastaProcurementWindowSweepOverdue
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaProcurementServiceMetricsUnavailable
+  # ---------------------------------------------------------------------------
+  # Scraped, then its scrape fails for four minutes, then it is back.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="procurement-service",instance="host.docker.internal:3107",environment="local"}'
+        values: '1 1 0 0 0 0 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaProcurementServiceMetricsUnavailable
+        exp_alerts: []
+      # Down from 2m, but not yet for 2 minutes.
+      - eval_time: 3m
+        alertname: RastaProcurementServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaProcurementServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: procurement-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped procurement-service for 2 minutes'
+              description: 'The procurement-service scrape target has been down or missing for at least 2 minutes. RastaProcurementWindowSweepRetriesHigh and RastaProcurementWindowSweepOverdue have no input while this fires: their silence is not evidence that aggregation windows are being swept.'
+              runbook: docs/runbooks/aggregation-window-sweep-stuck.md
+      - eval_time: 6m
+        alertname: RastaProcurementServiceMetricsUnavailable
+        exp_alerts: []
+
+  # Two instances, one of them not scraped: `min by (job)` still fires, with `job` only.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="procurement-service",instance="procurement-a:3107",environment="local"}'
+        values: '1 1 1 1 1'
+      - series: 'up{job="procurement-service",instance="procurement-b:3107",environment="local"}'
+        values: '1 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RastaProcurementServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: procurement-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped procurement-service for 2 minutes'
+              description: 'The procurement-service scrape target has been down or missing for at least 2 minutes. RastaProcurementWindowSweepRetriesHigh and RastaProcurementWindowSweepOverdue have no input while this fires: their silence is not evidence that aggregation windows are being swept.'
+              runbook: docs/runbooks/aggregation-window-sweep-stuck.md
+
+  # Never configured (PR-338 r1 F2): other jobs are scraped, procurement-service is not there at all.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="audit-service",instance="host.docker.internal:3115",environment="local"}'
+        values: '1 1 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaProcurementServiceMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaProcurementServiceMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: procurement-service
+            exp_annotations:
+              summary: 'Prometheus has not scraped procurement-service for 2 minutes'
+              description: 'The procurement-service scrape target has been down or missing for at least 2 minutes. RastaProcurementWindowSweepRetriesHigh and RastaProcurementWindowSweepOverdue have no input while this fires: their silence is not evidence that aggregation windows are being swept.'
+              runbook: docs/runbooks/aggregation-window-sweep-stuck.md

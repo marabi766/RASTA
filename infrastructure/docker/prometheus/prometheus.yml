@@ -13,6 +13,7 @@ rule_files:
   - rules/rasta-notification-alerts.yml
   - rules/rasta-economic-alerts.yml
   - rules/rasta-construction-alerts.yml
+  - rules/rasta-procurement-alerts.yml
 
 scrape_configs:
   - job_name: prometheus
@@ -77,5 +78,19 @@ scrape_configs:
     static_configs:
       - targets:
           - 'host.docker.internal:3115'
+        labels:
+          environment: local
+
+  # procurement-service in its own job, for the same reason as the two above:
+  # RastaProcurementServiceMetricsUnavailable selects up{job="procurement-service"}
+  # and keeps only `job`. Both window sweep alerts read only this target's
+  # gauges (sampled from its database by the service, in its own prom-client
+  # registry, which the OTLP collector does not export), so without this target
+  # they evaluate against absent series and never fire (PR-338 r1 F2).
+  - job_name: procurement-service
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - 'host.docker.internal:3107'
         labels:
           environment: local
