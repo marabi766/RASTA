@@ -91,6 +91,10 @@
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
         "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SERVICE_URL",
+        "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_BATCH_SIZE",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",
@@ -160,6 +164,10 @@
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
         "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SERVICE_URL",
+        "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_BATCH_SIZE",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",
@@ -274,6 +282,11 @@
     // CONTRACT_SERVICE_URL and ECONOMIC_STATEMENT_BUSINESS_LINE (CON-003 PR 6b):
     // economic-service's statement owner (A-13) and the line a statement's
     // obligation is recorded under (Q-130, unset by default); the same rule.
+    // ECONOMIC_SERVICE_URL and CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS (CON-003
+    // PR 6c): where contract-service asks economic-service, before a statement
+    // is SETTLED, for its obligation (A-13), and how long that may take.
+    // CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS / _BATCH_SIZE (#343 r1 F1): the reconciliation
+    // that settles what economic settled and no event announced; technical cadence, defaulted.
     //
     // PROCUREMENT_* and CORS_ORIGINS (COM-007 PR 1): procurement-service is new,
     // so none of its settings may join the withheld list — its own settings and
@@ -305,6 +318,10 @@
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
         "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SERVICE_URL",
+        "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_BATCH_SIZE",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",

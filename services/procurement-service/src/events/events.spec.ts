@@ -71,10 +71,27 @@ const PUBLISHED: Record<ProcurementEventName, Record<string, unknown>> = {
     reasonCode: 'NO_LIVE_DEMAND',
     closedAt: AT,
   },
+  AGGREGATION_CANCELLED: {
+    ...window,
+    demandCount: 2,
+    demandIdsSha256: demandIdsDigest(['DMD_1', 'DMD_2']),
+    cancelledBy: 'USR_1',
+    cancelledAt: AT,
+  },
+  AGGREGATION_SETTING_CHANGED: {
+    organizationId: 'ORG_BUYER',
+    settingVersion: 2,
+    previousVersion: 1,
+    windowHours: 72,
+    minQuantity: 500,
+    shortfallPolicy: 'REFER',
+    recordedBy: 'USR_1',
+    recordedAt: AT,
+  },
 };
 
-describe('the procurement events (ADR-070 § 9, PR 1)', () => {
-  it('are the demand’s two and the four of a window’s end, each with a schema and an aggregate', () => {
+describe('the procurement events (ADR-070 § 9, PRs 1 and 2)', () => {
+  it('are the demand’s two, the four of a window’s end and the cancellation, each with a schema and an aggregate', () => {
     const names = [
       'DEMAND_SUBMITTED',
       'DEMAND_WITHDRAWN',
@@ -82,6 +99,8 @@ describe('the procurement events (ADR-070 § 9, PR 1)', () => {
       'AGGREGATION_WINDOW_EXTENDED',
       'AGGREGATION_REFERRED',
       'AGGREGATION_LAPSED',
+      'AGGREGATION_CANCELLED',
+      'AGGREGATION_SETTING_CHANGED',
     ];
     expect(Object.keys(PROCUREMENT_EVENTS)).toEqual(names);
     expect(Object.keys(PROCUREMENT_EVENT_SCHEMAS)).toEqual(names);
@@ -89,10 +108,12 @@ describe('the procurement events (ADR-070 § 9, PR 1)', () => {
   });
 
   it.each(Object.keys(PUBLISHED) as ProcurementEventName[])(
-    '%s accepts its payload as published and is keyed by the aggregation',
+    '%s accepts its payload as published and is keyed by the aggregation — a setting by its organization',
     (name) => {
       const payload = validateProcurementPayload(name, PUBLISHED[name]);
-      expect(resolvePartitionKey(name, payload).key).toBe('AGG_1');
+      expect(resolvePartitionKey(name, payload).key).toBe(
+        name === 'AGGREGATION_SETTING_CHANGED' ? 'ORG_BUYER' : 'AGG_1',
+      );
     },
   );
 
@@ -152,6 +173,7 @@ describe('the procurement events (ADR-070 § 9, PR 1)', () => {
       'DEMAND_AGGREGATED',
       'AGGREGATION_REFERRED',
       'AGGREGATION_LAPSED',
+      'AGGREGATION_CANCELLED',
     ] as const) {
       expect(() =>
         validateProcurementPayload(name, { ...PUBLISHED[name], demandIds: ['DMD_1'] }),
@@ -183,6 +205,21 @@ describe('the procurement events (ADR-070 § 9, PR 1)', () => {
       }),
     ).toThrow();
   });
+
+  it('a cancellation names its demands and who cancelled, never why', () => {
+    expect(() =>
+      validateProcurementPayload('AGGREGATION_CANCELLED', {
+        ...PUBLISHED.AGGREGATION_CANCELLED,
+        demandCount: 0,
+      }),
+    ).toThrow();
+    expect(() =>
+      validateProcurementPayload('AGGREGATION_CANCELLED', {
+        ...PUBLISHED.AGGREGATION_CANCELLED,
+        cancelReason: 'no longer needed',
+      }),
+    ).toThrow();
+  });
 });
 
 describe('routing', () => {
@@ -194,5 +231,39 @@ describe('routing', () => {
 
   it('refuses an event that names no aggregation to key it by', () => {
     expect(() => resolvePartitionKey('DEMAND_SUBMITTED', {})).toThrow(/no aggregationId/);
+  });
+
+  it('keys a setting version by its organization, and refuses one that names none (plan PR 3)', () => {
+    expect(AGGREGATE_OF.AGGREGATION_SETTING_CHANGED).toBe('AggregationSetting');
+    expect(
+      resolvePartitionKey('AGGREGATION_SETTING_CHANGED', { organizationId: 'ORG_1' }).key,
+    ).toBe('ORG_1');
+    expect(() => resolvePartitionKey('AGGREGATION_SETTING_CHANGED', {})).toThrow(
+      /no organizationId/,
+    );
+  });
+
+  it('a setting version names the one before it, null before the first, and no free text', () => {
+    const first = {
+      ...PUBLISHED.AGGREGATION_SETTING_CHANGED,
+      settingVersion: 1,
+      previousVersion: null,
+    };
+    expect(validateProcurementPayload('AGGREGATION_SETTING_CHANGED', first)).toEqual(first);
+    for (const wrong of [
+      { settingVersion: 1, previousVersion: 1 },
+      { settingVersion: 3, previousVersion: 1 },
+      { settingVersion: 2, previousVersion: null },
+      { minQuantity: 2_147_483_648 },
+      { windowHours: 8761 },
+      { shortfallPolicy: 'WAIT' },
+    ]) {
+      expect(() =>
+        validateProcurementPayload('AGGREGATION_SETTING_CHANGED', {
+          ...PUBLISHED.AGGREGATION_SETTING_CHANGED,
+          ...wrong,
+        }),
+      ).toThrow(/does not match its published contract/);
+    }
   });
 });

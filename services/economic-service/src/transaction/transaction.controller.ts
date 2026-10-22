@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { AllowService, RastaError, Roles, zodPipe } from '@rasta/nest-common';
+import { AllowService, RastaError, Roles, getContext, zodPipe } from '@rasta/nest-common';
+import { mayRecordSource, RECORDED_SOURCE_REFUSAL } from './recorded-sources';
 import { TransactionService, type TransactionDetail } from './transaction.service';
 import { IdempotencyStore, targeted } from '../shared/idempotency';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
@@ -83,7 +84,7 @@ export class TransactionController {
     summary: 'List transactions, newest first',
     description:
       'By default the transactions this organization owes. Set `includeIncoming=true` for the ' +
-      'payee view — what it is owed. Filter by status, type, source reference and an ' +
+      'payee view — what it is owed. Filter by status, type, source type, source reference and an ' +
       '`occurredAt` window. Cursor-paginated.',
   })
   async list(@Query(zodPipe(listTransactionsQuerySchema)) query: ListTransactionsQuery) {
@@ -107,7 +108,11 @@ export class TransactionController {
     summary: 'One transaction, with its legs, commission and settlement',
     description:
       'Visible to the payer and to the payee. Anyone else gets 404, never 403 — a 403 would ' +
-      'confirm that the transaction exists.',
+      'confirm that the transaction exists. The dispute fields describe the latest dispute: ' +
+      'who raised it and why, and who resolved it, when and how. A resolution older than ' +
+      '`disputedAt` belongs to an earlier dispute. A transaction resolved before the ' +
+      'resolution had a field of its own holds the resolution text in `disputeReason`, with ' +
+      '`disputeResolution` null and `disputeResolvedAt` set (docs/23 D-060).',
   })
   async get(@Param('id') id: string) {
     const transaction = await this.transactions.get(id);
@@ -126,13 +131,23 @@ export class TransactionController {
       'With `holdFunds=true` the money is moved into escrow in the same transaction, so there ' +
       'is no window in which the obligation exists and the funds are still spendable. ' +
       'Refused with 422 INSUFFICIENT_BALANCE if the wallet cannot cover it — and the whole ' +
-      'request rolls back, leaving no orphaned obligation. Requires an `Idempotency-Key`.',
+      'request rolls back, leaving no orphaned obligation. Requires an `Idempotency-Key`. ' +
+      '`sourceType` `MAINTENANCE_REQUEST`, `PAYMENT_INTENT` and `STATEMENT` are refused to every ' +
+      'caller, and `ORDER` to everyone but marketplace-service recording a `MARKETPLACE_ORDER` ' +
+      '(400 VALIDATION_FAILED on `sourceType`).',
   })
   async create(
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body(zodPipe(createTransactionSchema)) dto: CreateTransactionDto,
   ) {
     assertNotAuditor();
+    // With the schema's rule, and like it before any replay: a source type
+    // its owner records (`ORDER`) is that owner's alone (recorded-sources.ts).
+    if (!mayRecordSource(getContext(), dto.sourceType, dto.transactionType)) {
+      throw RastaError.validation([
+        { path: 'sourceType', code: 'custom', message: RECORDED_SOURCE_REFUSAL },
+      ]);
+    }
     const key = requireIdempotencyKey(idempotencyKey);
 
     return this.idempotency.run(
@@ -183,7 +198,11 @@ export class TransactionController {
     description:
       'A registered objection halts settlement entirely and indefinitely (docs/10 § 10.5). ' +
       'There is no timeout that clears it and no automatic resolution: the state machine has ' +
-      'no path from DISPUTED to SETTLED. A human resolves it, or the funds are refunded.',
+      'no path from DISPUTED to SETTLED. A human resolves it, or the funds are refunded. ' +
+      'A MARKETPLACE_ORDER transaction is disputed only through its order ' +
+      '(`POST /v1/orders/{id}/disputes`), whose saga mirrors the dispute here as ' +
+      'marketplace-service; anyone else is refused with 422 BUSINESS_RULE_VIOLATION ' +
+      '(docs/24 Q-138).',
   })
   async dispute(
     @Param('id') id: string,
@@ -216,7 +235,10 @@ export class TransactionController {
       'transaction and must be able to mirror the resolution back — otherwise a dispute ' +
       'decided in the supplier’s favour could never settle. The decision itself is still a ' +
       'platform-operator act: marketplace-service only reaches here after its own ' +
-      '`assertDisputeResolver` has required a platform role of the person who decided.',
+      '`assertDisputeResolver` has required a platform role of the person who decided. ' +
+      'A MARKETPLACE_ORDER transaction is resolved only that way: anyone else is refused ' +
+      'with 422 BUSINESS_RULE_VIOLATION (docs/24 Q-138). The resolution is kept in ' +
+      '`disputeResolution`, beside the reason the dispute was raised for.',
   })
   async resolveDispute(
     @Param('id') id: string,

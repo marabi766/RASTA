@@ -542,7 +542,8 @@ describe('return mirror (RUN-005 PR 3)', () => {
             key('mir-cancel-late'),
           ),
         ),
-      ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+        // Seen AUTHORIZED, now IN_TRANSIT: a stale command, 409 (Codex r2 on #339, finding 2).
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
       await expect(
         asActor({ organizationId: f.buyer, roles: ['PROCUREMENT_USER'] }, () =>
           wiring.returns.request(

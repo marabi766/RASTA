@@ -32,6 +32,7 @@ import {
   type TerminalRefusals,
 } from '../shared/idempotency';
 import { PaymentReconciliationRepository } from './payment-reconciliation.repository';
+import { ECONOMIC_RECORDED_SOURCE_TYPES } from '../transaction/recorded-sources';
 import type { PaymentIntent } from '../generated/prisma';
 
 /**
@@ -349,7 +350,10 @@ export class PaymentService {
       await this.lockIntent(tx, intentId, organizationId);
       const row = await tx.paymentIntent.findUniqueOrThrow({ where: { id: intentId } });
       const transaction = await tx.transaction.findFirst({
-        where: { sourceType: 'PAYMENT_INTENT', sourceReference: intentId },
+        where: {
+          sourceType: ECONOMIC_RECORDED_SOURCE_TYPES.PAYMENT_INTENT,
+          sourceReference: intentId,
+        },
       });
       if (row.status !== 'CAPTURED' && !transaction) return null;
       if (row.status !== 'CAPTURED') {
@@ -690,7 +694,7 @@ export class PaymentService {
               currency,
               occurredAt: capturedAt,
               settledAt: capturedAt,
-              sourceType: 'PAYMENT_INTENT',
+              sourceType: ECONOMIC_RECORDED_SOURCE_TYPES.PAYMENT_INTENT,
               sourceReference: intentId,
               correlationId: getContext().correlationId,
               createdBy: actor,

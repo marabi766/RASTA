@@ -3,7 +3,7 @@
   "paths": {
     "/v1/demand-requests": {
       "post": {
-        "description": "Joins the OPEN aggregation of (organization, productId), or opens one with the first demand, under the aggregation’s row lock and the database clock read after it. The window is half-open, [openedAt, closesAt): a demand at or after closesAt never joins it — that same request ends the window (READY when it holds a demand and reaches its threshold; otherwise its snapshot’s policy: EXTEND moves it on and the demand joins it, REFER and CLOSE end it) and the demand joins the window that follows. A demand that would take the total of the window it joins past 2147483647 is 422 AGGREGATION_QUANTITY_LIMIT_EXCEEDED and writes nothing. One that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands (default 5000) is 422 AGGREGATION_DEMAND_LIMIT_REACHED — a technical limit that keeps the window’s close within one transaction — and the demand is not written; but when the window was due to end and its policy is EXTEND, the extension this request made is committed, with AGGREGATION_WINDOW_EXTENDED, so a full window still moves on. productId is opaque and never checked against marketplace (Q-105, Q-120). DEMAND_SUBMITTED carries identifiers, the quantity and instants only — never the note. Closed by default (S-02). The buyer’s own organization only: a person holding a role PROCUREMENT_DEMAND_ROLES names (default PROCUREMENT_USER, ORGANIZATION_ADMIN) in the organization the request acts for. A demand or aggregation of any other organization, and one that does not exist, are both 404, never 403 (S-03). AUDITOR, the platform administrator (SYSTEM_ADMIN, whatever organization it selected) and a service token are refused (403) before anything is read. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id (403 otherwise).",
+        "description": "Joins the OPEN aggregation of (organization, productId), or opens one with the first demand, under the aggregation’s row lock and the database clock read after it. The window is half-open, [openedAt, closesAt): a demand at or after closesAt never joins it — that same request ends the window (READY when it holds a demand and reaches its threshold; otherwise its snapshot’s policy: EXTEND moves it on and the demand joins it, REFER and CLOSE end it) and the demand joins the window that follows. A demand that would take the total of the window it joins past 2147483647 is 422 AGGREGATION_QUANTITY_LIMIT_EXCEEDED and writes nothing. One that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands (default 200000) is 422 AGGREGATION_DEMAND_LIMIT_REACHED — a technical limit: no window holds more than one close can digest — and the demand is not written; but when the window was due to end and its policy is EXTEND, the extension this request made is committed, with AGGREGATION_WINDOW_EXTENDED, so a full window still moves on. productId is opaque and never checked against marketplace (Q-105, Q-120). DEMAND_SUBMITTED carries identifiers, the quantity and instants only — never the note. Closed by default (S-02). The buyer’s own organization only: a person holding a role PROCUREMENT_DEMAND_ROLES names (default PROCUREMENT_USER, ORGANIZATION_ADMIN) in the organization the request acts for. A demand or aggregation of any other organization, and one that does not exist, are both 404, never 403 (S-03). AUDITOR, the platform administrator (SYSTEM_ADMIN, whatever organization it selected) and a service token are refused (403) before anything is read. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id (403 otherwise).",
         "operationId": "DemandController_submit_v1",
         "parameters": [
           {
@@ -110,7 +110,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -120,7 +120,7 @@
             }
           },
           "409": {
-            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw, `expectedVersion` that is not the demand’s current version (OPTIMISTIC_LOCK_FAILED — reload and retry).",
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on cancel, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry).",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -141,7 +141,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen). When refused for a closed reason, `details` names it: one entry, `path` the area (submission or withdrawal) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (submission: AGGREGATION_QUANTITY_LIMIT_EXCEEDED, AGGREGATION_DEMAND_LIMIT_REACHED)",
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal or cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (submission: AGGREGATION_QUANTITY_LIMIT_EXCEEDED, AGGREGATION_DEMAND_LIMIT_REACHED)",
             "content": {
               "application/json": {
                 "schema": {
@@ -387,7 +387,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -512,7 +512,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -668,7 +668,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -688,7 +688,7 @@
             }
           },
           "409": {
-            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw, `expectedVersion` that is not the demand’s current version (OPTIMISTIC_LOCK_FAILED — reload and retry).",
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on cancel, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry).",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -709,7 +709,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen). When refused for a closed reason, `details` names it: one entry, `path` the area (submission or withdrawal) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (withdrawal: DEMAND_NOT_SUBMITTED, AGGREGATION_WINDOW_ENDED)",
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal or cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (withdrawal: DEMAND_NOT_SUBMITTED, AGGREGATION_WINDOW_ENDED)",
             "content": {
               "application/json": {
                 "schema": {
@@ -809,7 +809,7 @@
     },
     "/v1/aggregations": {
       "get": {
-        "description": "The caller organization’s aggregations (status=OPEN lists the open windows). A window whose closesAt has passed stays OPEN here until a demand for its product ends it (the sweeper that ends it on time is ADR-070 plan PR 2). Closed by default (S-02). The buyer’s own organization only: a person holding a role PROCUREMENT_DEMAND_ROLES names (default PROCUREMENT_USER, ORGANIZATION_ADMIN) in the organization the request acts for. A demand or aggregation of any other organization, and one that does not exist, are both 404, never 403 (S-03). AUDITOR, the platform administrator (SYSTEM_ADMIN, whatever organization it selected) and a service token are refused (403) before anything is read.",
+        "description": "The caller organization’s aggregations (status=OPEN lists the open windows). A window whose closesAt has passed is ended by the window sweeper within PROCUREMENT_WINDOW_SWEEP_INTERVAL_MS, or by the next demand for its product, whichever comes first; until then it reads OPEN here, and no demand joins it. A REFERRED or LAPSED window of more than PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE live demands moves its demands to its own status in batches, so some may read SUBMITTED for a few sweeps; the digest its end event carries is built in batches of the same size, so the event of such a window follows its status by as many sweeper steps. Closed by default (S-02). The buyer’s own organization only: a person holding a role PROCUREMENT_DEMAND_ROLES names (default PROCUREMENT_USER, ORGANIZATION_ADMIN) in the organization the request acts for. A demand or aggregation of any other organization, and one that does not exist, are both 404, never 403 (S-03). AUDITOR, the platform administrator (SYSTEM_ADMIN, whatever organization it selected) and a service token are refused (403) before anything is read.",
         "operationId": "AggregationController_list_v1",
         "parameters": [
           {
@@ -933,6 +933,16 @@
                             "nullable": true,
                             "description": "When the window ended, or null while OPEN."
                           },
+                          "cancelledAt": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "When the READY aggregation was cancelled (UTC, ISO 8601 with Z), or null."
+                          },
+                          "cancelReason": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "Why it was cancelled, or null."
+                          },
                           "rfqId": {
                             "type": "string",
                             "nullable": true
@@ -953,6 +963,8 @@
                           "extensionCount",
                           "setting",
                           "closedAt",
+                          "cancelledAt",
+                          "cancelReason",
                           "rfqId",
                           "version"
                         ],
@@ -991,7 +1003,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1113,6 +1125,16 @@
                       "nullable": true,
                       "description": "When the window ended, or null while OPEN."
                     },
+                    "cancelledAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the READY aggregation was cancelled (UTC, ISO 8601 with Z), or null."
+                    },
+                    "cancelReason": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Why it was cancelled, or null."
+                    },
                     "rfqId": {
                       "type": "string",
                       "nullable": true
@@ -1133,6 +1155,8 @@
                     "extensionCount",
                     "setting",
                     "closedAt",
+                    "cancelledAt",
+                    "cancelReason",
                     "rfqId",
                     "version"
                   ],
@@ -1152,7 +1176,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1190,11 +1214,578 @@
           }
         ]
       }
+    },
+    "/v1/aggregations/{id}/cancel": {
+      "post": {
+        "description": "READY → CANCELLED (ADR-070 § 2): the one way out for the requesters of a window that ended READY (Q-119 (4)); it affects every demand in it, which stay as they are, final with it. Only a READY aggregation is cancelled (422 `AGGREGATION_NOT_READY` otherwise: an OPEN window has not ended — the sweeper or the next demand ends it — and every other status is final); `expectedVersion` that is not the current version is 409 OPTIMISTIC_LOCK_FAILED; a READY aggregation whose end is still being recorded (its digest and DEMAND_AGGREGATED, built in batches) is 409 CONFLICT with Retry-After. The caller holds a role PROCUREMENT_RFQ_ISSUER_ROLES names (default ORGANIZATION_ADMIN) in the buyer’s organization; any other role is 403 INSUFFICIENT_ROLE. The reason is required and stays with the aggregation; AGGREGATION_CANCELLED names the demands by count and digest, never the reason. Closed by default (S-02). The buyer’s own organization only: a person holding a role PROCUREMENT_DEMAND_ROLES names (default PROCUREMENT_USER, ORGANIZATION_ADMIN) in the organization the request acts for. A demand or aggregation of any other organization, and one that does not exist, are both 404, never 403 (S-03). AUDITOR, the platform administrator (SYSTEM_ADMIN, whatever organization it selected) and a service token are refused (403) before anything is read. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id (403 otherwise).",
+        "operationId": "AggregationController_cancel_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for PROCUREMENT_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The buyer."
+                    },
+                    "productId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["OPEN", "READY", "RFQ_ISSUED", "REFERRED", "LAPSED", "CANCELLED"]
+                    },
+                    "openedAt": {
+                      "type": "string",
+                      "description": "When its first demand opened the window (UTC, ISO 8601 with Z)."
+                    },
+                    "closesAt": {
+                      "type": "string",
+                      "description": "When the window ends, exclusive: a demand at or after it never joins (UTC, ISO 8601 with Z)."
+                    },
+                    "totalQuantity": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 2147483647,
+                      "description": "The sum of the quantities of the demands it holds (withdrawn ones excluded); frozen once the window ended. Never above MAX_QUANTITY: a demand that would take it past is 422 AGGREGATION_QUANTITY_LIMIT_EXCEEDED (ADR-070 § 2)."
+                    },
+                    "demandCount": {
+                      "type": "integer",
+                      "description": "How many live demands it holds (withdrawn ones excluded). A demand that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS is 422 AGGREGATION_DEMAND_LIMIT_REACHED."
+                    },
+                    "extensionCount": {
+                      "type": "integer"
+                    },
+                    "setting": {
+                      "type": "object",
+                      "properties": {
+                        "windowHours": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "minQuantity": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 2147483647,
+                          "description": "A quantity, not an amount (Q-10); never above MAX_QUANTITY, so a window can reach it."
+                        },
+                        "shortfallPolicy": {
+                          "type": "string",
+                          "enum": ["EXTEND", "REFER", "CLOSE"]
+                        },
+                        "settingVersion": {
+                          "type": "integer",
+                          "nullable": true,
+                          "description": "null = the environment defaults (Q-10)."
+                        }
+                      },
+                      "required": [
+                        "windowHours",
+                        "minQuantity",
+                        "shortfallPolicy",
+                        "settingVersion"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "closedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the window ended, or null while OPEN."
+                    },
+                    "cancelledAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the READY aggregation was cancelled (UTC, ISO 8601 with Z), or null."
+                    },
+                    "cancelReason": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Why it was cancelled, or null."
+                    },
+                    "rfqId": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "productId",
+                    "status",
+                    "openedAt",
+                    "closesAt",
+                    "totalQuantity",
+                    "demandCount",
+                    "extensionCount",
+                    "setting",
+                    "closedAt",
+                    "cancelledAt",
+                    "cancelReason",
+                    "rfqId",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a demand or aggregation of any other organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on cancel, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry).",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed, or the window of the product changed meanwhile (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal or cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (cancellation: AGGREGATION_NOT_READY)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "cancellation"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["AGGREGATION_NOT_READY"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "traceId": {
+                      "type": "string"
+                    },
+                    "timestamp": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "path": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["code", "message", "correlationId", "timestamp"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Cancel a READY aggregation, with a reason",
+        "tags": ["aggregations"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The `version` of the aggregation the caller read: the cancellation applies only to that version (409 OPTIMISTIC_LOCK_FAILED otherwise)."
+                  },
+                  "reason": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "minLength": 8,
+                    "maxLength": 500,
+                    "description": "Why, 8 to 500 characters, trimmed, without bidirectional control characters. Kept with the aggregation and read through this API; never on an event."
+                  }
+                },
+                "required": ["expectedVersion", "reason"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/aggregation-settings": {
+      "get": {
+        "description": "The current setting version, or the environment defaults of Q-10 (settingVersion and recordedAt null) if the organization has recorded none. A window keeps the settings it opened with; this is what the next one takes. The caller holds a role PROCUREMENT_AGGREGATION_SETTING_ROLES (default ORGANIZATION_ADMIN) or PROCUREMENT_DEMAND_ROLES names in the organization. Closed by default (S-02). One setting for the whole organization, every product (Q-119 (3)). The buyer’s own organization only: the organization the request acts for. AUDITOR, the platform administrator (SYSTEM_ADMIN, whatever organization it selected — the operator does not write a tenant’s business configuration, Q-119 (2)) and a service token are refused (403) before anything is read.",
+        "operationId": "AggregationSettingController_current_v1",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "windowHours": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "minQuantity": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 2147483647,
+                      "description": "A quantity, not an amount (Q-10); never above MAX_QUANTITY, so a window can reach it."
+                    },
+                    "shortfallPolicy": {
+                      "type": "string",
+                      "enum": ["EXTEND", "REFER", "CLOSE"]
+                    },
+                    "settingVersion": {
+                      "type": "integer",
+                      "nullable": true,
+                      "description": "null = the environment defaults (Q-10)."
+                    },
+                    "recordedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When that version was recorded (UTC, ISO 8601 with Z), or null for the environment defaults."
+                    }
+                  },
+                  "required": [
+                    "windowHours",
+                    "minQuantity",
+                    "shortfallPolicy",
+                    "settingVersion",
+                    "recordedAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The caller organization’s aggregation settings in force for its next windows",
+        "tags": ["aggregation-settings"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "description": "Appends the next version (versions are never edited; the next one replaces it). It applies to windows opened afterwards only: an OPEN window keeps its snapshot. `expectedCurrentVersion` is the version the caller saw in force (null: none); any other current version — another person recorded one meanwhile — is 409 OPTIMISTIC_LOCK_FAILED and nothing is written. windowHours 1 to 8760; minQuantity 0 to 2147483647 (a threshold above the most a window can hold would never be reached); shortfallPolicy EXTEND, REFER or CLOSE — otherwise 400 VALIDATION_FAILED. AGGREGATION_SETTING_CHANGED, the audit record, is written in the same transaction. The caller holds a role PROCUREMENT_AGGREGATION_SETTING_ROLES names (default ORGANIZATION_ADMIN); any other role is 403 INSUFFICIENT_ROLE. Closed by default (S-02). One setting for the whole organization, every product (Q-119 (3)). The buyer’s own organization only: the organization the request acts for. AUDITOR, the platform administrator (SYSTEM_ADMIN, whatever organization it selected — the operator does not write a tenant’s business configuration, Q-119 (2)) and a service token are refused (403) before anything is read. Requires an `Idempotency-Key` (docs/06 § 6.8): the same key with the same body from the same user answers the original response and records nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED.",
+        "operationId": "AggregationSettingController_record_v1",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for PROCUREMENT_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "windowHours": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "minQuantity": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 2147483647,
+                      "description": "A quantity, not an amount (Q-10); never above MAX_QUANTITY, so a window can reach it."
+                    },
+                    "shortfallPolicy": {
+                      "type": "string",
+                      "enum": ["EXTEND", "REFER", "CLOSE"]
+                    },
+                    "settingVersion": {
+                      "type": "integer",
+                      "nullable": true,
+                      "description": "null = the environment defaults (Q-10)."
+                    },
+                    "recordedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When that version was recorded (UTC, ISO 8601 with Z), or null for the environment defaults."
+                    }
+                  },
+                  "required": [
+                    "windowHours",
+                    "minQuantity",
+                    "shortfallPolicy",
+                    "settingVersion",
+                    "recordedAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on cancel, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry).",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed, or the window of the product changed meanwhile (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Record a new version of the caller organization’s aggregation settings",
+        "tags": ["aggregation-settings"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "windowHours": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 8760,
+                    "description": "How long a window stays open from the demand that opens it, in hours."
+                  },
+                  "minQuantity": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647,
+                    "description": "The total quantity — a quantity, never an amount (Q-10) — a window must reach to be READY. 0 = no threshold. Never above MAX_QUANTITY, so a window can reach it."
+                  },
+                  "shortfallPolicy": {
+                    "type": "string",
+                    "enum": ["EXTEND", "REFER", "CLOSE"],
+                    "description": "What a window that ends short of the threshold does: EXTEND (carried into the next window), REFER (a fact only) or CLOSE."
+                  },
+                  "expectedCurrentVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "nullable": true,
+                    "description": "The setting version the caller saw in force, or null when none was (the environment defaults). Any other current version is 409 OPTIMISTIC_LOCK_FAILED and nothing is written."
+                  }
+                },
+                "required": [
+                  "windowHours",
+                  "minQuantity",
+                  "shortfallPolicy",
+                  "expectedCurrentVersion"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
     }
   },
   "info": {
     "title": "Rasta — Procurement Service",
-    "description": "The procurement boundary (COM-007, ADR-070). An organization registers its needs — a quantity of a product, the product an opaque marketplace identifier that is never checked there (Q-105) — and each joins the one OPEN aggregation of (organization, product), or opens it. A window is open from its first demand for PROCUREMENT_AGGREGATION_WINDOW_HOURS (Q-10), half-open [openedAt, closesAt) by the database clock read after the aggregation’s lock: a demand at or after closesAt never joins it, and ends it instead — READY when it holds a demand and reaches its threshold (a quantity, never an amount), otherwise its snapshot’s shortfall policy: EXTEND, REFER (a fact only) or CLOSE — before joining the window that follows. Each aggregation keeps the settings it opened with. Aggregation never spans organizations (Q-119); only the buyer’s own organization reads or changes its demands, anyone else gets 404. Every change is an event on rasta.procurement.v1 — identifiers, quantities and instants, never a note, a reason or an amount — and so an audit record. RFQs, sealed quotations, evaluation and purchase orders follow (ADR-070 plan PRs 2 to 14); nothing here moves money.",
+    "description": "The procurement boundary (COM-007, ADR-070). An organization registers its needs — a quantity of a product, the product an opaque marketplace identifier that is never checked there (Q-105) — and each joins the one OPEN aggregation of (organization, product), or opens it. A window is open from its first demand for PROCUREMENT_AGGREGATION_WINDOW_HOURS (Q-10), half-open [openedAt, closesAt) by the database clock read after the aggregation’s lock: a demand at or after closesAt never joins it, and ends it instead — READY when it holds a demand and reaches its threshold (a quantity, never an amount), otherwise its snapshot’s shortfall policy: EXTEND, REFER (a fact only) or CLOSE — before joining the window that follows. A window no demand arrives after is ended on time by the window sweeper, with the same transition. A READY aggregation may be cancelled with a reason by a role of the RFQ issuer. Each aggregation keeps the settings it opened with. Aggregation never spans organizations (Q-119); only the buyer’s own organization reads or changes its demands, anyone else gets 404. Every change is an event on rasta.procurement.v1 — identifiers, quantities and instants, never a note, a reason or an amount — and so an audit record. RFQs, sealed quotations, evaluation and purchase orders follow (ADR-070 plan PRs 2 to 14); nothing here moves money.",
     "version": "0.1.0",
     "contact": {}
   },

@@ -8,6 +8,7 @@ import { WalletRepository } from '../wallet/wallet.repository';
 import { TransactionRepository, type TransactionFilter } from './transaction.repository';
 import { nextStatus } from './state-machine';
 import {
+  assertMayDisputeDirectly,
   assertMayRefund,
   assertTransactionVisible,
   canActFinanciallyFor,
@@ -271,7 +272,12 @@ export class TransactionService {
       occurredAt: Date;
       sourceType: string;
       sourceReference: string;
-      causationId?: string;
+      /**
+       * The event that authorised it. Required: it, and the absent
+       * Idempotency-Key, are how `ck_transaction_recorded_source` tells a row
+       * recorded from an event from one written over HTTP.
+       */
+      causationId: string;
     },
   ): Promise<{ id: string; created: boolean }> {
     const existing = await this.repository.findBySource(
@@ -313,7 +319,7 @@ export class TransactionService {
         sourceType: input.sourceType,
         sourceReference: input.sourceReference,
         correlationId: getContext().correlationId,
-        causationId: input.causationId ?? null,
+        causationId: input.causationId,
         createdBy: SERVICE_NAME,
       },
       this.legsFor(
@@ -455,6 +461,9 @@ export class TransactionService {
    * There is no timeout that clears it and no automatic resolution: the state
    * machine has no edge from `DISPUTED` to `SETTLED`, only to
    * `PENDING_SETTLEMENT` by an explicit human decision, or to `REFUNDED`.
+   *
+   * An order's obligation is disputed only by the order saga (docs/24 Q-138,
+   * `assertMayDisputeDirectly`).
    */
   async dispute(
     transactionId: string,
@@ -484,6 +493,12 @@ export class TransactionService {
    *
    * A human decision, recorded with who made it. It does not settle — it only
    * unblocks, so that releasing the money remains a separate, deliberate act.
+   *
+   * The resolution goes in a column of its own. It used to be written over
+   * `disputeReason`, so a resolved transaction no longer said what the dispute
+   * had been about; rows resolved before migration
+   * `20261016160000_transaction_dispute_resolution` still hold the resolution
+   * there, with `disputeResolution` NULL (docs/23 D-060).
    */
   async resolveDispute(
     transactionId: string,
@@ -497,7 +512,7 @@ export class TransactionService {
       'RESOLVE_DISPUTE',
       actor,
       at,
-      { disputeResolvedAt: at, disputeResolvedBy: actor, disputeReason: dto.resolution },
+      { disputeResolvedAt: at, disputeResolvedBy: actor, disputeResolution: dto.resolution },
       answer,
       dto.disputeId,
     );
@@ -695,9 +710,14 @@ export class TransactionService {
    * A statement's obligation is never refunded or cancelled, by anyone
    * ({@link refuseStatementWithdrawal}): judged after visibility and before
    * any role, so every party gets the same refusal.
+   *
+   * An order's obligation is disputed and resolved only by the order saga
+   * ({@link assertMayDisputeDirectly}, docs/24 Q-138): judged after the
+   * authority to act at all, so a caller who could not act on the
+   * transaction is refused exactly as before.
    */
-  private authorizeAct(
-    transaction: RefundableTransaction & { sourceType: string | null },
+  private async authorizeAct(
+    transaction: ActedTransaction,
     command: TransactionCommand,
   ): Promise<FinancialAuthority> {
     assertTransactionVisible(transaction);
@@ -709,7 +729,15 @@ export class TransactionService {
         this.hierarchy,
       );
     }
-    return canActFinanciallyFor(command, transaction.organizationId, this.hierarchy);
+    const authority = await canActFinanciallyFor(
+      command,
+      transaction.organizationId,
+      this.hierarchy,
+    );
+    if (command === 'DISPUTE' || command === 'RESOLVE_DISPUTE') {
+      assertMayDisputeDirectly(transaction);
+    }
+    return authority;
   }
 
   /**
@@ -860,6 +888,12 @@ export const STATEMENT_WITHDRAWAL_REFUSED =
 /** What a caller asks to do to a transaction — see `TransactionService.authorizeAct`. */
 export type TransactionAct = 'READ' | TransactionCommand;
 
+/** The facts `authorizeAct` reads off a transaction. */
+type ActedTransaction = RefundableTransaction & {
+  sourceType: string | null;
+  transactionType: string;
+};
+
 /** The five financial commands made on `/v1/transactions/:id` (settlement is its own resource). */
 export type TransactionCommand = Exclude<FinancialCommand, 'SETTLE'>;
 
@@ -886,7 +920,11 @@ export interface TransactionDetail {
   sourceType: string | null;
   sourceReference: string | null;
   disputedAt: Date | null;
+  disputedBy: string | null;
   disputeReason: string | null;
+  disputeResolvedAt: Date | null;
+  disputeResolvedBy: string | null;
+  disputeResolution: string | null;
   settledAt: Date | null;
   failureReason: string | null;
   createdAt: Date;

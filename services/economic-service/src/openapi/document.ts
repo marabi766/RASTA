@@ -2,6 +2,7 @@ import type { OpenAPIObject } from '@nestjs/swagger';
 import { apiErrorSchema } from '@rasta/contracts';
 import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
 import { toJsonSchema, type JsonSchema } from './zod-schema';
+import { TRANSACTION_RESPONSES, TRANSACTION_VIEW_SCHEMAS } from './transaction-view';
 import {
   listEntriesQuerySchema,
   reverseJournalSchema,
@@ -201,6 +202,7 @@ const ERRORS: Record<string, readonly number[]> = {
   'POST /v1/payment-intents/{id}/reconciliation/resolutions': WRITE,
   'POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/approve': WRITE,
   'POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/reject': WRITE,
+  'GET /v1/internal/obligations/by-source/STATEMENT/{statementId}': READ_ONE,
 };
 
 const STATUS_TEXT: Record<number, string> = {
@@ -212,6 +214,33 @@ const STATUS_TEXT: Record<number, string> = {
   422: 'The request is well-formed but a business rule refuses it — INSUFFICIENT_BALANCE, LEDGER_UNBALANCED, or a domain rule',
   500: 'Unexpected server error',
 };
+
+/**
+ * The same statuses on the internal routes (`/v1/internal/…`, ADR-061 § 4),
+ * which answer one named service and no user at all.
+ */
+const INTERNAL_STATUS_TEXT: Record<number, string> = {
+  403: 'Authenticated, but not the service this route answers: any user token (whatever its roles), another service’s internal token, or an internal token signed for no organization',
+  404: 'Not found — also returned for a record of any organization but the one the internal token is signed for, so its existence is never disclosed',
+};
+
+/**
+ * The internal routes' credential: a service's internal token in
+ * `X-Internal-Token` and nothing else. `AuthGuard` judges a request that also
+ * carries `Authorization` on that bearer token, as a user — so the internal
+ * routes cannot be described by the bearer scheme.
+ */
+export const INTERNAL_TOKEN_SCHEME = 'internalToken';
+
+const INTERNAL_TOKEN_SECURITY_SCHEME = {
+  type: 'apiKey',
+  in: 'header',
+  name: 'X-Internal-Token',
+  description:
+    'A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user.',
+} as const;
+
+const isInternalPath = (path: string): boolean => path.startsWith('/v1/internal/');
 
 /**
  * `Retry-After` on an idempotent route's 409 (docs/06 § 6.8). Optional: only
@@ -232,12 +261,23 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   // The one error shape every Rasta service returns. Referenced rather than
   // inlined per response, so a client generates a single error type.
   document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
+  // The transaction a response carries — referenced for the same reason.
+  for (const [name, schema] of Object.entries(TRANSACTION_VIEW_SCHEMAS)) {
+    document.components.schemas[name] = schema as never;
+  }
+  document.components.securitySchemes ??= {};
+  document.components.securitySchemes[INTERNAL_TOKEN_SCHEME] = INTERNAL_TOKEN_SECURITY_SCHEME;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {
       if (!isOperation(operation)) continue;
 
       const key = `${method.toUpperCase()} ${path}`;
+      const internal = isInternalPath(path);
+
+      // Only the internal token reaches an internal route; a bearer token there
+      // is a user, and refused.
+      if (internal) operation.security = [{ [INTERNAL_TOKEN_SCHEME]: [] }];
 
       const body = REQUEST_BODIES[key];
       if (body) {
@@ -269,17 +309,21 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         ];
       }
 
-      // A success body, unless the route genuinely returns none.
-      const success = method.toUpperCase() === 'POST' && !body ? '200' : successStatus(method);
+      // The success body, under the status the handler answers with.
+      const success = successStatus(key, operation);
+      const view = TRANSACTION_RESPONSES[key];
       operation.responses ??= {};
       operation.responses[success] = {
         description: 'Success',
-        content: { 'application/json': { schema: {} } },
+        content: {
+          'application/json': { schema: view ? { $ref: `#/components/schemas/${view}` } : {} },
+        },
       };
 
       for (const status of ERRORS[key] ?? []) {
         operation.responses[String(status)] = {
-          description: STATUS_TEXT[status] ?? 'Error',
+          description:
+            (internal ? INTERNAL_STATUS_TEXT[status] : undefined) ?? STATUS_TEXT[status] ?? 'Error',
           ...(status === 409 && IDEMPOTENT_ROUTES.has(key)
             ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } }
             : {}),
@@ -294,8 +338,29 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   return document;
 }
 
-function successStatus(method: string): string {
-  return method.toUpperCase() === 'POST' ? '201' : '200';
+/**
+ * The status a route answers success with: the one Nest wrote into the
+ * document for it — the handler's `@HttpCode`, or without one Nest's default
+ * (201 for a POST, 200 otherwise), which is also what the route sends.
+ *
+ * Read from the route, never guessed from the request. Guessing that a POST
+ * with a body creates something documented the dispute, resolution, refund
+ * and cancel views under a 201 those routes never send, and left their real
+ * 200 with no schema (Codex on #322). A route with no success status, or
+ * more than one, is refused: there is nothing to attach the body to that
+ * would not be a guess.
+ */
+function successStatus(key: string, operation: MutableOperation): string {
+  const declared = Object.keys(operation.responses ?? {}).filter((status) =>
+    /^2\d\d$/.test(status),
+  );
+  if (declared.length !== 1) {
+    throw new Error(
+      `OpenAPI: ${key} declares ${declared.length} success statuses (${declared.join(', ')}); ` +
+        'exactly one is needed to document its body',
+    );
+  }
+  return declared[0]!;
 }
 
 /**
@@ -319,6 +384,7 @@ function toQueryParameters(schema: JsonSchema): Record<string, unknown>[] {
 }
 
 interface MutableOperation {
+  security?: Record<string, string[]>[];
   requestBody?: unknown;
   parameters?: unknown[];
   responses?: Record<string, unknown>;

@@ -48,7 +48,11 @@ describe('refund authority (actor × state), dispute and tenant isolation', () =
     return { id: wallet.body.id, available: BigInt(wallet.body.availableBalanceMinor) };
   }
 
-  /** A held transaction, moved on to `state` the way a payer really would. */
+  /**
+   * A held transaction, moved on to `state` the way it really would be: by its
+   * payer — and, for a dispute, by the order saga mirroring the order's
+   * dispute, the only way an order's obligation is disputed (docs/24 Q-138).
+   */
   async function transactionIn(state: State): Promise<string> {
     const created = await request(http)
       .post('/v1/transactions')
@@ -74,7 +78,10 @@ describe('refund authority (actor × state), dispute and tenant isolation', () =
     if (state === 'DISPUTED') {
       await request(http)
         .post(`/v1/transactions/${transactionId}/dispute`)
-        .set('authorization', asPayerAdmin())
+        .set(
+          'x-internal-token',
+          await internalToken('marketplace-service', { organizationId: payer }),
+        )
         .set('idempotency-key', id('rfd-dispute'))
         .send({ reason: 'The delivered quantity does not match the order.' })
         .expect(200);

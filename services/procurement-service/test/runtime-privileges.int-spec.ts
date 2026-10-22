@@ -18,6 +18,10 @@ const DENIED = /Code: `42501`/;
 
 /** The guards this service keeps in the database, by table: none may vanish unnoticed. */
 const GUARDS = [
+  ['aggregation_setting', 'tg_aggregation_setting_guard'],
+  ['aggregation_setting', 'tg_aggregation_setting_no_truncate'],
+  ['demand_aggregation', 'tg_demand_aggregation_born'],
+  ['demand_aggregation', 'tg_demand_aggregation_snapshot'],
   ['demand_aggregation', 'tg_demand_aggregation_guard'],
   ['demand_aggregation', 'tg_demand_aggregation_no_truncate'],
   ['demand_aggregation', 'tg_demand_aggregation_totals_check'],
@@ -130,6 +134,7 @@ describe('the runtime role cannot lift an integrity guard (D-045)', () => {
        ORDER BY 1`;
     expect(rows.map((row) => row.table)).toEqual([
       '_prisma_migrations',
+      'aggregation_setting',
       'demand_aggregation',
       'demand_request',
       'idempotency_key',

@@ -1,5 +1,11 @@
 import { MAX_QUANTITY } from '../demand/dto';
-import { MAX_LIVE_DEMANDS_LIMIT, corsOrigins, loadProcurementEnv } from './env';
+import {
+  corsOrigins,
+  loadProcurementEnv,
+  MAX_FOLLOW_BATCH_SIZE,
+  DEFAULT_MAX_LIVE_DEMANDS,
+  MAX_LIVE_DEMANDS_LIMIT,
+} from './env';
 import { procurementOperationBudgets } from './operation-budgets';
 
 const base: NodeJS.ProcessEnv = {
@@ -27,13 +33,30 @@ describe('the provisional defaults (Q-10, Q-119, ADR-070 § 2)', () => {
     expect(env.PROCUREMENT_AGGREGATION_SHORTFALL_POLICY).toBe('EXTEND');
   });
 
+  it('lets only the buyer’s ORGANIZATION_ADMIN cancel an aggregation (ADR-070 § 3)', () => {
+    expect(env.PROCUREMENT_RFQ_ISSUER_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+  });
+
+  it('lets only the buyer’s ORGANIZATION_ADMIN record its aggregation settings (Q-119 (2), plan PR 3)', () => {
+    expect(env.PROCUREMENT_AGGREGATION_SETTING_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+  });
+
+  it('sweeps every five seconds, twenty windows under a one-minute lease, and moves 2000 demands a transaction', () => {
+    expect(env.PROCUREMENT_WINDOW_SWEEP_INTERVAL_MS).toBe(5000);
+    expect(env.PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE).toBe(20);
+    expect(env.PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS).toBe(60);
+    expect(env.PROCUREMENT_WINDOW_SWEEP_BACKOFF_BASE_SECONDS).toBe(10);
+    expect(env.PROCUREMENT_WINDOW_SWEEP_BACKOFF_MAX_SECONDS).toBe(900);
+    expect(env.PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE).toBe(2000);
+  });
+
   it('replays a command’s response for a day and leases an in-flight key for two minutes', () => {
     expect(env.PROCUREMENT_IDEMPOTENCY_TTL_HOURS).toBe(24);
     expect(env.PROCUREMENT_IDEMPOTENCY_CLAIM_LEASE_SECONDS).toBe(120);
   });
 
-  it('holds a window to 5000 live demands, a technical limit well inside the close budget (Q-119 note of 2026-10-17)', () => {
-    expect(env.PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS).toBe(5_000);
+  it('holds a window to 200,000 live demands, a tenth of what one transaction digests whole (Q-119 note of 2026-10-17, PR-338 r1 F1)', () => {
+    expect(env.PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS).toBe(200_000);
   });
 
   it('names itself, and listens on 3107', () => {
@@ -96,13 +119,14 @@ describe('overrides', () => {
 
   it.each([
     ['one', 1],
-    ['MAX_LIVE_DEMANDS_LIMIT, the window the scale test closes within the budget', 10_000],
+    ['MAX_LIVE_DEMANDS_LIMIT, half of what one transaction digests whole', 1_000_000],
   ])('accepts a live-demand limit of %s', (_label, limit) => {
     expect(
       load({ PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: String(limit) })
         .PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS,
     ).toBe(limit);
-    expect(MAX_LIVE_DEMANDS_LIMIT).toBe(10_000);
+    expect(MAX_LIVE_DEMANDS_LIMIT).toBe(1_000_000);
+    expect(DEFAULT_MAX_LIVE_DEMANDS).toBe(200_000);
   });
 
   it.each([
@@ -124,14 +148,41 @@ describe('overrides', () => {
     ],
     ['a live-demand limit of zero', { PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: '0' }],
     [
-      'a live-demand limit past what one close is proven to fit',
-      { PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: '10001' },
+      'a live-demand limit past half of what one transaction digests whole',
+      { PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: '1000001' },
     ],
     ['a fractional live-demand limit', { PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS: '2.5' }],
     ['a zero idempotency lifetime', { PROCUREMENT_IDEMPOTENCY_TTL_HOURS: '0' }],
     ['a lease under ten seconds', { PROCUREMENT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: '5' }],
+    ['AUDITOR among the RFQ issuer roles', { PROCUREMENT_RFQ_ISSUER_ROLES: 'AUDITOR' }],
+    [
+      'SYSTEM_ADMIN among the RFQ issuer roles',
+      { PROCUREMENT_RFQ_ISSUER_ROLES: 'ORGANIZATION_ADMIN,SYSTEM_ADMIN' },
+    ],
+    ['an empty RFQ issuer role list', { PROCUREMENT_RFQ_ISSUER_ROLES: '' }],
+    ['AUDITOR among the setting roles', { PROCUREMENT_AGGREGATION_SETTING_ROLES: 'AUDITOR' }],
+    [
+      'SYSTEM_ADMIN among the setting roles: the operator does not write a tenant’s configuration',
+      { PROCUREMENT_AGGREGATION_SETTING_ROLES: 'ORGANIZATION_ADMIN,SYSTEM_ADMIN' },
+    ],
+    ['an empty setting role list', { PROCUREMENT_AGGREGATION_SETTING_ROLES: '' }],
+    ['a sweep more often than twice a second', { PROCUREMENT_WINDOW_SWEEP_INTERVAL_MS: '499' }],
+    ['a sweep of no window', { PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE: '0' }],
+    ['a sweep lease under ten seconds', { PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS: '9' }],
+    ['a follow batch of no demand', { PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE: '0' }],
+    [
+      'a follow batch past MAX_FOLLOW_BATCH_SIZE, which the transaction budget does not hold',
+      { PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE: String(MAX_FOLLOW_BATCH_SIZE + 1) },
+    ],
   ])('refuses %s at startup', (_label, change) => {
     expect(() => load(change)).toThrow();
+  });
+
+  it('accepts a follow batch of exactly MAX_FOLLOW_BATCH_SIZE', () => {
+    expect(
+      load({ PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE: String(MAX_FOLLOW_BATCH_SIZE) })
+        .PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE,
+    ).toBe(MAX_FOLLOW_BATCH_SIZE);
   });
 });
 

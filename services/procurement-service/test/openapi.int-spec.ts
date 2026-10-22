@@ -4,7 +4,7 @@ import type { OpenAPIObject } from '@nestjs/swagger';
 import request from 'supertest';
 import { ulid } from 'ulid';
 import { buildProcurementOpenApiDocument, formatDocument } from '../src/openapi/document';
-import { actor, buyer, client, key, startApi, type ApiHarness } from './api-helpers';
+import { actor, buyer, client, key, startApi, TestClock, type ApiHarness } from './api-helpers';
 import { cleanup, newOrganizationId, newProductId } from './helpers';
 import { responseSchemaOf, validateBody } from './openapi-body';
 
@@ -17,8 +17,8 @@ import { responseSchemaOf, validateBody } from './openapi-body';
  *   proves the generator's module produces the same file.
  *
  *   **It describes exactly the routes the application serves**, read from the Express router.
- *   The statuses it documents are provoked by `demand.int-spec.ts`, `window.int-spec.ts` and
- *   `tenancy.int-spec.ts`.
+ *   The statuses it documents are provoked by `demand.int-spec.ts`, `window.int-spec.ts`,
+ *   `aggregation-cancel.int-spec.ts` and `tenancy.int-spec.ts`.
  *
  *   **It accepts what the application answers** (PR-327 r1 F3): every documented status of every
  *   route, provoked here once, has its real body validated against the document's own schema for
@@ -31,13 +31,18 @@ describe('the published OpenAPI contract (real application)', () => {
   let api: ApiHarness;
   let document: OpenAPIObject;
   const organizations: string[] = [];
+  /** The database clock, pinned only to make a READY aggregation for the cancel route. */
+  const clock = new TestClock();
 
   beforeAll(async () => {
-    api = await startApi({
-      PROCUREMENT_AGGREGATION_WINDOW_HOURS: '168',
-      PROCUREMENT_AGGREGATION_MIN_QUANTITY: '0',
-      PROCUREMENT_AGGREGATION_SHORTFALL_POLICY: 'EXTEND',
-    });
+    api = await startApi(
+      {
+        PROCUREMENT_AGGREGATION_WINDOW_HOURS: '168',
+        PROCUREMENT_AGGREGATION_MIN_QUANTITY: '0',
+        PROCUREMENT_AGGREGATION_SHORTFALL_POLICY: 'EXTEND',
+      },
+      { clock },
+    );
     document = buildProcurementOpenApiDocument(api.app);
   });
 
@@ -166,6 +171,47 @@ describe('the published OpenAPI contract (real application)', () => {
     documentedAs('GET', AGGREGATION, await as.aggregation(missing.aggregation));
     documentedAs('GET', AGGREGATION, await anonymous().get(`${AGGREGATIONS}/${aggregationId}`));
     documentedAs('GET', AGGREGATION, await other.aggregation(aggregationId));
+
+    // A READY aggregation to cancel: a window ended by a later demand, the clock pinned for both.
+    const CANCEL = '/v1/aggregations/{id}/cancel';
+    const issuer = client(api, actor(a, ['ORGANIZATION_ADMIN']));
+    const readyProduct = newProductId();
+    clock.set(new Date('2032-01-01T08:00:00.000Z'));
+    const ending = (await as.submit({ productId: readyProduct, quantity: 2 })).body;
+    clock.set(new Date('2032-01-08T08:00:00.000Z'));
+    await as.submit({ productId: readyProduct, quantity: 1 });
+    // After the end it was cancelled at: a cancellation never precedes the end (its CHECK).
+    clock.set(new Date('2032-01-09T08:00:00.000Z'));
+    const ready = (await as.aggregation(ending.aggregationId as string)).body;
+    expect(ready.status).toBe('READY');
+    const cancelPath = `${AGGREGATIONS}/${ready.id as string}/cancel`;
+    documentedAs('POST', CANCEL, await issuer.cancel(ready.id, ready.version + 1));
+    documentedAs('POST', CANCEL, await issuer.post(cancelPath, { expectedVersion: ready.version }));
+    documentedAs(
+      'POST',
+      CANCEL,
+      await anonymous().post(cancelPath).set('idempotency-key', key()).send({}),
+    );
+    documentedAs('POST', CANCEL, await as.cancel(ready.id, ready.version));
+    documentedAs('POST', CANCEL, await issuer.cancel(missing.aggregation, 1));
+    documentedAs('POST', CANCEL, await issuer.cancel(aggregationId, 1));
+    documentedAs('POST', CANCEL, await issuer.cancel(ready.id, ready.version));
+    clock.set(null);
+
+    // The organization's settings (plan PR 3): read by a requester; recorded by the administrator.
+    const SETTINGS = '/v1/aggregation-settings';
+    documentedAs('GET', SETTINGS, await as.setting());
+    documentedAs('GET', SETTINGS, await anonymous().get(SETTINGS));
+    documentedAs('GET', SETTINGS, await other.setting());
+    documentedAs('POST', SETTINGS, await issuer.recordSetting({ windowHours: 48 }));
+    documentedAs('POST', SETTINGS, await issuer.recordSetting({ windowHours: 0 }));
+    documentedAs(
+      'POST',
+      SETTINGS,
+      await anonymous().post(SETTINGS).set('idempotency-key', key()).send({}),
+    );
+    documentedAs('POST', SETTINGS, await as.recordSetting({ expectedCurrentVersion: 1 }));
+    documentedAs('POST', SETTINGS, await issuer.recordSetting({ expectedCurrentVersion: null }));
 
     expect(problems).toEqual([]);
     // Every status the document gives a route was answered here, but the 500 nothing provokes.

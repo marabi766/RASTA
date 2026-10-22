@@ -45,6 +45,7 @@ export const TENANT_SCOPED_MODELS = [
   'WalletHold',
   'Transaction',
   'TransactionLeg',
+  'TransactionSourceQuarantine',
   'PaymentIntent',
   'PaymentReconciliationTask',
   'PaymentReconciliationResolution',

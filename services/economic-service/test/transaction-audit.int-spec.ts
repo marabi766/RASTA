@@ -38,10 +38,13 @@ describe('transaction lifecycle audit (real database)', () => {
   const asPayer = <T>(fn: () => Promise<T>) =>
     asActor({ organizationId: payer, userId: actor }, fn);
 
-  const create = (holdFunds = false) =>
+  const create = (
+    holdFunds = false,
+    transactionType: 'MARKETPLACE_ORDER' | 'LOGISTICS' = 'MARKETPLACE_ORDER',
+  ) =>
     asPayer(() =>
       wiring.transactions.create({
-        transactionType: 'MARKETPLACE_ORDER',
+        transactionType,
         counterpartyOrganizationId: payee,
         grossAmountMinor: '250000',
         currency: 'IRR',
@@ -133,7 +136,8 @@ describe('transaction lifecycle audit (real database)', () => {
 
   it('records disputes, their resolution and a refund as steps too', async () => {
     await fundWallet(wiring, payer, 1_000_000n);
-    const created = await create(true);
+    // Not an order's obligation, which only the order saga disputes (docs/24 Q-138).
+    const created = await create(true, 'LOGISTICS');
     await asPayer(() => wiring.transactions.dispute(created.id, { reason: 'not delivered' }));
     await asPayer(() =>
       wiring.transactions.resolveDispute(created.id, { resolution: 'delivered after all' }),

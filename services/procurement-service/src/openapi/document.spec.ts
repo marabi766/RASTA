@@ -47,24 +47,24 @@ describe('the committed OpenAPI document', () => {
     expect(readFileSync(committedPath, 'utf8')).toBe(generated);
   });
 
-  it('publishes exactly the operations the planned contract gives ADR-070 plan PR 1, each closed', () => {
+  it('publishes exactly the operations the planned contract gives ADR-070 plan PRs 1 to 3, each closed', () => {
     const planned = JSON.parse(
       readFileSync(join(docs, 'procurement-service.planned.openapi.json'), 'utf8'),
     ) as { paths: Record<string, Record<string, { 'x-step'?: string }>> };
-    const step1 = Object.entries(planned.paths)
+    const built = Object.entries(planned.paths)
       .flatMap(([path, item]) =>
         Object.entries(item)
-          .filter(([, operation]) => operation['x-step'] === 'PR 1')
+          .filter(([, operation]) => ['PR 1', 'PR 2', 'PR 3'].includes(operation['x-step'] ?? ''))
           .map(([method]) => `${method.toUpperCase()} ${path}`),
       )
       .sort();
 
     const published = operations();
-    expect(published.map((o) => o.key).sort()).toEqual(step1);
+    expect(published.map((o) => o.key).sort()).toEqual(built);
     expect(published.map((o) => o.key).sort()).toEqual(Object.keys(RESPONSE_BODIES).sort());
     for (const { key, operation } of published) {
       expect({ key, security: operation.security }).toEqual({ key, security: [{ bearer: [] }] });
-      const created = key === 'POST /v1/demand-requests';
+      const created = ['POST /v1/demand-requests', 'POST /v1/aggregation-settings'].includes(key);
       expect(operation.responses['200'] !== undefined).toBe(!created);
       expect(operation.responses['201'] !== undefined).toBe(created);
     }
@@ -94,12 +94,18 @@ describe('the committed OpenAPI document', () => {
       expect(reader['409']).toBeUndefined();
       expect(reader['422']).toBeUndefined();
     }
-    const withdraw = byKey.get('POST /v1/demand-requests/{id}/withdraw')!;
-    for (const status of ['200', '400', '401', '403', '404', '409', '422']) {
-      expect({ status, documented: withdraw[status] !== undefined }).toEqual({
-        status,
-        documented: true,
-      });
+    for (const command of [
+      'POST /v1/demand-requests/{id}/withdraw',
+      'POST /v1/aggregations/{id}/cancel',
+    ]) {
+      const responses = byKey.get(command)!;
+      for (const status of ['200', '400', '401', '403', '404', '409', '422']) {
+        expect({ command, status, documented: responses[status] !== undefined }).toEqual({
+          command,
+          status,
+          documented: true,
+        });
+      }
     }
     const submit = byKey.get('POST /v1/demand-requests')!;
     expect(submit['404']).toBeUndefined();
@@ -117,6 +123,7 @@ describe('the committed OpenAPI document', () => {
       'withdrawal',
       ['DEMAND_NOT_SUBMITTED', 'AGGREGATION_WINDOW_ENDED'],
     ],
+    ['POST /v1/aggregations/{id}/cancel', 'cancellation', ['AGGREGATION_NOT_READY']],
   ])('types the 422 of %s with its closed reasons', (key, area, codes) => {
     const responses = new Map(operations().map((o) => [o.key, o.operation.responses])).get(key)!;
     const schema = (

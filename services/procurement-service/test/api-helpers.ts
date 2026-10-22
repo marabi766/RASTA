@@ -16,6 +16,12 @@ import { AppModule } from '../src/app.module';
 import { PrismaService, type ExtendedPrismaClient } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { DatabaseClock } from '../src/shared/clock';
+import {
+  AggregationWindowSweeper,
+  type AggregationWindowSweeperOptions,
+} from '../src/demand/aggregation-window.sweeper';
+import { WindowSweepRepository } from '../src/demand/window-sweep.repository';
+import { WindowSweepService } from '../src/demand/window-sweep.service';
 import { databaseUrl, newProductId } from './helpers';
 
 /**
@@ -35,6 +41,8 @@ export interface ApiHarness {
   app: INestApplication;
   prisma: PrismaService;
   publisher: InMemoryEventPublisher;
+  /** A real window sweeper over this app's real repository and service; never started. */
+  sweeper(overrides?: Partial<AggregationWindowSweeperOptions>): AggregationWindowSweeper;
   close(): Promise<void>;
 }
 
@@ -159,6 +167,10 @@ export async function startApi(
     .useValue(inert)
     .overrideProvider(OutboxPurgeScheduler)
     .useValue(inert)
+    // The timer never runs here: a suite sweeps when it says so (`harness.sweeper()`), so a window
+    // a suite ends by a demand is never ended first by a sweep it did not ask for.
+    .overrideProvider(AggregationWindowSweeper)
+    .useValue(inert)
     .overrideProvider(AUTH_OPTIONS)
     .useFactory({
       factory: (): AuthGuardOptions => ({
@@ -218,6 +230,19 @@ export async function startApi(
     app,
     prisma: moduleRef.get(PrismaService),
     publisher,
+    sweeper: (overrides = {}) =>
+      new AggregationWindowSweeper(
+        moduleRef.get(WindowSweepRepository),
+        moduleRef.get(WindowSweepService),
+        {
+          intervalMs: 60_000,
+          batchSize: 20,
+          leaseSeconds: 60,
+          retryBackoffBaseSeconds: 10,
+          retryBackoffMaxSeconds: 900,
+          ...overrides,
+        },
+      ),
     close: async () => {
       await app.close();
       restoreEnvironment();
@@ -253,5 +278,28 @@ export function client(api: ApiHarness, token: string, headers: Record<string, s
     demands: (query = '') => get(`/v1/demand-requests${query}`),
     aggregation: (id: string) => get(`/v1/aggregations/${id}`),
     aggregations: (query = '') => get(`/v1/aggregations${query}`),
+    cancel: (id: string, expectedVersion: number, reason = 'the need went away', k?: string) =>
+      post(`/v1/aggregations/${id}/cancel`, { expectedVersion, reason }, k),
+    setting: () => get('/v1/aggregation-settings'),
+    recordSetting: (
+      body: {
+        windowHours?: number;
+        minQuantity?: number;
+        shortfallPolicy?: string;
+        expectedCurrentVersion?: number | null;
+      } = {},
+      k?: string,
+    ) =>
+      post(
+        '/v1/aggregation-settings',
+        {
+          windowHours: 24,
+          minQuantity: 0,
+          shortfallPolicy: 'EXTEND',
+          expectedCurrentVersion: null,
+          ...body,
+        },
+        k,
+      ),
   };
 }

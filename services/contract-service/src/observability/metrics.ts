@@ -39,6 +39,20 @@ export const contractCommandsTotal = new Counter({
 });
 
 /**
+ * What the consumer of `SETTLEMENT_COMPLETED` did with each delivery (CON-003 PR 6c): `settled` (a
+ * statement went SETTLED), `contract_settled` (and its contract with it), `replayed` (already
+ * settled by that obligation; nothing again), `not_statement` (economic's settlement is of no
+ * statement here), `refused` (economic did not confirm, or the delivery contradicts what is
+ * recorded) or `unavailable` (economic could not be asked; retried).
+ */
+export const statementSettlementsTotal = new Counter({
+  name: 'rasta_contract_statement_settlements_total',
+  help: 'SETTLEMENT_COMPLETED deliveries handled, by outcome',
+  labelNames: ['service', 'outcome'] as const,
+  registers: [registry],
+});
+
+/**
  * Commands answered from a stored response under their Idempotency-Key: a retry that did
  * nothing a second time. `endpoint` is the route template, a closed set.
  */

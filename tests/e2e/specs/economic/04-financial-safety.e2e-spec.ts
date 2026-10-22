@@ -127,7 +127,9 @@ test.describe('Financial safety through the whole stack', () => {
     const created = await tenantA.post('/v1/transactions', {
       idempotencyKey: key,
       body: {
-        transactionType: 'MARKETPLACE_ORDER',
+        // Not an order's obligation, which is disputed only through its order
+        // (docs/24 Q-138) — the next test.
+        transactionType: 'LOGISTICS',
         counterpartyOrganizationId: ORG.b,
         grossAmountMinor: '9000',
         currency: 'IRR',
@@ -164,6 +166,40 @@ test.describe('Financial safety through the whole stack', () => {
     // And the money is still where it was — held, not moved and not returned.
     const after = await tenantA.get(`/v1/transactions/${id}`);
     expect((after.body as { status: string }).status).toBe('DISPUTED');
+  });
+
+  test('an order’s transaction is disputed only through the order', async ({ tenantA }) => {
+    // docs/24 Q-138: the order's dispute records the outcome and who was
+    // responsible, and its saga mirrors the dispute onto the transaction. A
+    // dispute raised on the transaction directly is refused, and nothing moves.
+    const key = idempotencyKey('order-dispute');
+    const created = await tenantA.post('/v1/transactions', {
+      idempotencyKey: key,
+      body: {
+        transactionType: 'MARKETPLACE_ORDER',
+        counterpartyOrganizationId: ORG.b,
+        grossAmountMinor: '3000',
+        currency: 'IRR',
+        sourceType: 'E2E',
+        sourceReference: key,
+        holdFunds: true,
+      },
+    });
+    expect(created.status).toBe(201);
+    const id = (created.body as { id: string }).id;
+
+    const refused = await tenantA.post(`/v1/transactions/${id}/dispute`, {
+      idempotencyKey: idempotencyKey('order-dispute-raise'),
+      body: { reason: 'The delivered quantity does not match the recorded obligation.' },
+    });
+    expect(refused.status).toBe(422);
+    expect(errorCode(refused.body)).toBe('BUSINESS_RULE_VIOLATION');
+
+    const after = await tenantA.get(`/v1/transactions/${id}`);
+    expect(after.body as { status: string; disputeReason: string | null }).toMatchObject({
+      status: 'HELD',
+      disputeReason: null,
+    });
   });
 
   test('an amount larger than a JSON number survives the round trip', async ({ tenantA }) => {

@@ -448,7 +448,14 @@ model Transaction {
   occurredAt DateTime @map("occurred_at")
 
   /// What caused this, in the owning service's identifier space. Never a
-  /// foreign key — that row is in another database (ADR-005).
+  /// foreign key — that row is in another database (ADR-005). The types
+  /// economic-service records itself (`src/transaction/recorded-sources.ts`)
+  /// are refused on POST /v1/transactions, and `MAINTENANCE_REQUEST` /
+  /// `PAYMENT_INTENT` rows have their writer's shape
+  /// (`ck_transaction_recorded_source`, migration
+  /// `20261017130000_transaction_recorded_source`). `ORDER` is
+  /// marketplace-service's alone on that route, and a person's row cannot
+  /// carry it (`ck_transaction_order_source`).
   sourceType      String? @map("source_type")
   sourceReference String? @map("source_reference")
 
@@ -465,6 +472,12 @@ model Transaction {
   disputeReason     String?   @map("dispute_reason")
   disputeResolvedAt DateTime? @map("dispute_resolved_at")
   disputeResolvedBy String?   @map("dispute_resolved_by")
+  /// What the resolver decided, beside the reason rather than over it. NULL
+  /// until a resolution, and on rows resolved before migration
+  /// `20261016160000_transaction_dispute_resolution`, whose `disputeReason`
+  /// holds the resolution text instead — left there: the migration does not
+  /// guess which text was which (docs/23 D-060).
+  disputeResolution String?   @map("dispute_resolution")
 
   /// Who confirmed receipt, cancelled or refunded, and when (economic batch 2,
   /// item b). Every lifecycle step is also announced as
@@ -502,9 +515,10 @@ model Transaction {
   updatedAt DateTime @updatedAt @map("updated_at")
   createdBy String   @map("created_by")
 
-  legs       TransactionLeg[]
-  commission Commission?
-  settlement Settlement?
+  legs             TransactionLeg[]
+  commission       Commission?
+  settlement       Settlement?
+  sourceQuarantine TransactionSourceQuarantine?
 
   @@unique([organizationId, idempotencyKey])
   /// "What have I not settled yet" and "this order's transaction".
@@ -521,6 +535,28 @@ model Transaction {
   @@index([counterpartyOrganizationId, status])
   @@index([pricingRuleId])
   @@map("transaction")
+}
+
+/// A source key an operator took off a transaction, kept with the decision
+/// behind it (migration `20261017125000_transaction_source_quarantine`). The
+/// transaction keeps everything else and holds no key any more, so it collides
+/// with nothing. Written only by `quarantine_transaction_source(id, decision)`
+/// — the correction 20261017130000's preflight names — never by this service.
+/// Append-only (`trg_transaction_source_quarantine_append_only`).
+model TransactionSourceQuarantine {
+  transactionId   String   @id @map("transaction_id")
+  organizationId  String   @map("organization_id")
+  sourceType      String   @map("source_type")
+  /// NULL when the row claimed a reserved type with no reference (#334 r3 F1).
+  sourceReference String?  @map("source_reference")
+  decision        String
+  quarantinedBy   String   @map("quarantined_by")
+  quarantinedAt   DateTime @default(now()) @map("quarantined_at")
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([organizationId, sourceType, sourceReference], map: "ix_transaction_source_quarantine_key")
+  @@map("transaction_source_quarantine")
 }
 
 /// The transaction categories commission rules are written against

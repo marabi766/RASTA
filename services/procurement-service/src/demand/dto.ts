@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { cursorPaginationSchema, plainText } from '@rasta/contracts';
 import { SHORTFALL_POLICIES } from '../config/env';
+import { codePointLength } from '../openapi/zod-schema';
 import { AGGREGATION_STATES, DEMAND_STATES } from './demand.state-machine';
 
 /**
@@ -26,6 +27,15 @@ export const MAX_QUANTITY = 2_147_483_647;
 export const MAX_NOTE_LENGTH = 500;
 export const MIN_REASON_LENGTH = 8;
 export const MAX_REASON_LENGTH = 500;
+
+/**
+ * A reason, trimmed, of MIN_REASON_LENGTH to MAX_REASON_LENGTH characters as PostgreSQL's CHECK
+ * counts them (`char_length`: code points), both bounds (PR-338 r1 F3, r2 F2): a reason too short
+ * or too long in characters gets the same 400 whatever characters it is made of.
+ */
+function reasonText() {
+  return codePointLength(plainText(), MIN_REASON_LENGTH, MAX_REASON_LENGTH);
+}
 
 /** `POST /v1/demand-requests`: a need of the caller's organization. */
 export const submitDemandSchema = z
@@ -66,16 +76,32 @@ export const withdrawDemandSchema = z
         'The `version` the caller read: the withdrawal applies only to that version ' +
           '(409 OPTIMISTIC_LOCK_FAILED otherwise).',
       ),
-    reason: plainText()
-      .min(MIN_REASON_LENGTH)
-      .max(MAX_REASON_LENGTH)
-      .describe(
-        'Why, 8 to 500 characters, trimmed, without bidirectional control characters. Kept with ' +
-          'the demand and read through this API; never on an event.',
-      ),
+    reason: reasonText().describe(
+      'Why, 8 to 500 characters, trimmed, without bidirectional control characters. Kept with ' +
+        'the demand and read through this API; never on an event.',
+    ),
   })
   .strict();
 export type WithdrawDemandDto = z.infer<typeof withdrawDemandSchema>;
+
+/** `POST /v1/aggregations/{id}/cancel`: READY → CANCELLED; the reason is required (ADR-070 § 2). */
+export const cancelAggregationSchema = z
+  .object({
+    expectedVersion: z
+      .number()
+      .int()
+      .min(1)
+      .describe(
+        'The `version` of the aggregation the caller read: the cancellation applies only to that ' +
+          'version (409 OPTIMISTIC_LOCK_FAILED otherwise).',
+      ),
+    reason: reasonText().describe(
+      'Why, 8 to 500 characters, trimmed, without bidirectional control characters. Kept with ' +
+        'the aggregation and read through this API; never on an event.',
+    ),
+  })
+  .strict();
+export type CancelAggregationDto = z.infer<typeof cancelAggregationSchema>;
 
 export const listDemandsQuerySchema = cursorPaginationSchema
   .extend({ status: z.enum(DEMAND_STATES).optional() })
@@ -154,6 +180,11 @@ export const aggregationViewSchema = z
     extensionCount: z.number().int(),
     setting: settingSnapshotSchema,
     closedAt: z.string().nullable().describe('When the window ended, or null while OPEN.'),
+    cancelledAt: z
+      .string()
+      .nullable()
+      .describe('When the READY aggregation was cancelled (UTC, ISO 8601 with Z), or null.'),
+    cancelReason: z.string().nullable().describe('Why it was cancelled, or null.'),
     rfqId: z.string().nullable(),
     version: z.number().int(),
   })

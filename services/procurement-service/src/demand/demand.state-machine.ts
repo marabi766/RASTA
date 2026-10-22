@@ -10,8 +10,8 @@ import type { ShortfallPolicy } from '../config/env';
  *
  * Both lifecycles are declared whole now and stored as text under a `CHECK` (never an enum: a
  * value added to a PostgreSQL enum cannot be rolled back, ADR-068 § 2). COM-007 PR 1 reaches
- * `submit`, `withdraw` and the end of a window found by a demand that arrives after it; the
- * sweeper (PR 2), `cancel` (PR 2) and `issueRfq` (PR 6) join the same tables later.
+ * `submit`, `withdraw` and the end of a window found by a demand that arrives after it; PR 2 the
+ * same end made by the window sweeper, and `cancel`; `issueRfq` (PR 6) joins the same tables later.
  */
 
 export const DEMAND_STATES = ['SUBMITTED', 'WITHDRAWN', 'REFERRED', 'LAPSED'] as const;
@@ -101,6 +101,14 @@ export interface WindowSnapshot {
   readonly windowHours: number;
   readonly minQuantity: number;
   readonly shortfallPolicy: ShortfallPolicy;
+}
+
+/**
+ * What a window takes when it opens: the snapshot and the setting version it came from — null for
+ * the environment defaults (Q-10), a version of the organization's own settings otherwise (plan PR 3).
+ */
+export interface SettingSnapshot extends WindowSnapshot {
+  readonly settingVersion: number | null;
 }
 
 /** What is left in a window when it ends: the demands still SUBMITTED. */

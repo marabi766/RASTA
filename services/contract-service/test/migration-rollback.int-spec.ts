@@ -129,6 +129,7 @@ describe('each down.sql, run whole with psql --file', () => {
   const ALL = readdirSync(MIGRATIONS)
     .filter((name) => /^\d{14}_/.test(name))
     .sort();
+  const SETTLEMENT = '20261017160000_statement_settlement';
   const DECISIONS = '20261016180000_statement_decisions';
   const SUBMISSION = '20261016120000_statement_submission';
   const STATEMENTS = '20261015120000_statements';
@@ -235,6 +236,7 @@ describe('each down.sql, run whole with psql --file', () => {
     STATEMENTS,
     SUBMISSION,
     DECISIONS,
+    SETTLEMENT,
   ])(
     '%s is one transaction: it opens with BEGIN and closes with COMMIT, the lock and the check inside',
     (migration) => {
@@ -1035,6 +1037,117 @@ describe('each down.sql, run whole with psql --file', () => {
              JOIN "contract" c ON c."id" = s."contract_id" WHERE s."id" = 'STM_rb'`,
         ]),
       ).toBe('APPROVED:10');
+    });
+  });
+
+  describe('statement_settlement (CON-003 PR 6c)', () => {
+    /** One decision of STM_rb with the statement's move, as in statement_decisions. */
+    const decision = (id: string, chain: string, by: string, status: string, version: number) =>
+      `INSERT INTO "statement_decision"
+         ("id", "organization_id", "contract_id", "statement_id", "chain", "step_order", "outcome",
+          "decider_organization_id", "decider_role", "decided_by", "decided_by_issuer",
+          "decided_by_subject", "decided_at", "correlation_id")
+       VALUES ('${id}', 'ORG_E', 'CTR_rb', 'STM_rb', '${chain}', 1, 'APPROVED', 'ORG_E',
+               'ORGANIZATION_ADMIN', '${by}', 'iss', 'sub-${by}', now(), 'COR_1');
+       UPDATE "statement" SET "status" = '${status}', "version" = ${version}, "updated_at" = now()
+        WHERE "id" = 'STM_rb';`;
+    /** STM_rb submitted and taken through both chains to APPROVED, its gross in the approved total. */
+    const approvedStatement = [
+      signedContract,
+      chainPolicy('APL_T', 'contract.statement.technical'),
+      chainPolicy('APL_F', 'contract.statement.financial'),
+      draftStatement('STM_rb', 1),
+      submission(),
+      `BEGIN; ${decision('SDC_t', 'TECHNICAL', 'USR_2', 'TECHNICALLY_APPROVED', 3)} COMMIT;`,
+      `BEGIN; ${decision('SDC_f', 'FINANCIAL', 'USR_3', 'APPROVED', 4)}
+         UPDATE "contract" SET "approved_total_minor" = 10 WHERE "id" = 'CTR_rb';
+         COMMIT;`,
+    ];
+    /** economic's confirmed settlement of STM_rb's whole net, as the consumer records it. */
+    const settlement = `UPDATE "statement" SET "status" = 'SETTLED', "settled_at" = now(),
+         "settlement_obligation_id" = 'TXN_rb', "settlement_id" = 'STL_rb', "settled_amount_minor" = 10,
+         "settlement_event_id" = 'EVT_rb', "version" = 5, "updated_at" = now()
+       WHERE "id" = 'STM_rb'`;
+
+    it('over a SETTLED statement it refuses and changes nothing — with ON_ERROR_STOP and without it; over none it succeeds, to the exact previous shape, enum and guards', () => {
+      const schema = scratch(SETTLEMENT);
+      for (const sql of [...approvedStatement, settlement]) mustRun(schema, ['-c', sql]);
+      const before = shape(schema);
+      const guards = functions(schema);
+      for (const stop of [true, false]) {
+        const refused = psql(schema, ['--file', down(SETTLEMENT)], stop);
+        expect(refused.out).toMatch(
+          /down refused: 1 settled statement\(s\) exist; nothing was changed/,
+        );
+        expect(shape(schema)).toBe(before);
+        expect(functions(schema)).toBe(guards);
+      }
+
+      const unused = scratch(SETTLEMENT);
+      const result = psql(unused, ['--file', down(SETTLEMENT)]);
+      expect(result.out).toBe('');
+      expect(result.ok).toBe(true);
+      const previous = scratch(DECISIONS);
+      expect(shape(unused)).toBe(shape(previous));
+      expect(functions(unused)).toBe(functions(previous));
+      expect(shape(unused)).not.toContain('StatementStatus=SETTLED');
+    });
+
+    it('up → down → up over a schema already holding an APPROVED statement and its approved total: each way the shape and guards are exact, the rows untouched, and the old approval is settled after the second up', () => {
+      const held = (schema: string) =>
+        mustRun(schema, [
+          '-c',
+          `SELECT jsonb_build_object(
+             'contracts', (SELECT jsonb_agg(to_jsonb(c) ORDER BY c."id") FROM "contract" c),
+             'statements', (SELECT jsonb_agg(to_jsonb(s) - 'settled_at' - 'settlement_obligation_id'
+                                             - 'settlement_id' - 'settled_amount_minor'
+                                             - 'settlement_event_id' ORDER BY s."id") FROM "statement" s),
+             'decisions', (SELECT jsonb_agg(to_jsonb(d) ORDER BY d."id") FROM "statement_decision" d),
+             'chains', (SELECT jsonb_agg(to_jsonb(a) ORDER BY a."id") FROM "statement_approval_step" a)
+           )::text`,
+        ]);
+      const up = (schema: string) => {
+        mustRun(schema, ['--file', join(MIGRATIONS, SETTLEMENT, 'migration.sql')]);
+        mustRun(schema, ['-c', `INSERT INTO "_prisma_migrations" VALUES ('${SETTLEMENT}')`]);
+      };
+
+      const schema = scratch(DECISIONS);
+      for (const sql of approvedStatement) mustRun(schema, ['-c', sql]);
+      mustRun(schema, ['-c', draftStatement('STM_rb_2', 2)]);
+      const before = shape(schema);
+      const guards = functions(schema);
+      const rows = held(schema);
+      expect(rows).toContain('"APPROVED"');
+
+      up(schema);
+      const afterUp = shape(schema);
+      const afterUpGuards = functions(schema);
+      const reference = scratch(SETTLEMENT);
+      expect(afterUp).toBe(shape(reference));
+      expect(afterUpGuards).toBe(functions(reference));
+      expect(held(schema)).toBe(rows);
+
+      const result = psql(schema, ['--file', down(SETTLEMENT)]);
+      expect(result.out).toBe('');
+      expect(result.ok).toBe(true);
+      expect(shape(schema)).toBe(before);
+      expect(functions(schema)).toBe(guards);
+      expect(held(schema)).toBe(rows);
+
+      up(schema);
+      expect(shape(schema)).toBe(afterUp);
+      expect(functions(schema)).toBe(afterUpGuards);
+      expect(held(schema)).toBe(rows);
+      // A statement approved before this migration existed is settled after it, and the approved
+      // total still counts it.
+      mustRun(schema, ['-c', settlement]);
+      expect(
+        mustRun(schema, [
+          '-c',
+          `SELECT s.status::text || ':' || s.settled_amount_minor || ':' || c.approved_total_minor
+             FROM "statement" s JOIN "contract" c ON c."id" = s."contract_id" WHERE s."id" = 'STM_rb'`,
+        ]),
+      ).toBe('SETTLED:10:10');
     });
   });
 });

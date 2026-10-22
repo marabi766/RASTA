@@ -129,9 +129,11 @@ describe('the roles the portal mirrors', () => {
     expect(squash(service)).toContain("this.move(transactionId,'DISPUTE',");
     expect(squash(service)).toContain("this.move(transactionId,'RESOLVE_DISPUTE',");
     expect(squash(service)).toContain('this.authorizeAct(transaction,event)');
-    expect(squash(service)).toContain(
-      'canActFinanciallyFor(command,transaction.organizationId,this.hierarchy)',
+    expect(squash(service)).toMatch(
+      /canActFinanciallyFor\(command,transaction\.organizationId,this\.hierarchy,?\)/,
     );
+    // And an order's obligation only by the order saga (Q-138): the portal offers it no form.
+    expect(squash(service)).toContain('assertMayDisputeDirectly(transaction)');
     const functionText = (name: string) =>
       squash(
         collect(access, ts.isFunctionDeclaration)
@@ -296,10 +298,12 @@ describe('the answer the portal reads', () => {
     },
   );
 
-  it('resolving overwrites the dispute text — the caveat the screen prints stays true', () => {
-    expect(squash(service)).toContain('disputeReason:dto.resolution');
+  it('resolving keeps the reason and records the decision beside it — what the screen shows (D-060)', () => {
+    expect(squash(service)).not.toContain('disputeReason:dto.resolution');
     expect(squash(service)).toContain('disputeReason:dto.reason');
-    expect(viewFields.has('disputeResolvedAt')).toBe(false);
+    expect(squash(service)).toContain('disputeResolution:dto.resolution');
+    expect(viewFields.get('disputeResolvedAt')).toBe(true);
+    expect(viewFields.get('disputeResolution')).toBe(true);
   });
 });
 

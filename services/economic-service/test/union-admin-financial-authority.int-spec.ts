@@ -7,6 +7,7 @@ import {
   admin,
   apiTenant,
   bearer,
+  internalToken,
   startApi,
   verifyInternalToken,
   type ApiHarness,
@@ -152,7 +153,7 @@ describe('a union administrator acts financially only within its union (docs/24 
   /** A B→C transaction in `state`, moved there by B itself. */
   async function transaction(state: State): Promise<string> {
     const created = await post('/v1/transactions', asPayer(), id('ufa-txn'), {
-      transactionType: 'MARKETPLACE_ORDER',
+      transactionType: 'LOGISTICS',
       counterpartyOrganizationId: payee,
       grossAmountMinor: '9000',
       currency: 'IRR',
@@ -648,5 +649,92 @@ describe('a union administrator acts financially only within its union (docs/24 
       { transactionId },
     ).expect(201);
     expect(asked).toEqual([]);
+  });
+
+  // An order's obligation is disputed and resolved only through the order
+  // (docs/24 Q-138): the source rule is judged after this authority, so a
+  // union administrator within its subtree is refused by the source rule and
+  // one outside it by the authority, as before. The commands above use another
+  // type for that reason.
+  describe('an order’s obligation (Q-138)', () => {
+    const REFUSAL =
+      'A marketplace order’s transaction is disputed and resolved only through the order';
+    const saga = () => internalToken('marketplace-service', { organizationId: payer });
+
+    async function orderObligation(): Promise<{ orderId: string; transactionId: string }> {
+      const orderId = `ORD_UFA_${id('o')}`;
+      const created = await request(http)
+        .post('/v1/transactions')
+        .set('x-internal-token', await saga())
+        .set('idempotency-key', `order:${orderId}:hold`)
+        .send({
+          transactionType: 'MARKETPLACE_ORDER',
+          counterpartyOrganizationId: payee,
+          grossAmountMinor: '7000',
+          currency: 'IRR',
+          sourceType: 'ORDER',
+          sourceReference: orderId,
+          holdFunds: true,
+        })
+        .expect(201);
+      return { orderId, transactionId: created.body.id as string };
+    }
+
+    it('a UNION_ADMIN acting for U is refused a dispute on B’s order — 422, nothing written', async () => {
+      const { transactionId } = await orderObligation();
+      const key = id('ufa-order-dispute');
+      const before = await written(transactionId, key);
+
+      const refused = await post(`/v1/transactions/${transactionId}/dispute`, asUnionAdmin(), key, {
+        reason: 'Raised by the union for its member',
+      });
+
+      expect(refused.status).toBe(422);
+      expect(refused.body).toMatchObject({ code: 'BUSINESS_RULE_VIOLATION', message: REFUSAL });
+      // The authority was asked first, and granted: the source rule refused.
+      expect(asked.map((question) => question.scope)).toContain(union);
+      expect(await written(transactionId, key)).toEqual(before);
+    });
+
+    it('a UNION_ADMIN acting for U is refused the resolution of the saga’s dispute — 422, still DISPUTED', async () => {
+      const { orderId, transactionId } = await orderObligation();
+      await request(http)
+        .post(`/v1/transactions/${transactionId}/dispute`)
+        .set('x-internal-token', await saga())
+        .set('idempotency-key', `order:${orderId}:dispute:DSP_UFA_${id('d')}`)
+        .send({ reason: 'The goods arrived damaged' })
+        .expect(200);
+      const key = id('ufa-order-resolve');
+      const before = await written(transactionId, key);
+
+      const refused = await post(
+        `/v1/transactions/${transactionId}/resolve-dispute`,
+        asUnionAdmin(),
+        key,
+        { resolution: 'The delivery note was shown to the union' },
+      );
+
+      expect(refused.status).toBe(422);
+      expect(refused.body).toMatchObject({ code: 'BUSINESS_RULE_VIOLATION', message: REFUSAL });
+      expect(await written(transactionId, key)).toEqual(before);
+      expect(before.transaction.status).toBe('DISPUTED');
+    });
+
+    it('a UNION_ADMIN acting for S is refused by the authority first — 403, not the source rule', async () => {
+      const { transactionId } = await orderObligation();
+      const key = id('ufa-order-other');
+      const before = await written(transactionId, key);
+
+      const refused = await post(
+        `/v1/transactions/${transactionId}/dispute`,
+        asUnionAdmin(otherUnion),
+        key,
+        { reason: 'Raised by another union' },
+      );
+
+      expect(refused.status).toBe(403);
+      expect(JSON.stringify(refused.body)).not.toContain(REFUSAL);
+      expect(await written(transactionId, key)).toEqual(before);
+    });
   });
 });

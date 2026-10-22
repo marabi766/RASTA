@@ -309,7 +309,10 @@ describe('transaction and settlement API', () => {
   });
 
   it('stops settlement completely once an objection is registered', async () => {
+    // Not an order's obligation: that one is disputed only through its order
+    // (docs/24 Q-138, `transaction-dispute-source.int-spec.ts`).
     const created = await createTransaction({
+      transactionType: 'LOGISTICS',
       grossAmountMinor: '4000',
       holdFunds: true,
     }).expect(201);
@@ -363,6 +366,13 @@ describe('transaction and settlement API', () => {
     // Resolving unblocks; it does not pay. Releasing the money stays a
     // separate, deliberate act.
     expect(resolved.body.status).toBe('PENDING_SETTLEMENT');
+    // And it keeps what the dispute was about beside what was decided.
+    expect(resolved.body.disputeReason).toBe(
+      'The delivered quantity does not match the recorded obligation.',
+    );
+    expect(resolved.body.disputeResolution).toBe(
+      'The quantity was confirmed by the delivery note.',
+    );
   });
 
   it('refunds a held transaction to the payer, at the payee’s request', async () => {
