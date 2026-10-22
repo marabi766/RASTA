@@ -272,7 +272,8 @@ describe('enrichOpenApiDocument', () => {
 
     const enrichedWith = (path: string) => {
       const document = emptyDocument();
-      document.paths = { [path]: { get: { responses: {} } } } as never;
+      // As Nest emits a plain @Get: 200 (#322 documents only the declared status).
+      document.paths = { [path]: { get: nest('200') } } as never;
       const enriched = enrichOpenApiDocument(document);
       return {
         enriched,
