@@ -26,6 +26,19 @@ export function isCheckViolation(error: unknown): boolean {
   );
 }
 
+/**
+ * A trigger's own refusal, `RAISE EXCEPTION '<guard>: …' USING ERRCODE = 'check_violation'`.
+ *
+ * Prisma reports one from a model query as an unknown request error, with no code: the SQLSTATE
+ * and the message are only in its text (`PostgresError { code: "23514", message: "<guard>: …" }`).
+ * Both are matched — the check_violation and the guard's name at the head of the message — so
+ * another guard's refusal, a CHECK constraint, or any other 23514 is not this one.
+ */
+export function isGuardRefusal(error: unknown, guard: string): boolean {
+  const message = (error as { message?: unknown } | null)?.message;
+  return typeof message === 'string' && message.includes(`code: "23514", message: "${guard}: `);
+}
+
 /** The constraint a violation names, when the driver reports one. */
 export function violatedConstraint(error: unknown): string | undefined {
   const meta = (error as { meta?: { target?: unknown } } | null)?.meta?.target;

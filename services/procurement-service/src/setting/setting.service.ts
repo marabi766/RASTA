@@ -6,7 +6,7 @@ import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.servi
 import { EventPublisher } from '../events/publisher';
 import { DatabaseClock } from '../shared/clock';
 import type { ClaimFence } from '../shared/idempotency';
-import { isUniqueViolation } from '../shared/prisma-errors';
+import { isGuardRefusal, isUniqueViolation } from '../shared/prisma-errors';
 import { ENV } from '../tokens';
 import type { ProcurementEnv, ShortfallPolicy } from '../config/env';
 import { snapshotOf } from '../demand/demand.repository';
@@ -45,8 +45,8 @@ export class AggregationSettingService {
    * A new version, the next after the one the caller saw (`expectedCurrentVersion`), with its
    * `AGGREGATION_SETTING_CHANGED` in the same transaction. Any other current version — another
    * writer got there first — is 409 OPTIMISTIC_LOCK_FAILED and nothing is written; so is the loser
-   * of two writers that both read the same version (the primary key, under the guard that numbers
-   * versions without a gap).
+   * of two writers that both read the same version, whichever way their transactions interleave
+   * (READ COMMITTED; {@link isLostVersionRace}).
    */
   async record(
     dto: RecordAggregationSettingDto,
@@ -96,7 +96,7 @@ export class AggregationSettingService {
         return fence.complete(tx, this.viewOf(recorded));
       });
     } catch (error) {
-      if (isUniqueViolation(error)) {
+      if (isLostVersionRace(error)) {
         throw RastaError.optimisticLockFailed('AggregationSetting', acting.organizationId);
       }
       throw error;
@@ -123,6 +123,24 @@ export class AggregationSettingService {
       : { ...snapshotOf(this.env), settingVersion: null };
     return { ...snapshot, recordedAt: setting ? setting.recordedAt.toISOString() : null };
   }
+}
+
+/**
+ * The insert of version n + 1 lost to another writer's n + 1 — after this transaction read n and
+ * matched `expectedCurrentVersion`, so the caller's precondition no longer holds: 409, as if the
+ * other version had been read. Two refusals mean exactly that, one per order of commit:
+ *
+ * - the other writer committed before this insert: `aggregation_setting_guard`, a BEFORE trigger,
+ *   sees n + 1 and refuses with `ck_aggregation_setting_next_version` (check_violation) — the
+ *   primary key is never reached;
+ * - the other writer's row was not yet committed when the guard ran: the guard sees n and passes,
+ *   then the primary key waits on that row and, once it commits, is a unique violation (P2002).
+ *
+ * Nothing else is: the guard's other refusal (append-only) or any other check_violation stays the
+ * 500 it is. The transaction rolls back either way, and the idempotency claim is released.
+ */
+function isLostVersionRace(error: unknown): boolean {
+  return isUniqueViolation(error) || isGuardRefusal(error, 'ck_aggregation_setting_next_version');
 }
 
 function settingOf(setting: AggregationSetting): SettingSnapshot {

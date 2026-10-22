@@ -1,5 +1,7 @@
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { runUnscoped } from '@rasta/nest-common';
+import { AggregationSettingRepository } from '../src/setting/setting.repository';
+import { isGuardRefusal, isUniqueViolation } from '../src/shared/prisma-errors';
 import { actor, buyer, client, key, startApi, TestClock, type ApiHarness } from './api-helpers';
 import { cleanup, newOrganizationId, newProductId } from './helpers';
 
@@ -181,6 +183,203 @@ describe('aggregation settings (plan PR 3)', () => {
     expect(racing.map((r) => r.status).sort()).toEqual([201, 409]);
     expect((await versions(organizationId)).map((v) => v.version)).toEqual([1, 2]);
     expect(await events(organizationId)).toHaveLength(2);
+  });
+
+  /**
+   * Two writers that both read version n, in each order of commit the database can give them
+   * (PR-348 r1 F1). Forced, not hoped for: a spy on the real repository parks one writer inside
+   * its transaction until the test lets it go. The loser is 409 either way, writes no version and
+   * no event, and its released key records afterwards.
+   */
+  describe('two writers that read the same version (PR-348 r1 F1)', () => {
+    let repository: AggregationSettingRepository;
+    const releases: Array<() => void> = [];
+    const gate = () => {
+      let open!: () => void;
+      const opened = new Promise<void>((resolve) => (open = resolve));
+      releases.push(open);
+      return { open, opened };
+    };
+
+    beforeAll(() => {
+      repository = api.app.get(AggregationSettingRepository);
+    });
+
+    afterEach(() => {
+      // A failed assertion must not strand a parked request (afterAll would wait on it).
+      for (const open of releases.splice(0)) open();
+      jest.restoreAllMocks();
+    });
+
+    /** Each `record` the service makes for `organizationId`, and how it ended. */
+    const watchInserts = (organizationId: string) => {
+      const outcomes: unknown[] = [];
+      const record = repository.record.bind(repository);
+      const spy = jest.spyOn(repository, 'record');
+      spy.mockImplementation(async (tx, setting) => {
+        try {
+          return await record(tx, setting);
+        } catch (error) {
+          if (setting.organizationId === organizationId) outcomes.push(error);
+          throw error;
+        }
+      });
+      return { outcomes, spy, record };
+    };
+
+    /** Versions 1..n recorded first, so the race is for n + 1. */
+    const atVersion = async (organizationId: string, n: number) => {
+      for (let version = 1; version <= n; version++) {
+        await admin(organizationId)
+          .recordSetting({ windowHours: version, expectedCurrentVersion: version - 1 || null })
+          .expect(201);
+      }
+    };
+
+    const loserLeftNoTrace = async (
+      organizationId: string,
+      n: number,
+      setter: ReturnType<typeof admin>,
+      loserKey: string,
+    ) => {
+      expect((await versions(organizationId)).map((v) => [v.version, v.windowHours])).toEqual([
+        ...Array.from({ length: n }, (_, i) => [i + 1, i + 1]),
+        [n + 1, 30],
+      ]);
+      const changed = await events(organizationId);
+      expect(changed).toHaveLength(n + 1);
+      expect(changed[n]).toMatchObject({
+        settingVersion: n + 1,
+        previousVersion: n || null,
+        windowHours: 30,
+      });
+      // The loser's claim was released, not kept: its key takes another body and records.
+      const retried = await setter.recordSetting(
+        { windowHours: 31, expectedCurrentVersion: n + 1 },
+        loserKey,
+      );
+      expect(retried.status).toBe(201);
+      expect(retried.body.settingVersion).toBe(n + 2);
+      expect(await events(organizationId)).toHaveLength(n + 2);
+    };
+
+    it.each([
+      ['the first version', 0],
+      ['a later version', 1],
+    ])(
+      '%s: B reads n, A commits n + 1, B resumes — the guard refuses B before the primary key: 409',
+      async (_, n) => {
+        const organizationId = org();
+        await atVersion(organizationId, n);
+        const setter = admin(organizationId);
+        const inserts = watchInserts(organizationId);
+
+        // Park the first writer (B) right after it read the current version, in its transaction.
+        const bRead = gate();
+        const resumeB = gate();
+        let parked = false;
+        const current = repository.current.bind(repository);
+        jest.spyOn(repository, 'current').mockImplementation(async (organization, tx) => {
+          const read = await current(organization, tx);
+          if (organization === organizationId && tx !== undefined && !parked) {
+            parked = true;
+            bRead.open();
+            await resumeB.opened;
+          }
+          return read;
+        });
+
+        const bKey = key();
+        const b = setter
+          .recordSetting({ windowHours: 31, expectedCurrentVersion: n || null }, bKey)
+          .then((response) => response);
+        await bRead.opened;
+        expect((await versions(organizationId)).map((v) => v.version)).toHaveLength(n);
+
+        const a = await setter.recordSetting({
+          windowHours: 30,
+          expectedCurrentVersion: n || null,
+        });
+        expect(a.status).toBe(201);
+        expect(a.body.settingVersion).toBe(n + 1);
+
+        resumeB.open();
+        const lost = await b;
+        expect([lost.status, lost.body.code]).toEqual([409, 'OPTIMISTIC_LOCK_FAILED']);
+        // B passed its own version check (it read n) and was stopped by the guard, not the key.
+        expect(inserts.outcomes).toHaveLength(1);
+        expect(isGuardRefusal(inserts.outcomes[0], 'ck_aggregation_setting_next_version')).toBe(
+          true,
+        );
+        expect(isUniqueViolation(inserts.outcomes[0])).toBe(false);
+
+        await loserLeftNoTrace(organizationId, n, setter, bKey);
+      },
+    );
+
+    it.each([
+      ['the first version', 0],
+      ['a later version', 1],
+    ])(
+      '%s: A inserts n + 1 and waits, B passes the guard and waits on A’s row, A commits — the primary key refuses B: 409',
+      async (_, n) => {
+        const organizationId = org();
+        await atVersion(organizationId, n);
+        const setter = admin(organizationId);
+        const inserts = watchInserts(organizationId);
+
+        // Park the first writer (A) after its insert, before its commit.
+        const aInserted = gate();
+        const resumeA = gate();
+        let parked = false;
+        inserts.spy.mockImplementation(async (tx, setting) => {
+          try {
+            const row = await inserts.record(tx, setting);
+            if (setting.organizationId === organizationId && !parked) {
+              parked = true;
+              aInserted.open();
+              await resumeA.opened;
+            }
+            return row;
+          } catch (error) {
+            if (setting.organizationId === organizationId) inserts.outcomes.push(error);
+            throw error;
+          }
+        });
+
+        const a = setter
+          .recordSetting({ windowHours: 30, expectedCurrentVersion: n || null })
+          .then((response) => response);
+        await aInserted.opened;
+
+        const bKey = key();
+        const b = setter
+          .recordSetting({ windowHours: 31, expectedCurrentVersion: n || null }, bKey)
+          .then((response) => response);
+        // B is waiting on A's uncommitted row: its insert holds no answer until A ends.
+        const deadline = Date.now() + 10_000;
+        for (;;) {
+          const [{ waiting }] = await api.prisma.client.$queryRaw<Array<{ waiting: number }>>`
+            SELECT count(*)::int AS waiting FROM pg_stat_activity
+             WHERE datname = current_database() AND wait_event_type = 'Lock'
+               AND query LIKE 'INSERT INTO "public"."aggregation_setting"%'`;
+          if (waiting === 1) break;
+          if (Date.now() > deadline) throw new Error('B never waited on A’s row');
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+
+        resumeA.open();
+        const won = await a;
+        expect(won.status).toBe(201);
+        expect(won.body.settingVersion).toBe(n + 1);
+        const lost = await b;
+        expect([lost.status, lost.body.code]).toEqual([409, 'OPTIMISTIC_LOCK_FAILED']);
+        expect(inserts.outcomes).toHaveLength(1);
+        expect(isUniqueViolation(inserts.outcomes[0])).toBe(true);
+
+        await loserLeftNoTrace(organizationId, n, setter, bKey);
+      },
+    );
   });
 
   it('is idempotent under its key: the same answer, one version; another body under it is refused', async () => {

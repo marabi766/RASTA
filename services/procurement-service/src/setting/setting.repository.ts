@@ -24,7 +24,8 @@ export class AggregationSettingRepository {
 
   /**
    * Writes `version`, which the guard accepts only as the next one: a writer that raced another to
-   * the same number meets the primary key (a unique violation) instead.
+   * the same number meets the guard's `ck_aggregation_setting_next_version` (the other committed
+   * first) or the primary key (it had not yet) — both 409 in the service.
    */
   record(
     tx: ExtendedPrismaClient,
