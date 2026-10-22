@@ -47,7 +47,9 @@ describe('aggregation settings (plan PR 3)', () => {
     (
       await api.prisma.client.outboxMessage.findMany({
         where: { organizationId, eventName: 'AGGREGATION_SETTING_CHANGED' },
-        orderBy: { createdAt: 'asc' },
+        // The clock is pinned, so two versions' events can share an instant: their stream (the
+        // organization's) orders them exactly.
+        orderBy: [{ createdAt: 'asc' }, { streamSeq: 'asc' }],
       })
     ).map((row) => eventEnvelopeSchema.parse(row.payload).payload as Record<string, unknown>);
   const versions = (organizationId: string) =>
