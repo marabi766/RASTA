@@ -708,6 +708,11 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 | **Scale**        | نوشتن‌سنگین در `ledger_entry` → پارتیشن ماهانه، فقط الحاقی.                                                                                                                                                                                                                                            |
 | **Failure**      | افت آن پرداخت را می‌خواباند. **هیچ داده مالی گم نمی‌شود** — Outbox و Saga تضمین می‌کنند.                                                                                                                                                                                                               |
 
+> **خواندن داخلی تعهد صورت‌وضعیت** (ADR-068 § ۶ (۳)، پیش‌نیاز CON-003 PR 6c):
+>
+> - `GET /v1/internal/obligations/by-source/STATEMENT/{statementId}` فقط برای توکن داخلیِ `contract-service` امضاشده برای **پرداخت‌کننده (کارفرما)** (الگوی ADR-061 § ۴، همان `GET /v1/internal/statements/{id}`): هر کاربر، هر سرویس دیگر و توکن بی سازمان `403`؛ هر سازمان دیگر (ذی‌نفع هم) `404` مثل نبودن.
+>   پاسخ از ردیف‌های economic و با هر وضعیتی: شناسهٔ تعهد، `statementId`، وضعیت، مبلغ (رشته، واحد فرعی)، ارز، دو طرف، تسویه و لحظه‌اش، و `fullySettled` (فقط `SETTLED` با تسویهٔ کل مبلغ). پایان تسویه را `SETTLEMENT_COMPLETED` اعلام می‌کند، نه `PAYMENT_COMPLETED` (شارژ کیف پول).
+
 ---
 
 ## ۴٫۱۵ سرویس‌های پشتیبان
@@ -825,6 +830,7 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 | **Consumes**    | همه Topicهای دامنه                                                                                                                           |
 | **مرز امنیتی**  | **تنها سرویسی که `AUDITOR` به آن دسترسی دارد** — و فقط به Endpointهای تجمیعی.                                                                |
 | **CONSTRAINT**  | KPIهای وابسته به خط مبنا تا پر شدن `baseline_metric` وضعیت `INSUFFICIENT_BASELINE` برمی‌گردانند — **نه صفر، نه تخمین.**                      |
+| **ADR**         | [ADR-071](adr/ADR-071-analytics-read-models-and-governed-views.md) — `Proposed`. فقط Kafka؛ Q-141، Q-142                                     |
 
 ---
 

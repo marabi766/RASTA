@@ -7,6 +7,7 @@ import {
 } from '@rasta/contracts';
 import { queryBoolean } from '@rasta/config';
 import { cursorQueryParameter } from '../shared/cursor';
+import { isEconomicRecordedSource, RECORDED_SOURCE_REFUSAL } from './recorded-sources';
 
 /**
  * Request and response shapes for transactions.
@@ -48,15 +49,6 @@ export const TRANSACTION_STATUSES = [
  */
 export const STATEMENT_SOURCE_TYPE = 'STATEMENT';
 
-/**
- * Source types no HTTP caller may claim. A caller who recorded
- * `STATEMENT/<id>` first would hold the key the consumer needs, and the real
- * approval would then find that row — with the caller's amount — and record
- * nothing (I4). `ck_transaction_statement_obligation` refuses it at the
- * database as well.
- */
-export const CONSUMER_RECORDED_SOURCE_TYPES: readonly string[] = [STATEMENT_SOURCE_TYPE];
-
 export const createTransactionSchema = z
   .object({
     /**
@@ -87,16 +79,11 @@ export const createTransactionSchema = z
      * when it occurred (docs/10 § 10.7). Defaults to now.
      */
     occurredAt: z.string().datetime().optional(),
-    /** The owning service's identifier space — an order id, a statement id. */
-    sourceType: z
-      .string()
-      .trim()
-      .min(1)
-      .max(64)
-      .refine((value) => !CONSUMER_RECORDED_SOURCE_TYPES.includes(value), {
-        message: 'This source type is recorded only from its owning service',
-      })
-      .optional(),
+    /**
+     * The owning service's identifier space — an order id, a statement id.
+     * Reserved types are refused below (`recorded-sources.ts`).
+     */
+    sourceType: z.string().trim().min(1).max(64).optional(),
     sourceReference: z.string().trim().min(1).max(128).optional(),
     /**
      * Reserve the funds immediately.
@@ -109,7 +96,18 @@ export const createTransactionSchema = z
     /** Mirrors the `Idempotency-Key` header onto the row, for tracing. */
     idempotencyKey: z.string().trim().min(8).max(128).optional(),
   })
-  .strict();
+  .strict()
+  // No caller — person or service — may record under a source type
+  // economic-service records itself from the owner (`recorded-sources.ts`).
+  .superRefine((dto, ctx) => {
+    if (dto.sourceType !== undefined && isEconomicRecordedSource(dto.sourceType)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['sourceType'],
+        message: RECORDED_SOURCE_REFUSAL,
+      });
+    }
+  });
 
 export type CreateTransactionDto = z.infer<typeof createTransactionSchema>;
 
@@ -117,6 +115,12 @@ export const listTransactionsQuerySchema = z
   .object({
     status: z.enum(TRANSACTION_STATUSES).optional(),
     transactionType: z.enum([...TRANSACTION_TYPES, 'WALLET_TOP_UP']).optional(),
+    /**
+     * Exactly this source type. With `sourceReference`, one source fact: at
+     * most one row per payer (`ux_transaction_source_fact`), however many
+     * other rows name the same reference under other types.
+     */
+    sourceType: z.string().trim().min(1).max(64).optional(),
     sourceReference: z.string().trim().min(1).max(128).optional(),
     from: z.string().datetime().optional(),
     to: z.string().datetime().optional(),

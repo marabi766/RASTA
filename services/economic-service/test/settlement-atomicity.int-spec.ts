@@ -232,6 +232,7 @@ describe('settlement atomicity (real database)', () => {
           occurredAt: new Date(),
           sourceType: 'MAINTENANCE_REQUEST',
           sourceReference: `MNT_ITEST_${Date.now()}`,
+          causationId: `EVT_ITEST_${Date.now()}`,
         }),
       ),
     );
@@ -270,6 +271,7 @@ describe('settlement atomicity (real database)', () => {
           occurredAt: new Date(),
           sourceType: 'MAINTENANCE_REQUEST',
           sourceReference: `MNT_ITEST_POOR_${Date.now()}`,
+          causationId: `EVT_ITEST_POOR_${Date.now()}`,
         }),
       ),
     );

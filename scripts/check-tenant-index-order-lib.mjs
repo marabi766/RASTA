@@ -213,6 +213,19 @@ export const EXEMPTIONS = {
         "the consignee's own shipments (GET /v1/shipments, /{id}, /{id}/tracking; ADR-056 § 5): a shipment belongs to the organization that owns its origin warehouse, but the consignee asking is another tenant, whose organization is consignee_organization_id — the column this index leads with, and the predicate of that read (ShipmentRepository visibleTo, raw SQL)",
     },
   },
+  // procurement: the window sweeper's two queues (COM-007 PR 2, ADR-070 § 2).
+  procurement: {
+    ix_demand_aggregation_sweep_open: {
+      index: 'demand_aggregation (closes_at, id)',
+      reason:
+        'the window sweeper claims OPEN windows past closes_at for every tenant at once, earliest end first (WindowSweepRepository.claimDue, runUnscoped); a partial index on status = OPEN — one per (organization, product) — so it is small, and each window is then ended under its own organization_id',
+    },
+    ix_demand_aggregation_sweep_follow: {
+      index: 'demand_aggregation (closes_at, id)',
+      reason:
+        'the window sweeper claims ended windows whose demands are still following them for every tenant at once (WindowSweepRepository.claimDue, runUnscoped); a partial index on demands_to_follow > 0, empty but for windows larger than one batch, and each is then worked under its own organization_id',
+    },
+  },
   contract: {
     ix_contract_contractor: {
       index: 'contract (contractor_organization_id, id)',

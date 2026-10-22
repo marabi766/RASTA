@@ -49,7 +49,7 @@ describe('tenant isolation and authorization', () => {
     expect(events).toBe(1);
   };
 
-  /** Every route of PR 1, as one caller: [label, response]. */
+  /** Every route of PRs 1 and 2, as one caller: [label, response]. */
   const everyRoute = async (as: ReturnType<typeof client>) =>
     [
       ['GET demand', await as.demand(demand.id)],
@@ -58,6 +58,7 @@ describe('tenant isolation and authorization', () => {
       ['GET aggregations', await as.aggregations()],
       ['POST withdraw', await as.withdraw(demand.id, 1)],
       ['POST submit', await as.submit({ quantity: 1 })],
+      ['POST cancel', await as.cancel(demand.aggregationId, 1)],
     ] as const;
 
   it('a third organization: 404 on every route by id, the same as a missing id; its lists show nothing of the buyer', async () => {
@@ -67,6 +68,7 @@ describe('tenant isolation and authorization', () => {
       await as.demand(demand.id),
       await as.aggregation(demand.aggregationId),
       await as.withdraw(demand.id, 1),
+      await client(api, actor(third, ['ORGANIZATION_ADMIN'])).cancel(demand.aggregationId, 1),
     ]) {
       expect(response.status).toBe(404);
       expect(response.body.code).toBe('NOT_FOUND');
@@ -140,8 +142,13 @@ describe('tenant isolation and authorization', () => {
         .set('x-internal-token', token)
         .set('idempotency-key', key())
         .send({ productId: newProductId(), quantity: 1 }),
+      await http()
+        .post(`/v1/aggregations/${demand.aggregationId}/cancel`)
+        .set('x-internal-token', token)
+        .set('idempotency-key', key())
+        .send({ expectedVersion: 1, reason: 'a service has no say here' }),
     ];
-    expect(responses.map((r) => r.status)).toEqual([403, 403, 403, 403, 403]);
+    expect(responses.map((r) => r.status)).toEqual([403, 403, 403, 403, 403, 403]);
     await unchanged();
   });
 
@@ -163,6 +170,8 @@ describe('tenant isolation and authorization', () => {
     expect((await as.demand(demand.id)).status).toBe(200);
     expect((await as.submit({ quantity: 1 })).status).toBe(403);
     expect((await as.withdraw(demand.id, 1)).status).toBe(403);
+    const admin = client(api, actor(owner, ['ORGANIZATION_ADMIN'], { rastaUserId: null }));
+    expect((await admin.cancel(demand.aggregationId, 1)).status).toBe(403);
     await unchanged();
   });
 

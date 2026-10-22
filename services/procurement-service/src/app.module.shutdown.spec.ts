@@ -6,10 +6,11 @@ import {
   type OutboxStopOptions,
 } from '@rasta/nest-common';
 import { AppModule } from './app.module';
+import { AggregationWindowSweeper } from './demand/aggregation-window.sweeper';
 import { ENV } from './tokens';
 
 /**
- * D-052: the relay and the purge stop together in the destroy phase, by one deadline inside
+ * D-052: the relay, the purge and the window sweeper stop together in the destroy phase, by one deadline inside
  * SHUTDOWN_TIMEOUT_MS, and `onApplicationShutdown` only joins that stop. This reads the wiring
  * without a database or a broker: AppModule's own factory, called with stand-ins for what it
  * injects. The publisher closing last is
@@ -34,7 +35,7 @@ function outboxShutdownProvider(): FactoryProvider {
 }
 
 describe('AppModule shutdown wiring (D-052)', () => {
-  it('stops the relay and the purge by one deadline', async () => {
+  it('stops the relay, the purge and the window sweeper by one deadline', async () => {
     const provider = outboxShutdownProvider();
     const inject = provider.inject ?? [];
     const stops = new Map<unknown, (OutboxStopOptions | undefined)[]>();
@@ -54,12 +55,10 @@ describe('AppModule shutdown wiring (D-052)', () => {
     const before = Date.now();
     await shutdown.stop();
 
-    expect(inject).toEqual(expect.arrayContaining([OutboxRelay, OutboxPurgeScheduler]));
-    expect(stops.get(OutboxRelay)).toHaveLength(1);
-    expect(stops.get(OutboxPurgeScheduler)).toHaveLength(1);
-    const deadlines = new Set(
-      [OutboxRelay, OutboxPurgeScheduler].map((token) => stops.get(token)?.[0]?.deadlineAt),
-    );
+    const stopped = [OutboxRelay, OutboxPurgeScheduler, AggregationWindowSweeper];
+    expect(inject).toEqual(expect.arrayContaining(stopped));
+    for (const token of stopped) expect(stops.get(token)).toHaveLength(1);
+    const deadlines = new Set(stopped.map((token) => stops.get(token)?.[0]?.deadlineAt));
     expect(deadlines.size).toBe(1);
     const [deadlineAt] = [...deadlines];
     expect(deadlineAt).toBeGreaterThanOrEqual(before + 23_000);

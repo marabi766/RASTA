@@ -35,12 +35,13 @@ describe('source fact uniqueness — concurrency, duplicate and tenant isolation
     occurredAt: new Date(),
     sourceType: 'MAINTENANCE_REQUEST',
     sourceReference: reference,
+    causationId: ulid(),
   });
 
-  const rowsFor = (reference: string) =>
+  const rowsFor = (reference: string, sourceType = 'MAINTENANCE_REQUEST') =>
     runUnscoped('the suite counts rows for one fact across the whole table', () =>
       prisma.client.transaction.findMany({
-        where: { sourceType: 'MAINTENANCE_REQUEST', sourceReference: reference },
+        where: { sourceType, sourceReference: reference },
         include: { legs: true },
       }),
     );
@@ -125,12 +126,16 @@ describe('source fact uniqueness — concurrency, duplicate and tenant isolation
     expect(await rowsFor(reference)).toHaveLength(1);
   });
 
+  // A source type a caller owns: MAINTENANCE_REQUEST is economic-service's
+  // own and refused over HTTP (recorded-source-reservation.int-spec.ts).
   describe('over HTTP', () => {
     let harness: ApiHarness;
     let http: Server;
     const payer = apiTenant('SRC-PAYER');
     const payee = apiTenant('SRC-PAYEE');
     const other = apiTenant('SRC-OTHER');
+    const SOURCE = 'ITEST_FACT';
+    const httpRowsFor = (reference: string) => rowsFor(reference, SOURCE);
 
     const create = (organizationId: string, reference: string) =>
       request(http)
@@ -142,7 +147,7 @@ describe('source fact uniqueness — concurrency, duplicate and tenant isolation
           counterpartyOrganizationId: payee,
           grossAmountMinor: '9000',
           currency: 'IRR',
-          sourceType: 'MAINTENANCE_REQUEST',
+          sourceType: SOURCE,
           sourceReference: reference,
         });
 
@@ -162,7 +167,7 @@ describe('source fact uniqueness — concurrency, duplicate and tenant isolation
 
       const duplicate = await create(payer, reference).expect(409);
       expect(duplicate.body.code).toBe('CONFLICT');
-      expect(await rowsFor(reference)).toHaveLength(1);
+      expect(await httpRowsFor(reference)).toHaveLength(1);
     });
 
     it('records one obligation when two different keys race for the same fact', async () => {
@@ -173,7 +178,7 @@ describe('source fact uniqueness — concurrency, duplicate and tenant isolation
 
       const statuses = responses.map((response) => response.status).sort();
       expect(statuses).toEqual([201, 409, 409, 409, 409, 409]);
-      expect(await rowsFor(reference)).toHaveLength(1);
+      expect(await httpRowsFor(reference)).toHaveLength(1);
     });
 
     it('does not let one tenant block another tenant’s fact — tenant isolation', async () => {
@@ -184,7 +189,7 @@ describe('source fact uniqueness — concurrency, duplicate and tenant isolation
       await create(other, reference).expect(201);
       await create(payer, reference).expect(201);
 
-      const rows = await rowsFor(reference);
+      const rows = await httpRowsFor(reference);
       expect(rows.map((row) => row.organizationId).sort()).toEqual([other, payer].sort());
     });
   });

@@ -10,6 +10,7 @@ import { AggregationController, DemandController } from '../demand/demand.contro
 import { DemandService } from '../demand/demand.service';
 import {
   aggregationViewSchema,
+  cancelAggregationSchema,
   demandViewSchema,
   listAggregationsQuerySchema,
   listDemandsQuerySchema,
@@ -73,12 +74,14 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'POST /v1/demand-requests/{id}/withdraw': { status: '200', schema: demandViewSchema },
   'GET /v1/aggregations': { status: '200', schema: cursorPageOf(aggregationViewSchema) },
   'GET /v1/aggregations/{id}': { status: '200', schema: aggregationViewSchema },
+  'POST /v1/aggregations/{id}/cancel': { status: '200', schema: aggregationViewSchema },
 };
 
 /** Every command takes a strict body. */
 const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'POST /v1/demand-requests': submitDemandSchema,
   'POST /v1/demand-requests/{id}/withdraw': withdrawDemandSchema,
+  'POST /v1/aggregations/{id}/cancel': cancelAggregationSchema,
 };
 
 /** The commands that require an `Idempotency-Key` (docs/06 § 6.8): every one. */
@@ -88,6 +91,7 @@ const IDEMPOTENT_COMMANDS: ReadonlySet<string> = new Set(Object.keys(REQUEST_BOD
 const REFUSAL_AREA_OF: Record<string, RefusalArea> = {
   'POST /v1/demand-requests': 'submission',
   'POST /v1/demand-requests/{id}/withdraw': 'withdrawal',
+  'POST /v1/aggregations/{id}/cancel': 'cancellation',
 };
 
 /** `Retry-After` on a command's in-flight 409: optional, only that 409 carries it. */
@@ -123,7 +127,8 @@ function refusalErrorSchema(area: RefusalArea, status: number): z.ZodTypeAny | u
 
 const REFUSAL_DETAILS_NOTE =
   ' When refused for a closed reason, `details` names it: one entry, `path` the area ' +
-  '(submission or withdrawal) and `code` the reason, one of those listed here. Branch on `code` and ' +
+  '(submission, withdrawal or cancellation) and `code` the reason, one of those listed here. ' +
+  'Branch on `code` and ' +
   '`details[].code`, never on `message`.';
 
 const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
@@ -134,10 +139,10 @@ const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
   400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
-  403: 'Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.',
+  403: 'Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.',
   404: 'Not found — also returned for a demand or aggregation of any other organization, so its existence is never disclosed.',
-  409: 'On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw, `expectedVersion` that is not the demand’s current version (OPTIMISTIC_LOCK_FAILED — reload and retry).',
-  422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen).',
+  409: 'On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on cancel, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry).',
+  422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY).',
   500: 'Unexpected server error.',
 };
 
@@ -149,8 +154,10 @@ const DESCRIPTION =
   'half-open [openedAt, closesAt) by the database clock read after the aggregation’s lock: a ' +
   'demand at or after closesAt never joins it, and ends it instead — READY when it holds a demand ' +
   'and reaches its threshold (a quantity, never an amount), otherwise its snapshot’s shortfall ' +
-  'policy: EXTEND, REFER (a fact only) or CLOSE — before joining the window that follows. Each ' +
-  'aggregation keeps the settings it opened with. Aggregation never spans organizations (Q-119); ' +
+  'policy: EXTEND, REFER (a fact only) or CLOSE — before joining the window that follows. A ' +
+  'window no demand arrives after is ended on time by the window sweeper, with the same ' +
+  'transition. A READY aggregation may be cancelled with a reason by a role of the RFQ issuer. ' +
+  'Each aggregation keeps the settings it opened with. Aggregation never spans organizations (Q-119); ' +
   'only the buyer’s own organization reads or changes its demands, anyone else gets 404. Every ' +
   'change is an event on rasta.procurement.v1 — identifiers, quantities and instants, never a ' +
   'note, a reason or an amount — and so an audit record. RFQs, sealed quotations, evaluation and ' +

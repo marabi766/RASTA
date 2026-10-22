@@ -82,6 +82,7 @@
 | [068](adr/ADR-068-contract-lifecycle-and-boundary.md)                       | چرخهٔ قرارداد و مرز `contract-service`              | **Proposed**                          | CON-003؛ Q-95 تا Q-97                                        |
 | [069](adr/ADR-069-portal-relays-document-uploads.md)                        | بارگذاری مدرک از سرور پورتال؛ نه مرورگر             | **Proposed**                          | EXP-002 برش ۷؛ ADR-014؛ Q-98                                 |
 | [070](adr/ADR-070-procurement-service-boundary-and-lifecycle.md)            | مرز `procurement-service`: تجمیع، RFQ و سفارش خرید  | **Proposed** (فقط طراحی)              | COM-007؛ Q-10، Q-119 تا Q-124؛ D-055                         |
+| [071](adr/ADR-071-analytics-read-models-and-governed-views.md)              | مرز `analytics-service` و نمای حاکمیتی تجمیعی       | **Proposed**                          | RUN-001؛ Q-141، Q-142                                        |
 
 ---
 
