@@ -171,13 +171,26 @@ describe('approval policy governance (Q-70 (7), decided)', () => {
         organizationId,
       );
 
-    it('a retry with the same key and body returns the first policy and writes nothing', async () => {
+    it('a retry with the same key and body returns the first policy and writes nothing; another person under it is refused (PR-350 r1 F3)', async () => {
       const { union, dehyari } = tree();
-      const first = await asSetter(union, () => w.policies.create(policyFor(dehyari), 'key-1'));
+      const author = newUserId();
+      const first = await asSetter(
+        union,
+        () => w.policies.create(policyFor(dehyari), 'key-1'),
+        author,
+      );
       w.hierarchy.asked.length = 0;
-      const again = await asSetter(union, () => w.policies.create(policyFor(dehyari), 'key-1'));
+      const again = await asSetter(
+        union,
+        () => w.policies.create(policyFor(dehyari), 'key-1'),
+        author,
+      );
       expect(again).toEqual(first);
       expect(w.hierarchy.asked).toEqual([]); // a replay runs nothing
+      // Another person of the same organization, the same key and body: not the author's answer.
+      await expect(
+        asSetter(union, () => w.policies.create(policyFor(dehyari), 'key-1'), newUserId()),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
       expect(await policyRows(dehyari)).toHaveLength(1);
       const created = (await outboxFor(w.prisma, dehyari)).filter(
         (row) => row.eventName === 'APPROVAL_POLICY_CREATED',

@@ -92,7 +92,7 @@ export class NeedService {
     return this.idempotency.run(
       ADD_NEED_ENDPOINT,
       idempotencyKey,
-      targeted(projectId, dto),
+      targeted(projectId, { requester: actor, body: dto }),
       201,
       work,
     );

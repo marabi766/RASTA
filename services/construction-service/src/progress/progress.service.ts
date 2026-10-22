@@ -76,7 +76,7 @@ export class ProgressService {
     return this.idempotency.run(
       DRAFT_PROGRESS_ENDPOINT,
       idempotencyKey,
-      targeted(projectId, dto),
+      targeted(projectId, { requester: actor, body: dto }),
       201,
       (record) => this.writeDraft(organizationId, actor, projectId, dto, record),
     );

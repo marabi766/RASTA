@@ -1862,6 +1862,82 @@ describe('opening the bids of a tender', () => {
         expect(w4.evidence.asked).toHaveLength(0);
       });
 
+      describe('after the tender moved on (PR-350 r1 F2): the state is judged after the replay', () => {
+        const cancelBySql = (tenderId: string) =>
+          sql(
+            'the suite cancels the tender behind the commands',
+            `UPDATE "tender" SET "status" = 'CANCELLED', "status_reason" = 'withdrawn by the owner',
+               "status_reason_code" = 'OWNER_REQUEST', "version" = "version" + 1 WHERE "id" = '${tenderId}'`,
+          );
+        const outboxSize = async (owner: string) => (await outboxFor(w4.prisma, owner)).length;
+
+        it('a proposal retried after the bids were opened is the first answer (200): no refusal row, no event; without its key it is NOT_CLOSED', async () => {
+          const { owner, tenderId } = await closedTender();
+          const key = newKey();
+          const answer = await proposeKeyed(owner, tenderId, alice, key);
+          await approve(owner, tenderId, bob);
+          expect((await rowOf(tenderId)).status).toBe('EVALUATING');
+          const logged = await logOf(tenderId);
+          const outbox = await outboxSize(owner);
+
+          expect(await proposeKeyed(owner, tenderId, alice, key)).toEqual(answer);
+
+          expect(await logOf(tenderId)).toEqual(logged);
+          expect(await outboxSize(owner)).toBe(outbox);
+          // A new request — no key, or another — is judged on the tender as it is now, and audited.
+          expect(await refusalOf(proposeKeyed(owner, tenderId, alice, newKey()))).toContain(
+            'NOT_CLOSED',
+          );
+          expect((await rowsOf(tenderId, 'PROPOSE_OPENING')).pop()).toMatch(
+            new RegExp(`^${alice}:REFUSED:`),
+          );
+        });
+
+        it('a proposal retried after the tender was cancelled is the first answer, logging nothing', async () => {
+          const { owner, tenderId } = await closedTender();
+          const key = newKey();
+          const answer = await proposeKeyed(owner, tenderId, alice, key);
+          await cancelBySql(tenderId);
+          const logged = await logOf(tenderId);
+
+          expect(await proposeKeyed(owner, tenderId, alice, key)).toEqual(answer);
+
+          expect(await logOf(tenderId)).toEqual(logged);
+        });
+
+        it('a withdrawal retried after a new proposal was made and approved is the first answer: nothing taken back, nothing logged', async () => {
+          const { owner, tenderId } = await closedTender();
+          const first = await propose(owner, tenderId, alice);
+          const key = newKey();
+          const answer = await withdrawNamed(owner, tenderId, alice, first, key);
+          await propose(owner, tenderId, bob);
+          await approve(owner, tenderId, alice);
+          expect((await rowOf(tenderId)).status).toBe('EVALUATING');
+          const logged = await logOf(tenderId);
+          const outbox = await outboxSize(owner);
+
+          expect(await withdrawNamed(owner, tenderId, alice, first, key)).toEqual(answer);
+
+          expect(await logOf(tenderId)).toEqual(logged);
+          expect(await outboxSize(owner)).toBe(outbox);
+          expect(await withdrawals(owner, tenderId)).toHaveLength(1);
+        });
+
+        it('an opening retried after the tender was cancelled is the first answer: one BIDS_OPENED, nothing logged', async () => {
+          const { owner, tenderId } = await closedTender();
+          await propose(owner, tenderId, alice);
+          const key = newKey();
+          const answer = await openKeyed(owner, tenderId, bob, key);
+          await cancelBySql(tenderId);
+          const logged = await logOf(tenderId);
+
+          expect(await openKeyed(owner, tenderId, bob, key)).toEqual(answer);
+
+          expect(await logOf(tenderId)).toEqual(logged);
+          expect(await eventsOf(owner, 'BIDS_OPENED', tenderId)).toHaveLength(1);
+        });
+      });
+
       it('keeps one person’s answer from another: the same key from another user is 409 IDEMPOTENCY_KEY_REUSED, from another organization it is never met', async () => {
         const { owner, tenderId } = await closedTender();
         const key = newKey();

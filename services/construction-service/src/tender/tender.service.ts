@@ -151,7 +151,7 @@ export class TenderService {
     return this.idempotency.run(
       CREATE_TENDER_ENDPOINT,
       idempotencyKey,
-      targeted(projectId, dto),
+      targeted(projectId, { requester: actor, body: dto }),
       201,
       work,
     );

@@ -500,13 +500,17 @@ export class TenderOpenService {
     return this.guarded(tenderId, 'PROPOSE_OPENING', async (caller, found) => {
       const principal = await this.livePrincipal(caller);
       await this.assertNotConflicted(principal, tenderId);
-      if (found.status !== 'CLOSED') throw this.refused('NOT_CLOSED');
+      // The state is judged in the work, after the replay (PR-350 r1 F2): the first answer is kept
+      // whatever the tender has become since — opened, cancelled — as every check above still holds.
       return this.idempotency.run(
         PROPOSE_OPENING_ENDPOINT,
         idempotencyKey,
         targeted(tenderId, { requester: principal.actor }),
         200,
-        (record) => this.proposeOnce(principal, tenderId, record),
+        (record) => {
+          if (found.status !== 'CLOSED') throw this.refused('NOT_CLOSED');
+          return this.proposeOnce(principal, tenderId, record);
+        },
       );
     });
   }

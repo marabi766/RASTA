@@ -33,10 +33,16 @@ export { CLAIM_WAIT_MS };
  * simply is not deduplicated. Submitting a bid **requires** one (docs/06 § 6.8,
  * construction audit F4: {@link requiredIdempotencyKey}) and stores its request
  * under a keyed hash ({@link RequestHasher}). A command's key is claimed only
- * once the caller is authorised, and its request names the caller (`requester`),
- * so the same key from another person is `IDEMPOTENCY_KEY_REUSED`, never their
- * answer; the key is the organization's (`organizationId` is part of it), so
- * another organization never meets it at all. Every other command carries
+ * once the caller is authorised. Every request stored names the caller — the
+ * creates' as `{ requester, body }` (PR-350 r1 F3), a score's as its evaluator,
+ * a bid's in its keyed hash — so the same key and body from another person of
+ * the organization is `IDEMPOTENCY_KEY_REUSED`, never their answer; the key is
+ * the organization's (`organizationId` is part of it), so another organization
+ * never meets it at all. A create stored before its request named the caller
+ * (its hash is of the body alone) matches no request since: a retry under such
+ * a key is `IDEMPOTENCY_KEY_REUSED` for everyone, its author included, until the
+ * record expires (`CONSTRUCTION_IDEMPOTENCY_TTL_HOURS`) — refused, never
+ * replayed, and nothing is created twice under it. Every other command carries
  * `expectedVersion` (or a bid's `expectedRevision`), or answers its own repeat
  * without writing, and a retry of one that already committed is refused by the
  * compare-and-set, or answered as it stands, instead.

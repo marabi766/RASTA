@@ -12,10 +12,12 @@ import {
   asBidder,
   bidContent,
   bidKey,
+  cancelApproved,
   cleanup,
   ensureGatePolicy,
   evaluatedTender,
   evaluatingTender,
+  grantRequest,
   newOrganizationId,
   newUserId,
   outboxFor,
@@ -325,6 +327,117 @@ describe('tender commands are retry-safe (task 060)', () => {
         code: 'IDEMPOTENCY_KEY_REUSED',
       });
       expect(await eventsOf(a, 'TENDER_BIDDER_INVITED', tenderId)).toHaveLength(1);
+    });
+  });
+
+  // -- (b) after the tender moved on ---------------------------------------------------------
+
+  describe('a retry after the tender moved on is the first answer (PR-350 r1 F2): the state is judged after the replay', () => {
+    const publish = (a: string, tenderId: string, version: number, key?: string, user?: string) =>
+      asAdmin(a, () => w.publication.publish(tenderId, { expectedVersion: version }, key), user);
+    const cancelBody = (version: number) => ({
+      expectedVersion: version,
+      reason: 'The road is no longer needed',
+      reasonCode: 'OWNER_REQUEST' as const,
+    });
+    const cancel = (a: string, tenderId: string, version: number, key?: string, user?: string) =>
+      asAdmin(a, () => w.tenders.cancel(tenderId, cancelBody(version), key), user);
+    const cancelNow = async (a: string, tenderId: string) => {
+      const { version } = await asAdmin(a, () => w.tenders.get(tenderId));
+      await asAdmin(a, () => cancelApproved(w, tenderId, cancelBody(version)));
+      expect((await asAdmin(a, () => w.tenders.get(tenderId))).status).toBe('CANCELLED');
+    };
+    /** Everything a retry could leave behind: the gate's log (refusals included) and the outbox. */
+    const traces = async (a: string, tenderId: string) => ({
+      log: await logOf(a, tenderId),
+      outbox: (await outboxFor(w.prisma, a)).length,
+    });
+
+    it('a publication executed (200), retried after the tender was cancelled: the first answer, no refusal, no event', async () => {
+      const { a, tenderId, version } = await draft();
+      await asAdmin(a, () => approvePublication(w, tenderId, { expectedVersion: version }));
+      const key = newKey();
+      const user = newUserId();
+      const done = await publish(a, tenderId, version, key, user);
+      expect(done.executed).toBe(true);
+      await cancelNow(a, tenderId);
+      const before = await traces(a, tenderId);
+
+      expect(await publish(a, tenderId, version, key, user)).toEqual(done);
+
+      expect(await traces(a, tenderId)).toEqual(before);
+      expect(await eventsOf(a, 'TENDER_PUBLISHED', tenderId)).toHaveLength(1);
+    });
+
+    it('a publication asked (202), retried after the round was granted and executed: the first answer, no new round', async () => {
+      const { a, tenderId, version } = await draft();
+      await ensureGatePolicy(w, a, 'tender.publication');
+      const key = newKey();
+      const user = newUserId();
+      const first = await publish(a, tenderId, version, key, user);
+      await grantRequest(w, requested(first));
+      expect((await publish(a, tenderId, version, newKey(), user)).executed).toBe(true);
+      const before = await traces(a, tenderId);
+
+      expect(await publish(a, tenderId, version, key, user)).toEqual(first);
+
+      expect(await traces(a, tenderId)).toEqual(before);
+      expect(await requestsOf(tenderId, 'tender.publication')).toHaveLength(1);
+    });
+
+    it('a cancellation asked (202), retried after the round was granted and executed: the first answer', async () => {
+      const { a, tenderId, version } = await draft();
+      await ensureGatePolicy(w, a, 'tender.cancellation');
+      const key = newKey();
+      const user = newUserId();
+      const first = await cancel(a, tenderId, version, key, user);
+      await grantRequest(w, requested(first));
+      expect((await cancel(a, tenderId, version, newKey(), user)).executed).toBe(true);
+      const before = await traces(a, tenderId);
+
+      expect(await cancel(a, tenderId, version, key, user)).toEqual(first);
+
+      expect(await traces(a, tenderId)).toEqual(before);
+      expect(await eventsOf(a, 'TENDER_CANCELLED', tenderId)).toHaveLength(1);
+    });
+
+    it('an invitation retried after the tender was cancelled: the first answer (201), one TENDER_BIDDER_INVITED', async () => {
+      const { a, tenderId } = await draft('RESTRICTED');
+      const key = newKey();
+      const user = newUserId();
+      const invite = () =>
+        asAdmin(
+          a,
+          () => w.publication.invite(tenderId, { organizationId: 'ORG_BIDDER_1' }, key),
+          user,
+        );
+      const first = await invite();
+      await cancelNow(a, tenderId);
+      const before = await traces(a, tenderId);
+
+      expect(await invite()).toEqual(first);
+
+      expect(await traces(a, tenderId)).toEqual(before);
+      expect(await eventsOf(a, 'TENDER_BIDDER_INVITED', tenderId)).toHaveLength(1);
+    });
+
+    it('an award asked (202), retried after the round was granted and the award made: the first answer, no new round', async () => {
+      const { owner, tenderId, bids } = await evaluatedTender(w, organizations, { count: 2 });
+      await ensureGatePolicy(w, owner, 'tender.award');
+      const key = newKey();
+      const user = newUserId();
+      const award = (k: string) =>
+        asAdmin(owner, () => w.award.award(tenderId, { bidId: bids[0]!.bidId }, k), user);
+      const first = await award(key);
+      await grantRequest(w, requested(first));
+      expect((await award(newKey())).executed).toBe(true);
+      const before = await traces(owner, tenderId);
+
+      expect(await award(key)).toEqual(first);
+
+      expect(await traces(owner, tenderId)).toEqual(before);
+      expect(await requestsOf(tenderId, 'tender.award')).toHaveLength(1);
+      expect(await eventsOf(owner, 'TENDER_AWARDED', tenderId)).toHaveLength(1);
     });
   });
 

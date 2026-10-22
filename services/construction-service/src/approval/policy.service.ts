@@ -110,8 +110,12 @@ export class PolicyService implements OnModuleInit {
    */
   async create(dto: CreatePolicyDto, idempotencyKey?: string): Promise<PolicyView> {
     const author = this.access.assertPolicyAuthor();
-    return this.idempotency.run(CREATE_POLICY_ENDPOINT, idempotencyKey, dto, 201, (record) =>
-      this.writePolicy(author, dto, record),
+    return this.idempotency.run(
+      CREATE_POLICY_ENDPOINT,
+      idempotencyKey,
+      { requester: author.actor, body: dto },
+      201,
+      (record) => this.writePolicy(author, dto, record),
     );
   }
 

@@ -1229,8 +1229,8 @@ export async function forgetBootstrap(): Promise<void> {
 }
 
 /** Runs `fn` as the union administrator of `organizationId` (a policy author, Q-70 (7)). */
-export function asSetter<T>(organizationId: string, fn: () => T): T {
-  return asUser(organizationId, ['UNION_ADMIN'], fn);
+export function asSetter<T>(organizationId: string, fn: () => T, userId = newUserId()): T {
+  return asUser(organizationId, ['UNION_ADMIN'], fn, userId);
 }
 
 /** The platform organization the suites' SYSTEM_ADMIN acts for. */
