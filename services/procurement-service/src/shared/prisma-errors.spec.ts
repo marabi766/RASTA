@@ -1,4 +1,9 @@
-import { isCheckViolation, isUniqueViolation, violatedConstraint } from './prisma-errors';
+import {
+  isCheckViolation,
+  isGuardRefusal,
+  isUniqueViolation,
+  violatedConstraint,
+} from './prisma-errors';
 
 /**
  * Driver error shapes, as predicates.
@@ -35,6 +40,61 @@ describe('check violations', () => {
   it('does not recognise an unrelated error', () => {
     expect(isCheckViolation(new Error('connection terminated'))).toBe(false);
     expect(isCheckViolation(null)).toBe(false);
+  });
+});
+
+describe('a guard’s own refusal', () => {
+  // What Prisma 6 throws when `aggregation_setting_guard` refuses a `create` (an unknown request
+  // error: no code, no meta — the driver error only in the text).
+  const refusal = (code: string, message: string) =>
+    new Error(
+      'Invalid `prisma.aggregationSetting.create()` invocation:\n\n\nError occurred during query ' +
+        'execution:\nConnectorError(ConnectorError { user_facing_error: None, kind: ' +
+        `QueryError(PostgresError { code: "${code}", message: "${message}", severity: "ERROR", ` +
+        'detail: None, column: None, hint: None }), transient: false })',
+    );
+
+  it('recognises the named guard’s check_violation', () => {
+    expect(
+      isGuardRefusal(
+        refusal(
+          '23514',
+          'ck_aggregation_setting_next_version: version 2 of an organization at version 2',
+        ),
+        'ck_aggregation_setting_next_version',
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    [
+      'another guard of the same table',
+      refusal('23514', 'ck_aggregation_setting_append_only: a setting version is never changed'),
+    ],
+    [
+      'a CHECK constraint',
+      refusal(
+        '23514',
+        'new row for relation \\"aggregation_setting\\" violates check constraint \\"ck_aggregation_setting_values\\"',
+      ),
+    ],
+    [
+      'the same name under another SQLSTATE',
+      refusal(
+        'P0001',
+        'ck_aggregation_setting_next_version: version 2 of an organization at version 2',
+      ),
+    ],
+    [
+      'a longer name that starts with it',
+      refusal('23514', 'ck_aggregation_setting_next_version_2: something else'),
+    ],
+    ['the name alone', new Error('ck_aggregation_setting_next_version: version 2')],
+    ['a unique violation', { code: 'P2002' }],
+    ['null', null],
+    ['a string', 'code: "23514", message: "ck_aggregation_setting_next_version: "'],
+  ])('does not recognise %s', (_, error) => {
+    expect(isGuardRefusal(error, 'ck_aggregation_setting_next_version')).toBe(false);
   });
 });
 

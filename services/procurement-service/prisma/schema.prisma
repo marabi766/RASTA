@@ -101,6 +101,24 @@ model DemandAggregation {
 
 /// One organization's need for a quantity of one product (ADR-070 § 2). Never edited: a
 /// correction is a withdrawal with a reason and a new demand.
+/// One version of an organization's aggregation settings (COM-007 PR 3, ADR-070 § 2, Q-119 (2)).
+/// Append-only and numbered 1, 2, 3… per organization (`aggregation_setting_guard`): the largest is
+/// in force for windows opened from then on; a window keeps the version it opened with
+/// (`DemandAggregation.settingVersion`, `fk_demand_aggregation_setting`, declared in SQL).
+model AggregationSetting {
+  organizationId  String   @map("organization_id")
+  version         Int
+  windowHours     Int      @map("window_hours")
+  minQuantity     Int      @map("min_quantity")
+  shortfallPolicy String   @map("shortfall_policy")
+  recordedBy      String   @map("recorded_by")
+  recordedAt      DateTime @map("recorded_at") @db.Timestamptz(3)
+  correlationId   String   @map("correlation_id")
+
+  @@id([organizationId, version], map: "aggregation_setting_pkey")
+  @@map("aggregation_setting")
+}
+
 model DemandRequest {
   id             String @id
   organizationId String @map("organization_id")

@@ -8,6 +8,9 @@ import { toJsonSchema } from './zod-schema';
 import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
 import { AggregationController, DemandController } from '../demand/demand.controller';
 import { DemandService } from '../demand/demand.service';
+import { AggregationSettingController } from '../setting/setting.controller';
+import { AggregationSettingService } from '../setting/setting.service';
+import { aggregationSettingViewSchema, recordAggregationSettingSchema } from '../setting/dto';
 import {
   aggregationViewSchema,
   cancelAggregationSchema,
@@ -75,6 +78,8 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'GET /v1/aggregations': { status: '200', schema: cursorPageOf(aggregationViewSchema) },
   'GET /v1/aggregations/{id}': { status: '200', schema: aggregationViewSchema },
   'POST /v1/aggregations/{id}/cancel': { status: '200', schema: aggregationViewSchema },
+  'GET /v1/aggregation-settings': { status: '200', schema: aggregationSettingViewSchema },
+  'POST /v1/aggregation-settings': { status: '201', schema: aggregationSettingViewSchema },
 };
 
 /** Every command takes a strict body. */
@@ -82,6 +87,7 @@ const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'POST /v1/demand-requests': submitDemandSchema,
   'POST /v1/demand-requests/{id}/withdraw': withdrawDemandSchema,
   'POST /v1/aggregations/{id}/cancel': cancelAggregationSchema,
+  'POST /v1/aggregation-settings': recordAggregationSettingSchema,
 };
 
 /** The commands that require an `Idempotency-Key` (docs/06 § 6.8): every one. */
@@ -182,9 +188,10 @@ export function buildProcurementOpenApiDocument(app: INestApplication): OpenAPIO
  * endpoint and produces the same bytes on every machine.
  */
 @Module({
-  controllers: [DemandController, AggregationController],
+  controllers: [DemandController, AggregationController, AggregationSettingController],
   providers: [
     { provide: DemandService, useValue: {} },
+    { provide: AggregationSettingService, useValue: {} },
     { provide: IdempotencyStore, useValue: {} },
   ],
 })
@@ -262,6 +269,9 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         if (status === '400' && !query && !body) continue;
         // 409 and 422 are a command's: a read has no state to move and no rule to refuse.
         if ((status === '409' || status === '422') && !body) continue;
+        // 422 is a business rule's: a command with no closed refusal reason has none to answer
+        // (recording a setting: its bounds are 400, a stale version 409).
+        if (status === '422' && !REFUSAL_AREA_OF[key]) continue;
         operation.responses[status] ??= {
           description,
           ...(status === '409' && idempotent

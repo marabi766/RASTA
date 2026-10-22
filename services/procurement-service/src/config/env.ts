@@ -110,6 +110,13 @@ function roleList(name: string, options: { min: number }) {
  *                                      Q-10. What a window that ends short of it does: EXTEND
  *                                      (default — "carried into the next window"; its demands stay),
  *                                      REFER (a fact only: marketplace is never called) or CLOSE.
+ *   PROCUREMENT_AGGREGATION_SETTING_ROLES
+ *                                      Q-119 (2), plan PR 3. Which roles of the buyer's own
+ *                                      organization record its aggregation settings — a new
+ *                                      version replacing the three environment values above for
+ *                                      windows it opens afterwards. Default `ORGANIZATION_ADMIN`.
+ *                                      AUDITOR or SYSTEM_ADMIN here stops startup: the platform
+ *                                      operator does not write a tenant's business configuration.
  *   PROCUREMENT_RFQ_ISSUER_ROLES       ADR-070 § 3. Which roles of the buyer's own organization
  *                                      cancel a READY aggregation (plan PR 2; they issue its RFQ
  *                                      from PR 6). Default `ORGANIZATION_ADMIN` — `docs/09` gives
@@ -170,6 +177,12 @@ export const procurementEnvSchema = baseEnvSchema
 
     /** Q-10: "carried into the next window". */
     PROCUREMENT_AGGREGATION_SHORTFALL_POLICY: z.enum(SHORTFALL_POLICIES).default('EXTEND'),
+
+    /** Q-119 (2): who records the organization's aggregation settings (plan PR 3). */
+    PROCUREMENT_AGGREGATION_SETTING_ROLES: z
+      .string()
+      .default('ORGANIZATION_ADMIN')
+      .pipe(roleList('PROCUREMENT_AGGREGATION_SETTING_ROLES', { min: 1 })),
 
     /** ADR-070 § 3: who cancels a READY aggregation (and, from PR 6, issues its RFQ). */
     PROCUREMENT_RFQ_ISSUER_ROLES: z

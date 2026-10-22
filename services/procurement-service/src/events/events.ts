@@ -31,6 +31,7 @@ export const PROCUREMENT_EVENTS = {
   AGGREGATION_REFERRED: 'AGGREGATION_REFERRED',
   AGGREGATION_LAPSED: 'AGGREGATION_LAPSED',
   AGGREGATION_CANCELLED: 'AGGREGATION_CANCELLED',
+  AGGREGATION_SETTING_CHANGED: 'AGGREGATION_SETTING_CHANGED',
 } as const;
 
 export type ProcurementEventName = keyof typeof PROCUREMENT_EVENTS;
@@ -167,6 +168,28 @@ export const aggregationCancelledPayload = z
   })
   .strict();
 
+/**
+ * A new version of an organization's aggregation settings (plan PR 3, Q-119 (2)): its audit record
+ * (AGENTS.md S-06). The three values, the version it replaces (null: the environment defaults
+ * were in force), who recorded it and when. Windows opened afterwards take it; open ones keep
+ * their snapshot.
+ */
+export const aggregationSettingChangedPayload = z
+  .object({
+    organizationId: id,
+    settingVersion: z.number().int().min(1),
+    previousVersion: z.number().int().min(1).nullable(),
+    windowHours: z.number().int().min(1).max(8760),
+    minQuantity: z.number().int().min(0).max(2_147_483_647),
+    shortfallPolicy: z.enum(['EXTEND', 'REFER', 'CLOSE']),
+    recordedBy: id,
+    recordedAt: instant,
+  })
+  .strict()
+  .refine((p) => p.previousVersion === (p.settingVersion === 1 ? null : p.settingVersion - 1), {
+    message: 'previousVersion is the version before settingVersion, null before the first',
+  });
+
 export const PROCUREMENT_EVENT_SCHEMAS = {
   DEMAND_SUBMITTED: demandSubmittedPayload,
   DEMAND_WITHDRAWN: demandWithdrawnPayload,
@@ -175,6 +198,7 @@ export const PROCUREMENT_EVENT_SCHEMAS = {
   AGGREGATION_REFERRED: aggregationReferredPayload,
   AGGREGATION_LAPSED: aggregationLapsedPayload,
   AGGREGATION_CANCELLED: aggregationCancelledPayload,
+  AGGREGATION_SETTING_CHANGED: aggregationSettingChangedPayload,
 } as const satisfies Record<ProcurementEventName, z.ZodTypeAny>;
 
 export type ProcurementEventPayload<N extends ProcurementEventName> = z.infer<

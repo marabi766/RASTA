@@ -40,6 +40,9 @@ import { EventPublisher } from './events/publisher';
 import { ProcurementAccess } from './access/access';
 import { DemandRepository } from './demand/demand.repository';
 import { DemandService } from './demand/demand.service';
+import { AggregationSettingController } from './setting/setting.controller';
+import { AggregationSettingRepository } from './setting/setting.repository';
+import { AggregationSettingService } from './setting/setting.service';
 import { WindowEnd } from './demand/window-end';
 import { WindowSweepRepository } from './demand/window-sweep.repository';
 import { WindowSweepService } from './demand/window-sweep.service';
@@ -72,7 +75,13 @@ import {
  * calls another service.
  */
 @Module({
-  controllers: [DemandController, AggregationController, HealthController, MetricsController],
+  controllers: [
+    DemandController,
+    AggregationController,
+    AggregationSettingController,
+    HealthController,
+    MetricsController,
+  ],
   providers: [
     { provide: ENV, useFactory: () => loadProcurementEnv() },
 
@@ -111,6 +120,8 @@ import {
     DatabaseClock,
     ProcurementAccess,
     DemandRepository,
+    AggregationSettingRepository,
+    AggregationSettingService,
     WindowEnd,
     DemandService,
 
