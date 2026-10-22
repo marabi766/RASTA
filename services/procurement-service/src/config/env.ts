@@ -9,6 +9,7 @@ import {
   outboxPurgeEnvSchema,
 } from '@rasta/config';
 import { procurementOperationBudgets } from './operation-budgets';
+import { isKekId, parseKekConfiguration, parseKekEntries } from '../rfq/key-provider';
 
 export const SERVICE_NAME = 'procurement-service';
 
@@ -60,6 +61,13 @@ export const DEFAULT_MAX_LIVE_DEMANDS = DIGEST_DEMANDS_PER_BUDGET / 10;
 
 /** The largest `PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS`: half of it (safety factor 2). */
 export const MAX_LIVE_DEMANDS_LIMIT = DIGEST_DEMANDS_PER_BUDGET / 2;
+
+/**
+ * The most suppliers one RFQ may invite, at most (Q-121 (1)): the measured bound of a tender's
+ * standing bids (Q-117), since only an invited supplier quotes. `@rasta/contracts` bounds
+ * `RFQ_ISSUED` by the same number.
+ */
+export const MAX_INVITEES_LIMIT = 500;
 
 /** A comma-separated list, trimmed, with empty elements dropped. */
 function commaList() {
@@ -118,10 +126,23 @@ function roleList(name: string, options: { min: number }) {
  *                                      AUDITOR or SYSTEM_ADMIN here stops startup: the platform
  *                                      operator does not write a tenant's business configuration.
  *   PROCUREMENT_RFQ_ISSUER_ROLES       ADR-070 § 3. Which roles of the buyer's own organization
- *                                      cancel a READY aggregation (plan PR 2; they issue its RFQ
- *                                      from PR 6). Default `ORGANIZATION_ADMIN` — `docs/09` gives
- *                                      `PROCUREMENT_USER` only `rfq:read`. AUDITOR or SYSTEM_ADMIN
- *                                      here stops startup.
+ *                                      cancel a READY aggregation (plan PR 2), issue its RFQ, and
+ *                                      close or cancel that RFQ (plan PR 6). Default
+ *                                      `ORGANIZATION_ADMIN` — `docs/09` gives `PROCUREMENT_USER`
+ *                                      only `rfq:read`. AUDITOR or SYSTEM_ADMIN here stops startup.
+ *                                      The buyer's RFQs are read by these roles and by
+ *                                      PROCUREMENT_DEMAND_ROLES (`rfq:read`).
+ *   PROCUREMENT_SUPPLIER_ROLES         ADR-070 § 4 (plan PR 6). Which roles of an invited
+ *                                      supplier's own organization read the RFQs it is invited to.
+ *                                      Default `SUPPLIER`. AUDITOR or SYSTEM_ADMIN here stops
+ *                                      startup: neither is ever on the supplier side.
+ *   PROCUREMENT_RFQ_MAX_INVITEES       Q-121 (1). The most suppliers one RFQ invites: default 200,
+ *                                      at most 500 — protection of the service (each is asked of
+ *                                      supplier-service before the issue), not a business rule.
+ *   PROCUREMENT_RFQ_KEKS / _KEK_CURRENT
+ *                                      ADR-070 § 4. The key-encryption keys that wrap each RFQ's
+ *                                      private sealing key — a secret, never construction's.
+ *                                      Unset, no RFQ is issued (503); there is no default key.
  *   PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS
  *                                      Not a domain setting: a technical limit (Q-119 note of
  *                                      2026-10-17). The most live demands a window holds, so that
@@ -143,8 +164,8 @@ function roleList(name: string, options: { min: number }) {
  * change reaches only windows opened after it (`docs/08` § 8.9). The per-organization versioned
  * setting that takes precedence over them is ADR-070 plan PR 3.
  *
- * Nothing here names an amount, an approval authority or a supplier: those are rows of later
- * changes (ADR-070 § 6), never environment values.
+ * Nothing here names an amount, an approval authority or a supplier organization: those are rows
+ * (ADR-070 § 6) or a buyer's choice in a command (an RFQ's invitees, § 3), never environment values.
  */
 export const procurementEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
@@ -189,6 +210,99 @@ export const procurementEnvSchema = baseEnvSchema
       .string()
       .default('ORGANIZATION_ADMIN')
       .pipe(roleList('PROCUREMENT_RFQ_ISSUER_ROLES', { min: 1 })),
+
+    /** ADR-070 § 4: who reads, for an invited supplier's organization, the RFQs it is invited to. */
+    PROCUREMENT_SUPPLIER_ROLES: z
+      .string()
+      .default('SUPPLIER')
+      .pipe(roleList('PROCUREMENT_SUPPLIER_ROLES', { min: 1 })),
+
+    /** Q-121 (1): protection of the service, not a business rule. */
+    PROCUREMENT_RFQ_MAX_INVITEES: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_INVITEES_LIMIT)
+      .default(200),
+
+    /**
+     * The key-encryption keys that wrap each RFQ's private sealing key (ADR-070 § 4, ADR-066 § 2):
+     * `id:base64,id:base64`, each key 32 random bytes. A **secret**, from the deployment's secret
+     * store, and never construction's (`CONSTRUCTION_TENDER_KEKS`): a bid's key and a quotation's
+     * are wrapped apart. Unset means no RFQ can be issued (503 — the seal fails closed); there is
+     * no default key. No message here repeats a value.
+     */
+    PROCUREMENT_RFQ_KEKS: z
+      .string()
+      .optional()
+      .refine(
+        (value) => {
+          try {
+            parseKekEntries(value);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        {
+          message:
+            'PROCUREMENT_RFQ_KEKS must be id:base64 pairs (id a-z0-9-, 32 random bytes each)',
+        },
+      ),
+    /** The id in `PROCUREMENT_RFQ_KEKS` that wraps new RFQ keys; older ones only unwrap. */
+    PROCUREMENT_RFQ_KEK_CURRENT: z
+      .string()
+      .optional()
+      .refine((value) => value === undefined || value === '' || isKekId(value), {
+        message: 'PROCUREMENT_RFQ_KEK_CURRENT must be a KEK id (a-z0-9-)',
+      }),
+
+    /**
+     * Where an invitee's standing is read (ADR-070 § 7, plan PRs 5 and 6):
+     * `GET {SUPPLIER_SERVICE_URL}/v1/suppliers/standing-snapshot/{organizationId}`, a service call
+     * with a token signed for no tenant, before the issue's transaction. Unreachable, or anything
+     * but a well-formed 200, refuses the issue (503; 504 past the timeout) and writes nothing.
+     */
+    SUPPLIER_SERVICE_URL: z.string().url().default('http://localhost:3108'),
+    PROCUREMENT_SUPPLIER_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(60_000)
+      .default(5000),
+
+    /**
+     * The sweeper that closes RFQs at their deadline (ADR-070 § 3, plan PR 6; the shape of the
+     * window sweeper above): every `INTERVAL_MS` it claims at most `BATCH_SIZE` PUBLISHED RFQs whose
+     * `quotationClosingAt` has passed, under a lease and a fencing token, and closes each in a
+     * transaction of its own. A failed one waits `min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS ×
+     * 2^failures)`. A person of the buyer may close one after its deadline too: the same command.
+     */
+    PROCUREMENT_RFQ_CLOSE_SWEEP_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(500)
+      .max(300_000)
+      .default(5000),
+    PROCUREMENT_RFQ_CLOSE_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+    PROCUREMENT_RFQ_CLOSE_SWEEP_LEASE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(10)
+      .max(3600)
+      .default(60),
+    PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_BASE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(3600)
+      .default(10),
+    PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_MAX_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(86_400)
+      .default(900),
 
     /**
      * A technical limit, not a business rule (PR-327 r2 F1, PR-338 r1 F1, Q-119 note of
@@ -262,6 +376,24 @@ export const procurementEnvSchema = baseEnvSchema
       .min(1)
       .max(MAX_FOLLOW_BATCH_SIZE)
       .default(2000),
+  })
+  .superRefine((env, ctx) => {
+    try {
+      parseKekEntries(env.PROCUREMENT_RFQ_KEKS);
+    } catch {
+      return; // malformed entries are already reported at their own field
+    }
+    try {
+      parseKekConfiguration(env.PROCUREMENT_RFQ_KEKS, env.PROCUREMENT_RFQ_KEK_CURRENT);
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['PROCUREMENT_RFQ_KEK_CURRENT'],
+        message:
+          'PROCUREMENT_RFQ_KEK_CURRENT must name one of the ids in PROCUREMENT_RFQ_KEKS, ' +
+          'and be set exactly when PROCUREMENT_RFQ_KEKS is',
+      });
+    }
   });
 
 export type ProcurementEnv = z.infer<typeof procurementEnvSchema>;

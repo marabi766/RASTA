@@ -156,6 +156,19 @@ export class DemandRepository {
     });
   }
 
+  /**
+   * READY → RFQ_ISSUED, naming the RFQ the same transaction inserted (ADR-070 § 3, plan PR 6;
+   * `fk_demand_aggregation_rfq`).
+   */
+  async issueRfq(
+    tx: ExtendedPrismaClient,
+    window: DemandAggregation,
+    rfqId: string,
+    at: Date,
+  ): Promise<void> {
+    await this.moveWindow(tx, window, 'RFQ_ISSUED', { rfqId, updatedAt: at });
+  }
+
   /** The end of a window under EXTEND: it moves on by `windows` of its own length; it stays OPEN. */
   async extendWindow(
     tx: ExtendedPrismaClient,
@@ -439,6 +452,7 @@ export class DemandRepository {
       cancelledAt?: Date;
       cancelledBy?: string;
       cancelReason?: string;
+      rfqId?: string;
       updatedAt: Date;
     },
   ): Promise<void> {

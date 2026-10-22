@@ -22,8 +22,7 @@
   },
   "construction-service": {
     "AUDIT_SERVICE_URL": ["dev", "test", "test:integration"],
-    "IDENTITY_SERVICE_URL": ["dev", "test", "test:integration"],
-    "SUPPLIER_SERVICE_URL": ["dev", "test", "test:integration"]
+    "IDENTITY_SERVICE_URL": ["dev", "test", "test:integration"]
   },
   "contract-service": {
     "CONTRACT_AMENDMENT_REASON_CODES": ["dev", "test", "test:integration"],

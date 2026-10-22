@@ -1,3 +1,4 @@
+import { RFQ_AGGREGATE } from '@rasta/contracts';
 import type { ProcurementEventName } from './events';
 
 /**
@@ -16,6 +17,7 @@ import type { ProcurementEventName } from './events';
 export const DEMAND_AGGREGATE_TYPE = 'DemandRequest';
 export const AGGREGATION_AGGREGATE_TYPE = 'DemandAggregation';
 export const SETTING_AGGREGATE_TYPE = 'AggregationSetting';
+export const RFQ_AGGREGATE_TYPE = RFQ_AGGREGATE;
 
 export const AGGREGATE_OF = {
   DEMAND_SUBMITTED: DEMAND_AGGREGATE_TYPE,
@@ -26,7 +28,17 @@ export const AGGREGATE_OF = {
   AGGREGATION_LAPSED: AGGREGATION_AGGREGATE_TYPE,
   AGGREGATION_CANCELLED: AGGREGATION_AGGREGATE_TYPE,
   AGGREGATION_SETTING_CHANGED: SETTING_AGGREGATE_TYPE,
+  RFQ_ISSUED: RFQ_AGGREGATE_TYPE,
+  RFQ_CLOSED: RFQ_AGGREGATE_TYPE,
+  RFQ_CANCELLED: RFQ_AGGREGATE_TYPE,
 } as const satisfies Record<ProcurementEventName, string>;
+
+/** The events keyed by the RFQ they concern (ADR-070 § 9: an RFQ and its quotations are one stream). */
+const RFQ_KEYED: ReadonlySet<ProcurementEventName> = new Set([
+  'RFQ_ISSUED',
+  'RFQ_CLOSED',
+  'RFQ_CANCELLED',
+]);
 
 export interface PartitionDecision {
   readonly key: string;
@@ -39,8 +51,17 @@ export interface PartitionDecision {
  */
 export function resolvePartitionKey(
   eventName: ProcurementEventName,
-  payload: { aggregationId?: string; organizationId?: string },
+  payload: { aggregationId?: string; organizationId?: string; rfqId?: string },
 ): PartitionDecision {
+  if (RFQ_KEYED.has(eventName)) {
+    if (!payload.rfqId) throw new Error(`${eventName} carries no rfqId to partition by`);
+    return {
+      key: payload.rfqId,
+      reason:
+        `${eventName} is keyed by the RFQ it concerns: an RFQ and its quotations are one stream ` +
+        '(docs/07 § 7.7, ADR-070 § 9)',
+    };
+  }
   if (eventName === 'AGGREGATION_SETTING_CHANGED') {
     if (!payload.organizationId) {
       throw new Error(`${eventName} carries no organizationId to partition by`);

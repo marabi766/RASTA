@@ -121,6 +121,36 @@ export const windowMaxExtensionCount = new Gauge({
  * Commands answered from a stored response under their Idempotency-Key: a retry that did
  * nothing a second time. `endpoint` is the route template, a closed set.
  */
+/** RFQ commands committed (plan PR 6): issue, close (by a person) and cancel. */
+export const rfqCommandsTotal = new Counter({
+  name: 'rasta_procurement_rfq_commands_total',
+  help: 'RFQ commands committed, by command',
+  labelNames: ['service', 'command'] as const,
+  registers: [registry],
+});
+
+/** RFQ close sweeper steps (plan PR 6), the shape of the window sweeper's. */
+export const rfqCloseSweepTotal = new Counter({
+  name: 'rasta_procurement_rfq_close_sweep_total',
+  help: 'RFQ close sweeper steps, by result',
+  labelNames: ['service', 'result'] as const,
+  registers: [registry],
+});
+
+export const rfqCloseDue = new Gauge({
+  name: 'rasta_procurement_rfq_close_due',
+  help: 'PUBLISHED RFQs past their quotation deadline, not yet closed',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+export const rfqCloseOldestDueAgeSeconds = new Gauge({
+  name: 'rasta_procurement_rfq_close_oldest_due_age_seconds',
+  help: 'Age past its deadline of the oldest PUBLISHED RFQ not yet closed',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
 export const idempotentReplaysTotal = new Counter({
   name: 'rasta_procurement_idempotent_replays_total',
   help: 'Requests answered from a stored response under their Idempotency-Key',
