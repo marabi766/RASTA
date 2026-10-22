@@ -14,6 +14,7 @@ import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka
 import { OrderSagaWorker } from '../src/temporal/worker';
 import { OrderSagaClient } from '../src/temporal/saga.client';
 import { databaseUrl } from './helpers';
+import { startInventoryFake, type InventoryFake } from './inventory-fake';
 
 /**
  * The HTTP surface, booted from the **real** `AppModule`.
@@ -72,6 +73,8 @@ export interface ApiHarness {
   app: INestApplication;
   prisma: PrismaService;
   publisher: InMemoryEventPublisher;
+  /** inventory-service's dispatch-fence routes, on a real port (`inventory-fake.ts`). */
+  inventory: InventoryFake;
   close(): Promise<void>;
 }
 
@@ -237,6 +240,13 @@ const inertWorker = {
 
 export async function startApi(): Promise<ApiHarness> {
   applyEnvironment();
+  // The owner of a return's goods, asked before an AUTHORIZED return is cancelled and when a
+  // dispatch reservation is reconciled (Q-133 (9)): a stand-in on a real port that verifies this
+  // run's internal tokens and, unless a suite says otherwise, holds no shipment. A short deadline,
+  // so the suite proving a silent inventory refuses does not wait the default two seconds.
+  const inventory = await startInventoryFake(INTERNAL_SECRET);
+  process.env.INVENTORY_SERVICE_URL = inventory.url;
+  process.env.MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS = '500';
 
   const publisher = new InMemoryEventPublisher();
 
@@ -288,8 +298,10 @@ export async function startApi(): Promise<ApiHarness> {
     app,
     prisma: moduleRef.get(PrismaService),
     publisher,
+    inventory,
     close: async () => {
       await app.close();
+      await inventory.close();
     },
   };
 }

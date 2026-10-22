@@ -462,6 +462,12 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 | `RETURN_INSPECTED`  | همان                            | **audit** (و اعلان: ساخته نشده)                                       | همان، `returnVersion` (۵), `returnShipmentId`, `reportDocumentId` (`DOC_…` یا `null`), `inspectedAt`                                                                            |
 | `RETURN_RESOLVED`   | همان                            | **audit** (و اعلان: ساخته نشده) · economic (Refund: ساخته نشده، Q-76) | همان، `returnVersion` (۶), `returnShipmentId`, `outcomes[]` (`orderLineId`, `disposition`, `quantity`؛ خالی فقط وقتی هیچ چیز نرسیده، Q-133 (4)), `resolvedAt` — **Refund نیست** |
 
+**آزادشدن رزرو ارسال (#339).** `RETURN_DISPATCH_RELEASED` (Aggregate `ReturnRequest`، کلید `returnRequestId`؛ مصرف‌کننده: **audit**)
+گامی از چرخهٔ درخواست نیست — وضعیت `AUTHORIZED` و `returnVersion` تغییر نمی‌کنند — و جدا از `RETURN_REQUEST_EVENTS` تعریف شده است.
+رکورد ممیزیِ آزادسازی رزروی است که یکی از دو طرف با تطبیق با inventory انجام داد، در همان تراکنشِ ردیف `return_dispatch_release`:
+`returnRequestId`, `orderId`, `buyerOrganizationId`, `supplierOrganizationId`, `releaseId` (`RDL_…`), `reservationId` (`RDR_…`),
+`reservedAt`, `withdrawnAt` (لحظهٔ پاسخ inventory), `releasedBy` (شخص), `releasedAt`.
+
 **نیمهٔ فیزیکی، از زبان درخواست (RUN-005 PR 3).** چهار ردیف آخر را marketplace پس از سنجیدن هر رویداد
 `RETURN_SHIPMENT_*` inventory-service با درخواست خودش منتشر می‌کند (مصرف‌کنندهٔ `marketplace-service.return-mirror` روی
 `rasta.inventory.v1`، DLQ `rasta.marketplace.v1.dlq`، پیش‌فرض خاموش: `MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED`). مستأجر
@@ -590,6 +596,14 @@ Envelope باید سازمان Payload (تأمین‌کننده) باشد و ت�
 | `RETURN_SHIPMENT_RECEIVED`   | **audit** · **marketplace** (mirror) | همان، `lines[]` با `receivedQuantity` (۰ تا `expectedQuantity`), `returnShipmentVersion` (۲), `receivedBy`, `receivedAt`                                                                                                                                                                                                                       |
 | `RETURN_SHIPMENT_INSPECTED`  | **audit** · **marketplace** (mirror) | همان واقعیت‌ها (بی `lines`)، `reportDocumentId` (`DOC_…` یا `null`)، `returnShipmentVersion` (۳), `inspectedBy`, `inspectedAt` — **یادداشت بازرس نمی‌آید**                                                                                                                                                                                     |
 | `RETURN_SHIPMENT_RESOLVED`   | **audit** · **marketplace** (mirror) | همان واقعیت‌ها، `dispositions[]` (`orderLineId`, `disposition` ∈ `RESTOCK`\|`REPAIR`\|`REPLACE`\|`RETURN_TO_SUPPLIER`\|`SCRAP`\|`RECYCLE`, `quantity`؛ خالی فقط وقتی هیچ چیز نرسیده و `INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED` روشن است، Q-133)، `returnShipmentVersion` (۴), `resolvedBy`, `resolvedAt` — موجودی و Refund را تغییر نمی‌دهد |
+
+**پس‌گرفتن رزرو ارسال (#339).** `RETURN_DISPATCH_WITHDRAWN` (Aggregate `ReturnDispatchWithdrawal`، کلید `returnRequestId`؛
+مصرف‌کننده: **audit**) گام محموله نیست — محموله‌ای در کار نیست — و جدا از `INVENTORY_RETURN_EVENTS` تعریف شده تا آینهٔ
+marketplace آن را گام نشمارد. با ردیف `return_dispatch_withdrawal` و فقط یک بار نوشته می‌شود؛ تکرارِ هم‌توان پس‌گرفتن، که همان
+ردیف را می‌یابد، هیچ‌کدام را نمی‌نویسد. از آن پس ارسالی با آن رزرو در inventory رد می‌شود؛ اگر آزادسازیِ marketplace پس از آن
+شکست بخورد، تطبیق بعدی همان پاسخ را می‌گیرد و آزادسازی را کامل می‌کند. Payload: `withdrawalId` (`RDW_…`), `organizationId`
+(تأمین‌کننده), `returnRequestId`, `reservationId`, `withdrawnBy` (سرویس پرسنده: `marketplace-service`؛ شخص در رکورد marketplace است),
+`withdrawnAt`.
 
 ## Construction — `rasta.construction.v1`
 

@@ -63,6 +63,25 @@ export const marketplaceEnvSchema = baseEnvSchema
       .max(ORGANIZATION_REQUEST_CEILING_MS)
       .default(2_000),
 
+    /**
+     * The owner of a return's goods (ADR-048 § 2, A-13), asked before an AUTHORIZED return is
+     * cancelled whether a shipment exists for it, and asked to withdraw a dispatch reservation
+     * when one is reconciled (Q-133 (9)(a)).
+     */
+    INVENTORY_SERVICE_URL: z.string().url().default('http://localhost:3109'),
+
+    /**
+     * How long that question may take, body included. Asked before the command's transaction,
+     * never inside it; no answer in time refuses the cancellation or reconciliation with 504 and
+     * nothing is written (fail closed).
+     */
+    MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(30_000)
+      .default(2_000),
+
     // ---- Temporal ---------------------------------------------------------
 
     TEMPORAL_ADDRESS: z.string().default('localhost:7233'),

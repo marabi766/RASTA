@@ -9,6 +9,7 @@ import { OrderRepository, type SagaStep } from '../src/order/order.repository';
 import { OrderService } from '../src/order/order.service';
 import { ReturnRepository } from '../src/returns/return.repository';
 import { ReturnService } from '../src/returns/return.service';
+import type { ReturnGoodsOwner } from '../src/returns/return-goods';
 import { CatalogueService } from '../src/offer/catalogue.service';
 import type { HierarchyQuestion } from '../src/organization/organization-hierarchy';
 import { loadMarketplaceEnv, type MarketplaceEnv } from '../src/config/env';
@@ -138,17 +139,28 @@ export const unreachableHierarchy: HierarchyQuestion = {
   withinVersion: () => Promise.reject(RastaError.upstreamUnavailable('organization-service')),
 };
 
+/**
+ * inventory-service as the hand-wired suites meet it: it holds no shipment of any return, and
+ * withdraws any reservation asked (Q-133 (9)). What it answers on a real port, and when it holds
+ * one, is `api-return-reconciliation.int-spec.ts`'s, over `inventory-fake.ts`.
+ */
+export const noGoodsAnywhere: ReturnGoodsOwner = {
+  shipmentOf: async () => null,
+  withdraw: async () => ({ outcome: 'WITHDRAWN', withdrawnAt: new Date() }),
+};
+
 export function wire(
   prisma: PrismaService,
   overrides: Partial<MarketplaceEnv> = {},
   hierarchy: HierarchyQuestion = unreachableHierarchy,
+  goods: ReturnGoodsOwner = noGoodsAnywhere,
 ): Wiring {
   const env = { ...testEnv(), ...overrides };
   const events = new EventPublisher(env);
   const idempotency = new IdempotencyStore(prisma, env);
   const repository = new OrderRepository(prisma);
   const orders = new OrderService(prisma, repository, events, env, hierarchy);
-  const returns = new ReturnService(prisma, new ReturnRepository(prisma), events, env);
+  const returns = new ReturnService(prisma, new ReturnRepository(prisma), events, env, goods);
   const catalogue = new CatalogueService(prisma, events);
 
   return { prisma, env, events, idempotency, repository, orders, returns, catalogue };
@@ -225,6 +237,7 @@ async function purgeReturns(orgs: readonly string[]): Promise<void> {
   try {
     await owner.$transaction(async (tx) => {
       for (const [table, trigger] of [
+        ['return_dispatch_release', 'tg_return_dispatch_release_guard'],
         ['return_status_history', 'tg_return_status_history_guard'],
         ['return_line', 'tg_return_line_guard'],
         ['return_request', 'tg_return_request_guard'],

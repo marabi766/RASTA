@@ -34,12 +34,14 @@ export const AGGREGATE_OF = {
   RETURN_SHIPMENT_RECEIVED: RETURN_SHIPMENT_AGGREGATE,
   RETURN_SHIPMENT_INSPECTED: RETURN_SHIPMENT_AGGREGATE,
   RETURN_SHIPMENT_RESOLVED: RETURN_SHIPMENT_AGGREGATE,
+  RETURN_DISPATCH_WITHDRAWN: 'ReturnDispatchWithdrawal',
 } as const satisfies Record<InventoryEventName, string>;
 
 export const PARTITION_SCOPES = {
   STOCK_ITEM: 'STOCK_ITEM',
   SHIPMENT: 'SHIPMENT',
   RETURN_SHIPMENT: 'RETURN_SHIPMENT',
+  RETURN_REQUEST: 'RETURN_REQUEST',
   WAREHOUSE: 'WAREHOUSE',
 } as const;
 
@@ -87,6 +89,11 @@ export const PARTITION_KEY_POLICY: { [N in InventoryEventName]: PartitionRule<N>
   RETURN_SHIPMENT_RESOLVED: (payload) => ({
     scope: 'RETURN_SHIPMENT',
     key: payload.returnShipmentId,
+  }),
+  // ---- a request's dispatch fence: by the request — there is no shipment to key it by ----
+  RETURN_DISPATCH_WITHDRAWN: (payload) => ({
+    scope: 'RETURN_REQUEST',
+    key: payload.returnRequestId,
   }),
 };
 
