@@ -34,7 +34,7 @@ const cancelled = {
 };
 
 describe('the contract events', () => {
-  it('are the lifecycle’s four, the approval policy’s seven, the authority review’s two, amendments’ and milestones’ seven and statements’ six, each with a schema and an aggregate', () => {
+  it('are the lifecycle’s four, the approval policy’s seven, the authority review’s two, amendments’ and milestones’ seven, statements’ six and the settlement’s two, each with a schema and an aggregate', () => {
     const names = [
       'CONTRACT_DRAFTED',
       'CONTRACT_SIGNATURE_RECORDED',
@@ -62,6 +62,8 @@ describe('the contract events', () => {
       'STATEMENT_TECHNICALLY_APPROVED',
       'STATEMENT_APPROVED',
       'STATEMENT_REJECTED',
+      'STATEMENT_SETTLED',
+      'CONTRACT_SETTLED',
     ];
     expect(Object.keys(CONTRACT_EVENTS)).toEqual(names);
     expect(Object.keys(CONTRACT_EVENT_SCHEMAS)).toEqual(names);
@@ -727,6 +729,59 @@ describe('the statement decision events (CON-003 PR 6)', () => {
         chain: 'X',
       }),
     ).toThrow();
+  });
+});
+
+describe('the settlement events (CON-003 PR 6c)', () => {
+  const settled = {
+    STATEMENT_SETTLED: {
+      contractId: 'CTR_1',
+      statementId: 'STM_1',
+      statementNumber: 3,
+      organizationId: 'ORG_OWNER',
+      contractorOrganizationId: 'ORG_WINNER',
+      obligationId: 'TXN_1',
+      settlementId: 'STL_1',
+      settledAt: '2026-10-17T10:00:00.000Z',
+    },
+    CONTRACT_SETTLED: {
+      contractId: 'CTR_1',
+      projectId: 'PRJ_1',
+      organizationId: 'ORG_OWNER',
+      contractorOrganizationId: 'ORG_WINNER',
+      settledAt: '2026-10-17T10:00:00.000Z',
+    },
+  } as const;
+  const names = Object.keys(settled) as (keyof typeof settled)[];
+
+  it('accept the settlements as published, keyed by the contract', () => {
+    for (const name of names) {
+      expect(validateContractPayload(name, settled[name])).toEqual(settled[name]);
+      expect(resolvePartitionKey(name, settled[name]).key).toBe('CTR_1');
+    }
+  });
+
+  it.each(['netMinor', 'amountMinor', 'settledAmountMinor', 'grossAmountMinor', 'currency'])(
+    'refuse %s: identifiers and instants only — no amount (Q-97 (2))',
+    (field) => {
+      for (const name of names) {
+        expect(() => validateContractPayload(name, { ...settled[name], [field]: '1' })).toThrow(
+          /does not match its published contract/,
+        );
+      }
+    },
+  );
+
+  it('carry UTC instants and every identifier', () => {
+    for (const name of names) {
+      expect(() =>
+        validateContractPayload(name, { ...settled[name], settledAt: '2026-10-17T13:30:00+03:30' }),
+      ).toThrow();
+      for (const field of Object.keys(settled[name]).filter((key) => key !== 'statementNumber')) {
+        const { [field as keyof (typeof settled)[typeof name]]: _dropped, ...rest } = settled[name];
+        expect(() => validateContractPayload(name, rest)).toThrow();
+      }
+    }
   });
 });
 

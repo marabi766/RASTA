@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import {
   FINAL_STATEMENT_STATES,
   INITIAL_STATEMENT_STATE,
+  OPEN_STATEMENT_STATES,
   STATEMENT_COMMANDS,
   STATEMENT_STATES,
   STATEMENT_TRANSITIONS,
@@ -18,23 +19,25 @@ const DECLARED: ReadonlyArray<readonly [StatementStateName, StatementStateName]>
   ['SUBMITTED', 'REJECTED'],
   ['TECHNICALLY_APPROVED', 'APPROVED'],
   ['TECHNICALLY_APPROVED', 'REJECTED'],
+  ['APPROVED', 'SETTLED'],
 ];
 
 const migration = (name: string): string =>
   readFileSync(join(__dirname, '..', '..', 'prisma', 'migrations', name, 'migration.sql'), 'utf8');
 
 describe('the statement lifecycle', () => {
-  it('declares the five states of ADR-068 § 5, in order', () => {
+  it('declares the five states of ADR-068 § 5 and SETTLED (§ 6 (3)), in order', () => {
     expect([...STATEMENT_STATES]).toEqual([
       'DRAFT',
       'SUBMITTED',
       'TECHNICALLY_APPROVED',
       'APPROVED',
       'REJECTED',
+      'SETTLED',
     ]);
   });
 
-  it('opens the submission and the decisions: technical, then financial, a rejection from either', () => {
+  it('opens the submission, the decisions — technical, then financial, a rejection from either — and the settlement', () => {
     expect(STATEMENT_TRANSITIONS.map((entry) => [entry.from, entry.to])).toEqual(DECLARED);
   });
 
@@ -47,13 +50,14 @@ describe('the statement lifecycle', () => {
     }
   });
 
-  it('starts DRAFT; each command moves exactly the states it names; APPROVED and REJECTED are final', () => {
+  it('starts DRAFT; each command moves exactly the states it names; APPROVED moves only to SETTLED; SETTLED and REJECTED are final', () => {
     expect(INITIAL_STATEMENT_STATE).toBe('DRAFT');
     expect([...STATEMENT_COMMANDS]).toEqual([
       'submit',
       'approve_technical',
       'approve_financial',
       'reject',
+      'settle',
     ]);
     const moves = (command: (typeof STATEMENT_COMMANDS)[number]) =>
       STATEMENT_STATES.flatMap((from) => {
@@ -64,20 +68,38 @@ describe('the statement lifecycle', () => {
     expect(moves('approve_technical')).toEqual(['SUBMITTED>TECHNICALLY_APPROVED']);
     expect(moves('approve_financial')).toEqual(['TECHNICALLY_APPROVED>APPROVED']);
     expect(moves('reject')).toEqual(['SUBMITTED>REJECTED', 'TECHNICALLY_APPROVED>REJECTED']);
-    expect([...FINAL_STATEMENT_STATES]).toEqual(['APPROVED', 'REJECTED']);
+    expect(moves('settle')).toEqual(['APPROVED>SETTLED']);
+    // I3 (ADR-068 § 6 (5)): out of APPROVED there is the settlement and nothing else.
+    expect(STATEMENT_TRANSITIONS.filter((entry) => entry.from === 'APPROVED')).toEqual([
+      { from: 'APPROVED', to: 'SETTLED', command: 'settle' },
+    ]);
+    expect([...FINAL_STATEMENT_STATES]).toEqual(['REJECTED', 'SETTLED']);
     for (const final of FINAL_STATEMENT_STATES) {
       expect(STATEMENT_TRANSITIONS.filter((entry) => entry.from === final)).toEqual([]);
     }
+  });
+
+  it('calls a statement open until it is rejected or settled', () => {
+    expect([...OPEN_STATEMENT_STATES]).toEqual([
+      'DRAFT',
+      'SUBMITTED',
+      'TECHNICALLY_APPROVED',
+      'APPROVED',
+    ]);
+    expect([...OPEN_STATEMENT_STATES, ...FINAL_STATEMENT_STATES].sort()).toEqual(
+      [...STATEMENT_STATES].sort(),
+    );
   });
 
   it('is frozen all the way down', () => {
     expect(Object.isFrozen(STATEMENT_TRANSITIONS)).toBe(true);
     for (const entry of STATEMENT_TRANSITIONS) expect(Object.isFrozen(entry)).toBe(true);
     expect(Object.isFrozen(FINAL_STATEMENT_STATES)).toBe(true);
+    expect(Object.isFrozen(OPEN_STATEMENT_STATES)).toBe(true);
   });
 
   it('is the table the latest migration header lists and its guard allows, over the enum the database declares', () => {
-    const sql = migration('20261016180000_statement_decisions');
+    const sql = migration('20261017160000_statement_settlement');
     const table = STATEMENT_TRANSITIONS.map((entry) => `${entry.from}>${entry.to}`);
     const listed = /^--\s+statement transitions:\s*(.+)$/m.exec(sql)?.[1]?.trim().split(/\s+/);
     expect(listed).toEqual(table);
@@ -95,12 +117,20 @@ describe('the statement lifecycle', () => {
     expect(guard).toContain(
       `NOT (NEW."status" = OLD."status" AND OLD."status" IN ('SUBMITTED', 'TECHNICALLY_APPROVED'))`,
     );
-    expect(guard).toContain(`IF OLD."status" IN ('APPROVED', 'REJECTED') THEN`);
+    expect(guard).toContain(`IF OLD."status"::text IN ('REJECTED', 'SETTLED') THEN`);
+    expect(guard).toContain(
+      `IF OLD."status" = 'APPROVED' AND NEW."status"::text <> 'SETTLED' THEN`,
+    );
+    // The enum: the five of 20261015120000, and SETTLED added by this migration.
     const declared = /CREATE TYPE "StatementStatus" AS ENUM \(([^)]*)\)/.exec(
       migration('20261015120000_statements'),
     )?.[1];
-    expect(declared?.split(',').map((value) => value.trim().replace(/'/g, ''))).toEqual([
-      ...STATEMENT_STATES,
-    ]);
+    const added = [...sql.matchAll(/ALTER TYPE "StatementStatus" ADD VALUE '([A-Z_]+)'/g)].map(
+      (match) => match[1],
+    );
+    expect([
+      ...(declared?.split(',').map((value) => value.trim().replace(/'/g, '')) ?? []),
+      ...added,
+    ]).toEqual([...STATEMENT_STATES]);
   });
 });
