@@ -556,7 +556,8 @@ describe('evaluating the opened bids of a tender', () => {
           .digest('hex'),
         scoredAt: at.toISOString(),
       });
-      expect(JSON.stringify(payloadOf(event!))).not.toContain('8500');
+      // 8500 as a number of its own: the payload's ULIDs, UUIDs and digest can contain it by chance.
+      expect(JSON.stringify(payloadOf(event!))).not.toMatch(/(?<![\w-])8500(?![\w-])/);
     });
 
     it.each([

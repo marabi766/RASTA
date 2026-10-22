@@ -329,7 +329,8 @@ describe('award API', () => {
     );
     expect(conflicted.status).toBe(403);
     expect(conflicted.body.message).toContain('CONFLICT_OF_INTEREST');
-    expect(JSON.stringify(conflicted.body)).not.toContain('1000');
+    // 1000 as a number of its own: the answer's ULIDs can contain it by chance.
+    expect(JSON.stringify(conflicted.body)).not.toMatch(/(?<![\w-])1000(?![\w-])/);
 
     // Reads of the price are in the owner's log, the service's under its own name.
     const rows = await runUnscoped('the suite reads the log', () =>

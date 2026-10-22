@@ -28,6 +28,25 @@ import {
 } from './helpers';
 
 /**
+ * Every key and every leaf value of a payload. Content is looked for as a whole value, never as a
+ * substring of the serialised text: the payload carries random ULIDs that contain any short run of
+ * digits by chance (CI flake on 2026-10-22: "2027" inside a milestone id).
+ */
+function keysAndValues(payload: unknown): { keys: string[]; values: unknown[] } {
+  const keys: string[] = [];
+  const values: unknown[] = [];
+  JSON.stringify(payload, (key, value: unknown) => {
+    if (key !== '') keys.push(key);
+    values.push(value);
+    return value;
+  });
+  return { keys, values };
+}
+
+/** The planned day as the API says it or as the database stores it; a timestamp of today is not it. */
+const dayForms = (day: string) => [day, `${day}T00:00:00.000Z`];
+
+/**
  * CON-003 PR 3 (ADR-068 § 9, Q-100): the planned milestones of a SIGNED contract, from the real
  * `AppModule` over real guards and a real database. The employer plans and edits them while no
  * statement refers to them; both parties read; the planned day is a date, never an instant.
@@ -134,10 +153,12 @@ describe('milestones of a signed contract', () => {
         plannedBy: expect.any(String),
         plannedAt: expect.any(String),
       });
-      const text = JSON.stringify(events);
-      expect(text).not.toContain('Foundation');
-      expect(text).not.toContain('2026-12-01');
-      expect(text).not.toContain('2500');
+      const { keys, values } = keysAndValues(events);
+      for (const key of ['title', 'plannedDate', 'plannedShareBp']) expect(keys).not.toContain(key);
+      expect(values.filter((v) => typeof v === 'string' && v.includes('Foundation'))).toEqual([]);
+      for (const form of dayForms('2026-12-01')) expect(values).not.toContain(form);
+      expect(values).not.toContain(2500);
+      expect(values).not.toContain('2500');
     });
 
     it('the share is optional, and a day is exact whatever the time zone: the calendar edges and a leap day', async () => {
@@ -295,7 +316,12 @@ describe('milestones of a signed contract', () => {
 
       const events = await eventsOf(w.prisma, c.employer, 'CONTRACT_MILESTONE_CHANGED');
       expect(events.map((e) => e.payload.version)).toEqual([2, 3]);
-      expect(JSON.stringify(events)).not.toMatch(/Piles|2027|1000/);
+      const { keys, values } = keysAndValues(events);
+      for (const key of ['title', 'plannedDate', 'plannedShareBp']) expect(keys).not.toContain(key);
+      expect(values.filter((v) => typeof v === 'string' && v.includes('Piles'))).toEqual([]);
+      for (const form of dayForms('2027-01-15')) expect(values).not.toContain(form);
+      expect(values).not.toContain(1000);
+      expect(values).not.toContain('1000');
     });
 
     it('a change that changes nothing answers the milestone as it is and writes nothing: no version, no event', async () => {
