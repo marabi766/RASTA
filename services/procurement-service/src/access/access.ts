@@ -45,10 +45,12 @@ export interface Acting {
 export class ProcurementAccess {
   private readonly demandRoles: readonly string[];
   private readonly rfqIssuerRoles: readonly string[];
+  private readonly settingRoles: readonly string[];
 
   constructor(@Inject(ENV) env: ProcurementEnv) {
     this.demandRoles = env.PROCUREMENT_DEMAND_ROLES;
     this.rfqIssuerRoles = env.PROCUREMENT_RFQ_ISSUER_ROLES;
+    this.settingRoles = env.PROCUREMENT_AGGREGATION_SETTING_ROLES;
   }
 
   /**
@@ -69,13 +71,26 @@ export class ProcurementAccess {
     return this.assertBuyerRole(this.rfqIssuerRoles);
   }
 
+  /** Records the organization's aggregation settings (Q-119 (2)). */
+  assertSettingWriter(): Acting {
+    return this.assertBuyerRole(this.settingRoles);
+  }
+
+  /**
+   * Reads the settings in force: whoever records them, and whoever registers demands — the
+   * windows a demand opens take them, so its requester may know what they are.
+   */
+  assertSettingReader(): Acting {
+    return this.assertBuyerRole([...new Set([...this.settingRoles, ...this.demandRoles])]);
+  }
+
   private assertBuyerRole(granted: readonly string[]): Acting {
     assertNotAuditor();
     assertNotServiceCaller();
     const context = getContext();
     if (context.roles.includes(PLATFORM_ROLE)) {
       throw RastaError.forbidden(
-        'The platform administrator does not register, withdraw or read a buyer’s demands',
+        'The platform administrator does not act for a buyer’s procurement: its demands, aggregations or settings',
       );
     }
     if (!granted.some((role) => context.roles.includes(role))) {

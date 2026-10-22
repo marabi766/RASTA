@@ -82,12 +82,17 @@ describe('the schema keeps history from being erased', () => {
 });
 
 describe('the schema models nothing COM-007 has not decided so far', () => {
-  it('has the aggregation, the demand and the idempotency store (RFQs, quotations and purchase orders are later PRs)', () => {
+  it('has the aggregation, its settings, the demand and the idempotency store (RFQs, quotations and purchase orders are later PRs)', () => {
     // Each step adds its models here, so an unplanned one still fails this test.
     const names = [...models(SCHEMA).keys()].filter(
       (name) => !['OutboxMessage', 'OutboxStreamSequence'].includes(name),
     );
-    expect(names).toEqual(['DemandAggregation', 'DemandRequest', 'IdempotencyKey']);
+    expect(names).toEqual([
+      'DemandAggregation',
+      'AggregationSetting',
+      'DemandRequest',
+      'IdempotencyKey',
+    ]);
   });
 
   it('keeps every status as text, never an enum (ADR-068 § 2)', () => {

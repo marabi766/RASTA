@@ -132,6 +132,8 @@ export async function seedOpenWindow(input: {
 const GUARDED = [
   ['demand_request', ['tg_demand_request_guard', 'tg_demand_request_totals_check']],
   ['demand_aggregation', ['tg_demand_aggregation_guard', 'tg_demand_aggregation_totals_check']],
+  // After the windows that name its versions (fk_demand_aggregation_setting).
+  ['aggregation_setting', ['tg_aggregation_setting_guard']],
 ] as const;
 
 /**

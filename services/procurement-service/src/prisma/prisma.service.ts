@@ -17,6 +17,7 @@ import { PrismaClient } from '../generated/prisma';
  * omission fails a unit test rather than passing review.
  */
 export const TENANT_SCOPED_MODELS = [
+  'AggregationSetting',
   'DemandAggregation',
   'DemandRequest',
   'IdempotencyKey',

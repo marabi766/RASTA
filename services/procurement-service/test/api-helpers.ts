@@ -280,5 +280,26 @@ export function client(api: ApiHarness, token: string, headers: Record<string, s
     aggregations: (query = '') => get(`/v1/aggregations${query}`),
     cancel: (id: string, expectedVersion: number, reason = 'the need went away', k?: string) =>
       post(`/v1/aggregations/${id}/cancel`, { expectedVersion, reason }, k),
+    setting: () => get('/v1/aggregation-settings'),
+    recordSetting: (
+      body: {
+        windowHours?: number;
+        minQuantity?: number;
+        shortfallPolicy?: string;
+        expectedCurrentVersion?: number | null;
+      } = {},
+      k?: string,
+    ) =>
+      post(
+        '/v1/aggregation-settings',
+        {
+          windowHours: 24,
+          minQuantity: 0,
+          shortfallPolicy: 'EXTEND',
+          expectedCurrentVersion: null,
+          ...body,
+        },
+        k,
+      ),
   };
 }

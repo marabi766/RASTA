@@ -3,7 +3,12 @@ import { RastaError } from '@rasta/nest-common';
 import type { DemandAggregation, DemandRequest } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { ShortfallPolicy } from '../config/env';
-import type { AggregationStateName, DemandStateName, WindowSnapshot } from './demand.state-machine';
+import type {
+  AggregationStateName,
+  DemandStateName,
+  SettingSnapshot,
+  WindowSnapshot,
+} from './demand.state-machine';
 
 /** A page of rows, newest first by id (a ULID), with one more fetched to tell whether there is more. */
 export interface PageFilter<S extends string> {
@@ -67,7 +72,7 @@ export class DemandRepository {
       productId: string;
       openedAt: Date;
       closesAt: Date;
-      snapshot: WindowSnapshot;
+      snapshot: SettingSnapshot;
     },
   ): Promise<boolean> {
     const inserted = await tx.$queryRaw<{ id: string }[]>`
@@ -77,7 +82,8 @@ export class DemandRepository {
          created_at, updated_at, version)
       VALUES (${window.id}, ${window.organizationId}, ${window.productId}, 'OPEN',
               ${window.openedAt}, ${window.closesAt}, ${window.snapshot.windowHours},
-              ${window.snapshot.minQuantity}, ${window.snapshot.shortfallPolicy}, NULL,
+              ${window.snapshot.minQuantity}, ${window.snapshot.shortfallPolicy},
+              ${window.snapshot.settingVersion},
               0, 0, 0, ${window.openedAt}, ${window.openedAt}, 1)
       ON CONFLICT (organization_id, product_id) WHERE status = 'OPEN' DO NOTHING
       RETURNING id`;
@@ -449,7 +455,7 @@ export class DemandRepository {
   }
 }
 
-/** The snapshot a new window takes: the environment defaults today (Q-10; PR 3 adds the per-organization row). */
+/** The environment defaults (Q-10): what a window takes in an organization with no setting version. */
 export function snapshotOf(env: {
   PROCUREMENT_AGGREGATION_WINDOW_HOURS: number;
   PROCUREMENT_AGGREGATION_MIN_QUANTITY: number;
