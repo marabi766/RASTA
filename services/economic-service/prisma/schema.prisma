@@ -507,6 +507,16 @@ model Transaction {
   /// transaction still holds that dispute (docs/23 D-053).
   disputeId String? @map("dispute_id")
 
+  /// The dispute the recorded resolution decided — `disputeId` as it was when
+  /// the row left DISPUTED for PENDING_SETTLEMENT. Assigned by the database,
+  /// never by a writer: trigger `trg_transaction_resolved_dispute` sets it on
+  /// that move and keeps it otherwise (migration
+  /// `20261022120000_transaction_resolved_dispute`). Equal to `disputeId`: the
+  /// resolution is the latest dispute's; different: an earlier one's. NULL
+  /// before any resolution, and on rows resolved before the migration that it
+  /// could not attribute for certain (docs/23 D-060).
+  resolvedDisputeId String? @map("resolved_dispute_id")
+
   settledAt DateTime? @map("settled_at")
 
   failureReason String? @map("failure_reason")

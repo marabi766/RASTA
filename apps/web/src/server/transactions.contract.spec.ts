@@ -305,6 +305,28 @@ describe('the answer the portal reads', () => {
     expect(viewFields.get('disputeResolvedAt')).toBe(true);
     expect(viewFields.get('disputeResolution')).toBe(true);
   });
+
+  it('says which dispute the resolution decided — the database’s record, set on leaving DISPUTED (task 061)', () => {
+    // The screen compares `resolvedDisputeId` with `disputeId`; both are the
+    // database's, and the instants are no longer what attributes a resolution.
+    const migration = squash(
+      readSource(
+        'services',
+        'economic-service',
+        'prisma',
+        'migrations',
+        '20261022120000_transaction_resolved_dispute',
+        'migration.sql',
+      ),
+    );
+    expect(migration).toContain(
+      `ELSIFOLD."status"='DISPUTED'ANDNEW."status"='PENDING_SETTLEMENT'THENNEW."resolved_dispute_id":=OLD."dispute_id";`,
+    );
+    expect(migration).toContain(`ELSENEW."resolved_dispute_id":=OLD."resolved_dispute_id";`);
+    expect(viewFields.get('resolvedDisputeId')).toBe(true);
+    expect(viewFields.get('disputeId')).toBe(true);
+    expect(squash(service)).toContain('constat=awaitdatabaseNow(tx);');
+  });
 });
 
 describe('the refusals the portal says in fixed Persian', () => {

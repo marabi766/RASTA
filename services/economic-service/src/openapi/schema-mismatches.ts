@@ -6,10 +6,14 @@ import type { JsonSchema } from './zod-schema';
  *
  * Only what the hand-written views use (`transaction-view.ts`): strings (with
  * `date-time` and `pattern`), integers, booleans, arrays, objects and
- * `nullable`. Every documented property must be present — documented and
- * never written is a promise a generated client would rely on. Properties
- * the schema does not name are not departures (no `additionalProperties:
- * false`). Used by the specs that hold the document to the responses.
+ * `nullable`. Both ways: every documented property must be present —
+ * documented and never written is a promise a generated client would rely
+ * on — and every property written must be documented — written and never
+ * documented is a field no generated client has, which is how the detail
+ * view's `disputeId` and `settlementAuthorisation` went unnoticed (Codex on
+ * #322 round 3, finding 1). The document itself stays open (no
+ * `additionalProperties: false`); this check is what keeps it complete. Used
+ * by the specs that hold the document to the responses.
  */
 export function schemaMismatches(
   schema: JsonSchema,
@@ -48,11 +52,16 @@ export function schemaMismatches(
       if (typeof value !== 'object') return [`${path}: not an object`];
       const record = value as Record<string, unknown>;
       const properties = schema.properties as Record<string, JsonSchema>;
-      return Object.entries(properties).flatMap(([key, property]) =>
-        key in record
-          ? schemaMismatches(property, record[key], `${path}.${key}`, components)
-          : [`${path}.${key}: documented, never written`],
-      );
+      return [
+        ...Object.entries(properties).flatMap(([key, property]) =>
+          key in record
+            ? schemaMismatches(property, record[key], `${path}.${key}`, components)
+            : [`${path}.${key}: documented, never written`],
+        ),
+        ...Object.keys(record)
+          .filter((key) => !Object.hasOwn(properties, key))
+          .map((key) => `${path}.${key}: written, never documented`),
+      ];
     }
     default:
       return [`${path}: undocumented type ${String(schema.type)}`];

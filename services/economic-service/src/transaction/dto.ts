@@ -253,6 +253,15 @@ export interface TransactionDetailView extends TransactionView {
    * `resolve-dispute` names to decide exactly this dispute (docs/23 D-053).
    */
   disputeId: string | null;
+  /**
+   * The dispute the recorded resolution (`disputeResolvedAt`, `disputeResolvedBy`,
+   * `disputeResolution`) decided. Equal to `disputeId`: it is the latest
+   * dispute's resolution; different: an earlier dispute's, and the latest has
+   * none. Null if never resolved, and on a transaction resolved before the
+   * identity was kept that could not be attributed for certain — there,
+   * resolution and dispute are told apart by time (docs/23 D-060).
+   */
+  resolvedDisputeId: string | null;
   legs: { role: string; organizationId: string; amountMinor: string; currency: string }[];
   commission: {
     id: string;

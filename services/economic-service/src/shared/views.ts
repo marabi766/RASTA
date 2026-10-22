@@ -260,6 +260,7 @@ export function toTransactionDetailView(
     settlementAuthorisedService?: string | null;
     settlementAuthorisationKey?: string | null;
     disputeId?: string | null;
+    resolvedDisputeId?: string | null;
   },
 ): TransactionDetailView {
   return {
@@ -272,6 +273,7 @@ export function toTransactionDetailView(
         }
       : null,
     disputeId: row.disputeId ?? null,
+    resolvedDisputeId: row.resolvedDisputeId ?? null,
     legs: row.legs.map((leg) => ({
       role: leg.role,
       organizationId: leg.organizationId,

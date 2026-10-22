@@ -109,10 +109,13 @@ export class TransactionController {
     description:
       'Visible to the payer and to the payee. Anyone else gets 404, never 403 — a 403 would ' +
       'confirm that the transaction exists. The dispute fields describe the latest dispute: ' +
-      'who raised it and why, and who resolved it, when and how. A resolution older than ' +
-      '`disputedAt` belongs to an earlier dispute. A transaction resolved before the ' +
-      'resolution had a field of its own holds the resolution text in `disputeReason`, with ' +
-      '`disputeResolution` null and `disputeResolvedAt` set (docs/23 D-060).',
+      'who raised it and why, and who resolved it, when and how. `resolvedDisputeId` names ' +
+      'the dispute that resolution decided: equal to `disputeId`, it is the latest dispute’s; ' +
+      'different, an earlier one’s. Null on a transaction resolved before it was kept and not ' +
+      'attributable for certain — there, a resolution older than `disputedAt` belongs to an ' +
+      'earlier dispute. A transaction resolved before the resolution had a field of its own ' +
+      'holds the resolution text in `disputeReason`, with `disputeResolution` null and ' +
+      '`disputeResolvedAt` set (docs/23 D-060).',
   })
   async get(@Param('id') id: string) {
     const transaction = await this.transactions.get(id);
