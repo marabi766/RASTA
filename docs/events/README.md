@@ -536,8 +536,8 @@ Envelope باید سازمان Payload (تأمین‌کننده) باشد و ت�
 > | رویداد          | Payload                                                                                                                                                                                                      |
 > | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 > | `RFQ_ISSUED`    | شناسه‌ها و `rfqVersion` (۱)، `productId`, `totalQuantity`, `procurementNature`, `quotationClosingAt`, `invitedSupplierOrganizationIds[]`, `criteriaCount`, `criteriaDigest`, `keyId`, `issuedBy`, `issuedAt` |
-> | `RFQ_CLOSED`    | `rfqId`, `organizationId`, `aggregationId`, `rfqVersion`, `quotationClosingAt`, `trigger` (`SWEEPER` \| `MANUAL`), `closedBy`, `closedAt`                                                                    |
-> | `RFQ_CANCELLED` | `rfqId`, `organizationId`, `aggregationId`, `rfqVersion`, `previousStatus`, `reasonCode` (`BUYER_REQUEST`), `cancelledBy`, `cancelledAt`                                                                     |
+> | `RFQ_CLOSED`    | `rfqId`, `organizationId`, `aggregationId`, `rfqVersion`, `quotationClosingAt`, `trigger` (`SWEEPER` \| `MANUAL`), `closedBy`, `closedAt`, `quotationCount` (ADR-070 § ۹؛ تا PR 8 صفر)                       |
+> | `RFQ_CANCELLED` | `rfqId`, `organizationId`, `aggregationId`, `rfqVersion`, `previousStatus`, `reasonCode` (فهرست بستهٔ `PROCUREMENT_RFQ_CANCELLATION_CODES`، پیش‌فرض `BUYER_REQUEST`), `cancelledBy`, `cancelledAt`           |
 
 ## Supplier — `rasta.supplier.v1`
 

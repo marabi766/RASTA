@@ -300,12 +300,14 @@ Fail Closed)؛ دست‌کم یک دعوت؛ سقف `PROCUREMENT_RFQ_MAX_INVITEE
 **یادداشت پیاده‌سازی 2026-10-22 (COM-007 PR 6، همه موقت و پیکربندی‌پذیر).** (الف) `PROCUREMENT_RFQ_MAX_INVITEES` پیش‌فرض ۲۰۰، بازهٔ ۱ تا
 ۵۰۰؛ بیش از آن `422 INVITEE_LIMIT_EXCEEDED` پیش از هر پرسش. (ب) دعوت‌شده‌ای که همین حالا واجد نیست (بی تأیید `GOODS_SUPPLY`، یا تعلیق باز؛
 تأیید `CONTRACTING` بس نیست) کل صدور را `422 INVITEE_NOT_ELIGIBLE` می‌کند، **بی نام بردن کدام و چرا**: وضعیت تأمین‌کننده را supplier-service
-می‌گوید، نه procurement به خریدار. (ج) ابطال RFQ با کد بستهٔ `BUYER_REQUEST` و دلیل الزامی (۸ تا ۵۰۰ نویسه، فقط از API) به‌دست
-`PROCUREMENT_RFQ_ISSUER_ROLES`، از هر وضعیت جز `AWARDED`؛ کدهای دیگر (از جمله `NO_QUALIFIED_QUOTATION`) با قاعدهٔ سنجش خودشان می‌آیند. (د)
+می‌گوید، نه procurement به خریدار. (ج) ابطال RFQ با کدی از فهرست بستهٔ `PROCUREMENT_RFQ_CANCELLATION_CODES` (پیش‌فرض `BUYER_REQUEST`) و دلیل
+اختیاری (تا ۵۰۰ نویسه، فقط از API) به‌دست `PROCUREMENT_RFQ_ISSUER_ROLES`، از هر وضعیت جز `AWARDED`؛ `NO_QUALIFIED_QUOTATION` با قاعدهٔ
+سنجش خودش (PR 10) می‌آید و تا آن روز پیکربندی و پایگاه داده ردش می‌کنند. (د)
 تأمین‌کنندهٔ دعوت‌شده با نقش‌های `PROCUREMENT_SUPPLIER_ROLES` (پیش‌فرض `SUPPLIER`) در سازمان خودش RFQ را می‌خواند؛ خریدار با
 `PROCUREMENT_DEMAND_ROLES` و `PROCUREMENT_RFQ_ISSUER_ROLES`. (ه) بستن پس از مهلت هم با جاروکننده و هم با نقش صادرکننده؛ تمدید مهلت نیست (۲).
-**اثر پاسخ:** (الف) و (د) مقدار متغیر؛ (ب) نام بردن دعوت‌شدهٔ ناواجد در `details` — تصمیم حریم supplier-service؛ (ج) کد تازه در
-`RFQ_CANCELLATION_CODES` (`@rasta/contracts`) و `ck_rfq_cancelled`.
+**اثر پاسخ:** (الف) و (د) مقدار متغیر؛ (ب) نام بردن دعوت‌شدهٔ ناواجد در `details` — تصمیم حریم supplier-service؛ (ج) کد تازه مقدار
+`PROCUREMENT_RFQ_CANCELLATION_CODES`؛ کدی که واقعیتی را بیان می‌کند با سنجش خودش و برداشتن آن از `RESERVED_RFQ_CANCELLATION_CODES`
+(`@rasta/contracts`) و `ck_rfq_cancelled`.
 
 **اثر پاسخ.** RFQ عمومی = نمای فهرست برای تأمین‌کنندگان واجد (الگوی مناقصهٔ عمومی) و برداشتن الزام دعوت؛ کمینه‌ها و مهلت = متغیر پیکربندی و
 اعتبارسنجی؛ قاعدهٔ آستانه = همان اثر Q-03؛ بازگشت نیازها = گذار `RFQ_ISSUED → READY` یا انتقال به پنجرهٔ تازه.

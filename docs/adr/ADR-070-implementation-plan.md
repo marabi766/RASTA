@@ -206,24 +206,31 @@ procurement در organization-service در PR 11) ولی امتیازی را ع�
 >    `PROCUREMENT_SUPPLIER_REQUEST_TIMEOUT_MS` ⇒ `504`؛ هیچ ردیف)، و جفت‌کلید (`@rasta/sealing`، کلید خصوصی پیچیده با `PROCUREMENT_RFQ_KEKS`،
 >    برچسب `rasta.rfqkey.aad.v1` جدا از construction؛ بی KEK ⇒ `503`). سپس یک تراکنش زیر قفل تجمیع: همان سنجش‌ها دوباره، مهلت در برابر ساعت
 >    پایگاه داده (`422 QUOTATION_CLOSING_NOT_IN_FUTURE`)، و RFQ، معیارها، دعوت‌ها، `READY → RFQ_ISSUED` و `RFQ_ISSUED` با هم.
-> 2. **پیش‌شرط جابه‌جاشده `409` در هر ترتیب (درس PR-348 r1):** `expectedVersion` پیش از وضعیت سنجیده می‌شود — در صدور، ابطال RFQ و (تغییر
->    رفتار PR 2) ابطال تجمیع؛ پس بازندهٔ صدور در برابر صدور یا ابطال تجمیع، در هر دو ترتیب، `409 OPTIMISTIC_LOCK_FAILED` است نه `422`. ردِ
->    پایگاه داده برای نوشتنی که قفل را دور بزند (`ck_rfq_from_ready_aggregation`، گذار تجمیع، `ux_rfq_aggregation`) هم `409` است. آزمون‌ها هر
->    ترتیب را با مانع و انتظار قفل در `pg_stat_activity` اجبار می‌کنند، از جمله نوشتنی که قفل نمی‌گیرد.
+> 2. **نسخهٔ جابه‌جاشده `409`، هر فرمانی که برده باشد (درس PR-348 r1):** `expectedVersion` پیش از وضعیت سنجیده می‌شود — در صدور، ابطال
+>    RFQ و (تغییر رفتار PR 2) ابطال تجمیع؛ پس بازندهٔ صدور در برابر صدور یا ابطال تجمیع، و بازندهٔ ابطال RFQ در برابر بستن (شخص یا
+>    جاروکننده)، در هر ترتیب `409 OPTIMISTIC_LOCK_FAILED` است نه `422`. **استثنا (PR-349 r1):** بستن نسخه نمی‌برد، پس کهنه نیست — بستنی
+>    که پس از ابطال برسد `422 RFQ_CANCELLED` است و بستنی که RFQ را بسته بیابد همان را پاسخ می‌دهد (Idempotent)؛ جاروکننده در هر دو `NOOP`.
+>    ردِ پایگاه داده برای صدوری که قفل را دور بزند هم `409` است: `ck_rfq_from_ready_aggregation`، گذار تجمیع، و از نقض‌های یکتایی **فقط**
+>    `ux_rfq_aggregation` (مدل و ستون‌های Prisma)؛ هر P2002 دیگری در همان تراکنش (`rfq.key_id`، شناسهٔ outbox) همان خطایی است که هست، نه
+>    `409` (PR-349 r1 F1). آزمون‌ها هر ترتیب را با مانع و انتظار قفل در `pg_stat_activity` اجبار می‌کنند، از جمله نوشتنی که قفل نمی‌گیرد و
+>    هر چهار ترتیب جاروکننده در برابر بستن و ابطال شخص.
 > 3. **پایگاه داده:** یک RFQ به‌ازای تجمیع؛ RFQ و تجمیع یکدیگر را نام می‌برند (`fk_rfq_aggregation`، `fk_demand_aggregation_rfq`) و در Commit هر
 >    کدام دیگری را (`tg_rfq_issue_check`)؛ معیار و دعوت منجمد: فقط با صدور، هرگز تغییر و حذف، و در Commit شمارشان همان شمار بیان‌شدهٔ RFQ (ردیف
->    دیرهنگام رد می‌شود)؛ بستن پیش از مهلت از هر مسیری رد (`ck_rfq_deadline`). Migration برگشت‌پذیر است و تا RFQ ای هست رد می‌شود.
+>    دیرهنگام رد می‌شود)؛ بستن پیش از مهلت **با ساعت خود پایگاه داده** در لحظهٔ گذار (`clock_timestamp()`، نه `closed_at` که نویسنده می‌دهد؛
+>    `closed_at` میان مهلت و همان ساعت) از هر مسیری رد (`ck_rfq_deadline`، PR-349 r1 F3). Migration برگشت‌پذیر است و تا RFQ ای هست رد می‌شود.
 > 4. **بستن:** `RfqCloseSweeper` (اجاره، حصار، `SKIP LOCKED`، Backoff) و `POST /v1/rfqs/{id}/close` یک فرمان‌اند (`RfqClose`)؛ مهلت نیم‌باز
 >    (۱ میلی‌ثانیه پیش از آن `422 QUOTATION_DEADLINE_NOT_REACHED`، دقیقاً در آن بسته)؛ Idempotent؛ RFQ باطل‌شده `422 RFQ_CANCELLED`. نقش پس
 >    از یافتن RFQ در سازمان فراخواننده سنجیده می‌شود: نقش دیگر خریدار `403`، تأمین‌کننده و سازمان سوم همان `404`.
-> 5. **ابطال RFQ:** کد بستهٔ `BUYER_REQUEST` و دلیل **الزامی** ۸ تا ۵۰۰ نویسه — قرارداد طرح‌شده کد را «از پیکربندی» و دلیل را اختیاری داشت؛
->    کد بسته در کد است چون هر کد قاعده‌ای دارد که کد می‌سنجد (همان `CANCELLATION_CODES` construction)، و دلیل الزامی قاعدهٔ هر ابطال دیگر
->    همین سرویس است. `NO_QUALIFIED_QUOTATION` با ارزیابی (PR 10) می‌آید، جایی که سنجیدنی است. تجمیع `RFQ_ISSUED` می‌ماند.
+> 5. **ابطال RFQ، همان قرارداد طرح‌شدهٔ `CancelRfq` (PR-349 r1 F2):** `expectedVersion` و `reasonCode` از فهرست بستهٔ پیکربندی
+>    `PROCUREMENT_RFQ_CANCELLATION_CODES` (پیش‌فرض `BUYER_REQUEST`؛ کد بیرون از فهرست `422 CANCELLATION_CODE_NOT_ALLOWED`)، و `reason`
+>    اختیاری تا ۵۰۰ نویسه (خالی یعنی هیچ). پایگاه داده پیکربندی را نمی‌بیند: شکل کد را نگه می‌دارد (`RFQ_CANCELLATION_CODE_PATTERN` قرارداد
+>    رویداد) و فهرست با سرویس است. `NO_QUALIFIED_QUOTATION` تا ارزیابی (PR 10) که آن را می‌سنجد هم در پیکربندی (توقف راه‌اندازی) و هم در
+>    `ck_rfq_cancelled` رد است. تجمیع `RFQ_ISSUED` می‌ماند.
 > 6. **خواندن:** خریدار با `PROCUREMENT_DEMAND_ROLES` و `PROCUREMENT_RFQ_ISSUER_ROLES`؛ تأمین‌کنندهٔ دعوت‌شده با `PROCUREMENT_SUPPLIER_ROLES`
 >    (تازه، پیش‌فرض `SUPPLIER`) و `runUnscoped` با دلیل و Predicate دعوت خودش؛ نمای تأمین‌کننده بی فهرست دعوت و بی متن دلیل؛ `side` در فهرست
 >    الزامی. `quotationCount` و `openedAt` قرارداد طرح‌شده با PR 8 و PR 9 می‌آیند. `AUDITOR`، `SYSTEM_ADMIN` و توکن سرویس پیش از خواندن `403`.
 > 7. **رویدادها** قرارداد `@rasta/contracts` (`events/procurement-rfq.ts`)، کلید پارتیشن `rfqId`؛ `RFQ_CLOSED` با `trigger` و `closedBy` (تهی برای
->    جاروکننده) به‌جای شمار پیشنهادها (پیشنهادی هنوز نیست). متریک‌های `rasta_procurement_rfq_*` بی قاعدهٔ هشدار (پیگیری). `SUPPLIER_SERVICE_URL`
+>    جاروکننده) **و** `quotationCount` که ADR-070 § 9 وعده داده (تا PR 8 صفر، پیش از انجماد قرارداد). متریک‌های `rasta_procurement_rfq_*` بی قاعدهٔ هشدار (پیگیری). `SUPPLIER_SERVICE_URL`
 >    در turbo اعلام و از فهرست withheld construction برداشته شد. تصمیم‌های موقت تازه در یادداشت Q-121.
 
 ### PR 7 — شواهد در audit-service (`M`)
