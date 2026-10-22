@@ -1,5 +1,12 @@
 import { AllExceptionsFilter, RastaError, isRastaError } from '@rasta/nest-common';
-import { EconomicClient, idempotencyKeyFor } from './economic.client';
+import {
+  EconomicClient,
+  fundsOf,
+  idempotencyKeyFor,
+  OBLIGATION_LOOKUP_PAGES,
+  ObligationLookupIncomplete,
+  type ObligationFunds,
+} from './economic.client';
 import type { MarketplaceEnv } from '../config/env';
 
 /**
@@ -129,6 +136,8 @@ describe('creating the obligation', () => {
     // The order is named as the source, so an auditor can walk from a ledger
     // entry back to the purchase.
     expect(body.sourceReference).toBe('ORD_1');
+    // Under the key the recovery's lookup asks for exactly (`findObligations`).
+    expect(body.sourceType).toBe('ORDER');
     expect(request.headers['idempotency-key']).toBe(idempotencyKeyFor.hold('ORD_1'));
   });
 
@@ -418,5 +427,126 @@ describe('reading the order’s obligation back (D-053)', () => {
     await expect(read(new EconomicClient(ENV, recordingTokens().service as never))).resolves.toBe(
       null,
     );
+  });
+});
+
+describe('finding the order’s obligation by its exact key (review of #334 round 2, F2)', () => {
+  const original = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = original;
+  });
+
+  const row = (id: string, overrides: Record<string, unknown> = {}) => ({
+    id,
+    organizationId: 'ORG-BUYER',
+    counterpartyOrganizationId: 'ORG-SUPPLIER',
+    transactionType: 'MARKETPLACE_ORDER',
+    status: 'HELD',
+    grossAmountMinor: '500000',
+    commissionAmountMinor: '0',
+    netAmountMinor: '500000',
+    currency: 'IRR',
+    sourceType: 'ORDER',
+    sourceReference: 'ORD_1',
+    ...overrides,
+  });
+
+  /** Answers each GET with the next page; the last one repeats. */
+  function pagedFetch(pages: { items: unknown[]; nextCursor: string | null; hasMore: boolean }[]) {
+    const urls: URL[] = [];
+    globalThis.fetch = (async (url: string) => {
+      urls.push(new URL(url));
+      const page = pages[Math.min(urls.length, pages.length) - 1];
+      return { ok: true, status: 200, text: async () => JSON.stringify(page) } as Response;
+    }) as typeof fetch;
+    return urls;
+  }
+
+  const find = () =>
+    new EconomicClient(ENV, recordingTokens().service as never).findObligations({
+      orderId: 'ORD_1',
+      buyerOrganizationId: 'ORG-BUYER',
+      correlationId: 'corr-1',
+    });
+
+  it('asks for exactly ORDER/<order id> as MARKETPLACE_ORDER, the largest page', async () => {
+    const urls = pagedFetch([{ items: [row('TXN_1')], nextCursor: null, hasMore: false }]);
+
+    await expect(find()).resolves.toEqual([row('TXN_1')]);
+
+    expect(urls).toHaveLength(1);
+    expect(urls[0]!.pathname).toBe('/v1/transactions');
+    expect(Object.fromEntries(urls[0]!.searchParams)).toEqual({
+      transactionType: 'MARKETPLACE_ORDER',
+      sourceType: 'ORDER',
+      sourceReference: 'ORD_1',
+      limit: '100',
+    });
+  });
+
+  it('reads every page, following the cursor, before it answers', async () => {
+    const urls = pagedFetch([
+      {
+        items: [row('TXN_A', { counterpartyOrganizationId: 'ORG-OTHER' })],
+        nextCursor: 'TXN_A',
+        hasMore: true,
+      },
+      { items: [row('TXN_B')], nextCursor: null, hasMore: false },
+    ]);
+
+    const found = await find();
+
+    expect(found.map((transaction) => transaction.id)).toEqual(['TXN_A', 'TXN_B']);
+    expect(urls.map((url) => url.searchParams.get('cursor'))).toEqual([null, 'TXN_A']);
+  });
+
+  it('keeps only rows under the exact key, whatever the answer carries', async () => {
+    pagedFetch([
+      {
+        items: [
+          row('TXN_TYPE', { sourceType: 'ORDER_UNCONFIRMED' }),
+          row('TXN_CASE', { sourceType: 'order' }),
+          row('TXN_REF', { sourceReference: 'ORD_2' }),
+          row('TXN_KIND', { transactionType: 'LOGISTICS' }),
+          row('TXN_OWN'),
+        ],
+        nextCursor: null,
+        hasMore: false,
+      },
+    ]);
+
+    await expect(find()).resolves.toEqual([row('TXN_OWN')]);
+  });
+
+  it(`gives up on an answer that has not ended after ${OBLIGATION_LOOKUP_PAGES} pages`, async () => {
+    const urls = pagedFetch([{ items: [], nextCursor: 'more', hasMore: true }]);
+
+    await expect(find()).rejects.toBeInstanceOf(ObligationLookupIncomplete);
+    expect(urls).toHaveLength(OBLIGATION_LOOKUP_PAGES);
+  });
+
+  it('gives up on more pages announced with no cursor to them', async () => {
+    const urls = pagedFetch([{ items: [row('TXN_1')], nextCursor: null, hasMore: true }]);
+
+    await expect(find()).rejects.toBeInstanceOf(ObligationLookupIncomplete);
+    expect(urls).toHaveLength(1);
+  });
+});
+
+describe('what an obligation’s status says of its funds (review of #334 round 2, F1)', () => {
+  // Every status economic-service has (its TransactionStatus enum), and ones it does not.
+  it.each<[string, ObligationFunds]>([
+    ['HELD', 'HELD'],
+    ['CREATED', 'NEVER_HELD'],
+    ['PENDING_SETTLEMENT', 'UNPROVEN'],
+    ['DISPUTED', 'UNPROVEN'],
+    ['SETTLED', 'PAID_OUT'],
+    ['REFUNDED', 'RETURNED'],
+    ['CANCELLED', 'NEVER_HELD'],
+    ['FAILED', 'NEVER_HELD'],
+    ['A_STATUS_ADDED_LATER', 'UNPROVEN'],
+    ['held', 'UNPROVEN'],
+  ])('%s → %s', (status, funds) => {
+    expect(fundsOf(status)).toBe(funds);
   });
 });

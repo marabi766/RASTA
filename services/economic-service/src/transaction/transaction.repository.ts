@@ -15,6 +15,7 @@ import { STATEMENT_SOURCE_TYPE } from './dto';
 export interface TransactionFilter {
   status?: TransactionStatus;
   transactionType?: TransactionType;
+  sourceType?: string;
   sourceReference?: string;
   from?: Date;
   to?: Date;
@@ -260,6 +261,7 @@ export class TransactionRepository {
     const window: Prisma.TransactionWhereInput = {
       ...(filter.status ? { status: filter.status } : {}),
       ...(filter.transactionType ? { transactionType: filter.transactionType } : {}),
+      ...(filter.sourceType ? { sourceType: filter.sourceType } : {}),
       ...(filter.sourceReference ? { sourceReference: filter.sourceReference } : {}),
       ...(filter.from || filter.to
         ? {

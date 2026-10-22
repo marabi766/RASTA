@@ -10,8 +10,8 @@ import type { ShortfallPolicy } from '../config/env';
  *
  * Both lifecycles are declared whole now and stored as text under a `CHECK` (never an enum: a
  * value added to a PostgreSQL enum cannot be rolled back, ADR-068 § 2). COM-007 PR 1 reaches
- * `submit`, `withdraw` and the end of a window found by a demand that arrives after it; the
- * sweeper (PR 2), `cancel` (PR 2) and `issueRfq` (PR 6) join the same tables later.
+ * `submit`, `withdraw` and the end of a window found by a demand that arrives after it; PR 2 the
+ * same end made by the window sweeper, and `cancel`; `issueRfq` (PR 6) joins the same tables later.
  */
 
 export const DEMAND_STATES = ['SUBMITTED', 'WITHDRAWN', 'REFERRED', 'LAPSED'] as const;
