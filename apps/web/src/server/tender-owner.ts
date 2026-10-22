@@ -137,6 +137,8 @@ export const OWNER_BIDS_SCHEMA = z.object({
   bidCount: z.number().int().min(0),
   receivedAt: z.array(utcInstant),
   bids: z.array(openedBidSchema),
+  /** The proposal to open that stands (task 060: what a withdrawal names); not yet read by a form. */
+  proposal: z.object({ proposedBy: z.string(), proposedAt: utcInstant }).nullable().optional(),
 });
 
 export type OwnerBids = z.infer<typeof OWNER_BIDS_SCHEMA>;
