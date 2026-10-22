@@ -2,6 +2,7 @@
   "profile": "development",
   "admin": "admin",
   "principals": [
+    "analytics-service",
     "asset-service",
     "audit-service",
     "construction-service",
@@ -23,6 +24,34 @@
     "supplier-service"
   ],
   "acls": [
+    {
+      "principal": "analytics-service",
+      "resourceType": "GROUP",
+      "resourceName": "analytics-service.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "analytics-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.analytics.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "analytics-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "analytics-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
     {
       "principal": "asset-service",
       "resourceType": "GROUP",
@@ -460,6 +489,20 @@
     {
       "principal": "contract-service",
       "resourceType": "TOPIC",
+      "resourceName": "rasta.economic.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "contract-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.economic.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "contract-service",
+      "resourceType": "TOPIC",
       "resourceName": "rasta.organization.v1.retry",
       "patternType": "LITERAL",
       "operation": "READ"
@@ -658,6 +701,13 @@
       "resourceType": "GROUP",
       "resourceName": "itest-observer.",
       "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.analytics.v1.dlq",
+      "patternType": "LITERAL",
       "operation": "READ"
     },
     {
@@ -985,6 +1035,13 @@
     {
       "principal": "kafka-exporter",
       "resourceType": "GROUP",
+      "resourceName": "analytics-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-exporter",
+      "resourceType": "GROUP",
       "resourceName": "asset-service.",
       "patternType": "PREFIXED",
       "operation": "DESCRIBE"
@@ -1085,6 +1142,13 @@
       "resourceType": "CLUSTER",
       "resourceName": "kafka-cluster",
       "patternType": "LITERAL",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-ui",
+      "resourceType": "GROUP",
+      "resourceName": "analytics-service.",
+      "patternType": "PREFIXED",
       "operation": "DESCRIBE"
     },
     {
@@ -1330,6 +1394,13 @@
       "resourceType": "GROUP",
       "resourceName": "ops-replay.",
       "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.analytics.v1.dlq",
+      "patternType": "LITERAL",
       "operation": "READ"
     },
     {

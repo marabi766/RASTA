@@ -1,4 +1,8 @@
-import type { EventEnvelope } from '@rasta/contracts';
+import {
+  returnDispatchReleasedPayloadSchema,
+  returnDispatchWithdrawnPayloadSchema,
+  type EventEnvelope,
+} from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
 import { SENSITIVE_KEYS } from '@rasta/logging';
 import type { PrismaService } from '../src/prisma/prisma.service';
@@ -407,6 +411,83 @@ describe('domain-event ingestion (real PostgreSQL)', () => {
       });
       expect(rows).toBe(2);
     });
+  });
+
+  describe('the dispatch fence of a return request (Codex r2 on #339, finding 1)', () => {
+    // A reservation released by reconciliation, and inventory's withdrawal behind it, each its
+    // own domain event, on its producer's topic — path A, with no declaration here (S-06).
+    const ULID = '01JBQ0000000000000000000AB';
+    const cases = [
+      {
+        topic: 'rasta.marketplace.v1',
+        eventName: 'RETURN_DISPATCH_RELEASED',
+        producer: 'marketplace-service',
+        aggregateType: 'ReturnRequest',
+        aggregateId: `RET_${ULID}`,
+        payload: returnDispatchReleasedPayloadSchema.parse({
+          returnRequestId: `RET_${ULID}`,
+          orderId: `ORD_${ULID}`,
+          buyerOrganizationId: 'ORG-BUYER',
+          supplierOrganizationId: 'ORG-SUPPLIER',
+          releaseId: `RDL_${ULID}`,
+          reservationId: `RDR_${ULID}`,
+          reservedAt: '2026-11-20T14:00:00.000Z',
+          withdrawnAt: '2026-11-20T14:04:00.000Z',
+          releasedBy: 'USR-BUYER',
+          releasedAt: '2026-11-20T14:05:00.000Z',
+        }),
+      },
+      {
+        topic: 'rasta.inventory.v1',
+        eventName: 'RETURN_DISPATCH_WITHDRAWN',
+        producer: 'inventory-service',
+        aggregateType: 'ReturnDispatchWithdrawal',
+        aggregateId: `RDW_${ULID}`,
+        payload: returnDispatchWithdrawnPayloadSchema.parse({
+          withdrawalId: `RDW_${ULID}`,
+          organizationId: 'ORG-SUPPLIER',
+          returnRequestId: `RET_${ULID}`,
+          reservationId: `RDR_${ULID}`,
+          withdrawnBy: 'marketplace-service',
+          withdrawnAt: '2026-11-20T14:04:00.000Z',
+        }),
+      },
+    ];
+
+    it.each(cases)(
+      'records $eventName from $topic once, and a redelivery as a duplicate',
+      async ({ topic, eventName, producer, aggregateType, aggregateId, payload }) => {
+        const source = envelope({ eventName, producer, aggregateType, aggregateId, payload });
+
+        expect(
+          await repository.ingest(
+            toAuditEventRecord(source, delivery(topic)),
+            DOMAIN_PROJECTOR_CONSUMER,
+          ),
+        ).toBe('WRITTEN');
+        expect(
+          await repository.ingest(
+            toAuditEventRecord(source, delivery(topic)),
+            DOMAIN_PROJECTOR_CONSUMER,
+          ),
+        ).toBe('DUPLICATE');
+
+        const rows = await prisma.client.auditEvent.findMany({
+          where: { sourceEventId: source.eventId },
+        });
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          sourceEventName: eventName,
+          sourceTopic: topic,
+          sourceService: producer,
+          resourceType: aggregateType,
+          resourceId: aggregateId,
+          organizationId: source.tenantId,
+          correlationId: source.correlationId,
+          outcome: 'SUCCESS',
+        });
+      },
+    );
   });
 
   it('writes the audit row and its marker atomically', async () => {

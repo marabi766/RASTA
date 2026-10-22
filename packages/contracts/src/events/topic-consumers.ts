@@ -102,8 +102,14 @@ export const TOPIC_CONSUMERS = Object.freeze({
   // And ORGANIZATION_MOVED (Q-83, #231 round 2): a signing policy a union wrote must stop
   // governing an employer that left the union's subtree. Reads only that event, as a trigger:
   // the answer is asked of organization-service on every delivery.
+  // And SETTLEMENT_COMPLETED (CON-003 PR 6c, ADR-068 § 6 (3)), as a trigger only: a statement is
+  // SETTLED only once economic-service itself confirms its obligation settled in full (I5, A-13).
   'contract-service': Object.freeze({
-    subscribes: Object.freeze(['rasta.construction.v1', 'rasta.organization.v1'] as const),
+    subscribes: Object.freeze([
+      'rasta.construction.v1',
+      'rasta.organization.v1',
+      'rasta.economic.v1',
+    ] as const),
     deadLetterTopic: 'rasta.contract.v1.dlq',
   }),
   // RUN-005 (ADR-048 § 2, § 3): mirrors the physical half of a return onto the return request
@@ -121,6 +127,13 @@ export const TOPIC_CONSUMERS = Object.freeze({
   'audit-service': Object.freeze({
     subscribes: EVERY_DECLARED_TOPIC,
     deadLetterTopic: 'rasta.audit.v1.dlq',
+  }),
+  // RUN-001 (ADR-071 § 1): read models built from events only, never from another service's
+  // database. PR 1 reads MAINTENANCE_COMPLETED into `fact_maintenance`; each later projection
+  // adds its topic here when it lands (ADR-071 § 3), never before.
+  'analytics-service': Object.freeze({
+    subscribes: Object.freeze(['rasta.maintenance.v1'] as const),
+    deadLetterTopic: 'rasta.analytics.v1.dlq',
   }),
 });
 

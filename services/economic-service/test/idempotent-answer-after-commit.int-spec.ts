@@ -144,7 +144,9 @@ describe('a failure after the commit of an idempotent economic command (HTTP)', 
       .set('authorization', asPayer())
       .set('idempotency-key', id('answer-txn'))
       .send({
-        transactionType: 'MARKETPLACE_ORDER',
+        // Not an order's obligation, which only the order saga disputes
+        // (docs/24 Q-138): the payer and a platform person act on it here.
+        transactionType: 'LOGISTICS',
         counterpartyOrganizationId: payee,
         grossAmountMinor: '7000',
         currency: 'IRR',

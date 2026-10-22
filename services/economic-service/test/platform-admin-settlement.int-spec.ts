@@ -78,7 +78,7 @@ describe('a system administrator settles another organization’s transaction (H
   /** A B→C transaction with funds held, in `state`, made by B itself. */
   async function transaction(state: 'created' | 'held' | 'authorised' | 'disputed') {
     const created = await post('/v1/transactions', asPayer(), id('xsettle-txn'), {
-      transactionType: 'MARKETPLACE_ORDER',
+      transactionType: 'LOGISTICS',
       counterpartyOrganizationId: payee,
       grossAmountMinor: '9000',
       currency: 'IRR',

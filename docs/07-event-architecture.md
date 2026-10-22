@@ -296,6 +296,8 @@ Aggregate نیاز دارد، یا آن دو در واقع **یک** چرخه‌�
 > **دربارهٔ `aggregateVersion`:** این فیلد در Envelope **اختیاری** است و امروز فقط
 > سه محل تولیدی آن را می‌فرستند — `asset`، `identity` و `organization`. پنج سرویس
 > دیگر هرگز نمی‌فرستند، پس تکیه بر آن به‌عنوان ابزار عمومی ترتیب، امروز کار نمی‌کند.
+> در asset هم فقط `ASSET_UPDATED` آن را دارد (`asset.service.ts:463`)؛ مبنای ترتیب ترکیب ناوگان در analytics
+> `streamSeq` است (ADR-071 § ۳-الف).
 > ADR-051 نشان می‌دهد واحد درست هم `topic + partitionKey` است نه Aggregate، چون
 > `fleet`، `maintenance` و بخش تراکنشی `economic` عمداً رویدادهای چند Aggregate را
 > روی یک کلید می‌نشانند.

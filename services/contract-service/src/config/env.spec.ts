@@ -19,6 +19,11 @@ describe('the provisional defaults (Q-95)', () => {
     expect(env.CONTRACT_READER_ROLES).toEqual(['ORGANIZATION_ADMIN']);
   });
 
+  it('asks economic-service on its port, within five seconds, before a statement settles (CON-003 PR 6c)', () => {
+    expect(env.ECONOMIC_SERVICE_URL).toBe('http://localhost:3112');
+    expect(env.CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS).toBe(5000);
+  });
+
   it('asks construction-service on its port, within five seconds, and retries five times', () => {
     expect(env.CONSTRUCTION_SERVICE_URL).toBe('http://localhost:3110');
     expect(env.CONTRACT_AWARD_REQUEST_TIMEOUT_MS).toBe(5000);
@@ -122,6 +127,9 @@ describe('overrides', () => {
     ['an endless retry count', { CONTRACT_CONSUMER_MAX_RETRIES: '21' }],
     ['a backoff under 10 ms', { CONTRACT_CONSUMER_RETRY_BACKOFF_MS: '1' }],
     ['a construction URL that is not a URL', { CONSTRUCTION_SERVICE_URL: 'construction' }],
+    ['an economic URL that is not a URL', { ECONOMIC_SERVICE_URL: 'economic' }],
+    ['a settlement timeout under 100 ms', { CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS: '10' }],
+    ['a settlement timeout over a minute', { CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS: '60001' }],
   ])('refuses %s at startup', (_label, change) => {
     expect(() => load(change)).toThrow();
   });

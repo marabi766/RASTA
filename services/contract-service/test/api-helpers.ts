@@ -15,6 +15,7 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { TenderAwardedConsumer } from '../src/events/tender-awarded.consumer';
 import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
+import { SettlementCompletedConsumer } from '../src/events/settlement-completed.consumer';
 import { PolicyReconciliationSweeper } from '../src/policy/policy-reconciliation.sweeper';
 import { OrganizationDirectory } from '../src/organization/organization-directory';
 import { FakeHierarchy, databaseUrl } from './helpers';
@@ -203,6 +204,9 @@ export async function startApi(env: Record<string, string> = {}): Promise<ApiHar
     // driven directly: booted here they would subscribe to a broker and sweep rows other suites
     // assert on.
     .overrideProvider(OrganizationMovedConsumer)
+    .useValue(inert)
+    // The settlement consumer is driven directly in statement-settled.int-spec.ts.
+    .overrideProvider(SettlementCompletedConsumer)
     .useValue(inert)
     .overrideProvider(PolicyReconciliationSweeper)
     .useValue(inert)

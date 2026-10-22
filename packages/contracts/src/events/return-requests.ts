@@ -217,6 +217,46 @@ export const RETURN_REQUEST_EVENT_SCHEMAS = {
   RETURN_RESOLVED: returnResolvedPayloadSchema,
 } as const satisfies Record<ReturnRequestEventName, z.ZodTypeAny>;
 
+// ---------------------------------------------------------------------------
+// A dispatch reservation released by reconciliation (Codex r2 on #339, finding 1)
+//
+// Not a step of the request's lifecycle: its status stays AUTHORIZED and `returnVersion` does not
+// move, so it is kept apart from `RETURN_REQUEST_EVENTS` (whose members each carry a version).
+// The audit record of the release (AGENTS.md S-06): the person who reconciled, inventory's
+// withdrawal instant, the reservation that ended. Written in the transaction that clears the
+// reservation beside its `return_dispatch_release` row, so the two commit or neither does.
+// ---------------------------------------------------------------------------
+
+export const RETURN_DISPATCH_EVENTS = {
+  RETURN_DISPATCH_RELEASED: 'RETURN_DISPATCH_RELEASED',
+} as const;
+
+export type ReturnDispatchEventName = keyof typeof RETURN_DISPATCH_EVENTS;
+
+const dispatchReservationId = z.string().regex(new RegExp(`^RDR_${ulid}$`));
+
+export const returnDispatchReleasedPayloadSchema = z
+  .object({
+    returnRequestId,
+    orderId,
+    buyerOrganizationId: organizationIdSchema,
+    supplierOrganizationId: organizationIdSchema,
+    releaseId: z.string().regex(new RegExp(`^RDL_${ulid}$`)),
+    reservationId: dispatchReservationId,
+    reservedAt: instant,
+    /** When inventory-service recorded the reservation as withdrawn — its answer, its clock. */
+    withdrawnAt: instant,
+    releasedBy: id,
+    releasedAt: instant,
+  })
+  .strict();
+
+export const RETURN_DISPATCH_EVENT_SCHEMAS = {
+  RETURN_DISPATCH_RELEASED: returnDispatchReleasedPayloadSchema,
+} as const satisfies Record<ReturnDispatchEventName, z.ZodTypeAny>;
+
+export type ReturnDispatchReleasedPayload = z.infer<typeof returnDispatchReleasedPayloadSchema>;
+
 export type ReturnLine = z.infer<typeof returnLineSchema>;
 export type ReturnRequestedPayload = z.infer<typeof returnRequestedPayloadSchema>;
 export type ReturnAuthorizedPayload = z.infer<typeof returnAuthorizedPayloadSchema>;

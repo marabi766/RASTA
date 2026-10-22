@@ -32,11 +32,17 @@ import {
   TENDER_AWARDED_CONSUMER,
   TENDER_AWARDED_TOPICS,
 } from '../src/events/tender-awarded.consumer';
+import {
+  SETTLEMENT_COMPLETED_CONSUMER,
+  SETTLEMENT_COMPLETED_TOPICS,
+} from '../src/events/settlement-completed.consumer';
+import { SettlementRepository } from '../src/settlement/settlement.repository';
 import { databaseUrl, newAward, newOrganizationId, tenderAwarded } from './helpers';
 
 /**
- * The whole shutdown path through the real AppModule, with both Kafka
- * consumers on the real `EventConsumer`.
+ * The whole shutdown path through the real AppModule, with the Kafka consumers
+ * on the real `EventConsumer` — since CON-003 PR 6c three, the third the
+ * `SETTLEMENT_COMPLETED` consumer, held here where it reads its statements.
  *
  * Codex r1 on #277 (Medium): `AppModule.onApplicationShutdown` stopped
  * `TenderAwardedConsumer` and then `OrganizationMovedConsumer` with no bound,
@@ -121,6 +127,38 @@ const organizationMoved = (): Buffer => {
   );
 };
 
+/** A SETTLEMENT_COMPLETED envelope, as economic-service publishes it. */
+const settlementCompleted = (): Buffer => {
+  const organizationId = newOrganizationId();
+  return Buffer.from(
+    JSON.stringify(
+      eventEnvelopeSchema.parse({
+        eventId: ulid(),
+        eventName: 'SETTLEMENT_COMPLETED',
+        occurredAt: new Date().toISOString(),
+        producer: 'economic-service',
+        aggregateType: 'Settlement',
+        aggregateId: `STL_${ulid()}`,
+        tenantId: organizationId,
+        correlationId: ulid(),
+        payload: {
+          settlementId: `STL_${ulid()}`,
+          transactionId: `TXN_${ulid()}`,
+          organizationId,
+          payerOrganizationId: organizationId,
+          payeeOrganizationId: newOrganizationId(),
+          journalId: `JNL_${ulid()}`,
+          grossAmountMinor: '1000',
+          commissionAmountMinor: '10',
+          netAmountMinor: '990',
+          currency: 'IRR',
+          settledAt: new Date().toISOString(),
+        },
+      }),
+    ),
+  );
+};
+
 type EachMessage = (payload: {
   topic: string;
   partition: number;
@@ -164,9 +202,10 @@ class FakeKafkaConsumer {
 interface Booted {
   app: INestApplication;
   env: ContractEnv;
-  calls: { publish: number; purge: number; awards: number; moves: number };
+  calls: { publish: number; purge: number; awards: number; moves: number; settlements: number };
   awarded: FakeKafkaConsumer;
   moves: FakeKafkaConsumer;
+  settlements: FakeKafkaConsumer;
 }
 
 const inert = { start: () => undefined, stop: async () => undefined };
@@ -203,7 +242,7 @@ async function boot(options: {
   };
   const env = loadContractEnv(source);
 
-  const calls = { publish: 0, purge: 0, awards: 0, moves: 0 };
+  const calls = { publish: 0, purge: 0, awards: 0, moves: 0, settlements: 0 };
   let claimed = !options.relayRow;
   const store: Partial<Record<keyof PrismaOutboxStore, unknown>> = {
     claimPending: async (): Promise<OutboxClaim> => {
@@ -229,6 +268,7 @@ async function boot(options: {
   const fakes = new Map<string, FakeKafkaConsumer>([
     [TENDER_AWARDED_CONSUMER, new FakeKafkaConsumer(TENDER_AWARDED_TOPICS[0])],
     [ORGANIZATION_MOVES_CONSUMER, new FakeKafkaConsumer(ORGANIZATION_MOVES_TOPICS[0])],
+    [SETTLEMENT_COMPLETED_CONSUMER, new FakeKafkaConsumer(SETTLEMENT_COMPLETED_TOPICS[0])],
   ]);
   const realStart = EventConsumer.prototype.start;
   jest.spyOn(EventConsumer.prototype, 'start').mockImplementation(function (this: EventConsumer) {
@@ -271,6 +311,14 @@ async function boot(options: {
     })
     .overrideProvider(AWARD_SOURCE)
     .useValue(awards)
+    // The settlement handler is held where it first reads its statements.
+    .overrideProvider(SettlementRepository)
+    .useValue({
+      findSettledBy: () => {
+        calls.settlements += 1;
+        return never();
+      },
+    })
     .overrideProvider(PolicyReconciliationSweeper)
     .useValue(inert)
     .overrideProvider(AUTH_OPTIONS)
@@ -288,6 +336,7 @@ async function boot(options: {
     calls,
     awarded: fakes.get(TENDER_AWARDED_CONSUMER)!,
     moves: fakes.get(ORGANIZATION_MOVES_CONSUMER)!,
+    settlements: fakes.get(SETTLEMENT_COMPLETED_CONSUMER)!,
   };
 }
 
@@ -327,19 +376,27 @@ describe('contract-service shutdown: relay, purge and both consumers by one dead
 
   it('finishes the close under SHUTDOWN_TIMEOUT_MS with a publish, a purge batch and both consumers’ handlers never ending', async () => {
     booted = await boot({ award: never, enqueueMove: never, relayRow: true });
-    const { app, calls, awarded: awards, moves } = booted;
+    const { app, calls, awarded: awards, moves, settlements } = booted;
     expect(app.get(OutboxRelay)).toBeInstanceOf(OutboxRelay);
     const purge = app.get(OutboxPurgeScheduler);
     expect(purge.stopBoundMs).toBe(5200);
 
     // The relay's poll claims the probe and its publish hangs; the purge's
-    // batch hangs too; construction-service never answers for the award, and
-    // the move's write never returns.
+    // batch hangs too; construction-service never answers for the award, the
+    // move's write never returns, and neither does the settlement's first read.
     void purge.runOnce();
     void awards.deliver('91', awarded());
     void moves.deliver('92', organizationMoved());
-    await until(() => calls.publish > 0 && calls.purge > 0 && calls.awards > 0 && calls.moves > 0);
-    expect(calls).toMatchObject({ publish: 1, purge: 1, awards: 1, moves: 1 });
+    void settlements.deliver('94', settlementCompleted());
+    await until(
+      () =>
+        calls.publish > 0 &&
+        calls.purge > 0 &&
+        calls.awards > 0 &&
+        calls.moves > 0 &&
+        calls.settlements > 0,
+    );
+    expect(calls).toMatchObject({ publish: 1, purge: 1, awards: 1, moves: 1, settlements: 1 });
 
     const { exits, errors, tookMs } = await closeUnderDeadline(booted);
 
@@ -353,9 +410,10 @@ describe('contract-service shutdown: relay, purge and both consumers by one dead
     expect(tookMs).toBeLessThan(BUDGET_MS + 1500);
     // And started nothing new while closing; neither message was committed,
     // so the groups deliver them again.
-    expect(calls).toMatchObject({ publish: 1, purge: 1, awards: 1, moves: 1 });
+    expect(calls).toMatchObject({ publish: 1, purge: 1, awards: 1, moves: 1, settlements: 1 });
     expect(awards.committed).toEqual([]);
     expect(moves.committed).toEqual([]);
+    expect(settlements.committed).toEqual([]);
   }, 30_000);
 
   it('an owner that answers after the close: the award is still not committed', async () => {

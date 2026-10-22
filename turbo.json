@@ -82,11 +82,19 @@
         "ORGANIZATION_SERVICE_URL",
         "FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS",
         "INVENTORY_LOCK_TIMEOUT_MS",
+        "INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS",
+        "MARKETPLACE_SERVICE_URL",
+        "INVENTORY_SERVICE_URL",
+        "MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
         "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SERVICE_URL",
+        "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_BATCH_SIZE",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",
@@ -94,6 +102,7 @@
         "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
         "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
         "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
+        "ANALYTICS_*",
         "CORS_ORIGINS",
         "PROCUREMENT_*",
         "SUPPLIER_SERVICE_URL"
@@ -148,11 +157,19 @@
         "ORGANIZATION_SERVICE_URL",
         "FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS",
         "INVENTORY_LOCK_TIMEOUT_MS",
+        "INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS",
+        "MARKETPLACE_SERVICE_URL",
+        "INVENTORY_SERVICE_URL",
+        "MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
         "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SERVICE_URL",
+        "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_BATCH_SIZE",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",
@@ -160,6 +177,7 @@
         "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
         "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
         "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
+        "ANALYTICS_*",
         "CORS_ORIGINS",
         "PROCUREMENT_*",
         "SUPPLIER_SERVICE_URL"
@@ -265,9 +283,20 @@
     // MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED (Q-133 (8)): false by default —
     // a return shipment names exactly what was authorized.
     //
+    // ANALYTICS_* (RUN-001, ADR-071): analytics-service's own settings — the
+    // fleet dashboard's readers and the projection switch — declared from its
+    // first commit. CORS_ORIGINS with them: every service's schema reads it, and
+    // declaring it for analytics declares it for all, so it leaves the withheld
+    // list in the three tasks above (identity's aggregation-stress task still
+    // withholds it).
     // CONTRACT_SERVICE_URL and ECONOMIC_STATEMENT_BUSINESS_LINE (CON-003 PR 6b):
     // economic-service's statement owner (A-13) and the line a statement's
     // obligation is recorded under (Q-130, unset by default); the same rule.
+    // ECONOMIC_SERVICE_URL and CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS (CON-003
+    // PR 6c): where contract-service asks economic-service, before a statement
+    // is SETTLED, for its obligation (A-13), and how long that may take.
+    // CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS / _BATCH_SIZE (#343 r1 F1): the reconciliation
+    // that settles what economic settled and no event announced; technical cadence, defaulted.
     //
     // PROCUREMENT_* and CORS_ORIGINS (COM-007 PR 1): procurement-service is new,
     // so none of its settings may join the withheld list — its own settings and
@@ -295,11 +324,19 @@
         "ORGANIZATION_SERVICE_URL",
         "FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS",
         "INVENTORY_LOCK_TIMEOUT_MS",
+        "INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS",
+        "MARKETPLACE_SERVICE_URL",
+        "INVENTORY_SERVICE_URL",
+        "MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
         "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SERVICE_URL",
+        "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_BATCH_SIZE",
         "INSURANCE_CLAIM_MAX_DOCUMENTS",
         "INSURANCE_CLAIM_DOCUMENT_STATUSES",
         "MARKETPLACE_RETURN_WINDOW_DAYS",
@@ -307,6 +344,7 @@
         "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
         "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
         "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
+        "ANALYTICS_*",
         "CORS_ORIGINS",
         "PROCUREMENT_*",
         "SUPPLIER_SERVICE_URL"

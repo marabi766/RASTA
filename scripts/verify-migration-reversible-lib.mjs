@@ -944,6 +944,137 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
   },
 ];
 
+const TRANSACTION_DISPUTE_RESOLUTION = '20261016160000_transaction_dispute_resolution';
+
+/** A transaction's dispute fields, as `resolve-dispute` and `dispute` wrote them. */
+const DISPUTE_MIGCHECK = (id, reason, disputedAt, resolvedAt) => `
+UPDATE "transaction"
+   SET status = '${resolvedAt ? 'PENDING_SETTLEMENT' : 'DISPUTED'}',
+       disputed_at = '${disputedAt}', disputed_by = 'USR-MIGCHECK', dispute_reason = '${reason}',
+       dispute_resolved_at = ${resolvedAt ? `'${resolvedAt}'` : 'NULL'},
+       dispute_resolved_by = ${resolvedAt ? `'USR-MIGCHECK-PLATFORM'` : 'NULL'}
+ WHERE id = '${id}';`;
+
+/** Every dispute probe row, exactly as the release before the migration left it. */
+const DISPUTE_ROWS_UNTOUCHED = `
+DO $$
+DECLARE found INT;
+BEGIN
+  SELECT count(*) INTO found FROM "transaction"
+   WHERE (id, dispute_reason, dispute_resolved_at IS NOT NULL) IN (
+           ('TXN_MIGCHECK_DSP_RESOLVED', 'resolution text written over the reason', true),
+           ('TXN_MIGCHECK_DSP_AGAIN', 'a second objection after the first was resolved', true),
+           ('TXN_MIGCHECK_DSP_OPEN', 'an objection nobody has resolved yet', false));
+  IF found <> 3 THEN RAISE EXCEPTION 'a dispute row changed (found % of 3 as they were)', found; END IF;
+END $$;`;
+
+/**
+ * The resolution's own column (docs/23 D-060), rolled back and re-applied over
+ * disputes the previous release wrote: one resolved (its reason overwritten by
+ * the resolution), one disputed again after a resolution, one still open. Up
+ * guesses nothing — every reason stays as it was and every resolution starts
+ * NULL. Down refuses while any row holds a resolution, before changing
+ * anything, and once none does it drops the column and leaves the reasons.
+ */
+const TRANSACTION_DISPUTE_RESOLUTION_STEPS = [
+  {
+    label: 'dispute resolution: down to the schema before the column (empty)',
+    runDownScript: [TRANSACTION_DISPUTE_RESOLUTION],
+  },
+  {
+    label: 'dispute resolution: disputes as the previous release wrote them',
+    sql: [
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_DSP_RESOLVED'),
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_DSP_AGAIN'),
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_DSP_OPEN'),
+      DISPUTE_MIGCHECK(
+        'TXN_MIGCHECK_DSP_RESOLVED',
+        'resolution text written over the reason',
+        '2026-10-01T10:00:00Z',
+        '2026-10-02T10:00:00Z',
+      ),
+      DISPUTE_MIGCHECK(
+        'TXN_MIGCHECK_DSP_AGAIN',
+        'a second objection after the first was resolved',
+        '2026-10-03T10:00:00Z',
+        '2026-10-02T10:00:00Z',
+      ),
+      DISPUTE_MIGCHECK(
+        'TXN_MIGCHECK_DSP_OPEN',
+        'an objection nobody has resolved yet',
+        '2026-10-01T10:00:00Z',
+        null,
+      ),
+    ].join('\n'),
+  },
+  { label: 'dispute resolution: up again over them', reapply: true },
+  {
+    label: 'dispute resolution: no row guessed — every reason as it was, every resolution NULL',
+    sql: `${DISPUTE_ROWS_UNTOUCHED}
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "transaction"
+         WHERE id LIKE 'TXN_MIGCHECK_DSP_%' AND dispute_resolution IS NOT NULL;
+        IF found <> 0 THEN RAISE EXCEPTION 'a resolution was backfilled for % row(s)', found; END IF;
+      END $$;`,
+  },
+  {
+    label: 'dispute resolution: a resolution recorded beside its reason, as the new release does',
+    sql: `UPDATE "transaction" SET dispute_resolution = 'decided in the supplier''s favour'
+           WHERE id = 'TXN_MIGCHECK_DSP_OPEN';`,
+  },
+  {
+    label: 'dispute resolution: the rollback refuses while any row holds a resolution',
+    runDownScript: [TRANSACTION_DISPUTE_RESOLUTION],
+    mustFail: 'hold a dispute resolution; refusing to drop dispute_resolution',
+  },
+  {
+    label: 'dispute resolution: …and changed nothing — the column, the resolution, the ledger row',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "transaction"
+         WHERE id = 'TXN_MIGCHECK_DSP_OPEN' AND dispute_resolution = 'decided in the supplier''s favour';
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback touched the resolution'; END IF;
+        SELECT count(*) INTO found FROM "_prisma_migrations"
+         WHERE migration_name = '${TRANSACTION_DISPUTE_RESOLUTION}' AND rolled_back_at IS NULL;
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback left the ledger'; END IF;
+      END $$;`,
+  },
+  {
+    label: 'dispute resolution: the resolution cleared (in the probe), and down again',
+    sql: `UPDATE "transaction" SET dispute_resolution = NULL WHERE id = 'TXN_MIGCHECK_DSP_OPEN';`,
+  },
+  {
+    label: 'dispute resolution: down succeeds with no resolution anywhere',
+    runDownScript: [TRANSACTION_DISPUTE_RESOLUTION],
+  },
+  {
+    label: 'dispute resolution: the column is gone and every reason is still there',
+    sql: `${DISPUTE_ROWS_UNTOUCHED}
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema() AND table_name = 'transaction'
+                      AND column_name = 'dispute_resolution') THEN
+          RAISE EXCEPTION 'dispute_resolution survived its rollback';
+        END IF;
+        IF EXISTS (SELECT 1 FROM "_prisma_migrations"
+                    WHERE migration_name = '${TRANSACTION_DISPUTE_RESOLUTION}') THEN
+          RAISE EXCEPTION 'the rollback left its ledger row';
+        END IF;
+      END $$;`,
+  },
+  { label: 'dispute resolution: up again', reapply: true },
+  {
+    label: 'dispute resolution: clean up the probe rows',
+    sql: `DELETE FROM "transaction_leg" WHERE transaction_id LIKE 'TXN_MIGCHECK_DSP_%';
+          DELETE FROM "transaction" WHERE organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_DSP_%';`,
+  },
+];
+
 const PARTICIPATION_RULE = '20261016190000_participation_rule';
 
 /** A reward evaluation row; `subject` adds the two columns this migration brings. */
@@ -1183,7 +1314,7 @@ const RECOGNITION_RULE_STEPS = [
 export const ECONOMIC_DATA_ROLLBACK = {
   migration: '20260930200000_payment_reconciliation_task',
   label:
-    'intents B0 left marked, and the open tasks they get; then charges and rules before and under business lines',
+    'intents B0 left marked, and the open tasks they get; then charges and rules before and under business lines; then disputes before and beside their resolution column',
   steps: [
     {
       label: 'down: the rollback succeeds while no task is open (the resolutions first)',
@@ -1338,6 +1469,7 @@ export const ECONOMIC_DATA_ROLLBACK = {
             DELETE FROM "payment_intent" WHERE organization_id = 'ORG-MIGCHECK';`,
     },
     ...COMMISSION_BUSINESS_LINES_STEPS,
+    ...TRANSACTION_DISPUTE_RESOLUTION_STEPS,
   ],
 };
 
@@ -1954,6 +2086,8 @@ export const EXPECTED = {
       'return_request',
       'return_line',
       'return_status_history',
+      // 20261017160000_return_dispatch_reservation (Q-133 (9)(a)): a reconciliation's release.
+      'return_dispatch_release',
     ],
     triggers: [
       'tg_return_request_guard',
@@ -1963,12 +2097,15 @@ export const EXPECTED = {
       'tg_return_line_no_truncate',
       'tg_return_status_history_guard',
       'tg_return_status_history_no_truncate',
+      'tg_return_dispatch_release_guard',
+      'tg_return_dispatch_release_no_truncate',
     ],
     functions: [
       'return_request_guard',
       'return_request_history_check',
       'return_line_guard',
       'return_status_history_guard',
+      'return_dispatch_release_guard',
     ],
     constraints: [
       'ck_return_request_status',
@@ -1980,6 +2117,11 @@ export const EXPECTED = {
       // 20261016140000_return_request_physical (RUN-005 PR 3): which shipment, and its report.
       'ck_return_request_shipment_id',
       'ck_return_request_report_document_id',
+      // 20261017160000_return_dispatch_reservation (Codex r1 on #336, F2): the reservation's columns.
+      'ck_return_request_dispatch_reservation',
+      'ck_return_dispatch_release_ids',
+      'ck_return_dispatch_release_actors',
+      'fk_return_dispatch_release_request',
       'ck_saga_step_key_not_blank',
       'ck_order_settled_after_receipt',
       'ck_order_completed_has_settlement',
@@ -2004,6 +2146,9 @@ export const EXPECTED = {
       'ux_return_history_version',
       'ux_return_line_order_line',
       'ux_return_request_shipment',
+      'ux_return_dispatch_release_reservation',
+      'ux_return_dispatch_release_command',
+      'ix_return_dispatch_release_request',
     ],
     types: ['ResponsibilityAttribution'],
     dataRollback: MARKETPLACE_DATA_ROLLBACK,
@@ -2635,6 +2780,8 @@ export const EXPECTED = {
       'return_tracking_event',
       // 20261016130000_return_inspection_resolution: what becomes of received goods.
       'return_disposition',
+      // 20261017170000_return_dispatch_withdrawal: reservations withdrawn on reconciliation.
+      'return_dispatch_withdrawal',
     ],
     types: ['StockMovementType', 'StockReservationStatus'],
     triggers: [
@@ -2665,6 +2812,9 @@ export const EXPECTED = {
       'tg_return_tracking_event_no_truncate',
       'tg_return_disposition_guard',
       'tg_return_disposition_no_truncate',
+      'tg_return_shipment_dispatch_fence',
+      'tg_return_dispatch_withdrawal_guard',
+      'tg_return_dispatch_withdrawal_no_truncate',
     ],
     functions: [
       'warehouse_guard',
@@ -2683,6 +2833,8 @@ export const EXPECTED = {
       'return_shipment_line_guard',
       'return_tracking_event_guard',
       'return_disposition_guard',
+      'return_shipment_dispatch_fence',
+      'return_dispatch_withdrawal_guard',
     ],
     indexes: [
       'ux_warehouse_org_id',
@@ -2708,6 +2860,8 @@ export const EXPECTED = {
       'ux_return_tracking_event_command',
       'ux_return_tracking_event_sequence',
       'ux_return_disposition_line',
+      'ux_return_dispatch_withdrawal_reservation',
+      'ix_return_dispatch_withdrawal_request',
     ],
     constraints: [
       'fk_stock_item_warehouse',
@@ -2754,6 +2908,10 @@ export const EXPECTED = {
       'ck_return_shipment_inspection',
       'ck_return_disposition_value',
       'ck_return_disposition_quantity_positive',
+      // 20261017170000_return_dispatch_withdrawal (Q-133 (9)(a)): the dispatch fence.
+      'ck_return_shipment_dispatch_reservation',
+      'ck_return_dispatch_withdrawal_ids',
+      'ck_return_dispatch_withdrawal_actor_recorded',
       'ck_idempotency_state',
       'ck_idempotency_completed_has_response',
       'ck_outbox_claim_triple',
@@ -2761,6 +2919,38 @@ export const EXPECTED = {
       'ck_outbox_attempts_nonneg',
       'ck_outbox_next_attempt_requires_failure',
       'ck_outbox_published_is_clean',
+    ],
+  },
+  /**
+   * analytics-service (RUN-001 PR 1, ADR-071). The first fact and the consumer's idempotency
+   * marker; no outbox — the service publishes nothing — so `verify-outbox-claim-migration.mjs`
+   * has nothing of it to fold.
+   *
+   * The objects listed carry the claims a dashboard rests on: one fact per completion
+   * (`fact_maintenance_pkey` on organization + request), a fact is never changed or erased (both
+   * halves of the append-only control, since a row trigger does not cover TRUNCATE), and nothing
+   * stored is a negative cost or downtime, a non-code type or a non-ISO currency.
+   */
+  analytics: {
+    // D-045: the runtime role owns nothing and lost CREATEDB, so the scratch schema is created —
+    // and migrated — as the migrator, which owns rasta_analytics.
+    connectAs: 'migrator',
+    tables: ['fact_maintenance', 'processed_event'],
+    types: [],
+    triggers: [
+      'tg_fact_maintenance_append_only',
+      'tg_fact_maintenance_no_truncate',
+      'tg_fact_maintenance_recorded_at',
+    ],
+    functions: ['fact_maintenance_append_only', 'fact_recorded_at_now'],
+    indexes: ['fact_maintenance_pkey', 'ix_fact_maintenance_org_completed', 'processed_event_pkey'],
+    constraints: [
+      'ck_processed_event_ids',
+      'ck_fact_maintenance_ids',
+      'ck_fact_maintenance_type',
+      'ck_fact_maintenance_downtime_nonneg',
+      'ck_fact_maintenance_cost_nonneg',
+      'ck_fact_maintenance_currency',
     ],
   },
   /**

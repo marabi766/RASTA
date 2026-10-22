@@ -56,8 +56,9 @@ describe('TOPIC_CONSUMERS', () => {
       },
       // CON-003: the draft contract of an awarded tender (TENDER_AWARDED, confirmed by the owner),
       // and the signing policy's follow-up to an organization move (ORGANIZATION_MOVED, Q-83).
+      // CON-003 PR 6c: SETTLEMENT_COMPLETED, confirmed by economic-service before a statement settles.
       'contract-service': {
-        subscribes: ['rasta.construction.v1', 'rasta.organization.v1'],
+        subscribes: ['rasta.construction.v1', 'rasta.organization.v1', 'rasta.economic.v1'],
         deadLetterTopic: 'rasta.contract.v1.dlq',
       },
       // RUN-005: the physical half of a return, mirrored onto marketplace's own request.
@@ -72,6 +73,11 @@ describe('TOPIC_CONSUMERS', () => {
       'audit-service': {
         subscribes: Object.keys(TOPIC_PRODUCERS),
         deadLetterTopic: 'rasta.audit.v1.dlq',
+      },
+      // RUN-001 PR 1: the first read model, MAINTENANCE_COMPLETED → fact_maintenance (ADR-071).
+      'analytics-service': {
+        subscribes: ['rasta.maintenance.v1'],
+        deadLetterTopic: 'rasta.analytics.v1.dlq',
       },
     });
   });

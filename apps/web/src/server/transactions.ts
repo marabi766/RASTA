@@ -82,12 +82,15 @@ const transactionSchema = z.object({
   sourceReference: z.string().nullable(),
   disputedAt: utcInstant.nullable(),
   /**
-   * The text the last dispute act stored. `dispute` writes the reason here, and
-   * `resolveDispute` **overwrites it with the resolution** — the view has no
-   * separate resolution field and no `disputeResolvedAt` (`transaction.service.ts`).
-   * The screen says so rather than labelling it one or the other.
+   * The reason the last dispute was raised with. A resolution no longer
+   * overwrites it (#322, docs/23 D-060) — except on rows resolved before that
+   * migration, which hold the resolution here with `disputeResolution` null.
    */
   disputeReason: z.string().nullable(),
+  /** When the last resolution was decided; it may precede a later dispute. */
+  disputeResolvedAt: utcInstant.nullable(),
+  /** The last resolution's text, in its own field (D-060); null before it. */
+  disputeResolution: z.string().nullable(),
   /**
    * The dispute the transaction holds or last held (docs/23 D-053): a new one on
    * every move into `DISPUTED`, kept until the next. A resolution names it, so a

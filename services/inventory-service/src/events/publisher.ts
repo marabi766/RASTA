@@ -118,6 +118,8 @@ export const ID_PREFIX = {
   returnShipmentLine: 'RSL',
   returnTrackingEvent: 'RTK',
   returnDisposition: 'RDP',
+  /** A marketplace dispatch reservation withdrawn here on reconciliation (Q-133 (9)(a)). */
+  returnDispatchWithdrawal: 'RDW',
 } as const;
 
 /**

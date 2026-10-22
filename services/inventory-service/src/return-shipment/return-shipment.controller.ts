@@ -98,7 +98,17 @@ export class ReturnShipmentController {
       'An IN_TRANSIT return shipment into `destinationWarehouseId` — a warehouse of the ' +
       'organization the request acts for (another’s is 404) — from `buyerOrganizationId`, for ' +
       '`returnRequestId`, with 1 to 50 order lines and their quantities. One return shipment per ' +
-      'return request: a second is 409 `RETURN_ALREADY_DISPATCHED`. It moves no stock. The ' +
+      'return request: a second is 409 `RETURN_ALREADY_DISPATCHED`. Before anything is written ' +
+      'the return request is read from marketplace-service, which owns it (A-13): one this ' +
+      'organization does not supply is 404 as if it did not exist; one that is not AUTHORIZED is ' +
+      '422 `RETURN_REQUEST_NOT_AUTHORIZED`; another order or buyer 422 `RETURN_REQUEST_MISMATCH`; ' +
+      'lines that are not its own, of another product or over what was authorized — or, unless ' +
+      'marketplace allows a partial dispatch (Q-133 (8)), not all of them in exactly their ' +
+      'authorized quantities — 422 `RETURN_LINES_MISMATCH`. Then its dispatch is reserved there, ' +
+      'after which the buyer can no longer cancel it (Q-133 (5)); the shipment is recorded under ' +
+      'that reservation, and one marketplace’s reconciliation has since withdrawn here is 409 ' +
+      '`RETURN_DISPATCH_WITHDRAWN` (Q-133 (9)(a)). A marketplace that cannot be ' +
+      'asked refuses the dispatch (503/504) and nothing is written. It moves no stock. The ' +
       'shipment, its lines, its IN_TRANSIT tracking event and RETURN_SHIPMENT_DISPATCHED ' +
       '(identifiers and quantities only — no carrier) commit in one transaction. ' +
       RETURN_SHIPMENT_MOVE_NOTE +
