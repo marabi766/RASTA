@@ -21,7 +21,7 @@ import {
 const NAMES = Object.values(MARKETPLACE_EVENTS);
 
 describe('the catalogue', () => {
-  it('publishes the nine events docs/04 § 4.8 lists, ORDER_DISPUTE_RESOLVED (ADR-052 § 1-b), the seven L7-14 audit records, the four return-request events (ADR-048) and the four physical steps it mirrors (RUN-005 PR 3)', () => {
+  it('publishes the nine events docs/04 § 4.8 lists, ORDER_DISPUTE_RESOLVED (ADR-052 § 1-b), the seven L7-14 audit records, the four return-request events (ADR-048), the four physical steps it mirrors (RUN-005 PR 3) and the release of a dispatch reservation (#339)', () => {
     expect([...NAMES].sort()).toEqual(
       [
         'RETURN_REQUESTED',
@@ -32,6 +32,7 @@ describe('the catalogue', () => {
         'RETURN_RECEIVED',
         'RETURN_INSPECTED',
         'RETURN_RESOLVED',
+        'RETURN_DISPATCH_RELEASED',
         'PRODUCT_CREATED',
         'OFFER_DRAFTED',
         'OFFER_UPDATED',

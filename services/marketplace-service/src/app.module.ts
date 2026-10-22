@@ -42,7 +42,10 @@ import { IdempotencyStore } from './shared/idempotency';
 import { OrderRepository } from './order/order.repository';
 import { OrderService } from './order/order.service';
 import { OrderController } from './order/order.controller';
+import { ReturnDispatchSourceService } from './returns/dispatch-source';
+import { InternalReturnController } from './returns/internal-return.controller';
 import { OrderReturnsController, ReturnController } from './returns/return.controller';
+import { RETURN_GOODS_OWNER, ReturnGoodsClient } from './returns/return-goods';
 import { ReturnRepository } from './returns/return.repository';
 import { ReturnService } from './returns/return.service';
 import {
@@ -83,6 +86,7 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
     OrderController,
     OrderReturnsController,
     ReturnController,
+    InternalReturnController,
     ProductController,
     OfferController,
     HealthController,
@@ -128,6 +132,7 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
     OrderService,
     ReturnRepository,
     ReturnService,
+    ReturnDispatchSourceService,
     CatalogueService,
     OrderSagaClient,
     OrderSagaWorker,
@@ -202,6 +207,21 @@ import { loadMarketplaceEnv, SERVICE_NAME, type MarketplaceEnv } from './config/
         new OrganizationHierarchy({
           baseUrl: env.ORGANIZATION_SERVICE_URL,
           timeoutMs: env.MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS,
+          tokens,
+        }),
+    },
+
+    /**
+     * The owner of a return's goods (A-13), asked before an AUTHORIZED return is cancelled and
+     * when a dispatch reservation is reconciled (Q-133 (9)(a)). Its token is minted above.
+     */
+    {
+      provide: RETURN_GOODS_OWNER,
+      inject: [ENV, InternalTokenService],
+      useFactory: (env: MarketplaceEnv, tokens: InternalTokenService) =>
+        new ReturnGoodsClient({
+          baseUrl: env.INVENTORY_SERVICE_URL,
+          timeoutMs: env.MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS,
           tokens,
         }),
     },

@@ -188,6 +188,42 @@ export const INVENTORY_RETURN_EVENT_SCHEMAS = {
   RETURN_SHIPMENT_RESOLVED: returnShipmentResolvedPayloadSchema,
 } as const satisfies Record<InventoryReturnEventName, z.ZodTypeAny>;
 
+// ---------------------------------------------------------------------------
+// A dispatch reservation withdrawn here (Codex r2 on #339, finding 1)
+//
+// Not a return-shipment step — no shipment exists for the request — so it is kept apart from
+// `INVENTORY_RETURN_EVENTS`, which marketplace mirrors step by step. The audit record of the
+// withdrawal (AGENTS.md S-06), written with the `return_dispatch_withdrawal` row it reports, once:
+// an idempotent repeat that finds the row writes neither. From then on a dispatch carrying the
+// reservation is refused here, whatever marketplace does next; if marketplace's release then
+// fails, the next reconciliation is answered by the same withdrawal and completes it.
+// ---------------------------------------------------------------------------
+
+export const INVENTORY_RETURN_DISPATCH_EVENTS = {
+  RETURN_DISPATCH_WITHDRAWN: 'RETURN_DISPATCH_WITHDRAWN',
+} as const;
+
+export type InventoryReturnDispatchEventName = keyof typeof INVENTORY_RETURN_DISPATCH_EVENTS;
+
+export const returnDispatchWithdrawnPayloadSchema = z
+  .object({
+    withdrawalId: z.string().regex(/^RDW_[0-9A-HJKMNP-TV-Z]{26}$/),
+    /** The supplier: the warehouse owner the reservation was asked of. */
+    organizationId: id,
+    returnRequestId: z.string().regex(/^RET_[0-9A-HJKMNP-TV-Z]{26}$/),
+    reservationId: z.string().regex(/^RDR_[0-9A-HJKMNP-TV-Z]{26}$/),
+    /** The service that asked — marketplace-service; the person is on its release record. */
+    withdrawnBy: id,
+    withdrawnAt: instant,
+  })
+  .strict();
+
+export const INVENTORY_RETURN_DISPATCH_EVENT_SCHEMAS = {
+  RETURN_DISPATCH_WITHDRAWN: returnDispatchWithdrawnPayloadSchema,
+} as const satisfies Record<InventoryReturnDispatchEventName, z.ZodTypeAny>;
+
+export type ReturnDispatchWithdrawnPayload = z.infer<typeof returnDispatchWithdrawnPayloadSchema>;
+
 export type ReturnShipmentLine = z.infer<typeof returnShipmentLineSchema>;
 export type ReceivedReturnShipmentLine = z.infer<typeof receivedReturnShipmentLineSchema>;
 export type ReturnShipmentDispatchedPayload = z.infer<typeof returnShipmentDispatchedPayloadSchema>;
