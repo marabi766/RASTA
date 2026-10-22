@@ -605,7 +605,7 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 | **Queries**      | `GetContract` · `ListContracts` · `GetStatements` · `GetContractFinancialSummary`                                                                                                                                  |
 | **REST**         | `POST /contracts` · `GET /contracts/{id}` · `POST /contracts/{id}/sign` · `POST /contracts/{id}/amendments` · `POST /contracts/{id}/statements` · `POST /statements/{id}/approvals` · `POST /contracts/{id}/close` |
 | **Publishes**    | `CONTRACT_CREATED` · `CONTRACT_SIGNED` · `CONTRACT_AMENDED` · `STATEMENT_SUBMITTED` · `STATEMENT_APPROVED` · `STATEMENT_REJECTED` · `CONTRACT_COMPLETED`                                                           |
-| **Consumes**     | `TENDER_AWARDED` (ایجاد پیش‌نویس قرارداد) · `PROJECT_PROGRESS_UPDATED` · `PAYMENT_COMPLETED`                                                                                                                       |
+| **Consumes**     | `TENDER_AWARDED` (ایجاد پیش‌نویس قرارداد) · `PROJECT_PROGRESS_UPDATED` · `SETTLEMENT_COMPLETED` (تسویهٔ صورت‌وضعیت؛ فقط محرک، تأیید از economic)                                                                   |
 | **Dependencies** | PostgreSQL · Kafka · Temporal (چرخه تأیید صورت‌وضعیت) · `document-service`                                                                                                                                         |
 | **مرز امنیتی**   | فقط طرفین قرارداد و اپراتور پلتفرم. تأیید فنی و مالی **باید توسط دو نقش متفاوت** انجام شود (تفکیک وظایف).                                                                                                          |
 | **Scale**        | کم.                                                                                                                                                                                                                |
@@ -663,6 +663,13 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 >
 > - `GET /v1/internal/statements/{id}` فقط برای توکن داخلیِ `economic-service` امضاشده برای **کارفرما** (الگوی ADR-061 § ۴، همان maintenance و fleet): هر کاربر، هر سرویس دیگر و توکن بی سازمان `403`؛ هر سازمان دیگر (پیمانکار هم) `404` مثل نبودن.
 >   پاسخ از ردیف و با هر وضعیتی: وضعیت، خالص (رشته، واحد فرعی)، `IRR` (Q-73 (۲))، پرداخت‌کننده = کارفرما، ذی‌نفع = پیمانکار، لحظهٔ تأیید مالی؛ economic هر چه `APPROVED` نیست را رد می‌کند. مبلغ هرگز روی `STATEMENT_APPROVED` نیست.
+>
+> **CON-003 PR 6c — `SETTLED` با تأیید economic** (ADR-068 § ۶ (۳) و (۵)؛ Q-97 (۶)):
+>
+> - رویداد پایان تسویه **`SETTLEMENT_COMPLETED`** است، نه `PAYMENT_COMPLETED` (دریافت شارژ کیف پول). Consumer `contract-service.settlement-completed` روی `rasta.economic.v1` (DLQ `rasta.contract.v1.dlq`) آن را فقط **محرک** می‌گیرد: رویداد صورت‌وضعیت را نام نمی‌برد،
+>   پس صورت‌وضعیت‌های `APPROVED` کارفرما (= `tenantId` = پرداخت‌کننده) که پیمانکارشان دریافت‌کننده است یافته و برای هرکدام، بیرون از تراکنش، از `GET /v1/internal/obligations/by-source/STATEMENT/{id}` (#340) پرسیده می‌شود؛
+>   صورت‌وضعیتی که تعهدش همان `transactionId` رویداد است، فقط با پاسخ economic (`SETTLED`، `fullySettled`، مبلغ = خالص، همان تسویه) `SETTLED` می‌شود (`STATEMENT_SETTLED`، بی مبلغ). قرارداد `COMPLETED` بی صورت‌وضعیت باز و با `Σ تسویه‌شده = Σ خالص تأییدشده` در همان تراکنش `SETTLED` می‌شود (`CONTRACT_SETTLED`).
+> - economic در دسترس نیست ⇒ تلاش دوباره و سپس DLQ `UPSTREAM_UNAVAILABLE`؛ ناهمخوانی ⇒ DLQ فوری `SOURCE_UNCONFIRMED`؛ در هر دو هیچ نوشتنی. فرمان `complete` (`SIGNED → COMPLETED`) هنوز ساخته نشده است.
 
 ---
 

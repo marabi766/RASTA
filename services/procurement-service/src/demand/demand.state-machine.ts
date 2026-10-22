@@ -103,6 +103,14 @@ export interface WindowSnapshot {
   readonly shortfallPolicy: ShortfallPolicy;
 }
 
+/**
+ * What a window takes when it opens: the snapshot and the setting version it came from — null for
+ * the environment defaults (Q-10), a version of the organization's own settings otherwise (plan PR 3).
+ */
+export interface SettingSnapshot extends WindowSnapshot {
+  readonly settingVersion: number | null;
+}
+
 /** What is left in a window when it ends: the demands still SUBMITTED. */
 export interface WindowContents {
   readonly liveDemands: number;

@@ -53,6 +53,12 @@ import { ShipmentController } from './shipment/shipment.controller';
 import { ShipmentRepository } from './shipment/shipment.repository';
 import { ShipmentService } from './shipment/shipment.service';
 import { ReturnShipmentController } from './return-shipment/return-shipment.controller';
+import { ReturnDispatchFenceService } from './return-shipment/dispatch-fence';
+import { InternalReturnRequestController } from './return-shipment/internal-return-request.controller';
+import {
+  RETURN_REQUEST_SOURCE,
+  ReturnRequestSourceClient,
+} from './return-shipment/return-request-source';
 import { ReturnShipmentRepository } from './return-shipment/return-shipment.repository';
 import { ReturnShipmentService } from './return-shipment/return-shipment.service';
 import { CommandRunner } from './shared/command-runner';
@@ -83,6 +89,7 @@ import { loadInventoryEnv, SERVICE_NAME, type InventoryEnv } from './config/env'
     StockController,
     ShipmentController,
     ReturnShipmentController,
+    InternalReturnRequestController,
     HealthController,
     MetricsController,
   ],
@@ -134,6 +141,19 @@ import { loadInventoryEnv, SERVICE_NAME, type InventoryEnv } from './config/env'
     ShipmentService,
     ReturnShipmentRepository,
     ReturnShipmentService,
+    // What marketplace asks before a cancellation and to release a reservation (Q-133 (9)).
+    ReturnDispatchFenceService,
+    // The owner of the return request, asked before a return shipment is recorded (A-13).
+    {
+      provide: RETURN_REQUEST_SOURCE,
+      inject: [ENV, InternalTokenService],
+      useFactory: (env: InventoryEnv, tokens: InternalTokenService) =>
+        new ReturnRequestSourceClient({
+          baseUrl: env.MARKETPLACE_SERVICE_URL,
+          timeoutMs: env.INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS,
+          tokens,
+        }),
+    },
 
     {
       provide: ReservationSweeper,

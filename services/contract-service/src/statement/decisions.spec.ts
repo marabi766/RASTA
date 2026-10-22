@@ -31,6 +31,7 @@ describe('openChain: technical, then financial (Q-96 (2))', () => {
       ['TECHNICALLY_APPROVED', 'FINANCIAL'],
       ['APPROVED', null],
       ['REJECTED', null],
+      ['SETTLED', null],
     ]);
   });
 });

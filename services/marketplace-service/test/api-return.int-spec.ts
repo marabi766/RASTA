@@ -128,10 +128,12 @@ describe('return request API', () => {
     command: 'authorize' | 'reject' | 'cancel',
     token: string,
     idempotencyKey = apiKey(`ret-${command}`),
+    /** A cancellation names the status the buyer saw (Codex r1 on #339). */
+    expectedStatus: 'REQUESTED' | 'AUTHORIZED' = 'REQUESTED',
   ) => {
     const call =
       command === 'cancel'
-        ? request(http).post(`/v1/returns/${id}/cancellation`)
+        ? request(http).post(`/v1/returns/${id}/cancellation`).send({ expectedStatus })
         : request(http)
             .post(`/v1/returns/${id}/decisions`)
             .send({ decision: command === 'authorize' ? 'AUTHORIZE' : 'REJECT' });
@@ -446,7 +448,11 @@ describe('return request API', () => {
       await decide(id, 'reject', supplier(supplierOrg)).expect(200);
 
       await decide(id, 'authorize', supplier(supplierOrg)).expect(422);
-      await decide(id, 'cancel', buyer(buyerOrg)).expect(422);
+      // The buyer saw it REQUESTED; it is not any more: a stale command, 409 — before the
+      // transition is judged at all (Codex r2 on #339, finding 2).
+      const stale = await decide(id, 'cancel', buyer(buyerOrg)).expect(409);
+      expect(stale.body.code).toBe('OPTIMISTIC_LOCK_FAILED');
+      expect((await eventsOf(buyerOrg, id)).length).toBe(2);
     });
 
     it('an AUTHORIZED return cannot be rejected, but the buyer may withdraw it (version 3)', async () => {
@@ -454,14 +460,21 @@ describe('return request API', () => {
       await decide(id, 'authorize', supplier(supplierOrg)).expect(200);
 
       await decide(id, 'reject', supplier(supplierOrg)).expect(422);
-      const cancelled = await decide(id, 'cancel', buyer(buyerOrg)).expect(200);
+      const cancelled = await decide(
+        id,
+        'cancel',
+        buyer(buyerOrg),
+        apiKey('ret-cancel'),
+        'AUTHORIZED',
+      ).expect(200);
 
       expect(cancelled.body).toMatchObject({
         status: 'CANCELLED',
         version: 3,
         cancelledFrom: 'AUTHORIZED',
       });
-      await decide(id, 'cancel', buyer(buyerOrg)).expect(422);
+      // A second cancellation names a status the request no longer has: stale, 409.
+      await decide(id, 'cancel', buyer(buyerOrg)).expect(409);
     });
 
     it('a cancelled quantity is free to be asked for again', async () => {

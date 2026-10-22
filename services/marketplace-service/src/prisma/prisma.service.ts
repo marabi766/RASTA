@@ -38,6 +38,7 @@ export const TENANT_SCOPED_MODELS = [
   'ReturnRequest',
   'ReturnLine',
   'ReturnStatusHistory',
+  'ReturnDispatchRelease',
 ] as const;
 
 /**

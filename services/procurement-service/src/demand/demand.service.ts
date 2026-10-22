@@ -10,7 +10,8 @@ import { ruleRefusal } from '../shared/refusal';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ProcurementEnv } from '../config/env';
 import { aggregationCancelledTotal, demandCommandsTotal } from '../observability/metrics';
-import { DemandRepository, snapshotOf } from './demand.repository';
+import { AggregationSettingService } from '../setting/setting.service';
+import { DemandRepository } from './demand.repository';
 import { closingInstant, type WindowOutcome } from './demand.state-machine';
 import { countWindowEnded, WindowEnd } from './window-end';
 import {
@@ -53,6 +54,7 @@ export class DemandService {
     private readonly publisher: EventPublisher,
     private readonly clock: DatabaseClock,
     private readonly windowEnd: WindowEnd,
+    private readonly settings: AggregationSettingService,
     @Inject(ENV) private readonly env: ProcurementEnv,
   ) {}
 
@@ -418,14 +420,16 @@ export class DemandService {
     return window;
   }
 
-  private openWindowRow(
+  private async openWindowRow(
     tx: ExtendedPrismaClient,
     acting: Acting,
     productId: string,
     id: string,
     openedAt: Date,
   ): Promise<boolean> {
-    const snapshot = snapshotOf(this.env);
+    // The organization's setting in force, read in this transaction, or the environment defaults
+    // (plan PR 3): the window keeps it whatever is recorded later.
+    const snapshot = await this.settings.snapshotFor(tx, acting.organizationId);
     return this.repository.openWindow(tx, {
       id,
       organizationId: acting.organizationId,

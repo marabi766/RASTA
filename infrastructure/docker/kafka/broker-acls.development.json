@@ -460,6 +460,20 @@
     {
       "principal": "contract-service",
       "resourceType": "TOPIC",
+      "resourceName": "rasta.economic.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "contract-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.economic.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "contract-service",
+      "resourceType": "TOPIC",
       "resourceName": "rasta.organization.v1.retry",
       "patternType": "LITERAL",
       "operation": "READ"

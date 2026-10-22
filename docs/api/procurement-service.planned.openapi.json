@@ -2055,7 +2055,7 @@
       "RecordAggregationSetting": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["windowHours", "minQuantity", "shortfallPolicy"],
+        "required": ["windowHours", "minQuantity", "shortfallPolicy", "expectedCurrentVersion"],
         "properties": {
           "windowHours": {
             "type": "integer",
@@ -2069,6 +2069,12 @@
           },
           "shortfallPolicy": {
             "$ref": "#/components/schemas/ShortfallPolicy"
+          },
+          "expectedCurrentVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "nullable": true,
+            "description": "The version the caller saw in force, null for none; any other current version is 409 OPTIMISTIC_LOCK_FAILED (#328 r1 lesson)."
           }
         }
       },

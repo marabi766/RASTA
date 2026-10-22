@@ -37,6 +37,10 @@ describe('the provisional defaults (Q-10, Q-119, ADR-070 § 2)', () => {
     expect(env.PROCUREMENT_RFQ_ISSUER_ROLES).toEqual(['ORGANIZATION_ADMIN']);
   });
 
+  it('lets only the buyer’s ORGANIZATION_ADMIN record its aggregation settings (Q-119 (2), plan PR 3)', () => {
+    expect(env.PROCUREMENT_AGGREGATION_SETTING_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+  });
+
   it('sweeps every five seconds, twenty windows under a one-minute lease, and moves 2000 demands a transaction', () => {
     expect(env.PROCUREMENT_WINDOW_SWEEP_INTERVAL_MS).toBe(5000);
     expect(env.PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE).toBe(20);
@@ -156,6 +160,12 @@ describe('overrides', () => {
       { PROCUREMENT_RFQ_ISSUER_ROLES: 'ORGANIZATION_ADMIN,SYSTEM_ADMIN' },
     ],
     ['an empty RFQ issuer role list', { PROCUREMENT_RFQ_ISSUER_ROLES: '' }],
+    ['AUDITOR among the setting roles', { PROCUREMENT_AGGREGATION_SETTING_ROLES: 'AUDITOR' }],
+    [
+      'SYSTEM_ADMIN among the setting roles: the operator does not write a tenant’s configuration',
+      { PROCUREMENT_AGGREGATION_SETTING_ROLES: 'ORGANIZATION_ADMIN,SYSTEM_ADMIN' },
+    ],
+    ['an empty setting role list', { PROCUREMENT_AGGREGATION_SETTING_ROLES: '' }],
     ['a sweep more often than twice a second', { PROCUREMENT_WINDOW_SWEEP_INTERVAL_MS: '499' }],
     ['a sweep of no window', { PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE: '0' }],
     ['a sweep lease under ten seconds', { PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS: '9' }],

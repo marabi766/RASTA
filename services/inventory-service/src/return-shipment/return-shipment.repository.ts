@@ -78,6 +78,18 @@ const LINE_COLUMNS = Prisma.sql`
   "id", "order_line_id" AS "orderLineId", "product_id" AS "productId",
   "expected_quantity" AS "expectedQuantity", "received_quantity" AS "receivedQuantity"`;
 
+/** A marketplace dispatch reservation withdrawn here (Q-133 (9)(a)). */
+export interface ReturnDispatchWithdrawalRow {
+  id: string;
+  returnRequestId: string;
+  reservationId: string;
+  withdrawnAt: Date;
+}
+
+const WITHDRAWAL_COLUMNS = Prisma.sql`
+  "id", "return_request_id" AS "returnRequestId", "reservation_id" AS "reservationId",
+  "withdrawn_at" AS "withdrawnAt"`;
+
 const EVENT_COLUMNS = Prisma.sql`
   "id", "return_shipment_id" AS "returnShipmentId", "type", "shipment_version" AS "shipmentVersion",
   "occurred_at" AS "occurredAt", "recorded_at" AS "recordedAt"`;
@@ -129,6 +141,7 @@ export class ReturnShipmentRepository {
       carrierName: string | null;
       carrierReference: string | null;
       lineCount: number;
+      dispatchReservationId: string;
       commandKeyHash: string;
       actor: string;
       correlationId: string;
@@ -140,14 +153,66 @@ export class ReturnShipmentRepository {
                                      "buyer_organization_id", "return_request_id", "order_id",
                                      "carrier_name", "carrier_reference", "line_count",
                                      "status", "command_key_hash", "created_at", "created_by",
-                                     "created_correlation_id", "updated_at", "version")
+                                     "created_correlation_id", "updated_at", "version",
+                                     "dispatch_reservation_id")
       VALUES (${input.id}, ${input.organizationId}, ${input.destinationWarehouseId},
               ${input.buyerOrganizationId}, ${input.returnRequestId}, ${input.orderId},
               ${input.carrierName}, ${input.carrierReference}, ${input.lineCount}::integer, 'IN_TRANSIT',
               ${input.commandKeyHash}, ${input.at}, ${input.actor},
-              ${input.correlationId}, ${input.at}, 1)
+              ${input.correlationId}, ${input.at}, 1, ${input.dispatchReservationId})
       RETURNING ${COLUMNS}`;
     return rows[0] as ReturnShipmentRow;
+  }
+
+  // -- the dispatch fence (Q-133 (9)(a)) ---------------------------------------------------
+
+  /**
+   * Serialises everything that decides whether a return request has goods here: recording its
+   * shipment, and withdrawing a reservation of it. One transaction-scoped advisory lock per
+   * (organization, return request), the key `tg_return_shipment_dispatch_fence` and
+   * `tg_return_dispatch_withdrawal_guard` take too — so the checks that follow run under it, and
+   * whichever of a shipment and a withdrawal commits first, the other sees it.
+   */
+  async lockDispatch(
+    tx: ExtendedPrismaClient,
+    organizationId: string,
+    returnRequestId: string,
+  ): Promise<void> {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`return-dispatch|${organizationId}|${returnRequestId}`}, 0))`;
+  }
+
+  /** The withdrawal of one reservation in the owner's books, or `null`. */
+  async findWithdrawal(
+    tx: ExtendedPrismaClient,
+    organizationId: string,
+    reservationId: string,
+  ): Promise<ReturnDispatchWithdrawalRow | null> {
+    const rows = await tx.$queryRaw<ReturnDispatchWithdrawalRow[]>`
+      SELECT ${WITHDRAWAL_COLUMNS} FROM "return_dispatch_withdrawal"
+       WHERE "organization_id" = ${organizationId} AND "reservation_id" = ${reservationId}`;
+    return rows[0] ?? null;
+  }
+
+  async insertWithdrawal(
+    tx: ExtendedPrismaClient,
+    input: {
+      id: string;
+      organizationId: string;
+      returnRequestId: string;
+      reservationId: string;
+      at: Date;
+      by: string;
+      correlationId: string;
+    },
+  ): Promise<ReturnDispatchWithdrawalRow> {
+    const rows = await tx.$queryRaw<ReturnDispatchWithdrawalRow[]>`
+      INSERT INTO "return_dispatch_withdrawal" ("id", "organization_id", "return_request_id",
+                                                "reservation_id", "withdrawn_at", "withdrawn_by",
+                                                "correlation_id")
+      VALUES (${input.id}, ${input.organizationId}, ${input.returnRequestId},
+              ${input.reservationId}, ${input.at}, ${input.by}, ${input.correlationId})
+      RETURNING ${WITHDRAWAL_COLUMNS}`;
+    return rows[0] as ReturnDispatchWithdrawalRow;
   }
 
   async insertLine(
@@ -236,13 +301,17 @@ export class ReturnShipmentRepository {
     return rows[0] ?? null;
   }
 
-  /** The owner's shipment for a return request, if one was already dispatched. */
+  /**
+   * The owner's shipment for a return request, if one was already dispatched — in the command's
+   * transaction, or (no `tx`) before it, as the check that runs ahead of asking marketplace.
+   */
   async findByRequest(
-    tx: ExtendedPrismaClient,
+    tx: ExtendedPrismaClient | undefined,
     organizationId: string,
     returnRequestId: string,
   ): Promise<ReturnShipmentRow | null> {
-    const rows = await tx.$queryRaw<ReturnShipmentRow[]>`
+    const client = tx ?? this.prisma.client;
+    const rows = await client.$queryRaw<ReturnShipmentRow[]>`
       SELECT ${COLUMNS} FROM "return_shipment"
        WHERE "organization_id" = ${organizationId} AND "return_request_id" = ${returnRequestId}`;
     return rows[0] ?? null;

@@ -365,15 +365,16 @@ model Milestone {
 // Statements and deductions (CON-003 PR 4, ADR-068 § 5, docs/24 Q-96 and Q-97)
 // ---------------------------------------------------------------------------
 
-/// `src/statement/statement.state-machine.ts`. The whole ADR-068 § 5 lifecycle is declared (adding
-/// a value to a PostgreSQL enum cannot be reversed); one transition is open — DRAFT → SUBMITTED, with
-/// the approval chains' snapshot (CON-003 PR 5). The approvals that move it on are the next change.
+/// `src/statement/statement.state-machine.ts`. The ADR-068 § 5 lifecycle, and SETTLED (§ 6 (3), CON-003
+/// PR 6c): an APPROVED statement moves to SETTLED on economic-service's confirmation and to nothing
+/// else. SETTLED was added with `ADD VALUE`; its `down.sql` rebuilds the type without it.
 enum StatementStatus {
   DRAFT
   SUBMITTED
   TECHNICALLY_APPROVED
   APPROVED
   REJECTED
+  SETTLED
 }
 
 /// A deduction an employer has configured (Q-96 (6)): a name, a rate in whole basis points and the
@@ -439,6 +440,16 @@ model Statement {
   technicalStepCount Int? @map("technical_step_count")
   financialStepCount Int? @map("financial_step_count")
 
+  /// The settlement economic-service confirmed (CON-003 PR 6c, ADR-068 § 6 (3)): set with the move to
+  /// SETTLED and only then, all five together (`ck_statement_settlement`). `settledAt` is economic's
+  /// instant; `settledAmountMinor` is the amount the settlement took, which is the net (Q-97 (4));
+  /// `settlementEventId` is the `SETTLEMENT_COMPLETED` that triggered the confirmation.
+  settledAt              DateTime? @map("settled_at") @db.Timestamptz(3)
+  settlementObligationId String?   @map("settlement_obligation_id")
+  settlementId           String?   @map("settlement_id")
+  settledAmountMinor     BigInt?   @map("settled_amount_minor")
+  settlementEventId      String?   @map("settlement_event_id")
+
   updatedAt DateTime @map("updated_at") @db.Timestamptz(3)
   version   Int      @default(1)
 
@@ -450,6 +461,10 @@ model Statement {
 
   @@unique([organizationId, id], map: "ux_statement_org_id")
   @@unique([organizationId, contractId, statementNumber], map: "ux_statement_number")
+  // One obligation settles one statement.
+  @@unique([organizationId, settlementObligationId], map: "ux_statement_settlement_obligation")
+  // The consumer's lookup: the payer's statements in a status, of an amount.
+  @@index([organizationId, status, netMinor], map: "ix_statement_settleable")
   @@map("statement")
 }
 

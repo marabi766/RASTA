@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
+import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError, getContext } from '@rasta/nest-common';
 import { assertOrderVisible } from '../access/access';
 import { SERVICE_NAME, type MarketplaceEnv } from '../config/env';
@@ -10,8 +11,9 @@ import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.servi
 import type { RecordResponse } from '../shared/idempotency';
 import { isUniqueViolation, violatedConstraint } from '../shared/prisma-errors';
 import { ENV } from '../tokens';
-import type { CreateReturnDto, ListReturnsQuery, ReturnRequestView } from './dto';
+import type { CancelReturnDto, CreateReturnDto, ListReturnsQuery, ReturnRequestView } from './dto';
 import { RETURN_AUTHORISATION, assertReturnVisible, type ReturnCommand } from './return-access';
+import { RETURN_GOODS_OWNER, type ReturnGoodsOwner } from './return-goods';
 import { ReturnRepository, type ReturnRequestRow } from './return.repository';
 import {
   RETURN_STATUSES_HOLDING_UNITS,
@@ -65,6 +67,7 @@ export class ReturnService {
     private readonly repository: ReturnRepository,
     private readonly events: EventPublisher,
     @Inject(ENV) private readonly env: MarketplaceEnv,
+    @Inject(RETURN_GOODS_OWNER) private readonly goods: ReturnGoodsOwner,
   ) {}
 
   // -- the buyer asks ---------------------------------------------------------------------------
@@ -234,21 +237,175 @@ export class ReturnService {
     return this.decide(id, 'REJECTED', 'reject', idempotencyKey, record);
   }
 
-  /** REQUESTED|AUTHORIZED → CANCELLED. The buyer withdraws it, before any goods moved. */
-  cancel(
+  /**
+   * REQUESTED|AUTHORIZED → CANCELLED. The buyer withdraws it, before any goods moved:
+   *
+   * - only from the status it saw (`expectedStatus`), judged under the row lock — a request the
+   *   supplier authorized after the buyer's read is refused, `409`, nothing written (Codex r1 on
+   *   #339, finding 1);
+   * - never once inventory has reserved its dispatch, even while it still reads AUTHORIZED (Q-133
+   *   (5));
+   * - and from AUTHORIZED only once inventory, the owner of the goods, has said it holds no
+   *   shipment for it (Q-133 (9), PM ruling): a request authorized before reservations existed —
+   *   or dispatched without one — may have goods on the road this service never heard of. Asked
+   *   before the transaction; no definite answer refuses the cancellation (fail closed).
+   */
+  async cancel(
+    id: string,
+    dto: CancelReturnDto,
+    idempotencyKey: string,
+    record?: RecordResponse<ReturnRequestView>,
+  ): Promise<ReturnRequestView> {
+    const goodsAbsent = await this.confirmNoGoods(id, dto.expectedStatus);
+    return this.decide(id, 'CANCELLED', 'cancel', idempotencyKey, record, {
+      expectedStatus: dto.expectedStatus,
+      goodsAbsent,
+    });
+  }
+
+  /**
+   * Whether inventory confirmed it holds no shipment for an AUTHORIZED, unreserved request the
+   * buyer means to cancel. `false` when the question does not arise — the caller expects REQUESTED,
+   * or the request is not (or no longer) unreserved AUTHORIZED: the checks under the lock answer
+   * those, and a request found AUTHORIZED there without this confirmation is refused.
+   */
+  private async confirmNoGoods(id: string, expected: CancelReturnDto['expectedStatus']) {
+    if (expected !== 'AUTHORIZED') return false;
+    // The parties first: nobody else makes this service ask inventory anything.
+    const row = await this.visible(id);
+    RETURN_AUTHORISATION.cancel(row);
+    if (row.status !== 'AUTHORIZED' || row.dispatchReservedAt !== null) return false;
+
+    const shipment = await this.goods.shipmentOf(row.supplierOrganizationId, row.id);
+    if (shipment) {
+      returnRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'DISPATCHED' });
+      throw dispatchedRefusal(row.id, shipment.id);
+    }
+    return true;
+  }
+
+  // -- either party reconciles a dispatch reservation ------------------------------------------
+
+  /**
+   * Releases a dispatch reservation whose dispatch never happened — inventory's transaction
+   * failed or its process died after reserving (Codex r1 on #339, finding 2; Q-133 (9)(a), PM
+   * ruling: no clock releases one). Either party asks; inventory answers (A-13):
+   *
+   * 1. outside any transaction, inventory is asked to withdraw **this** reservation. Under its own
+   *    lock it either names a shipment that exists for the request — the reservation stands, 422
+   *    `RETURN_DISPATCHED` — or records the reservation id as withdrawn, after which a dispatch
+   *    carrying it is refused there however late it arrives. No definite answer: 503/504, nothing
+   *    written;
+   * 2. on "withdrawn", under the request's row lock, the reservation is cleared beside its release
+   *    record (who asked, when, inventory's answer) — once: a second reconciliation finds nothing
+   *    reserved, and the record is unique per reservation. The trigger clears a reservation on no
+   *    other path.
+   *
+   * After it the buyer may cancel (inventory is asked again), and the supplier may dispatch again
+   * under a new reservation.
+   */
+  async reconcileDispatch(
     id: string,
     idempotencyKey: string,
     record?: RecordResponse<ReturnRequestView>,
   ): Promise<ReturnRequestView> {
-    return this.decide(id, 'CANCELLED', 'cancel', idempotencyKey, record);
+    const context = getContext();
+    const actor = context.userId ?? context.callerService ?? SERVICE_NAME;
+    const keyHash = commandKeyHash(
+      'POST /v1/returns/:id/dispatch-reconciliation',
+      id,
+      idempotencyKey,
+    );
+
+    const row = await this.visible(id);
+    RETURN_AUTHORISATION.reconcile(row);
+    const reservationId = row.status === 'AUTHORIZED' ? row.dispatchReservationId : null;
+    if (reservationId === null) {
+      returnRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'NOT_RESERVED' });
+      throw notReservedRefusal(id);
+    }
+
+    const answer = await this.goods.withdraw(row.supplierOrganizationId, row.id, reservationId);
+    if (answer.outcome === 'DISPATCHED') {
+      returnRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'DISPATCHED' });
+      throw dispatchedRefusal(row.id, answer.returnShipment.id);
+    }
+
+    return this.prisma.transaction(async (tx) => {
+      const locked = await this.repository.lockRequest(tx, id);
+      if (!locked) throw RastaError.notFound('ReturnRequest', id);
+      assertReturnVisible(locked);
+      RETURN_AUTHORISATION.reconcile(locked);
+      // Released by another reconciliation meanwhile (or moved on): exactly once.
+      if (
+        locked.status !== 'AUTHORIZED' ||
+        locked.dispatchReservationId !== reservationId ||
+        locked.dispatchReservedAt === null ||
+        locked.dispatchReservedBy === null ||
+        locked.dispatchReservedCorrelationId === null
+      ) {
+        returnRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'NOT_RESERVED' });
+        throw notReservedRefusal(id);
+      }
+
+      const at = new Date(Math.max(Date.now(), locked.updatedAt.getTime()));
+      const releaseId = newId(ID_PREFIX.returnDispatchRelease);
+      const released = await this.repository.releaseDispatch(
+        tx,
+        {
+          ...locked,
+          dispatchReservationId: reservationId,
+          dispatchReservedAt: locked.dispatchReservedAt,
+          dispatchReservedBy: locked.dispatchReservedBy,
+          dispatchReservedCorrelationId: locked.dispatchReservedCorrelationId,
+        },
+        {
+          id: releaseId,
+          withdrawnAt: answer.withdrawnAt,
+          at,
+          by: actor,
+          correlationId: context.correlationId,
+          commandKeyHash: keyHash,
+        },
+      );
+      if (!released) throw RastaError.optimisticLockFailed('ReturnRequest', id);
+      // The release's audit record, with it (AGENTS.md S-06; Codex r2 on #339, finding 1): the
+      // person who reconciled, inventory's withdrawal, the reservation that ended. The request's
+      // status and version do not move.
+      await this.events.enqueue(tx, {
+        aggregateId: locked.id,
+        organizationId: locked.organizationId,
+        eventName: MARKETPLACE_EVENTS.RETURN_DISPATCH_RELEASED,
+        payload: {
+          returnRequestId: locked.id,
+          orderId: locked.orderId,
+          buyerOrganizationId: locked.organizationId,
+          supplierOrganizationId: locked.supplierOrganizationId,
+          releaseId,
+          reservationId,
+          reservedAt: locked.dispatchReservedAt.toISOString(),
+          withdrawnAt: answer.withdrawnAt.toISOString(),
+          releasedBy: actor,
+          releasedAt: at.toISOString(),
+        },
+      });
+      returnTransitionsTotal.inc({ service: SERVICE_NAME, to: 'DISPATCH_RELEASED' });
+
+      const after = await this.repository.findWithLines(id, tx);
+      if (!after) throw new Error(`Return request ${id} vanished inside its own transaction`);
+      const view = toReturnView(after);
+      await record?.(tx, view);
+      return view;
+    });
   }
 
   private async decide(
     id: string,
     to: DecidedStatus,
-    command: Exclude<ReturnCommand, 'request'>,
+    command: Exclude<ReturnCommand, 'request' | 'reconcile'>,
     idempotencyKey: string,
     record?: RecordResponse<ReturnRequestView>,
+    cancellation?: { expectedStatus: ReturnStatus; goodsAbsent: boolean },
   ): Promise<ReturnRequestView> {
     const context = getContext();
     const actor = context.userId ?? context.callerService ?? SERVICE_NAME;
@@ -263,11 +420,37 @@ export class ReturnService {
       assertReturnVisible(locked);
       RETURN_AUTHORISATION[command](locked);
 
+      // Conditional: the status the buyer saw, judged here, under the lock — not by a read the
+      // supplier's authorization can overtake (Codex r1 on #339, finding 1). Before the transition
+      // check: a request the buyer saw REQUESTED and the supplier has since rejected — or saw
+      // AUTHORIZED and its goods have since moved it IN_TRANSIT — is a stale command, 409, not an
+      // illegal one, 422 (Codex r2 on #339, finding 2).
+      if (cancellation && locked.status !== cancellation.expectedStatus) {
+        returnRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'STALE_EXPECTED_STATUS' });
+        throw RastaError.optimisticLockFailed('ReturnRequest', id);
+      }
       try {
         assertReturnTransition(locked.id, locked.status, to);
       } catch (error) {
         returnRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'ILLEGAL_TRANSITION' });
         throw error;
+      }
+      if (cancellation) {
+        // The goods may be on the road while the request still reads AUTHORIZED: inventory
+        // reserved the dispatch here before recording its shipment, and the shipment's own event
+        // moves the request on later — or not at all while the mirror is off (Q-133 (5)). Read
+        // under the same lock the reservation takes, so the two never both succeed.
+        if (locked.dispatchReservedAt !== null) {
+          returnRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'DISPATCH_RESERVED' });
+          throw dispatchReservedRefusal(locked.id);
+        }
+        // AUTHORIZED and unreserved: only on inventory's word that it holds no shipment. A request
+        // that became so after the question was skipped (a reservation released meanwhile) was not
+        // asked about: refused, and the buyer retries.
+        if (locked.status === 'AUTHORIZED' && !cancellation.goodsAbsent) {
+          returnRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'GOODS_NOT_CONFIRMED' });
+          throw RastaError.optimisticLockFailed('ReturnRequest', id);
+        }
       }
 
       // Never before what it follows: a command whose transaction began before the previous move
@@ -470,6 +653,68 @@ export function facts(row: ReturnRequestRow) {
       quantity: line.quantity,
     })),
   };
+}
+
+/**
+ * A cancellation of a request whose dispatch inventory reserved: the platform's business-rule code
+ * (`422`, as any other move the request's state refuses), with the closed reason in `details` so a
+ * client can say why without reading the message.
+ */
+export function dispatchReservedRefusal(returnRequestId: string): RastaError {
+  return new RastaError(
+    ERROR_CODES.BUSINESS_RULE_VIOLATION,
+    `Return request ${returnRequestId} is being dispatched and can no longer be cancelled`,
+    {
+      details: [
+        {
+          path: 'returnRequest',
+          code: 'RETURN_DISPATCH_RESERVED',
+          message: 'The goods of this return are being dispatched',
+        },
+      ],
+      internalContext: { returnRequestId },
+    },
+  );
+}
+
+/**
+ * A cancellation or reconciliation refused because inventory, the owner of the goods, holds a
+ * shipment for the request (Q-133 (9)): the goods may be on the road, whatever this service's
+ * mirror has heard. The shipment's id stays in the log; the buyer reads it from inventory.
+ */
+export function dispatchedRefusal(returnRequestId: string, returnShipmentId: string): RastaError {
+  return new RastaError(
+    ERROR_CODES.BUSINESS_RULE_VIOLATION,
+    `Return request ${returnRequestId} has a return shipment and can no longer be cancelled`,
+    {
+      details: [
+        {
+          path: 'returnRequest',
+          code: 'RETURN_DISPATCHED',
+          message: 'The goods of this return have been dispatched',
+        },
+      ],
+      internalContext: { returnRequestId, returnShipmentId },
+    },
+  );
+}
+
+/** A reconciliation of a request with no dispatch reservation standing: nothing to release. */
+export function notReservedRefusal(returnRequestId: string): RastaError {
+  return new RastaError(
+    ERROR_CODES.BUSINESS_RULE_VIOLATION,
+    `Return request ${returnRequestId} has no dispatch reservation to reconcile`,
+    {
+      details: [
+        {
+          path: 'returnRequest',
+          code: 'RETURN_DISPATCH_NOT_RESERVED',
+          message: 'No dispatch of this return is reserved',
+        },
+      ],
+      internalContext: { returnRequestId },
+    },
+  );
 }
 
 /**

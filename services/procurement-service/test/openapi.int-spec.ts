@@ -198,6 +198,21 @@ describe('the published OpenAPI contract (real application)', () => {
     documentedAs('POST', CANCEL, await issuer.cancel(ready.id, ready.version));
     clock.set(null);
 
+    // The organization's settings (plan PR 3): read by a requester; recorded by the administrator.
+    const SETTINGS = '/v1/aggregation-settings';
+    documentedAs('GET', SETTINGS, await as.setting());
+    documentedAs('GET', SETTINGS, await anonymous().get(SETTINGS));
+    documentedAs('GET', SETTINGS, await other.setting());
+    documentedAs('POST', SETTINGS, await issuer.recordSetting({ windowHours: 48 }));
+    documentedAs('POST', SETTINGS, await issuer.recordSetting({ windowHours: 0 }));
+    documentedAs(
+      'POST',
+      SETTINGS,
+      await anonymous().post(SETTINGS).set('idempotency-key', key()).send({}),
+    );
+    documentedAs('POST', SETTINGS, await as.recordSetting({ expectedCurrentVersion: 1 }));
+    documentedAs('POST', SETTINGS, await issuer.recordSetting({ expectedCurrentVersion: null }));
+
     expect(problems).toEqual([]);
     // Every status the document gives a route was answered here, but the 500 nothing provokes.
     const documented = Object.entries(document.paths ?? {}).flatMap(([path, item]) =>

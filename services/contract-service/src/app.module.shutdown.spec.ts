@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { OutboxShutdown, type EventConsumer, type OutboxStopOptions } from '@rasta/nest-common';
 import { AppModule } from './app.module';
 import { OrganizationMovedConsumer } from './events/organization-moved.consumer';
+import { SettlementCompletedConsumer } from './events/settlement-completed.consumer';
 import { TenderAwardedConsumer } from './events/tender-awarded.consumer';
 import { ENV } from './tokens';
 
@@ -50,11 +51,21 @@ const awarded = (stop: ConsumerStop) =>
     {} as never,
     silent,
   );
+const settlements = (stop: ConsumerStop) =>
+  new SettlementCompletedConsumer(
+    factoryOf(stop),
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    silent,
+  );
 const moves = (stop: ConsumerStop) =>
   new OrganizationMovedConsumer(factoryOf(stop), {} as never, silent);
 
 describe('AppModule shutdown wiring (Codex r1 on #277)', () => {
-  it('stops both consumers with the relay, the purge and the sweep, by one deadline', async () => {
+  it('stops the three consumers with the relay, the purge and the sweep, by one deadline', async () => {
     const provider = outboxShutdownProvider();
     const inject = provider.inject ?? [];
     const stops = new Map<unknown, (OutboxStopOptions | undefined)[]>();
@@ -73,11 +84,16 @@ describe('AppModule shutdown wiring (Codex r1 on #277)', () => {
     await shutdown.stop();
 
     expect(inject).toEqual(
-      expect.arrayContaining([TenderAwardedConsumer, OrganizationMovedConsumer]),
+      expect.arrayContaining([
+        TenderAwardedConsumer,
+        OrganizationMovedConsumer,
+        SettlementCompletedConsumer,
+      ]),
     );
     expect(stops.size).toBe(inject.length - 1);
     expect(stops.get(TenderAwardedConsumer)).toHaveLength(1);
     expect(stops.get(OrganizationMovedConsumer)).toHaveLength(1);
+    expect(stops.get(SettlementCompletedConsumer)).toHaveLength(1);
     const deadlines = new Set([...stops.values()].map((calls) => calls[0]?.deadlineAt));
     expect(deadlines.size).toBe(1);
     const [deadlineAt] = [...deadlines];
@@ -88,6 +104,7 @@ describe('AppModule shutdown wiring (Codex r1 on #277)', () => {
   it.each([
     ['TenderAwardedConsumer', awarded],
     ['OrganizationMovedConsumer', moves],
+    ['SettlementCompletedConsumer', settlements],
   ] as const)('%s passes the deadline to its EventConsumer', async (_name, build) => {
     const consumerStop = jest.fn(async (_options?: OutboxStopOptions) => undefined);
     const consumer = build(consumerStop);
@@ -102,17 +119,20 @@ describe('AppModule shutdown wiring (Codex r1 on #277)', () => {
     const consumerStop = jest.fn(async () => undefined);
     await expect(awarded(consumerStop).stop({ deadlineAt: 1234 })).resolves.toBeUndefined();
     await expect(moves(consumerStop).stop({ deadlineAt: 1234 })).resolves.toBeUndefined();
+    await expect(settlements(consumerStop).stop({ deadlineAt: 1234 })).resolves.toBeUndefined();
     expect(consumerStop).not.toHaveBeenCalled();
   });
 
   it('AppModule no longer stops the consumers on its own in onApplicationShutdown', async () => {
     const awardedStop = jest.fn(async () => undefined);
     const movesStop = jest.fn(async () => undefined);
+    const settlementsStop = jest.fn(async () => undefined);
     const outboxStop = jest.fn(async () => undefined);
     const module = Object.create(AppModule.prototype) as AppModule;
     Object.assign(module, {
       awarded: { stop: awardedStop },
       moves: { stop: movesStop },
+      settlements: { stop: settlementsStop },
       outboxShutdown: { stop: outboxStop },
     });
 
@@ -121,5 +141,6 @@ describe('AppModule shutdown wiring (Codex r1 on #277)', () => {
     expect(outboxStop).toHaveBeenCalledTimes(1);
     expect(awardedStop).not.toHaveBeenCalled();
     expect(movesStop).not.toHaveBeenCalled();
+    expect(settlementsStop).not.toHaveBeenCalled();
   });
 });
