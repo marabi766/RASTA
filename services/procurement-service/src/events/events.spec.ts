@@ -71,10 +71,17 @@ const PUBLISHED: Record<ProcurementEventName, Record<string, unknown>> = {
     reasonCode: 'NO_LIVE_DEMAND',
     closedAt: AT,
   },
+  AGGREGATION_CANCELLED: {
+    ...window,
+    demandCount: 2,
+    demandIdsSha256: demandIdsDigest(['DMD_1', 'DMD_2']),
+    cancelledBy: 'USR_1',
+    cancelledAt: AT,
+  },
 };
 
-describe('the procurement events (ADR-070 § 9, PR 1)', () => {
-  it('are the demand’s two and the four of a window’s end, each with a schema and an aggregate', () => {
+describe('the procurement events (ADR-070 § 9, PRs 1 and 2)', () => {
+  it('are the demand’s two, the four of a window’s end and the cancellation, each with a schema and an aggregate', () => {
     const names = [
       'DEMAND_SUBMITTED',
       'DEMAND_WITHDRAWN',
@@ -82,6 +89,7 @@ describe('the procurement events (ADR-070 § 9, PR 1)', () => {
       'AGGREGATION_WINDOW_EXTENDED',
       'AGGREGATION_REFERRED',
       'AGGREGATION_LAPSED',
+      'AGGREGATION_CANCELLED',
     ];
     expect(Object.keys(PROCUREMENT_EVENTS)).toEqual(names);
     expect(Object.keys(PROCUREMENT_EVENT_SCHEMAS)).toEqual(names);
@@ -152,6 +160,7 @@ describe('the procurement events (ADR-070 § 9, PR 1)', () => {
       'DEMAND_AGGREGATED',
       'AGGREGATION_REFERRED',
       'AGGREGATION_LAPSED',
+      'AGGREGATION_CANCELLED',
     ] as const) {
       expect(() =>
         validateProcurementPayload(name, { ...PUBLISHED[name], demandIds: ['DMD_1'] }),
@@ -180,6 +189,21 @@ describe('the procurement events (ADR-070 § 9, PR 1)', () => {
       validateProcurementPayload('AGGREGATION_LAPSED', {
         ...PUBLISHED.AGGREGATION_LAPSED,
         reasonCode: 'BECAUSE',
+      }),
+    ).toThrow();
+  });
+
+  it('a cancellation names its demands and who cancelled, never why', () => {
+    expect(() =>
+      validateProcurementPayload('AGGREGATION_CANCELLED', {
+        ...PUBLISHED.AGGREGATION_CANCELLED,
+        demandCount: 0,
+      }),
+    ).toThrow();
+    expect(() =>
+      validateProcurementPayload('AGGREGATION_CANCELLED', {
+        ...PUBLISHED.AGGREGATION_CANCELLED,
+        cancelReason: 'no longer needed',
       }),
     ).toThrow();
   });

@@ -514,6 +514,12 @@ Envelope باید سازمان Payload (تأمین‌کننده) باشد و ت�
 > | `AGGREGATION_WINDOW_EXTENDED` | `aggregationId`, `organizationId`, `productId`, `totalQuantity`, `previousClosesAt`, `closesAt`, `windows`, `extensionCount`          |
 > | `AGGREGATION_REFERRED`        | `aggregationId`, `organizationId`, `productId`, `totalQuantity`, `demandCount`, `demandIdsSha256`, `closedAt`                         |
 > | `AGGREGATION_LAPSED`          | همان، با `reasonCode` (`NO_LIVE_DEMAND` \| `SHORTFALL_CLOSED`)                                                                        |
+> | `AGGREGATION_CANCELLED`       | `aggregationId`, `organizationId`, `productId`, `totalQuantity`, `demandCount`, `demandIdsSha256`, `cancelledBy`, `cancelledAt`       |
+>
+> **COM-007 PR 2 (2026-10-17).** جاروکنندهٔ پنجره همان چهار رویداد پایان پنجره را با همان Payload می‌سازد (پنجره‌ای که پس از پایانش نیازی
+> نمی‌گیرد هم پایان می‌یابد)، و ابطال تجمیع `READY` رویداد `AGGREGATION_CANCELLED` را (بی دلیل ابطال). رویداد پایان پنجرهٔ `REFERRED`/`LAPSED`
+> همهٔ نیازهایش را از همان آغاز با شمار و Digest نام می‌برد، حتی وقتی نیازهای پنجرهٔ بزرگ دسته‌دسته دنبالش می‌روند؛ جابه‌جایی آن دسته‌ها
+> رویداد تازه‌ای ندارد.
 
 ## Supplier — `rasta.supplier.v1`
 

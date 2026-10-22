@@ -1799,6 +1799,8 @@ export const EXPECTED = {
       'participation_rule',
       // The levels-and-badges versions (COM-012, docs/24 Q-140).
       'recognition_rule',
+      // A source key taken off a transaction, kept with its decision (#334 r3).
+      'transaction_source_quarantine',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -1821,6 +1823,9 @@ export const EXPECTED = {
       // Nor is a levels-and-badges version.
       'trg_recognition_rule_append_only',
       'trg_recognition_rule_no_truncate',
+      // A quarantined source key is never changed nor deleted.
+      'trg_transaction_source_quarantine_append_only',
+      'trg_transaction_source_quarantine_no_truncate',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: ['BusinessLine', 'CommissionOutcome'],
@@ -1836,6 +1841,9 @@ export const EXPECTED = {
       'reject_statement_obligation_change',
       'reject_participation_rule_mutation',
       'reject_recognition_rule_mutation',
+      'reject_transaction_source_quarantine_mutation',
+      // The correction 20261017130000's preflight names (an operator's tool).
+      'quarantine_transaction_source',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
@@ -1851,6 +1859,11 @@ export const EXPECTED = {
       // An obligation's recorded pricing names a rule exactly when one applied.
       'ck_transaction_pricing',
       'transaction_pricing_rule_id_fkey',
+      // Only economic-service records MAINTENANCE_REQUEST / PAYMENT_INTENT rows (recorded-sources.ts).
+      'ck_transaction_recorded_source',
+      // ORDER is recorded by a service over the API, never by a person (recorded-sources.ts).
+      'ck_transaction_order_source',
+      'ck_transaction_source_quarantine_decision',
       'ck_commission_pricing_cutover_single',
       'ck_payment_reconciliation_done_complete',
       'ck_payment_reconciliation_lease_pair',
@@ -1880,6 +1893,8 @@ export const EXPECTED = {
       'ix_payment_resolution_org_intent',
       // A person's verified facts in one organization: the breakdown's access path.
       'ix_reward_source_evaluation_subject',
+      // A quarantined key, per tenant, as the row carried it (#334 r3).
+      'ix_transaction_source_quarantine_key',
     ],
     dataRollback: ECONOMIC_DATA_ROLLBACK,
   },
@@ -2825,9 +2840,16 @@ export const EXPECTED = {
       'ux_demand_request_org_id',
       'ix_demand_request_org_status',
       'ix_demand_request_aggregation',
+      // COM-007 PR 2: the window sweeper's two queues.
+      'ix_demand_aggregation_sweep_open',
+      'ix_demand_aggregation_sweep_follow',
     ],
     constraints: [
       'fk_demand_request_aggregation',
+      // COM-007 PR 2: demands still to follow an ended window, the sweeper's claim, a cancellation.
+      'ck_demand_aggregation_follow',
+      'ck_demand_aggregation_sweep_claim',
+      'ck_demand_aggregation_cancelled',
       'ck_demand_aggregation_status',
       'ck_demand_aggregation_identifiers',
       'ck_demand_aggregation_window',

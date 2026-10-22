@@ -12,6 +12,7 @@ import { RastaError } from '@rasta/nest-common';
 export const REFUSAL_AREAS = {
   submission: 'Demand cannot be submitted',
   withdrawal: 'Demand cannot be withdrawn',
+  cancellation: 'Aggregation cannot be cancelled',
 } as const;
 export type RefusalArea = keyof typeof REFUSAL_AREAS;
 
@@ -46,9 +47,17 @@ export const REFUSAL_REASONS = {
     /**
      * The demand's window has ended — its aggregation is no longer OPEN, or the database clock is
      * at or past `closesAt`: the demand set is frozen (the way out is cancelling the READY
-     * aggregation, ADR-070 plan PR 2).
+     * aggregation, `POST /v1/aggregations/{id}/cancel`).
      */
     AGGREGATION_WINDOW_ENDED: 422,
+  },
+  /** Cancelling an aggregation (ADR-070 § 2, plan PR 2). */
+  cancellation: {
+    /**
+     * Only a READY aggregation is cancelled: an OPEN window has not ended (its end is the
+     * sweeper's, or the next demand's), and REFERRED, LAPSED, RFQ_ISSUED and CANCELLED are final.
+     */
+    AGGREGATION_NOT_READY: 422,
   },
 } as const satisfies Record<RefusalArea, Record<string, 403 | 409 | 422>>;
 

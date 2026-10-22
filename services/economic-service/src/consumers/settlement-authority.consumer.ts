@@ -12,6 +12,7 @@ import {
 } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 import { TransactionService } from '../transaction/transaction.service';
+import { ECONOMIC_RECORDED_SOURCE_TYPES } from '../transaction/recorded-sources';
 import {
   CONSUMED_EVENTS,
   MAINTENANCE_APPROVED_FIELDS,
@@ -219,7 +220,7 @@ export class SettlementAuthorityConsumer implements OnModuleInit, OnApplicationS
           currency: fact.currency,
           // Equal to the event's instant; `confirmApproval` refuses a fact without one.
           occurredAt: new Date(fact.approvedAt ?? payload.approvedAt),
-          sourceType: 'MAINTENANCE_REQUEST',
+          sourceType: ECONOMIC_RECORDED_SOURCE_TYPES.MAINTENANCE_REQUEST,
           sourceReference: payload.requestId,
           causationId: envelope.eventId,
         });

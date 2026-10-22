@@ -440,6 +440,14 @@ Prometheus **محلی** Compose ارزیابی می‌کند؛ مخزن **Alertm
     از نو آغاز می‌کند و قطع دوباره باز ۲ دقیقه می‌خواهد.
   - **مرز:** فقط از دست رفتن تله‌متری identity-service را ثابت می‌کند؛ نمی‌گوید هر رد یا تغییر وضعیت شواهد حسابرسی ساخته است.
     تا وقتی می‌سوزد، سکوت سه هشدار صف ردها نشانهٔ سلامت شواهد رد **نیست**.
+- **از دست رفتن متریک‌های `procurement-service` (جاروکنندهٔ پنجرهٔ تجمیع، ADR-070 plan PR 2).** دو هشدار
+  `RastaProcurementWindowSweepRetriesHigh` و `RastaProcurementWindowSweepOverdue` Gaugeهایی را می‌خوانند که سرویس از پایگاه‌داده‌اش در
+  Registry ‏prom-client خودش می‌گذارد (Collector ‏OTLP آن را صادر نمی‌کند)؛ تا بازبینی PR-338 r1 F2 هیچ Job ای سرویس را Scrape نمی‌کرد و
+  هر دو بی Series بودند. اکنون Job اختصاصی **`procurement-service`** (`host.docker.internal:3107`، `metrics_path: /metrics`،
+  `environment: local`) و هشدار `RastaProcurementServiceMetricsUnavailable` (`warning`، `for: 2m`، Label فقط `job` و `severity`) =
+  `min by (job) (up{job="procurement-service"}) == 0 or absent(up{job="procurement-service"})`، با همان معنای `up == 0`/`absent`/Replica
+  بالا. `services/procurement-service/src/observability/alert-wiring.spec.ts` بارشدن فایل قاعده، Job و Port، ثبت هر Series خوانده‌شده در
+  Registry سرویس و برچسب Job ورودی‌های promtool را می‌سنجد — آزمون‌های promtool با Series ساختگی این پیوند را نمی‌بینند.
 - **از دست رفتن سیگنال.** `RastaAuditConsumerLag` فقط روی Seriesهای موجود کار می‌کند، پس نبودن ورودی دو هشدار جدا و مکمل دارد:
   - `RastaKafkaExporterUnavailable` (`for: 2m`، Label فقط `job`): Target `kafka-exporter` Scrape نمی‌شود (`up == 0`) یا اصلاً
     Series `up` ندارد (`absent`)؛ `min by (job)` Label `instance` را حذف می‌کند. در این حالت Lag و عمق DLQ نامعلوم‌اند.

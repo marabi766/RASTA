@@ -1,5 +1,6 @@
 import type { ExtendedPrismaClient } from '../src/prisma/prisma.service';
 import { PrismaClient } from '../src/generated/prisma';
+import { WindowSweepService } from '../src/demand/window-sweep.service';
 import { buyer, client, startApi, TestClock, type ApiHarness } from './api-helpers';
 import { cleanup, newOrganizationId, newProductId, ownerDatabaseUrl } from './helpers';
 
@@ -29,6 +30,10 @@ import { cleanup, newOrganizationId, newProductId, ownerDatabaseUrl } from './he
  * whose whole history arrived after the last ANALYZE: the statistics do not know it, which is what
  * made the end's id query read the organization's history in id order.
  *
+ * PR 2 ends a window in batches (`WindowEnd`, the sweeper): its last case ends a REFER window of
+ * `SWEPT_LIVE` live demands with a follow batch of `SWEPT_BATCH`, so the end and each sweep step after
+ * it — a batch that follows, a batch of the digest — are each measured over the same history.
+ *
  * Not measured: a table of this size with no statistics at all, which autovacuum never leaves it
  * with. There the planner costed every index of the table alike and was seen taking even a
  * lookup by (organization, id) through `ix_demand_request_aggregation`.
@@ -40,6 +45,9 @@ const HISTORY = 100_000;
 const LIVE = 3;
 /** The most `demand_request` rows and entries one transaction may read: a few times `LIVE`. */
 const READ_BOUND = 10 * (LIVE + 1);
+/** The sweeper's case: more live demands than one batch takes, so the end takes several steps. */
+const SWEPT_LIVE = 7;
+const SWEPT_BATCH = 2;
 
 jest.setTimeout(180_000);
 
@@ -95,10 +103,14 @@ describe("a window's withdrawn history", () => {
   });
 
   /**
-   * An OPEN window ending at T0 + 10 h under `policy`, never reaching its threshold: `HISTORY`
-   * demands submitted and withdrawn, then `LIVE` still SUBMITTED.
+   * An OPEN window opened at `opened` for 10 h under `policy`, never reaching its threshold:
+   * `HISTORY` demands submitted and withdrawn, then `live` still SUBMITTED.
    */
-  async function seedWindow(policy: 'EXTEND' | 'REFER'): Promise<Seeded> {
+  async function seedWindow(
+    policy: 'EXTEND' | 'REFER',
+    opened: Date = T0,
+    live: number = LIVE,
+  ): Promise<Seeded> {
     const organizationId = newOrganizationId();
     organizations.push(organizationId);
     const productId = newProductId();
@@ -114,21 +126,22 @@ describe("a window's withdrawn history", () => {
             (id, organization_id, product_id, status, opened_at, closes_at, window_hours,
              min_quantity, shortfall_policy, setting_version, total_quantity, demand_count,
              extension_count, created_at, updated_at, version)
-          VALUES (${aggregationId}, ${organizationId}, ${productId}, 'OPEN', ${T0},
-                  ${new Date(T0.getTime() + 10 * HOUR)}, 10, ${MAX_QUANTITY}, ${policy}, NULL,
-                  ${LIVE}, ${LIVE}, 0, ${T0}, ${T0}, 1)`;
-        // Demand n is submitted at T0 + n ms; the first HISTORY are withdrawn a second later.
+          VALUES (${aggregationId}, ${organizationId}, ${productId}, 'OPEN', ${opened},
+                  ${new Date(opened.getTime() + 10 * HOUR)}, 10, ${MAX_QUANTITY}, ${policy}, NULL,
+                  ${live}, ${live}, 0, ${opened}, ${opened}, 1)`;
+        // Demand n is submitted `n` ms after the opening; the first HISTORY are withdrawn a second
+        // later.
         await tx.$executeRaw`
           INSERT INTO demand_request
             (id, organization_id, aggregation_id, product_id, quantity, status, submitted_at,
              submitted_by, submitted_correlation_id, created_at, updated_at, version)
           SELECT 'DMD_HIST_' || lpad(n::text, 8, '0') || '_' || ${tag},
                  ${organizationId}, ${aggregationId}, ${productId}, 1, 'SUBMITTED',
-                 ${T0}::timestamptz + make_interval(secs => n / 1000.0),
+                 ${opened}::timestamptz + make_interval(secs => n / 1000.0),
                  'USR-HISTORY-SEED', 'corr-history-seed',
-                 ${T0}::timestamptz + make_interval(secs => n / 1000.0),
-                 ${T0}::timestamptz + make_interval(secs => n / 1000.0), 1
-            FROM generate_series(1, ${HISTORY + LIVE}::int) AS n`;
+                 ${opened}::timestamptz + make_interval(secs => n / 1000.0),
+                 ${opened}::timestamptz + make_interval(secs => n / 1000.0), 1
+            FROM generate_series(1, ${HISTORY + live}::int) AS n`;
         const withdrawn = await tx.$executeRaw`
           UPDATE demand_request
              SET status = 'WITHDRAWN', withdrawn_at = submitted_at + interval '1 second',
@@ -147,12 +160,17 @@ describe("a window's withdrawn history", () => {
   }
 
   /** The API, every transaction of which records the `demand_request` rows it read. */
-  async function measuredApi(policy: 'EXTEND' | 'REFER', clock: TestClock) {
+  async function measuredApi(
+    policy: 'EXTEND' | 'REFER',
+    clock: TestClock,
+    env: Record<string, string> = {},
+  ) {
     const harness = await startApi(
       {
         PROCUREMENT_AGGREGATION_WINDOW_HOURS: '10',
         PROCUREMENT_AGGREGATION_MIN_QUANTITY: String(MAX_QUANTITY),
         PROCUREMENT_AGGREGATION_SHORTFALL_POLICY: policy,
+        ...env,
       },
       { clock },
     );
@@ -170,7 +188,7 @@ describe("a window's withdrawn history", () => {
       }, options)) as typeof harness.prisma.transaction);
     /** The most any transaction since the last call read; cleared. */
     const mostRead = () => Math.max(0, ...reads.splice(0));
-    return { harness, mostRead };
+    return { harness, mostRead, reads };
   }
 
   /** The late submit that ends a REFER window; what its transactions read at most. */
@@ -237,5 +255,45 @@ describe("a window's withdrawn history", () => {
     // Vacuumed, not analysed: the dead rows are gone, and the statistics still do not know it.
     await owner.$executeRawUnsafe('VACUUM "demand_request"');
     expect(bounded(await referLate(unseen))).toEqual(expect.objectContaining({ bounded: true }));
+  });
+
+  it(`REFER, ended in batches of ${SWEPT_BATCH} (PR 2): with ${HISTORY} withdrawn demands and ${SWEPT_LIVE} live, the late submit and every sweep step after it read at most ${READ_BOUND} demand rows`, async () => {
+    // Opened three days ago: due by the database clock the sweeper claims with.
+    const seeded = await seedWindow('REFER', new Date(Date.now() - 72 * HOUR), SWEPT_LIVE);
+    await owner.$executeRawUnsafe('VACUUM "demand_request"');
+    const clock = new TestClock();
+    const { harness, mostRead, reads } = await measuredApi('REFER', clock, {
+      PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE: String(SWEPT_BATCH),
+    });
+    const as = client(harness, buyer(seeded.organizationId));
+
+    clock.set(null);
+    const late = await as.submit({ productId: seeded.productId, quantity: 1 });
+    expect(late.status).toBe(201);
+    expect(late.body.aggregationId).not.toBe(seeded.aggregationId);
+    const end = mostRead();
+
+    // Each step of this window, and only this window: the claim spans tenants.
+    const service = harness.app.get(WindowSweepService);
+    const step = service.step.bind(service);
+    const steps: number[] = [];
+    jest.spyOn(service, 'step').mockImplementation(async (target, lease) => {
+      reads.splice(0);
+      const done = await step(target, lease);
+      const taken = reads.splice(0);
+      if (target.aggregationId === seeded.aggregationId) steps.push(Math.max(0, ...taken));
+      return done;
+    });
+    const sweeper = harness.sweeper();
+    for (let round = 0; round < 50 && (await sweeper.runOnce()).claimed > 0; round += 1);
+
+    const window = await owner.demandAggregation.findFirst({
+      where: { organizationId: seeded.organizationId, id: seeded.aggregationId },
+    });
+    expect(window).toMatchObject({ status: 'REFERRED', demandsToFollow: 0, endDigestState: null });
+    expect(window?.demandIdsSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(steps.length).toBeGreaterThanOrEqual(Math.ceil(SWEPT_LIVE / SWEPT_BATCH) - 1);
+    const all = [end, ...steps];
+    expect(all.map(bounded)).toEqual(all.map((read) => ({ read, bounded: true })));
   });
 });
