@@ -17,6 +17,7 @@ import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
 import { parseIdempotencyKey } from '../project/project.controller';
 import { TenderService } from './tender.service';
 import { GATED_NOTE, answerGated } from './gated-response';
+import { RETRY_NOTE } from './retry-note';
 import {
   cancelTenderSchema,
   createTenderSchema,
@@ -113,13 +114,19 @@ export class TenderController {
       'required and kept as statusReason; TENDER_CANCELLED carries only the closed code ' +
       '(`reasonCode`: OWNER_REQUEST by default, or NO_QUALIFIED_BID for an EVALUATING tender in which ' +
       'no bid was qualified — 422 REASON_CODE_NOT_APPLICABLE otherwise; no free text on events). ' +
-      `${GATED_NOTE} The request is bound to the tender, its version, the reason and its code.`,
+      `${GATED_NOTE} The request is bound to the tender, its version, the reason and its code. ` +
+      `${RETRY_NOTE} A retried request whose round was rejected meanwhile is answered that round's ` +
+      '202 again and opens no new one.',
   })
   async cancel(
     @Param('id') id: string,
     @Body(zodPipe(cancelTenderSchema)) dto: CancelTenderDto,
     @Res({ passthrough: true }) response: Response,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return answerGated(response, await this.tenders.cancel(id, dto));
+    return answerGated(
+      response,
+      await this.tenders.cancel(id, dto, parseIdempotencyKey(idempotencyKey)),
+    );
   }
 }

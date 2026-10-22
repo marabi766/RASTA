@@ -168,6 +168,65 @@ describe('publication API', () => {
     expect((await publish(token)).status).toBe(409);
   });
 
+  it('keeps the first answer by Idempotency-Key, its status included: the 202 of a round rejected since, then the 200 of the publication (task 060)', async () => {
+    const a = org('publish-retry');
+    const { id, version, token } = await tenderFor(a);
+    await activatePublicationPolicy(w, a);
+    const publish = (key: string, body: object = { expectedVersion: version }) =>
+      http()
+        .post(`/v1/tenders/${id}/publish`)
+        .set(as(token))
+        .set('Idempotency-Key', key)
+        .send(body);
+
+    const asked = await publish('publish-retry-1');
+    expect(asked.status).toBe(202);
+    // The round is rejected by somebody else; the answer had been lost, and the request is sent again.
+    const stepId = asked.body.steps[0].approvalId as string;
+    const step = await http().get(`/v1/approvals/${stepId}`).set(as(token));
+    const rejected = await http()
+      .post(`/v1/approvals/${stepId}/decision`)
+      .set(as(orgAdmin(a)))
+      .send({
+        decision: 'REJECT',
+        reason: 'Not on these terms',
+        expectedVersion: step.body.version,
+      });
+    expect(rejected.status).toBe(200);
+    const again = await publish('publish-retry-1');
+    expect({ status: again.status, body: again.body }).toEqual({ status: 202, body: asked.body });
+    const listed = await http().get(`/v1/tenders/${id}/approvals`).set(as(token));
+    expect(listed.body.items).toHaveLength(1);
+    // Another body under the key, and a key that is not one: refused, nothing asked.
+    const reused = await publish('publish-retry-1', { expectedVersion: version + 1 });
+    expect({ status: reused.status, code: reused.body.code }).toEqual({
+      status: 409,
+      code: 'IDEMPOTENCY_KEY_REUSED',
+    });
+    expect((await publish('x'.repeat(256))).status).toBe(400);
+
+    // A new request asks anew; once granted, it publishes, and its retry is its 200.
+    const fresh = await publish('publish-retry-2');
+    expect(fresh.status).toBe(202);
+    const freshStep = fresh.body.steps[0].approvalId as string;
+    const current = await http().get(`/v1/approvals/${freshStep}`).set(as(token));
+    expect(
+      (
+        await http()
+          .post(`/v1/approvals/${freshStep}/decision`)
+          .set(as(orgAdmin(a)))
+          .send({ decision: 'GRANT', expectedVersion: current.body.version })
+      ).status,
+    ).toBe(200);
+    const published = await publish('publish-retry-3');
+    expect(published.status).toBe(200);
+    const replayed = await publish('publish-retry-3');
+    expect({ status: replayed.status, body: replayed.body }).toEqual({
+      status: 200,
+      body: published.body,
+    });
+  });
+
   it('answers 409 APPROVAL_STALE when the tender changed after the approval, and publishes nothing', async () => {
     const a = org('publish-stale');
     const { id, version, token } = await tenderFor(a);

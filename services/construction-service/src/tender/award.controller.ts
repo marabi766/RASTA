@@ -1,4 +1,14 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Res } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+  Res,
+} from '@nestjs/common';
 import type { Response } from 'express';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
@@ -7,9 +17,11 @@ import {
   RequirePlatformUserId,
   zodPipe,
 } from '@rasta/nest-common';
+import { parseIdempotencyKey } from '../project/project.controller';
 import { AwardService } from './award.service';
 import { awardTenderSchema, type AwardTenderDto } from './award.dto';
 import { GATED_NOTE, answerGated } from './gated-response';
+import { RETRY_NOTE } from './retry-note';
 
 /** The one service that reads an award: it drafts the contract from it (CON-003; `TENDER_AWARDED` carries no amount). */
 export const AWARD_READ_CALLER = 'contract-service';
@@ -74,14 +86,20 @@ export class AwardController {
       'judged as the awarder is (the roles the bid side excludes, bidder membership, and ' +
       'AWARDER_NOT_EVALUATOR). Executing asks supplier-service again — an approval never replaces ' +
       'that check. ' +
+      `${RETRY_NOTE} A retried request whose round was rejected meanwhile is answered that round's ` +
+      '202 again and opens no new one. ' +
       AWARDER_NOTE,
   })
   async award(
     @Param('id') id: string,
     @Body(zodPipe(awardTenderSchema)) dto: AwardTenderDto,
     @Res({ passthrough: true }) response: Response,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return answerGated(response, await this.awards.award(id, dto));
+    return answerGated(
+      response,
+      await this.awards.award(id, dto, parseIdempotencyKey(idempotencyKey)),
+    );
   }
 
   @AllowService(AWARD_READ_CALLER)

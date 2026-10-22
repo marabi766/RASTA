@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -12,8 +13,10 @@ import {
 import type { Response } from 'express';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
+import { parseIdempotencyKey } from '../project/project.controller';
 import { PublicationService } from './publication.service';
 import { GATED_NOTE, answerGated } from './gated-response';
+import { RETRY_NOTE } from './retry-note';
 import {
   inviteBidderSchema,
   listInvitationsQuerySchema,
@@ -60,14 +63,20 @@ export class PublicationController {
       '(ADR-066); without one configured nothing is published and the answer is 503. Publishes ' +
       `TENDER_PUBLISHED. ${GATED_NOTE} The request is bound to the tender and its version; a ` +
       'publication that could not succeed (any reason above) is never asked for. ' +
+      `${RETRY_NOTE} A retried request whose round was rejected meanwhile is answered that round's ` +
+      '202 again and opens no new one; a new request (a new key) asks anew. ' +
       `${TENANT_NOTE} ${ROLES_NOTE}`,
   })
   async publish(
     @Param('id') id: string,
     @Body(zodPipe(publishTenderSchema)) dto: PublishTenderDto,
     @Res({ passthrough: true }) response: Response,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return answerGated(response, await this.publication.publish(id, dto));
+    return answerGated(
+      response,
+      await this.publication.publish(id, dto, parseIdempotencyKey(idempotencyKey)),
+    );
   }
 
   @Post('tenders/:id/invitations')
@@ -81,10 +90,14 @@ export class PublicationController {
       'organization-service (422 INVITED_ORGANIZATION_NOT_FOUND if not; 503/504 if it cannot be ' +
       'confirmed — nothing is invited unconfirmed). Eligibility to bid (qualified, not suspended) is ' +
       'not judged here but at bid time. ' +
-      `Publishes TENDER_BIDDER_INVITED. ${TENANT_NOTE} ${ROLES_NOTE}`,
+      `Publishes TENDER_BIDDER_INVITED. ${RETRY_NOTE} ${TENANT_NOTE} ${ROLES_NOTE}`,
   })
-  async invite(@Param('id') id: string, @Body(zodPipe(inviteBidderSchema)) dto: InviteBidderDto) {
-    return this.publication.invite(id, dto);
+  async invite(
+    @Param('id') id: string,
+    @Body(zodPipe(inviteBidderSchema)) dto: InviteBidderDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    return this.publication.invite(id, dto, parseIdempotencyKey(idempotencyKey));
   }
 
   @Get('tenders/:id/invitations')

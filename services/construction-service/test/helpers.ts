@@ -404,6 +404,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       reader,
       identity,
       memberships,
+      idempotency,
     ),
     evaluation: new EvaluationService(
       prisma,
@@ -435,6 +436,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       env,
       gate,
       tenderApprovalRepository,
+      idempotency,
     ),
     tenderApprovalRepository,
     tenderApprovals,
@@ -500,6 +502,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       hierarchy as unknown as OrganizationDirectory,
       gate,
       tenderApprovalRepository,
+      idempotency,
     ),
     criteriaRepository,
     criteria: new CriteriaService(

@@ -185,7 +185,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -893,7 +893,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1200,7 +1200,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1426,7 +1426,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -1892,7 +1892,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2140,7 +2140,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2358,7 +2358,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2612,7 +2612,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3210,7 +3210,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3459,7 +3459,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3700,7 +3700,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -4181,7 +4181,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4398,7 +4398,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4690,7 +4690,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -5967,7 +5967,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6286,7 +6286,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6605,7 +6605,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6909,7 +6909,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7982,7 +7982,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
             "content": {
               "application/json": {
                 "schema": {
@@ -8287,7 +8287,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -8983,7 +8983,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9079,7 +9079,7 @@
     },
     "/v1/tenders/{id}/cancel": {
       "post": {
-        "description": "`expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. Cancellable from every live state (DRAFT, PUBLISHED, CLOSED, EVALUATING, EVALUATED); a DRAFT too — every cancellation needs an approval policy (Q-84). The reason is required and kept as statusReason; TENDER_CANCELLED carries only the closed code (`reasonCode`: OWNER_REQUEST by default, or NO_QUALIFIED_BID for an EVALUATING tender in which no bid was qualified — 422 REASON_CODE_NOT_APPLICABLE otherwise; no free text on events). **Behind an approval gate (Q-84):** with no active approval policy for this workflow the answer is 422 naming APPROVAL_POLICY_REQUIRED. With one, a command that could succeed opens (or finds) the approval request bound to exactly what it would execute and answers **202** with the request (`TenderApprovalRequestView`); the policy names who decides it, and never the person who made it (`POST /v1/approvals/{id}/decision`). Once every step is granted the **same command**, on the same tender version, executes and uses the approval up in the same transaction (200); what changed since the approval is 409 naming APPROVAL_STALE and nothing is executed (a command sent with the version the approval was made on, after the tender moved, included). An approval is used at most once. A policy step with an amount range has no amount to be judged on for these commands and does not apply; a policy whose steps are all of that kind has no step that applies and refuses (APPROVAL_POLICY_REQUIRED). The request is bound to the tender, its version, the reason and its code.",
+        "description": "`expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. Cancellable from every live state (DRAFT, PUBLISHED, CLOSED, EVALUATING, EVALUATED); a DRAFT too — every cancellation needs an approval policy (Q-84). The reason is required and kept as statusReason; TENDER_CANCELLED carries only the closed code (`reasonCode`: OWNER_REQUEST by default, or NO_QUALIFIED_BID for an EVALUATING tender in which no bid was qualified — 422 REASON_CODE_NOT_APPLICABLE otherwise; no free text on events). **Behind an approval gate (Q-84):** with no active approval policy for this workflow the answer is 422 naming APPROVAL_POLICY_REQUIRED. With one, a command that could succeed opens (or finds) the approval request bound to exactly what it would execute and answers **202** with the request (`TenderApprovalRequestView`); the policy names who decides it, and never the person who made it (`POST /v1/approvals/{id}/decision`). Once every step is granted the **same command**, on the same tender version, executes and uses the approval up in the same transaction (200); what changed since the approval is 409 naming APPROVAL_STALE and nothing is executed (a command sent with the version the approval was made on, after the tender moved, included). An approval is used at most once. A policy step with an amount range has no amount to be judged on for these commands and does not apply; a policy whose steps are all of that kind has no step that applies and refuses (APPROVAL_POLICY_REQUIRED). The request is bound to the tender, its version, the reason and its code. An optional Idempotency-Key (the gateway always sends one) makes a retry return the first answer — its status included — and do nothing again: a retry whose first attempt committed but whose answer was lost is that answer, even if the tender has moved on since. The key is the organization’s and the request names the caller: the same key with another body, or from another person, is 409 IDEMPOTENCY_KEY_REUSED; while the first is in flight, 409 CONFLICT with Retry-After. It is claimed only once the caller is authorised; a refused request keeps nothing. A retried request whose round was rejected meanwhile is answered that round's 202 again and opens no new one.",
         "operationId": "TenderController_cancel_v1",
         "parameters": [
           {
@@ -9088,6 +9088,17 @@
             "in": "path",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with a Retry-After header, in seconds. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
             }
           }
         ],
@@ -9368,7 +9379,18 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -9662,7 +9684,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -10210,7 +10232,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -10458,7 +10480,7 @@
     },
     "/v1/tenders/{id}/publish": {
       "post": {
-        "description": "`expectedVersion` must equal the tender's current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED. Refused with 422 (BUSINESS_RULE_VIOLATION), naming every reason in the message, unless: the procurement nature and the visibility are chosen (never defaulted, Q-03); the bidding window is set, at least CONSTRUCTION_TENDER_MIN_BIDDING_PERIOD_SECONDS long (default 0) and not already closed by the database clock; the criteria exist and their weights sum to exactly 10000 basis points; a RESTRICTED tender has at least one invitation. The criteria are frozen from this moment. Makes the tender's key pair, wrapping its private half with the key-encryption key (ADR-066); without one configured nothing is published and the answer is 503. Publishes TENDER_PUBLISHED. **Behind an approval gate (Q-84):** with no active approval policy for this workflow the answer is 422 naming APPROVAL_POLICY_REQUIRED. With one, a command that could succeed opens (or finds) the approval request bound to exactly what it would execute and answers **202** with the request (`TenderApprovalRequestView`); the policy names who decides it, and never the person who made it (`POST /v1/approvals/{id}/decision`). Once every step is granted the **same command**, on the same tender version, executes and uses the approval up in the same transaction (200); what changed since the approval is 409 naming APPROVAL_STALE and nothing is executed (a command sent with the version the approval was made on, after the tender moved, included). An approval is used at most once. A policy step with an amount range has no amount to be judged on for these commands and does not apply; a policy whose steps are all of that kind has no step that applies and refuses (APPROVAL_POLICY_REQUIRED). The request is bound to the tender and its version; a publication that could not succeed (any reason above) is never asked for. Only the organization the request acts for: a tender of any other organization answers 404, never 403, so its existence is not disclosed. Owner side. Allowed roles are the project roles from configuration (CONSTRUCTION_PROJECT_ROLES to change, plus CONSTRUCTION_PROJECT_READER_ROLES to read; SYSTEM_ADMIN acting for a selected organization always) — docs/24 Q-69, Q-84. AUDITOR is always refused.",
+        "description": "`expectedVersion` must equal the tender's current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED. Refused with 422 (BUSINESS_RULE_VIOLATION), naming every reason in the message, unless: the procurement nature and the visibility are chosen (never defaulted, Q-03); the bidding window is set, at least CONSTRUCTION_TENDER_MIN_BIDDING_PERIOD_SECONDS long (default 0) and not already closed by the database clock; the criteria exist and their weights sum to exactly 10000 basis points; a RESTRICTED tender has at least one invitation. The criteria are frozen from this moment. Makes the tender's key pair, wrapping its private half with the key-encryption key (ADR-066); without one configured nothing is published and the answer is 503. Publishes TENDER_PUBLISHED. **Behind an approval gate (Q-84):** with no active approval policy for this workflow the answer is 422 naming APPROVAL_POLICY_REQUIRED. With one, a command that could succeed opens (or finds) the approval request bound to exactly what it would execute and answers **202** with the request (`TenderApprovalRequestView`); the policy names who decides it, and never the person who made it (`POST /v1/approvals/{id}/decision`). Once every step is granted the **same command**, on the same tender version, executes and uses the approval up in the same transaction (200); what changed since the approval is 409 naming APPROVAL_STALE and nothing is executed (a command sent with the version the approval was made on, after the tender moved, included). An approval is used at most once. A policy step with an amount range has no amount to be judged on for these commands and does not apply; a policy whose steps are all of that kind has no step that applies and refuses (APPROVAL_POLICY_REQUIRED). The request is bound to the tender and its version; a publication that could not succeed (any reason above) is never asked for. An optional Idempotency-Key (the gateway always sends one) makes a retry return the first answer — its status included — and do nothing again: a retry whose first attempt committed but whose answer was lost is that answer, even if the tender has moved on since. The key is the organization’s and the request names the caller: the same key with another body, or from another person, is 409 IDEMPOTENCY_KEY_REUSED; while the first is in flight, 409 CONFLICT with Retry-After. It is claimed only once the caller is authorised; a refused request keeps nothing. A retried request whose round was rejected meanwhile is answered that round's 202 again and opens no new one; a new request (a new key) asks anew. Only the organization the request acts for: a tender of any other organization answers 404, never 403, so its existence is not disclosed. Owner side. Allowed roles are the project roles from configuration (CONSTRUCTION_PROJECT_ROLES to change, plus CONSTRUCTION_PROJECT_READER_ROLES to read; SYSTEM_ADMIN acting for a selected organization always) — docs/24 Q-69, Q-84. AUDITOR is always refused.",
         "operationId": "PublicationController_publish_v1",
         "parameters": [
           {
@@ -10467,6 +10489,17 @@
             "in": "path",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with a Retry-After header, in seconds. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
             }
           }
         ],
@@ -10747,7 +10780,18 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -10934,7 +10978,7 @@
     },
     "/v1/tenders/{id}/invitations": {
       "post": {
-        "description": "While the tender is a DRAFT or PUBLISHED, and only when its visibility is RESTRICTED (422 otherwise). The owner cannot invite itself (422); the same organization twice is 409 ALREADY_EXISTS. The invited organization must exist: it is confirmed with organization-service (422 INVITED_ORGANIZATION_NOT_FOUND if not; 503/504 if it cannot be confirmed — nothing is invited unconfirmed). Eligibility to bid (qualified, not suspended) is not judged here but at bid time. Publishes TENDER_BIDDER_INVITED. Only the organization the request acts for: a tender of any other organization answers 404, never 403, so its existence is not disclosed. Owner side. Allowed roles are the project roles from configuration (CONSTRUCTION_PROJECT_ROLES to change, plus CONSTRUCTION_PROJECT_READER_ROLES to read; SYSTEM_ADMIN acting for a selected organization always) — docs/24 Q-69, Q-84. AUDITOR is always refused.",
+        "description": "While the tender is a DRAFT or PUBLISHED, and only when its visibility is RESTRICTED (422 otherwise). The owner cannot invite itself (422); the same organization twice is 409 ALREADY_EXISTS. The invited organization must exist: it is confirmed with organization-service (422 INVITED_ORGANIZATION_NOT_FOUND if not; 503/504 if it cannot be confirmed — nothing is invited unconfirmed). Eligibility to bid (qualified, not suspended) is not judged here but at bid time. Publishes TENDER_BIDDER_INVITED. An optional Idempotency-Key (the gateway always sends one) makes a retry return the first answer — its status included — and do nothing again: a retry whose first attempt committed but whose answer was lost is that answer, even if the tender has moved on since. The key is the organization’s and the request names the caller: the same key with another body, or from another person, is 409 IDEMPOTENCY_KEY_REUSED; while the first is in flight, 409 CONFLICT with Retry-After. It is claimed only once the caller is authorised; a refused request keeps nothing. Only the organization the request acts for: a tender of any other organization answers 404, never 403, so its existence is not disclosed. Owner side. Allowed roles are the project roles from configuration (CONSTRUCTION_PROJECT_ROLES to change, plus CONSTRUCTION_PROJECT_READER_ROLES to read; SYSTEM_ADMIN acting for a selected organization always) — docs/24 Q-69, Q-84. AUDITOR is always refused.",
         "operationId": "PublicationController_invite_v1",
         "parameters": [
           {
@@ -10943,6 +10987,17 @@
             "in": "path",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with a Retry-After header, in seconds. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
             }
           }
         ],
@@ -11017,7 +11072,18 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -11695,7 +11761,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -11965,9 +12031,24 @@
                         "additionalProperties": false
                       },
                       "description": "Empty until the bids are opened."
+                    },
+                    "proposal": {
+                      "type": "object",
+                      "properties": {
+                        "proposedBy": {
+                          "type": "string"
+                        },
+                        "proposedAt": {
+                          "type": "string"
+                        }
+                      },
+                      "required": ["proposedBy", "proposedAt"],
+                      "additionalProperties": false,
+                      "nullable": true,
+                      "description": "Before the opening: the proposal to open that stands (four-eyes, Q-91) — who and when, what a withdrawal names — else null. Always null once the bids are opened."
                     }
                   },
-                  "required": ["tenderId", "opened", "bidCount", "receivedAt", "bids"],
+                  "required": ["tenderId", "opened", "bidCount", "receivedAt", "bids", "proposal"],
                   "additionalProperties": false
                 }
               }
@@ -12057,7 +12138,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -12669,7 +12750,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -13007,7 +13088,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -13222,7 +13303,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -13330,7 +13411,7 @@
     },
     "/v1/tenders/{id}/open-bids": {
       "post": {
-        "description": "Only after the tender is CLOSED, judged on the database clock after the tender lock; a tender still PUBLISHED, even past its deadline, is 422 (BUSINESS_RULE_VIOLATION, `NOT_CLOSED`) — closing is the sweeper’s. The receipt chain and its head are read from audit-service (a request signed for the owner’s organization and the tender) and every bid is opened against **those** receipts, never against this service’s own: audit-service unreachable is 503/504 (UPSTREAM_UNAVAILABLE), not yet caught up with the newest receipts is 503 (retry), and a chain or a bid that differs from the evidence is 422 `INTEGRITY` — nothing is opened in any of them. Opening is atomic: every standing bid becomes OPENED and the tender EVALUATING, with BIDS_OPENED (a count and a digest of the bid ids only; the ids are read with GET /tenders/:id/bids). With four-eyes on (CONSTRUCTION_TENDER_OPEN_FOUR_EYES, default true — Q-91, provisional) this call is the second person’s approval of a proposal another user made: no proposal is 422 `PROPOSAL_REQUIRED`, the proposer approving their own is 422 `SECOND_PERSON_REQUIRED` — the same person under another user id included (issuer and subject are compared, #188) — and a proposal that names no stable identity is 422 `ACTOR_IDENTITY_UNKNOWN` and is cleared by that approval (`BID_OPENING_PROPOSAL_WITHDRAWN`, reason `PROPOSER_IDENTITY_UNKNOWN`) so that anyone eligible may propose again. A token without `rasta_uid` is 403 on this route, on proposing and on withdrawing. Opening again answers the same view with `alreadyOpened: true` and writes nothing. A tender with more standing bids than CONSTRUCTION_TENDER_MAX_STANDING_BIDS (the limit lowered after they were submitted) is 422 `TENDER_OVER_LIMIT` at once, before audit-service is asked or any bid decrypted; the answer gives no count, nothing is opened, and what becomes of the tender is an operator’s decision (Q-117). Every call is audited in the same transaction: a bid_access_log row and BID_ACCESSED per bid read, with the purpose and the outcome; a refused call commits a REFUSED row and then answers the refusal. Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds), a service token and a member of any organization that bid on the tender (on every route here, the access log included; judged on the token and on identity-service now, which cannot be reached: 502/504, nothing shown) are refused. A tender of another organization answers 404, never 403, whatever roles the caller holds: ownership is checked before any role, so a contractor of another organization gets exactly what a missing tender gets; the attempt is logged under its owner. 403 is only ever answered to a member of the owning organization.",
+        "description": "Only after the tender is CLOSED, judged on the database clock after the tender lock; a tender still PUBLISHED, even past its deadline, is 422 (BUSINESS_RULE_VIOLATION, `NOT_CLOSED`) — closing is the sweeper’s. The receipt chain and its head are read from audit-service (a request signed for the owner’s organization and the tender) and every bid is opened against **those** receipts, never against this service’s own: audit-service unreachable is 503/504 (UPSTREAM_UNAVAILABLE), not yet caught up with the newest receipts is 503 (retry), and a chain or a bid that differs from the evidence is 422 `INTEGRITY` — nothing is opened in any of them. Opening is atomic: every standing bid becomes OPENED and the tender EVALUATING, with BIDS_OPENED (a count and a digest of the bid ids only; the ids are read with GET /tenders/:id/bids). With four-eyes on (CONSTRUCTION_TENDER_OPEN_FOUR_EYES, default true — Q-91, provisional) this call is the second person’s approval of a proposal another user made: no proposal is 422 `PROPOSAL_REQUIRED`, the proposer approving their own is 422 `SECOND_PERSON_REQUIRED` — the same person under another user id included (issuer and subject are compared, #188) — and a proposal that names no stable identity is 422 `ACTOR_IDENTITY_UNKNOWN` and is cleared by that approval (`BID_OPENING_PROPOSAL_WITHDRAWN`, reason `PROPOSER_IDENTITY_UNKNOWN`) so that anyone eligible may propose again. A token without `rasta_uid` is 403 on this route, on proposing and on withdrawing. Opening again answers the same view with `alreadyOpened: true` and writes nothing. A tender with more standing bids than CONSTRUCTION_TENDER_MAX_STANDING_BIDS (the limit lowered after they were submitted) is 422 `TENDER_OVER_LIMIT` at once, before audit-service is asked or any bid decrypted; the answer gives no count, nothing is opened, and what becomes of the tender is an operator’s decision (Q-117). An optional Idempotency-Key (the gateway always sends one) makes a retry return the first answer — its status included — and do nothing again: a retry whose first attempt committed but whose answer was lost is that answer, even if the tender has moved on since. The key is the organization’s and the request names the caller: the same key with another body, or from another person, is 409 IDEMPOTENCY_KEY_REUSED; while the first is in flight, 409 CONFLICT with Retry-After. It is claimed only once the caller is authorised; a refused request keeps nothing. Every call is audited in the same transaction: a bid_access_log row and BID_ACCESSED per bid read, with the purpose and the outcome; a refused call commits a REFUSED row and then answers the refusal. Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds), a service token and a member of any organization that bid on the tender (on every route here, the access log included; judged on the token and on identity-service now, which cannot be reached: 502/504, nothing shown) are refused. A tender of another organization answers 404, never 403, whatever roles the caller holds: ownership is checked before any role, so a contractor of another organization gets exactly what a missing tender gets; the attempt is logged under its owner. 403 is only ever answered to a member of the owning organization.",
         "operationId": "BidOpeningController_open_v1",
         "parameters": [
           {
@@ -13339,6 +13420,17 @@
             "in": "path",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with a Retry-After header, in seconds. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
             }
           }
         ],
@@ -13468,7 +13560,18 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -13578,7 +13681,7 @@
     },
     "/v1/tenders/{id}/open-bids/proposal": {
       "post": {
-        "description": "Records that the caller proposes opening the bids; a second authorised user then approves with `POST /tenders/:id/open-bids`. The first proposal stands: proposing again answers it with `alreadyProposed: true`. Neither proposer nor approver may be a member of an organization that bid. Reads and opens nothing; a tender not yet CLOSED is 422 `NOT_CLOSED`. Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds), a service token and a member of any organization that bid on the tender (on every route here, the access log included; judged on the token and on identity-service now, which cannot be reached: 502/504, nothing shown) are refused. A tender of another organization answers 404, never 403, whatever roles the caller holds: ownership is checked before any role, so a contractor of another organization gets exactly what a missing tender gets; the attempt is logged under its owner. 403 is only ever answered to a member of the owning organization.",
+        "description": "Records that the caller proposes opening the bids; a second authorised user then approves with `POST /tenders/:id/open-bids`. The first proposal stands: proposing again answers it with `alreadyProposed: true`. Neither proposer nor approver may be a member of an organization that bid. Reads and opens nothing; a tender not yet CLOSED is 422 `NOT_CLOSED`. The answer says when the proposal that stands was made (`proposedAt`): what withdrawing it names. A retried proposal under its key never proposes afresh after the first was withdrawn or cleared. An optional Idempotency-Key (the gateway always sends one) makes a retry return the first answer — its status included — and do nothing again: a retry whose first attempt committed but whose answer was lost is that answer, even if the tender has moved on since. The key is the organization’s and the request names the caller: the same key with another body, or from another person, is 409 IDEMPOTENCY_KEY_REUSED; while the first is in flight, 409 CONFLICT with Retry-After. It is claimed only once the caller is authorised; a refused request keeps nothing. Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds), a service token and a member of any organization that bid on the tender (on every route here, the access log included; judged on the token and on identity-service now, which cannot be reached: 502/504, nothing shown) are refused. A tender of another organization answers 404, never 403, whatever roles the caller holds: ownership is checked before any role, so a contractor of another organization gets exactly what a missing tender gets; the attempt is logged under its owner. 403 is only ever answered to a member of the owning organization.",
         "operationId": "BidOpeningController_propose_v1",
         "parameters": [
           {
@@ -13587,6 +13690,17 @@
             "in": "path",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with a Retry-After header, in seconds. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
             }
           }
         ],
@@ -13604,12 +13718,16 @@
                     "proposedBy": {
                       "type": "string"
                     },
+                    "proposedAt": {
+                      "type": "string",
+                      "description": "When the proposal that stands was made: what a withdrawal of it names."
+                    },
                     "alreadyProposed": {
                       "type": "boolean",
                       "description": "True when the opening had been proposed before; the first proposal stands."
                     }
                   },
-                  "required": ["tenderId", "proposedBy", "alreadyProposed"],
+                  "required": ["tenderId", "proposedBy", "proposedAt", "alreadyProposed"],
                   "additionalProperties": false
                 }
               }
@@ -13690,6 +13808,27 @@
           },
           "404": {
             "description": "Not found — also returned for a project, need, progress report, tender, policy or approval that belongs to another organization (and, for an approval, whose authority the caller is not), so its existence is never disclosed. On the owner’s side of a tender’s bids and its evaluation, ownership is checked before any role: another organization’s caller gets this 404 whatever roles it holds (#223 F3).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -13773,7 +13912,7 @@
     },
     "/v1/tenders/{id}/open-bids/proposal/withdraw": {
       "post": {
-        "description": "The proposer takes their proposal back, so another eligible user can propose afresh; nobody else may (403). The proposer is recognised by the user id they proposed under or, where it shows them, by their stable identity (issuer and subject, #188). No proposal is 422 `NO_PROPOSAL`; a tender not CLOSED, or already opened, is 422 `NOT_CLOSED`. Audited like the proposal (an access row, BID_ACCESSED) with `BID_OPENING_PROPOSAL_WITHDRAWN`. An approval that finds the proposer a member of a bidding organization refuses (403) and clears the proposal the same way, as does one that finds no stable identity on record for the proposer (422 `ACTOR_IDENTITY_UNKNOWN`, reason `PROPOSER_IDENTITY_UNKNOWN`). Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds), a service token and a member of any organization that bid on the tender (on every route here, the access log included; judged on the token and on identity-service now, which cannot be reached: 502/504, nothing shown) are refused. A tender of another organization answers 404, never 403, whatever roles the caller holds: ownership is checked before any role, so a contractor of another organization gets exactly what a missing tender gets; the attempt is logged under its owner. 403 is only ever answered to a member of the owning organization.",
+        "description": "The proposer takes their proposal back, so another eligible user can propose afresh; nobody else may (403). The proposer is recognised by the user id they proposed under or, where it shows them, by their stable identity (issuer and subject, #188). The body names the proposal to withdraw by its `proposedAt` (as answered by proposing, or by GET /tenders/:id/bids): another proposal standing — made since, a fresh one by the same person included — is 409 `PROPOSAL_SUPERSEDED`, nothing is withdrawn and the refusal is audited (judged before who may withdraw). No proposal is 422 `NO_PROPOSAL`; a tender not CLOSED, or already opened, is 422 `NOT_CLOSED`. Audited like the proposal (an access row, BID_ACCESSED) with `BID_OPENING_PROPOSAL_WITHDRAWN`. An approval that finds the proposer a member of a bidding organization refuses (403) and clears the proposal the same way, as does one that finds no stable identity on record for the proposer (422 `ACTOR_IDENTITY_UNKNOWN`, reason `PROPOSER_IDENTITY_UNKNOWN`). A retried withdrawal under its key is answered the first answer and takes back nothing made since. An optional Idempotency-Key (the gateway always sends one) makes a retry return the first answer — its status included — and do nothing again: a retry whose first attempt committed but whose answer was lost is that answer, even if the tender has moved on since. The key is the organization’s and the request names the caller: the same key with another body, or from another person, is 409 IDEMPOTENCY_KEY_REUSED; while the first is in flight, 409 CONFLICT with Retry-After. It is claimed only once the caller is authorised; a refused request keeps nothing. Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds), a service token and a member of any organization that bid on the tender (on every route here, the access log included; judged on the token and on identity-service now, which cannot be reached: 502/504, nothing shown) are refused. A tender of another organization answers 404, never 403, whatever roles the caller holds: ownership is checked before any role, so a contractor of another organization gets exactly what a missing tender gets; the attempt is logged under its owner. 403 is only ever answered to a member of the owning organization.",
         "operationId": "BidOpeningController_withdrawProposal_v1",
         "parameters": [
           {
@@ -13782,6 +13921,17 @@
             "in": "path",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with a Retry-After header, in seconds. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
             }
           }
         ],
@@ -13799,9 +13949,13 @@
                     "withdrawnProposal": {
                       "type": "string",
                       "description": "The user id the proposal was made under: the caller, or the same person under another user id (#188)."
+                    },
+                    "proposedAt": {
+                      "type": "string",
+                      "description": "When the withdrawn proposal was made: the one the request named."
                     }
                   },
-                  "required": ["tenderId", "withdrawnProposal"],
+                  "required": ["tenderId", "withdrawnProposal", "proposedAt"],
                   "additionalProperties": false
                 }
               }
@@ -13890,6 +14044,70 @@
               }
             }
           },
+          "409": {
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (opening: PROPOSAL_SUPERSEDED)",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "opening"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["PROPOSAL_SUPERSEDED"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "traceId": {
+                      "type": "string"
+                    },
+                    "timestamp": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "path": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["code", "message", "correlationId", "timestamp"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
           "422": {
             "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): a transition the state machine does not have; requesting approval with no active policy or no step for the estimate (the platform never approves by default) or without the configured preconditions; deciding a step that is not PENDING; starting when a contract is required; completing below 100% progress; progress that goes down; progress outside IN_PROGRESS; creating a tender under a project that is not APPROVED; editing a tender, or setting its criteria, when it is not a DRAFT; cancelling a project that has a tender not yet finished; opening the bids of a tender that is not CLOSED (NOT_CLOSED), reading one that is not opened (NOT_OPENED), or a receipt chain or stored bid that differs from what audit-service holds (INTEGRITY) — nothing is opened; evaluating (ADR-067): a tender that is not EVALUATING (NOT_EVALUATING), a bid not in the state the command needs (BID_NOT_OPENED, BID_NOT_QUALIFIED, BID_NOT_EVALUABLE), a second and different decision on a bid (BID_ALREADY_DECIDED), a qualification of a contractor supplier-service no longer finds eligible (BIDDER_NOT_ELIGIBLE), a criterion the tender does not have (UNKNOWN_CRITERION), a score outside what the criterion allows (SCORE_OUT_OF_RANGE), more evaluators than CONSTRUCTION_EVALUATION_MAX_EVALUATORS (EVALUATOR_LIMIT), completing with no qualified bid (NO_QUALIFIED_BID) or with one not scored in full or an opened bid undecided (EVALUATION_INCOMPLETE). ACTOR_IDENTITY_UNKNOWN (#188): a separation of duties cannot be proven because a record names no stable identity (written before issuer and subject were recorded, or under another issuer) — the bid-opening proposer, a policy’s author or submitter, a tender’s creator or publisher, or another evaluator of the bid; never treated as another person. Awarding (ADR-067 § 3): a tender that is not EVALUATED (NOT_EVALUATED), a bid that is not a qualified one of it (BID_NOT_QUALIFIED), a choice of any rank but the single first without a justification (JUSTIFICATION_REQUIRED), a winner supplier-service no longer finds eligible (WINNER_NOT_ELIGIBLE — nothing falls back to the next rank), an awarder the records cannot show to be a different person from the evaluators (ACTOR_IDENTITY_UNKNOWN), the approval gate (APPROVAL_POLICY_REQUIRED), or a receipt chain or stored bid that differs from what audit-service holds (INTEGRITY). Approval gates of a tender (CON-002 PR 11): publishing, awarding or cancelling with no active approval policy for the workflow, or one with no step that applies (APPROVAL_POLICY_REQUIRED — the platform never approves by default); a request whose maker cannot be told from its approver, or an approver of an award who cannot be told from the evaluators (ACTOR_IDENTITY_UNKNOWN); cancelling with the reason code NO_QUALIFIED_BID when the tender is not EVALUATING with no qualified bid (REASON_CODE_NOT_APPLICABLE). When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (opening: NOT_CLOSED, NO_PROPOSAL)",
             "content": {
@@ -13960,7 +14178,26 @@
           {
             "bearer": []
           }
-        ]
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "proposedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "The `proposedAt` of the proposal to withdraw, as answered by proposing or by GET /tenders/{id}/bids. Another proposal standing is 409 `PROPOSAL_SUPERSEDED`: nothing is withdrawn."
+                  }
+                },
+                "required": ["proposedAt"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
       }
     },
     "/v1/tenders/{id}/bid-access-log": {
@@ -14343,7 +14580,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -14633,7 +14870,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -14942,7 +15179,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -15252,7 +15489,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -15806,7 +16043,7 @@
     },
     "/v1/tenders/{id}/award": {
       "post": {
-        "description": "A person chooses; the platform ranks and shows, it never picks (ADR-067 § 3). The body names a QUALIFIED bid of the tender (422 `BID_NOT_QUALIFIED`; 404 for a bid that is not the tender’s). Any choice but the single first rank of the frozen matrix — another rank, or a member of a tie — needs `justification` (422 `JUSTIFICATION_REQUIRED`). Only an EVALUATED tender (422 `NOT_EVALUATED`). The winner’s standing is asked of supplier-service **now**, authoritatively and failing closed: not eligible is 422 `WINNER_NOT_ELIGIBLE` (the tender stays EVALUATED and the owner may name another qualified bid — nothing falls back to the next rank by itself, Q-93), unreachable is 503/504. The winner’s price is read from its sealed content against audit-service’s receipts (422 `INTEGRITY`; 503/504 when audit-service or the key is not there) and audited as a read of a bid. In one transaction under the tender’s lock: the award, the tender AWARDED, the winning bid AWARDED, every other qualified bid NOT_AWARDED, TENDER_AWARDED, one BID_NOT_AWARDED per bid that lost. Two awards at once are one award and a 409; the same award again answers itself with `alreadyAwarded: true` and writes nothing, another bid on an awarded tender is 409. **Behind an approval gate (Q-84):** with no active approval policy for this workflow the answer is 422 naming APPROVAL_POLICY_REQUIRED. With one, a command that could succeed opens (or finds) the approval request bound to exactly what it would execute and answers **202** with the request (`TenderApprovalRequestView`); the policy names who decides it, and never the person who made it (`POST /v1/approvals/{id}/decision`). Once every step is granted the **same command**, on the same tender version, executes and uses the approval up in the same transaction (200); what changed since the approval is 409 naming APPROVAL_STALE and nothing is executed (a command sent with the version the approval was made on, after the tender moved, included). An approval is used at most once. A policy step with an amount range has no amount to be judged on for these commands and does not apply; a policy whose steps are all of that kind has no step that applies and refuses (APPROVAL_POLICY_REQUIRED). The request is bound to the tender, its version, the bid, its rank, the justification, the matrix digest and the standing read it was decided on; its approvers are judged as the awarder is (the roles the bid side excludes, bidder membership, and AWARDER_NOT_EVALUATOR). Executing asks supplier-service again — an approval never replaces that check. Owner side: the roles of CONSTRUCTION_TENDER_AWARD_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — ADR-067 § 3. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds) and a service token are refused. The caller is judged on identity-service as of now (it cannot be reached: 502/504, nothing is done): a member of any organization that bid on the tender is refused 403 `CONFLICT_OF_INTEREST` before anything is said about the tender; with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, so is anyone who took part in the evaluation (403 `AWARDER_IS_EVALUATOR`; 422 `ACTOR_IDENTITY_UNKNOWN` when the records cannot show they are two people). The route names no role at the guard: the service decides, **ownership first** — a tender that is missing, or not the caller’s organization’s, answers 404 (never 403) and is **not** logged — then the roles and the conflict rules. On the caller’s own tender every refusal is audited (a REFUSED row in the bid access log with its closed code, and BID_ACCESSED).",
+        "description": "A person chooses; the platform ranks and shows, it never picks (ADR-067 § 3). The body names a QUALIFIED bid of the tender (422 `BID_NOT_QUALIFIED`; 404 for a bid that is not the tender’s). Any choice but the single first rank of the frozen matrix — another rank, or a member of a tie — needs `justification` (422 `JUSTIFICATION_REQUIRED`). Only an EVALUATED tender (422 `NOT_EVALUATED`). The winner’s standing is asked of supplier-service **now**, authoritatively and failing closed: not eligible is 422 `WINNER_NOT_ELIGIBLE` (the tender stays EVALUATED and the owner may name another qualified bid — nothing falls back to the next rank by itself, Q-93), unreachable is 503/504. The winner’s price is read from its sealed content against audit-service’s receipts (422 `INTEGRITY`; 503/504 when audit-service or the key is not there) and audited as a read of a bid. In one transaction under the tender’s lock: the award, the tender AWARDED, the winning bid AWARDED, every other qualified bid NOT_AWARDED, TENDER_AWARDED, one BID_NOT_AWARDED per bid that lost. Two awards at once are one award and a 409; the same award again answers itself with `alreadyAwarded: true` and writes nothing, another bid on an awarded tender is 409. **Behind an approval gate (Q-84):** with no active approval policy for this workflow the answer is 422 naming APPROVAL_POLICY_REQUIRED. With one, a command that could succeed opens (or finds) the approval request bound to exactly what it would execute and answers **202** with the request (`TenderApprovalRequestView`); the policy names who decides it, and never the person who made it (`POST /v1/approvals/{id}/decision`). Once every step is granted the **same command**, on the same tender version, executes and uses the approval up in the same transaction (200); what changed since the approval is 409 naming APPROVAL_STALE and nothing is executed (a command sent with the version the approval was made on, after the tender moved, included). An approval is used at most once. A policy step with an amount range has no amount to be judged on for these commands and does not apply; a policy whose steps are all of that kind has no step that applies and refuses (APPROVAL_POLICY_REQUIRED). The request is bound to the tender, its version, the bid, its rank, the justification, the matrix digest and the standing read it was decided on; its approvers are judged as the awarder is (the roles the bid side excludes, bidder membership, and AWARDER_NOT_EVALUATOR). Executing asks supplier-service again — an approval never replaces that check. An optional Idempotency-Key (the gateway always sends one) makes a retry return the first answer — its status included — and do nothing again: a retry whose first attempt committed but whose answer was lost is that answer, even if the tender has moved on since. The key is the organization’s and the request names the caller: the same key with another body, or from another person, is 409 IDEMPOTENCY_KEY_REUSED; while the first is in flight, 409 CONFLICT with Retry-After. It is claimed only once the caller is authorised; a refused request keeps nothing. A retried request whose round was rejected meanwhile is answered that round's 202 again and opens no new one. Owner side: the roles of CONSTRUCTION_TENDER_AWARD_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — ADR-067 § 3. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds) and a service token are refused. The caller is judged on identity-service as of now (it cannot be reached: 502/504, nothing is done): a member of any organization that bid on the tender is refused 403 `CONFLICT_OF_INTEREST` before anything is said about the tender; with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, so is anyone who took part in the evaluation (403 `AWARDER_IS_EVALUATOR`; 422 `ACTOR_IDENTITY_UNKNOWN` when the records cannot show they are two people). The route names no role at the guard: the service decides, **ownership first** — a tender that is missing, or not the caller’s organization’s, answers 404 (never 403) and is **not** logged — then the roles and the conflict rules. On the caller’s own tender every refusal is audited (a REFUSED row in the bid access log with its closed code, and BID_ACCESSED).",
         "operationId": "AwardController_award_v1",
         "parameters": [
           {
@@ -15815,6 +16052,17 @@
             "in": "path",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with a Retry-After header, in seconds. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
             }
           }
         ],
@@ -16102,7 +16350,18 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (award: ALREADY_AWARDED; approval: APPROVAL_STALE)",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (award: ALREADY_AWARDED; approval: APPROVAL_STALE)",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {

@@ -195,8 +195,16 @@ describe('stable actor identity (#188) through the API', () => {
       http().post(`/v1/tenders/${tenderId}/open-bids/proposal`).set(as(token));
     const open = (tenderId: string, token: string) =>
       http().post(`/v1/tenders/${tenderId}/open-bids`).set(as(token));
-    const withdraw = (tenderId: string, token: string) =>
-      http().post(`/v1/tenders/${tenderId}/open-bids/proposal/withdraw`).set(as(token));
+    // Names the proposal standing (task 060); none standing: an instant of no proposal.
+    const withdraw = async (tenderId: string, token: string) => {
+      const proposedAt = (
+        (await tenderRow(tenderId)).openingProposedAt ?? new Date(0)
+      ).toISOString();
+      return http()
+        .post(`/v1/tenders/${tenderId}/open-bids/proposal/withdraw`)
+        .set(as(token))
+        .send({ proposedAt });
+    };
 
     it('refuses one person approving under a second platform id (U1 vs U2): 422 SECOND_PERSON_REQUIRED', async () => {
       const { owner: o, tenderId } = await closed('a1-u1u2');
@@ -323,7 +331,11 @@ describe('stable actor identity (#188) through the API', () => {
       );
       const withdrawn = await withdraw(tenderId, carol.token(o, ['ORGANIZATION_ADMIN']));
       expect(withdrawn.status).toBe(200);
-      expect(withdrawn.body).toEqual({ tenderId, withdrawnProposal: carol.sub });
+      expect(withdrawn.body).toEqual({
+        tenderId,
+        withdrawnProposal: carol.sub,
+        proposedAt: expect.any(String),
+      });
       expect((await tenderRow(tenderId)).openingProposedBy).toBeNull();
       expect((await withdrawals(o, tenderId)).map((p) => (p as { reason: string }).reason)).toEqual(
         ['WITHDRAWN_BY_PROPOSER'],
