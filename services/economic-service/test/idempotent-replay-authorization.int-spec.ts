@@ -79,7 +79,9 @@ describe('who an idempotent economic answer is replayed to (HTTP)', () => {
       .set('authorization', asPayer())
       .set('idempotency-key', id('replay-txn'))
       .send({
-        transactionType: 'MARKETPLACE_ORDER',
+        // Not an order's obligation, which only the order saga disputes
+        // (docs/24 Q-138): people dispute and resolve it here.
+        transactionType: 'LOGISTICS',
         counterpartyOrganizationId: payee,
         grossAmountMinor: '7000',
         currency: 'IRR',

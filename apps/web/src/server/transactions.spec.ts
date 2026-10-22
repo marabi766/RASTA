@@ -68,6 +68,8 @@ const WIRE = {
   sourceReference: 'ref-1',
   disputedAt: null,
   disputeReason: null,
+  disputeResolvedAt: null,
+  disputeResolution: null,
   disputeId: null,
   settledAt: null,
   failureReason: null,

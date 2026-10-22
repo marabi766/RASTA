@@ -2,6 +2,7 @@ import type { OpenAPIObject } from '@nestjs/swagger';
 import { apiErrorSchema } from '@rasta/contracts';
 import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
 import { toJsonSchema, type JsonSchema } from './zod-schema';
+import { TRANSACTION_RESPONSES, TRANSACTION_VIEW_SCHEMAS } from './transaction-view';
 import {
   listEntriesQuerySchema,
   reverseJournalSchema,
@@ -260,6 +261,10 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   // The one error shape every Rasta service returns. Referenced rather than
   // inlined per response, so a client generates a single error type.
   document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
+  // The transaction a response carries — referenced for the same reason.
+  for (const [name, schema] of Object.entries(TRANSACTION_VIEW_SCHEMAS)) {
+    document.components.schemas[name] = schema as never;
+  }
   document.components.securitySchemes ??= {};
   document.components.securitySchemes[INTERNAL_TOKEN_SCHEME] = INTERNAL_TOKEN_SECURITY_SCHEME;
 
@@ -304,12 +309,15 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         ];
       }
 
-      // A success body, unless the route genuinely returns none.
-      const success = method.toUpperCase() === 'POST' && !body ? '200' : successStatus(method);
+      // The success body, under the status the handler answers with.
+      const success = successStatus(key, operation);
+      const view = TRANSACTION_RESPONSES[key];
       operation.responses ??= {};
       operation.responses[success] = {
         description: 'Success',
-        content: { 'application/json': { schema: {} } },
+        content: {
+          'application/json': { schema: view ? { $ref: `#/components/schemas/${view}` } : {} },
+        },
       };
 
       for (const status of ERRORS[key] ?? []) {
@@ -330,8 +338,29 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   return document;
 }
 
-function successStatus(method: string): string {
-  return method.toUpperCase() === 'POST' ? '201' : '200';
+/**
+ * The status a route answers success with: the one Nest wrote into the
+ * document for it — the handler's `@HttpCode`, or without one Nest's default
+ * (201 for a POST, 200 otherwise), which is also what the route sends.
+ *
+ * Read from the route, never guessed from the request. Guessing that a POST
+ * with a body creates something documented the dispute, resolution, refund
+ * and cancel views under a 201 those routes never send, and left their real
+ * 200 with no schema (Codex on #322). A route with no success status, or
+ * more than one, is refused: there is nothing to attach the body to that
+ * would not be a guess.
+ */
+function successStatus(key: string, operation: MutableOperation): string {
+  const declared = Object.keys(operation.responses ?? {}).filter((status) =>
+    /^2\d\d$/.test(status),
+  );
+  if (declared.length !== 1) {
+    throw new Error(
+      `OpenAPI: ${key} declares ${declared.length} success statuses (${declared.join(', ')}); ` +
+        'exactly one is needed to document its body',
+    );
+  }
+  return declared[0]!;
 }
 
 /**

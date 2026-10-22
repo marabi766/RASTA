@@ -508,6 +508,42 @@ export async function assertMayRefund(
 }
 
 /**
+ * The transaction type an order's obligation is recorded as — what
+ * marketplace-service's economic client sends (`OBLIGATION_TYPE`).
+ */
+export const ORDER_OBLIGATION_TYPE = 'MARKETPLACE_ORDER';
+
+/** The one caller that disputes an order's obligation: the order saga. */
+export const ORDER_DISPUTE_SERVICE = 'marketplace-service';
+
+/**
+ * Refuses a dispute, or a dispute's resolution, made on an order's obligation
+ * by anyone but the order saga (docs/24 Q-138).
+ *
+ * An order is disputed through the order (`POST /v1/orders/{id}/disputes`),
+ * where marketplace-service records the outcome and who was responsible, and
+ * its saga then mirrors the dispute and the resolution onto the transaction
+ * itself. A dispute raised on the transaction directly would halt settlement
+ * with no dispute on the order: the order could not say why it is stuck, and
+ * no resolution recorded there would ever reach the transaction.
+ *
+ * Asked after {@link canCommitOrganization}, so a caller who could not act on
+ * the transaction at all is refused exactly as before; the type is fixed at
+ * creation, so the answer cannot change under the row lock. Every other type
+ * is unchanged.
+ */
+export function assertMayDisputeDirectly(transaction: { transactionType: string }): void {
+  if (transaction.transactionType !== ORDER_OBLIGATION_TYPE) return;
+
+  const context = getContext();
+  if (context.authType === 'SERVICE' && context.callerService === ORDER_DISPUTE_SERVICE) return;
+
+  throw RastaError.businessRule(
+    'A marketplace order’s transaction is disputed and resolved only through the order',
+  );
+}
+
+/**
  * Refuses a wallet that is not the caller's own.
  *
  * There is no "read another organization's wallet" path for a tenant, not even

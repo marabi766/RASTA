@@ -57,11 +57,16 @@ export interface TransactionView {
 export interface TransactionDetailView extends TransactionView {
   disputedAt: string | null;
   /**
-   * The objection while DISPUTED. Once resolved, the resolution — or, from an
-   * economic-service that keeps the resolution apart, still the objection.
+   * The objection, kept through the resolution. On a transaction resolved
+   * before economic-service kept the resolution apart — or by an
+   * economic-service older than that — the resolution, written over it.
    */
   disputeReason: string | null;
-  /** The resolution, from an economic-service that keeps it apart; absent otherwise. */
+  /**
+   * The resolution, once resolved (docs/23 D-060). Null on a transaction
+   * resolved before economic-service kept it apart; absent from an
+   * economic-service older than the field.
+   */
   disputeResolution?: string | null;
   /**
    * The latest dispute's identity: new each time the transaction is disputed,
