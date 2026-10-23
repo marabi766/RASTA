@@ -100,13 +100,15 @@ warehouse, so a phone is a second viewport and not a second writer). The owner
 creates a warehouse, receives stock, adjusts it down (one adjustment that would
 leave less than zero is refused in fixed words), creates a two-leg shipment to
 ORG-DEH-0002, dispatches and delivers it; the consignee reads and tracks it and is
-offered no move; a third organization finds it exactly as it finds an id that does
-not exist. No fixture: nothing is seeded, and the API is touched only to prove a
-service refusal the portal never draws a form for.
+offered no move; ORG-DEH-0001, a third organization, finds it exactly as it finds
+an id that does not exist. No fixture: nothing is seeded, and the API is touched
+only to prove a service refusal the portal never draws a form for. The owner is
+**provisioned per run** into its own organization, so nothing is written to the
+realm organizations whose whole pages `tenant-isolation.spec.ts` compares.
 
 - It needs `WEB_LIVE_STACK_E2E=true` and `WEB_LIVE_STACK_E2E_EXP004=true`
   (inventory-service started), and under `CI` a skip fails the job.
-- Like returns, it **provisions one person per run** into `ORG-E2E-INV-<run>`.
+- Like returns, it **provisions one person per run**, here the owner, into `ORG-E2E-INV-<run>`.
 
 ## Settlements (`settlements.spec.ts`) — the one scenario that settles
 

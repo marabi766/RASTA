@@ -17,7 +17,7 @@ import {
   type LivePersona,
   type ProvisionedPerson,
 } from './live-session';
-import { provisionPerson } from './provisioned-people';
+import { provisionPerson, provisionedAccessToken } from './provisioned-people';
 
 /**
  * Inventory's operator commands through the real stack (EXP-004 criterion 1
@@ -28,16 +28,19 @@ import { provisionPerson } from './provisioned-people';
  *
  * ## Who does what
  *
- * - **the owner** — `dehyari.admin` (ORG-DEH-0001): creates a warehouse,
+ * - **the owner** — provisioned with ORGANIZATION_ADMIN into an organization of
+ *   its own (`provisioned-people.ts`, one per run): creates a warehouse,
  *   receives stock, adjusts it (a decrease; one that would leave less than zero
- *   is refused in fixed words), creates a shipment to the other organization,
- *   dispatches it and delivers it.
+ *   is refused in fixed words), creates a shipment to ORG-DEH-0002, dispatches
+ *   it and delivers it. Everything is written there, so no realm organization's
+ *   lists change under `tenant-isolation.spec.ts`, which compares whole pages
+ *   and runs beside this file.
  * - **the consignee** — `dehyari.admin.b` (ORG-DEH-0002): reads the shipment
  *   and its tracking and is offered no move, in fixed words; never sees the
  *   owner's warehouse.
- * - **a third organization** — provisioned with ORGANIZATION_ADMIN into an
- *   organization of its own: the shipment is, to it, the same absence as an id
- *   that does not exist.
+ * - **a third organization** — `dehyari.admin` (ORG-DEH-0001), which only
+ *   reads: the shipment is, to it, the same absence as an id that does not
+ *   exist.
  *
  * Each test of the serial run builds on the one before; every run creates its
  * own warehouse, so the same file runs at desktop and at phone size
@@ -49,8 +52,12 @@ import { provisionPerson } from './provisioned-people';
 const CONSIGNEE = 'ORG-DEH-0002';
 const MISSING_SHIPMENT = 'SHP_ZZZZZZZZZZZZZZZZZZZZZZZZZZ';
 const RUN = randomUUID().slice(0, 8);
-/** An organization of its own for each run: two viewports provision two people. */
-const OUTSIDER_ORGANIZATION = `ORG-E2E-INV-${RUN.toUpperCase()}`;
+/**
+ * An organization of its own for each run, which owns everything written here: two viewports
+ * provision two owners, and no realm organization's lists change under the live isolation
+ * scenarios that read them (`tenant-isolation.spec.ts` compares whole pages).
+ */
+const OWNER_ORGANIZATION = `ORG-E2E-INV-${RUN.toUpperCase()}`;
 const WAREHOUSE_NAME = `انبار آزمون ${RUN}`;
 const WCAG_2_1_AA = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'];
 
@@ -108,22 +115,22 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
   );
   test.setTimeout(120_000);
 
-  let outsider: ProvisionedPerson;
+  let owner: ProvisionedPerson;
   let warehousePath = '';
   let shipmentPath = '';
 
   test.beforeAll(async () => {
     test.setTimeout(120_000);
-    outsider = await provisionPerson(
+    owner = await provisionPerson(
       await liveAccessToken('systemAdmin'),
-      `e2e.inventory.${RUN}.outsider`,
-      OUTSIDER_ORGANIZATION,
+      `e2e.inventory.${RUN}.owner`,
+      OWNER_ORGANIZATION,
       ['ORGANIZATION_ADMIN'],
     );
   });
 
   test('the owner creates a warehouse in the browser', async ({ browser }) => {
-    const { page, close } = await as(browser, 'orgAdmin');
+    const { page, close } = await as(browser, owner);
     try {
       await page.goto('/inventory');
       const form = page.getByRole('form', { name: INVENTORY_COMMAND_LABELS.CREATE_WAREHOUSE });
@@ -154,7 +161,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
   });
 
   test('the owner receives stock; the balance and the ledger say so', async ({ browser }) => {
-    const { page, close } = await as(browser, 'orgAdmin');
+    const { page, close } = await as(browser, owner);
     try {
       await page.goto(warehousePath);
       const form = page.getByRole('form', { name: INVENTORY_COMMAND_LABELS.RECEIVE_STOCK });
@@ -178,7 +185,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
   test('the owner adjusts it down; one that would go below zero is refused in the portal’s words', async ({
     browser,
   }) => {
-    const { page, close } = await as(browser, 'orgAdmin');
+    const { page, close } = await as(browser, owner);
     try {
       await page.goto(warehousePath);
       const form = page.getByRole('form', { name: INVENTORY_COMMAND_LABELS.ADJUST_STOCK });
@@ -211,7 +218,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
   });
 
   test('the owner creates a shipment to the other organization', async ({ browser }) => {
-    const { page, close } = await as(browser, 'orgAdmin');
+    const { page, close } = await as(browser, owner);
     try {
       await page.goto(warehousePath);
       const form = page.getByRole('form', { name: INVENTORY_COMMAND_LABELS.CREATE_SHIPMENT });
@@ -272,7 +279,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
   test('a third organization finds the shipment exactly as it finds an id that does not exist', async ({
     browser,
   }) => {
-    const { page, close } = await as(browser, outsider);
+    const { page, close } = await as(browser, 'orgAdmin');
     try {
       await page.goto(shipmentPath);
       await expect(page.getByText('این محموله پیدا نشد')).toBeVisible();
@@ -289,7 +296,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
   });
 
   test('the owner dispatches, then delivers; the history follows', async ({ browser }) => {
-    const { page, close } = await as(browser, 'orgAdmin');
+    const { page, close } = await as(browser, owner);
     try {
       await page.goto(shipmentPath);
       await page
@@ -329,7 +336,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
   }) => {
     // A dispatch form drawn earlier in another tab is what the service refuses once the
     // shipment has moved: proven through the API, with the closed reason in `details`.
-    const token = await liveAccessToken('orgAdmin');
+    const token = await provisionedAccessToken(owner);
     const id = shipmentPath.split('/').pop()!;
     const response = await fetch(
       `${(process.env.API_GATEWAY_URL ?? '').replace(/\/+$/, '')}/v1/shipments/${id}/dispatch`,
@@ -348,7 +355,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
     expect(body.code).toBe('INVALID_STATE_TRANSITION');
     expect(body.details?.[0]?.code).toBe('SHIPMENT_NOT_CREATED');
     // And the portal draws neither move.
-    const { page, close } = await as(browser, 'orgAdmin');
+    const { page, close } = await as(browser, owner);
     try {
       await page.goto(shipmentPath);
       await expect(page.locator('main form')).toHaveCount(0);
