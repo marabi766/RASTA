@@ -28,6 +28,7 @@ import { financialTransactionDuration, transactionsCreatedTotal } from '../obser
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { ENV } from '../tokens';
 import type { IdempotentAnswer } from '../shared/idempotency';
+import { databaseNow } from '../shared/database-clock';
 import type { BusinessLine, Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
 import {
   STATEMENT_SOURCE_TYPE,
@@ -439,18 +440,16 @@ export class TransactionService {
     const actor = context.userId ?? SERVICE_NAME;
     // The signed caller, never a header (ADR-035).
     const service = context.authType === 'SERVICE' ? (context.callerService ?? null) : null;
-    const at = new Date();
     return this.move(
       transactionId,
       'AUTHORISE_SETTLEMENT',
       actor,
-      at,
-      {
+      (at) => ({
         settlementAuthorisedAt: at,
         settlementAuthorisedBy: actor,
         settlementAuthorisedService: service,
         settlementAuthorisationKey: service ? (idempotencyKey ?? null) : null,
-      },
+      }),
       answer,
     );
   }
@@ -471,13 +470,11 @@ export class TransactionService {
     answer?: IdempotentAnswer<TransactionDetail>,
   ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
-    const at = new Date();
     return this.move(
       transactionId,
       'DISPUTE',
       actor,
-      at,
-      { disputedAt: at, disputedBy: actor, disputeReason: dto.reason },
+      (at) => ({ disputedAt: at, disputedBy: actor, disputeReason: dto.reason }),
       answer,
     );
   }
@@ -506,13 +503,15 @@ export class TransactionService {
     answer?: IdempotentAnswer<TransactionDetail>,
   ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
-    const at = new Date();
     return this.move(
       transactionId,
       'RESOLVE_DISPUTE',
       actor,
-      at,
-      { disputeResolvedAt: at, disputeResolvedBy: actor, disputeResolution: dto.resolution },
+      (at) => ({
+        disputeResolvedAt: at,
+        disputeResolvedBy: actor,
+        disputeResolution: dto.resolution,
+      }),
       answer,
       dto.disputeId,
     );
@@ -622,13 +621,11 @@ export class TransactionService {
     answer?: IdempotentAnswer<TransactionDetail>,
   ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
-    const at = new Date();
     return this.move(
       transactionId,
       'CANCEL',
       actor,
-      at,
-      { failureReason: reason, cancelledAt: at, cancelledBy: actor },
+      (at) => ({ failureReason: reason, cancelledAt: at, cancelledBy: actor }),
       answer,
     );
   }
@@ -644,6 +641,15 @@ export class TransactionService {
    * the same transaction as the move — and so does the answer, read from the
    * row the move wrote (see {@link answered}).
    *
+   * The instant is the database clock's, read once the row lock is held
+   * (`databaseNow`): two moves of one transaction are dated in the order the
+   * lock let them happen, whichever host made each. It used to be the
+   * caller's clock, read before the wait — a re-dispute that waited behind a
+   * resolution was dated before it, and the resolution read as the new
+   * dispute's (Codex on #322 round 4, finding 1). Which dispute a resolution
+   * decided is now the database's record, `resolvedDisputeId`, not an
+   * inference from these instants (docs/23 D-060).
+   *
    * `heldDispute`, when given, is the dispute the transaction must hold for
    * the move to happen — read under the same lock, so it cannot be replaced
    * between the check and the write (see {@link resolveDispute}).
@@ -652,8 +658,7 @@ export class TransactionService {
     transactionId: string,
     event: 'AUTHORISE_SETTLEMENT' | 'DISPUTE' | 'RESOLVE_DISPUTE' | 'CANCEL',
     actor: string,
-    at: Date,
-    extra: Prisma.TransactionUncheckedUpdateManyInput,
+    extra: (at: Date) => Prisma.TransactionUncheckedUpdateManyInput,
     answer?: IdempotentAnswer<TransactionDetail>,
     heldDispute?: string,
   ): Promise<TransactionDetail> {
@@ -677,12 +682,13 @@ export class TransactionService {
           'The transaction no longer holds the dispute this decision is about',
         );
       }
+      const at = await databaseNow(tx);
       const moved = await this.repository.transition(
         tx,
         transactionId,
         transaction.status,
         target,
-        extra,
+        extra(at),
       );
       if (moved === 0) throw RastaError.optimisticLockFailed('Transaction', transactionId);
 
@@ -933,6 +939,7 @@ export interface TransactionDetail {
   settlementAuthorisedService: string | null;
   settlementAuthorisationKey: string | null;
   disputeId: string | null;
+  resolvedDisputeId: string | null;
   legs: {
     id: string;
     organizationId: string;

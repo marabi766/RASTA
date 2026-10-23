@@ -1,5 +1,6 @@
 import request from 'supertest';
 import type { Server } from 'node:http';
+import { runUnscoped } from '@rasta/nest-common';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { enrichOpenApiDocument } from '../src/openapi/document';
 import { schemaMismatches } from '../src/openapi/schema-mismatches';
@@ -34,6 +35,8 @@ describe('the documented transaction responses, against the routes', () => {
 
   /** What each route answered, by `METHOD /path` as the document names it. */
   const answered = new Map<string, { status: number; body: unknown }>();
+  /** Each command route's last request, sent again: a retry under the same key. */
+  const retries = new Map<string, () => request.Test>();
 
   beforeAll(async () => {
     harness = await startApi();
@@ -54,28 +57,43 @@ describe('the documented transaction responses, against the routes', () => {
       .expect(201);
     await request(http).get('/v1/wallets/me').set('authorization', asPayee()).expect(200);
 
+    // The last command sent, as a retry with the same key and body would send it.
+    let lastSent: (() => request.Test) | undefined;
+    const sent = (send: () => request.Test) => {
+      lastSent = send;
+      return send();
+    };
     const record = (route: string, response: request.Response) => {
       answered.set(route, { status: response.status, body: response.body });
+      if (route.startsWith('POST ')) retries.set(route, lastSent!);
       return response.body as { id: string };
     };
-    const create = (holdFunds: boolean) =>
-      request(http)
-        .post('/v1/transactions')
-        .set('authorization', asPayer())
-        .set('idempotency-key', id('oas-create'))
-        .send({
-          transactionType: 'LOGISTICS',
-          counterpartyOrganizationId: payee,
-          grossAmountMinor: '5000',
-          currency: 'IRR',
-          holdFunds,
-        });
-    const command = (transactionId: string, verb: string, auth: string, body?: object) =>
-      request(http)
-        .post(`/v1/transactions/${transactionId}/${verb}`)
-        .set('authorization', auth)
-        .set('idempotency-key', id(`oas-${verb}`))
-        .send(body ?? {});
+    const create = (holdFunds: boolean) => {
+      const key = id('oas-create');
+      return sent(() =>
+        request(http)
+          .post('/v1/transactions')
+          .set('authorization', asPayer())
+          .set('idempotency-key', key)
+          .send({
+            transactionType: 'LOGISTICS',
+            counterpartyOrganizationId: payee,
+            grossAmountMinor: '5000',
+            currency: 'IRR',
+            holdFunds,
+          }),
+      );
+    };
+    const command = (transactionId: string, verb: string, auth: string, body?: object) => {
+      const key = id(`oas-${verb}`);
+      return sent(() =>
+        request(http)
+          .post(`/v1/transactions/${transactionId}/${verb}`)
+          .set('authorization', auth)
+          .set('idempotency-key', key)
+          .send(body ?? {}),
+      );
+    };
 
     // Held, disputed, resolved back to the queue.
     const disputed = record('POST /v1/transactions', await create(true));
@@ -157,6 +175,46 @@ describe('the documented transaction responses, against the routes', () => {
       const route = `POST /v1/transactions/{id}/${verb}`;
       expect([route, answered.get(route)?.status]).toEqual([route, 200]);
       expect([route, Object.keys(responsesOf(route)).includes('201')]).toEqual([route, false]);
+    }
+  });
+
+  it('replays an answer the previous release stored — without `resolvedDisputeId` — as the documented view (Codex on #352, finding 2)', async () => {
+    const commands = Object.keys(TRANSACTION_RESPONSES).filter((route) =>
+      route.startsWith('POST '),
+    );
+    expect([...retries.keys()].sort()).toEqual(commands.sort());
+    const components = (document.components?.schemas ?? {}) as Record<string, JsonSchema>;
+
+    // Every stored answer of the suite, as that release stored it.
+    const stripped = await runUnscoped(
+      'the suite rewrites its answers as the previous release stored them',
+      () =>
+        harness.prisma.client.$executeRaw`UPDATE "idempotency_key"
+         SET response_body = response_body - 'resolvedDisputeId'
+       WHERE organization_id IN (${payer}, ${payee}, ${platform})
+         AND response_body ? 'resolvedDisputeId'`,
+    );
+    expect(stripped).toBeGreaterThanOrEqual(commands.length);
+
+    for (const route of commands) {
+      const fresh = answered.get(route)!;
+      const schema =
+        responsesOf(route)[String(fresh.status)]!.content!['application/json']!.schema!;
+      const { resolvedDisputeId: _dropped, ...asStored } = fresh.body as Record<string, unknown>;
+      // Returned as stored, it would break the document.
+      expect([route, schemaMismatches(schema, asStored, route, components)]).not.toEqual([
+        route,
+        [],
+      ]);
+
+      const replayed = await retries.get(route)!();
+      expect([route, replayed.status]).toEqual([route, fresh.status]);
+      expect([route, schemaMismatches(schema, replayed.body, route, components)]).toEqual([
+        route,
+        [],
+      ]);
+      // The stored answer, with the field it lacked as explicitly unknown.
+      expect([route, replayed.body]).toEqual([route, { ...asStored, resolvedDisputeId: null }]);
     }
   });
 });

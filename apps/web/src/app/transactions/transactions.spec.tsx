@@ -73,6 +73,7 @@ const HELD: Transaction = {
   disputeResolvedAt: null,
   disputeResolution: null,
   disputeId: null,
+  resolvedDisputeId: null,
   settledAt: null,
   failureReason: null,
   createdAt: '2026-10-01T08:00:01.000Z',
@@ -92,6 +93,11 @@ const ok = (data: Transaction): ReadResult<Transaction> => ({ kind: 'OK', data }
 /** The labels of the screen's description rows. */
 const terms = (container: HTMLElement): string[] =>
   [...container.querySelectorAll('dt')].map((term) => term.textContent ?? '');
+
+/** The labels of the dispute section's rows, in order. */
+const DISPUTE_TERMS = ['دلیل اعتراض', 'آخرین متن ثبت‌شده برای اعتراض', 'زمان رسیدگی', 'شرح تصمیم'];
+const disputeTerms = (container: HTMLElement): string[] =>
+  terms(container).filter((term) => DISPUTE_TERMS.includes(term));
 
 function renderScreen(
   result: ReadResult<Transaction>,
@@ -230,6 +236,7 @@ describe('the dispute state, as the record says it', () => {
         status: 'PENDING_SETTLEMENT',
         disputeResolvedAt: '2026-10-03T09:00:00.000Z',
         disputeResolution: 'تحویل تأیید شد',
+        resolvedDisputeId: 'TXD_A',
       }),
     );
     const text = container.textContent ?? '';
@@ -259,6 +266,84 @@ describe('the dispute state, as the record says it', () => {
     // No row names a decision: the caveat says why there is none to show.
     expect(terms(container)).not.toContain('شرح تصمیم');
     await expectAccessible(container);
+  });
+
+  it('re-disputed while the first was being decided, then refunded: the first decision is not shown under the second reason (task 061)', async () => {
+    // Codex on #322 round 4: B waited for the row lock dated 09:00, A's
+    // resolution locked first dated 10:00, B committed, the platform refunded B.
+    // By time A's decision is B's; by identity it is A's.
+    const { container } = renderScreen(
+      ok({
+        ...DISPUTED,
+        status: 'REFUNDED',
+        disputedAt: '2026-10-02T09:00:00.000Z',
+        disputeReason: REASON,
+        disputeId: 'TXD_B',
+        disputeResolvedAt: '2026-10-02T10:00:00.000Z',
+        disputeResolution: 'تصمیم دربارهٔ اعتراض نخست',
+        resolvedDisputeId: 'TXD_A',
+      }),
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain(REASON);
+    expect(text).not.toContain('تصمیم دربارهٔ اعتراض نخست');
+    expect(disputeTerms(container)).toEqual(['دلیل اعتراض']);
+    expect(text).not.toContain('نمی‌تواند بگوید کدام است');
+    await expectAccessible(container);
+  });
+
+  it('the resolution of the dispute shown is shown, whatever the instants say', () => {
+    // Same dispute, dated by a clock behind: the identity decides, not the times.
+    const { container } = renderScreen(
+      ok({
+        ...DISPUTED,
+        status: 'PENDING_SETTLEMENT',
+        disputedAt: '2026-10-02T10:00:00.000Z',
+        disputeResolvedAt: '2026-10-02T09:59:00.000Z',
+        disputeResolution: 'تحویل تأیید شد',
+        resolvedDisputeId: 'TXD_A',
+      }),
+    );
+    expect(disputeTerms(container)).toEqual(['دلیل اعتراض', 'زمان رسیدگی', 'شرح تصمیم']);
+    expect(container.textContent).toContain('تحویل تأیید شد');
+  });
+
+  it('resolved before the identity was kept: the times, as before', () => {
+    const later = renderScreen(
+      ok({
+        ...DISPUTED,
+        status: 'REFUNDED',
+        disputeResolvedAt: '2026-10-03T09:00:00.000Z',
+        disputeResolution: 'تحویل تأیید شد',
+        resolvedDisputeId: null,
+      }),
+    );
+    expect(disputeTerms(later.container)).toEqual(['دلیل اعتراض', 'زمان رسیدگی', 'شرح تصمیم']);
+    later.unmount();
+    const earlier = renderScreen(
+      ok({
+        ...DISPUTED,
+        status: 'REFUNDED',
+        disputeResolvedAt: '2026-10-01T09:00:00.000Z',
+        disputeResolution: 'تحویل تأیید شد',
+        resolvedDisputeId: null,
+      }),
+    );
+    expect(disputeTerms(earlier.container)).toEqual(['دلیل اعتراض']);
+  });
+
+  it('resolved before D-060 and attributed since: still says the one text may be either', () => {
+    const { container } = renderScreen(
+      ok({
+        ...DISPUTED,
+        status: 'PENDING_SETTLEMENT',
+        disputeReason: 'تحویل تأیید شد',
+        disputeResolvedAt: '2026-10-03T09:00:00.000Z',
+        resolvedDisputeId: 'TXD_A',
+      }),
+    );
+    expect(container.textContent).toContain('آخرین متن ثبت‌شده برای اعتراض');
+    expect(container.textContent).toContain('نمی‌تواند بگوید کدام است');
   });
 
   it('a resolution of an earlier dispute is not this one’s', () => {

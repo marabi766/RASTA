@@ -1075,6 +1075,189 @@ const TRANSACTION_DISPUTE_RESOLUTION_STEPS = [
   },
 ];
 
+const TRANSACTION_RESOLVED_DISPUTE = '20261022120000_transaction_resolved_dispute';
+
+/** One lifecycle move of a probe row, as the service writes it: the dispute triggers see a status change. */
+const RSD_MOVE = (id, set) => `UPDATE "transaction" SET ${set} WHERE id = '${id}';`;
+const RSD_DISPUTE = (id, reason, at) =>
+  RSD_MOVE(
+    id,
+    `status = 'DISPUTED', disputed_at = '${at}', disputed_by = 'USR-MIGCHECK', dispute_reason = '${reason}'`,
+  );
+const RSD_RESOLVE = (id, decision, at) =>
+  RSD_MOVE(
+    id,
+    `status = 'PENDING_SETTLEMENT', dispute_resolved_at = '${at}', dispute_resolved_by = 'USR-MIGCHECK-PLATFORM', dispute_resolution = '${decision}'`,
+  );
+
+/** Each probe row's `resolved_dispute_id` against its `dispute_id`: `same`, `null`, or `kept` (the value in `RSD_KEPT`). */
+const RSD_EXPECT = (label, rows) => `
+DO $$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN SELECT id, dispute_id, resolved_dispute_id FROM "transaction"
+            WHERE id LIKE 'TXN_MIGCHECK_RSD_%' ORDER BY id LOOP
+    IF r.id IN (${rows.same.map((id) => `'${id}'`).join(', ') || "''"})
+       AND (r.resolved_dispute_id IS NULL OR r.resolved_dispute_id <> r.dispute_id) THEN
+      RAISE EXCEPTION '${label}: % should name its own dispute (%), names %', r.id, r.dispute_id, r.resolved_dispute_id;
+    END IF;
+    IF r.id IN (${rows.none.map((id) => `'${id}'`).join(', ') || "''"}) AND r.resolved_dispute_id IS NOT NULL THEN
+      RAISE EXCEPTION '${label}: % should have no resolved dispute, has %', r.id, r.resolved_dispute_id;
+    END IF;
+  END LOOP;
+END $$;`;
+
+const RSD_ROWS = ['PENDING', 'SETTLED', 'REFUNDED', 'OPEN', 'NEVER'].map(
+  (row) => `TXN_MIGCHECK_RSD_${row}`,
+);
+
+/** The backfill's write, to every probe row and without its filter: the trigger decides what is kept. */
+const RSD_ATTRIBUTE_ALL = `UPDATE "transaction" SET resolved_dispute_id = dispute_id
+  WHERE id LIKE 'TXN_MIGCHECK_RSD_%';`;
+
+/** The dispute fields of every probe row, exactly as the previous release wrote them. */
+const RSD_FIELDS_UNTOUCHED = `
+DO $$
+DECLARE found INT;
+BEGIN
+  SELECT count(*) INTO found FROM "transaction"
+   WHERE (id, status::text, dispute_reason, dispute_resolution, dispute_id IS NOT NULL) IN (
+           ('TXN_MIGCHECK_RSD_PENDING', 'PENDING_SETTLEMENT', 'short on arrival', 'counted again: complete', true),
+           ('TXN_MIGCHECK_RSD_SETTLED', 'SETTLED', 'short on arrival', 'counted again: complete', true),
+           ('TXN_MIGCHECK_RSD_REFUNDED', 'REFUNDED', 'the invoice names another supplier', 'counted again: complete', true),
+           ('TXN_MIGCHECK_RSD_OPEN', 'DISPUTED', 'the invoice names another supplier', 'counted again: complete', true))
+     AND disputed_at IS NOT NULL AND dispute_resolved_at IS NOT NULL;
+  IF found <> 4 THEN RAISE EXCEPTION 'a dispute probe row changed (found % of 4 as they were)', found; END IF;
+  SELECT count(*) INTO found FROM "transaction"
+   WHERE id = 'TXN_MIGCHECK_RSD_NEVER' AND status = 'HELD' AND disputed_at IS NULL AND dispute_id IS NULL;
+  IF found <> 1 THEN RAISE EXCEPTION 'the undisputed probe row changed'; END IF;
+END $$;`;
+
+/**
+ * Which dispute a resolution decided (docs/23 D-060), rolled back and
+ * re-applied over transactions the previous release wrote: resolved and
+ * waiting for settlement, resolved and settled, resolved then disputed again
+ * and refunded from DISPUTED, resolved then disputed again and still open,
+ * and one never disputed. Up changes the catalogue and no row (Codex on #352,
+ * finding 1): every row NULL, the reasons and resolutions as they were. A
+ * write to every row — what the backfill (economic-service
+ * resolved-dispute-backfill.ts) and a later move do — attributes only what is
+ * certain, the first two, whose latest dispute was resolved, whatever it
+ * sets, and leaves the refunded and the open ones NULL. The trigger then
+ * attributes a resolution written by anyone, and a write can neither forge nor
+ * clear one. Down refuses nothing and leaves every other dispute field; after
+ * a second up the same write attributes the same rows again.
+ */
+const TRANSACTION_RESOLVED_DISPUTE_STEPS = [
+  {
+    label: 'resolved dispute: down to the schema before the column (empty)',
+    runDownScript: [TRANSACTION_RESOLVED_DISPUTE],
+  },
+  {
+    label: 'resolved dispute: disputes as the previous release wrote them',
+    sql: [
+      ...['PENDING', 'SETTLED', 'REFUNDED', 'OPEN', 'NEVER'].map((row) =>
+        TRANSACTION_MIGCHECK(`TXN_MIGCHECK_RSD_${row}`),
+      ),
+      RSD_MOVE('TXN_MIGCHECK_RSD_NEVER', `status = 'HELD'`),
+      ...['PENDING', 'SETTLED', 'REFUNDED', 'OPEN'].flatMap((row) => [
+        RSD_MOVE(`TXN_MIGCHECK_RSD_${row}`, `status = 'HELD'`),
+        RSD_DISPUTE(`TXN_MIGCHECK_RSD_${row}`, 'short on arrival', '2026-10-20T10:00:00Z'),
+        RSD_RESOLVE(`TXN_MIGCHECK_RSD_${row}`, 'counted again: complete', '2026-10-20T11:00:00Z'),
+      ]),
+      RSD_MOVE(
+        'TXN_MIGCHECK_RSD_SETTLED',
+        `status = 'SETTLED', settled_at = '2026-10-20T12:00:00Z', net_amount_minor = gross_amount_minor`,
+      ),
+      // Disputed again, dated before the resolution: the previous release read
+      // its clock before the row lock (Codex on #322 round 4, finding 1).
+      ...['REFUNDED', 'OPEN'].map((row) =>
+        RSD_DISPUTE(
+          `TXN_MIGCHECK_RSD_${row}`,
+          'the invoice names another supplier',
+          '2026-10-20T10:59:00Z',
+        ),
+      ),
+      RSD_MOVE(
+        'TXN_MIGCHECK_RSD_REFUNDED',
+        `status = 'REFUNDED', refunded_at = '2026-10-20T13:00:00Z', refunded_by = 'USR-MIGCHECK-PLATFORM'`,
+      ),
+    ].join('\n'),
+  },
+  { label: 'resolved dispute: up again over them', reapply: true },
+  {
+    label: 'resolved dispute: up writes no row; every field as it was',
+    sql: `${RSD_FIELDS_UNTOUCHED}
+      ${RSD_EXPECT('after up', { same: [], none: RSD_ROWS })}`,
+  },
+  {
+    label: 'resolved dispute: a write to every row attributes only the certain ones',
+    sql: `${RSD_ATTRIBUTE_ALL}
+      ${RSD_FIELDS_UNTOUCHED}
+      ${RSD_EXPECT('after the backfill’s write', {
+        same: ['TXN_MIGCHECK_RSD_PENDING', 'TXN_MIGCHECK_RSD_SETTLED'],
+        none: ['TXN_MIGCHECK_RSD_REFUNDED', 'TXN_MIGCHECK_RSD_OPEN', 'TXN_MIGCHECK_RSD_NEVER'],
+      })}`,
+  },
+  {
+    label:
+      'resolved dispute: a resolution written by anyone is attributed; a forged one is not kept',
+    sql: `${RSD_MOVE('TXN_MIGCHECK_RSD_OPEN', `status = 'PENDING_SETTLEMENT', dispute_resolved_at = '2026-10-20T14:00:00Z', resolved_dispute_id = 'TXD_FORGED'`)}
+      ${RSD_MOVE('TXN_MIGCHECK_RSD_PENDING', `resolved_dispute_id = 'TXD_FORGED'`)}
+      ${RSD_MOVE('TXN_MIGCHECK_RSD_NEVER', `resolved_dispute_id = 'TXD_FORGED'`)}
+      ${RSD_EXPECT('after the trigger', {
+        same: ['TXN_MIGCHECK_RSD_PENDING', 'TXN_MIGCHECK_RSD_SETTLED', 'TXN_MIGCHECK_RSD_OPEN'],
+        none: ['TXN_MIGCHECK_RSD_REFUNDED', 'TXN_MIGCHECK_RSD_NEVER'],
+      })}`,
+  },
+  {
+    label: 'resolved dispute: down succeeds over attributed rows',
+    runDownScript: [TRANSACTION_RESOLVED_DISPUTE],
+  },
+  {
+    label:
+      'resolved dispute: the column and its trigger are gone; every dispute and its identity stay',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema() AND table_name = 'transaction'
+                      AND column_name = 'resolved_dispute_id') THEN
+          RAISE EXCEPTION 'resolved_dispute_id survived its rollback';
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+                    WHERE t.tgname = 'trg_transaction_resolved_dispute'
+                      AND c.relnamespace = current_schema()::regnamespace) THEN
+          RAISE EXCEPTION 'the resolved-dispute trigger survived its rollback';
+        END IF;
+        SELECT count(*) INTO found FROM "transaction"
+         WHERE id LIKE 'TXN_MIGCHECK_RSD_%' AND dispute_id IS NOT NULL AND dispute_reason IS NOT NULL
+           AND dispute_resolution = 'counted again: complete';
+        IF found <> 4 THEN RAISE EXCEPTION 'the rollback touched a dispute (found % of 4)', found; END IF;
+        IF EXISTS (SELECT 1 FROM "_prisma_migrations"
+                    WHERE migration_name = '${TRANSACTION_RESOLVED_DISPUTE}') THEN
+          RAISE EXCEPTION 'the rollback left its ledger row';
+        END IF;
+      END $$;`,
+  },
+  { label: 'resolved dispute: up again', reapply: true },
+  {
+    label: 'resolved dispute: after the second up, the same write attributes the same rows again',
+    sql: `${RSD_EXPECT('after the second up', { same: [], none: RSD_ROWS })}
+      ${RSD_ATTRIBUTE_ALL}
+      ${RSD_EXPECT('after the second backfill’s write', {
+        same: ['TXN_MIGCHECK_RSD_PENDING', 'TXN_MIGCHECK_RSD_SETTLED', 'TXN_MIGCHECK_RSD_OPEN'],
+        none: ['TXN_MIGCHECK_RSD_REFUNDED', 'TXN_MIGCHECK_RSD_NEVER'],
+      })}`,
+  },
+  {
+    label: 'resolved dispute: clean up the probe rows',
+    sql: `DELETE FROM "transaction_leg" WHERE transaction_id LIKE 'TXN_MIGCHECK_RSD_%';
+          DELETE FROM "transaction" WHERE organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_RSD_%';`,
+  },
+];
+
 const PARTICIPATION_RULE = '20261016190000_participation_rule';
 
 /** A reward evaluation row; `subject` adds the two columns this migration brings. */
@@ -1470,6 +1653,7 @@ export const ECONOMIC_DATA_ROLLBACK = {
     },
     ...COMMISSION_BUSINESS_LINES_STEPS,
     ...TRANSACTION_DISPUTE_RESOLUTION_STEPS,
+    ...TRANSACTION_RESOLVED_DISPUTE_STEPS,
   ],
 };
 
