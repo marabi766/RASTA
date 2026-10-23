@@ -16,6 +16,7 @@
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/packages/contracts/src/common/errors.ts",
         "$TURBO_ROOT$/packages/contracts/src/common/money.ts",
+        "$TURBO_ROOT$/packages/contracts/src/events/inventory-returns.ts",
         "$TURBO_ROOT$/packages/contracts/src/common/pagination.ts",
         "$TURBO_ROOT$/packages/nest-common/src/auth/token-verifier.ts",
         "$TURBO_ROOT$/packages/nest-common/src/errors/rasta-error.ts",
@@ -103,6 +104,8 @@
         "$TURBO_ROOT$/services/fleet-service/src/fleet/dto.ts",
         "$TURBO_ROOT$/services/fleet-service/src/fleet/fleet.controller.ts",
         "$TURBO_ROOT$/services/fleet-service/src/fleet/transfer-clearance.ts",
+        "$TURBO_ROOT$/services/inventory-service/src/return-shipment/dto.ts",
+        "$TURBO_ROOT$/services/inventory-service/src/return-shipment/views.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/dto.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/lifecycle.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/repair-order.controller.ts",
@@ -111,10 +114,19 @@
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/request.service.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-clearance.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-record.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/access/access.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/config/env.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/order/dto.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/order/order.controller.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/order/order.service.ts",
-        "$TURBO_ROOT$/services/marketplace-service/src/order/pricing.ts"
+        "$TURBO_ROOT$/services/marketplace-service/src/order/pricing.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/dto.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/return-access.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/return-mirror.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/return.controller.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/return.service.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/state-machine.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/views.ts"
       ]
     },
     "test:unit": {
@@ -122,6 +134,7 @@
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/packages/contracts/src/common/errors.ts",
         "$TURBO_ROOT$/packages/contracts/src/common/money.ts",
+        "$TURBO_ROOT$/packages/contracts/src/events/inventory-returns.ts",
         "$TURBO_ROOT$/packages/contracts/src/common/pagination.ts",
         "$TURBO_ROOT$/packages/nest-common/src/auth/token-verifier.ts",
         "$TURBO_ROOT$/packages/nest-common/src/errors/rasta-error.ts",
@@ -209,6 +222,8 @@
         "$TURBO_ROOT$/services/fleet-service/src/fleet/dto.ts",
         "$TURBO_ROOT$/services/fleet-service/src/fleet/fleet.controller.ts",
         "$TURBO_ROOT$/services/fleet-service/src/fleet/transfer-clearance.ts",
+        "$TURBO_ROOT$/services/inventory-service/src/return-shipment/dto.ts",
+        "$TURBO_ROOT$/services/inventory-service/src/return-shipment/views.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/dto.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/lifecycle.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/repair-order.controller.ts",
@@ -217,10 +232,19 @@
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/request.service.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-clearance.ts",
         "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-record.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/access/access.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/config/env.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/order/dto.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/order/order.controller.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/order/order.service.ts",
-        "$TURBO_ROOT$/services/marketplace-service/src/order/pricing.ts"
+        "$TURBO_ROOT$/services/marketplace-service/src/order/pricing.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/dto.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/return-access.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/return-mirror.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/return.controller.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/return.service.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/state-machine.ts",
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/views.ts"
       ]
     }
   }
