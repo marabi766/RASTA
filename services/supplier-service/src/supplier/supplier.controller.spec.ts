@@ -128,7 +128,7 @@ describe('qualification routes', () => {
 describe('suspension routes', () => {
   it('forwards a suspension to suspend', async () => {
     const { controller, calls } = harness();
-    const dto = { reason: 'Two undelivered orders in one week' };
+    const dto = { reason: 'Two undelivered orders in one week', latestSuspensionId: null };
 
     await controller.suspend('SUP_1', dto);
 
@@ -136,9 +136,9 @@ describe('suspension routes', () => {
   });
 
   it('forwards a reinstatement to reinstate, never to suspend', async () => {
-    // The two are opposites and take an identically-shaped body.
+    // The two are opposites, and both name a suspension episode.
     const { controller, calls } = harness();
-    const dto = { reason: 'The orders were delivered late, not never' };
+    const dto = { reason: 'The orders were delivered late, not never', suspensionId: 'SSP_1' };
 
     await controller.reinstate('SUP_1', dto);
 

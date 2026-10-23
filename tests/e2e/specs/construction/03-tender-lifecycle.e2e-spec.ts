@@ -1326,10 +1326,22 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     expect((await decide(p1, request.steps[0]!.approvalId)).status).toBe(200);
 
     // An approval never replaces supplier-service's word on the winner now.
+    // Suspend and reinstate name the episode they were decided on (PR 366): the
+    // newest one on the record, then the one this suspension opened.
+    const record = await systemAdmin.get(`/v1/suppliers/${supplier.c1}`);
+    expect(record.status, JSON.stringify(record.body)).toBe(200);
+    const history = (record.body as { suspensions: { id: string; suspendedAt: string }[] })
+      .suspensions;
     const suspended = await systemAdmin.post(`/v1/suppliers/${supplier.c1}/suspend`, {
-      body: { reason: 'E2E: standing checked when the award executes' },
+      body: {
+        reason: 'E2E: standing checked when the award executes',
+        latestSuspensionId: history[0]?.id ?? null,
+      },
     });
     expect(suspended.status, JSON.stringify(suspended.body)).toBe(200);
+    const opened = (
+      suspended.body as { suspensions: { id: string; open: boolean }[] }
+    ).suspensions.find((episode) => episode.open);
     const notEligible = await send(awarder, 'POST', `/v1/tenders/${tenderId}/award`, {
       bidId: bid.c1,
     });
@@ -1341,7 +1353,7 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     expect((await tender(author, tenderId)).status).toBe('EVALUATED');
 
     const reinstated = await systemAdmin.post(`/v1/suppliers/${supplier.c1}/reinstate`, {
-      body: { reason: 'E2E: the suspension is lifted again' },
+      body: { reason: 'E2E: the suspension is lifted again', suspensionId: opened?.id },
     });
     expect(reinstated.status, JSON.stringify(reinstated.body)).toBe(200);
 

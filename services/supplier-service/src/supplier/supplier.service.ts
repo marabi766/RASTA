@@ -9,6 +9,7 @@ import {
   assertCanBrowseDirectory,
   assertCanRegisterSupplier,
   assertSupplierReadable,
+  mayReadReviewerNote,
 } from '../access/access';
 import { transactionNow } from '../shared/clock';
 import { isUniqueViolation } from '../shared/prisma-errors';
@@ -116,7 +117,11 @@ export class SupplierService {
       throw RastaError.internal('The supplier profile disappeared immediately after creation');
     }
 
-    return toDetailView(created as unknown as SupplierRow);
+    // The registering organization is the supplier, so never a reviewer — and a
+    // new profile has no decision to carry a note anyway.
+    return toDetailView(created as unknown as SupplierRow, {
+      reviewer: mayReadReviewerNote(created),
+    });
   }
 
   /**
@@ -135,7 +140,9 @@ export class SupplierService {
 
     assertSupplierReadable(supplier);
 
-    return toDetailView(supplier as unknown as SupplierRow);
+    return toDetailView(supplier as unknown as SupplierRow, {
+      reviewer: mayReadReviewerNote(supplier),
+    });
   }
 
   /**

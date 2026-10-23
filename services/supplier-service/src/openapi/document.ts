@@ -123,7 +123,7 @@ const ERROR_DESCRIPTIONS: Record<number, string> = {
   401: 'No credentials, or a token that is expired or invalid',
   403: 'Authenticated, but not permitted. Also returned when a platform operator belongs to the supplier’s own organization: no role exempts anybody from the rule that a supplier organization may not decide its own qualification, suspension or reinstatement.',
   404: 'Not found — also returned for a supplier owned by another organization, so its existence is never disclosed through the private endpoints. The directory is where a stranger legitimately learns a supplier exists, and it returns a catalogue-safe object.',
-  409: 'Conflict: this organization already has a supplier profile',
+  409: 'Conflict. `ALREADY_EXISTS`: this organization already has a supplier profile. `OPTIMISTIC_LOCK_FAILED` with `details[].code` `SUSPENSION_EPISODE_CHANGED` (suspend and reinstate only): the supplier’s suspension history is no longer the one the request names — reinstate’s `suspensionId` is not the open episode, or suspend’s `latestSuspensionId` is not the newest — and nothing was written; read the supplier again.',
   422: 'The request is well-formed but a business rule refuses it (see `code`) — a qualification that is already decided, a second submission for a capability that is open or approved, suspending a supplier that is already suspended, or reinstating one that is not.',
   500: 'Unexpected server error',
 };
