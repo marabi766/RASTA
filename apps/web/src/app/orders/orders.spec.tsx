@@ -70,7 +70,14 @@ const ORDER: Order = {
 const ok = (order: Order): ReadResult<Order> => ({ kind: 'OK', data: order });
 
 const renderDetail = (order: Order) =>
-  render(<OrderDetailScreen result={ok(order)} csrfToken={CSRF} mintSubmissionId={mint} />);
+  render(
+    <OrderDetailScreen
+      demoMode="REAL"
+      result={ok(order)}
+      csrfToken={CSRF}
+      mintSubmissionId={mint}
+    />,
+  );
 
 const formsOffered = () =>
   screen.queryAllByRole('form').map((f) => f.getAttribute('aria-labelledby'));
@@ -268,7 +275,12 @@ describe('the stepper and the amounts', () => {
 describe('an order this viewer may not see', () => {
   it('says the same thing whether it is absent or not theirs', () => {
     render(
-      <OrderDetailScreen result={{ kind: 'NOT_FOUND' }} csrfToken={CSRF} mintSubmissionId={mint} />,
+      <OrderDetailScreen
+        demoMode="REAL"
+        result={{ kind: 'NOT_FOUND' }}
+        csrfToken={CSRF}
+        mintSubmissionId={mint}
+      />,
     );
     // marketplace-service answers 404 for both precisely so an order's
     // existence cannot be learned by asking for it.
@@ -283,7 +295,7 @@ describe('the list', () => {
   });
 
   it('marks the side being shown, and links to the other', () => {
-    render(<OrdersScreen result={page([ORDER])} query={{ role: 'SUPPLIER' }} />);
+    render(<OrdersScreen demoMode="REAL" result={page([ORDER])} query={{ role: 'SUPPLIER' }} />);
     expect(screen.getByRole('link', { current: 'page' })).toHaveTextContent('به ما داده شده');
     expect(screen.getByRole('link', { name: 'سفارش‌هایی که ثبت کرده‌ایم' })).toHaveAttribute(
       'href',
@@ -294,6 +306,7 @@ describe('the list', () => {
   it('flags an order waiting on this viewer, without offering the action here', () => {
     render(
       <OrdersScreen
+        demoMode="REAL"
         result={page([{ ...ORDER, availableActions: ['CONFIRM_RECEIPT'] }])}
         query={{ role: 'BUYER' }}
       />,
@@ -303,7 +316,7 @@ describe('the list', () => {
   });
 
   it('tells an empty supplier list from an empty buyer list', () => {
-    render(<OrdersScreen result={page([])} query={{ role: 'SUPPLIER' }} />);
+    render(<OrdersScreen demoMode="REAL" result={page([])} query={{ role: 'SUPPLIER' }} />);
     expect(screen.getByText('هنوز سفارشی به این سازمان داده نشده است.')).toBeInTheDocument();
   });
 });
@@ -311,7 +324,13 @@ describe('the list', () => {
 describe('an order that was just placed', () => {
   it('says it was placed and that it is not settled, claiming no payment and no acceptance', () => {
     const { container } = render(
-      <OrderDetailScreen result={ok(ORDER)} csrfToken={CSRF} mintSubmissionId={mint} placed />,
+      <OrderDetailScreen
+        demoMode="REAL"
+        result={ok(ORDER)}
+        csrfToken={CSRF}
+        mintSubmissionId={mint}
+        placed
+      />,
     );
     expect(screen.getByText(/سفارش ثبت شد/)).toBeInTheDocument();
     expect(container.textContent).toMatch(/هنوز قطعی نیست/);
@@ -345,11 +364,53 @@ describe('accessibility', () => {
   it('has no violations on the list', async () => {
     const { container } = render(
       <OrdersScreen
+        demoMode="REAL"
         result={{ kind: 'OK', data: { items: [ORDER], nextCursor: null } }}
         query={{ role: 'BUYER' }}
       />,
     );
     expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe('the order page while the provider is unknown (Q-14)', () => {
+  it('says so in place of the label, and withholds every command but a review', () => {
+    render(
+      <OrderDetailScreen
+        result={ok({ ...ORDER, availableActions: ['CONFIRM_RECEIPT', 'RAISE_DISPUTE', 'REVIEW'] })}
+        csrfToken={CSRF}
+        mintSubmissionId={mint}
+        demoMode="UNKNOWN"
+      />,
+    );
+    expect(screen.getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
+    expect(screen.queryByText('حالت نمایشی')).toBeNull();
+    expect(screen.getByText('اقدام‌های مالی این سفارش اکنون در دسترس نیست')).toBeInTheDocument();
+    expect(screen.getAllByRole('form')).toHaveLength(1);
+  });
+
+  it('withholds nothing when only a review is offered', () => {
+    render(
+      <OrderDetailScreen
+        result={ok({ ...ORDER, availableActions: ['REVIEW'] })}
+        csrfToken={CSRF}
+        mintSubmissionId={mint}
+        demoMode="UNKNOWN"
+      />,
+    );
+    expect(screen.queryByText(/اکنون در دسترس نیست/)).toBeNull();
+    expect(screen.getAllByRole('form')).toHaveLength(1);
+  });
+
+  it('says so on the list too', () => {
+    render(
+      <OrdersScreen
+        result={{ kind: 'OK', data: { items: [ORDER], nextCursor: null } }}
+        query={{ role: 'BUYER' }}
+        demoMode="UNKNOWN"
+      />,
+    );
+    expect(screen.getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
   });
 });
 
@@ -359,7 +420,7 @@ describe('the order list and the order page: «حالت نمایشی» (Q-14)', 
       <OrdersScreen
         result={{ kind: 'OK', data: { items: [ORDER], nextCursor: null } }}
         query={{ role: 'BUYER' }}
-        demoMode={true}
+        demoMode="SIMULATED"
       />,
     );
     expect(screen.getByText('حالت نمایشی')).toBeInTheDocument();
@@ -370,7 +431,7 @@ describe('the order list and the order page: «حالت نمایشی» (Q-14)', 
       <OrdersScreen
         result={{ kind: 'OK', data: { items: [ORDER], nextCursor: null } }}
         query={{ role: 'BUYER' }}
-        demoMode={false}
+        demoMode="REAL"
       />,
     );
     expect(screen.queryByText('حالت نمایشی')).toBeNull();
@@ -378,11 +439,23 @@ describe('the order list and the order page: «حالت نمایشی» (Q-14)', 
 
   it('is drawn on the order page too, and only when simulated', () => {
     const { unmount } = render(
-      <OrderDetailScreen result={ok(ORDER)} csrfToken={CSRF} mintSubmissionId={mint} demoMode />,
+      <OrderDetailScreen
+        result={ok(ORDER)}
+        csrfToken={CSRF}
+        mintSubmissionId={mint}
+        demoMode="SIMULATED"
+      />,
     );
     expect(screen.getByText('حالت نمایشی')).toBeInTheDocument();
     unmount();
-    render(<OrderDetailScreen result={ok(ORDER)} csrfToken={CSRF} mintSubmissionId={mint} />);
+    render(
+      <OrderDetailScreen
+        demoMode="REAL"
+        result={ok(ORDER)}
+        csrfToken={CSRF}
+        mintSubmissionId={mint}
+      />,
+    );
     expect(screen.queryByText('حالت نمایشی')).toBeNull();
   });
 });

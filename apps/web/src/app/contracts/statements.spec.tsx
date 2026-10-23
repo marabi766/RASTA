@@ -1,4 +1,5 @@
 import { render, screen, within } from '@testing-library/react';
+import type { DemoMode } from '@/lib/demo-mode';
 import { axe } from 'jest-axe';
 
 import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
@@ -107,6 +108,7 @@ function contractPage(
 ) {
   return render(
     <ContractDetailScreen
+      demoMode="REAL"
       result={{ kind: 'OK', data: CONTRACT }}
       amendments={{ kind: 'OK', data: { items: [], nextCursor: null, hasMore: false } }}
       milestones={{ kind: 'OK', data: { items: [], nextCursor: null, hasMore: false } }}
@@ -119,7 +121,7 @@ function contractPage(
 function statementPage(
   result: ReadResult<Statement>,
   offered: StatementCommand[] = [],
-  extra: { contractUnavailable?: boolean; notice?: StatementCommand; demoMode?: boolean } = {},
+  extra: { contractUnavailable?: boolean; notice?: StatementCommand; demoMode?: DemoMode } = {},
 ) {
   return render(
     <StatementDetailScreen
@@ -134,7 +136,7 @@ function statementPage(
       sessionMaxAgeSeconds={SESSION_MAX_AGE}
       notice={extra.notice}
       pageHref={PAGE}
-      demoMode={extra.demoMode}
+      demoMode={extra.demoMode ?? 'REAL'}
     />,
   );
 }
@@ -462,12 +464,34 @@ describe('each form state', () => {
 
 describe('the statement page: «حالت نمایشی» (Q-14)', () => {
   it('is drawn when the provider is simulated', () => {
-    statementPage({ kind: 'OK', data: DRAFTED }, [], { demoMode: true });
+    statementPage({ kind: 'OK', data: DRAFTED }, [], { demoMode: 'SIMULATED' });
     expect(screen.getByText('حالت نمایشی')).toBeInTheDocument();
   });
 
   it('is absent when it is not', () => {
-    statementPage({ kind: 'OK', data: DRAFTED }, [], { demoMode: false });
+    statementPage({ kind: 'OK', data: DRAFTED }, [], { demoMode: 'REAL' });
     expect(screen.queryByText('حالت نمایشی')).toBeNull();
+    expect(screen.queryByText('وضعیت درگاه پرداخت معلوم نیست')).toBeNull();
+  });
+
+  it('says the provider is unknown, and withholds the approval but not the rejection', async () => {
+    statementPage({ kind: 'OK', data: SUBMITTED }, ['APPROVE', 'REJECT'], { demoMode: 'UNKNOWN' });
+    expect(screen.getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
+    expect(screen.queryByText('حالت نمایشی')).toBeNull();
+    expect(screen.getByText('تأیید صورت‌وضعیت اکنون در دسترس نیست')).toBeInTheDocument();
+    expect(
+      await screen.findByRole('form', { name: STATEMENT_COMMAND_LABELS.REJECT }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('form', { name: STATEMENT_COMMAND_LABELS.APPROVE }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('withholds nothing when no approval is offered', async () => {
+    statementPage({ kind: 'OK', data: SUBMITTED }, ['REJECT'], { demoMode: 'UNKNOWN' });
+    expect(screen.queryByText('تأیید صورت‌وضعیت اکنون در دسترس نیست')).toBeNull();
+    expect(
+      await screen.findByRole('form', { name: STATEMENT_COMMAND_LABELS.REJECT }),
+    ).toBeInTheDocument();
   });
 });

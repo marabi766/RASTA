@@ -15,7 +15,8 @@ import {
   type OrderCommand,
   type StepState,
 } from '@/lib/order-fields';
-import { DemoModeNotice } from '@/app/DemoModeNotice';
+import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
+import { movesMoney, type DemoMode } from '@/lib/demo-mode';
 import type { Order, ReadResult } from '@/server/orders';
 
 import { formatOrderAmount } from '../OrdersScreen';
@@ -49,8 +50,8 @@ export interface OrderDetailScreenProps {
   readonly done?: OrderCommand;
   /** The order was just placed from the offers page (`?placed=1`). */
   readonly placed?: boolean;
-  /** The provider is simulated (`fetchDemoMode`, Q-14): draw «حالت نمایشی». */
-  readonly demoMode?: boolean;
+  /** What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or that it is unknown. */
+  readonly demoMode: DemoMode;
   /** Its return requests and the request form (EXP-003); null for a viewer who is neither party. */
   readonly returns?: Omit<OrderReturnsProps, 'orderId' | 'csrfToken'> | null;
 }
@@ -131,14 +132,22 @@ function Lines({ order }: { order: Order }) {
   );
 }
 
+/**
+ * The one command that moves no money: every other step takes held funds on
+ * towards the seller, back to the buyer, or stops them (`DONE_MESSAGES`).
+ */
+const MOVES_NO_MONEY: ReadonlySet<OrderCommand> = new Set(['REVIEW']);
+
 function WhatNext({
   order,
   csrfToken,
   mintSubmissionId,
+  demoMode,
 }: {
   order: Order;
   csrfToken: string;
   mintSubmissionId: () => string;
+  demoMode: DemoMode;
 }) {
   if (order.availableActions.length === 0) {
     // Not "you may not": for a buyer at FUNDS_HELD this is simply the
@@ -147,9 +156,17 @@ function WhatNext({
     return <p className="text-sm text-content-muted">در این مرحله اقدامی از سوی شما لازم نیست.</p>;
   }
 
+  // While the provider is unknown, only what moves no money is offered (Q-14).
+  const offered = movesMoney(demoMode)
+    ? order.availableActions
+    : order.availableActions.filter((command) => MOVES_NO_MONEY.has(command));
+
   return (
     <div className="flex flex-col gap-4">
-      {order.availableActions.map((command) => (
+      {offered.length < order.availableActions.length ? (
+        <MoneyActionWithheld title="اقدام‌های مالی این سفارش اکنون در دسترس نیست" />
+      ) : null}
+      {offered.map((command) => (
         <OrderCommandForm
           key={command}
           orderId={order.id}
@@ -211,7 +228,7 @@ export function OrderDetailScreen({
 
   return (
     <div className="flex flex-col gap-4">
-      {demoMode ? <DemoModeNotice /> : null}
+      <DemoModeNotice mode={demoMode} />
       {done ? <Alert tone="success">{DONE_MESSAGES[done]}</Alert> : null}
       {placed ? (
         <Alert tone="success">
@@ -247,7 +264,12 @@ export function OrderDetailScreen({
       </Section>
 
       <Section headingId="order-next" title="اقدام بعدی شما">
-        <WhatNext order={order} csrfToken={csrfToken} mintSubmissionId={mintSubmissionId} />
+        <WhatNext
+          order={order}
+          csrfToken={csrfToken}
+          mintSubmissionId={mintSubmissionId}
+          demoMode={demoMode}
+        />
       </Section>
 
       <Section headingId="order-lines" title="اقلام و مبلغ">

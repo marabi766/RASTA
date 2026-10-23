@@ -10,6 +10,7 @@ import {
   StatusBadge,
 } from '@/ui';
 import { DemoModeNotice } from '@/app/DemoModeNotice';
+import type { DemoMode } from '@/lib/demo-mode';
 import { IRR, formatJalaliDateLong, formatMoney, toPersianDigits } from '@/lib/format';
 import {
   CONTRACT_STATES,
@@ -39,8 +40,8 @@ import type {
 export interface ContractsScreenProps {
   readonly result: ReadResult<ContractPage>;
   readonly query: ContractListQuery;
-  /** The provider is simulated (`fetchDemoMode`, Q-14): draw «حالت نمایشی». */
-  readonly demoMode?: boolean;
+  /** What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or that it is unknown. */
+  readonly demoMode: DemoMode;
 }
 
 function hrefWith(query: ContractListQuery, changes: Partial<ContractListQuery>): string {
@@ -105,14 +106,14 @@ function ContractRow({ contract }: { contract: ContractSummary }) {
 export function ContractsScreen({ result, query, demoMode }: ContractsScreenProps) {
   return (
     <div className="flex flex-col gap-4">
-      {demoMode ? <DemoModeNotice /> : null}
+      <DemoModeNotice mode={demoMode} />
       <StatusFilter query={query} />
       <ContractsBody result={result} query={query} />
     </div>
   );
 }
 
-function ContractsBody({ result, query }: ContractsScreenProps) {
+function ContractsBody({ result, query }: Omit<ContractsScreenProps, 'demoMode'>) {
   if (result.kind === 'FORBIDDEN') {
     return <NoAccessState description="فهرست قراردادهای این سازمان در اختیار شما نیست." />;
   }

@@ -10,7 +10,8 @@ import {
   StatusBadge,
   TableScroll,
 } from '@/ui';
-import { DemoModeNotice } from '@/app/DemoModeNotice';
+import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
+import { movesMoney, type DemoMode } from '@/lib/demo-mode';
 import { formatShareBp } from '@/lib/contract-fields';
 import { IRR, formatJalaliDateTime, formatMoney, toPersianDigits } from '@/lib/format';
 import { roleLabel } from '@/lib/organization-fields';
@@ -236,8 +237,8 @@ export interface StatementDetailScreenProps {
   /** A command this session confirmed just now (`server/flash.ts`), if any. */
   readonly notice?: StatementCommand;
   readonly pageHref: string;
-  /** The provider is simulated (`fetchDemoMode`, Q-14): draw «حالت نمایشی». */
-  readonly demoMode?: boolean;
+  /** What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or that it is unknown. */
+  readonly demoMode: DemoMode;
 }
 
 export function StatementDetailScreen({
@@ -253,10 +254,16 @@ export function StatementDetailScreen({
 }: StatementDetailScreenProps) {
   if (result.kind !== 'OK') return <Failure result={result} />;
   const statement = result.data;
+  // An approval is what puts the statement's net amount on its way to being paid: not offered
+  // while the provider is unknown (Q-14). Submitting and rejecting move nothing.
+  const shown = movesMoney(demoMode)
+    ? offered
+    : offered.filter(({ command }) => command !== 'APPROVE');
+  const withheld = shown.length < offered.length;
 
   return (
     <div className="flex flex-col gap-6">
-      {demoMode ? <DemoModeNotice /> : null}
+      <DemoModeNotice mode={demoMode} />
       {notice ? <Alert tone="success">{NOTICE_MESSAGES[notice]}</Alert> : null}
 
       <Section
@@ -335,10 +342,12 @@ export function StatementDetailScreen({
         </Alert>
       ) : null}
 
+      {withheld ? <MoneyActionWithheld title="تأیید صورت‌وضعیت اکنون در دسترس نیست" /> : null}
+
       <StatementCommands
         contractId={statement.contractId}
         statementId={statement.id}
-        offered={offered}
+        offered={shown}
         csrfToken={csrfToken}
         binding={binding}
         sessionMaxAgeSeconds={sessionMaxAgeSeconds}

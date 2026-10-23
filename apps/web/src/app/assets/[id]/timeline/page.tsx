@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchAssetTimeline, type AssetTimelineQuery } from '@/server/assets';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { TIMELINE_CATEGORIES, oneOf } from '@/lib/asset-fields';
 import { TimelineScreen } from './TimelineScreen';
@@ -46,7 +47,10 @@ export default async function AssetTimelinePage({
     cursor: one(search.cursor),
   };
 
-  const result = await fetchAssetTimeline(session, id, query);
+  const [result, demoMode] = await Promise.all([
+    fetchAssetTimeline(session, id, query),
+    fetchDemoMode(session),
+  ]);
 
   return (
     <AppShell
@@ -62,7 +66,7 @@ export default async function AssetTimelinePage({
       }
       sidebar={<PortalSidebar session={session} currentHref="/assets" />}
     >
-      <TimelineScreen result={result} assetId={id} query={query} />
+      <TimelineScreen result={result} assetId={id} query={query} demoMode={demoMode} />
     </AppShell>
   );
 }

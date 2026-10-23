@@ -11,7 +11,8 @@ import {
   Section,
   StatusBadge,
 } from '@/ui';
-import { DemoModeNotice } from '@/app/DemoModeNotice';
+import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
+import { movesMoney, type DemoMode } from '@/lib/demo-mode';
 import {
   costCategoryLabel,
   maintenanceRequestStatusLabel,
@@ -67,8 +68,8 @@ export interface RequestDetailScreenProps {
    * all when the read failed.
    */
   readonly notice?: 'created' | RequestCommandNotice | RepairCommandNotice;
-  /** The provider is simulated (`fetchDemoMode`, Q-14): draw «حالت نمایشی». */
-  readonly demoMode?: boolean;
+  /** What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or that it is unknown. */
+  readonly demoMode: DemoMode;
   /**
    * The three commands, present only for a person the page found allowed to
    * use them (`canManageMaintenance`) and only when the request read.
@@ -372,7 +373,7 @@ export function RequestDetailScreen({
         description={`${maintenanceTypeLabel(request.type)} — گزارش‌شده در ${formatJalaliDateLong(request.reportedAt)}`}
       />
 
-      {demoMode ? <DemoModeNotice /> : null}
+      <DemoModeNotice mode={demoMode} />
 
       {notice ? <Alert tone={NOTICES[notice].tone}>{NOTICES[notice].text}</Alert> : null}
 
@@ -493,7 +494,12 @@ export function RequestDetailScreen({
 
       {commandForms && request.status === 'COMPLETED' ? (
         <Section headingId="approve" title="تأیید هزینه">
-          {commandForms.approve}
+          {/* The approval authorises the repair's settlement: not offered while the provider is unknown (Q-14). */}
+          {movesMoney(demoMode) ? (
+            commandForms.approve
+          ) : (
+            <MoneyActionWithheld title="تأیید هزینه اکنون در دسترس نیست" />
+          )}
         </Section>
       ) : null}
 

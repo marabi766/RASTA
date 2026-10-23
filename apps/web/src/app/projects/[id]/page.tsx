@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, ButtonLink, PageHeader, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchProject } from '@/server/projects';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ProjectDetailScreen } from './ProjectDetailScreen';
@@ -21,7 +22,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/projects/${id}`)}`);
 
-  const result = await fetchProject(session, id);
+  const [result, demoMode] = await Promise.all([fetchProject(session, id), fetchDemoMode(session)]);
 
   return (
     <AppShell
@@ -44,7 +45,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
         </ButtonLink>
       </div>
       <div className="mt-4">
-        <ProjectDetailScreen result={result} />
+        <ProjectDetailScreen result={result} demoMode={demoMode} />
       </div>
     </AppShell>
   );
