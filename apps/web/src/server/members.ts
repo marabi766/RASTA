@@ -121,11 +121,22 @@ export function updateMemberRolesFormValues(form: FormData): UpdateMemberRolesFo
  * audit trail. Asking for it in the form is the difference between a person
  * writing a reason and a client inventing one.
  */
+/**
+ * How many `roles` values a posted form may carry. The checkbox group offers
+ * at most the platform's eleven roles (identity-service refuses more than
+ * that after de-duplication); fifty leaves room for a malformed page that
+ * posts each one twice, and stops a request whose length alone is the defect.
+ */
+export const MAX_POSTED_ROLES = 50;
+
 export const updateMemberRolesFormSchema = z.object({
   membershipId: z.string().trim().min(1, 'عضویت مشخص نیست'),
   roles: z
     .array(z.string().trim().min(1))
     .min(1, 'دست‌کم یک نقش را انتخاب کنید')
+    // Before the de-duplication below: what a posted form may carry at all
+    // (GHSA-mrhx-c7xc-m3w5). See MAX_POSTED_ROLES.
+    .max(MAX_POSTED_ROLES, 'تعداد نقش‌های فرستاده‌شده بیش از حد است')
     // A checkbox group can post the same value twice if the page is malformed.
     .transform((roles) => [...new Set(roles)]),
   reason: z

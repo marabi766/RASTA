@@ -176,11 +176,21 @@ const organizationMoved = z
     ),
   );
 
+/** See `affectedIds` below. */
+export const MAX_CASCADE_IDS = 100_000;
+
 const organizationStatusChanged = z.object({
   organizationId: identifier,
   newStatus: z.string(),
-  /** The cascade. A status change on a parent suspends its whole subtree. */
-  affectedIds: z.array(z.string()),
+  /**
+   * The cascade. A status change on a parent suspends its whole subtree, and
+   * organization-service puts no bound on a subtree, so the cap is set by the
+   * broker instead: a message is at most 1 MiB (Kafka's default
+   * `message.max.bytes`, not raised here), which holds about 70,000 of the
+   * shortest identifiers in use (`"ORG-DEH-0001",`). Only a payload no real
+   * cascade can produce reaches it (GHSA-mrhx-c7xc-m3w5).
+   */
+  affectedIds: z.array(z.string()).max(MAX_CASCADE_IDS),
 });
 
 /**

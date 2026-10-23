@@ -4,6 +4,7 @@ import {
   seedIdSchema,
   ID_PREFIXES,
   plainText,
+  withMaxKeys,
   withoutBidiControlDeep,
 } from '@rasta/contracts';
 
@@ -84,10 +85,20 @@ const locationInput = z
 // ---------------------------------------------------------------------------
 
 /**
+ * How many top-level attributes `metadata` may carry. The seeded organizations
+ * use one or two (`role`, `note`, `households`); a hundred is room for a new
+ * type's attributes, not a target. Counted before any entry is parsed
+ * (GHSA-mrhx-c7xc-m3w5, see `withMaxKeys`).
+ */
+export const MAX_METADATA_KEYS = 100;
+
+/**
  * Free-form attributes: any shape, but no bidi control in any key or string
  * value at any depth (#209) — they are stored and shown like any other text.
  */
-const freeFormMetadata = withoutBidiControlDeep(z.record(z.unknown()));
+const freeFormMetadata = withoutBidiControlDeep(
+  withMaxKeys(z.record(z.unknown()), MAX_METADATA_KEYS),
+);
 
 export const createOrganizationSchema = z
   .object({

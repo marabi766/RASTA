@@ -2,6 +2,7 @@ import { ZodError } from 'zod';
 import type { EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
 import {
+  MAX_CASCADE_IDS,
   isOrganizationProjectionEvent,
   ORGANIZATION_PROJECTION_EVENTS,
   ORGANIZATION_TOPIC,
@@ -351,6 +352,40 @@ describe('ORGANIZATION_STATUS_CHANGED', () => {
       ).toThrow(ZodError);
     },
   );
+
+  it('refuses a cascade longer than MAX_CASCADE_IDS the way it refuses any malformed payload (GHSA-mrhx-c7xc-m3w5)', () => {
+    const project = () =>
+      toOrganizationProjection(
+        envelope(ORGANIZATION_PROJECTION_EVENTS.STATUS_CHANGED, {
+          ...STATUS_PAYLOAD,
+          affectedIds: Array.from({ length: MAX_CASCADE_IDS + 1 }, () => 'ORG-CHILD'),
+        }),
+        ORG_DELIVERY,
+      );
+    let thrown: unknown;
+    try {
+      project();
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(ZodError);
+    expect((thrown as ZodError).issues[0]).toMatchObject({
+      code: 'too_big',
+      path: ['affectedIds'],
+    });
+  });
+
+  it('still projects a cascade of exactly MAX_CASCADE_IDS', () => {
+    expect(
+      toOrganizationProjection(
+        envelope(ORGANIZATION_PROJECTION_EVENTS.STATUS_CHANGED, {
+          ...STATUS_PAYLOAD,
+          affectedIds: Array.from({ length: MAX_CASCADE_IDS }, () => 'ORG-CHILD'),
+        }),
+        ORG_DELIVERY,
+      ),
+    ).toMatchObject({ affectedOrganizationIds: ['ORG-UNION', 'ORG-CHILD'] });
+  });
 
   it('records a status this service has never heard of', () => {
     // The vocabulary belongs to another service. Failing to record a status

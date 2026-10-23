@@ -28,6 +28,8 @@ export {
   withoutBidiControlDeep,
 } from './common/text';
 
+export { withMaxKeys } from './common/bounds';
+
 export {
   CURRENCIES,
   MAX_AMOUNT_MINOR,
