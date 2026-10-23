@@ -261,8 +261,9 @@ export interface TransactionDetailView extends TransactionView {
    * by identity: on a transaction resolved before the identity was kept that
    * could not be attributed for certain (or is not yet — the backfill), and in
    * a command's answer stored before the field existed, replayed
-   * (`storedTransactionDetailView`). There, resolution and dispute are told
-   * apart by time (docs/23 D-060).
+   * (`storedTransactionDetailView`). There, which dispute the resolution
+   * decided is not recorded, and the times do not establish it either: a
+   * re-dispute can be dated before a resolution it waited behind (docs/23 D-060).
    */
   resolvedDisputeId: string | null;
   legs: { role: string; organizationId: string; amountMinor: string; currency: string }[];

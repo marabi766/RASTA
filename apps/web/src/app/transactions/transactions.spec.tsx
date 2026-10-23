@@ -54,6 +54,9 @@ const SESSION_MAX_AGE = 12 * 60 * 60;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const STAMP = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };
 const REASON = 'کالا تحویل نشده و پاسخی هم نیامده است';
+/** The caveats of a resolution whose dispute economic did not record. */
+const UNRECORDED = 'سامانه ثبت نکرده است که این تصمیم برای کدام اعتراض گرفته شده است';
+const UNRECORDED_LEGACY = 'ثبت نشده که آن تصمیم برای کدام اعتراض بوده است';
 
 const HELD: Transaction = {
   id: 'TXN_1',
@@ -95,7 +98,14 @@ const terms = (container: HTMLElement): string[] =>
   [...container.querySelectorAll('dt')].map((term) => term.textContent ?? '');
 
 /** The labels of the dispute section's rows, in order. */
-const DISPUTE_TERMS = ['دلیل اعتراض', 'آخرین متن ثبت‌شده برای اعتراض', 'زمان رسیدگی', 'شرح تصمیم'];
+const DISPUTE_TERMS = [
+  'دلیل اعتراض',
+  'آخرین متن ثبت‌شده برای اعتراض',
+  'زمان رسیدگی',
+  'شرح تصمیم',
+  'زمان آخرین رسیدگی',
+  'شرح آخرین تصمیم',
+];
 const disputeTerms = (container: HTMLElement): string[] =>
   terms(container).filter((term) => DISPUTE_TERMS.includes(term));
 
@@ -265,6 +275,9 @@ describe('the dispute state, as the record says it', () => {
     expect(text).toContain('نمی‌تواند بگوید کدام است');
     // No row names a decision: the caveat says why there is none to show.
     expect(terms(container)).not.toContain('شرح تصمیم');
+    // Nor is the resolution this dispute's: its dispute is not recorded.
+    expect(disputeTerms(container)).toEqual(['آخرین متن ثبت‌شده برای اعتراض', 'زمان آخرین رسیدگی']);
+    expect(text).toContain(UNRECORDED_LEGACY);
     await expectAccessible(container);
   });
 
@@ -308,29 +321,72 @@ describe('the dispute state, as the record says it', () => {
     expect(container.textContent).toContain('تحویل تأیید شد');
   });
 
-  it('resolved before the identity was kept: the times, as before', () => {
-    const later = renderScreen(
+  it('re-disputed with an earlier date, refunded, never attributed: the earlier decision is not shown as this dispute’s (Codex on PR 352 r2)', async () => {
+    // A resolved at 10:00; B committed after it dated 09:00 (read before its
+    // lock wait); the platform refunded B from DISPUTED. The backfill leaves a
+    // refunded row unattributed, so the row has B's reason, A's decision and
+    // no `resolvedDisputeId` — and by time, 10:00 >= 09:00, A's decision was B's.
+    const { container } = renderScreen(
       ok({
         ...DISPUTED,
         status: 'REFUNDED',
-        disputeResolvedAt: '2026-10-03T09:00:00.000Z',
-        disputeResolution: 'تحویل تأیید شد',
+        disputedAt: '2026-10-02T09:00:00.000Z',
+        disputeReason: REASON,
+        disputeId: 'TXD_B',
+        disputeResolvedAt: '2026-10-02T10:00:00.000Z',
+        disputeResolution: 'تصمیم برای اعتراض نخست',
         resolvedDisputeId: null,
       }),
     );
-    expect(disputeTerms(later.container)).toEqual(['دلیل اعتراض', 'زمان رسیدگی', 'شرح تصمیم']);
-    later.unmount();
-    const earlier = renderScreen(
-      ok({
-        ...DISPUTED,
-        status: 'REFUNDED',
-        disputeResolvedAt: '2026-10-01T09:00:00.000Z',
-        disputeResolution: 'تحویل تأیید شد',
-        resolvedDisputeId: null,
-      }),
-    );
-    expect(disputeTerms(earlier.container)).toEqual(['دلیل اعتراض']);
+    const text = container.textContent ?? '';
+    // B's reason is B's; the decision is the transaction's last, of no named dispute.
+    expect(disputeTerms(container)).toEqual([
+      'دلیل اعتراض',
+      'زمان آخرین رسیدگی',
+      'شرح آخرین تصمیم',
+    ]);
+    expect(terms(container)).not.toContain('شرح تصمیم');
+    expect(terms(container)).not.toContain('زمان رسیدگی');
+    expect(text).toContain(REASON);
+    expect(text).toContain('تصمیم برای اعتراض نخست');
+    expect(text).toContain(UNRECORDED);
+    await expectAccessible(container);
   });
+
+  it.each([
+    ['after', '2026-10-03T09:00:00.000Z'],
+    ['before', '2026-10-01T09:00:00.000Z'],
+  ])(
+    'resolved before the identity was kept, dated %s the dispute: the times decide nothing',
+    (_, disputeResolvedAt) => {
+      const separate = renderScreen(
+        ok({
+          ...DISPUTED,
+          status: 'REFUNDED',
+          disputeResolvedAt,
+          disputeResolution: 'تحویل تأیید شد',
+          resolvedDisputeId: null,
+        }),
+      );
+      expect(disputeTerms(separate.container)).toEqual([
+        'دلیل اعتراض',
+        'زمان آخرین رسیدگی',
+        'شرح آخرین تصمیم',
+      ]);
+      expect(separate.container.textContent).toContain('تحویل تأیید شد');
+      expect(separate.container.textContent).toContain(UNRECORDED);
+      separate.unmount();
+      // Before D-060 too: the one text may be the reason or the decision, either way.
+      const legacy = renderScreen(
+        ok({ ...DISPUTED, status: 'REFUNDED', disputeResolvedAt, resolvedDisputeId: null }),
+      );
+      expect(disputeTerms(legacy.container)).toEqual([
+        'آخرین متن ثبت‌شده برای اعتراض',
+        'زمان آخرین رسیدگی',
+      ]);
+      expect(legacy.container.textContent).toContain(UNRECORDED_LEGACY);
+    },
+  );
 
   it('resolved before D-060 and attributed since: still says the one text may be either', () => {
     const { container } = renderScreen(
@@ -353,6 +409,7 @@ describe('the dispute state, as the record says it', () => {
         status: 'REFUNDED',
         disputeResolvedAt: '2026-10-01T09:00:00.000Z',
         disputeResolution: 'یک تصمیم قدیمی',
+        resolvedDisputeId: 'TXD_0',
       }),
     );
     const text = container.textContent ?? '';
