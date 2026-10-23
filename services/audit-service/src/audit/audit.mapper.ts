@@ -4,6 +4,7 @@ import type { AuditChange, EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
 import { toContractRefusalProjection } from './contract-refusal-projection';
 import { toCommissionRuleChanges } from './commission-rule-change-projection';
+import { toSettlementRefusalProjection } from './settlement-refusal-projection';
 import { AUDIT_DOMAIN_TOPIC_OWNERS, type AuditDomainTopic } from './audit-producer-topology';
 
 /**
@@ -81,9 +82,10 @@ export interface AuditEventRecord {
 
   // Path B (AUD-004 Phase B, `audit-trail.mapper.ts`). A path-A record carries
   // none of these keys — a domain envelope has nothing to put in them — with
-  // two allow-listed exceptions, each its own projection: a contract refusal's
-  // `reason`, and a commission rule change's `changes`
-  // (`commission-rule-change-projection.ts`). The repository writes an absent
+  // three allow-listed exceptions, each its own projection: a contract refusal's
+  // `reason`, a commission rule change's `changes`
+  // (`commission-rule-change-projection.ts`), and a refused settlement's
+  // `reason` and `changes` (`settlement-refusal-projection.ts`). The repository writes an absent
   // key as SQL NULL, and the record hash already covers all six
   // (`CANONICAL_FIELDS`), so every other path-A row hashes exactly as before.
 
@@ -264,10 +266,14 @@ export function toAuditEventRecord(
   const rawActorId = envelope.actor ? envelope.actor.id : envelope.producer;
   const actorId = boundOptional(rawActorId, LIMITS.actorId);
 
-  // The one family of published events that records a refusal: contract-service's (S-06). Its
-  // closed action and reason replace the event name and the default SUCCESS; nothing else of the
-  // payload is read.
+  // The published events that record a refusal (S-06). Contract-service's: its closed action and
+  // reason replace the event name and the default SUCCESS; nothing else of the payload is read.
   const refusal = toContractRefusalProjection(envelope, delivery);
+
+  // Economic's refused settlement (docs/24 Q-29): REFUSED under its own name, the closed reason,
+  // and the business line and transaction type, unchanged, in `changes`. Validated against
+  // economic's contract and allow-listed; refused to the dead-letter topic otherwise.
+  const settlementRefusal = toSettlementRefusalProjection(envelope, delivery);
 
   // The one published before/after pair: a commission rule's terms (docs/23 D-057). Allow-listed
   // and validated against economic's contract; refused to the dead-letter topic otherwise.
@@ -291,12 +297,15 @@ export function toAuditEventRecord(
     resourceType: bound(envelope.aggregateType, LIMITS.resourceType),
     resourceId: boundOptional(envelope.aggregateId, LIMITS.resourceId),
 
-    // A published domain event is a change that already happened — except the contract refusals
-    // above. Every other refusal never reaches a topic, which is why path B exists.
-    outcome: refusal ? 'REFUSED' : 'SUCCESS',
+    // A published domain event is a change that already happened — except the refusals above.
+    // Every other refusal never reaches a topic, which is why path B exists.
+    outcome: refusal || settlementRefusal ? 'REFUSED' : 'SUCCESS',
     occurrenceCount: 1,
     // Absent, not null, on every other path-A record: its hash is unchanged.
     ...(refusal ? { reason: refusal.reason } : {}),
+    ...(settlementRefusal
+      ? { reason: settlementRefusal.reason, changes: settlementRefusal.changes }
+      : {}),
     ...(ruleChanges ? { changes: ruleChanges } : {}),
   };
 }

@@ -38,9 +38,12 @@ import { z } from 'zod';
  *                              could read directly, so neither field can
  *                              disclose the existence of a record outside the
  *                              caller's authority.
- *   changes                    Published. Always null in path A, whose absence
- *                              is *itself* the documented contract (ADR-053 §
- *                              2.1: a projector row stores no payload value);
+ *   changes                    Published. Null in path A, whose absence is
+ *                              *itself* the documented contract (ADR-053 §
+ *                              2.1: a projector row stores no payload value) —
+ *                              but for the allow-listed projections of a
+ *                              commission rule change's terms and a refused
+ *                              settlement's line and type (`audit.mapper.ts`);
  *                              a path-B row carries the bounded, marker-redacted
  *                              delta its producer declared, or null.
  *

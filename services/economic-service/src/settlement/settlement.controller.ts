@@ -83,6 +83,10 @@ export class SettlementController {
       'without confirmed receipt is impossible by construction, not by check. ' +
       'On failure the funds stay held — this platform never moves money automatically to ' +
       'compensate for a failure it has not diagnosed (docs/08 § 8.6). ' +
+      'Refused with 422 NO_ACTIVE_RULE when no active commission rule covers the ' +
+      'transaction’s business line and settlement fails closed (docs/24 Q-29): nothing moves, ' +
+      'the refusal is recorded (SETTLEMENT_REFUSED), and the same settlement succeeds once a ' +
+      'rule for the line — a 0% rule included (Q-08) — is in force. ' +
       'Requires an `Idempotency-Key`; a retry returns the first response.',
   })
   async settle(
@@ -260,8 +264,10 @@ function toSettlementView(result: SettlementResult) {
     /**
      * False means no active commission rule matched, so nothing was
      * charged. Reported explicitly because "zero because unconfigured" and
-     * "zero because the rate is zero" are different facts and docs/24 Q-08
-     * is open (ADR-023).
+     * "zero because the rate is zero" are different facts (ADR-023): the
+     * pilot's explicit 0% rule per line answers true with a zero commission
+     * (docs/24 Q-08), and false is what a line-less transaction — or any, where
+     * settlement does not fail closed (Q-29) — answers without a rule.
      */
     commissionRuleMatched: result.commissionMatched,
     /** The same fact by name, as the commission row records it (ADR-045 § 2). */

@@ -290,6 +290,50 @@ describe('loadEconomicEnv', () => {
     }
   });
 
+  it('fails a settlement without a rule closed by default outside development and test, and refuses to turn that off there (Q-29)', () => {
+    const required = (env: NodeJS.ProcessEnv) =>
+      loadEconomicEnv({ ...base, ...env }).ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE;
+
+    // Unset: on, unless NODE_ENV — as given — is development or test.
+    for (const NODE_ENV of ['staging', 'production', undefined]) {
+      expect(required({ NODE_ENV })).toBe(true);
+      expect(required({ NODE_ENV, ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: '' })).toBe(true);
+      expect(required({ NODE_ENV, ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: 'true' })).toBe(
+        true,
+      );
+    }
+    for (const NODE_ENV of ['development', 'test']) {
+      expect(required({ NODE_ENV })).toBe(false);
+      expect(required({ NODE_ENV, ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: '' })).toBe(false);
+      // Turned on explicitly, it is on there too.
+      expect(required({ NODE_ENV, ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: 'true' })).toBe(
+        true,
+      );
+      expect(required({ NODE_ENV, ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: 'false' })).toBe(
+        false,
+      );
+    }
+
+    // Off is refused at boot anywhere else, an unset NODE_ENV included.
+    for (const NODE_ENV of ['staging', 'production', undefined]) {
+      expect(() =>
+        loadEconomicEnv({
+          ...base,
+          NODE_ENV,
+          ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: 'false',
+        }),
+      ).toThrow(/ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE/);
+    }
+    // Not a boolean is refused everywhere, rather than read as either.
+    expect(() =>
+      loadEconomicEnv({
+        ...base,
+        NODE_ENV: 'test',
+        ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: 'maybe',
+      }),
+    ).toThrow(EnvValidationError);
+  });
+
   it('refuses to start without the identity provider or the internal secret', () => {
     // Validated once, at startup, and loudly: a service that boots without
     // these discovers it on the first request, which turns a deployment error

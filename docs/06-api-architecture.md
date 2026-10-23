@@ -361,20 +361,30 @@ Charset یا Content-Encoding پشتیبانی‌نشده (`charset.unsupported`
 
 فهرست کامل کدها: [`packages/contracts/src/common/errors.ts`](../packages/contracts/src/common/errors.ts)
 
-| وضعیت | کدهای نمونه                                                                                                      |
-| ----- | ---------------------------------------------------------------------------------------------------------------- |
-| 400   | `VALIDATION_FAILED` · `MALFORMED_REQUEST`                                                                        |
-| 413   | `PAYLOAD_TOO_LARGE`                                                                                              |
-| 415   | `UNSUPPORTED_MEDIA_TYPE`                                                                                         |
-| 401   | `UNAUTHENTICATED` · `TOKEN_EXPIRED` · `TOKEN_INVALID`                                                            |
-| 403   | `FORBIDDEN` · `INSUFFICIENT_ROLE` · **`TENANT_MISMATCH`**                                                        |
-| 404   | `NOT_FOUND`                                                                                                      |
-| 409   | `ALREADY_EXISTS` · `CONFLICT` · `IDEMPOTENCY_KEY_REUSED` · `INVALID_STATE_TRANSITION` · `OPTIMISTIC_LOCK_FAILED` |
-| 422   | `BUSINESS_RULE_VIOLATION` · `INSUFFICIENT_BALANCE` · `LEDGER_UNBALANCED` · `ACTOR_IDENTITY_UNKNOWN`              |
-| 429   | `RATE_LIMIT_EXCEEDED`                                                                                            |
-| 500   | `INTERNAL_ERROR`                                                                                                 |
-| 503   | `UPSTREAM_UNAVAILABLE`                                                                                           |
-| 504   | `UPSTREAM_TIMEOUT`                                                                                               |
+| وضعیت | کدهای نمونه                                                                                                                                       |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400   | `VALIDATION_FAILED` · `MALFORMED_REQUEST`                                                                                                         |
+| 413   | `PAYLOAD_TOO_LARGE`                                                                                                                               |
+| 415   | `UNSUPPORTED_MEDIA_TYPE`                                                                                                                          |
+| 401   | `UNAUTHENTICATED` · `TOKEN_EXPIRED` · `TOKEN_INVALID`                                                                                             |
+| 403   | `FORBIDDEN` · `INSUFFICIENT_ROLE` · **`TENANT_MISMATCH`**                                                                                         |
+| 404   | `NOT_FOUND`                                                                                                                                       |
+| 409   | `ALREADY_EXISTS` · `CONFLICT` · `IDEMPOTENCY_KEY_REUSED` · `INVALID_STATE_TRANSITION` · `OPTIMISTIC_LOCK_FAILED`                                  |
+| 422   | `BUSINESS_RULE_VIOLATION` · `INSUFFICIENT_BALANCE` · `LEDGER_UNBALANCED` · `ACTOR_IDENTITY_UNKNOWN` · `NO_ACTIVE_RULE` · `BUSINESS_LINE_REQUIRED` |
+| 429   | `RATE_LIMIT_EXCEEDED`                                                                                                                             |
+| 500   | `INTERNAL_ERROR`                                                                                                                                  |
+| 503   | `UPSTREAM_UNAVAILABLE`                                                                                                                            |
+| 504   | `UPSTREAM_TIMEOUT`                                                                                                                                |
+
+**`NO_ACTIVE_RULE` (422، economic، docs/24 Q-29).** `POST /v1/settlements` برای تراکنشی که خط کسب‌وکار دارد و هیچ قاعدهٔ
+کارمزد فعالی خطش را نمی‌پوشاند، بیرون از `development` و `test`؛ هیچ چیز جابه‌جا نمی‌شود و همان تسویه پس از نافذشدن قاعده‌ای برای
+خط — صفر درصد هم — موفق است. کدی تازه در `ERROR_CODES`، نه `details[].code`: کلاینت باید آن را از رد قاعدهٔ دیگر جدا کند.
+رد پیش از پاسخ در `SETTLEMENT_REFUSED` ثبت و Commit می‌شود؛ اگر ثبت نشود پاسخ `500` است، نه `422`، و همان کلید دوباره امن است.
+
+**`BUSINESS_LINE_REQUIRED` (422، economic، docs/24 Q-29 و Q-130).** `POST /v1/transactions` بی `businessLine`، هرجا تسویه بسته
+در خطاست (بیرون از `development` و `test`): تعهد بی خط را هیچ قاعده‌ای قیمت نمی‌کند و با صفر تسویه می‌شد. هیچ چیز ثبت یا
+Hold نمی‌شود؛ خط را بفرست. تنها استثنا marketplace-service است که سفارش خودش (`ORDER` به‌صورت `MARKETPLACE_ORDER`) را ثبت
+می‌کند — با منبع راستی‌آزمایی‌شده، نه انتخاب فراخوان. خط نامعتبر همان `400 VALIDATION_FAILED` است.
 
 **تغییر قرارداد (#188، بخش پ).** `CREATOR_IDENTITY_UNKNOWN` (economic، مسیر اپراتور آشتی پرداخت، ADR-064 § ۶) حذف شد و همان
 حالت اکنون `422 ACTOR_IDENTITY_UNKNOWN` است — همان کدی که هر جدایی وظایفِ اثبات‌ناپذیر در پلتفرم برمی‌گرداند (`docs/09` § ۹٫۳).
