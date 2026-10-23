@@ -110,3 +110,51 @@ export function mayRecordSource(
     transactionType === owner.transactionType
   );
 }
+
+/**
+ * The owner-recorded source types that may still record their obligation
+ * without a business line while settlement fails closed (docs/24 Q-29).
+ *
+ * A transaction without a line is one no rule can price — none is written
+ * without a line any more (docs/23 D-057) — so it settles with nothing
+ * charged. With `ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE` on, a new
+ * obligation through `POST /v1/transactions` must therefore name its line
+ * (422 `BUSINESS_LINE_REQUIRED`), or any caller could choose that zero by
+ * leaving the field out (review of #364 round 1, F1).
+ *
+ * The exceptions are the source flows disclosed in docs/24 Q-130, each named
+ * here and identified by its verified source — the owner, signed as itself,
+ * under its own source type and transaction type ({@link mayRecordSource}) —
+ * never by what a caller chooses to send:
+ *
+ * - `ORDER`: marketplace-service's order saga, which sends no line until
+ *   Q-130 is answered.
+ *
+ * The other disclosed flow, a contract statement's obligation, does not come
+ * through this route: `StatementSettlementConsumer` records it with
+ * `ECONOMIC_STATEMENT_BUSINESS_LINE`, null while that is unset. Rows already
+ * recorded without a line are not touched and settle as they always have.
+ */
+export const LINE_LESS_SOURCE_TYPES: ReadonlySet<string> = new Set(['ORDER']);
+
+/**
+ * Whether this caller may record an obligation without a business line while
+ * settlement fails closed: only as the owner of a {@link LINE_LESS_SOURCE_TYPES}
+ * entry, recording its own source.
+ */
+export function mayRecordWithoutLine(
+  caller: { authType?: string; callerService?: string },
+  sourceType: string | undefined,
+  transactionType: string,
+): boolean {
+  return (
+    sourceType !== undefined &&
+    LINE_LESS_SOURCE_TYPES.has(sourceType) &&
+    Object.hasOwn(OWNER_RECORDED_SOURCE_TYPES, sourceType) &&
+    mayRecordSource(caller, sourceType, transactionType)
+  );
+}
+
+/** The refusal's text: fixed, it never echoes what the caller sent. */
+export const BUSINESS_LINE_REQUIRED_MESSAGE =
+  'A business line is required to record this obligation: settlement fails closed without a commission rule for it';

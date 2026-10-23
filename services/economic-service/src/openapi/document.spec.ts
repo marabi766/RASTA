@@ -241,6 +241,46 @@ describe('enrichOpenApiDocument', () => {
     );
   });
 
+  it('names NO_ACTIVE_RULE on the settlement’s 422, and only there (docs/24 Q-29)', () => {
+    const document = emptyDocument();
+    document.paths = {
+      '/v1/settlements': { post: nest('201') },
+      '/v1/transactions': { post: nest('201') },
+    } as never;
+
+    const enriched = enrichOpenApiDocument(document);
+    const unprocessable = (path: string) =>
+      (
+        (enriched.paths[path] as Record<string, never>).post as unknown as {
+          responses: Record<string, { description: string }>;
+        }
+      ).responses['422']?.description;
+
+    expect(unprocessable('/v1/settlements')).toContain('NO_ACTIVE_RULE');
+    expect(unprocessable('/v1/settlements')).toContain('INSUFFICIENT_BALANCE');
+    expect(unprocessable('/v1/transactions')).not.toContain('NO_ACTIVE_RULE');
+  });
+
+  it('names BUSINESS_LINE_REQUIRED on the obligation’s 422, and only there (docs/24 Q-29)', () => {
+    const document = emptyDocument();
+    document.paths = {
+      '/v1/settlements': { post: nest('201') },
+      '/v1/transactions': { post: nest('201') },
+    } as never;
+
+    const enriched = enrichOpenApiDocument(document);
+    const unprocessable = (path: string) =>
+      (
+        (enriched.paths[path] as Record<string, never>).post as unknown as {
+          responses: Record<string, { description: string }>;
+        }
+      ).responses['422']?.description;
+
+    expect(unprocessable('/v1/transactions')).toContain('BUSINESS_LINE_REQUIRED');
+    expect(unprocessable('/v1/transactions')).toContain('INSUFFICIENT_BALANCE');
+    expect(unprocessable('/v1/settlements')).not.toContain('BUSINESS_LINE_REQUIRED');
+  });
+
   it.each([
     '/v1/transactions',
     '/v1/settlements',

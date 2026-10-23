@@ -60,6 +60,21 @@ export const ERROR_CODES = {
   BUSINESS_RULE_VIOLATION: 'BUSINESS_RULE_VIOLATION',
   INSUFFICIENT_BALANCE: 'INSUFFICIENT_BALANCE',
   LEDGER_UNBALANCED: 'LEDGER_UNBALANCED',
+  /**
+   * A settlement refused because no active commission rule covers the
+   * transaction's business line (docs/24 Q-29). Nothing moved; the funds stay
+   * where they were, and the same settlement succeeds once a rule — a 0% one
+   * included (Q-08) — is in force for the line.
+   */
+  NO_ACTIVE_RULE: 'NO_ACTIVE_RULE',
+  /**
+   * A new obligation recorded without a business line while settlement fails
+   * closed (docs/24 Q-29): no rule could ever price it, so it would settle
+   * with nothing charged. Nothing was recorded; send the line. Only the source
+   * flows named in economic-service's `recorded-sources.ts` record without
+   * one, identified by their verified caller (docs/24 Q-130).
+   */
+  BUSINESS_LINE_REQUIRED: 'BUSINESS_LINE_REQUIRED',
 
   // 429
   RATE_LIMIT_EXCEEDED: 'RATE_LIMIT_EXCEEDED',
@@ -125,6 +140,8 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   BUSINESS_RULE_VIOLATION: 422,
   INSUFFICIENT_BALANCE: 422,
   LEDGER_UNBALANCED: 422,
+  NO_ACTIVE_RULE: 422,
+  BUSINESS_LINE_REQUIRED: 422,
   RATE_LIMIT_EXCEEDED: 429,
   INTERNAL_ERROR: 500,
   UPSTREAM_UNAVAILABLE: 503,

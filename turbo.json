@@ -94,6 +94,7 @@
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
         "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE",
         "ECONOMIC_SERVICE_URL",
         "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
         "CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS",
@@ -172,6 +173,7 @@
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
         "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE",
         "ECONOMIC_SERVICE_URL",
         "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
         "CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS",
@@ -298,6 +300,9 @@
     // CONTRACT_SERVICE_URL and ECONOMIC_STATEMENT_BUSINESS_LINE (CON-003 PR 6b):
     // economic-service's statement owner (A-13) and the line a statement's
     // obligation is recorded under (Q-130, unset by default); the same rule.
+    // ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE (docs/24 Q-29): whether a
+    // settlement with no active rule for its line is refused; unset, on outside
+    // development and test. Declared from its first commit, the same rule.
     // ECONOMIC_SERVICE_URL and CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS (CON-003
     // PR 6c): where contract-service asks economic-service, before a statement
     // is SETTLED, for its obligation (A-13), and how long that may take.
@@ -339,6 +344,7 @@
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
         "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE",
         "ECONOMIC_SERVICE_URL",
         "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
         "CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS",

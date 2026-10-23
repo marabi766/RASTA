@@ -2,7 +2,9 @@ import { createTransactionSchema } from './dto';
 import {
   ECONOMIC_RECORDED_SOURCE_TYPES,
   isEconomicRecordedSource,
+  LINE_LESS_SOURCE_TYPES,
   mayRecordSource,
+  mayRecordWithoutLine,
   OWNER_RECORDED_SOURCE_TYPES,
   RECORDED_SOURCE_REFUSAL,
 } from './recorded-sources';
@@ -103,5 +105,49 @@ describe('source types economic-service records itself', () => {
   it('compares exactly: the unique key does too', () => {
     expect(isEconomicRecordedSource('MAINTENANCE_REQUEST')).toBe(true);
     expect(isEconomicRecordedSource('Maintenance_Request')).toBe(false);
+  });
+});
+
+describe('recording without a business line while settlement fails closed (docs/24 Q-29, Q-130)', () => {
+  const saga = { authType: 'SERVICE', callerService: 'marketplace-service' };
+
+  it('names exactly the disclosed owner flow, and only owner-recorded types', () => {
+    expect([...LINE_LESS_SOURCE_TYPES]).toEqual(['ORDER']);
+    for (const sourceType of LINE_LESS_SOURCE_TYPES) {
+      expect(Object.hasOwn(OWNER_RECORDED_SOURCE_TYPES, sourceType)).toBe(true);
+    }
+  });
+
+  it('admits marketplace-service, signed as itself, recording its own ORDER as a MARKETPLACE_ORDER', () => {
+    expect(mayRecordWithoutLine(saga, 'ORDER', 'MARKETPLACE_ORDER')).toBe(true);
+  });
+
+  it.each<[string, { authType?: string; callerService?: string }, string | undefined, string]>([
+    ['a person, with no source', { authType: 'USER' }, undefined, 'LOGISTICS'],
+    ['a person naming ORDER', { authType: 'USER' }, 'ORDER', 'MARKETPLACE_ORDER'],
+    [
+      'a person claiming to be marketplace-service',
+      { authType: 'USER', callerService: 'marketplace-service' },
+      'ORDER',
+      'MARKETPLACE_ORDER',
+    ],
+    ['marketplace-service with no source', saga, undefined, 'MARKETPLACE_ORDER'],
+    ['marketplace-service under another source', saga, 'E2E', 'MARKETPLACE_ORDER'],
+    ['marketplace-service as another type', saga, 'ORDER', 'LOGISTICS'],
+    [
+      'contract-service naming ORDER',
+      { authType: 'SERVICE', callerService: 'contract-service' },
+      'ORDER',
+      'MARKETPLACE_ORDER',
+    ],
+    [
+      'procurement-service with no source',
+      { authType: 'SERVICE', callerService: 'procurement-service' },
+      undefined,
+      'PROCUREMENT_ORDER',
+    ],
+    ['anyone naming STATEMENT', saga, 'STATEMENT', 'CONSTRUCTION_STATEMENT'],
+  ])('refuses %s', (_label, caller, sourceType, transactionType) => {
+    expect(mayRecordWithoutLine(caller, sourceType, transactionType)).toBe(false);
   });
 });
