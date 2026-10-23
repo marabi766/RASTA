@@ -18,6 +18,11 @@ import {
   purgeForeignUnresolvedReturns,
 } from '@/lib/unresolved-return';
 import {
+  markInventoryOpen,
+  purgeAllUnresolvedInventory,
+  purgeForeignUnresolvedInventory,
+} from '@/lib/unresolved-inventory';
+import {
   markContractCommandsOpen,
   purgeAllUnresolvedContractCommands,
   purgeForeignUnresolvedContractCommands,
@@ -40,13 +45,14 @@ import {
 
 /**
  * The browser's side of an account boundary: what an unresolved order,
- * dispute command, statement command, return command or contract command left
- * in `sessionStorage` (`lib/unresolved-order.ts`, `lib/unresolved-dispute.ts`,
- * `lib/unresolved-statement.ts`, `lib/unresolved-return.ts`,
+ * dispute command, statement command, return command, inventory command or
+ * contract command left in `sessionStorage` (`lib/unresolved-order.ts`,
+ * `lib/unresolved-dispute.ts`, `lib/unresolved-statement.ts`,
+ * `lib/unresolved-return.ts`, `lib/unresolved-inventory.ts`,
  * `lib/unresolved-contract-command.ts`) must not outlive. All follow the same
- * rules; a statement, return or contract command is reduced to a marker at
- * logout like a dispute command (a draft, a request, an amendment or a
- * milestone repeated under a fresh key is a second one). A bid command's
+ * rules; a statement, return, inventory or contract command is reduced to a
+ * marker at logout like a dispute command (a draft, a request, a receipt, an
+ * amendment or a milestone repeated under a fresh key is a second one). A bid command's
  * record (`lib/unresolved-bid.ts`), and a tender owner's command's
  * (`lib/unresolved-tender-command.ts`), are markers from the start — they never
  * hold what was sent — so a logout only stops them being written again.
@@ -81,6 +87,7 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
     markAccountOpen();
     markDisputesOpen();
     markReturnsOpen();
+    markInventoryOpen();
     markStatementsOpen();
     markContractCommandsOpen();
     markBidsOpen();
@@ -88,6 +95,7 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
     purgeForeignUnresolvedOrders(owner);
     purgeForeignUnresolvedDisputes(owner);
     purgeForeignUnresolvedReturns(owner);
+    purgeForeignUnresolvedInventory(owner);
     purgeForeignUnresolvedStatements(owner);
     purgeForeignUnresolvedContractCommands(owner);
     purgeForeignUnresolvedBids(owner);
@@ -101,6 +109,7 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
         purgeAllUnresolvedOrders();
         purgeAllUnresolvedDisputes();
         purgeAllUnresolvedReturns();
+        purgeAllUnresolvedInventory();
         purgeAllUnresolvedStatements();
         purgeAllUnresolvedContractCommands();
         purgeAllUnresolvedBids();

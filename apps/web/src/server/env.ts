@@ -398,6 +398,33 @@ const schema = z.object({
     .max(30 * 60)
     .default(10 * 60),
 
+  /**
+   * How long inventory-service keeps an idempotency record, in hours — the
+   * window in which an inventory command re-sent under its original key is
+   * answered with its stored response rather than run again
+   * (`server/inventory-replay.ts`). A receipt or an adjustment run again under
+   * a fresh record would move stock **twice**, so past this window the portal
+   * never re-sends one.
+   *
+   * This **mirrors** inventory-service's `INVENTORY_IDEMPOTENCY_TTL_HOURS`
+   * (same bounds, 1..168; the service's default is 24) and must be changed
+   * together with it, or set lower. The default is that setting's floor, as for
+   * the services above.
+   */
+  WEB_INVENTORY_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+
+  /**
+   * How much earlier than that retention the portal stops re-sending an
+   * inventory command, in seconds: room for the request to reach
+   * inventory-service. Same bounds as the dispute margin.
+   */
+  WEB_INVENTORY_REPLAY_MARGIN_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .max(30 * 60)
+    .default(10 * 60),
+
   WEB_COOKIE_SECURE: z
     .enum(['true', 'false'])
     .default('true')
