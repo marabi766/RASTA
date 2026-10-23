@@ -25,12 +25,27 @@ export { CLAIM_WAIT_MS };
  * `POST /v1/approval-policies`, `POST /v1/projects/{id}/tenders`,
  * `POST /v1/criteria-templates`), where a retried request would otherwise
  * create a second project, need, progress draft, policy version, tender or
- * template, and by scoring a bid. The key is **optional** there: a request
- * without one simply is not deduplicated. Submitting a bid **requires** one
- * (docs/06 § 6.8, construction audit F4: {@link requiredIdempotencyKey}) and
- * stores its request under a keyed hash ({@link RequestHasher}). Every other
- * command carries `expectedVersion`, and a retry of one that already committed
- * is refused by the compare-and-set instead.
+ * template, by scoring a bid, and by the tender commands whose retry would
+ * otherwise do something new (task 060): publishing, cancelling and awarding
+ * (behind the approval gate, a retried request would open a new round once the
+ * first was rejected), inviting, and the opening's three (proposing, withdrawing
+ * the proposal, opening). The key is **optional** there: a request without one
+ * simply is not deduplicated. Submitting a bid **requires** one (docs/06 § 6.8,
+ * construction audit F4: {@link requiredIdempotencyKey}) and stores its request
+ * under a keyed hash ({@link RequestHasher}). A command's key is claimed only
+ * once the caller is authorised. Every request stored names the caller — the
+ * creates' as `{ requester, body }` (PR-350 r1 F3), a score's as its evaluator,
+ * a bid's in its keyed hash — so the same key and body from another person of
+ * the organization is `IDEMPOTENCY_KEY_REUSED`, never their answer; the key is
+ * the organization's (`organizationId` is part of it), so another organization
+ * never meets it at all. A create stored before its request named the caller
+ * (its hash is of the body alone) matches no request since: a retry under such
+ * a key is `IDEMPOTENCY_KEY_REUSED` for everyone, its author included, until the
+ * record expires (`CONSTRUCTION_IDEMPOTENCY_TTL_HOURS`) — refused, never
+ * replayed, and nothing is created twice under it. Every other command carries
+ * `expectedVersion` (or a bid's `expectedRevision`), or answers its own repeat
+ * without writing, and a retry of one that already committed is refused by the
+ * compare-and-set, or answered as it stands, instead.
  *
  * ## Two transactions, and why the second is the domain's own
  *
@@ -105,11 +120,16 @@ export function requiredIdempotencyKey(value: string | undefined): string {
   return value.trim();
 }
 
-/** Records the completion inside the caller's domain transaction. */
+/**
+ * Records the completion inside the caller's domain transaction. `status` is the one the response
+ * was answered with, when a command answers more than one (a gated command: 200 executed, 202
+ * asked for approval); by default the call's `successStatus`.
+ */
 export type RecordCompletion<T> = (
   tx: ExtendedPrismaClient,
   resourceId: string,
   response: T,
+  status?: number,
 ) => Promise<void>;
 
 interface Claim {
@@ -341,8 +361,8 @@ export class IdempotencyStore {
     let recorded = false;
     let result: T;
     try {
-      result = await work(async (tx, resourceId, response) => {
-        await this.complete(tx, claimed.claim, successStatus, resourceId, response);
+      result = await work(async (tx, resourceId, response, status) => {
+        await this.complete(tx, claimed.claim, status ?? successStatus, resourceId, response);
         recorded = true;
       });
     } catch (error) {

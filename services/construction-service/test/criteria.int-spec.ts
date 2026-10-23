@@ -7,6 +7,7 @@ import {
   asAdmin,
   cleanup,
   newOrganizationId,
+  newUserId,
   outboxFor,
   ownerClient,
   untilASessionWaitsOnALock,
@@ -146,16 +147,26 @@ describe('evaluation criteria', () => {
       expect(versions).toHaveLength(created.length);
     });
 
-    it('are idempotent: a retry returns the first, another body under the key is refused', async () => {
+    it('are idempotent: a retry returns the first, another body or another person under the key is refused', async () => {
       const a = org();
       const key = 'template-key-1';
-      const first = await asAdmin(a, () =>
-        w.criteria.createTemplate({ label: 'Idem', criteria: WHOLE }, key),
+      const author = newUserId();
+      const first = await asAdmin(
+        a,
+        () => w.criteria.createTemplate({ label: 'Idem', criteria: WHOLE }, key),
+        author,
       );
-      const again = await asAdmin(a, () =>
-        w.criteria.createTemplate({ label: 'Idem', criteria: WHOLE }, key),
+      const again = await asAdmin(
+        a,
+        () => w.criteria.createTemplate({ label: 'Idem', criteria: WHOLE }, key),
+        author,
       );
-      expect(again.id).toBe(first.id);
+      expect(again).toEqual(first);
+      // Another person of the same organization, the same key and body: refused, not the author's
+      // template (PR-350 r1 F3).
+      await expect(
+        asAdmin(a, () => w.criteria.createTemplate({ label: 'Idem', criteria: WHOLE }, key)),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
       expect(
         (await asAdmin(a, () => w.criteria.listTemplates({ limit: 25, label: 'Idem' }))).items,
       ).toHaveLength(1);

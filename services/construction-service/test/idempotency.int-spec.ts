@@ -7,6 +7,7 @@ import {
   asAdmin,
   cleanup,
   newOrganizationId,
+  newUserId,
   testEnv,
   wire,
   type Wiring,
@@ -44,11 +45,19 @@ describe('idempotency store', () => {
     return id;
   };
 
+  /** One person sends every request below: a request names its author (PR-350 r1 F3). */
+  const author = newUserId();
+  const asAuthor = <T>(organizationId: string, fn: () => T, userId = author): T =>
+    asAdmin(organizationId, fn, userId);
+  /** The request a project creation stores: its author and its body. */
+  const requestOf = (userId: string) => ({ requester: userId, body: PROJECT });
+
   async function seedKey(
     organizationId: string,
     key: string,
     state: 'IN_PROGRESS' | 'COMPLETED',
     expiresAt: Date,
+    requestHash = store.hash(requestOf(author)),
   ): Promise<void> {
     await runUnscoped('seed an idempotency record for the test', () =>
       w.prisma.client.idempotencyKey.create({
@@ -56,7 +65,7 @@ describe('idempotency store', () => {
           organizationId,
           endpoint: CREATE_PROJECT_ENDPOINT,
           key,
-          requestHash: store.hash(PROJECT),
+          requestHash,
           claimToken: `seeded-${key}`,
           state,
           expiresAt,
@@ -72,7 +81,7 @@ describe('idempotency store', () => {
     const a = org();
     await seedKey(a, 'in-flight', 'IN_PROGRESS', new Date(Date.now() + 60_000));
 
-    await expect(asAdmin(a, () => w.projects.create(PROJECT, 'in-flight'))).rejects.toMatchObject({
+    await expect(asAuthor(a, () => w.projects.create(PROJECT, 'in-flight'))).rejects.toMatchObject({
       code: 'CONFLICT',
     });
   });
@@ -81,8 +90,31 @@ describe('idempotency store', () => {
     const a = org();
     await seedKey(a, 'expired', 'COMPLETED', new Date(Date.now() - 60_000));
 
-    const project = await asAdmin(a, () => w.projects.create(PROJECT, 'expired'));
+    const project = await asAuthor(a, () => w.projects.create(PROJECT, 'expired'));
     expect(project.status).toBe('DRAFT');
+  });
+
+  it('replays a completed key to its author only: another person of the organization, the same key and body, is 409 IDEMPOTENCY_KEY_REUSED (PR-350 r1 F3)', async () => {
+    const a = org();
+    const first = await asAuthor(a, () => w.projects.create(PROJECT, 'authored'));
+
+    await expect(
+      asAuthor(a, () => w.projects.create(PROJECT, 'authored'), newUserId()),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+    expect(await asAuthor(a, () => w.projects.create(PROJECT, 'authored'))).toEqual(first);
+    expect(await projectsOf(a)).toHaveLength(1);
+  });
+
+  it('a record stored before a request named its author (its hash of the body alone) replays to nobody: 409 IDEMPOTENCY_KEY_REUSED until it expires, nothing created', async () => {
+    const a = org();
+    await seedKey(a, 'legacy', 'COMPLETED', new Date(Date.now() + 60_000), store.hash(PROJECT));
+
+    for (const userId of [author, newUserId()]) {
+      await expect(
+        asAuthor(a, () => w.projects.create(PROJECT, 'legacy'), userId),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+    }
+    expect(await projectsOf(a)).toEqual([]);
   });
 
   it('purges expired records and keeps live ones', async () => {
@@ -112,7 +144,7 @@ describe('idempotency store', () => {
 
   it('completes the key, with the created project’s id, in the project’s own transaction', async () => {
     const a = org();
-    const project = await asAdmin(a, () => w.projects.create(PROJECT, 'atomic'));
+    const project = await asAuthor(a, () => w.projects.create(PROJECT, 'atomic'));
     expect(await keyRow(a, 'atomic')).toMatchObject({
       state: 'COMPLETED',
       responseStatus: 201,
@@ -120,7 +152,7 @@ describe('idempotency store', () => {
       responseBody: expect.objectContaining({ id: project.id }),
     });
 
-    const replay = await asAdmin(a, () => w.projects.create(PROJECT, 'atomic'));
+    const replay = await asAuthor(a, () => w.projects.create(PROJECT, 'atomic'));
     expect(replay).toEqual(project);
     expect(await projectsOf(a)).toHaveLength(1);
   });
@@ -131,7 +163,7 @@ describe('idempotency store', () => {
     jest.spyOn(projectTransitionsTotal, 'inc').mockImplementationOnce(() => {
       throw new Error('the process died after the commit');
     });
-    await expect(asAdmin(a, () => w.projects.create(PROJECT, 'after-commit'))).rejects.toThrow(
+    await expect(asAuthor(a, () => w.projects.create(PROJECT, 'after-commit'))).rejects.toThrow(
       /died after the commit/,
     );
 
@@ -140,7 +172,7 @@ describe('idempotency store', () => {
       state: 'COMPLETED',
       resourceId: created!.id,
     });
-    const retried = await asAdmin(a, () => w.projects.create(PROJECT, 'after-commit'));
+    const retried = await asAuthor(a, () => w.projects.create(PROJECT, 'after-commit'));
     expect(retried.id).toBe(created!.id);
     expect(await projectsOf(a)).toHaveLength(1);
   });
@@ -155,14 +187,14 @@ describe('idempotency store', () => {
       await complete(...args);
       throw new Error('the transaction fails after the key was completed in it');
     });
-    await expect(asAdmin(a, () => w.projects.create(PROJECT, 'rolled-back'))).rejects.toThrow(
+    await expect(asAuthor(a, () => w.projects.create(PROJECT, 'rolled-back'))).rejects.toThrow(
       /fails after the key/,
     );
     expect(await projectsOf(a)).toEqual([]);
     expect(await keyRow(a, 'rolled-back')).toBeNull();
 
     // A corrected retry with the same key runs once.
-    await asAdmin(a, () => w.projects.create(PROJECT, 'rolled-back'));
+    await asAuthor(a, () => w.projects.create(PROJECT, 'rolled-back'));
     expect(await projectsOf(a)).toHaveLength(1);
   });
 
@@ -181,7 +213,7 @@ describe('idempotency store', () => {
             organizationId: a,
             endpoint: CREATE_PROJECT_ENDPOINT,
             key: 'purged',
-            requestHash: store.hash(PROJECT),
+            requestHash: store.hash(requestOf(author)),
             claimToken: 'the-competing-claim',
             state: 'IN_PROGRESS',
             expiresAt: new Date(Date.now() + 60_000),
@@ -191,7 +223,7 @@ describe('idempotency store', () => {
       return createProject(tx, input);
     });
 
-    await expect(asAdmin(a, () => w.projects.create(PROJECT, 'purged'))).rejects.toMatchObject({
+    await expect(asAuthor(a, () => w.projects.create(PROJECT, 'purged'))).rejects.toMatchObject({
       code: 'CONFLICT',
     });
     expect(await projectsOf(a)).toEqual([]);
@@ -205,7 +237,7 @@ describe('idempotency store', () => {
   it('lets exactly one of many concurrent requests with one key create', async () => {
     const a = org();
     const outcomes = await Promise.allSettled(
-      Array.from({ length: 8 }, () => asAdmin(a, () => w.projects.create(PROJECT, 'racing'))),
+      Array.from({ length: 8 }, () => asAuthor(a, () => w.projects.create(PROJECT, 'racing'))),
     );
 
     const projects = await projectsOf(a);
@@ -283,7 +315,7 @@ describe('idempotency store', () => {
 
     try {
       const started = Date.now();
-      const refused = asAdmin(a, () => w.projects.create(PROJECT, key)).catch(
+      const refused = asAuthor(a, () => w.projects.create(PROJECT, key)).catch(
         (error: unknown) => error,
       );
       const until = Date.now() + 5_000;
@@ -307,7 +339,7 @@ describe('idempotency store', () => {
     }
 
     // Once the holder lets go, the next retry takes the lapsed claim over.
-    const project = await asAdmin(a, () => w.projects.create(PROJECT, key));
+    const project = await asAuthor(a, () => w.projects.create(PROJECT, key));
     expect((await projectsOf(a)).map((row) => row.id)).toEqual([project.id]);
   }, 30_000);
 

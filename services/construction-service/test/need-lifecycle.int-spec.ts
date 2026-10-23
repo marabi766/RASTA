@@ -4,6 +4,7 @@ import {
   asAdmin,
   cleanup,
   newOrganizationId,
+  newUserId,
   outboxFor,
   outboxStream,
   wire,
@@ -447,17 +448,22 @@ describe('need lifecycle', () => {
     expect(submitted.items.map((item) => item.id)).toEqual([n2.id]);
   });
 
-  it('adds a need idempotently, and refuses the same key on another project', async () => {
+  it('adds a need idempotently, and refuses the same key on another project or from another person', async () => {
     const a = org();
     const first = await newProject(a);
     const second = await newProject(a);
     const dto = { title: 'Bitumen', description: 'Tack coat' };
+    const author = newUserId();
+    const add = (projectId: string, user = author) =>
+      asAdmin(a, () => w.needs.add(projectId, dto, 'need-key'), user);
 
-    const once = await asAdmin(a, () => w.needs.add(first.id, dto, 'need-key'));
-    const again = await asAdmin(a, () => w.needs.add(first.id, dto, 'need-key'));
+    const once = await add(first.id);
+    const again = await add(first.id);
     expect(again).toEqual(once);
 
-    await expect(asAdmin(a, () => w.needs.add(second.id, dto, 'need-key'))).rejects.toMatchObject({
+    await expect(add(second.id)).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+    // Another person of the same organization, the same key, project and body (PR-350 r1 F3).
+    await expect(add(first.id, newUserId())).rejects.toMatchObject({
       code: 'IDEMPOTENCY_KEY_REUSED',
     });
   });

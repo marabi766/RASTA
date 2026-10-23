@@ -112,7 +112,13 @@ export class ProjectService {
       return view;
     };
 
-    return this.idempotency.run(CREATE_PROJECT_ENDPOINT, idempotencyKey, dto, 201, work);
+    return this.idempotency.run(
+      CREATE_PROJECT_ENDPOINT,
+      idempotencyKey,
+      { requester: actor, body: dto },
+      201,
+      work,
+    );
   }
 
   /** GetProject — the caller's own organization only; any other answers 404. */

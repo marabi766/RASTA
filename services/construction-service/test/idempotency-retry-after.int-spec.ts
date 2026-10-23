@@ -60,10 +60,22 @@ describe('an Idempotency-Key in flight: 409 with Retry-After (real HTTP)', () =>
     return { claimed, release, restore: () => spy.mockRestore() };
   }
 
-  const createProject = (organizationId: string, key: string, body: object = PROJECT) =>
+  /** One person per organization sends the requests below: a request names its author (PR-350 r1 F3). */
+  const admins = new Map<string, string>();
+  const adminOf = (organizationId: string): string => {
+    if (!admins.has(organizationId)) admins.set(organizationId, orgAdmin(organizationId));
+    return admins.get(organizationId)!;
+  };
+
+  const createProject = (
+    organizationId: string,
+    key: string,
+    body: object = PROJECT,
+    token = adminOf(organizationId),
+  ) =>
     request(http)
       .post('/v1/projects')
-      .set('authorization', `Bearer ${orgAdmin(organizationId)}`)
+      .set('authorization', `Bearer ${token}`)
       .set('idempotency-key', key)
       .send(body);
 
@@ -102,6 +114,11 @@ describe('an Idempotency-Key in flight: 409 with Retry-After (real HTTP)', () =>
       expect(retried.status).toBe(201);
       expect(retried.body).toEqual(done.body);
       expect(retried.headers['retry-after']).toBeUndefined();
+
+      // Another person of the organization, the same key and body: not the author's project.
+      const colleague = await createProject(org, key, PROJECT, orgAdmin(org));
+      expect(colleague.status).toBe(409);
+      expect(colleague.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
     } finally {
       // Whatever failed above, the held request finishes inside this test:
       // left running, it would outlive the application and hold Jest open.
@@ -129,7 +146,7 @@ describe('an Idempotency-Key in flight: 409 with Retry-After (real HTTP)', () =>
       const raw = JSON.stringify(PROJECT).replace(/^\{/, `{"${name}":{"x":1},`);
       const refused = await request(http)
         .post('/v1/projects')
-        .set('authorization', `Bearer ${orgAdmin(org)}`)
+        .set('authorization', `Bearer ${adminOf(org)}`)
         .set('idempotency-key', key)
         .set('content-type', 'application/json')
         .send(raw);

@@ -72,6 +72,7 @@ import {
   bidAccessLogEntrySchema,
   bidOpeningProposalViewSchema,
   bidOpeningProposalWithdrawnViewSchema,
+  withdrawProposalSchema,
   bidsOpenedViewSchema,
   listBidAccessLogQuerySchema,
   openedBidViewSchema,
@@ -316,6 +317,7 @@ const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'PUT /v1/tenders/{id}/criteria': setCriteriaSchema,
   'POST /v1/tenders/{id}/publish': publishTenderSchema,
   'POST /v1/tenders/{id}/invitations': inviteBidderSchema,
+  'POST /v1/tenders/{id}/open-bids/proposal/withdraw': withdrawProposalSchema,
   'POST /v1/tenders/{id}/bids': submitBidSchema,
   'PUT /v1/tenders/{id}/bids/{bidId}': reviseBidSchema,
   'POST /v1/tenders/{id}/bids/{bidId}/withdraw': withdrawBidSchema,
@@ -353,6 +355,16 @@ const IDEMPOTENT = new Set([
   'POST /v1/projects/{id}/tenders',
   'POST /v1/criteria-templates',
   'POST /v1/tenders/{id}/bids/{bidId}/scores',
+  // The tender commands whose retry would otherwise do something new (task 060): a gated one would
+  // open a new round once the first was rejected, an invitation would be refused as a second, a
+  // proposal made afresh, a withdrawal take back a proposal made since.
+  'POST /v1/tenders/{id}/publish',
+  'POST /v1/tenders/{id}/cancel',
+  'POST /v1/tenders/{id}/award',
+  'POST /v1/tenders/{id}/invitations',
+  'POST /v1/tenders/{id}/open-bids',
+  'POST /v1/tenders/{id}/open-bids/proposal',
+  'POST /v1/tenders/{id}/open-bids/proposal/withdraw',
   ...REQUIRED_IDEMPOTENT,
 ]);
 
@@ -537,7 +549,7 @@ export const REFUSAL_REASONS: Record<string, RouteRefusals> = {
   },
   'POST /v1/tenders/{id}/open-bids/proposal': { opening: ['CONFLICT_OF_INTEREST', 'NOT_CLOSED'] },
   'POST /v1/tenders/{id}/open-bids/proposal/withdraw': {
-    opening: ['CONFLICT_OF_INTEREST', 'NOT_CLOSED', 'NO_PROPOSAL'],
+    opening: ['CONFLICT_OF_INTEREST', 'NOT_CLOSED', 'NO_PROPOSAL', 'PROPOSAL_SUPERSEDED'],
   },
   'GET /v1/tenders/{id}/bids': { opening: ['CONFLICT_OF_INTEREST', 'INTEGRITY'] },
   'GET /v1/tenders/{id}/bids/{bidId}': {
@@ -619,7 +631,12 @@ const FORBIDDEN_REASONS: ReadonlySet<string> = new Set([
   'APPROVER_IS_EVALUATOR',
   'READ_ROLE_NOT_HELD',
 ]);
-const CONFLICT_REASONS: ReadonlySet<string> = new Set(['APPROVAL_STALE', 'ALREADY_AWARDED']);
+const CONFLICT_REASONS: ReadonlySet<string> = new Set([
+  'APPROVAL_STALE',
+  'ALREADY_AWARDED',
+  // The proposal a withdrawal named is no longer the one that stands (task 060).
+  'PROPOSAL_SUPERSEDED',
+]);
 
 export function refusalStatusOf(reason: string): '403' | '409' | '422' {
   if (FORBIDDEN_REASONS.has(reason)) return '403';
@@ -679,7 +696,7 @@ export const ERROR_DESCRIPTIONS: Record<number, string> = {
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
   403: 'Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the person who wrote or submitted it approving it (four eyes; a union-written policy always); on requesting approval or completing, a union-written policy in force whose union no longer governs the organization (re-confirmed at use); on evaluating bids (ADR-067 § 4), a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a caller identity-service no longer shows as a member of the organization with an evaluating role, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST), with CONSTRUCTION_COI_RULES naming it the user who created or published the tender (EVALUATOR_IS_TENDER_AUTHOR), and an evaluator who stood down from the bid (RECUSED) — each refusal audited; on awarding a tender (ADR-067 § 3), the same refusals for the same callers (a member of a bidding organization is CONFLICT_OF_INTEREST) and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (AWARDER_IS_EVALUATOR). A user token without `rasta_uid` (the platform user id) on a route that records or compares who acted — proposing, approving or withdrawing a bid opening; creating, submitting or approving an approval policy; creating or publishing a tender; deciding on, scoring, standing down from or completing the evaluation of bids — is 403 with a fixed message (#188). On evaluation, a person who stood down from the bid under another user id (RECUSED) or already evaluates it under another user id (SAME_PERSON_AS_EVALUATOR) — one person is one evaluator. Approval gates of a tender (CON-002 PR 11): deciding a tender approval as the person who made the request (separation of duties through the shared helper; the same person under two user ids or another issuer is one person); on an award approval, a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST — also on reading it), and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (APPROVER_IS_EVALUATOR). Refusals on the caller’s own tender are audited in the tender approval log.',
   404: 'Not found — also returned for a project, need, progress report, tender, policy or approval that belongs to another organization (and, for an approval, whose authority the caller is not), so its existence is never disclosed. On the owner’s side of a tender’s bids and its evaluation, ownership is checked before any role: another organization’s caller gets this 404 whatever roles it holds (#223 F3).',
-  409: 'Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.',
+  409: 'Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.',
   422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): a transition the state machine does not have; requesting approval with no active policy or no step for the estimate (the platform never approves by default) or without the configured preconditions; deciding a step that is not PENDING; starting when a contract is required; completing below 100% progress; progress that goes down; progress outside IN_PROGRESS; creating a tender under a project that is not APPROVED; editing a tender, or setting its criteria, when it is not a DRAFT; cancelling a project that has a tender not yet finished; opening the bids of a tender that is not CLOSED (NOT_CLOSED), reading one that is not opened (NOT_OPENED), or a receipt chain or stored bid that differs from what audit-service holds (INTEGRITY) — nothing is opened; evaluating (ADR-067): a tender that is not EVALUATING (NOT_EVALUATING), a bid not in the state the command needs (BID_NOT_OPENED, BID_NOT_QUALIFIED, BID_NOT_EVALUABLE), a second and different decision on a bid (BID_ALREADY_DECIDED), a qualification of a contractor supplier-service no longer finds eligible (BIDDER_NOT_ELIGIBLE), a criterion the tender does not have (UNKNOWN_CRITERION), a score outside what the criterion allows (SCORE_OUT_OF_RANGE), more evaluators than CONSTRUCTION_EVALUATION_MAX_EVALUATORS (EVALUATOR_LIMIT), completing with no qualified bid (NO_QUALIFIED_BID) or with one not scored in full or an opened bid undecided (EVALUATION_INCOMPLETE). ACTOR_IDENTITY_UNKNOWN (#188): a separation of duties cannot be proven because a record names no stable identity (written before issuer and subject were recorded, or under another issuer) — the bid-opening proposer, a policy’s author or submitter, a tender’s creator or publisher, or another evaluator of the bid; never treated as another person. Awarding (ADR-067 § 3): a tender that is not EVALUATED (NOT_EVALUATED), a bid that is not a qualified one of it (BID_NOT_QUALIFIED), a choice of any rank but the single first without a justification (JUSTIFICATION_REQUIRED), a winner supplier-service no longer finds eligible (WINNER_NOT_ELIGIBLE — nothing falls back to the next rank), an awarder the records cannot show to be a different person from the evaluators (ACTOR_IDENTITY_UNKNOWN), the approval gate (APPROVAL_POLICY_REQUIRED), or a receipt chain or stored bid that differs from what audit-service holds (INTEGRITY). Approval gates of a tender (CON-002 PR 11): publishing, awarding or cancelling with no active approval policy for the workflow, or one with no step that applies (APPROVAL_POLICY_REQUIRED — the platform never approves by default); a request whose maker cannot be told from its approver, or an approver of an award who cannot be told from the evaluators (ACTOR_IDENTITY_UNKNOWN); cancelling with the reason code NO_QUALIFIED_BID when the tender is not EVALUATING with no qualified bid (REASON_CODE_NOT_APPLICABLE).',
   500: 'Unexpected server error.',
   503: 'organization-service could not confirm the union hierarchy (UPSTREAM_UNAVAILABLE); the policy write, or the approval round a union-written policy would open, is refused — never assumed (Q-70 (7), fail closed). Also: publishing a tender when no key-encryption key is configured (CONSTRUCTION_TENDER_KEKS): a tender whose bids cannot be sealed is not opened (ADR-066). Opening or reading bids: audit-service, which holds the receipt chain and its head, is unreachable or has not yet received the newest receipts, or the key-encryption key is not available — never answered from this service’s own copy of the chain (ADR-066 § 2). Evaluating bids: identity-service, which says who the caller is now, or — for a qualification — supplier-service, which says whether the contractor is still eligible, cannot be reached; nothing is done (fail closed). A contractor reading its own opened bid: audit-service or the key-encryption key as for the owner. Awarding: identity-service, supplier-service (the winner’s standing now), audit-service or the key-encryption key cannot be reached; nothing is awarded.',

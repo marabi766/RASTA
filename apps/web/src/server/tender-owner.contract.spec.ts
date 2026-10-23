@@ -211,7 +211,7 @@ describe('who may publish — `assertCanWrite`', () => {
     expect(order.every((index) => index >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     expect(publicationService).toContain(
-      'asyncpublish(tenderId:string,dto:PublishTenderDto):Promise<Gated<TenderView>>{const{organizationId,actor}=this.access.assertCanWrite();',
+      'asyncpublish(tenderId:string,dto:PublishTenderDto,idempotencyKey?:string,):Promise<Gated<TenderView>>{const{organizationId,actor}=this.access.assertCanWrite();',
     );
   });
 
@@ -296,18 +296,35 @@ describe('an opener who may not read the tender', () => {
 });
 
 describe('which commands may be sent again after a lost answer (PR 345 reviews 1 and 2, PR 346 review 1)', () => {
-  it('none of the owner’s publication, opening or decision commands keeps its result under its Idempotency-Key — the gateway only requires the header', () => {
-    for (const source of [publicationService, squash(openService)!, tenderApprovals]) {
-      expect(source).not.toContain('IdempotencyStore');
-      expect(source).not.toContain('idempotency.run(');
+  it('publishing and the opening’s three keep their first answer under the Idempotency-Key since task 060; a decision keeps none — and the portal sends none of them again yet', () => {
+    // The server side (task 060): the first answer is kept with the work it answers for.
+    expect(publicationService).toContain(
+      'this.idempotency.run(PUBLISH_TENDER_ENDPOINT,idempotencyKey,',
+    );
+    for (const endpoint of [
+      'OPEN_BIDS_ENDPOINT',
+      'PROPOSE_OPENING_ENDPOINT',
+      'WITHDRAW_PROPOSAL_ENDPOINT',
+    ]) {
+      expect(squash(openService)).toContain(`(${endpoint},idempotencyKey,`);
     }
-    for (const controller of [publication, opening, approvals]) {
-      expect(squash(controller.getText())).not.toContain("@Headers('idempotency-key')");
+    for (const [tree, name] of [
+      [publication, 'publish'],
+      [opening, 'open'],
+      [opening, 'propose'],
+      [opening, 'withdrawProposal'],
+    ] as const) {
+      expect(method(tree, name)).toContain("@Headers('idempotency-key')idempotencyKey?:string");
     }
-    // The publication a re-send would make: a rejected round is ended, so the same version asks anew.
+    // A decision keeps nothing by key.
+    expect(tenderApprovals).not.toContain('idempotency');
+    expect(squash(approvals.getText())).not.toContain("@Headers('idempotency-key')");
+    // Without the key the gate still asks anew once a round was rejected: the key is what keeps a
+    // re-send the first send's.
     expect(approvalGate).toContain(
       "kind:'REQUESTED',request:awaitthis.open(tx,input),created:true,",
     );
+    // The portal's side is its own follow-up: until then these stay view-only after a lost answer.
     for (const command of [
       'PUBLISH',
       'GRANT',
@@ -369,9 +386,9 @@ describe('who may open — `assertCanOpenBids`', () => {
   it('only a CLOSED tender is proposed for opening; a proposal is idempotent, so is an opening', () => {
     const propose = method(openServiceTree, 'proposeOpening');
     expect(propose).toContain("if(found.status!=='CLOSED')throwthis.refused('NOT_CLOSED');");
-    expect(propose).toContain('alreadyProposed:true');
+    expect(method(openServiceTree, 'proposeOnce')).toContain('alreadyProposed:true');
     expect(squash(openService)).toContain('alreadyOpened');
-    const withdraw = method(openServiceTree, 'withdrawProposal');
+    const withdraw = method(openServiceTree, 'withdrawOnce');
     expect(withdraw).toContain("throwthis.refused('NO_PROPOSAL');");
   });
 });

@@ -110,7 +110,13 @@ export class CriteriaService {
       }
     };
 
-    return this.idempotency.run(CREATE_TEMPLATE_ENDPOINT, idempotencyKey, dto, 201, work);
+    return this.idempotency.run(
+      CREATE_TEMPLATE_ENDPOINT,
+      idempotencyKey,
+      { requester: actor, body: dto },
+      201,
+      work,
+    );
   }
 
   async getTemplate(templateId: string): Promise<CriteriaTemplateView> {

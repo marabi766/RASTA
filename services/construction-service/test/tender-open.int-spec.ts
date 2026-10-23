@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { RastaError, runUnscoped, runWithContext } from '@rasta/nest-common';
 import type { PrismaClient } from '../src/generated/prisma';
@@ -65,6 +65,9 @@ const deferred = () => {
 
 const payloadOf = (row: { payload: unknown }) => eventEnvelopeSchema.parse(row.payload).payload;
 
+/** A withdrawal that is refused before the proposal it names is looked at (who, identity-service). */
+const ANY_PROPOSAL = { proposedAt: '2026-01-01T00:00:00.000Z' };
+
 describe('opening the bids of a tender', () => {
   let w: Wiring;
   const organizations: string[] = [];
@@ -83,6 +86,11 @@ describe('opening the bids of a tender', () => {
     runUnscoped('the suite reads the tender it made', () =>
       w.prisma.client.tender.findFirstOrThrow({ where: { id: tenderId } }),
     );
+
+  /** What a withdrawal of the proposal standing names (task 060); none standing: an instant of no proposal. */
+  const standingProposal = async (tenderId: string) => ({
+    proposedAt: ((await rowOf(tenderId)).openingProposedAt ?? new Date(0)).toISOString(),
+  });
 
   const bidRows = (tenderId: string) =>
     runUnscoped('the suite reads the bids', () =>
@@ -1247,7 +1255,7 @@ describe('opening the bids of a tender', () => {
         () => w.tenderOpen.listAccessLog(tenderId, { limit: 10 }),
         () => w.tenderOpen.open(tenderId),
         () => w.tenderOpen.proposeOpening(tenderId),
-        () => w.tenderOpen.withdrawProposal(tenderId),
+        () => w.tenderOpen.withdrawProposal(tenderId, ANY_PROPOSAL),
       ];
       for (const call of calls) {
         expect(await codeOf(asCarol(owner, call))).toMatchObject({ code: 'FORBIDDEN' });
@@ -1314,7 +1322,7 @@ describe('opening the bids of a tender', () => {
         () => w.tenderOpen.listAccessLog(tenderId, { limit: 10 }),
         () => w.tenderOpen.open(tenderId),
         () => w.tenderOpen.proposeOpening(tenderId),
-        () => w.tenderOpen.withdrawProposal(tenderId),
+        () => w.tenderOpen.withdrawProposal(tenderId, ANY_PROPOSAL),
       ];
       for (const call of calls) {
         expect(await codeOf(asCarol(owner, call))).toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
@@ -1374,6 +1382,7 @@ describe('opening the bids of a tender', () => {
       expect(await propose(owner, tenderId, alice)).toEqual({
         tenderId,
         proposedBy: alice,
+        proposedAt: (await rowOf(tenderId)).openingProposedAt!.toISOString(),
         alreadyProposed: false,
       });
 
@@ -1404,6 +1413,7 @@ describe('opening the bids of a tender', () => {
       expect(await propose(owner, tenderId, bob)).toEqual({
         tenderId,
         proposedBy: alice,
+        proposedAt: (await rowOf(tenderId)).openingProposedAt!.toISOString(),
         alreadyProposed: true,
       });
       expect(await propose(owner, tenderId, alice)).toMatchObject({ alreadyProposed: true });
@@ -1569,7 +1579,8 @@ describe('opening the bids of a tender', () => {
         const stale = await rowOf(tenderId);
         // Between bob reading alice's proposal and the clearing, alice withdraws and proposes afresh.
         w4.memberships.beforeAnswer.set(alice, async () => {
-          await asAdmin(owner, () => w4.tenderOpen.withdrawProposal(tenderId), alice);
+          const named = await standingProposal(tenderId);
+          await asAdmin(owner, () => w4.tenderOpen.withdrawProposal(tenderId, named), alice);
           await new Promise((resolve) => setTimeout(resolve, 10));
           await propose(owner, tenderId, alice);
           w4.memberships.of.set(alice, [bidders[0]!]);
@@ -1610,16 +1621,20 @@ describe('opening the bids of a tender', () => {
 
     describe('a proposal withdrawn by its proposer', () => {
       afterEach(() => w4.memberships.reset());
-      const withdraw = (owner: string, tenderId: string, user: string) =>
-        asAdmin(owner, () => w4.tenderOpen.withdrawProposal(tenderId), user);
+      const withdraw = async (owner: string, tenderId: string, user: string) => {
+        const named = await standingProposal(tenderId);
+        return asAdmin(owner, () => w4.tenderOpen.withdrawProposal(tenderId, named), user);
+      };
 
       it('is cleared, audited and announced; anyone eligible may then propose afresh', async () => {
         const { owner, tenderId } = await closedTender();
         await propose(owner, tenderId, alice);
+        const { proposedAt } = await standingProposal(tenderId);
 
         expect(await withdraw(owner, tenderId, alice)).toEqual({
           tenderId,
           withdrawnProposal: alice,
+          proposedAt,
         });
 
         expect(await rowOf(tenderId)).toMatchObject({
@@ -1665,6 +1680,304 @@ describe('opening the bids of a tender', () => {
         w4.memberships.of.set(alice, [bidders[0]!]);
 
         expect(await codeOf(withdraw(owner, tenderId, alice))).toMatchObject({ code: 'FORBIDDEN' });
+      });
+    });
+
+    describe('a retry is the first request’s, and a withdrawal names its proposal (task 060)', () => {
+      afterEach(() => w4.memberships.reset());
+      const newKey = () => `retry-${randomUUID()}`;
+      const proposeKeyed = (owner: string, tenderId: string, user: string, key?: string) =>
+        asAdmin(owner, () => w4.tenderOpen.proposeOpening(tenderId, key), user);
+      const withdrawNamed = (
+        owner: string,
+        tenderId: string,
+        user: string,
+        named: { proposedAt: string },
+        key?: string,
+      ) => asAdmin(owner, () => w4.tenderOpen.withdrawProposal(tenderId, named, key), user);
+      const openKeyed = (owner: string, tenderId: string, user: string, key?: string) =>
+        asAdmin(owner, () => w4.tenderOpen.open(tenderId, key), user);
+      /** Two proposals by one person are told apart by their instant (milliseconds): never the same one. */
+      const nextMillisecond = () => new Promise((resolve) => setTimeout(resolve, 5));
+      const withdrawals = async (owner: string, tenderId: string) =>
+        (await eventsOf(owner, 'BID_OPENING_PROPOSAL_WITHDRAWN', tenderId)).map(
+          (event) => payloadOf(event) as { proposedBy: string; reason: string },
+        );
+      const rowsOf = async (tenderId: string, purpose: string) =>
+        (await logOf(tenderId))
+          .filter((row) => row.purpose === purpose)
+          .map((row) => `${row.accessorUserId}:${row.outcome}:${row.refusalCode ?? '-'}`);
+
+      it('a withdrawal of a proposal that no longer stands is 409 PROPOSAL_SUPERSEDED: the newer one untouched, the refusal audited', async () => {
+        const { owner, tenderId } = await closedTender();
+        const first = await propose(owner, tenderId, alice);
+        await withdrawNamed(owner, tenderId, alice, first);
+        await nextMillisecond();
+        const second = await propose(owner, tenderId, alice);
+        expect(second.proposedAt).not.toBe(first.proposedAt);
+
+        // The first withdrawal again — the answer was lost, or a second tab — names the first proposal.
+        const error = (await codeOf(withdrawNamed(owner, tenderId, alice, first))) as {
+          code?: string;
+          details?: { path: string; code: string }[];
+        };
+        expect(error.code).toBe('CONFLICT');
+        expect(error.details).toEqual([
+          expect.objectContaining({ path: 'opening', code: 'PROPOSAL_SUPERSEDED' }),
+        ]);
+
+        // The newer proposal stands, as it was; only the first withdrawal is on record.
+        const row = await rowOf(tenderId);
+        expect(row.openingProposedBy).toBe(alice);
+        expect(row.openingProposedAt!.toISOString()).toBe(second.proposedAt);
+        expect(await withdrawals(owner, tenderId)).toHaveLength(1);
+        expect(await rowsOf(tenderId, 'WITHDRAW_PROPOSAL')).toEqual([
+          `${alice}:GRANTED:-`,
+          `${alice}:REFUSED:PROPOSAL_SUPERSEDED`,
+        ]);
+        // Another person naming a stale proposal is told the same, before who may withdraw.
+        expect(await codeOf(withdrawNamed(owner, tenderId, bob, first))).toMatchObject({
+          code: 'CONFLICT',
+        });
+        // The proposal standing, named, is withdrawn — by its proposer only.
+        expect(await codeOf(withdrawNamed(owner, tenderId, bob, second))).toMatchObject({
+          code: 'FORBIDDEN',
+        });
+        expect(await withdrawNamed(owner, tenderId, alice, second)).toEqual({
+          tenderId,
+          withdrawnProposal: alice,
+          proposedAt: second.proposedAt,
+        });
+      });
+
+      it('a forced interleaving: the proposal is withdrawn and made afresh while a stale withdrawal is on its way — the stale one takes back nothing', async () => {
+        const { owner, tenderId } = await closedTender();
+        const first = await propose(owner, tenderId, alice);
+        let second: { proposedAt: string } | undefined;
+        // While the stale withdrawal asks identity-service who alice is, another of her tabs takes the
+        // first proposal back and proposes afresh.
+        w4.memberships.beforeAnswer.set(alice, async () => {
+          await withdrawNamed(owner, tenderId, alice, first);
+          await nextMillisecond();
+          second = await propose(owner, tenderId, alice);
+        });
+
+        expect(await codeOf(withdrawNamed(owner, tenderId, alice, first))).toMatchObject({
+          code: 'CONFLICT',
+        });
+
+        expect(second).toBeDefined();
+        expect((await rowOf(tenderId)).openingProposedAt!.toISOString()).toBe(second!.proposedAt);
+        expect(await withdrawals(owner, tenderId)).toHaveLength(1);
+      });
+
+      it('a forced interleaving at the lock: a withdrawal queued behind a new proposal by another person is refused PROPOSAL_SUPERSEDED, not 403, and changes nothing', async () => {
+        const { owner, tenderId } = await closedTender();
+        const first = await propose(owner, tenderId, alice);
+        await withdrawNamed(owner, tenderId, alice, first);
+        const held = deferred();
+        const release = deferred();
+        // Bob's proposal holds the tender's lock at its decision; alice's withdrawal of hers queues behind it.
+        w4.clock.onDecision = async () => {
+          held.resolve();
+          await release.promise;
+        };
+        const bobs = propose(owner, tenderId, bob);
+        await held.promise;
+        const stale = codeOf(withdrawNamed(owner, tenderId, alice, first));
+        await untilASessionWaitsOnALock(w4.prisma);
+        release.resolve();
+
+        const proposal = await bobs;
+        expect(await stale).toMatchObject({ code: 'CONFLICT' });
+        expect(await rowOf(tenderId)).toMatchObject({ openingProposedBy: bob });
+        expect((await rowOf(tenderId)).openingProposedAt!.toISOString()).toBe(proposal.proposedAt);
+        expect((await withdrawals(owner, tenderId)).map((event) => event.proposedBy)).toEqual([
+          alice,
+        ]);
+      });
+
+      it('a retried withdrawal under its key is answered the first answer, and does not take back the proposal made since', async () => {
+        const { owner, tenderId } = await closedTender();
+        const first = await propose(owner, tenderId, alice);
+        const key = newKey();
+        const answer = await withdrawNamed(owner, tenderId, alice, first, key);
+        await nextMillisecond();
+        const second = await propose(owner, tenderId, alice);
+        const logged = (await logOf(tenderId)).length;
+
+        // The answer was lost; the same request is sent again.
+        expect(await withdrawNamed(owner, tenderId, alice, first, key)).toEqual(answer);
+
+        expect((await rowOf(tenderId)).openingProposedAt!.toISOString()).toBe(second.proposedAt);
+        expect(await withdrawals(owner, tenderId)).toHaveLength(1);
+        // Nothing done, nothing logged: the replay is the first request's answer.
+        expect((await logOf(tenderId)).length).toBe(logged);
+        // The same key naming another proposal is another request: refused, and audited.
+        expect(await codeOf(withdrawNamed(owner, tenderId, alice, second, key))).toMatchObject({
+          code: 'IDEMPOTENCY_KEY_REUSED',
+        });
+        expect((await rowOf(tenderId)).openingProposedAt!.toISOString()).toBe(second.proposedAt);
+        expect((await rowsOf(tenderId, 'WITHDRAW_PROPOSAL')).pop()).toBe(
+          `${alice}:REFUSED:IDEMPOTENCY_KEY_REUSED`,
+        );
+      });
+
+      it('a retried proposal under its key is answered the first answer: it does not propose afresh after the first was withdrawn', async () => {
+        const { owner, tenderId } = await closedTender();
+        const key = newKey();
+        const answer = await proposeKeyed(owner, tenderId, alice, key);
+        expect(answer).toMatchObject({ proposedBy: alice, alreadyProposed: false });
+        await withdrawNamed(owner, tenderId, alice, answer);
+        const logged = (await logOf(tenderId)).length;
+
+        expect(await proposeKeyed(owner, tenderId, alice, key)).toEqual(answer);
+
+        // No proposal was made by the retry; without a key the same call would have made one.
+        expect(await rowOf(tenderId)).toMatchObject({
+          openingProposedBy: null,
+          openingProposedAt: null,
+        });
+        expect((await logOf(tenderId)).length).toBe(logged);
+        expect(await proposeKeyed(owner, tenderId, alice)).toMatchObject({
+          alreadyProposed: false,
+        });
+      });
+
+      it('a retried opening under its key is the first answer: one opening, one BIDS_OPENED, nothing read or logged again', async () => {
+        const { owner, tenderId } = await closedTender();
+        await propose(owner, tenderId, alice);
+        const key = newKey();
+        const answer = await openKeyed(owner, tenderId, bob, key);
+        expect(answer).toMatchObject({ status: 'EVALUATING', openedBy: bob, alreadyOpened: false });
+        const rowAfter = await rowOf(tenderId);
+        const logAfter = await logOf(tenderId);
+        w4.evidence.asked.length = 0;
+
+        expect(await openKeyed(owner, tenderId, bob, key)).toEqual(answer);
+
+        expect(await rowOf(tenderId)).toEqual(rowAfter);
+        expect(await logOf(tenderId)).toEqual(logAfter);
+        expect(await eventsOf(owner, 'BIDS_OPENED', tenderId)).toHaveLength(1);
+        expect(w4.evidence.asked).toHaveLength(0);
+      });
+
+      describe('after the tender moved on (PR-350 r1 F2): the state is judged after the replay', () => {
+        const cancelBySql = (tenderId: string) =>
+          sql(
+            'the suite cancels the tender behind the commands',
+            `UPDATE "tender" SET "status" = 'CANCELLED', "status_reason" = 'withdrawn by the owner',
+               "status_reason_code" = 'OWNER_REQUEST', "version" = "version" + 1 WHERE "id" = '${tenderId}'`,
+          );
+        const outboxSize = async (owner: string) => (await outboxFor(w4.prisma, owner)).length;
+
+        it('a proposal retried after the bids were opened is the first answer (200): no refusal row, no event; without its key it is NOT_CLOSED', async () => {
+          const { owner, tenderId } = await closedTender();
+          const key = newKey();
+          const answer = await proposeKeyed(owner, tenderId, alice, key);
+          await approve(owner, tenderId, bob);
+          expect((await rowOf(tenderId)).status).toBe('EVALUATING');
+          const logged = await logOf(tenderId);
+          const outbox = await outboxSize(owner);
+
+          expect(await proposeKeyed(owner, tenderId, alice, key)).toEqual(answer);
+
+          expect(await logOf(tenderId)).toEqual(logged);
+          expect(await outboxSize(owner)).toBe(outbox);
+          // A new request — no key, or another — is judged on the tender as it is now, and audited.
+          expect(await refusalOf(proposeKeyed(owner, tenderId, alice, newKey()))).toContain(
+            'NOT_CLOSED',
+          );
+          expect((await rowsOf(tenderId, 'PROPOSE_OPENING')).pop()).toMatch(
+            new RegExp(`^${alice}:REFUSED:`),
+          );
+        });
+
+        it('a proposal retried after the tender was cancelled is the first answer, logging nothing', async () => {
+          const { owner, tenderId } = await closedTender();
+          const key = newKey();
+          const answer = await proposeKeyed(owner, tenderId, alice, key);
+          await cancelBySql(tenderId);
+          const logged = await logOf(tenderId);
+
+          expect(await proposeKeyed(owner, tenderId, alice, key)).toEqual(answer);
+
+          expect(await logOf(tenderId)).toEqual(logged);
+        });
+
+        it('a withdrawal retried after a new proposal was made and approved is the first answer: nothing taken back, nothing logged', async () => {
+          const { owner, tenderId } = await closedTender();
+          const first = await propose(owner, tenderId, alice);
+          const key = newKey();
+          const answer = await withdrawNamed(owner, tenderId, alice, first, key);
+          await propose(owner, tenderId, bob);
+          await approve(owner, tenderId, alice);
+          expect((await rowOf(tenderId)).status).toBe('EVALUATING');
+          const logged = await logOf(tenderId);
+          const outbox = await outboxSize(owner);
+
+          expect(await withdrawNamed(owner, tenderId, alice, first, key)).toEqual(answer);
+
+          expect(await logOf(tenderId)).toEqual(logged);
+          expect(await outboxSize(owner)).toBe(outbox);
+          expect(await withdrawals(owner, tenderId)).toHaveLength(1);
+        });
+
+        it('an opening retried after the tender was cancelled is the first answer: one BIDS_OPENED, nothing logged', async () => {
+          const { owner, tenderId } = await closedTender();
+          await propose(owner, tenderId, alice);
+          const key = newKey();
+          const answer = await openKeyed(owner, tenderId, bob, key);
+          await cancelBySql(tenderId);
+          const logged = await logOf(tenderId);
+
+          expect(await openKeyed(owner, tenderId, bob, key)).toEqual(answer);
+
+          expect(await logOf(tenderId)).toEqual(logged);
+          expect(await eventsOf(owner, 'BIDS_OPENED', tenderId)).toHaveLength(1);
+        });
+      });
+
+      it('keeps one person’s answer from another: the same key from another user is 409 IDEMPOTENCY_KEY_REUSED, from another organization it is never met', async () => {
+        const { owner, tenderId } = await closedTender();
+        const key = newKey();
+        const answer = await proposeKeyed(owner, tenderId, alice, key);
+
+        // Another person of the owner, the same key and the same (empty) body: not alice's answer.
+        expect(await codeOf(proposeKeyed(owner, tenderId, bob, key))).toMatchObject({
+          code: 'IDEMPOTENCY_KEY_REUSED',
+        });
+        expect((await rowsOf(tenderId, 'PROPOSE_OPENING')).pop()).toBe(
+          `${bob}:REFUSED:IDEMPOTENCY_KEY_REUSED`,
+        );
+        // Another organization: the owner's tender is a 404 before any key is looked at ...
+        const stranger = org();
+        expect(await codeOf(proposeKeyed(stranger, tenderId, alice, key))).toMatchObject({
+          code: 'NOT_FOUND',
+        });
+        // ... and its own tender, under the same key, is its own request, answered for itself.
+        const other = await closedTender();
+        const theirs = await proposeKeyed(other.owner, other.tenderId, alice, key);
+        expect(theirs).toMatchObject({ tenderId: other.tenderId, alreadyProposed: false });
+        expect(theirs).not.toEqual(answer);
+        expect(await rowOf(tenderId)).toMatchObject({ openingProposedBy: alice });
+      });
+
+      it('an identity that cannot be shown to be the proposer’s withdraws nothing, named or not', async () => {
+        const { owner, tenderId } = await closedTender();
+        const first = await propose(owner, tenderId, alice);
+        // As a token without rasta_uid wrote it before the record, under a user id nobody arrives with now.
+        await sql(
+          'the suite makes the proposal a legacy one',
+          `UPDATE "tender" SET "opening_proposed_by" = 'legacy-subject',
+             "opening_proposed_by_issuer" = NULL, "opening_proposed_by_subject" = NULL
+            WHERE "id" = '${tenderId}'`,
+        );
+        expect(await codeOf(withdrawNamed(owner, tenderId, alice, first, newKey()))).toMatchObject({
+          code: 'FORBIDDEN',
+        });
+        expect(await rowOf(tenderId)).toMatchObject({ openingProposedBy: 'legacy-subject' });
+        expect(await withdrawals(owner, tenderId)).toHaveLength(0);
       });
     });
 
