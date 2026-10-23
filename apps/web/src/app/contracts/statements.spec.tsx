@@ -474,24 +474,16 @@ describe('the statement page: «حالت نمایشی» (Q-14)', () => {
     expect(screen.queryByText('وضعیت درگاه پرداخت معلوم نیست')).toBeNull();
   });
 
-  it('says the provider is unknown, and withholds the approval but not the rejection', async () => {
+  // An approval records the obligation; a separate settlement pays it, so it moves no money
+  // and a disclosure outage must not stop it (Codex PR-361 r2, the same rule as orders).
+  it('says the provider is unknown, and still offers the approval and the rejection', async () => {
     statementPage({ kind: 'OK', data: SUBMITTED }, ['APPROVE', 'REJECT'], { demoMode: 'UNKNOWN' });
     expect(screen.getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
     expect(screen.queryByText('حالت نمایشی')).toBeNull();
-    expect(screen.getByText('تأیید صورت‌وضعیت اکنون در دسترس نیست')).toBeInTheDocument();
+    expect(screen.queryByText(/اکنون در دسترس نیست/)).toBeNull();
     expect(
-      await screen.findByRole('form', { name: STATEMENT_COMMAND_LABELS.REJECT }),
+      await screen.findByRole('form', { name: STATEMENT_COMMAND_LABELS.APPROVE }),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByRole('form', { name: STATEMENT_COMMAND_LABELS.APPROVE }),
-    ).not.toBeInTheDocument();
-  });
-
-  it('withholds nothing when no approval is offered', async () => {
-    statementPage({ kind: 'OK', data: SUBMITTED }, ['REJECT'], { demoMode: 'UNKNOWN' });
-    expect(screen.queryByText('تأیید صورت‌وضعیت اکنون در دسترس نیست')).toBeNull();
-    expect(
-      await screen.findByRole('form', { name: STATEMENT_COMMAND_LABELS.REJECT }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole('form', { name: STATEMENT_COMMAND_LABELS.REJECT })).toBeInTheDocument();
   });
 });

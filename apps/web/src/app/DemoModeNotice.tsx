@@ -28,7 +28,7 @@ export function DemoModeNotice({ mode }: { readonly mode: DemoMode }) {
 
 /**
  * In place of an action that moves money while the provider is `UNKNOWN`
- * (`movesMoney`): the wallet's own "withheld" state for its top-up form, so
+ * (`mayOffer`): the wallet's own "withheld" state for its top-up form, so
  * every screen withholds the same way.
  */
 export function MoneyActionWithheld({ title }: { readonly title: string }) {

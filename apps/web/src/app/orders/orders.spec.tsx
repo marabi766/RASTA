@@ -374,32 +374,67 @@ describe('accessibility', () => {
 });
 
 describe('the order page while the provider is unknown (Q-14)', () => {
-  it('says so in place of the label, and withholds every command but a review', () => {
+  const renderUnknown = (order: Order) =>
     render(
       <OrderDetailScreen
-        result={ok({ ...ORDER, availableActions: ['CONFIRM_RECEIPT', 'RAISE_DISPUTE', 'REVIEW'] })}
+        result={ok(order)}
         csrfToken={CSRF}
         mintSubmissionId={mint}
         demoMode="UNKNOWN"
       />,
     );
+  const WITHHELD = 'اقدام‌های مالی این سفارش اکنون در دسترس نیست';
+
+  it('says so in place of the label, and withholds what releases money but not the dispute that stops it', () => {
+    renderUnknown({ ...ORDER, availableActions: ['CONFIRM_RECEIPT', 'RAISE_DISPUTE', 'CANCEL'] });
     expect(screen.getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
     expect(screen.queryByText('حالت نمایشی')).toBeNull();
-    expect(screen.getByText('اقدام‌های مالی این سفارش اکنون در دسترس نیست')).toBeInTheDocument();
-    expect(screen.getAllByRole('form')).toHaveLength(1);
+    expect(screen.getByText(WITHHELD)).toBeInTheDocument();
+    expect(formsOffered()).toEqual(['command-RAISE_DISPUTE']);
+  });
+
+  // Codex PR-361 r2: accepting and recording delivery move no money — the saga
+  // only waits on — so a disclosure outage must not stop a supplier's work.
+  it.each([
+    ['FUNDS_HELD', 'CONFIRM'],
+    ['CONFIRMED', 'FULFILL'],
+  ] as const)('offers the supplier of a %s order %s, and withholds nothing', (status, command) => {
+    renderUnknown({ ...ORDER, status, availableActions: [command] });
+    expect(screen.getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
+    expect(screen.queryByText(WITHHELD)).toBeNull();
+    expect(formsOffered()).toEqual([`command-${command}`]);
+  });
+
+  it.each([
+    ['DISPUTED', 'RESOLVE_DISPUTE'],
+    ['AWAITING_RECEIPT_CONFIRMATION', 'CONFIRM_RECEIPT'],
+    ['CONFIRMED', 'CANCEL'],
+  ] as const)('withholds %s → %s, which settles or refunds', (status, command) => {
+    renderUnknown({ ...ORDER, status, availableActions: [command] });
+    expect(screen.getByText(WITHHELD)).toBeInTheDocument();
+    expect(formsOffered()).toEqual([]);
+  });
+
+  it('offers the same commands once the provider is known', () => {
+    for (const demoMode of ['SIMULATED', 'REAL'] as const) {
+      const { unmount } = render(
+        <OrderDetailScreen
+          result={ok({ ...ORDER, availableActions: ['CONFIRM_RECEIPT', 'CANCEL'] })}
+          csrfToken={CSRF}
+          mintSubmissionId={mint}
+          demoMode={demoMode}
+        />,
+      );
+      expect(screen.queryByText(WITHHELD)).toBeNull();
+      expect(formsOffered()).toEqual(['command-CONFIRM_RECEIPT', 'command-CANCEL']);
+      unmount();
+    }
   });
 
   it('withholds nothing when only a review is offered', () => {
-    render(
-      <OrderDetailScreen
-        result={ok({ ...ORDER, availableActions: ['REVIEW'] })}
-        csrfToken={CSRF}
-        mintSubmissionId={mint}
-        demoMode="UNKNOWN"
-      />,
-    );
+    renderUnknown({ ...ORDER, status: 'COMPLETED', availableActions: ['REVIEW'] });
     expect(screen.queryByText(/اکنون در دسترس نیست/)).toBeNull();
-    expect(screen.getAllByRole('form')).toHaveLength(1);
+    expect(formsOffered()).toEqual(['command-REVIEW']);
   });
 
   it('says so on the list too', () => {

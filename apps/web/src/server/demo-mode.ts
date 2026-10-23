@@ -19,7 +19,7 @@ export type { DemoMode } from '@/lib/demo-mode';
  *
  * **A read that fails is not a "no".** A refusal, an outage, a timeout or an
  * answer of the wrong shape is `UNKNOWN`, and the screen says so and withholds
- * what moves money (`DemoModeNotice`, `movesMoney`): drawing nothing would
+ * what moves money (`DemoModeNotice`, `mayOffer`): drawing nothing would
  * show the money as if it were real.
  */
 export async function fetchDemoMode(session: WebSession): Promise<DemoMode> {

@@ -16,7 +16,7 @@ import {
   type StepState,
 } from '@/lib/order-fields';
 import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
-import { movesMoney, type DemoMode } from '@/lib/demo-mode';
+import { MONEY_EFFECTS, mayOffer, type DemoMode } from '@/lib/demo-mode';
 import type { Order, ReadResult } from '@/server/orders';
 
 import { formatOrderAmount } from '../OrdersScreen';
@@ -132,12 +132,6 @@ function Lines({ order }: { order: Order }) {
   );
 }
 
-/**
- * The one command that moves no money: every other step takes held funds on
- * towards the seller, back to the buyer, or stops them (`DONE_MESSAGES`).
- */
-const MOVES_NO_MONEY: ReadonlySet<OrderCommand> = new Set(['REVIEW']);
-
 function WhatNext({
   order,
   csrfToken,
@@ -156,10 +150,11 @@ function WhatNext({
     return <p className="text-sm text-content-muted">در این مرحله اقدامی از سوی شما لازم نیست.</p>;
   }
 
-  // While the provider is unknown, only what moves no money is offered (Q-14).
-  const offered = movesMoney(demoMode)
-    ? order.availableActions
-    : order.availableActions.filter((command) => MOVES_NO_MONEY.has(command));
+  // While the provider is unknown, what moves money is withheld and nothing else (Q-14):
+  // a supplier still accepts and records delivery, a buyer still disputes.
+  const offered = order.availableActions.filter((command) =>
+    mayOffer(demoMode, MONEY_EFFECTS.order[command]),
+  );
 
   return (
     <div className="flex flex-col gap-4">

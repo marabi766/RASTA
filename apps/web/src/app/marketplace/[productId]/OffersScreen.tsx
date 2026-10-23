@@ -8,7 +8,7 @@ import {
   Section,
 } from '@/ui';
 import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
-import { movesMoney, type DemoMode } from '@/lib/demo-mode';
+import { MONEY_EFFECTS, mayOffer, type DemoMode } from '@/lib/demo-mode';
 import { productKindLabel } from '@/lib/labels';
 import { formatMoney, toPersianDigits } from '@/lib/format';
 import type { OffersPage, Product, ReadResult } from '@/server/marketplace';
@@ -166,7 +166,7 @@ function OrderSection({
   return (
     <Section headingId="place-order" title="سفارش از یکی از پیشنهادها">
       {/* Placing an order holds its amount in escrow: not offered while the provider is unknown (Q-14). */}
-      {!movesMoney(demoMode) ? (
+      {!mayOffer(demoMode, MONEY_EFFECTS.placeOrder) ? (
         <MoneyActionWithheld title="ثبت سفارش اکنون در دسترس نیست" />
       ) : orderable.length === 0 ? (
         <EmptyState

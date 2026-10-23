@@ -717,7 +717,9 @@ describe('the maintenance request page: «حالت نمایشی» (Q-14)', () =>
     cancel: <div>فرم لغو نمونه</div>,
   };
 
-  it('says the provider is unknown, and withholds the cost approval — it authorises settlement — but not cancelling', () => {
+  // The approval records the obligation; a separate settlement pays it, so it moves no money
+  // and a disclosure outage must not stop it (Codex PR-361 r2, the same rule as orders).
+  it('says the provider is unknown, and still offers the cost approval and cancelling', () => {
     const view = render(
       <RequestDetailScreen
         result={{ kind: 'OK', data: { ...DETAIL, status: 'COMPLETED' } }}
@@ -728,8 +730,8 @@ describe('the maintenance request page: «حالت نمایشی» (Q-14)', () =>
     );
     expect(view.getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
     expect(view.queryByText('حالت نمایشی')).toBeNull();
-    expect(view.getByText('تأیید هزینه اکنون در دسترس نیست')).toBeInTheDocument();
-    expect(view.queryByText('فرم تأیید نمونه')).toBeNull();
+    expect(view.queryByText(/اکنون در دسترس نیست/)).toBeNull();
+    expect(view.getByText('فرم تأیید نمونه')).toBeInTheDocument();
     expect(view.getByText('فرم لغو نمونه')).toBeInTheDocument();
   });
 

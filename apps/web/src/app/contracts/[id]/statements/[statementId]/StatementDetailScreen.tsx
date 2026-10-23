@@ -11,7 +11,7 @@ import {
   TableScroll,
 } from '@/ui';
 import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
-import { movesMoney, type DemoMode } from '@/lib/demo-mode';
+import { MONEY_EFFECTS, mayOffer, type DemoMode } from '@/lib/demo-mode';
 import { formatShareBp } from '@/lib/contract-fields';
 import { IRR, formatJalaliDateTime, formatMoney, toPersianDigits } from '@/lib/format';
 import { roleLabel } from '@/lib/organization-fields';
@@ -254,11 +254,11 @@ export function StatementDetailScreen({
 }: StatementDetailScreenProps) {
   if (result.kind !== 'OK') return <Failure result={result} />;
   const statement = result.data;
-  // An approval is what puts the statement's net amount on its way to being paid: not offered
-  // while the provider is unknown (Q-14). Submitting and rejecting move nothing.
-  const shown = movesMoney(demoMode)
-    ? offered
-    : offered.filter(({ command }) => command !== 'APPROVE');
+  // Withheld while the provider is unknown only if it moves money (Q-14). None of these does:
+  // even the last approval only records the obligation that a separate settlement pays.
+  const shown = offered.filter(({ command }) =>
+    mayOffer(demoMode, MONEY_EFFECTS.statement[command]),
+  );
   const withheld = shown.length < offered.length;
 
   return (
@@ -342,7 +342,9 @@ export function StatementDetailScreen({
         </Alert>
       ) : null}
 
-      {withheld ? <MoneyActionWithheld title="تأیید صورت‌وضعیت اکنون در دسترس نیست" /> : null}
+      {withheld ? (
+        <MoneyActionWithheld title="اقدام‌های مالی این صورت‌وضعیت اکنون در دسترس نیست" />
+      ) : null}
 
       <StatementCommands
         contractId={statement.contractId}

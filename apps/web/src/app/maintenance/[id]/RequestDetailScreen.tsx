@@ -12,7 +12,7 @@ import {
   StatusBadge,
 } from '@/ui';
 import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
-import { movesMoney, type DemoMode } from '@/lib/demo-mode';
+import { MONEY_EFFECTS, mayOffer, type DemoMode } from '@/lib/demo-mode';
 import {
   costCategoryLabel,
   maintenanceRequestStatusLabel,
@@ -494,8 +494,8 @@ export function RequestDetailScreen({
 
       {commandForms && request.status === 'COMPLETED' ? (
         <Section headingId="approve" title="تأیید هزینه">
-          {/* The approval authorises the repair's settlement: not offered while the provider is unknown (Q-14). */}
-          {movesMoney(demoMode) ? (
+          {/* Withheld while the provider is unknown only if it moves money (Q-14): the approval records the obligation, a separate settlement pays it. */}
+          {mayOffer(demoMode, MONEY_EFFECTS.maintenanceApproval) ? (
             commandForms.approve
           ) : (
             <MoneyActionWithheld title="تأیید هزینه اکنون در دسترس نیست" />

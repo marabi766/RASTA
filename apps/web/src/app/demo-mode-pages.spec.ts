@@ -12,7 +12,8 @@
  * - A contractor's contract asks the disclosure every member may read, with
  *   its own bearer, and never the administrators' provider read.
  * - A refused, failed, timed-out or malformed read is UNKNOWN: said in place
- *   of the label, and the screen withholds what moves money.
+ *   of the label, and the screen withholds what moves money — and only that
+ *   (`MONEY_EFFECTS`, review of PR 361 r2).
  * - The screens added in round 2 carry the label, and only while simulated.
  */
 
@@ -248,8 +249,12 @@ describe('/orders/[id] while the provider is unknown (finding 1)', () => {
     availableActions: ['CONFIRM_RECEIPT', 'RAISE_DISPUTE'],
   };
 
+  const WITHHELD = 'اقدام‌های مالی این سفارش اکنون در دسترس نیست';
+  const forms = (html: string) =>
+    [...html.matchAll(/<form[^>]*aria-labelledby="command-([A-Z_]+)"/g)].map((match) => match[1]);
+
   it.each(FAILURES)(
-    'withholds the order’s money commands when the read was %s',
+    'withholds the buyer’s receipt confirmation, not the dispute, when the read was %s',
     async (_how, answer) => {
       signedIn('ORG-DEH-0001', ['ORGANIZATION_ADMIN']);
       answers['/v1/orders/ORD_1'] = { status: 200, body: ORDER };
@@ -258,10 +263,54 @@ describe('/orders/[id] while the provider is unknown (finding 1)', () => {
       const screen = drawn(await run('./orders/[id]/page', { id: 'ORD_1' }), OrderDetailScreen);
       expect(screen.props.demoMode).toBe('UNKNOWN');
       expect(screen.html).toContain(UNKNOWN);
-      expect(screen.html).toContain('اقدام‌های مالی این سفارش اکنون در دسترس نیست');
-      expect(screen.html).not.toContain('<form');
+      expect(screen.html).toContain(WITHHELD);
+      // A dispute stops settlement; it moves nothing (Codex PR-361 r2).
+      expect(forms(screen.html)).toEqual(['RAISE_DISPUTE']);
       // The amounts are still shown — labelled as unknown, not hidden.
       expect(screen.html).toContain('فیلتر روغن');
+    },
+  );
+
+  // Codex PR-361 r2: an outage of the disclosure alone must not stop a supplier
+  // accepting an order or recording its delivery — neither moves money.
+  it.each([
+    ['FUNDS_HELD', 'CONFIRM'],
+    ['CONFIRMED', 'FULFILL'],
+  ])(
+    'offers the supplier of a %s order %s while the provider is unknown',
+    async (status, command) => {
+      signedIn('ORG-SUP-0001', ['ORGANIZATION_ADMIN']);
+      answers['/v1/orders/ORD_1'] = {
+        status: 200,
+        body: { ...ORDER, status, availableActions: [command] },
+      };
+      answers[DISCLOSURE] = { status: 503 };
+
+      const screen = drawn(await run('./orders/[id]/page', { id: 'ORD_1' }), OrderDetailScreen);
+      expect(screen.props.demoMode).toBe('UNKNOWN');
+      expect(screen.html).toContain(UNKNOWN);
+      expect(screen.html).not.toContain(WITHHELD);
+      expect(forms(screen.html)).toEqual([command]);
+    },
+  );
+
+  it.each([
+    ['DISPUTED', 'RESOLVE_DISPUTE', 'ORG-PLATFORM', ['SYSTEM_ADMIN']],
+    ['AWAITING_RECEIPT_CONFIRMATION', 'CONFIRM_RECEIPT', 'ORG-DEH-0001', ['ORGANIZATION_ADMIN']],
+    ['CONFIRMED', 'CANCEL', 'ORG-DEH-0001', ['ORGANIZATION_ADMIN']],
+  ])(
+    'withholds %s → %s, which settles or refunds, while the provider is unknown',
+    async (status, command, org, roles) => {
+      signedIn(org, roles);
+      answers['/v1/orders/ORD_1'] = {
+        status: 200,
+        body: { ...ORDER, status, availableActions: [command] },
+      };
+      answers[DISCLOSURE] = { status: 503 };
+
+      const screen = drawn(await run('./orders/[id]/page', { id: 'ORD_1' }), OrderDetailScreen);
+      expect(screen.html).toContain(WITHHELD);
+      expect(forms(screen.html)).toEqual([]);
     },
   );
 
@@ -274,7 +323,7 @@ describe('/orders/[id] while the provider is unknown (finding 1)', () => {
     expect(screen.props.demoMode).toBe('SIMULATED');
     expect(screen.html).toContain(LABEL);
     expect(screen.html).not.toContain('اکنون در دسترس نیست');
-    expect(screen.html.match(/<form/g)?.length).toBe(2);
+    expect(forms(screen.html)).toEqual(['CONFIRM_RECEIPT', 'RAISE_DISPUTE']);
   });
 });
 
