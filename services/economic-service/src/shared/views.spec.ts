@@ -1,4 +1,5 @@
-import { toRewardBalanceView } from './views';
+import { storedTransactionDetailView, toRewardBalanceView } from './views';
+import type { TransactionDetailView } from '../transaction/dto';
 
 /**
  * The view mappers, at the points where they decide rather than copy.
@@ -58,5 +59,29 @@ describe('toRewardBalanceView', () => {
     expect(toRewardBalanceView({ ...base, level: null }).updatedAt).toBe(
       '2026-08-29T10:00:00.000Z',
     );
+  });
+});
+
+/**
+ * A transaction command's stored answer, replayed (Codex on #352, finding 2):
+ * one the previous release stored has no `resolvedDisputeId`, which this
+ * release documents as required.
+ */
+describe('storedTransactionDetailView', () => {
+  const stored = { id: 'TXN_STORED', disputeId: 'TXD_A' } as unknown as TransactionDetailView;
+
+  it('gives an answer stored before the field an explicit null: not attributed by identity', () => {
+    expect(storedTransactionDetailView(stored)).toEqual({
+      id: 'TXN_STORED',
+      disputeId: 'TXD_A',
+      resolvedDisputeId: null,
+    });
+  });
+
+  it('replays an answer that has it as stored, null or not', () => {
+    for (const resolvedDisputeId of ['TXD_A', null]) {
+      const answer = { ...stored, resolvedDisputeId };
+      expect(storedTransactionDetailView(answer)).toBe(answer);
+    }
   });
 });

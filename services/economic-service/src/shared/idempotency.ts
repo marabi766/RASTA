@@ -314,6 +314,11 @@ export class IdempotencyStore {
    *
    * `options.mayReplay` is required: no endpoint can return a stored answer
    * without saying who may still have it (see the class comment).
+   *
+   * `options.stored` brings a stored success answer to the shape this release
+   * documents before it is replayed: one stored by an earlier release lacks
+   * what was added since, and is returned as it was otherwise (Codex on #352,
+   * finding 2).
    */
   async run<T>(
     endpoint: string,
@@ -321,7 +326,11 @@ export class IdempotencyStore {
     body: unknown,
     successStatus: number,
     work: (answer: IdempotentAnswer<T>) => Promise<unknown>,
-    options: { mayReplay: ReplayGuard<T>; terminalRefusals?: TerminalRefusals },
+    options: {
+      mayReplay: ReplayGuard<T>;
+      terminalRefusals?: TerminalRefusals;
+      stored?: (answer: T) => T;
+    },
   ): Promise<T> {
     const claim = await this.claim(endpoint, key, body);
     if (claim.kind === 'REPLAY') {
@@ -330,7 +339,7 @@ export class IdempotencyStore {
       // refused, the replay is refused too.
       await options.mayReplay(refused ? undefined : (claim.body as T));
       if (refused) throw replayedRefusal(claim.body, options.terminalRefusals);
-      return claim.body as T;
+      return options.stored ? options.stored(claim.body as T) : (claim.body as T);
     }
     const { token } = claim;
 

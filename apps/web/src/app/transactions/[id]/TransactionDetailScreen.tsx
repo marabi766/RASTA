@@ -223,10 +223,11 @@ export function TransactionDetailScreen({
  *
  * `disputeReason` is the reason the last dispute was raised with, and a
  * resolution has its own fields (PR 322, docs/23 D-060). A resolution counts for
- * the dispute shown only when it was decided at or after that dispute: one
- * from an earlier dispute is not this one's. A row resolved before D-060 holds
- * the resolution in `disputeReason` with `disputeResolution` null — there the
- * screen cannot tell which text it is, and says so instead of guessing.
+ * the dispute shown only when it decided that dispute: one from an earlier
+ * dispute is not this one's (see {@link resolutionOfShownDispute}). A row
+ * resolved before D-060 holds the resolution in `disputeReason` with
+ * `disputeResolution` null — there the screen cannot tell which text it is, and
+ * says so instead of guessing.
  */
 function DisputeState({ transaction: t }: { transaction: Transaction }) {
   if (t.status === 'DISPUTED') {
@@ -249,10 +250,7 @@ function DisputeState({ transaction: t }: { transaction: Transaction }) {
   }
 
   if (t.disputedAt !== null) {
-    const resolvedAt =
-      t.disputeResolvedAt !== null && Date.parse(t.disputeResolvedAt) >= Date.parse(t.disputedAt)
-        ? t.disputeResolvedAt
-        : null;
+    const resolvedAt = resolutionOfShownDispute(t);
     const legacy = resolvedAt !== null && t.disputeResolution === null;
     return (
       <div className="flex flex-col gap-3">
@@ -286,4 +284,24 @@ function DisputeState({ transaction: t }: { transaction: Transaction }) {
   }
 
   return <p className="text-sm">برای این تراکنش اعتراضی ثبت نشده است.</p>;
+}
+
+/**
+ * When the dispute the screen shows was resolved, or `null` if the recorded
+ * resolution is not that dispute's.
+ *
+ * By identity: economic-service records which dispute the resolution decided
+ * (`resolvedDisputeId`) beside the latest dispute's (`disputeId`). Times do not
+ * establish it — a re-dispute that waited behind a resolution could be dated
+ * before it, and the earlier dispute's decision then read as the new one's
+ * (Codex on PR 322 round 4, finding 1). Only a row resolved before the identity
+ * was kept, which economic could not attribute for certain, has no
+ * `resolvedDisputeId`; for it the times are all there is, as before.
+ */
+function resolutionOfShownDispute(t: Transaction): string | null {
+  if (t.disputeResolvedAt === null || t.disputedAt === null) return null;
+  if (t.resolvedDisputeId !== null) {
+    return t.resolvedDisputeId === t.disputeId ? t.disputeResolvedAt : null;
+  }
+  return Date.parse(t.disputeResolvedAt) >= Date.parse(t.disputedAt) ? t.disputeResolvedAt : null;
 }

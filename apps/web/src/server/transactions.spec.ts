@@ -71,6 +71,7 @@ const WIRE = {
   disputeResolvedAt: null,
   disputeResolution: null,
   disputeId: null,
+  resolvedDisputeId: null,
   settledAt: null,
   failureReason: null,
   createdAt: '2026-10-01T08:00:01.000Z',
