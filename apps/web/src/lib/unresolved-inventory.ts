@@ -41,8 +41,10 @@ import type { Binding } from './unresolved-order';
  * The receipt, the adjustment and the new-shipment forms of a warehouse share
  * its slot, and a shipment's dispatch and delivery share its own: a new
  * submission never **replaces** another submission's record — saving it is
- * refused (`HELD`) and the form is not sent — and a record is cleared only by
- * the submission it belongs to, on a definite outcome of that submission. Every
+ * refused (`HELD`) and the form is not sent — a submission already in doubt is
+ * never sent again as a first send (`rememberInventoryFirstSend`), and a record
+ * is cleared only by the submission it belongs to, on a definite outcome of the
+ * very send that wrote it, a confirmed outcome, or the person. Every
  * change is announced to the page's other forms (`subscribeUnresolvedInventory`),
  * which stay view-only while another command holds the slot.
  *
@@ -321,11 +323,41 @@ export function purgeForeignUnresolvedInventory(owner: string): void {
  */
 export type SaveOutcome = 'SAVED' | 'HELD' | 'UNAVAILABLE';
 
+/**
+ * Updates the record of a submission already sent — its answer's correlation
+ * id, a withdrawn stamp; the body and the date stay the first send's.
+ */
 export function saveUnresolvedInventory(
   scope: InventoryScope,
   entry: Omit<UnresolvedInventory, 'savedAt' | 'marker'>,
   binding: Binding,
   now: number = Date.now(),
+): SaveOutcome {
+  return write(scope, entry, binding, now, false);
+}
+
+/**
+ * The record a first send leaves before it goes. `HELD` whenever the slot holds
+ * a record at all — another submission's, **or this one's**: a submission
+ * already in doubt is not sent again as a first send (a form drawn again with
+ * the same id, Back/Forward to a cached page, has lost what it sent), and a
+ * definite answer to such a send would say nothing about the first one.
+ */
+export function rememberInventoryFirstSend(
+  scope: InventoryScope,
+  entry: Omit<UnresolvedInventory, 'savedAt' | 'marker'>,
+  binding: Binding,
+  now: number = Date.now(),
+): SaveOutcome {
+  return write(scope, entry, binding, now, true);
+}
+
+function write(
+  scope: InventoryScope,
+  entry: Omit<UnresolvedInventory, 'savedAt' | 'marker'>,
+  binding: Binding,
+  now: number,
+  first: boolean,
 ): SaveOutcome {
   if (accountClosing) return 'UNAVAILABLE';
   try {
@@ -336,8 +368,9 @@ export function saveUnresolvedInventory(
     const parsed = stored(store, key);
     // Someone else's is not this person's to keep (`purgeForeignUnresolvedInventory`).
     const earlier = parsed?.owner === binding.owner ? parsed : null;
-    // Another submission's record — even a marker — is never replaced.
-    if (earlier !== null && earlier.submissionId !== entry.submissionId) return 'HELD';
+    // Another submission's record — even a marker — is never replaced; nor is
+    // this one's by a first send.
+    if (earlier !== null && (first || earlier.submissionId !== entry.submissionId)) return 'HELD';
     // A body that would not be read back as itself cannot be retried as the
     // same request: it is not sent at all.
     if (!roundTrips(entry.command, entry.body)) return 'UNAVAILABLE';

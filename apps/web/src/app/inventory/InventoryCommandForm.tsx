@@ -38,6 +38,7 @@ import { isRedirect, sessionHasEnded, SESSION_REFUSAL_MESSAGES } from '@/lib/ses
 import type { Binding } from '@/lib/unresolved-order';
 import {
   clearUnresolvedInventory,
+  rememberInventoryFirstSend,
   restoreUnresolvedInventory,
   saveUnresolvedInventory,
   type ReplayStamp,
@@ -68,6 +69,10 @@ import {
  * command's fields as they were sent; a shipment move's body is in the stamp.
  * A confirmed answer redirects and drops the entry; otherwise only the person
  * drops it, once the same request has been tried again or can no longer be.
+ * A form drawn with a submission id that is already in doubt — a page brought
+ * back from the browser's history — starts from that record (`initial`, from
+ * `InventoryCommands`), and its send path checks again: a matching id alone is
+ * never a first send.
  *
  * ## One unresolved command per slot
  *
@@ -188,6 +193,10 @@ export function InventoryCommandForm({
         // record is not touched.
         const holder = restoreUnresolvedInventory(scope, binding, sessionMaxAgeSeconds);
         if (holder && holder.entry.submissionId !== sentId) return { kind: 'HELD' };
+        // This one's is: the form was drawn again over it (Back/Forward to a
+        // cached page) and does not know what it sent. Not a first send — nothing
+        // is sent, and the record, not the typed values, is what is shown.
+        if (holder) return unconfirmedFrom(holder);
       } else {
         // A replay only while the service still holds its key, and only from
         // the login it is bound to. Past that, never re-sent.
@@ -199,7 +208,7 @@ export function InventoryCommandForm({
 
       // Remembered BEFORE it is sent; not sent if it cannot be remembered.
       const unsent = firstSend ? pendingFrom(form, command, replay) : null;
-      const saved = unsent ? saveUnresolvedInventory(scope, unsent, binding) : null;
+      const saved = unsent ? rememberInventoryFirstSend(scope, unsent, binding) : null;
       if (saved === 'HELD') return { kind: 'HELD' };
       if (saved === 'UNAVAILABLE') return { kind: 'STORAGE_UNAVAILABLE' };
 
@@ -218,10 +227,11 @@ export function InventoryCommandForm({
         throw error;
       }
 
-      // Still in doubt: kept. A definite answer to THIS submission's first send:
-      // its own record is dropped — never another's.
+      // Still in doubt: kept. A definite answer to the send that wrote the record
+      // just now: that record is dropped — never another's, and never on the
+      // answer to a later attempt, which says nothing about the first.
       if (next.kind === 'UNCONFIRMED') saveUnresolvedInventory(scope, next, binding);
-      else if (firstSend) clearUnresolvedInventory(scope, sentId);
+      else if (saved === 'SAVED') clearUnresolvedInventory(scope, sentId);
       return next;
     },
     [scope, command, replay, binding, sessionMaxAgeSeconds],

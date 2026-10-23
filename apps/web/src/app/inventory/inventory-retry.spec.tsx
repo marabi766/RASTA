@@ -15,6 +15,7 @@ import {
   markInventoryOpen,
   purgeAllUnresolvedInventory,
   purgeForeignUnresolvedInventory,
+  rememberInventoryFirstSend,
   restoreUnresolvedInventory,
   saveUnresolvedInventory,
   type ReplayStamp,
@@ -22,7 +23,11 @@ import {
 
 import { InventoryCommandForm } from './InventoryCommandForm';
 import { InventoryCommands } from './InventoryCommands';
-import type { InventoryFormState } from './inventory-form-state';
+import {
+  afterRetry,
+  type InventoryFormState,
+  type UnconfirmedInventory,
+} from './inventory-form-state';
 
 /**
  * The unconfirmed path with the real `useActionState` — the return retry
@@ -759,5 +764,226 @@ describe('a page drawn again brings fresh forms', () => {
     render(drawn(WAREHOUSE, FRESH, SECOND_STAMP));
     expect(await screen.findByRole('button', { name: RETRY_LABEL })).toBeInTheDocument();
     expect(screen.getByRole('form').querySelector('[name="submission"]')).toHaveValue(KEY);
+  });
+});
+
+/**
+ * Codex PR-363 r2: a page brought back from the browser's history (Back,
+ * Forward, the router's cache) draws the props it had — the submission in doubt
+ * included — in forms that have lost their state. The matching form came back
+ * idle and editable; sent after the replay deadline, its `REPLAY` refusal was
+ * taken for the answer to a first send and cleared the record, so the next
+ * page offered a fresh key over a receipt that may have committed.
+ */
+describe('a page brought back from the browser history', () => {
+  const RECEIVE_KEY = 'sub_RECEIVEKEYRECEIVEKEY';
+  const ADJUST_KEY = 'sub_ADJUSTKEYADJUSTKEYADJ';
+  const KEYS = { receive: RECEIVE_KEY, adjust: ADJUST_KEY };
+  const ADJUST_LABEL = 'اصلاح یا خروج مستقیم موجودی';
+  const FORGET_LABEL = 'وضعیت را دیدم؛ این درخواست را کنار بگذار';
+  const VIEW_ONLY_TEXT = /دیگر نمی‌توان\s+همان را با اطمینان دوباره فرستاد/;
+  const editable = (container: HTMLElement) =>
+    container.querySelector(`input[name="${PRODUCT_FIELD}"]:not([type="hidden"])`);
+  const record = () => stored() as { submissionId: string; body: unknown; replay: unknown } | null;
+
+  /** Past the receipt's replay deadline (50 minutes with the portal's defaults). */
+  function pastDeadline() {
+    const realNow = Date.now.bind(Date);
+    jest.spyOn(Date, 'now').mockImplementation(() => realNow() + 51 * 60 * 1000);
+  }
+
+  /** The receipt sent from the warehouse page, its response lost; then the page is left. */
+  async function lostReceipt() {
+    const view = renderWarehouseCommands(KEYS);
+    fill(view.container);
+    submit.mockRejectedValueOnce(lostResponse());
+    await send(await screen.findByRole('form', { name: 'ثبت رسید کالا' }));
+    await screen.findByRole('button', { name: RETRY_LABEL });
+    view.unmount();
+  }
+
+  it('the form that sent it comes back as its uncertainty view, same key, same body; the others wait', async () => {
+    await lostReceipt();
+    const { container } = renderWarehouseCommands(KEYS);
+    expect(await screen.findByRole('button', { name: RETRY_LABEL })).toBeInTheDocument();
+    expect(editable(container)).toBeNull();
+    expect(container.querySelector('input[name="submission"]')).toHaveValue(RECEIVE_KEY);
+    expect(screen.queryByRole('form', { name: ADJUST_LABEL })).toBeNull();
+    expect(screen.getByRole('region', { name: ADJUST_LABEL })).toHaveTextContent(
+      'نتیجه آن هنوز معلوم نیست',
+    );
+    expect(record()).toMatchObject({ submissionId: RECEIVE_KEY, body: RECEIPT });
+
+    submit.mockResolvedValueOnce({
+      ...(unconfirmedReceipt() as UnconfirmedInventory),
+      submissionId: RECEIVE_KEY,
+      retryUnknown: true,
+    });
+    await send(screen.getByRole('button', { name: RETRY_LABEL }).closest('form'));
+    const retry = submit.mock.calls[1]![2];
+    expect(submit.mock.calls[1]![1]).toMatchObject({ kind: 'UNCONFIRMED' });
+    expect(retry.get('submission')).toBe(RECEIVE_KEY);
+    expect(retry.get(PRODUCT_FIELD)).toBe(PRODUCT_ID);
+    expect(retry.get(QUANTITY_FIELD)).toBe('120');
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('past the replay deadline: view-only, nothing editable, nothing re-sendable, the record kept', async () => {
+    await lostReceipt();
+    pastDeadline();
+    const { container, unmount } = renderWarehouseCommands(KEYS);
+    expect(await screen.findByText(VIEW_ONLY_TEXT)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: RETRY_LABEL })).toBeNull();
+    expect(container.querySelector('button[type="submit"]')).toBeNull();
+    expect(editable(container)).toBeNull();
+    expect(screen.getByRole('link', { name: FORGET_LABEL })).toBeInTheDocument();
+    expect(record()).toMatchObject({ submissionId: RECEIVE_KEY, body: RECEIPT });
+    unmount();
+
+    // A fresh page still offers no fresh key over it.
+    const fresh = renderWarehouseCommands();
+    expect(await screen.findByText(VIEW_ONLY_TEXT)).toBeInTheDocument();
+    expect(fresh.container.querySelector(`input[value="${FRESH}"]`)).toBeNull();
+    expect(fresh.container.querySelector(`input[value="${OTHER}"]`)).toBeNull();
+  });
+
+  it.each([
+    ['before the replay deadline', false, { kind: 'IDLE' } as InventoryFormState],
+    ['past the replay deadline', true, { kind: 'REFUSED', reason: 'REPLAY' } as InventoryFormState],
+  ])(
+    'a form drawn idle with the id in doubt (%s) sends nothing and keeps the record',
+    async (_when, expired, answer) => {
+      // The form as the earlier `InventoryCommands` drew it on the way back: idle, editable.
+      saveUnresolvedInventory(
+        WAREHOUSE,
+        {
+          command: 'RECEIVE_STOCK',
+          submissionId: KEY,
+          body: RECEIPT,
+          correlationId: 'COR_ORIGINAL',
+          replay: STAMP,
+        },
+        BINDING,
+      );
+      if (expired) pastDeadline();
+      submit.mockResolvedValue(answer);
+      const { container } = renderReceiptForm();
+      fill(container, '۵');
+      await send(container.querySelector('form'));
+      expect(submit).not.toHaveBeenCalled();
+      expect(record()).toMatchObject({ submissionId: KEY, body: RECEIPT, replay: STAMP });
+      expect(editable(container)).toBeNull();
+      expect(await screen.findByText(/کد پیگیری: COR_ORIGINAL/)).toBeInTheDocument();
+      if (expired) {
+        expect(screen.getByText(VIEW_ONLY_TEXT)).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: RETRY_LABEL })).toBeNull();
+      } else {
+        expect(screen.getByRole('button', { name: RETRY_LABEL })).toBeInTheDocument();
+      }
+    },
+  );
+
+  it.each([
+    [
+      'a passed deadline',
+      { kind: 'REFUSED', reason: 'REPLAY' },
+      /مهلت ارسال دوباره همین درخواست گذشته است/,
+    ],
+    ['a 403', { kind: 'FORBIDDEN', correlationId: 'COR_RETRY' }, /ارسال دوباره رد شد/],
+    ['a 404', { kind: 'NOT_FOUND' }, /ارسال دوباره رد شد/],
+    ['a stale form', { kind: 'REFUSED', reason: 'CSRF' }, /ارسال دوباره رد شد/],
+  ] as const)(
+    'a retry from the page brought back, refused by %s, keeps the original uncertainty',
+    async (_by, refusal, note) => {
+      await lostReceipt();
+      const { container } = renderWarehouseCommands(KEYS);
+      await screen.findByRole('button', { name: RETRY_LABEL });
+      // The action's own reading of a refused retry (`submitInventoryCommand`).
+      submit.mockImplementationOnce(async (_scope, previous) =>
+        afterRetry(previous as UnconfirmedInventory, refusal as InventoryFormState),
+      );
+      await send(screen.getByRole('button', { name: RETRY_LABEL }).closest('form'));
+      expect(await screen.findByText(note)).toBeInTheDocument();
+      expect(record()).toMatchObject({ submissionId: RECEIVE_KEY, body: RECEIPT });
+      expect(editable(container)).toBeNull();
+      expect(screen.queryByRole('form', { name: ADJUST_LABEL })).toBeNull();
+    },
+  );
+
+  it('the form that sent it, still mounted, keeps its own state when drawn again with the same props', async () => {
+    const view = renderWarehouseCommands(KEYS);
+    fill(view.container);
+    submit.mockRejectedValueOnce(lostResponse());
+    await send(await screen.findByRole('form', { name: 'ثبت رسید کالا' }));
+    submit.mockResolvedValueOnce({
+      ...(unconfirmedReceipt() as UnconfirmedInventory),
+      submissionId: RECEIVE_KEY,
+      retryUnknown: true,
+    });
+    await send((await screen.findByRole('button', { name: RETRY_LABEL })).closest('form'));
+    const note = /ارسال دوباره نیز نتیجه روشنی نداشت/;
+    expect(await screen.findByText(note)).toBeInTheDocument();
+    view.rerender(
+      <InventoryCommands
+        scope={WAREHOUSE}
+        offered={[
+          { command: 'RECEIVE_STOCK', submission: { id: RECEIVE_KEY, replay: STAMP } },
+          { command: 'ADJUST_STOCK', submission: { id: ADJUST_KEY, replay: STAMP } },
+        ]}
+        csrfToken="csrf"
+        binding={BINDING}
+        sessionMaxAgeSeconds={SESSION_MAX_AGE}
+        items={ITEMS}
+        pageHref={`/inventory?warehouse=${WAREHOUSE_ID}`}
+      />,
+    );
+    expect(screen.getByText(note)).toBeInTheDocument();
+  });
+
+  it('an id in doubt drawn for another command is not that form: only the record’s own view', async () => {
+    saveUnresolvedInventory(
+      WAREHOUSE,
+      {
+        command: 'ADJUST_STOCK',
+        submissionId: RECEIVE_KEY,
+        body: { stockItemId: ITEM_ID, quantityDelta: -5, sourceReference: null },
+        correlationId: null,
+        replay: STAMP,
+      },
+      BINDING,
+    );
+    const { container } = renderWarehouseCommands(KEYS);
+    expect(await screen.findByRole('button', { name: RETRY_LABEL })).toBeInTheDocument();
+    expect(container.querySelectorAll('form')).toHaveLength(1);
+    expect(screen.getByRole('form', { name: ADJUST_LABEL })).toBeInTheDocument();
+    expect(screen.queryByRole('region')).toBeNull();
+    expect(editable(container)).toBeNull();
+  });
+
+  it('a first send never takes a slot that holds a record, its own included; an answer still updates it', () => {
+    const entry = {
+      command: 'RECEIVE_STOCK' as const,
+      submissionId: KEY,
+      body: RECEIPT,
+      correlationId: null,
+      replay: STAMP,
+    };
+    expect(rememberInventoryFirstSend(WAREHOUSE, entry, BINDING)).toBe('SAVED');
+    const first = window.sessionStorage.getItem(WAREHOUSE_SLOT);
+    expect(
+      rememberInventoryFirstSend(
+        WAREHOUSE,
+        { ...entry, body: { ...RECEIPT, quantity: 5 } },
+        BINDING,
+      ),
+    ).toBe('HELD');
+    expect(rememberInventoryFirstSend(WAREHOUSE, { ...entry, submissionId: OTHER }, BINDING)).toBe(
+      'HELD',
+    );
+    expect(window.sessionStorage.getItem(WAREHOUSE_SLOT)).toBe(first);
+    expect(saveUnresolvedInventory(WAREHOUSE, { ...entry, correlationId: 'COR' }, BINDING)).toBe(
+      'SAVED',
+    );
+    expect(stored()).toMatchObject({ submissionId: KEY, body: RECEIPT, correlationId: 'COR' });
   });
 });

@@ -44,6 +44,11 @@ export interface InventoryCommandsProps {
  * under its original key before any fresh form, with a fresh key, is offered.
  * Nothing is drawn until that question is answered.
  *
+ * The same submission id drawn again does not mean the same form: a page brought
+ * back from the browser's history (Back/Forward, the router's cache) draws the
+ * props it had, the submission in doubt included, in a form that has lost its
+ * state. That form starts from the record, as the reload does.
+ *
  * The question is asked again **whenever the slot's record changes**, not only
  * on mount: when one of the forms drawn here is sent and its outcome is not
  * confirmed, every other form becomes view-only with the uncertainty notice
@@ -109,9 +114,11 @@ export function InventoryCommands({
   // A record of none of the forms drawn now — this page was drawn after it was
   // sent (a reload): only its uncertainty view. A record of one of them: that
   // form keeps it, in place, and the others wait (`heldBy`).
-  const drawnHere =
+  const holds = (command: InventoryCommand, submissionId: string): boolean =>
     restored !== null &&
-    offered.some(({ submission }) => submission.id === restored.entry.submissionId);
+    restored.entry.submissionId === submissionId &&
+    restored.entry.command === command;
+  const drawnHere = offered.some(({ command, submission }) => holds(command, submission.id));
   if (restored && !drawnHere) {
     return (
       <div className="flex flex-col gap-4">
@@ -152,6 +159,12 @@ export function InventoryCommands({
           items={items}
           pageHref={pageHref}
           heldBy={restored?.entry.submissionId ?? null}
+          // The form that sent it, if still mounted, keeps its own state; one
+          // drawn again with the same id (Back/Forward to cached props) starts
+          // from the record — never as a fresh, editable form.
+          {...(restored && holds(command, submission.id)
+            ? { initial: unconfirmedFrom(restored) }
+            : {})}
         />
       ))}
     </div>
