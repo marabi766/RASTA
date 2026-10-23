@@ -99,6 +99,21 @@ export class OrganizationController {
     return this.organizations.get(id);
   }
 
+  @Get(':id/procurement-thresholds')
+  @AllowService(CONSTRUCTION_SERVICE)
+  @ApiOperation({
+    summary: 'Effective procurement thresholds for construction-service',
+    description:
+      'Service callers only (construction-service). Person/session callers and other services ' +
+      'receive 403. The token organization must equal the requested id exactly; otherwise 404 ' +
+      'without existence details. Returns only { organizationId, policy: { id, value } | null }.',
+  })
+  procurementThresholds(
+    @Param('id') id: string,
+  ): ReturnType<OrganizationService['procurementThresholds']> {
+    return this.organizations.procurementThresholds(id);
+  }
+
   @Get(':id/children')
   @ApiOperation({ summary: 'Direct children' })
   children(@Param('id') id: string) {

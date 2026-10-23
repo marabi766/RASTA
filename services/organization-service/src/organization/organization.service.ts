@@ -672,6 +672,24 @@ export class OrganizationService {
   // Policies — configurable governance (ADR-023)
   // =========================================================================
 
+  /** Narrow service read; the token's tenant must match before any database access. */
+  async procurementThresholds(
+    id: string,
+  ): Promise<{ organizationId: string; policy: { id: string; value: unknown } | null }> {
+    const context = getContext();
+    if (context.authType !== 'SERVICE') {
+      throw RastaError.forbidden('Service callers only');
+    }
+    // Exact tenant equality, before any lookup; a subtree token is insufficient here.
+    if (context.organizationId !== id) throw RastaError.notFound('Organization');
+    const policies = await this.readEffectivePolicies(
+      id,
+      'construction.tender.procurement_thresholds',
+    );
+    const policy = policies[0];
+    return { organizationId: id, policy: policy ? { id: policy.id, value: policy.value } : null };
+  }
+
   /**
    * Effective policies, with inheritance.
    *
@@ -680,6 +698,10 @@ export class OrganizationService {
    * default which an individual dehyari can still override.
    */
   async effectivePolicies(id: string): Promise<PolicyView[]> {
+    return this.readEffectivePolicies(id);
+  }
+
+  private async readEffectivePolicies(id: string, key?: string): Promise<PolicyView[]> {
     // One instant for both ends of the period test. Two clock reads let a
     // value that ends at T and its successor that starts at T both miss: the
     // first read said "not yet started", the second "already ended".
@@ -691,11 +713,14 @@ export class OrganizationService {
     // position.
     const { chain, rows } = await this.repository.readSnapshot(async (db) => {
       await this.assertCanRead(id, db);
+      if (key && !(await this.repository.getPath(id, db)))
+        throw RastaError.notFound('Organization');
       const ancestors = await this.repository.findAncestors(id, null, db);
       const ids = [...ancestors.map((row) => row.id), id];
       const policies = await db.organizationPolicy.findMany({
         where: {
           organizationId: { in: ids },
+          ...(key ? { key } : {}),
           effectiveFrom: { lte: effectiveAt },
           OR: [{ effectiveTo: null }, { effectiveTo: { gt: effectiveAt } }],
         },
