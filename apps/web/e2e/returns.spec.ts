@@ -305,18 +305,23 @@ test.describe.serial('returns, live (EXP-003)', () => {
   }) => {
     expect(returnPath).not.toBe('');
     const returnId = returnPath.split('/').pop()!;
-    // inventory-service never resolves the marketplace references it is given
-    // (PR 336 review 1, finding 1): any operator can record such a shipment
-    // into its own warehouse, and the named buyer can read it as its sender.
+    // An operator outside the request names it on a shipment into its own warehouse
+    // (PR 336 review 1, finding 1). Since #339 inventory-service resolves the return
+    // request first and refuses: nothing is recorded, so the buyer has nothing to read.
     const outsiderToken = await tokenOf(outsider);
     const theirs = await asSupplier(
       '/v1/warehouses',
       { name: `انبار بیگانه ${RUN}` },
       outsiderToken,
     );
-    await asSupplier(
-      '/v1/return-shipments',
-      {
+    const refused = await fetch(gatewayUrl('/v1/return-shipments'), {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${outsiderToken}`,
+        'content-type': 'application/json',
+        'idempotency-key': `e2e-returns-${randomUUID()}`,
+      },
+      body: JSON.stringify({
         returnRequestId: returnId,
         orderId: RECENT_ORDER,
         buyerOrganizationId: BUYER,
@@ -325,9 +330,9 @@ test.describe.serial('returns, live (EXP-003)', () => {
           { orderLineId: LINE_AGGREGATE, productId: 'PRD_01JE2ERETVRNS00000000000P1', quantity: 3 },
         ],
         carrierName: 'باربری جعلی',
-      },
-      outsiderToken,
-    );
+      }),
+    });
+    expect(refused.status).toBe(404);
 
     const buyer = await as(browser, 'orgAdmin');
     try {
