@@ -248,6 +248,29 @@ tests:
         alertname: RastaSettlementNoActiveRule
         exp_alerts: []
 
+  # The increase branch on its own: an established series (zero for longer
+  # than the window, so the new-series branch is silent) refuses once at 20m.
+  # It must page for the whole 15-minute window, not a shorter one.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_economic_settlement_failures_total{job="economic-service",instance="host.docker.internal:3112",environment="local",service="economic-service",reason="no_active_rule"}'
+        values: '0x19 1+0x40'
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: *settlement_no_active_rule_alerts
+      # Last minute whose window still holds the zero before the step
+      # (Prometheus 3 ranges are left-open), then resolved.
+      - eval_time: 33m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: *settlement_no_active_rule_alerts
+      - eval_time: 34m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []
+
   # Other settlement failures raise nothing here.
   - interval: 1m
     input_series:
