@@ -71,6 +71,19 @@ describe('POST /v1/contracts/{id}/sign', () => {
     const { correlationId: _c, timestamp: _t, path: _p, ...rest } = body;
     return rest;
   };
+  /**
+   * What `bare` leaves out of a refusal, pinned exactly, so nothing can travel in it: the path that
+   * was asked, the correlation id the response was sent under, and a valid ISO instant.
+   */
+  const expectFrame = (
+    res: { body: Record<string, unknown>; headers: Record<string, string> },
+    path: string,
+  ) => {
+    expect(res.body.path).toBe(path);
+    expect(res.body.correlationId).toBe(res.headers['x-correlation-id']);
+    const timestamp = res.body.timestamp as string;
+    expect(new Date(timestamp).toISOString()).toBe(timestamp);
+  };
 
   beforeAll(async () => {
     api = await startApi();
@@ -298,7 +311,10 @@ describe('POST /v1/contracts/{id}/sign', () => {
         const again = await sign(id, revoked, {}, key()).expect(status);
         expect(bare(again.body)).toEqual(bare(read.body));
         expect(again.body).not.toHaveProperty('id');
-        expect(JSON.stringify(again.body)).not.toMatch(/amount|DRAFT/i);
+        // The error's `path` echoes the contract's ULID: look at what the body says, not where it was
+        // asked — and pin where it was asked, when and under which correlation id exactly.
+        expectFrame(again, `/v1/contracts/${id}/sign`);
+        expect(JSON.stringify(bare(again.body))).not.toMatch(/amount|DRAFT/i);
       }
 
       const signatures = await signaturesOf(id);
