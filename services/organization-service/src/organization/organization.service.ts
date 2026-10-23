@@ -1,3 +1,4 @@
+import { PROCUREMENT_THRESHOLDS_KEY, procurementThresholdsSchema } from '@rasta/contracts';
 import { Injectable, Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
@@ -770,6 +771,19 @@ export class OrganizationService {
 
     const organization = await this.repository.findById(id);
     if (!organization) throw RastaError.notFound('Organization', id);
+
+    if (
+      dto.key === PROCUREMENT_THRESHOLDS_KEY &&
+      !procurementThresholdsSchema.safeParse(dto.value).success
+    ) {
+      throw RastaError.validation([
+        {
+          path: 'value',
+          code: 'INVALID_PROCUREMENT_THRESHOLDS',
+          message: 'Invalid procurement threshold table',
+        },
+      ]);
+    }
 
     const policyId = `POL_${ulid()}`;
     const actor = getContext().userId ?? 'SYSTEM';

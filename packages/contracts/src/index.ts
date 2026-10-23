@@ -262,6 +262,11 @@ export type {
   ShipmentDispatchedPayload,
   ShipmentDeliveredPayload,
 } from './events/inventory-shipments';
+export {
+  PROCUREMENT_THRESHOLDS_KEY,
+  procurementThresholdsSchema,
+} from './common/procurement-thresholds';
+export type { ProcurementThresholds } from './common/procurement-thresholds';
 export type {
   AuditOutcome,
   AuditTrailActor,

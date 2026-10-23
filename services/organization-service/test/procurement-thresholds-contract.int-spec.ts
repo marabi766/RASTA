@@ -182,6 +182,31 @@ describe('GET /v1/organizations/:id/procurement-thresholds provider contract', (
     });
   });
 
+  it.each([
+    null,
+    {},
+    { ...value, INQUIRY: { ...range, mode: 'ALLOW' } },
+    { ...value, INQUIRY: { ...range, minAmountMinor: 1 } },
+    { ...value, INQUIRY: { ...range, minAmountMinor: '1000001' } },
+    { ...value, INQUIRY: { ...range, maxAmountMinor: '9223372036854775808' } },
+    { ...value, extra: range },
+  ])('refuses malformed threshold policy %j before replacing any row', async (bad) => {
+    const original = await set(dehyari);
+    await expect(
+      asActor({ organizationId: union, roles: ['SYSTEM_ADMIN'] }, () =>
+        app
+          .get(OrganizationService)
+          .setPolicy(dehyari, { key, value: bad, inheritable: true, description: 'Invalid table' }),
+      ),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    expect((await read(dehyari)).body.policy).toEqual({ id: original.id, value });
+    expect(
+      await app
+        .get(PrismaService)
+        .client.organizationPolicy.count({ where: { organizationId: dehyari, key } }),
+    ).toBe(1);
+  });
+
   it('returns the own value ahead of the inherited value, with the consumer shape', async () => {
     await set(union);
     const own = await set(dehyari);

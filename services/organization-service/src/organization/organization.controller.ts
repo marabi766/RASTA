@@ -191,7 +191,11 @@ export class OrganizationController {
    * and `OrganizationService.setPolicy` refuses every role not configured.
    */
   @Post(':id/policies')
-  @ApiOperation({ summary: 'Set a governance policy value' })
+  @ApiOperation({
+    summary: 'Set a governance policy value',
+    description:
+      'For construction.tender.procurement_thresholds, value must satisfy the strict procurementThresholdsSchema contract (all four natures, integer-string or null inclusive bounds, min <= max, WARN or REJECT). Malformed tables answer 400 VALIDATION_FAILED before any policy replacement.',
+  })
   setPolicy(@Param('id') id: string, @Body(zodPipe(setPolicySchema)) dto: SetPolicyDto) {
     return this.organizations.setPolicy(id, dto);
   }
