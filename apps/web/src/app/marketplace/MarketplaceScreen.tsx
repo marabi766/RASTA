@@ -1,4 +1,6 @@
 import { Button, EmptyState, ErrorState, NoAccessState, PageHeader, Section } from '@/ui';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
+import type { DemoMode } from '@/lib/demo-mode';
 import { productKindLabel } from '@/lib/labels';
 import { formatMoney } from '@/lib/format';
 import type { ProductPage, ProductSearchQuery, ReadResult } from '@/server/marketplace';
@@ -22,6 +24,8 @@ import type { ProductPage, ProductSearchQuery, ReadResult } from '@/server/marke
 export interface MarketplaceScreenProps {
   readonly result: ReadResult<ProductPage>;
   readonly query: ProductSearchQuery;
+  /** What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or that it is unknown. */
+  readonly demoMode: DemoMode;
 }
 
 const CONTROL =
@@ -126,7 +130,7 @@ function ProductRows({ page }: { page: ProductPage }) {
   );
 }
 
-export function MarketplaceScreen({ result, query }: MarketplaceScreenProps) {
+export function MarketplaceScreen({ result, query, demoMode }: MarketplaceScreenProps) {
   const filtered = Boolean(query.q || query.category);
 
   return (
@@ -135,6 +139,8 @@ export function MarketplaceScreen({ result, query }: MarketplaceScreenProps) {
         title="جست‌وجوی کالا و خدمت"
         description="کاتالوگ کالا و خدمت هر تأمین‌کننده‌ای که پیشنهادی منتشرکرده باشد."
       />
+
+      <DemoModeNotice mode={demoMode} />
 
       <Section headingId="filters" title="جست‌وجو">
         <Filters query={query} />

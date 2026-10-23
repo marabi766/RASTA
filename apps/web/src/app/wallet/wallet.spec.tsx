@@ -141,6 +141,44 @@ describe('the top-up section', () => {
   });
 });
 
+describe('the whole screen: «حالت نمایشی» (Q-14)', () => {
+  it('is drawn once, above the balances, while the provider is simulated', () => {
+    const { getAllByText, queryByText } = render_();
+    expect(getAllByText('حالت نمایشی')).toHaveLength(1);
+    expect(queryByText('وضعیت درگاه پرداخت معلوم نیست')).toBeNull();
+  });
+
+  it('is absent once the provider is real', () => {
+    const { queryByText, container } = render_({
+      provider: {
+        kind: 'OK',
+        data: { ...PROVIDER, simulated: false, notice: 'Live payment provider.' },
+      },
+    });
+    expect(queryByText('حالت نمایشی')).toBeNull();
+    expect(queryByText('وضعیت درگاه پرداخت معلوم نیست')).toBeNull();
+    expect(container.querySelector('[name="amountMinor"]')).toBeInTheDocument();
+  });
+
+  it.each([
+    ['refused', { kind: 'FORBIDDEN' } as const],
+    ['unavailable', { kind: 'UNAVAILABLE', status: 503, correlationId: 'COR_1' } as const],
+    ['malformed', { kind: 'MALFORMED', correlationId: 'COR_2' } as const],
+  ])(
+    'says the provider is unknown when its read was %s — the history still shown, labelled',
+    (_how, provider) => {
+      // Even with the wallet itself unread: the history below is money too.
+      const { getByText, queryByText } = render_({
+        provider,
+        wallet: { kind: 'UNAVAILABLE', status: 503, correlationId: 'COR_9' },
+      });
+      expect(getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
+      expect(queryByText('حالت نمایشی')).toBeNull();
+      expect(getByText('تراکنش‌ها')).toBeInTheDocument();
+    },
+  );
+});
+
 describe('escrow holds', () => {
   it('lists a hold’s amount, status and reference', () => {
     const { getByText } = render_();

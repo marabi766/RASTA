@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { AllowService, RastaError, Roles, zodPipe } from '@rasta/nest-common';
+import { AllowService, RastaError, Roles, getOrganizationId, zodPipe } from '@rasta/nest-common';
 import { WalletService } from './wallet.service';
 import { PaymentService, type TopUpResult } from '../payment/payment.service';
 import { IdempotencyStore, targeted } from '../shared/idempotency';
@@ -63,6 +63,34 @@ export class WalletController {
   provider() {
     assertNotAuditor();
     return this.payments.describeProvider();
+  }
+
+  /**
+   * Whether payments are simulated, and nothing else (Q-14): the one fact a
+   * screen needs to draw «حالت نمایشی».
+   *
+   * Every money screen asks it, and most of their readers are not wallet
+   * administrators: a contractor reading its contract, a workshop its repair's
+   * costs, a buyer its order. So no `@Roles` — any authenticated member of the
+   * organization the request resolves to, which `AuthGuard` has already
+   * checked — and not the provider's name or notice, which stay behind the
+   * administrators' `provider` read above. The oversight role is still refused,
+   * as everywhere in this service. Declared before `:id` for the same reason
+   * as `provider`.
+   */
+  @Get('provider/disclosure')
+  @ApiOperation({
+    summary: 'Whether payments are simulated, for any member of the organization',
+    description:
+      'Only `simulated`, for a client to label every screen that shows or moves money (Q-14). ' +
+      'Readable by every role but the oversight role; the provider itself is `GET ' +
+      '/v1/wallets/provider`, for administrators.',
+  })
+  providerDisclosure() {
+    assertNotAuditor();
+    // Tenant-scoped like every user request here: a caller with no organization is refused.
+    getOrganizationId();
+    return { simulated: this.payments.describeProvider().simulated };
   }
 
   // ---- Reads ---------------------------------------------------------------
