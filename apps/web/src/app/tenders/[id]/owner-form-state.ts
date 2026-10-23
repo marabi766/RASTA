@@ -1,5 +1,5 @@
 import type { SessionRefusal } from '@/lib/session-refusal';
-import type { OwnerCommand } from '@/lib/tender-owner-fields';
+import { KEYED_REPLAY_OWNER_COMMANDS, type OwnerCommand } from '@/lib/tender-owner-fields';
 import type { OwnerValues } from '@/lib/tender-owner-input';
 import type { ReplayStamp } from '@/lib/unresolved-tender-command';
 
@@ -51,6 +51,8 @@ export type OwnerFormState =
       readonly values: OwnerValues | null;
       readonly replay: ReplayStamp | null;
       readonly retryRefused?: true;
+      /** The refusal of a re-send, in fixed words, when it named one (a key already used, a proposal superseded). */
+      readonly retryRefusal?: string;
       readonly retryUnknown?: true;
       readonly sessionEnded?: true;
       readonly viewOnly?: true;
@@ -93,6 +95,8 @@ export function pastReplayDeadline(unconfirmed: UnconfirmedOwnerCommand): Unconf
  * What a retry of an unconfirmed command came to: its refusal proves nothing
  * about the first request (a publication that took is refused `409` the second
  * time); only an ended session and a passed deadline say something definite.
+ * The refusal of a command the service answers again under its key is shown in
+ * its fixed words: it is the answer to that very send.
  */
 export function afterRetry(
   previous: UnconfirmedOwnerCommand,
@@ -102,6 +106,13 @@ export function afterRetry(
     if (state.reason === 'NO_SESSION') return withRetryNote(previous, 'sessionEnded');
     if (state.reason === 'SESSION_UNAVAILABLE') return withRetryNote(previous, 'retryUnknown');
     if (state.reason === 'REPLAY') return pastReplayDeadline(previous);
+  }
+  if (
+    state.kind === 'INVALID' &&
+    state.message &&
+    KEYED_REPLAY_OWNER_COMMANDS.includes(previous.command)
+  ) {
+    return { ...withRetryNote(previous, 'retryRefused'), retryRefusal: state.message };
   }
   return withRetryNote(previous, state.kind === 'UNCONFIRMED' ? 'retryUnknown' : 'retryRefused');
 }

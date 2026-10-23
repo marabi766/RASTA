@@ -13,7 +13,8 @@ import {
 import { formatJalaliDateTime, formatMoney, toPersianDigits } from '@/lib/format';
 import { bidStatusLabel } from '@/lib/bid-fields';
 import {
-  OWNER_COMMAND_DONE,
+  OWNER_RESENT_NOTE,
+  ownerDoneText,
   requestStatusLabel,
   stepStatusLabel,
   type OwnerDone,
@@ -45,9 +46,11 @@ const NOTES: Readonly<Record<Exclude<OwnerNote, null>, string>> = {
 
 export function OwnerFlash({ done }: { readonly done?: OwnerDone }) {
   if (!done) return null;
+  const { text, resent } = ownerDoneText(done);
   return (
     <Alert tone="success" title="انجام شد">
-      {OWNER_COMMAND_DONE[done]}
+      {text}
+      {resent ? <> {OWNER_RESENT_NOTE}</> : null}
     </Alert>
   );
 }
