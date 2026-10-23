@@ -683,10 +683,7 @@ export class OrganizationService {
     }
     // Exact tenant equality, before any lookup; a subtree token is insufficient here.
     if (context.organizationId !== id) throw RastaError.notFound('Organization');
-    const policies = await this.readEffectivePolicies(
-      id,
-      'construction.tender.procurement_thresholds',
-    );
+    const policies = await this.readEffectivePolicies(id, PROCUREMENT_THRESHOLDS_KEY);
     const policy = policies[0];
     return { organizationId: id, policy: policy ? { id: policy.id, value: policy.value } : null };
   }

@@ -207,6 +207,47 @@ describe('GET /v1/organizations/:id/procurement-thresholds provider contract', (
     ).toBe(1);
   });
 
+  const writeHttp = (policyKey: string, policyValue: unknown) =>
+    http()
+      .post(`/v1/organizations/${dehyari}/policies`)
+      .set(
+        'authorization',
+        `Bearer ${bearer({ sub: 'policy-setter', organizationId: dehyari, roles: ['SYSTEM_ADMIN'] })}`,
+      )
+      .send({
+        key: policyKey,
+        value: policyValue,
+        inheritable: true,
+        description: 'HTTP policy test',
+      });
+
+  it('returns HTTP 400 VALIDATION_FAILED for a malformed table without writing a row', async () => {
+    const response = await writeHttp(key, { ...value, INQUIRY: { ...range, mode: 'ALLOW' } });
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      code: 'VALIDATION_FAILED',
+      details: [expect.objectContaining({ path: 'value', code: 'INVALID_PROCUREMENT_THRESHOLDS' })],
+    });
+    expect(
+      await app.get(PrismaService).client.organizationPolicy.count({
+        where: { organizationId: dehyari },
+      }),
+    ).toBe(0);
+  });
+
+  it('accepts a non-table value over HTTP for another key', async () => {
+    const otherKey = 'private.other_policy';
+    const otherValue = { arbitrary: 'not a threshold table' };
+    const response = await writeHttp(otherKey, otherValue);
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({ key: otherKey, value: otherValue });
+    expect(
+      await app.get(PrismaService).client.organizationPolicy.findMany({
+        where: { organizationId: dehyari },
+      }),
+    ).toEqual([expect.objectContaining({ key: otherKey, value: otherValue })]);
+  });
+
   it('returns the own value ahead of the inherited value, with the consumer shape', async () => {
     await set(union);
     const own = await set(dehyari);
