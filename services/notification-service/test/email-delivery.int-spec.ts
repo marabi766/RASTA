@@ -15,6 +15,7 @@ import { seedEmailTemplates } from '../src/channels/template.seeder';
 import { templateReader } from '../src/channels/template.reader';
 import { EventPublisher } from '../src/events/publisher';
 import type { NotificationEnv } from '../src/config/env';
+import { MAILPIT_API, mailpitReachable, requireMailpitOrWarn } from './mailpit';
 
 /**
  * NTF-004 end to end: an event becomes a message a mail server accepted, and
@@ -28,14 +29,14 @@ import type { NotificationEnv } from '../src/config/env';
  * subject that arrived mangled, a recipient nobody asked for — and none of
  * them is visible to a test that stubs the transport.
  *
- * ## Why it skips rather than fails without Mailpit
+ * ## Why it skips locally but fails in CI without Mailpit
  *
  * `docker-compose.yml` puts Mailpit behind the `tools`/`all` profiles, so
  * `pnpm infra:up` does not start it. A suite that failed without it would be
- * red on a correct default stack.
+ * red on a correct default stack. CI provisions Mailpit and sets
+ * `REQUIRE_MAILPIT=1`, which turns the skip into an error (`./mailpit.ts`).
  */
 
-const MAILPIT_API = process.env.MAILPIT_API_URL ?? 'http://localhost:8025';
 const SMTP_HOST = process.env.NOTIFICATION_SMTP_HOST ?? 'localhost';
 const SMTP_PORT = Number(process.env.NOTIFICATION_SMTP_PORT ?? 1025);
 
@@ -45,14 +46,6 @@ interface MailpitSummary {
   To: { Address: string }[];
   Bcc: { Address: string }[];
   From: { Address: string };
-}
-
-async function mailpitReachable(): Promise<boolean> {
-  try {
-    return (await fetch(`${MAILPIT_API}/api/v1/messages?limit=1`)).ok;
-  } catch {
-    return false;
-  }
 }
 
 async function findMessage(to: string): Promise<MailpitSummary | undefined> {
@@ -115,12 +108,7 @@ describe('an email that actually leaves the platform', () => {
     // the same call `AppModule.onModuleInit` makes, for the same reason.
     await seedEmailTemplates(w.prisma.client);
     available = await mailpitReachable();
-    if (!available) {
-      console.warn(
-        `Mailpit is not reachable at ${MAILPIT_API}; skipping. ` +
-          'Start it with: docker compose --profile tools up -d mailpit',
-      );
-    }
+    requireMailpitOrWarn(available);
   }, 120_000);
 
   afterAll(async () => {

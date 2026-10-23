@@ -434,6 +434,26 @@ test('infrastructure no step of the job reads is refused', () => {
   fails(workflow, new RegExp(`${id} starts Redis, which no step of it reads`));
 });
 
+test('the notification SMTP suites cannot skip: Mailpit is provisioned and required', () => {
+  for (const name of ['Integration tests', 'Notification coverage gate']) {
+    const noMailpit = real();
+    delete noMailpit.jobs[jobRunning(noMailpit, name)].services.mailpit;
+    fails(noMailpit, new RegExp(`"${name}" runs without a mailpit service container`));
+
+    const notRequired = real();
+    delete stepNamed(notRequired, name).env.REQUIRE_MAILPIT;
+    fails(notRequired, new RegExp(`"${name}" lost REQUIRE_MAILPIT from its env`));
+
+    const optional = real();
+    stepNamed(optional, name).env.REQUIRE_MAILPIT = '0';
+    fails(optional, new RegExp(`"${name}" must set REQUIRE_MAILPIT: 1, not 0`));
+  }
+  const unread = real();
+  const id = jobRunning(unread, 'Construction coverage gate');
+  unread.jobs[id].services.mailpit = { image: 'axllent/mailpit' };
+  fails(unread, new RegExp(`${id} starts Mailpit, which no step of it reads`));
+});
+
 test('invalid YAML is a problem, not a pass', () => {
   assert.equal(checkIntegrationSplitText('jobs: [unclosed').length, 1);
 });

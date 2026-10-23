@@ -38,6 +38,9 @@
  *   - a step started without the infrastructure it reads (broker, bucket,
  *     scanner, Redis, a provisioned and migrated PostgreSQL), or a job that
  *     starts infrastructure none of its steps reads;
+ *   - a step that sets REQUIRE_MAILPIT (notification's SMTP suites then fail
+ *     instead of skipping) in a job without a mailpit service container, or a
+ *     mailpit container no step of the job reads;
  *   - a test run outside turbo with nothing having built the packages its
  *     suites resolve to their dist.
  *
@@ -93,6 +96,8 @@ const BUCKET = {
   S3_FORCE_PATH_STYLE: ANY,
 };
 const SCANNER = { DOCUMENT_CLAMAV_SOCKET_PATH: ANY, DOCUMENT_SCAN_SIGNATURE_MAX_AGE_HOURS: ANY };
+/** notification-service's SMTP suites fail, rather than skip, without Mailpit. */
+const MAILPIT = { REQUIRE_MAILPIT: '1' };
 const POSTGRES = { PGHOST: ANY, PGPORT: ANY, PGUSER: ANY, PGPASSWORD: ANY };
 
 const withKafka = (principal, ...commands) => [
@@ -121,6 +126,7 @@ export const STEP_INVENTORY = Object.freeze({
       ...BUCKET,
       ...SCANNER,
       REDIS_URL: ANY,
+      ...MAILPIT,
     },
     timeout: 12,
   },
@@ -132,7 +138,7 @@ export const STEP_INVENTORY = Object.freeze({
   'Contract coverage gate': coverageGate('contract'),
   'Inventory coverage gate': coverageGate('inventory'),
   'Audit coverage gate': coverageGate('audit'),
-  'Notification coverage gate': coverageGate('notification'),
+  'Notification coverage gate': coverageGate('notification', MAILPIT),
   'Organization coverage gate': coverageGate('organization'),
   'Procurement coverage gate': coverageGate('procurement'),
   'Analytics coverage gate': coverageGate('analytics'),
@@ -339,6 +345,11 @@ export function checkIntegrationSplit(workflow) {
         before(CLAMAV_STEP),
       );
       needsInfra(vars.includes('REDIS_URL'), 'a redis service container', 'redis' in services);
+      needsInfra(
+        vars.includes('REQUIRE_MAILPIT'),
+        'a mailpit service container',
+        'mailpit' in services,
+      );
       const database =
         vars.some((key) => key.startsWith('DATABASE_URL_')) || vars.includes('PGHOST');
       needsInfra(
@@ -370,6 +381,7 @@ export function checkIntegrationSplit(workflow) {
     unused(indexOf(MINIO_STEP) >= 0, 'S3_ENDPOINT', 'MinIO');
     unused(indexOf(CLAMAV_STEP) >= 0, 'DOCUMENT_CLAMAV_SOCKET_PATH', 'ClamAV');
     unused('redis' in services, 'REDIS_URL', 'Redis');
+    unused('mailpit' in services, 'REQUIRE_MAILPIT', 'Mailpit');
   }
   for (const [name, where] of seen) {
     if (where.length === 0) problems.push(`no ${SPLIT_PREFIX}* job runs "${name}"`);
