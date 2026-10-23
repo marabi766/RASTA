@@ -1,8 +1,9 @@
-import { cleanup as cleanupRender, render } from '@testing-library/react';
+import { cleanup as cleanupRender, render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
 import { MaintenanceScreen } from './MaintenanceScreen';
 import { RequestDetailScreen } from './[id]/RequestDetailScreen';
+import type { DemoMode } from '@/lib/demo-mode';
 import type {
   MaintenanceRequestDetail,
   MaintenanceRequestPage,
@@ -188,7 +189,7 @@ describe('the maintenance request detail', () => {
 
   it('shows the workflow history in order, only for what has happened', () => {
     const { getByText, queryByText } = render(
-      <RequestDetailScreen result={ok()} requestId="MREQ_1" />,
+      <RequestDetailScreen demoMode="REAL" result={ok()} requestId="MREQ_1" />,
     );
     expect(getByText('گزارش شد')).toBeInTheDocument();
     // Nothing has started yet, so no step claims it has.
@@ -203,7 +204,7 @@ describe('the maintenance request detail', () => {
       startedAt: '2026-02-02T00:00:00.000Z',
     };
     const { getByText } = render(
-      <RequestDetailScreen result={ok(inProgress)} requestId="MREQ_1" />,
+      <RequestDetailScreen demoMode="REAL" result={ok(inProgress)} requestId="MREQ_1" />,
     );
     expect(getByText('گزارش شد')).toBeInTheDocument();
     expect(getByText('تعمیر آغاز شد')).toBeInTheDocument();
@@ -217,7 +218,9 @@ describe('the maintenance request detail', () => {
       approvedAt: '2026-02-04T00:00:00.000Z',
       approvalNotes: 'تأیید شد، هزینه مطابق برآورد بود',
     };
-    const { getByText } = render(<RequestDetailScreen result={ok(approved)} requestId="MREQ_1" />);
+    const { getByText } = render(
+      <RequestDetailScreen demoMode="REAL" result={ok(approved)} requestId="MREQ_1" />,
+    );
     expect(getByText('تأیید شد، هزینه مطابق برآورد بود')).toBeInTheDocument();
   });
 
@@ -227,7 +230,9 @@ describe('the maintenance request detail', () => {
       returnedToServiceAt: '2026-02-01T10:30:00.000Z',
       downtimeMinutes: 150,
     };
-    const { getByText } = render(<RequestDetailScreen result={ok(returned)} requestId="MREQ_1" />);
+    const { getByText } = render(
+      <RequestDetailScreen demoMode="REAL" result={ok(returned)} requestId="MREQ_1" />,
+    );
     expect(getByText('۱۵۰ دقیقه')).toBeInTheDocument();
   });
 
@@ -238,7 +243,7 @@ describe('the maintenance request detail', () => {
       severity: null,
     };
     const { getByText } = render(
-      <RequestDetailScreen result={ok(preventive)} requestId="MREQ_1" />,
+      <RequestDetailScreen demoMode="REAL" result={ok(preventive)} requestId="MREQ_1" />,
     );
     expect(getByText('ندارد — کار پیشگیرانه')).toBeInTheDocument();
   });
@@ -246,7 +251,7 @@ describe('the maintenance request detail', () => {
   describe('the confirmation after reporting', () => {
     it('confirms a request that was just reported', () => {
       const { getByText } = render(
-        <RequestDetailScreen result={ok()} requestId="MREQ_1" notice="created" />,
+        <RequestDetailScreen demoMode="REAL" result={ok()} requestId="MREQ_1" notice="created" />,
       );
       // A confirmation is `status`, which waits for a pause in the screen
       // reader; only something the person must act on now is `alert`. Found by
@@ -255,7 +260,9 @@ describe('the maintenance request detail', () => {
     });
 
     it('says nothing when the page was opened without one', () => {
-      const { queryByText } = render(<RequestDetailScreen result={ok()} requestId="MREQ_1" />);
+      const { queryByText } = render(
+        <RequestDetailScreen demoMode="REAL" result={ok()} requestId="MREQ_1" />,
+      );
       expect(queryByText(/درخواست ثبت شد/)).toBeNull();
     });
 
@@ -263,7 +270,12 @@ describe('the maintenance request detail', () => {
       // Even a genuine flash must not put a confirmation in front of a request
       // the viewer cannot read.
       const { queryByText } = render(
-        <RequestDetailScreen result={{ kind: 'NOT_FOUND' }} requestId="MREQ_X" notice="created" />,
+        <RequestDetailScreen
+          demoMode="REAL"
+          result={{ kind: 'NOT_FOUND' }}
+          requestId="MREQ_X"
+          notice="created"
+        />,
       );
       expect(queryByText(/درخواست ثبت شد/)).toBeNull();
     });
@@ -274,13 +286,15 @@ describe('the maintenance request detail', () => {
     // should not learn it. maintenance-service answers 404 for both, and so
     // does this.
     const { getByText } = render(
-      <RequestDetailScreen result={{ kind: 'NOT_FOUND' }} requestId="MREQ_X" />,
+      <RequestDetailScreen demoMode="REAL" result={{ kind: 'NOT_FOUND' }} requestId="MREQ_X" />,
     );
     expect(getByText('این درخواست پیدا نشد')).toBeInTheDocument();
   });
 
   it('shows no repair order as not-yet-assigned, not as an error', () => {
-    const { getByText } = render(<RequestDetailScreen result={ok()} requestId="MREQ_1" />);
+    const { getByText } = render(
+      <RequestDetailScreen demoMode="REAL" result={ok()} requestId="MREQ_1" />,
+    );
     expect(getByText('هنوز ارجاع نشده')).toBeInTheDocument();
   });
 
@@ -307,13 +321,17 @@ describe('the maintenance request detail', () => {
         },
       ],
     };
-    const { getByText } = render(<RequestDetailScreen result={ok(withOrder)} requestId="MREQ_1" />);
+    const { getByText } = render(
+      <RequestDetailScreen demoMode="REAL" result={ok(withOrder)} requestId="MREQ_1" />,
+    );
     expect(getByText('تعمیرگاه مرکزی')).toBeInTheDocument();
     expect(getByText('بررسی موتور')).toBeInTheDocument();
   });
 
   it('has no accessibility violations', async () => {
-    const { container } = render(<RequestDetailScreen result={ok()} requestId="MREQ_1" />);
+    const { container } = render(
+      <RequestDetailScreen demoMode="REAL" result={ok()} requestId="MREQ_1" />,
+    );
     expect(await axe(container)).toHaveNoViolations();
   });
 });
@@ -349,7 +367,12 @@ describe('the commands on a request', () => {
 
   const shown = (data: MaintenanceRequestDetail) => {
     const { queryByText } = render(
-      <RequestDetailScreen result={ok(data)} requestId="MREQ_1" commandForms={forms} />,
+      <RequestDetailScreen
+        demoMode="REAL"
+        result={ok(data)}
+        requestId="MREQ_1"
+        commandForms={forms}
+      />,
     );
     return {
       assign: queryByText('فرم ارجاع نمونه') !== null,
@@ -380,7 +403,9 @@ describe('the commands on a request', () => {
   });
 
   it('offers nothing to a person the page did not hand the forms to', () => {
-    const { queryByText } = render(<RequestDetailScreen result={ok(DETAIL)} requestId="MREQ_1" />);
+    const { queryByText } = render(
+      <RequestDetailScreen demoMode="REAL" result={ok(DETAIL)} requestId="MREQ_1" />,
+    );
     expect(queryByText('فرم ارجاع نمونه')).toBeNull();
     expect(queryByText('فرم لغو نمونه')).toBeNull();
   });
@@ -388,6 +413,7 @@ describe('the commands on a request', () => {
   it('offers nothing where the read failed, whatever the page handed it', () => {
     const { queryByText } = render(
       <RequestDetailScreen
+        demoMode="REAL"
         result={{ kind: 'NOT_FOUND' }}
         requestId="MREQ_X"
         commandForms={forms}
@@ -404,7 +430,12 @@ describe('the commands on a request', () => {
     ['costChanged', 'هزینه از زمان نمایش تغییر کرده بود', 'alert'],
   ] as const)('says what %s did, as a %s', (notice, words, role) => {
     const { getByText } = render(
-      <RequestDetailScreen result={ok(DETAIL)} requestId="MREQ_1" notice={notice} />,
+      <RequestDetailScreen
+        demoMode="REAL"
+        result={ok(DETAIL)}
+        requestId="MREQ_1"
+        notice={notice}
+      />,
     );
     expect(getByText(new RegExp(words)).closest(`[role="${role}"]`)).not.toBeNull();
   });
@@ -412,6 +443,7 @@ describe('the commands on a request', () => {
   it('has no accessibility violations with the commands in place', async () => {
     const { container } = render(
       <RequestDetailScreen
+        demoMode="REAL"
         result={ok({ ...DETAIL, status: 'COMPLETED' })}
         requestId="MREQ_1"
         commandForms={forms}
@@ -514,9 +546,10 @@ describe('the repair orders on a request', () => {
     COMMANDS.map((command) => [command, <div key={command}>فرم {command} نمونه</div>]),
   );
 
-  const offered = (orderStatus: string) => {
+  const offered = (orderStatus: string, demoMode: DemoMode = 'REAL') => {
     const { queryByText } = render(
       <RequestDetailScreen
+        demoMode={demoMode}
         result={ok(request('IN_PROGRESS', orderStatus))}
         requestId="MREQ_1"
         orderForms={{ RPO_1: forms }}
@@ -539,9 +572,32 @@ describe('the repair orders on a request', () => {
     },
   );
 
+  // Completing publishes MAINTENANCE_COMPLETED, a reward trigger: under a monetised rule
+  // economic-service credits the wallet by itself, and the portal cannot see the rules
+  // (Codex PR-361 r3). The other order commands record work and cost, and stay.
+  it('withholds completing the repair while the provider is unknown, and nothing else on the order', () => {
+    expect(offered('IN_PROGRESS', 'UNKNOWN')).toEqual(['cancel', 'part', 'labour', 'cost']);
+    expect(screen.getByText('تکمیل تعمیر اکنون در دسترس نیست')).toBeInTheDocument();
+    expect(screen.getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
+    cleanupRender();
+    expect(offered('OPEN', 'UNKNOWN')).toEqual(['start', 'cancel', 'part', 'labour', 'cost']);
+  });
+
+  it.each(['SIMULATED', 'REAL'] as const)(
+    'offers completing the repair while the provider is %s',
+    (demoMode) => {
+      expect(offered('IN_PROGRESS', demoMode)).toContain('complete');
+      expect(screen.queryByText(/اکنون در دسترس نیست/)).toBeNull();
+    },
+  );
+
   it('offers no order command to a person the page did not hand the forms to', () => {
     const { queryByText } = render(
-      <RequestDetailScreen result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))} requestId="MREQ_1" />,
+      <RequestDetailScreen
+        demoMode="REAL"
+        result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))}
+        requestId="MREQ_1"
+      />,
     );
     for (const command of COMMANDS) expect(queryByText(`فرم ${command} نمونه`)).toBeNull();
   });
@@ -549,6 +605,7 @@ describe('the repair orders on a request', () => {
   it('puts the forms on the order they were built for, and on no other', () => {
     const { queryByText } = render(
       <RequestDetailScreen
+        demoMode="REAL"
         result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))}
         requestId="MREQ_1"
         orderForms={{ RPO_OTHER: forms }}
@@ -560,6 +617,7 @@ describe('the repair orders on a request', () => {
   it('lists the parts, the labour and the direct charges, once each, with every figure in rials', () => {
     const { getByText, getAllByText, queryAllByText } = render(
       <RequestDetailScreen
+        demoMode="REAL"
         result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))}
         requestId="MREQ_1"
         orderDetails={{ RPO_1: detail('IN_PROGRESS') }}
@@ -578,6 +636,7 @@ describe('the repair orders on a request', () => {
     const empty: RepairOrderDetail = { ...detail('OPEN'), parts: [], labour: [], costs: [] };
     const { getByText } = render(
       <RequestDetailScreen
+        demoMode="REAL"
         result={ok(request('OPEN', 'OPEN'))}
         requestId="MREQ_1"
         orderDetails={{ RPO_1: empty }}
@@ -589,6 +648,7 @@ describe('the repair orders on a request', () => {
   it('keeps the card, and says the lines could not be read, when they could not — the commands stay', () => {
     const { getByText, queryByText } = render(
       <RequestDetailScreen
+        demoMode="REAL"
         result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))}
         requestId="MREQ_1"
         orderDetails={{ RPO_1: null }}
@@ -602,7 +662,11 @@ describe('the repair orders on a request', () => {
 
   it('does not claim lines it was not given: a page that read none shows no list and no apology', () => {
     const { queryByText } = render(
-      <RequestDetailScreen result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))} requestId="MREQ_1" />,
+      <RequestDetailScreen
+        demoMode="REAL"
+        result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))}
+        requestId="MREQ_1"
+      />,
     );
     expect(queryByText(/خوانده نشد/)).toBeNull();
     expect(queryByText(/هنوز قطعه، اجرت یا هزینه‌ای ثبت نشده/)).toBeNull();
@@ -618,7 +682,12 @@ describe('the repair orders on a request', () => {
     ['costRecorded', 'هزینه ثبت شد', 'status'],
   ] as const)('says what %s did, as a %s', (notice, words, role) => {
     const { getByText } = render(
-      <RequestDetailScreen result={ok(DETAIL)} requestId="MREQ_1" notice={notice} />,
+      <RequestDetailScreen
+        demoMode="REAL"
+        result={ok(DETAIL)}
+        requestId="MREQ_1"
+        notice={notice}
+      />,
     );
     expect(getByText(new RegExp(words)).closest(`[role="${role}"]`)).not.toBeNull();
   });
@@ -626,6 +695,7 @@ describe('the repair orders on a request', () => {
   it('has no accessibility violations with lines, commands and a notice', async () => {
     const { container } = render(
       <RequestDetailScreen
+        demoMode="REAL"
         result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))}
         requestId="MREQ_1"
         orderDetails={{ RPO_1: detail('IN_PROGRESS') }}
@@ -634,5 +704,69 @@ describe('the repair orders on a request', () => {
       />,
     );
     expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe('the maintenance request page: «حالت نمایشی» (Q-14)', () => {
+  it('is drawn when the provider is simulated', () => {
+    const view = render(
+      <RequestDetailScreen
+        result={{ kind: 'OK', data: DETAIL }}
+        requestId="MREQ_1"
+        demoMode="SIMULATED"
+      />,
+    );
+    expect(view.getByText('حالت نمایشی')).toBeInTheDocument();
+  });
+
+  it('is absent when it is not', () => {
+    const view = render(
+      <RequestDetailScreen
+        result={{ kind: 'OK', data: DETAIL }}
+        requestId="MREQ_1"
+        demoMode="REAL"
+      />,
+    );
+    expect(view.queryByText('حالت نمایشی')).toBeNull();
+    expect(view.queryByText('وضعیت درگاه پرداخت معلوم نیست')).toBeNull();
+  });
+
+  const forms = {
+    assign: <div>فرم ارجاع نمونه</div>,
+    approve: <div>فرم تأیید نمونه</div>,
+    cancel: <div>فرم لغو نمونه</div>,
+  };
+
+  // The approval records the obligation; a separate settlement pays it, so it moves no money
+  // and a disclosure outage must not stop it (Codex PR-361 r2, the same rule as orders).
+  it('says the provider is unknown, and still offers the cost approval and cancelling', () => {
+    const view = render(
+      <RequestDetailScreen
+        result={{ kind: 'OK', data: { ...DETAIL, status: 'COMPLETED' } }}
+        requestId="MREQ_1"
+        commandForms={forms}
+        demoMode="UNKNOWN"
+      />,
+    );
+    expect(view.getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
+    expect(view.queryByText('حالت نمایشی')).toBeNull();
+    expect(view.queryByText(/اکنون در دسترس نیست/)).toBeNull();
+    expect(view.getByText('فرم تأیید نمونه')).toBeInTheDocument();
+    expect(view.getByText('فرم لغو نمونه')).toBeInTheDocument();
+  });
+
+  it('offers the approval while the provider is known', () => {
+    for (const demoMode of ['SIMULATED', 'REAL'] as const) {
+      const view = render(
+        <RequestDetailScreen
+          result={{ kind: 'OK', data: { ...DETAIL, status: 'COMPLETED' } }}
+          requestId="MREQ_1"
+          commandForms={forms}
+          demoMode={demoMode}
+        />,
+      );
+      expect(view.getByText('فرم تأیید نمونه')).toBeInTheDocument();
+      view.unmount();
+    }
   });
 });

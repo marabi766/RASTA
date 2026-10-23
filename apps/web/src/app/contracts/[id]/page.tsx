@@ -10,6 +10,7 @@ import {
   statementCallerOf,
 } from '@/server/contract-statements';
 import { currentSession } from '@/server/current-session';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { fetchAmendments, fetchContract, fetchMilestones } from '@/server/contracts';
 import { webServerEnv } from '@/server/env';
 import { readFlash } from '@/server/flash';
@@ -118,6 +119,8 @@ export default async function ContractPage({
         }
       : null;
 
+  const demoMode = await fetchDemoMode(session);
+
   return (
     <AppShell
       topBar={
@@ -150,6 +153,7 @@ export default async function ContractPage({
           draft={draft}
           commands={commands}
           notice={notice ?? null}
+          demoMode={demoMode}
         />
       </div>
     </AppShell>
