@@ -365,18 +365,51 @@ describe('never silently gone', () => {
     for (const value of [
       // A shipment move in a warehouse's slot.
       { command: 'DISPATCH_SHIPMENT', body: null },
-      // A typed command without its body.
-      { command: 'RECEIVE_STOCK', body: null },
-      // A receipt of zero, which the form would never send.
-      { command: 'RECEIVE_STOCK', body: { ...RECEIPT, quantity: 0 } },
-      // A product the form would refuse.
-      { command: 'RECEIVE_STOCK', body: { ...RECEIPT, productId: 'cement' } },
-      // A receipt body in an adjustment.
-      { command: 'ADJUST_STOCK', body: RECEIPT },
     ]) {
       window.sessionStorage.setItem(WAREHOUSE_SLOT, JSON.stringify({ ...base, ...value }));
       expect(restoreUnresolvedInventory(WAREHOUSE, BINDING, SESSION_MAX_AGE)).toBeNull();
       expect(stored()).toBeNull();
+    }
+  });
+
+  it('a sent command whose body cannot be read back is held as "outcome unknown", never dropped', () => {
+    const base = {
+      v: 1,
+      marker: false,
+      scope: `warehouse.${WAREHOUSE_ID}`,
+      submissionId: KEY,
+      correlationId: null,
+      savedAt: Date.now(),
+      replay: STAMP,
+      owner: BINDING.owner,
+      session: BINDING.session,
+    };
+    for (const value of [
+      { command: 'RECEIVE_STOCK', body: null },
+      { command: 'RECEIVE_STOCK', body: { ...RECEIPT, quantity: 0 } },
+      { command: 'ADJUST_STOCK', body: RECEIPT },
+      { command: 'RECEIVE_STOCK', body: RECEIPT, replay: 'garbage' },
+    ]) {
+      window.sessionStorage.setItem(WAREHOUSE_SLOT, JSON.stringify({ ...base, ...value }));
+      const restored = restoreUnresolvedInventory(WAREHOUSE, BINDING, SESSION_MAX_AGE);
+      expect(restored).toMatchObject({
+        kind: 'VIEW_ONLY',
+        entry: { submissionId: KEY, marker: true, body: null, replay: null },
+      });
+      // Another submission cannot take the slot while it is held.
+      expect(
+        saveUnresolvedInventory(
+          WAREHOUSE,
+          {
+            command: 'RECEIVE_STOCK',
+            submissionId: OTHER,
+            body: RECEIPT,
+            correlationId: null,
+            replay: STAMP,
+          },
+          BINDING,
+        ),
+      ).toBe('HELD');
     }
   });
 });
@@ -602,5 +635,129 @@ describe('a refused form is drawn again as it was typed', () => {
     expect(second.get(AMOUNT_FIELD)).toBe('8');
     // The same submission id: a refusal frees the service's claim, so the corrected form may reuse it.
     expect(second.get('submission')).toBe(ADJUST_KEY);
+  });
+});
+
+/**
+ * The page is drawn again by a link (another warehouse, the next page of a
+ * list) with fresh submission ids and fresh signed stamps, and the same client
+ * components stay mounted. A form that kept its `useActionState` would post the
+ * id of the earlier render beside the new stamp — a replay refusal — and show
+ * the earlier warehouse's values and refusals.
+ */
+describe('a page drawn again brings fresh forms', () => {
+  const SECOND_STAMP: ReplayStamp = {
+    token: 'second-signed-stamp',
+    until: Date.now() + 50 * 60 * 1000,
+  };
+  const OTHER_WAREHOUSE: InventoryScope = {
+    kind: 'WAREHOUSE',
+    warehouseId: 'WHS_01HYYYYYYYYYYYYYYYYYYYYYYY',
+  };
+  const drawn = (scope: InventoryScope, id: string, stamp: ReplayStamp) => (
+    <InventoryCommands
+      scope={scope}
+      offered={[{ command: 'RECEIVE_STOCK', submission: { id, replay: stamp } }]}
+      csrfToken="csrf"
+      binding={BINDING}
+      sessionMaxAgeSeconds={SESSION_MAX_AGE}
+      items={ITEMS}
+      pageHref="/inventory"
+    />
+  );
+  const field = (container: HTMLElement, name: string) =>
+    container.querySelector(`[name="${name}"]`) as HTMLInputElement;
+  const hidden = (container: HTMLElement, name: string) => field(container, name).value;
+
+  it('an invalid form, then pagination: the corrected form posts the new id with the new stamp', async () => {
+    const { container, rerender } = render(drawn(WAREHOUSE, KEY, STAMP));
+    await screen.findByRole('form', { name: 'ثبت رسید کالا' });
+    fireEvent.change(field(container, PRODUCT_FIELD), { target: { value: 'cement' } });
+    fireEvent.change(field(container, QUANTITY_FIELD), { target: { value: '5' } });
+    await send(container.querySelector('form'));
+    expect(submit).not.toHaveBeenCalled();
+    expect(field(container, PRODUCT_FIELD).value).toBe('cement');
+    expect(hidden(container, 'submission')).toBe(KEY);
+
+    // The next page of the same list: same warehouse, a fresh render.
+    rerender(drawn(WAREHOUSE, FRESH, SECOND_STAMP));
+    await screen.findByRole('form', { name: 'ثبت رسید کالا' });
+    expect(hidden(container, 'submission')).toBe(FRESH);
+    expect(field(container, PRODUCT_FIELD).value).toBe('');
+
+    submit.mockResolvedValueOnce({ kind: 'IDLE' });
+    fill(container);
+    await send(container.querySelector('form'));
+    const form = submit.mock.calls[0]![2];
+    expect(form.get('submission')).toBe(FRESH);
+    expect(form.get('replay')).toBe(SECOND_STAMP.token);
+  });
+
+  it('a refused form, then another warehouse: no stale values, no stale refusal', async () => {
+    const { container, rerender } = render(drawn(WAREHOUSE, KEY, STAMP));
+    await screen.findByRole('form', { name: 'ثبت رسید کالا' });
+    fireEvent.change(field(container, PRODUCT_FIELD), { target: { value: 'cement' } });
+    await send(container.querySelector('form'));
+    await screen
+      .findByText(/شناسه کالا را به شکل PRD_/, { selector: '[role="alert"], [role="alert"] *' })
+      .catch(() => undefined);
+    expect(field(container, PRODUCT_FIELD).value).toBe('cement');
+
+    rerender(drawn(OTHER_WAREHOUSE, FRESH, SECOND_STAMP));
+    await screen.findByRole('form', { name: 'ثبت رسید کالا' });
+    expect(field(container, PRODUCT_FIELD).value).toBe('');
+    expect(container.querySelector('[aria-invalid="true"]')).toBeNull();
+    expect(hidden(container, 'submission')).toBe(FRESH);
+  });
+
+  it('a form refused by the service is clean on the next render', async () => {
+    submit.mockResolvedValueOnce({ kind: 'REFUSED', reason: 'REPLAY' });
+    const { container, rerender } = render(drawn(WAREHOUSE, KEY, STAMP));
+    await screen.findByRole('form', { name: 'ثبت رسید کالا' });
+    fill(container);
+    await send(container.querySelector('form'));
+    await screen.findByText(/مهلت این فرم گذشته است/);
+    rerender(drawn(OTHER_WAREHOUSE, FRESH, SECOND_STAMP));
+    await screen.findByRole('form', { name: 'ثبت رسید کالا' });
+    expect(screen.queryByText(/مهلت این فرم گذشته است/)).toBeNull();
+  });
+
+  it('the answer read for one warehouse is not applied to the next while it is read', async () => {
+    saveUnresolvedInventory(
+      WAREHOUSE,
+      {
+        command: 'RECEIVE_STOCK',
+        submissionId: KEY,
+        body: RECEIPT,
+        correlationId: null,
+        replay: STAMP,
+      },
+      BINDING,
+    );
+    const { rerender } = render(drawn(WAREHOUSE, KEY, STAMP));
+    await screen.findByRole('form', { name: 'ثبت رسید کالا' });
+    // Another warehouse holds nothing: it draws its own fresh form, not the held one.
+    rerender(drawn(OTHER_WAREHOUSE, FRESH, SECOND_STAMP));
+    const form = await screen.findByRole('form', { name: 'ثبت رسید کالا' });
+    expect(form.querySelector(`[name="submission"]`)).toHaveValue(FRESH);
+    expect(screen.queryByRole('button', { name: RETRY_LABEL })).toBeNull();
+    expect(screen.queryByRole('region')).toBeNull();
+  });
+
+  it('a genuinely unresolved command is still restored, whatever the page now offers', async () => {
+    saveUnresolvedInventory(
+      WAREHOUSE,
+      {
+        command: 'RECEIVE_STOCK',
+        submissionId: KEY,
+        body: RECEIPT,
+        correlationId: null,
+        replay: STAMP,
+      },
+      BINDING,
+    );
+    render(drawn(WAREHOUSE, FRESH, SECOND_STAMP));
+    expect(await screen.findByRole('button', { name: RETRY_LABEL })).toBeInTheDocument();
+    expect(screen.getByRole('form').querySelector('[name="submission"]')).toHaveValue(KEY);
   });
 });

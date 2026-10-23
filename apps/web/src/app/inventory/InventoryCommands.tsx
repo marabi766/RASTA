@@ -82,24 +82,28 @@ export function InventoryCommands({
   pageHref,
   emptyNote,
 }: InventoryCommandsProps) {
-  const [checked, setChecked] = useState<{ readonly restored: RestoredInventory | null } | null>(
-    null,
-  );
+  const [checked, setChecked] = useState<{
+    readonly slot: string;
+    readonly restored: RestoredInventory | null;
+  } | null>(null);
   const { owner, session } = binding;
   const kind = scope.kind;
   const target = targetOf(scope);
+  const slotKey = `${kind}.${target}`;
 
   useEffect(() => {
     const slot = scopeOf(kind, target);
     const read = () =>
       setChecked({
+        slot: slotKey,
         restored: restoreUnresolvedInventory(slot, { owner, session }, sessionMaxAgeSeconds),
       });
     read();
     return subscribeUnresolvedInventory(read);
-  }, [kind, target, owner, session, sessionMaxAgeSeconds]);
+  }, [kind, target, slotKey, owner, session, sessionMaxAgeSeconds]);
 
-  if (checked === null) return null;
+  // What was read for another warehouse or shipment is not an answer for this one.
+  if (checked === null || checked.slot !== slotKey) return null;
 
   const { restored } = checked;
   // A record of none of the forms drawn now — this page was drawn after it was
@@ -134,7 +138,10 @@ export function InventoryCommands({
     <div className="flex flex-col gap-4">
       {offered.map(({ command, submission }) => (
         <InventoryCommandForm
-          key={command}
+          // A form is one submission: a page drawn again (a link to another
+          // warehouse, another page of a list) brings fresh ids and stamps, and
+          // the form that held the old ones, with its values and refusals, goes.
+          key={`${slotKey}.${command}.${submission.id}`}
           scope={scope}
           command={command}
           csrfToken={csrfToken}

@@ -142,9 +142,31 @@ describe('the warehouse list', () => {
 
   it('builds links from the query alone', () => {
     expect(inventoryHref({}, {})).toBe('/inventory');
-    expect(inventoryHref({ warehouse: WAREHOUSE_ID, cursor: 'c' }, { warehouse: undefined })).toBe(
-      '/inventory?cursor=c',
+    expect(inventoryHref({ warehouse: 'WHS_A', cursor: 'c' }, { shipmentCursor: 's' })).toBe(
+      '/inventory?warehouse=WHS_A&cursor=c&scursor=s',
     );
+  });
+
+  it("never carries one warehouse's stock or ledger cursor to another", () => {
+    const query = { warehouse: 'WHS_OLD', cursor: 'SKI_OLD', movementCursor: 'SMV_OLD_PAGE' };
+    expect(inventoryHref(query, { warehouse: 'WHS_NEW' })).toBe('/inventory?warehouse=WHS_NEW');
+    expect(inventoryHref(query, { warehouse: undefined })).toBe('/inventory');
+    // Staying on the warehouse keeps its place.
+    expect(inventoryHref(query, { warehouse: 'WHS_OLD', shipmentCursor: 's' })).toBe(
+      '/inventory?warehouse=WHS_OLD&cursor=SKI_OLD&mcursor=SMV_OLD_PAGE&scursor=s',
+    );
+  });
+
+  it('the warehouse links of the list drop the ledger cursor', () => {
+    render(
+      <InventoryScreen
+        warehouses={warehouses([WAREHOUSE])}
+        selection={null}
+        query={{ warehouse: 'WHS_OLD', movementCursor: 'SMV_OLD_PAGE', cursor: 'c' }}
+      />,
+    );
+    const link = screen.getByRole('link', { name: WAREHOUSE.name });
+    expect(link.getAttribute('href')).toBe(`/inventory?warehouse=${WAREHOUSE.id}`);
   });
 });
 

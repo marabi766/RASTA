@@ -331,10 +331,41 @@ describe('who may do what', () => {
     expect(accessText).toContain('context.roles.includes(PLATFORM_ROLE)');
   });
 
-  it('only an operator of the origin warehouse’s owner moves a shipment', () => {
-    expect(readSource(...SERVICE, 'shared', 'notes.ts')).toContain(
-      'Only an operator of the origin warehouse’s owner moves a shipment',
+  it('only an operator of the origin warehouse’s owner moves a shipment — in the code that moves it', () => {
+    const service = parseSource(readSource(...SERVICE, 'shipment', 'shipment.service.ts'));
+    const method = (name: string) =>
+      collect(service, ts.isMethodDeclaration).find((node) => node.name.getText() === name)!;
+    // Both moves go through `move`, which asks for an operator first and reads
+    // the row only under the acting organization.
+    expect(squash(method('dispatch').getText())).toContain("this.move('DISPATCHED'");
+    expect(squash(method('deliver').getText())).toContain("this.move('DELIVERED'");
+    const move = squash(method('move').getText()) ?? '';
+    expect(move.indexOf('this.access.assertOperator()')).toBeGreaterThan(-1);
+    expect(move.indexOf('this.access.assertOperator()')).toBeLessThan(
+      move.indexOf('this.shipments.lock('),
     );
+    expect(move).toContain('this.shipments.lock(tx,acting.organizationId,id)');
+    expect(move).toContain('if(!locked)throwawaitthis.notMovable(tx,acting.organizationId,id)');
+    // The lock matches the shipment's own (origin) organization, nothing else.
+    const lock = squash(
+      collect(
+        parseSource(readSource(...SERVICE, 'shipment', 'shipment.repository.ts')),
+        ts.isMethodDeclaration,
+      )
+        .find((node) => node.name.getText() === 'lock')!
+        .getText(),
+    );
+    expect(lock).toContain('WHERE"organization_id"=${organizationId}AND"id"=${id}FORUPDATE');
+    expect(lock).not.toContain('consignee');
+    // A consignee that may read the shipment is refused (403), anybody else sees nothing (404);
+    // neither is a move.
+    const refused = squash(method('notMovable').getText());
+    expect(refused).toContain('this.access.readsAsConsignee()');
+    expect(refused).toContain('{organizationId,asOrigin:false,asConsignee:true}');
+    expect(refused).toContain('returnRastaError.forbidden(');
+    expect(refused).toContain("returnRastaError.notFound('Shipment',id)");
+    expect(refused).not.toContain('advance(');
+    // The documented answers the portal says it with are the same.
     expect(shipmentController.getText()).toContain('not the consignee (Q-114)');
   });
 

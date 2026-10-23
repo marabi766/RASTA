@@ -202,6 +202,14 @@ function bodyOf(command: InventoryCommand, value: unknown): InventoryBody | null
   }
 }
 
+/** Whether a body, spelled as the retry spells it and read again, is the same body. */
+function roundTrips(command: InventoryCommand, body: InventoryBody | null): boolean {
+  if (!hasFields(command)) return body === null;
+  if (body === null) return false;
+  const again = bodyOf(command, JSON.parse(JSON.stringify(body)));
+  return again !== undefined && JSON.stringify(again) === JSON.stringify(body);
+}
+
 function parse(raw: string, scope: string): Stored | null {
   let value: unknown;
   try {
@@ -238,8 +246,11 @@ function parse(raw: string, scope: string): Stored | null {
 
   const replay = replayOf(entry.replay);
   const body = bodyOf(entry.command, entry.body);
+  // The command is known to have been sent but its record cannot be read back
+  // as something re-sendable: that is "outcome unknown", never "nothing sent" —
+  // it is held as a marker, not dropped, so no fresh key is offered over it.
   if (entry.marker !== false || !tag(entry.session) || replay === undefined || body === undefined) {
-    return null;
+    return { ...common, marker: true, replay: null, body: null };
   }
   return { ...common, marker: false, session: entry.session, replay, body };
 }
@@ -327,6 +338,9 @@ export function saveUnresolvedInventory(
     const earlier = parsed?.owner === binding.owner ? parsed : null;
     // Another submission's record — even a marker — is never replaced.
     if (earlier !== null && earlier.submissionId !== entry.submissionId) return 'HELD';
+    // A body that would not be read back as itself cannot be retried as the
+    // same request: it is not sent at all.
+    if (!roundTrips(entry.command, entry.body)) return 'UNAVAILABLE';
     // A marker is never turned back into something that can be re-sent.
     if (earlier?.marker) return 'SAVED';
     const same = earlier !== null;

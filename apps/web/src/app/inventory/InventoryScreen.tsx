@@ -101,6 +101,12 @@ export interface InventoryScreenProps {
 
 export function inventoryHref(query: InventoryQuery, changes: Partial<InventoryQuery>): string {
   const merged = { ...query, ...changes };
+  // The stock and ledger cursors are positions in one warehouse's rows: another
+  // warehouse never inherits them, whoever builds the link.
+  if ('warehouse' in changes && changes.warehouse !== query.warehouse) {
+    merged.cursor = changes.cursor;
+    merged.movementCursor = changes.movementCursor;
+  }
   const params = new URLSearchParams();
   if (merged.warehouse) params.set('warehouse', merged.warehouse);
   if (merged.warehouseCursor) params.set('wcursor', merged.warehouseCursor);
@@ -184,7 +190,11 @@ function WarehousesSection({
                 className="rounded-lg border border-border bg-surface-raised p-4"
               >
                 <Link
-                  href={inventoryHref(query, { warehouse: warehouse.id, cursor: undefined })}
+                  href={inventoryHref(query, {
+                    warehouse: warehouse.id,
+                    cursor: undefined,
+                    movementCursor: undefined,
+                  })}
                   aria-current={warehouse.id === query.warehouse ? 'page' : undefined}
                   className="font-medium underline"
                 >

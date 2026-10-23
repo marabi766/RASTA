@@ -243,7 +243,21 @@ function coordinate(value: string, limit: number): number | null | 'EMPTY' {
   if (typed === '') return 'EMPTY';
   if (!/^-?[0-9]{1,3}(\.[0-9]{1,12})?$/.test(typed)) return null;
   const number = Number(typed);
-  return Math.abs(number) <= limit ? number : null;
+  // "-0" is the zero it spells: one value, one spelling, one JSON body.
+  return Math.abs(number) <= limit ? (number === 0 ? 0 : number) : null;
+}
+
+/**
+ * A coordinate as {@link coordinate} reads it back: plain decimal, never
+ * exponent notation (`String(1e-7)` is "1e-7", which no form accepts). Twelve
+ * places are the most the parser takes, and a double within 1e-14 of a
+ * twelve-place decimal rounds back to exactly that decimal.
+ */
+export function coordinateText(value: number): string {
+  return value
+    .toFixed(12)
+    .replace(/(\.\d*?)0+$/, '$1')
+    .replace(/\.$/, '');
 }
 
 function parseWarehouse(values: InventoryFormValues): ParsedInventoryForm {
@@ -419,8 +433,8 @@ export function valuesOfBody(command: InventoryCommand, body: InventoryBody): In
     case 'CREATE_WAREHOUSE': {
       const kept = body as WarehouseBody;
       put(NAME_FIELD, kept.name);
-      put(LATITUDE_FIELD, kept.location?.latitude ?? null);
-      put(LONGITUDE_FIELD, kept.location?.longitude ?? null);
+      put(LATITUDE_FIELD, kept.location ? coordinateText(kept.location.latitude) : null);
+      put(LONGITUDE_FIELD, kept.location ? coordinateText(kept.location.longitude) : null);
       break;
     }
     case 'RECEIVE_STOCK': {
