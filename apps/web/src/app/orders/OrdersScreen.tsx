@@ -16,6 +16,7 @@ import {
   orderStatusLabel,
   type OrderListRole,
 } from '@/lib/order-fields';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
 import type { Order, OrderListQuery, OrderPage, ReadResult } from '@/server/orders';
 
 /**
@@ -37,6 +38,8 @@ import type { Order, OrderListQuery, OrderPage, ReadResult } from '@/server/orde
 export interface OrdersScreenProps {
   readonly result: ReadResult<OrderPage>;
   readonly query: OrderListQuery;
+  /** The provider is simulated (`fetchDemoMode`, Q-14): draw «حالت نمایشی». */
+  readonly demoMode?: boolean;
 }
 
 function hrefWith(query: OrderListQuery, changes: Partial<OrderListQuery>): string {
@@ -108,9 +111,10 @@ function OrderRow({ order }: { order: Order }) {
   );
 }
 
-export function OrdersScreen({ result, query }: OrdersScreenProps) {
+export function OrdersScreen({ result, query, demoMode }: OrdersScreenProps) {
   return (
     <div className="flex flex-col gap-4">
+      {demoMode ? <DemoModeNotice /> : null}
       <SideTabs query={query} />
       <OrdersBody result={result} query={query} />
     </div>

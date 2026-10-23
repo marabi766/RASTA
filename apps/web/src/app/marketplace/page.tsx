@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { OFFER_SORTS, searchProducts, type ProductSearchQuery } from '@/server/marketplace';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { MarketplaceScreen } from './MarketplaceScreen';
@@ -47,6 +48,8 @@ export default async function MarketplacePage({
 
   const result = await searchProducts(session, query);
 
+  const demoMode = await fetchDemoMode(session);
+
   return (
     <AppShell
       topBar={
@@ -61,7 +64,7 @@ export default async function MarketplacePage({
       }
       sidebar={<PortalSidebar session={session} currentHref="/marketplace" />}
     >
-      <MarketplaceScreen result={result} query={query} />
+      <MarketplaceScreen result={result} query={query} demoMode={demoMode} />
     </AppShell>
   );
 }

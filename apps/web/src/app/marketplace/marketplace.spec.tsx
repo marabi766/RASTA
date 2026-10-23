@@ -101,3 +101,15 @@ describe('the marketplace search', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 });
+
+describe('the marketplace search: «حالت نمایشی» (Q-14)', () => {
+  it('is drawn when the provider is simulated', () => {
+    const view = render(<MarketplaceScreen result={page()} query={{}} demoMode={true} />);
+    expect(view.getByText('حالت نمایشی')).toBeInTheDocument();
+  });
+
+  it('is absent when it is not', () => {
+    const view = render(<MarketplaceScreen result={page()} query={{}} demoMode={false} />);
+    expect(view.queryByText('حالت نمایشی')).toBeNull();
+  });
+});

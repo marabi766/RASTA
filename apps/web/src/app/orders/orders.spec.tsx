@@ -352,3 +352,37 @@ describe('accessibility', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 });
+
+describe('the order list and the order page: «حالت نمایشی» (Q-14)', () => {
+  it('is drawn when the provider is simulated', () => {
+    render(
+      <OrdersScreen
+        result={{ kind: 'OK', data: { items: [ORDER], nextCursor: null } }}
+        query={{ role: 'BUYER' }}
+        demoMode={true}
+      />,
+    );
+    expect(screen.getByText('حالت نمایشی')).toBeInTheDocument();
+  });
+
+  it('is absent when it is not', () => {
+    render(
+      <OrdersScreen
+        result={{ kind: 'OK', data: { items: [ORDER], nextCursor: null } }}
+        query={{ role: 'BUYER' }}
+        demoMode={false}
+      />,
+    );
+    expect(screen.queryByText('حالت نمایشی')).toBeNull();
+  });
+
+  it('is drawn on the order page too, and only when simulated', () => {
+    const { unmount } = render(
+      <OrderDetailScreen result={ok(ORDER)} csrfToken={CSRF} mintSubmissionId={mint} demoMode />,
+    );
+    expect(screen.getByText('حالت نمایشی')).toBeInTheDocument();
+    unmount();
+    render(<OrderDetailScreen result={ok(ORDER)} csrfToken={CSRF} mintSubmissionId={mint} />);
+    expect(screen.queryByText('حالت نمایشی')).toBeNull();
+  });
+});

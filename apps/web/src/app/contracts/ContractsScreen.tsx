@@ -9,6 +9,7 @@ import {
   Section,
   StatusBadge,
 } from '@/ui';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
 import { IRR, formatJalaliDateLong, formatMoney, toPersianDigits } from '@/lib/format';
 import {
   CONTRACT_STATES,
@@ -38,6 +39,8 @@ import type {
 export interface ContractsScreenProps {
   readonly result: ReadResult<ContractPage>;
   readonly query: ContractListQuery;
+  /** The provider is simulated (`fetchDemoMode`, Q-14): draw «حالت نمایشی». */
+  readonly demoMode?: boolean;
 }
 
 function hrefWith(query: ContractListQuery, changes: Partial<ContractListQuery>): string {
@@ -99,9 +102,10 @@ function ContractRow({ contract }: { contract: ContractSummary }) {
   );
 }
 
-export function ContractsScreen({ result, query }: ContractsScreenProps) {
+export function ContractsScreen({ result, query, demoMode }: ContractsScreenProps) {
   return (
     <div className="flex flex-col gap-4">
+      {demoMode ? <DemoModeNotice /> : null}
       <StatusFilter query={query} />
       <ContractsBody result={result} query={query} />
     </div>

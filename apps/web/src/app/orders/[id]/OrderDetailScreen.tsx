@@ -15,6 +15,7 @@ import {
   type OrderCommand,
   type StepState,
 } from '@/lib/order-fields';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
 import type { Order, ReadResult } from '@/server/orders';
 
 import { formatOrderAmount } from '../OrdersScreen';
@@ -48,6 +49,8 @@ export interface OrderDetailScreenProps {
   readonly done?: OrderCommand;
   /** The order was just placed from the offers page (`?placed=1`). */
   readonly placed?: boolean;
+  /** The provider is simulated (`fetchDemoMode`, Q-14): draw «حالت نمایشی». */
+  readonly demoMode?: boolean;
   /** Its return requests and the request form (EXP-003); null for a viewer who is neither party. */
   readonly returns?: Omit<OrderReturnsProps, 'orderId' | 'csrfToken'> | null;
 }
@@ -175,6 +178,7 @@ export function OrderDetailScreen({
   mintSubmissionId,
   done,
   placed,
+  demoMode,
   returns = null,
 }: OrderDetailScreenProps) {
   if (result.kind === 'NOT_FOUND') {
@@ -207,6 +211,7 @@ export function OrderDetailScreen({
 
   return (
     <div className="flex flex-col gap-4">
+      {demoMode ? <DemoModeNotice /> : null}
       {done ? <Alert tone="success">{DONE_MESSAGES[done]}</Alert> : null}
       {placed ? (
         <Alert tone="success">

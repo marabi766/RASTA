@@ -601,3 +601,15 @@ describe('a response missing a required field, not merely an invalid one', () =>
     },
   );
 });
+
+describe('the contract list: «حالت نمایشی» (Q-14)', () => {
+  it('is drawn when the provider is simulated', () => {
+    render(<ContractsScreen result={page([CONTRACT])} query={{}} demoMode={true} />);
+    expect(screen.getByText('حالت نمایشی')).toBeInTheDocument();
+  });
+
+  it('is absent when it is not', () => {
+    render(<ContractsScreen result={page([CONTRACT])} query={{}} demoMode={false} />);
+    expect(screen.queryByText('حالت نمایشی')).toBeNull();
+  });
+});

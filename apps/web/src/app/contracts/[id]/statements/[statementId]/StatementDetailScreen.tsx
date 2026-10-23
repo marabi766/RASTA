@@ -10,6 +10,7 @@ import {
   StatusBadge,
   TableScroll,
 } from '@/ui';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
 import { formatShareBp } from '@/lib/contract-fields';
 import { IRR, formatJalaliDateTime, formatMoney, toPersianDigits } from '@/lib/format';
 import { roleLabel } from '@/lib/organization-fields';
@@ -235,6 +236,8 @@ export interface StatementDetailScreenProps {
   /** A command this session confirmed just now (`server/flash.ts`), if any. */
   readonly notice?: StatementCommand;
   readonly pageHref: string;
+  /** The provider is simulated (`fetchDemoMode`, Q-14): draw «حالت نمایشی». */
+  readonly demoMode?: boolean;
 }
 
 export function StatementDetailScreen({
@@ -246,12 +249,14 @@ export function StatementDetailScreen({
   sessionMaxAgeSeconds,
   notice,
   pageHref,
+  demoMode,
 }: StatementDetailScreenProps) {
   if (result.kind !== 'OK') return <Failure result={result} />;
   const statement = result.data;
 
   return (
     <div className="flex flex-col gap-6">
+      {demoMode ? <DemoModeNotice /> : null}
       {notice ? <Alert tone="success">{NOTICE_MESSAGES[notice]}</Alert> : null}
 
       <Section

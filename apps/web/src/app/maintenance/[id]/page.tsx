@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { tokenWriteRoles } from '@/server/realm-roles';
 import { fetchMaintenanceRequest, fetchRepairOrder } from '@/server/maintenance';
 import { canManageMaintenance, sealApprovalBaseline } from '@/server/maintenance-commands';
@@ -129,6 +130,8 @@ export default async function MaintenanceRequestPage({
     }
   }
 
+  const demoMode = await fetchDemoMode(session);
+
   return (
     <AppShell
       topBar={
@@ -146,6 +149,7 @@ export default async function MaintenanceRequestPage({
       <RequestDetailScreen
         result={result}
         requestId={id}
+        demoMode={demoMode}
         notice={readFlash(
           session,
           typeof query[FLASH_PARAM] === 'string' ? query[FLASH_PARAM] : undefined,

@@ -97,7 +97,7 @@ const CANCEL_REASONS = [
 function contractPage(
   contract: ContractDetail,
   commands: Partial<ContractCommandOffers> = {},
-  extra: { notice?: ContractCommand; amendments?: boolean } = {},
+  extra: { notice?: ContractCommand; amendments?: boolean; demoMode?: boolean } = {},
 ) {
   return render(
     <ContractDetailScreen
@@ -113,6 +113,7 @@ function contractPage(
       statements={null}
       commands={{ ...NONE, ...commands }}
       notice={extra.notice ?? null}
+      demoMode={extra.demoMode}
     />,
   );
 }
@@ -421,5 +422,17 @@ describe('each form state', () => {
     expect(screen.getByText(/محتوای آن دیگر نگه داشته نمی‌شود/)).toBeVisible();
     expect(screen.queryByRole('button')).toBeNull();
     expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe('the contract page: «حالت نمایشی» (Q-14)', () => {
+  it('is drawn when the provider is simulated', () => {
+    contractPage(DRAFT, {}, { demoMode: true });
+    expect(screen.getByText('حالت نمایشی')).toBeInTheDocument();
+  });
+
+  it('is absent when it is not', () => {
+    contractPage(DRAFT, {}, { demoMode: false });
+    expect(screen.queryByText('حالت نمایشی')).toBeNull();
   });
 });

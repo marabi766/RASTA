@@ -119,7 +119,7 @@ function contractPage(
 function statementPage(
   result: ReadResult<Statement>,
   offered: StatementCommand[] = [],
-  extra: { contractUnavailable?: boolean; notice?: StatementCommand } = {},
+  extra: { contractUnavailable?: boolean; notice?: StatementCommand; demoMode?: boolean } = {},
 ) {
   return render(
     <StatementDetailScreen
@@ -134,6 +134,7 @@ function statementPage(
       sessionMaxAgeSeconds={SESSION_MAX_AGE}
       notice={extra.notice}
       pageHref={PAGE}
+      demoMode={extra.demoMode}
     />,
   );
 }
@@ -456,5 +457,17 @@ describe('each form state', () => {
     expect(
       screen.getByRole('link', { name: 'وضعیت را دیدم؛ این درخواست را کنار بگذار' }),
     ).toHaveAttribute('href', PAGE);
+  });
+});
+
+describe('the statement page: «حالت نمایشی» (Q-14)', () => {
+  it('is drawn when the provider is simulated', () => {
+    statementPage({ kind: 'OK', data: DRAFTED }, [], { demoMode: true });
+    expect(screen.getByText('حالت نمایشی')).toBeInTheDocument();
+  });
+
+  it('is absent when it is not', () => {
+    statementPage({ kind: 'OK', data: DRAFTED }, [], { demoMode: false });
+    expect(screen.queryByText('حالت نمایشی')).toBeNull();
   });
 });

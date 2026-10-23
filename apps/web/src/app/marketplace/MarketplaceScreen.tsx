@@ -1,4 +1,5 @@
 import { Button, EmptyState, ErrorState, NoAccessState, PageHeader, Section } from '@/ui';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
 import { productKindLabel } from '@/lib/labels';
 import { formatMoney } from '@/lib/format';
 import type { ProductPage, ProductSearchQuery, ReadResult } from '@/server/marketplace';
@@ -22,6 +23,8 @@ import type { ProductPage, ProductSearchQuery, ReadResult } from '@/server/marke
 export interface MarketplaceScreenProps {
   readonly result: ReadResult<ProductPage>;
   readonly query: ProductSearchQuery;
+  /** The provider is simulated (`fetchDemoMode`, Q-14): draw «حالت نمایشی». */
+  readonly demoMode?: boolean;
 }
 
 const CONTROL =
@@ -126,7 +129,7 @@ function ProductRows({ page }: { page: ProductPage }) {
   );
 }
 
-export function MarketplaceScreen({ result, query }: MarketplaceScreenProps) {
+export function MarketplaceScreen({ result, query, demoMode }: MarketplaceScreenProps) {
   const filtered = Boolean(query.q || query.category);
 
   return (
@@ -135,6 +138,8 @@ export function MarketplaceScreen({ result, query }: MarketplaceScreenProps) {
         title="جست‌وجوی کالا و خدمت"
         description="کاتالوگ کالا و خدمت هر تأمین‌کننده‌ای که پیشنهادی منتشرکرده باشد."
       />
+
+      {demoMode ? <DemoModeNotice /> : null}
 
       <Section headingId="filters" title="جست‌وجو">
         <Filters query={query} />

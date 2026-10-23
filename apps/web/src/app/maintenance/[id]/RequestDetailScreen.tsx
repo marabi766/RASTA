@@ -11,6 +11,7 @@ import {
   Section,
   StatusBadge,
 } from '@/ui';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
 import {
   costCategoryLabel,
   maintenanceRequestStatusLabel,
@@ -66,6 +67,8 @@ export interface RequestDetailScreenProps {
    * all when the read failed.
    */
   readonly notice?: 'created' | RequestCommandNotice | RepairCommandNotice;
+  /** The provider is simulated (`fetchDemoMode`, Q-14): draw «حالت نمایشی». */
+  readonly demoMode?: boolean;
   /**
    * The three commands, present only for a person the page found allowed to
    * use them (`canManageMaintenance`) and only when the request read.
@@ -312,6 +315,7 @@ export function RequestDetailScreen({
   result,
   requestId,
   notice,
+  demoMode,
   commandForms,
   orderDetails,
   orderForms,
@@ -367,6 +371,8 @@ export function RequestDetailScreen({
         title={request.title}
         description={`${maintenanceTypeLabel(request.type)} — گزارش‌شده در ${formatJalaliDateLong(request.reportedAt)}`}
       />
+
+      {demoMode ? <DemoModeNotice /> : null}
 
       {notice ? <Alert tone={NOTICES[notice].tone}>{NOTICES[notice].text}</Alert> : null}
 

@@ -7,6 +7,7 @@ import {
   PageHeader,
   Section,
 } from '@/ui';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
 import { productKindLabel } from '@/lib/labels';
 import { formatMoney, toPersianDigits } from '@/lib/format';
 import type { OffersPage, Product, ReadResult } from '@/server/marketplace';
@@ -33,6 +34,8 @@ export interface OffersScreenProps {
   readonly offers: ReadResult<OffersPage>;
   readonly productId: string;
   readonly sort?: string;
+  /** The provider is simulated (`fetchDemoMode`, Q-14): draw «حالت نمایشی». */
+  readonly demoMode?: boolean;
   /**
    * What placing an order needs from the page: the signed-in session's CSRF
    * token, a minter for the form's submission id (bound to that session, which
@@ -179,7 +182,14 @@ function OrderSection({
   );
 }
 
-export function OffersScreen({ product, offers, productId, sort, ordering }: OffersScreenProps) {
+export function OffersScreen({
+  product,
+  offers,
+  productId,
+  sort,
+  ordering,
+  demoMode,
+}: OffersScreenProps) {
   const title =
     product.kind === 'OK'
       ? product.data.name
@@ -197,6 +207,8 @@ export function OffersScreen({ product, offers, productId, sort, ordering }: Off
             : undefined
         }
       />
+
+      {demoMode ? <DemoModeNotice /> : null}
 
       {product.kind === 'NOT_FOUND' ? (
         <EmptyState

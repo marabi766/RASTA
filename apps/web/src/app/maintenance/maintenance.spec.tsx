@@ -636,3 +636,27 @@ describe('the repair orders on a request', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 });
+
+describe('the maintenance request page: «حالت نمایشی» (Q-14)', () => {
+  it('is drawn when the provider is simulated', () => {
+    const view = render(
+      <RequestDetailScreen
+        result={{ kind: 'OK', data: DETAIL }}
+        requestId="MREQ_1"
+        demoMode={true}
+      />,
+    );
+    expect(view.getByText('حالت نمایشی')).toBeInTheDocument();
+  });
+
+  it('is absent when it is not', () => {
+    const view = render(
+      <RequestDetailScreen
+        result={{ kind: 'OK', data: DETAIL }}
+        requestId="MREQ_1"
+        demoMode={false}
+      />,
+    );
+    expect(view.queryByText('حالت نمایشی')).toBeNull();
+  });
+});
