@@ -49,6 +49,8 @@ export const AGGREGATE_OF = {
   REWARD_GRANTED: 'Reward',
   REWARD_LEVEL_CHANGED: 'RewardBalance',
   SETTLEMENT_COMPLETED: 'Settlement',
+  // No settlement exists to be about: the refusal is about the transaction.
+  SETTLEMENT_REFUSED: 'Transaction',
   JOURNAL_POSTED: 'Journal',
   COMMISSION_RULE_CHANGED: 'CommissionRule',
   REWARD_RULE_CHANGED: 'RewardRule',
@@ -106,6 +108,7 @@ export const PARTITION_KEY_POLICY: { [N in EconomicEventName]: PartitionRule<N> 
   PAYMENT_COMPLETED: (payload) => ({ scope: 'TRANSACTION', key: payload.transactionId }),
   COMMISSION_APPLIED: (payload) => ({ scope: 'TRANSACTION', key: payload.transactionId }),
   SETTLEMENT_COMPLETED: (payload) => ({ scope: 'TRANSACTION', key: payload.transactionId }),
+  SETTLEMENT_REFUSED: (payload) => ({ scope: 'TRANSACTION', key: payload.transactionId }),
   TRANSACTION_STATUS_CHANGED: (payload) => ({ scope: 'TRANSACTION', key: payload.transactionId }),
 
   /**

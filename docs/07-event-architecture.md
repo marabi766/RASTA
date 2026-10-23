@@ -496,12 +496,21 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 | `REWARD_GRANTED`                         | economic | notification · analytics                            |
 | `REWARD_LEVEL_CHANGED`                   | economic | notification                                        |
 | `SETTLEMENT_COMPLETED`                   | economic | marketplace · supplier · notification               |
+| `SETTLEMENT_REFUSED`                     | economic | audit                                               |
 | `JOURNAL_POSTED`                         | economic | audit · analytics                                   |
 | `COMMISSION_RULE_CHANGED`                | economic | audit                                               |
 | `REWARD_RULE_CHANGED`                    | economic | audit                                               |
 | `PARTICIPATION_RULE_CHANGED`             | economic | audit                                               |
 | `RECOGNITION_RULE_CHANGED`               | economic | audit                                               |
 | `TRANSACTION_STATUS_CHANGED`             | economic | audit                                               |
+
+> **افزوده (2026-10-23).** `SETTLEMENT_REFUSED` رکورد Audit تسویه‌ای است که با `422 NO_ACTIVE_RULE` رد شد (docs/24
+> Q-29): هیچ چیز جابه‌جا نشده — هرچه تسویه تا آن لحظه نوشته بود تا Savepoint برمی‌گردد — و رکورد در **همان** تراکنش Commit
+> می‌شود، پیش از پاسخ `422`: ردی بی رکورد پاسخ داده نمی‌شود و نشدنِ نوشتنش `500` است که همان کلید دوباره می‌فرستد (بازبینی
+> #364 دور ۱، یافتهٔ ۲). یکی برای هر تلاشِ ردشده. `reason` فهرستی بسته است (امروز فقط `NO_ACTIVE_RULE`)؛ `transactionType` و
+> `businessLine` هم فهرست بسته‌اند و Payload `.strict()` است، بی مبلغ. audit-service آن را با نام خودش
+> (`action=SETTLEMENT_REFUSED`)، `outcome=REFUSED`، `reason` و خط و نوع در `changes` (بدون تغییر: `from` = `to`) نگه می‌دارد —
+> Projection اعتبارسنجی‌شده و فهرست‌سفید (`settlement-refusal-projection.ts`، یافتهٔ ۳).
 
 > **افزوده (2026-09-26).** `TRANSACTION_STATUS_CHANGED` رکورد Audit هر گام چرخهٔ
 > عمر تراکنش است که رویداد پولی خودش را ندارد: ثبت، ثبت تعهد از رویداد، تأیید

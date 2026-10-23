@@ -50,6 +50,7 @@ export const ECONOMIC_EVENTS = {
   REWARD_GRANTED: 'REWARD_GRANTED',
   REWARD_LEVEL_CHANGED: 'REWARD_LEVEL_CHANGED',
   SETTLEMENT_COMPLETED: 'SETTLEMENT_COMPLETED',
+  SETTLEMENT_REFUSED: 'SETTLEMENT_REFUSED',
   JOURNAL_POSTED: 'JOURNAL_POSTED',
   COMMISSION_RULE_CHANGED: 'COMMISSION_RULE_CHANGED',
   REWARD_RULE_CHANGED: 'REWARD_RULE_CHANGED',
@@ -607,6 +608,55 @@ export const settlementCompletedPayload = z.object({
 });
 
 /**
+ * Why a settlement was refused with nothing moved — a closed list, recorded as
+ * the refusal's audit trail (`SETTLEMENT_REFUSED`).
+ *
+ * `NO_ACTIVE_RULE`: no active commission rule covers the transaction's
+ * business line, and settlement fails closed (docs/24 Q-29).
+ */
+export const SETTLEMENT_REFUSAL_REASONS = ['NO_ACTIVE_RULE'] as const;
+
+/**
+ * The transaction types a settlement can be refused for: every type an
+ * obligation is recorded as (`TRANSACTION_TYPES`, `transaction/dto.ts` —
+ * `events.spec.ts` holds the two equal); a top-up never settles. A closed list
+ * here because audit-service stores the type of a refusal it projects, and
+ * stores only what it can name (`settlement-refusal-projection.ts`).
+ */
+export const SETTLEMENT_REFUSAL_TRANSACTION_TYPES = [
+  'MARKETPLACE_ORDER',
+  'MAINTENANCE_SERVICE',
+  'LOGISTICS',
+  'CONSTRUCTION_STATEMENT',
+  'PROCUREMENT_ORDER',
+] as const;
+
+/**
+ * A settlement was refused, and nothing it would have written was: no journal,
+ * no commission, no settlement, the transaction and the hold as they were.
+ *
+ * The audit record of the refusal (AGENTS.md S-06), written in the
+ * settlement's own transaction once everything it wrote has been rolled back
+ * to a savepoint, and committed before the 422 is answered: no refusal is
+ * answered without its record. One per refused attempt. audit-service is the
+ * consumer and projects it as `outcome=REFUSED` with the reason, the line and
+ * the transaction type; an operator reads `reason` to know what to configure.
+ */
+export const settlementRefusedPayload = z
+  .object({
+    transactionId: z.string(),
+    organizationId: z.string(),
+    payerOrganizationId: z.string(),
+    payeeOrganizationId: z.string(),
+    transactionType: z.enum(SETTLEMENT_REFUSAL_TRANSACTION_TYPES),
+    businessLine: z.enum(BUSINESS_LINES),
+    reason: z.enum(SETTLEMENT_REFUSAL_REASONS),
+    refusedBy: z.string(),
+    refusedAt: z.string(),
+  })
+  .strict();
+
+/**
  * A journal was posted.
  *
  * audit-service and analytics-service consume it, and between them they are
@@ -848,6 +898,7 @@ export const ECONOMIC_EVENT_SCHEMAS = {
   [ECONOMIC_EVENTS.REWARD_GRANTED]: rewardGrantedPayload,
   [ECONOMIC_EVENTS.REWARD_LEVEL_CHANGED]: rewardLevelChangedPayload,
   [ECONOMIC_EVENTS.SETTLEMENT_COMPLETED]: settlementCompletedPayload,
+  [ECONOMIC_EVENTS.SETTLEMENT_REFUSED]: settlementRefusedPayload,
   [ECONOMIC_EVENTS.JOURNAL_POSTED]: journalPostedPayload,
   [ECONOMIC_EVENTS.COMMISSION_RULE_CHANGED]: commissionRuleChangedPayloadV2,
   [ECONOMIC_EVENTS.REWARD_RULE_CHANGED]: rewardRuleChangedPayload,
