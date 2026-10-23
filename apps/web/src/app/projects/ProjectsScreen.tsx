@@ -17,6 +17,8 @@ import {
   type ProjectStatus,
 } from '@/lib/project-fields';
 import type { ProjectListQuery, ProjectPage, ProjectSummary, ReadResult } from '@/server/projects';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
+import type { DemoMode } from '@/lib/demo-mode';
 
 /**
  * The project list (docs/16 § ۱۶٫۶, `/projects`).
@@ -33,6 +35,8 @@ import type { ProjectListQuery, ProjectPage, ProjectSummary, ReadResult } from '
 export interface ProjectsScreenProps {
   readonly result: ReadResult<ProjectPage>;
   readonly query: ProjectListQuery;
+  /** What the provider says (`fetchDemoMode`, Q-14), over the estimates. Nothing here moves money. */
+  readonly demoMode: DemoMode;
 }
 
 function hrefWith(query: ProjectListQuery, changes: Partial<ProjectListQuery>): string {
@@ -98,16 +102,17 @@ function ProjectRow({ project }: { project: ProjectSummary }) {
   );
 }
 
-export function ProjectsScreen({ result, query }: ProjectsScreenProps) {
+export function ProjectsScreen({ result, query, demoMode }: ProjectsScreenProps) {
   return (
     <div className="flex flex-col gap-4">
+      <DemoModeNotice mode={demoMode} />
       <StatusFilter query={query} />
       <ProjectsBody result={result} query={query} />
     </div>
   );
 }
 
-function ProjectsBody({ result, query }: ProjectsScreenProps) {
+function ProjectsBody({ result, query }: Omit<ProjectsScreenProps, 'demoMode'>) {
   if (result.kind === 'FORBIDDEN') {
     return <NoAccessState description="فهرست پروژه‌های این سازمان در اختیار شما نیست." />;
   }

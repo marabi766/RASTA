@@ -11,6 +11,7 @@ import {
 } from '@/server/contract-statements';
 import { fetchContract } from '@/server/contracts';
 import { currentSession } from '@/server/current-session';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { webServerEnv } from '@/server/env';
 import { readFlash } from '@/server/flash';
 import { mintStatementSubmission } from '@/server/statement-replay';
@@ -98,6 +99,8 @@ export default async function StatementPage({
     }
   }
 
+  const demoMode = await fetchDemoMode(session);
+
   return (
     <AppShell
       topBar={
@@ -139,6 +142,7 @@ export default async function StatementPage({
           sessionMaxAgeSeconds={webServerEnv().WEB_SESSION_MAX_AGE_SECONDS}
           notice={notice}
           pageHref={href}
+          demoMode={demoMode}
         />
       </div>
     </AppShell>

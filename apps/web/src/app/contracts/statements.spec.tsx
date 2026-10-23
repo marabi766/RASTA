@@ -1,4 +1,5 @@
 import { render, screen, within } from '@testing-library/react';
+import type { DemoMode } from '@/lib/demo-mode';
 import { axe } from 'jest-axe';
 
 import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
@@ -107,6 +108,7 @@ function contractPage(
 ) {
   return render(
     <ContractDetailScreen
+      demoMode="REAL"
       result={{ kind: 'OK', data: CONTRACT }}
       amendments={{ kind: 'OK', data: { items: [], nextCursor: null, hasMore: false } }}
       milestones={{ kind: 'OK', data: { items: [], nextCursor: null, hasMore: false } }}
@@ -119,7 +121,7 @@ function contractPage(
 function statementPage(
   result: ReadResult<Statement>,
   offered: StatementCommand[] = [],
-  extra: { contractUnavailable?: boolean; notice?: StatementCommand } = {},
+  extra: { contractUnavailable?: boolean; notice?: StatementCommand; demoMode?: DemoMode } = {},
 ) {
   return render(
     <StatementDetailScreen
@@ -134,6 +136,7 @@ function statementPage(
       sessionMaxAgeSeconds={SESSION_MAX_AGE}
       notice={extra.notice}
       pageHref={PAGE}
+      demoMode={extra.demoMode ?? 'REAL'}
     />,
   );
 }
@@ -456,5 +459,31 @@ describe('each form state', () => {
     expect(
       screen.getByRole('link', { name: 'وضعیت را دیدم؛ این درخواست را کنار بگذار' }),
     ).toHaveAttribute('href', PAGE);
+  });
+});
+
+describe('the statement page: «حالت نمایشی» (Q-14)', () => {
+  it('is drawn when the provider is simulated', () => {
+    statementPage({ kind: 'OK', data: DRAFTED }, [], { demoMode: 'SIMULATED' });
+    expect(screen.getByText('حالت نمایشی')).toBeInTheDocument();
+  });
+
+  it('is absent when it is not', () => {
+    statementPage({ kind: 'OK', data: DRAFTED }, [], { demoMode: 'REAL' });
+    expect(screen.queryByText('حالت نمایشی')).toBeNull();
+    expect(screen.queryByText('وضعیت درگاه پرداخت معلوم نیست')).toBeNull();
+  });
+
+  // An approval records the obligation; a separate settlement pays it, so it moves no money
+  // and a disclosure outage must not stop it (Codex PR-361 r2, the same rule as orders).
+  it('says the provider is unknown, and still offers the approval and the rejection', async () => {
+    statementPage({ kind: 'OK', data: SUBMITTED }, ['APPROVE', 'REJECT'], { demoMode: 'UNKNOWN' });
+    expect(screen.getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
+    expect(screen.queryByText('حالت نمایشی')).toBeNull();
+    expect(screen.queryByText(/اکنون در دسترس نیست/)).toBeNull();
+    expect(
+      await screen.findByRole('form', { name: STATEMENT_COMMAND_LABELS.APPROVE }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('form', { name: STATEMENT_COMMAND_LABELS.REJECT })).toBeInTheDocument();
   });
 });

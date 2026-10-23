@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, PageHeader, TopBar } from '@/ui';
 import { ORDER_LIST_ROLES, type OrderListRole } from '@/lib/order-fields';
 import { currentSession } from '@/server/current-session';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { fetchOrders, type OrderListQuery } from '@/server/orders';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
@@ -53,6 +54,8 @@ export default async function OrdersPage({
 
   const result = await fetchOrders(session, query);
 
+  const demoMode = await fetchDemoMode(session);
+
   return (
     <AppShell
       topBar={
@@ -72,7 +75,7 @@ export default async function OrdersPage({
         description="سفارش‌هایی که این سازمان ثبت کرده یا به آن داده شده، و مرحله‌ای که هر کدام در آن است."
       />
       <div className="mt-4">
-        <OrdersScreen result={result} query={query} />
+        <OrdersScreen result={result} query={query} demoMode={demoMode} />
       </div>
     </AppShell>
   );

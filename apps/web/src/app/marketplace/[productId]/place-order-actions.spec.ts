@@ -33,6 +33,9 @@ jest.mock('@/server/current-session', () => ({
   missingSessionReason: () => missingSessionReason(),
 }));
 jest.mock('next/navigation', () => ({ redirect: (url: string) => redirect(url) }));
+// The provider gate is open here: what it refuses, against a fake gateway, is
+// `app/money-actions-gate.spec.ts`.
+jest.mock('@/server/money-gate', () => ({ mayDispatch: async () => true }));
 jest.mock('@/server/place-order', () => {
   const actual = jest.requireActual('@/server/place-order');
   return { ...actual, placeOrder: (...args: unknown[]) => placeOrder(...args) };

@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { tokenWriteRoles } from '@/server/realm-roles';
 import { canPlaceOrder } from '@/server/place-order';
 import { webServerEnv } from '@/server/env';
@@ -55,6 +56,8 @@ export default async function ProductOffersPage({
   const roles = tokenWriteRoles(session.accessToken);
   const canOrder = roles !== null && canPlaceOrder(roles);
 
+  const demoMode = await fetchDemoMode(session);
+
   return (
     <AppShell
       topBar={
@@ -74,6 +77,7 @@ export default async function ProductOffersPage({
         offers={offers}
         productId={productId}
         sort={sort}
+        demoMode={demoMode}
         ordering={
           canOrder
             ? {

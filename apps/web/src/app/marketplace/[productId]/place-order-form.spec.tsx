@@ -158,6 +158,13 @@ describe('PlaceOrderForm', () => {
     ).toBeInTheDocument();
   });
 
+  it('says the provider could not be read and nothing was sent when the action withheld it (PR 361 r4)', () => {
+    const { getByText, queryByText } = renderForm({ kind: 'REFUSED', reason: 'PROVIDER_UNKNOWN' });
+    expect(getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
+    expect(getByText(/فرستاده نشد و چیزی تغییر نکرد/)).toBeInTheDocument();
+    expect(queryByText(/این درخواست معتبر شناخته نشد/)).not.toBeInTheDocument();
+  });
+
   it('a session only unavailable: says so, not "ended", with no accessibility violations', async () => {
     const { container, getByText, queryByText } = renderForm({
       kind: 'REFUSED',

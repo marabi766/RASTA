@@ -10,6 +10,8 @@ import {
   Section,
   StatusBadge,
 } from '@/ui';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
+import type { DemoMode } from '@/lib/demo-mode';
 import {
   IRR,
   formatJalaliDate,
@@ -430,6 +432,8 @@ export interface ContractDetailScreenProps {
   readonly commands?: ContractCommandOffers | null;
   /** A command this session confirmed just now (`server/flash.ts`), if any. */
   readonly notice?: ContractCommand | null;
+  /** What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or that it is unknown. */
+  readonly demoMode: DemoMode;
 }
 
 const SIGNING_NOTES: Readonly<Record<'NO_POLICY' | 'UNREAD' | 'INCOMPLETE', string>> = {
@@ -449,6 +453,7 @@ export function ContractDetailScreen({
   draft = null,
   commands = null,
   notice = null,
+  demoMode,
 }: ContractDetailScreenProps) {
   if (result.kind !== 'OK') return <Failure result={result} />;
 
@@ -456,6 +461,7 @@ export function ContractDetailScreen({
 
   return (
     <div className="flex flex-col gap-6">
+      <DemoModeNotice mode={demoMode} />
       {notice ? <Alert tone="success">{CONTRACT_COMMAND_DONE[notice]}</Alert> : null}
       <Section headingId="contract-summary" title="قرارداد">
         <div className="flex flex-wrap items-center gap-3">
