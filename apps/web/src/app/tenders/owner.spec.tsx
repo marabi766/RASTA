@@ -5,6 +5,7 @@ import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import {
   OPENING_REFUSAL_TEXT,
   OWNER_COMMAND_DONE,
+  OWNER_RESENT_NOTE,
   OWNER_FORBIDDEN_TEXT,
   PUBLICATION_REFUSAL_TEXT,
   type OwnerCommand,
@@ -193,6 +194,19 @@ describe('the publication', () => {
     const { container } = render(<OwnerFlash done="REQUESTED" />);
     expect(screen.getByText(OWNER_COMMAND_DONE.REQUESTED)).toBeInTheDocument();
     expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('the answer of a re-send says it may be the first send’s, replayed — the current state is the page’s reads', async () => {
+    const { container } = render(<OwnerFlash done="REQUESTED_RESENT" />);
+    expect(
+      screen.getByText(new RegExp(`^${OWNER_COMMAND_DONE.REQUESTED}.*${OWNER_RESENT_NOTE}$`)),
+    ).toBeInTheDocument();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('a first answer carries no such note', () => {
+    render(<OwnerFlash done="REQUESTED" />);
+    expect(screen.queryByText(new RegExp(OWNER_RESENT_NOTE))).toBeNull();
   });
 });
 

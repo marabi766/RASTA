@@ -11,13 +11,20 @@ import {
   ownerBindingText,
   type OwnerTarget,
 } from '@/server/tender-owner-replay';
-import { REASON_CODE_FIELD, REASON_TEXT_FIELD } from '@/lib/tender-evaluation-fields';
+import {
+  JUSTIFICATION_FIELD,
+  REASON_CODE_FIELD,
+  REASON_TEXT_FIELD,
+} from '@/lib/tender-evaluation-fields';
 import { REPLAY_FIELD } from '@/lib/form-fields';
 import {
   OPENING_REFUSAL_TEXT,
   OWNER_CODE_TEXT,
+  OWNER_DONE,
+  OWNER_RESENT_NOTE,
   REASON_FIELD,
   REPEATABLE_OWNER_COMMANDS,
+  ownerDoneText,
   UNREPEATABLE_OWNER_COMMANDS,
   type OwnerCommand,
 } from '@/lib/tender-owner-fields';
@@ -97,6 +104,8 @@ interface Sent {
   readonly body: unknown;
 }
 let sent: Sent[] = [];
+/** The bytes of each request body, as sent (`sent[i].body` is their parse). */
+let rawBodies: string[] = [];
 let answer: (body: Record<string, unknown>) => Response;
 
 function json(status: number, body: unknown): Response {
@@ -137,6 +146,7 @@ function form(
 
 beforeEach(() => {
   sent = [];
+  rawBodies = [];
   currentSession.mockResolvedValue(SESSION);
   missingSessionReason.mockResolvedValue('NO_SESSION');
   redirect.mockClear();
@@ -144,6 +154,7 @@ beforeEach(() => {
   jest.spyOn(globalThis, 'fetch').mockImplementation((async (url: string, init: RequestInit) => {
     const body = init.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
     sent.push({ url, key: new Headers(init.headers).get('idempotency-key'), body });
+    rawBodies.push(String(init.body ?? ''));
     return answer(body);
   }) as unknown as typeof fetch);
 });
@@ -336,24 +347,15 @@ describe('unconfirmed', () => {
     expect(sent).toHaveLength(1);
   });
 
-  it('every command the service keeps no result for — all but a score — unconfirmed, is view-only and never sent again', async () => {
+  it('every command the service keeps no result for — the decisions, a bid’s decision and the evaluation — unconfirmed, is view-only and never sent again', async () => {
     const bid = { ...OPEN, bidId: 'BID_1' };
     const step = { ...REJECT, approvalId: 'APR_AWARD' };
-    const targets: Record<Exclude<OwnerCommand, 'SCORE'>, OwnerTarget> = {
-      PUBLISH,
+    const targets: Partial<Record<OwnerCommand, OwnerTarget>> = {
       GRANT: { ...REJECT, command: 'GRANT' },
       REJECT,
-      PROPOSE_OPENING: { ...OPEN, command: 'PROPOSE_OPENING' },
-      OPEN_BIDS: OPEN,
-      WITHDRAW_PROPOSAL: WITHDRAW,
       QUALIFY: { ...bid, command: 'QUALIFY' },
       DISQUALIFY: { ...bid, command: 'DISQUALIFY' },
       EVALUATE: { ...OPEN, command: 'EVALUATE' },
-      AWARD: {
-        ...bid,
-        command: 'AWARD',
-        award: { justificationRequired: false, execution: null },
-      },
       GRANT_AWARD: { ...step, command: 'GRANT_AWARD' },
       REJECT_AWARD: { ...step, command: 'REJECT_AWARD' },
     };
@@ -362,12 +364,19 @@ describe('unconfirmed', () => {
       REJECT_AWARD: { [REASON_FIELD]: 'رتبهٔ نخست بهتر است' },
       DISQUALIFY: { [REASON_CODE_FIELD]: 'NON_RESPONSIVE', [REASON_TEXT_FIELD]: 'مدارک ناقص' },
     };
-    expect(REPEATABLE_OWNER_COMMANDS).toEqual(['SCORE']);
+    expect(REPEATABLE_OWNER_COMMANDS).toEqual([
+      'PUBLISH',
+      'PROPOSE_OPENING',
+      'OPEN_BIDS',
+      'WITHDRAW_PROPOSAL',
+      'AWARD',
+      'SCORE',
+    ]);
     expect([...UNREPEATABLE_OWNER_COMMANDS].sort()).toEqual(Object.keys(targets).sort());
     for (const command of UNREPEATABLE_OWNER_COMMANDS) {
       sent = [];
       answer = () => problem(504, 'UPSTREAM_TIMEOUT');
-      const data = form(fields[command] ?? {}, targets[command as Exclude<OwnerCommand, 'SCORE'>]);
+      const data = form(fields[command] ?? {}, targets[command]!);
       const first = (await send(data)) as UnconfirmedOwnerCommand;
       expect(first).toMatchObject({
         kind: 'UNCONFIRMED',
@@ -384,15 +393,203 @@ describe('unconfirmed', () => {
     }
   });
 
-  it('a lost publication rejected meanwhile is never sent again: no second approval round', async () => {
-    // The first send's answer is lost; the request it opened is then rejected.
-    answer = () => problem(504, 'UPSTREAM_TIMEOUT');
-    const data = form({}, PUBLISH);
-    const lost = (await send(data)) as UnconfirmedOwnerCommand;
-    expect(lost).toMatchObject({ command: 'PUBLISH', viewOnly: true, replay: null });
-    // Were it sent again, the same key and version would open a new round (202).
-    answer = () => json(202, { ...PENDING_REQUEST, id: 'TAR_2', round: 2 });
-    expect(await send(data, lost)).toEqual(lost);
-    expect(sent).toHaveLength(1);
+  describe('the commands the service answers again under their key (task 060, PR 350)', () => {
+    const bid = { ...OPEN, bidId: 'BID_1' };
+    const AWARD: OwnerTarget = {
+      ...bid,
+      command: 'AWARD',
+      award: { justificationRequired: true, execution: null },
+    };
+    const awardRequest = { ...PENDING_REQUEST, id: 'TAR_AWARD', workflowKey: 'tender.award' };
+
+    interface KeyedCase {
+      readonly name: string;
+      readonly command: OwnerCommand;
+      readonly target: OwnerTarget;
+      /** What the form posts besides the stamp — never what is sent for the stamp's own part. */
+      readonly fields: Record<string, string>;
+      readonly path: string;
+      readonly body: unknown;
+      /** The first answer, replayed to the re-send. */
+      readonly stored: () => Response;
+      readonly flash: string;
+    }
+    const cases: readonly KeyedCase[] = [
+      {
+        name: 'publish, executed',
+        command: 'PUBLISH',
+        target: PUBLISH,
+        fields: { expectedVersion: '99' },
+        path: 'publish',
+        body: { expectedVersion: 4 },
+        stored: () => json(200, { id: TENDER_ID, status: 'PUBLISHED', version: 5 }),
+        flash: 'PUBLISHED_RESENT',
+      },
+      {
+        name: 'publish, a round asked for (a 202 rejected since is still said)',
+        command: 'PUBLISH',
+        target: PUBLISH,
+        fields: {},
+        path: 'publish',
+        body: { expectedVersion: 4 },
+        stored: () => json(202, PENDING_REQUEST),
+        flash: 'REQUESTED_RESENT',
+      },
+      {
+        name: 'propose the opening',
+        command: 'PROPOSE_OPENING',
+        target: { ...OPEN, command: 'PROPOSE_OPENING' },
+        fields: {},
+        path: 'open-bids/proposal',
+        body: {},
+        stored: () =>
+          json(200, { tenderId: TENDER_ID, proposedBy: 'USR-AUTHOR', alreadyProposed: false }),
+        flash: 'PROPOSE_OPENING_RESENT',
+      },
+      {
+        name: 'open the bids',
+        command: 'OPEN_BIDS',
+        target: OPEN,
+        fields: {},
+        path: 'open-bids',
+        body: {},
+        stored: () =>
+          json(200, {
+            tenderId: TENDER_ID,
+            status: 'EVALUATING',
+            openedAt: PROPOSED_AT,
+            bidCount: 2,
+            alreadyOpened: false,
+          }),
+        flash: 'OPEN_BIDS_RESENT',
+      },
+      {
+        name: 'withdraw the proposal (its signed proposedAt, whatever the form posts)',
+        command: 'WITHDRAW_PROPOSAL',
+        target: WITHDRAW,
+        fields: { proposedAt: '2026-10-21T00:00:00.000Z' },
+        path: 'open-bids/proposal/withdraw',
+        body: { proposedAt: PROPOSED_AT },
+        stored: () => json(200, { tenderId: TENDER_ID, withdrawnProposal: 'USR-AUTHOR' }),
+        flash: 'WITHDRAW_PROPOSAL_RESENT',
+      },
+      {
+        name: 'award, a round asked for',
+        command: 'AWARD',
+        target: AWARD,
+        fields: { [JUSTIFICATION_FIELD]: 'کمترین قیمت واجد شرایط' },
+        path: 'award',
+        body: { bidId: 'BID_1', justification: 'کمترین قیمت واجد شرایط' },
+        stored: () => json(202, awardRequest),
+        flash: 'AWARD_REQUESTED_RESENT',
+      },
+    ];
+
+    it('the commands are exactly the ones the service replays, plus the score', () => {
+      expect([...new Set(cases.map((c) => c.command))].sort()).toEqual(
+        REPEATABLE_OWNER_COMMANDS.filter((command) => command !== 'SCORE').sort(),
+      );
+    });
+
+    it.each(cases)(
+      '$name: a lost answer is sent again under the same key with the same bytes, and the replayed answer is said to be one',
+      async ({ command, target, fields, path, body, stored, flash }) => {
+        answer = () => problem(504, 'UPSTREAM_TIMEOUT');
+        const data = form(fields, target);
+        const lost = (await send(data)) as UnconfirmedOwnerCommand;
+        expect(lost).toMatchObject({
+          kind: 'UNCONFIRMED',
+          command,
+          submissionId: data.get(SUBMISSION_FIELD),
+          replay: { token: data.get(REPLAY_FIELD) },
+        });
+        expect(lost.viewOnly).toBeUndefined();
+        expect(lost.unrepeatable).toBeUndefined();
+
+        // The re-send is lost too: still the same request, still re-sendable.
+        const again = (await send(data, lost)) as UnconfirmedOwnerCommand;
+        expect(again).toMatchObject({ kind: 'UNCONFIRMED', retryUnknown: true });
+        expect(again.viewOnly).toBeUndefined();
+
+        // The second re-send is answered with the first answer, replayed.
+        answer = stored;
+        await expect(send(data, again)).rejects.toThrow('NEXT_REDIRECT');
+        expect(sent).toHaveLength(3);
+        expect(sent.every((request) => request.url.endsWith(`/tenders/${TENDER_ID}/${path}`))).toBe(
+          true,
+        );
+        expect(sent.map((request) => request.body)).toEqual([body, body, body]);
+        expect(new Set(sent.map((request) => request.key))).toEqual(
+          new Set([data.get(SUBMISSION_FIELD)]),
+        );
+        expect(new Set(rawBodies).size).toBe(1);
+
+        const url = new URL(redirect.mock.calls[0]![0], 'http://portal.test');
+        const done = readFlash(SESSION, url.searchParams.get('flash'), TENDER_ID, OWNER_DONE);
+        expect(done).toBe(flash);
+        expect(ownerDoneText(done!).resent).toBe(true);
+      },
+    );
+
+    it('a first send that is answered says nothing of a replay', async () => {
+      answer = cases[0]!.stored;
+      await expect(send(form({}, PUBLISH))).rejects.toThrow('NEXT_REDIRECT');
+      const url = new URL(redirect.mock.calls[0]![0], 'http://portal.test');
+      const done = readFlash(SESSION, url.searchParams.get('flash'), TENDER_ID, OWNER_DONE);
+      expect(done).toBe('PUBLISHED');
+      expect(ownerDoneText(done!).resent).toBe(false);
+    });
+
+    it('the replayed answer is a historical one: its fixed text says the current state comes from the page’s reads', () => {
+      expect(OWNER_RESENT_NOTE).toMatch(/[؀-ۿ]/);
+      expect(OWNER_RESENT_NOTE).toContain('خوانده‌های همین صفحه');
+      expect(OWNER_RESENT_NOTE).toContain('وضعیت کنونی');
+    });
+
+    it.each(cases)(
+      '$name: a different request under the key (409 IDEMPOTENCY_KEY_REUSED) is said in fixed Persian words, and nothing is claimed of the first',
+      async ({ command, target, fields }) => {
+        answer = () => problem(504, 'UPSTREAM_TIMEOUT');
+        const data = form(fields, target);
+        const lost = (await send(data)) as UnconfirmedOwnerCommand;
+        answer = () => problem(409, 'IDEMPOTENCY_KEY_REUSED');
+        const refused = await send(data, lost);
+        expect(refused).toMatchObject({
+          kind: 'UNCONFIRMED',
+          command,
+          retryRefused: true,
+          retryRefusal: OWNER_CODE_TEXT.IDEMPOTENCY_KEY_REUSED,
+        });
+        expect(OWNER_CODE_TEXT.IDEMPOTENCY_KEY_REUSED).toMatch(/[؀-ۿ]/);
+        expect(OWNER_CODE_TEXT.IDEMPOTENCY_KEY_REUSED).not.toContain('An English');
+      },
+    );
+
+    it('a re-sent withdrawal of a proposal replaced since is 409 PROPOSAL_SUPERSEDED, in fixed words', async () => {
+      answer = () => problem(504, 'UPSTREAM_TIMEOUT');
+      const data = form({}, WITHDRAW);
+      const lost = (await send(data)) as UnconfirmedOwnerCommand;
+      answer = () => problem(409, 'CONFLICT', 'PROPOSAL_SUPERSEDED');
+      expect(await send(data, lost)).toMatchObject({
+        kind: 'UNCONFIRMED',
+        retryRefused: true,
+        retryRefusal: OPENING_REFUSAL_TEXT.PROPOSAL_SUPERSEDED,
+      });
+      expect(sent.map((request) => request.body)).toEqual([
+        { proposedAt: PROPOSED_AT },
+        { proposedAt: PROPOSED_AT },
+      ]);
+    });
+
+    it('an in-flight first send (409 CONFLICT with Retry-After) is unconfirmed and re-sendable', async () => {
+      answer = () =>
+        new Response(JSON.stringify({ code: 'CONFLICT', message: 'x', correlationId: 'c' }), {
+          status: 409,
+          headers: { 'content-type': 'application/json', 'retry-after': '1' },
+        });
+      const lost = await send(form({}, OPEN));
+      expect(lost).toMatchObject({ kind: 'UNCONFIRMED', command: 'OPEN_BIDS' });
+      expect((lost as UnconfirmedOwnerCommand).viewOnly).toBeUndefined();
+    });
   });
 });

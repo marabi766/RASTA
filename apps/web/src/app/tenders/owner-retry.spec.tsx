@@ -2,6 +2,8 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
 import {
+  KEYED_REPLAY_OWNER_COMMANDS,
+  OWNER_CODE_TEXT,
   REASON_FIELD,
   UNREPEATABLE_OWNER_COMMANDS,
   type OwnerCommand,
@@ -125,6 +127,91 @@ it('a score is remembered before it leaves — that it was sent, never what it s
   expect(second!.get(scoreField('technical'))).toBe(first!.get(scoreField('technical')));
   expect(second!.get('binding')).toBe(BINDING);
   expect(await axe(container)).toHaveNoViolations();
+});
+
+it('every command the service answers again under its key, its call lost, is re-sent in the same page: the same key, the same stamp, the same fields', async () => {
+  for (const command of KEYED_REPLAY_OWNER_COMMANDS) {
+    action.mockReset();
+    window.sessionStorage.clear();
+    action.mockRejectedValueOnce(new Error('An unexpected response was received from the server.'));
+    sessionProbe.mockResolvedValue({ status: 503 });
+    const { container, unmount } = renderForm(command);
+    if (command === 'AWARD') {
+      fireEvent.change(container.querySelector('[name="justification"]')!, {
+        target: { value: 'کمترین قیمت' },
+      });
+    }
+    await submit(container);
+    expect(stored()).toMatchObject({ command, submissionId: KEY });
+    const retry = screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' });
+    expect(screen.queryByRole('link', { name: /کنار بگذار/ })).toBeNull();
+    action.mockRejectedValueOnce(new Error('An unexpected response was received from the server.'));
+    await act(async () => {
+      fireEvent.click(retry);
+    });
+    expect(action).toHaveBeenCalledTimes(2);
+    const [first, second] = action.mock.calls.map(([, , form]) => form);
+    for (const field of ['submission', 'replay', 'binding', 'justification']) {
+      expect(second!.get(field)).toBe(first!.get(field));
+    }
+    expect(second!.get('submission')).toBe(KEY);
+    expect(second!.get('replay')).toBe(STAMP.token);
+    unmount();
+  }
+});
+
+it('a re-send refused as a key already used shows its fixed words beside the unconfirmed record', async () => {
+  action.mockResolvedValueOnce({
+    kind: 'UNCONFIRMED',
+    command: 'OPEN_BIDS',
+    correlationId: 'COR_LOST',
+    submissionId: KEY,
+    values: {},
+    replay: STAMP,
+  });
+  const { container } = renderForm('OPEN_BIDS');
+  await submit(container);
+  action.mockResolvedValueOnce({
+    kind: 'UNCONFIRMED',
+    command: 'OPEN_BIDS',
+    correlationId: 'COR_LOST',
+    submissionId: KEY,
+    values: {},
+    replay: STAMP,
+    retryRefused: true,
+    retryRefusal: OWNER_CODE_TEXT.IDEMPOTENCY_KEY_REUSED,
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' }));
+  });
+  expect(screen.getByText(OWNER_CODE_TEXT.IDEMPOTENCY_KEY_REUSED)).toBeInTheDocument();
+  expect(screen.queryByText(/اگر آن انجام شده باشد، تکرارش پذیرفته نمی‌شود/)).toBeNull();
+  expect(await axe(container)).toHaveNoViolations();
+});
+
+it('after a reload a keyed command’s record is view-only, as any other: no re-send, only the set-aside', () => {
+  for (const command of KEYED_REPLAY_OWNER_COMMANDS) {
+    window.sessionStorage.clear();
+    saveUnresolvedOwnerCommand(
+      TENDER_ID,
+      { command, submissionId: KEY, correlationId: 'COR_ORIGINAL' },
+      OWNER,
+    );
+    const { unmount } = render(
+      <OwnerCommands
+        tenderId={TENDER_ID}
+        offered={[]}
+        csrfToken="csrf"
+        owner={OWNER}
+        pageHref={PAGE}
+        showsRestored
+        pageSubmissionIds={[]}
+      />,
+    );
+    expect(screen.getByText(/این درخواست پیش از تازه‌شدن صفحه فرستاده شد/)).toBeInTheDocument();
+    expect(screen.queryByRole('button')).toBeNull();
+    unmount();
+  }
 });
 
 /** What a command's form needs typed before it is sent at all. */

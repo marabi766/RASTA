@@ -44,32 +44,49 @@ export function isOwnerCommand(value: unknown): value is OwnerCommand {
 }
 
 /**
- * The commands whose unconfirmed outcome is never sent again (PR 345 reviews 1
- * and 2, PR 346 review 1): **every command construction-service keeps no
- * result for**. `IdempotencyStore.run` is not on their path (the gateway only
- * requires the header), so a re-send is a new request against the tender as it
- * is when it arrives — whatever its answer, it says nothing of the first:
+ * The commands construction-service answers again, with the first answer, to
+ * the same `Idempotency-Key` and body (`IdempotencyStore.run`, task 060 /
+ * PR 350): a re-send after a lost answer is the same request, not a new one.
+ * The service judges the tender's state inside the work, binds the request to
+ * its caller, and answers a different body under the key `409
+ * IDEMPOTENCY_KEY_REUSED`:
  *
- * - **publish** and **award** — if the lost request was rejected meanwhile, the
- *   same command opens a new approval round (`TenderApprovalGate.resolve`);
- * - **propose / withdraw the proposal** — neither names the proposal: a
- *   withdrawal clears whatever proposal stands, a newer one included, and a
- *   proposal may stand up one its author has since withdrawn;
- * - **open** — approves whichever proposal stands when it arrives;
- * - **a decision on a step** (publication's or award's) — decides the step as
- *   it stands when it arrives;
+ * - **publish** and **award** — a retry gets the first answer, a 202 of a
+ *   round rejected since included; it never opens a new round;
+ * - **propose / open / withdraw the proposal** — each keeps its answer; a
+ *   withdrawal also names the proposal it takes back (`proposedAt`).
+ *
+ * A score has been kept under its key from the start.
+ */
+export const KEYED_REPLAY_OWNER_COMMANDS: readonly OwnerCommand[] = [
+  'PUBLISH',
+  'PROPOSE_OPENING',
+  'OPEN_BIDS',
+  'WITHDRAW_PROPOSAL',
+  'AWARD',
+];
+
+/**
+ * The commands that may be sent again after a lost answer, in the same page,
+ * under the same key with the body the stamp binds.
+ */
+export const REPEATABLE_OWNER_COMMANDS: readonly OwnerCommand[] = [
+  ...KEYED_REPLAY_OWNER_COMMANDS,
+  'SCORE',
+];
+
+/**
+ * The commands a lost answer is never sent again for: the rest — **every
+ * command construction-service keeps no result for**, whose re-send is a new
+ * request against the tender as it is when it arrives:
+ *
+ * - **a decision on a step** (publication's or award's, `POST
+ *   /approvals/:id/decision`) — decides the step as it stands when it arrives;
  * - **a decision on a bid** — the recorded decision answers its repeat, but
  *   that answer cannot tell the first send from somebody else's;
  * - **completing the evaluation** — freezes the matrix as it stands when it
  *   arrives, a change made since the first send included.
- *
- * Only a **score** is kept under its key (`IdempotencyStore.run`): its re-send
- * under the same key is answered with the first answer, and each cell is a
- * compare-and-set on the revision its sender read besides.
  */
-export const REPEATABLE_OWNER_COMMANDS: readonly OwnerCommand[] = ['SCORE'];
-
-/** The commands a lost answer is never sent again for: the rest. */
 export const UNREPEATABLE_OWNER_COMMANDS: readonly OwnerCommand[] = OWNER_COMMANDS.filter(
   (command) => !REPEATABLE_OWNER_COMMANDS.includes(command),
 );
@@ -157,8 +174,52 @@ export const OWNER_COMMAND_DONE = {
   GRANT_AWARD: 'موافقت شما با واگذاری ثبت شد.',
   REJECT_AWARD: 'درخواست واگذاری رد شد.',
 } as const;
-export type OwnerDone = keyof typeof OWNER_COMMAND_DONE;
-export const OWNER_DONE = Object.keys(OWNER_COMMAND_DONE) as OwnerDone[];
+export type OwnerOutcomeDone = keyof typeof OWNER_COMMAND_DONE;
+
+/**
+ * The outcomes of a command construction-service answers again to the same key
+ * (`KEYED_REPLAY_OWNER_COMMANDS`): when the answer came from a re-send, the
+ * flash is `<outcome>_RESENT` and says what a replay is.
+ */
+const KEYED_REPLAY_OUTCOMES = [
+  'PUBLISHED',
+  'REQUESTED',
+  'PROPOSE_OPENING',
+  'OPEN_BIDS',
+  'WITHDRAW_PROPOSAL',
+  'AWARDED',
+  'AWARD_REQUESTED',
+] as const satisfies readonly OwnerOutcomeDone[];
+
+export type OwnerResentDone = `${(typeof KEYED_REPLAY_OUTCOMES)[number]}_RESENT`;
+export type OwnerDone = OwnerOutcomeDone | OwnerResentDone;
+
+export const OWNER_DONE: readonly OwnerDone[] = [
+  ...(Object.keys(OWNER_COMMAND_DONE) as OwnerOutcomeDone[]),
+  ...KEYED_REPLAY_OUTCOMES.map((outcome): OwnerResentDone => `${outcome}_RESENT`),
+];
+
+/** The flash of an outcome reached by sending the same request again. */
+export function resentOutcome(outcome: OwnerOutcomeDone): OwnerDone {
+  return (KEYED_REPLAY_OUTCOMES as readonly string[]).includes(outcome)
+    ? (`${outcome}_RESENT` as OwnerResentDone)
+    : outcome;
+}
+
+/** The sentence an outcome is confirmed with, and whether it was reached by a re-send. */
+export function ownerDoneText(done: OwnerDone): { text: string; resent: boolean } {
+  const resent = done.endsWith('_RESENT');
+  const outcome = (resent ? done.slice(0, -'_RESENT'.length) : done) as OwnerOutcomeDone;
+  return { text: OWNER_COMMAND_DONE[outcome], resent };
+}
+
+/**
+ * What a re-sent request's answer is: the answer the service gave the first
+ * send under the same key, replayed — a record of that moment, not of the
+ * tender now.
+ */
+export const OWNER_RESENT_NOTE =
+  'این پاسخِ ارسال دوبارهٔ همان درخواست است و ممکن است همان پاسخ ثبت‌شدهٔ نخستین ارسال باشد؛ پاسخ تکراری وضعیت همان لحظه را می‌گوید، نه وضعیت کنونی مناقصه. وضعیت کنونی را از خوانده‌های همین صفحه ببینید.';
 
 /** `TENDER_REQUEST_STATUSES`. */
 const REQUEST_STATUS_LABELS: Readonly<Record<string, string>> = {
@@ -250,6 +311,8 @@ export const OWNER_CODE_TEXT: Readonly<Record<string, string>> = {
     'این کار در وضعیت کنونی مناقصه ممکن نیست و چیزی ثبت نشد. صفحه را تازه کنید.',
   ACTOR_IDENTITY_UNKNOWN:
     'هویت پایدار شما یا شخص دیگرِ این کار ثبت نشده است و تفکیک وظایف قابل اثبات نیست؛ چیزی ثبت نشد.',
+  IDEMPOTENCY_KEY_REUSED:
+    'این شناسهٔ ارسال پیش‌تر با درخواست دیگری به کار رفته است و این ارسال چیزی ثبت نکرد. این دربارهٔ درخواست نخست چیزی نمی‌گوید؛ وضعیت مناقصه را با تازه‌کردن صفحه ببینید.',
   VALIDATION_FAILED: 'بخشی از فرم پذیرفتنی نیست؛ چیزی ثبت نشد. فرم را بررسی کنید.',
   UPSTREAM_UNAVAILABLE:
     'سرویسی که این کار به آن نیاز دارد در دسترس نبود؛ چیزی ثبت نشد. کمی بعد دوباره تلاش کنید.',
