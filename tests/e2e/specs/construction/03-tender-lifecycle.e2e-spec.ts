@@ -1328,9 +1328,9 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     // An approval never replaces supplier-service's word on the winner now.
     // Suspend and reinstate name the episode they were decided on (PR 366): the
     // newest one on the record, then the one this suspension opened.
-    const record = await systemAdmin.get(`/v1/suppliers/${supplier.c1}`);
-    expect(record.status, JSON.stringify(record.body)).toBe(200);
-    const history = (record.body as { suspensions: { id: string; suspendedAt: string }[] })
+    const winnerRecord = await systemAdmin.get(`/v1/suppliers/${supplier.c1}`);
+    expect(winnerRecord.status, JSON.stringify(winnerRecord.body)).toBe(200);
+    const history = (winnerRecord.body as { suspensions: { id: string; suspendedAt: string }[] })
       .suspensions;
     const suspended = await systemAdmin.post(`/v1/suppliers/${supplier.c1}/suspend`, {
       body: {
