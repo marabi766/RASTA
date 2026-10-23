@@ -826,10 +826,12 @@ export type OwnerCommandResult = Exclude<WriteResult<unknown, string>, { kind: '
 
 /**
  * Sends one command, with an `Idempotency-Key` — the gateway requires one on
- * every unsafe call under `/v1/tenders`. construction-service keeps a result
- * under it for a score alone (`IdempotencyStore.run`); which commands may be
- * sent again after a lost answer is `UNREPEATABLE_OWNER_COMMANDS`. Every
- * `UNAVAILABLE` is unconfirmed.
+ * every unsafe call under `/v1/tenders`. construction-service keeps the first
+ * answer under it (`IdempotencyStore.run`) for a score and for publish, award,
+ * propose, open and withdraw the proposal (`KEYED_REPLAY_OWNER_COMMANDS`): a
+ * re-send with the same key and body is answered with it. Which commands may
+ * be sent again after a lost answer is `REPEATABLE_OWNER_COMMANDS`, the rest
+ * `UNREPEATABLE_OWNER_COMMANDS`. Every `UNAVAILABLE` is unconfirmed.
  */
 export async function issueOwnerCommand(
   session: WebSession,
