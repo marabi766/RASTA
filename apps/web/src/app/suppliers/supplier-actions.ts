@@ -1,5 +1,7 @@
 'use server';
 
+import { redirect } from 'next/navigation';
+
 import {
   approveFormValues,
   parseApproveForm,
@@ -23,6 +25,14 @@ import {
   type SubmitField,
   type SubmitFormValues,
 } from '@/lib/supplier-commands';
+import { verifyCsrf } from '@/server/csrf';
+import { currentSession } from '@/server/current-session';
+import {
+  RECONCILED_FIELD,
+  RECONCILED_VALUE,
+  supplierWriteScope,
+} from '@/server/supplier-unresolved';
+import { clearUnresolved } from '@/server/unresolved-request';
 import {
   approveQualification,
   rejectQualification,
@@ -165,4 +175,24 @@ export async function submitReinstateSupplier(
     supplierId,
     form,
   );
+}
+
+/**
+ * "I re-read the record": lets go of the unresolved write of `supplierId` (null:
+ * the registration) so a new one may be sent. There is no key to send again, so
+ * this is the only way out, and only with the confirmation that names what the
+ * person did — without it nothing changes. It sends nothing to the service.
+ */
+export async function reconcileSupplierWrite(
+  supplierId: string | null,
+  form: FormData,
+): Promise<void> {
+  const back = supplierId === null ? '/suppliers' : `/suppliers/${encodeURIComponent(supplierId)}`;
+  const session = await currentSession();
+  if (!session) redirect(`/login?returnTo=${encodeURIComponent(back)}`);
+  if (!verifyCsrf(session, form).ok) redirect(back);
+  if (form.get(RECONCILED_FIELD) === RECONCILED_VALUE) {
+    await clearUnresolved(supplierWriteScope(supplierId));
+  }
+  redirect(back);
 }

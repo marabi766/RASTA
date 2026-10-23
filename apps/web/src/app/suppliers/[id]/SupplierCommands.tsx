@@ -77,9 +77,13 @@ export function supplierCommandsFor(
   session: WebSession,
   supplier: SupplierDetail,
   actor: SupplierActor | null = supplierActor(session.accessToken),
+  /** An earlier write on this supplier is unresolved: the forms cannot send. */
+  held = false,
 ): SupplierCommandsView {
   if (!actor) return NO_COMMANDS;
 
+  // A form that showed its warning is drawn anew once the person has reconciled.
+  const formKey = held ? 'held' : 'open';
   const identity = (
     command: Parameters<typeof sealSupplierBaseline>[1]['command'],
     bound: { qualificationId?: string; suspensionId?: string | null } = {},
@@ -87,6 +91,7 @@ export function supplierCommandsFor(
     supplierId: supplier.id,
     csrfToken: session.csrfToken,
     submissionId: mintSubmissionId(session),
+    held,
     baseline: sealSupplierBaseline(session, {
       supplierId: supplier.id,
       command,
@@ -101,6 +106,7 @@ export function supplierCommandsFor(
     if (capabilities.length > 0) {
       submit = (
         <SubmitQualificationForm
+          key={formKey}
           {...identity('SUBMIT_QUALIFICATION')}
           capabilities={capabilities}
         />
@@ -118,12 +124,14 @@ export function supplierCommandsFor(
         <div className="flex flex-col gap-4">
           <Disclosure summary="تایید صلاحیت…">
             <ApproveQualificationForm
+              key={formKey}
               {...identity('APPROVE_QUALIFICATION', { qualificationId: qualification.id })}
               capabilityLabel={capabilityLabel}
             />
           </Disclosure>
           <Disclosure summary="رد صلاحیت…">
             <RejectQualificationForm
+              key={formKey}
               {...identity('REJECT_QUALIFICATION', { qualificationId: qualification.id })}
               capabilityLabel={capabilityLabel}
             />
@@ -138,6 +146,7 @@ export function supplierCommandsFor(
       suspension = (
         <Disclosure summary="تعلیق این تامین‌کننده…">
           <SuspendSupplierForm
+            key={formKey}
             {...identity('SUSPEND', { suspensionId: latestSuspensionIdOf(supplier.suspensions) })}
           />
         </Disclosure>
@@ -145,7 +154,9 @@ export function supplierCommandsFor(
     } else if (supplier.status === 'SUSPENDED' && open !== null) {
       // A suspended record showing no open episode names nothing to lift, so
       // no form is drawn for it.
-      suspension = <ReinstateSupplierForm {...identity('REINSTATE', { suspensionId: open })} />;
+      suspension = (
+        <ReinstateSupplierForm key={formKey} {...identity('REINSTATE', { suspensionId: open })} />
+      );
     }
   }
 

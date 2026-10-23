@@ -6,10 +6,13 @@ import { currentSession } from '@/server/current-session';
 import { fetchSuppliers, type SupplierListQuery } from '@/server/suppliers';
 import { mintSubmissionId } from '@/server/submission';
 import { canRegisterSupplier, supplierActor } from '@/server/supplier-commands';
+import { supplierWriteScope } from '@/server/supplier-unresolved';
+import { readUnresolved } from '@/server/unresolved-request';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { RegisterSupplierForm } from './SupplierForms';
 import { SuppliersScreen } from './SuppliersScreen';
+import { UnresolvedSupplierNotice } from './UnresolvedSupplierNotice';
 
 /**
  * The `/suppliers` route — تأمین‌کنندگان (docs/16 § ۱۶٫۶): the directory, and
@@ -49,7 +52,11 @@ export default async function SuppliersPage({
     cursor: one(params.cursor),
   };
 
-  const result = await fetchSuppliers(session, query);
+  const [result, unresolved] = await Promise.all([
+    fetchSuppliers(session, query),
+    // A registration whose answer was lost: it keeps its warning until reconciled.
+    readUnresolved(session, supplierWriteScope(null)),
+  ]);
   const actor = supplierActor(session.accessToken);
 
   return (
@@ -77,10 +84,21 @@ export default async function SuppliersPage({
           ownOrganizationId={actor?.organizationId ?? null}
           register={
             actor && canRegisterSupplier(actor) ? (
-              <RegisterSupplierForm
-                csrfToken={session.csrfToken}
-                submissionId={mintSubmissionId(session)}
-              />
+              <div className="flex flex-col gap-4">
+                {unresolved ? (
+                  <UnresolvedSupplierNotice
+                    request={unresolved}
+                    supplierId={null}
+                    csrfToken={session.csrfToken}
+                  />
+                ) : null}
+                <RegisterSupplierForm
+                  key={unresolved ? 'held' : 'open'}
+                  csrfToken={session.csrfToken}
+                  submissionId={mintSubmissionId(session)}
+                  held={unresolved !== null}
+                />
+              </div>
             ) : null
           }
         />

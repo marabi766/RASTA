@@ -6,8 +6,12 @@ import { FLASH_PARAM } from '@/lib/form-fields';
 import { SUPPLIER_NOTICES } from '@/lib/supplier-commands';
 import { readFlash } from '@/server/flash';
 import { fetchSupplier } from '@/server/suppliers';
+import { supplierActor } from '@/server/supplier-commands';
+import { supplierWriteScope } from '@/server/supplier-unresolved';
+import { readUnresolved } from '@/server/unresolved-request';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
+import { UnresolvedSupplierNotice } from '../UnresolvedSupplierNotice';
 import { SupplierDetailScreen } from './SupplierDetailScreen';
 import { NO_COMMANDS, supplierCommandsFor } from './SupplierCommands';
 
@@ -36,7 +40,11 @@ export default async function SupplierPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/suppliers/${id}`)}`);
 
-  const result = await fetchSupplier(session, id);
+  const [result, unresolved] = await Promise.all([
+    fetchSupplier(session, id),
+    // A write on this supplier whose answer was lost: shown whatever the read says.
+    readUnresolved(session, supplierWriteScope(id)),
+  ]);
 
   return (
     <AppShell
@@ -58,6 +66,15 @@ export default async function SupplierPage({
           بازگشت به فهرست تأمین‌کنندگان
         </ButtonLink>
       </div>
+      {unresolved ? (
+        <div className="mt-4">
+          <UnresolvedSupplierNotice
+            request={unresolved}
+            supplierId={id}
+            csrfToken={session.csrfToken}
+          />
+        </div>
+      ) : null}
       <div className="mt-4">
         <SupplierDetailScreen
           result={result}
@@ -67,7 +84,16 @@ export default async function SupplierPage({
             id,
             SUPPLIER_NOTICES,
           )}
-          commands={result.kind === 'OK' ? supplierCommandsFor(session, result.data) : NO_COMMANDS}
+          commands={
+            result.kind === 'OK'
+              ? supplierCommandsFor(
+                  session,
+                  result.data,
+                  supplierActor(session.accessToken),
+                  unresolved !== null,
+                )
+              : NO_COMMANDS
+          }
         />
       </div>
     </AppShell>

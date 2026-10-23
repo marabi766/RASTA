@@ -22,6 +22,8 @@ import {
   type SupplierBaseline,
   type WrittenSupplier,
 } from '@/server/supplier-commands';
+import { supplierWriteScope, SUPPLIER_WRITE_PURPOSE } from '@/server/supplier-unresolved';
+import { readUnresolved, rememberUnresolved, requestDigest } from '@/server/unresolved-request';
 import type { WriteResult } from '@/server/write';
 
 import type { SupplierFormState } from './supplier-form-state';
@@ -53,6 +55,14 @@ import type { SupplierFormState } from './supplier-form-state';
  * or reinstatement is `422`. This runner sends the `422` rules that mean "the
  * record is no longer as the page drew it" to a fresh read of the supplier with a
  * sentence saying nothing was written this time (`stale`).
+ *
+ * That state cannot help once the first write was rejected by someone else in
+ * between: a retry would then be a second qualification (Codex review of PR 366,
+ * round 3). So a write whose answer was lost is **remembered** (`UNCONFIRMED`,
+ * `remember`) and nothing new is sent for that supplier until the person says,
+ * on the page, that they re-read the record (`reconcileSupplierWrite`). The hold
+ * is decided before the form is read, so an invalid resubmission cannot replace
+ * the warning, and it lives in a signed cookie, so navigation and a remount keep it.
  */
 
 export interface SupplierCommandSpec<V, B, F extends string> {
@@ -90,6 +100,35 @@ async function gate(form: FormData): Promise<Gated> {
     return { ok: false, state: { kind: 'REFUSED', reason: 'SUBMISSION' } };
   }
   return { ok: true, session, submissionId };
+}
+
+/**
+ * The warning of a write that is still unresolved for this slot, as the state a
+ * form shows — or null when nothing is held. Nothing is sent while it exists.
+ */
+async function heldState(
+  session: WebSession,
+  supplierId: string | null,
+): Promise<SupplierFormState<never, never> | null> {
+  const held = await readUnresolved(session, supplierWriteScope(supplierId));
+  return held === null ? null : { kind: 'UNCONFIRMED', correlationId: held.ref ?? held.key };
+}
+
+/** Remembers a write that may have committed; the digest names what it carried. */
+async function remember(
+  session: WebSession,
+  supplierId: string | null,
+  submissionId: string,
+  body: unknown,
+  state: SupplierFormState<unknown, string>,
+): Promise<void> {
+  if (state.kind !== 'UNCONFIRMED') return;
+  await rememberUnresolved(session, supplierWriteScope(supplierId), {
+    key: submissionId,
+    digest: requestDigest(session, SUPPLIER_WRITE_PURPOSE, body),
+    deadline: null,
+    ref: state.correlationId,
+  });
 }
 
 /** Everything a failed write can still say, once success (a redirect) is out of the way. */
@@ -136,6 +175,9 @@ export async function runRegister(
   const gated = await gate(form);
   if (!gated.ok) return gated.state;
 
+  const held = await heldState(gated.session, null);
+  if (held) return held;
+
   const values = command.valuesOf(form);
   const parsed = command.parse(values);
   if (!parsed.ok) {
@@ -152,7 +194,9 @@ export async function runRegister(
   if (result.kind === 'CREATED') {
     redirect(supplierPath(result.data.id, mintFlash(gated.session, result.data.id, 'registered')));
   }
-  return failure(result, gated.submissionId, values);
+  const state = failure(result, gated.submissionId, values);
+  await remember(gated.session, null, gated.submissionId, parsed.body, state);
+  return state;
 }
 
 export async function runOnSupplier<V, B, F extends string>(
@@ -188,6 +232,11 @@ export async function runOnSupplier<V, B, F extends string>(
     return { kind: 'REFUSED', reason: 'BASELINE' };
   }
 
+  // An earlier write on this supplier is unresolved: nothing new goes out, and
+  // nothing the person typed here replaces its warning.
+  const held = await heldState(session, supplierId);
+  if (held) return held;
+
   const values = command.valuesOf(form);
   const parsed = command.parse(values);
   if (!parsed.ok) {
@@ -215,5 +264,18 @@ export async function runOnSupplier<V, B, F extends string>(
     // offered back for another try: the person sees the record as it is.
     redirect(supplierPath(baseline.supplierId, mintFlash(session, baseline.supplierId, 'stale')));
   }
-  return failure(result, submissionId, values);
+  const state = failure(result, submissionId, values);
+  await remember(
+    session,
+    supplierId,
+    submissionId,
+    {
+      command: command.command,
+      supplierId,
+      qualificationId: baseline.qualificationId,
+      body: parsed.body,
+    },
+    state,
+  );
+  return state;
 }

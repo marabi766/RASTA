@@ -75,6 +75,11 @@ export interface SupplierIdentity {
   readonly csrfToken: string;
   /** Minted for this render and bound to this session. */
   readonly submissionId: string;
+  /**
+   * An earlier write here is unresolved (`UnresolvedSupplierNotice`): the send
+   * is disabled, and the action refuses it as well.
+   */
+  readonly held?: boolean;
 }
 
 export interface SupplierBoundIdentity extends SupplierIdentity {
@@ -98,6 +103,11 @@ function Hidden({
       )}
     </>
   );
+}
+
+/** No new send while this form or the page holds a write whose answer was lost. */
+function blocked(identity: { readonly held?: boolean }, state: { kind: string }): boolean {
+  return identity.held === true || state.kind === 'UNCONFIRMED';
 }
 
 /** A retry of the same form carries the same reference. */
@@ -237,7 +247,7 @@ export function RegisterSupplierForm(identity: SupplierIdentity) {
       />
 
       <div>
-        <Button type="submit" disabled={pending}>
+        <Button type="submit" disabled={pending || blocked(identity, state)}>
           {pending ? 'در حال ثبت…' : 'ثبت پرونده تامین‌کننده'}
         </Button>
       </div>
@@ -365,7 +375,7 @@ export function SubmitQualificationForm({
       </fieldset>
 
       <div>
-        <Button type="submit" disabled={pending}>
+        <Button type="submit" disabled={pending || blocked(identity, state)}>
           {pending ? 'در حال ارسال…' : 'ارسال درخواست صلاحیت'}
         </Button>
       </div>
@@ -411,7 +421,7 @@ export function ApproveQualificationForm({
         )}
       </Field>
       <div>
-        <Button type="submit" disabled={pending}>
+        <Button type="submit" disabled={pending || blocked(identity, state)}>
           {pending ? 'در حال ثبت…' : `تایید صلاحیت ${capabilityLabel}`}
         </Button>
       </div>
@@ -466,7 +476,7 @@ export function RejectQualificationForm({
         )}
       </Field>
       <div>
-        <Button type="submit" tone="secondary" disabled={pending}>
+        <Button type="submit" tone="secondary" disabled={pending || blocked(identity, state)}>
           {pending ? 'در حال ثبت…' : `رد صلاحیت ${capabilityLabel}`}
         </Button>
       </div>
@@ -522,7 +532,7 @@ function ReasonForm({
         )}
       </Field>
       <div>
-        <Button type="submit" tone={tone} disabled={pending}>
+        <Button type="submit" tone={tone} disabled={pending || blocked(identity, state)}>
           {pending ? pendingLabel : submitLabel}
         </Button>
       </div>

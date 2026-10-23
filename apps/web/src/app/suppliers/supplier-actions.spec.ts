@@ -8,6 +8,7 @@ import { readFlash } from '@/server/flash';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 import { sealSupplierBaseline } from '@/server/supplier-commands';
+import { RECONCILED_FIELD, RECONCILED_VALUE } from '@/server/supplier-unresolved';
 import { withForgedMac } from '@/test/forged-token';
 
 import { IDLE_SUPPLIER_FORM } from './supplier-form-state';
@@ -33,6 +34,15 @@ const redirect = jest.fn((url: string) => {
 jest.mock('@/server/current-session', () => ({
   currentSession: () => currentSession(),
   missingSessionReason: async () => 'NO_SESSION',
+}));
+const jar = new Map<string, string>();
+jest.mock('next/headers', () => ({
+  cookies: async () => ({
+    get: (name: string) => (jar.has(name) ? { name, value: jar.get(name)! } : undefined),
+    getAll: () => [...jar].map(([name, value]) => ({ name, value })),
+    set: (name: string, value: string) => void jar.set(name, value),
+    delete: (name: string) => void jar.delete(name),
+  }),
 }));
 jest.mock('next/navigation', () => ({ redirect: (url: string) => redirect(url) }));
 jest.mock('@/server/supplier-commands', () => {
@@ -237,6 +247,7 @@ beforeEach(() => {
     });
   }
   redirect.mockClear();
+  jar.clear();
 });
 
 describe.each(CASES)('$command', (testCase) => {
@@ -450,6 +461,167 @@ describe.each(CASES)('$command', (testCase) => {
       expect(await run()).toEqual(expected);
       expect(testCase.send).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+/**
+ * An unresolved write is not forgotten (Codex review of PR 366, round 3).
+ * supplier-service has no idempotency ledger, so after a lost answer nothing new
+ * may go out for that supplier until the person says they re-read the record.
+ */
+describe.each(CASES)('$command — an unresolved write', (testCase) => {
+  const run = (form: FormData = formData(testCase)) => testCase.submit(SUPPLIER_ID, form);
+  const lose = async () => {
+    testCase.send.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-lost' });
+    expect(await run()).toEqual({ kind: 'UNCONFIRMED', correlationId: 'corr-lost' });
+    testCase.send.mockClear();
+  };
+  const reconcile = (supplierId: string | null = SUPPLIER_ID, confirmed = true) => {
+    const form = new FormData();
+    form.set(CSRF_FIELD, SESSION.csrfToken);
+    if (confirmed) form.set(RECONCILED_FIELD, RECONCILED_VALUE);
+    return redirectedTo(actions.reconcileSupplierWrite(supplierId, form));
+  };
+
+  it('keeps its warning and correlation id when the next submission is invalid', async () => {
+    await lose();
+    const state = await run(formData(testCase, testCase.invalid));
+    expect(state).toEqual({ kind: 'UNCONFIRMED', correlationId: 'corr-lost' });
+    expect(sent()).toHaveLength(0);
+  });
+
+  it('keeps it across a fresh form: a valid post with a new submission id is not sent', async () => {
+    await lose();
+    expect(await run(formData(testCase))).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-lost',
+    });
+    expect(sent()).toHaveLength(0);
+    expect([...jar.keys()].filter((name) => name.startsWith('rasta_ur_'))).toHaveLength(1);
+  });
+
+  it('is read back for the page, for this person, organization and login only', async () => {
+    await lose();
+    const { readUnresolved } = jest.requireActual('@/server/unresolved-request');
+    const { supplierWriteScope } = jest.requireActual('@/server/supplier-unresolved');
+    const scope = supplierWriteScope(SUPPLIER_ID);
+    expect(await readUnresolved(SESSION, scope)).toMatchObject({
+      ref: 'corr-lost',
+      deadline: null,
+    });
+    expect(await readUnresolved({ ...SESSION, subject: 'user-2' }, scope)).toBeNull();
+    expect(await readUnresolved({ ...SESSION, organizationId: 'ORG-OTHER' }, scope)).toBeNull();
+    expect(await readUnresolved({ ...SESSION, csrfToken: 'a-later-login' }, scope)).toBeNull();
+    expect(await readUnresolved(SESSION, supplierWriteScope(OTHER_SUPPLIER_ID))).toBeNull();
+  });
+
+  it('does not hold another person, who sends as usual', async () => {
+    await lose();
+    const other = { ...SESSION, subject: 'user-2', csrfToken: 'csrf-of-user-2' };
+    currentSession.mockResolvedValue(other);
+    testCase.send.mockResolvedValue({ kind: 'FORBIDDEN', correlationId: 'corr-other' });
+    const form = formData(testCase, undefined, {
+      csrf: other.csrfToken,
+      submission: mintSubmissionId(other),
+      baseline: baselineFor(testCase, {}, other),
+    });
+    expect(await run(form)).toEqual({ kind: 'FORBIDDEN', correlationId: 'corr-other' });
+    expect(testCase.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not hold the same command on another supplier', async () => {
+    await lose();
+    testCase.send.mockResolvedValue({ kind: 'FORBIDDEN', correlationId: 'corr-other' });
+    const form = formData(testCase, undefined, {
+      baseline: baselineFor(testCase, { supplierId: OTHER_SUPPLIER_ID }),
+    });
+    expect(await testCase.submit(OTHER_SUPPLIER_ID, form)).toEqual({
+      kind: 'FORBIDDEN',
+      correlationId: 'corr-other',
+    });
+  });
+
+  it('is released only by a confirmed reconciliation, after which a new send is allowed', async () => {
+    await lose();
+    const url = await reconcile(SUPPLIER_ID, false);
+    expect(url.pathname).toBe(`/suppliers/${SUPPLIER_ID}`);
+    expect(await run()).toEqual({ kind: 'UNCONFIRMED', correlationId: 'corr-lost' });
+    expect(sent()).toHaveLength(0);
+
+    await reconcile();
+    testCase.send.mockResolvedValue({
+      kind: 'CREATED',
+      data: { id: SUPPLIER_ID },
+      correlationId: 'c',
+    });
+    await redirectedTo(run());
+    expect(testCase.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('is not released by a post with a wrong CSRF token or no session', async () => {
+    await lose();
+    const form = new FormData();
+    form.set(CSRF_FIELD, 'someone-elses');
+    form.set(RECONCILED_FIELD, RECONCILED_VALUE);
+    await redirectedTo(actions.reconcileSupplierWrite(SUPPLIER_ID, form));
+    currentSession.mockResolvedValue(null);
+    await redirectedTo(actions.reconcileSupplierWrite(SUPPLIER_ID, form));
+    currentSession.mockResolvedValue(SESSION);
+    expect(await run()).toEqual({ kind: 'UNCONFIRMED', correlationId: 'corr-lost' });
+  });
+
+  it('is remembered for an ambiguous 5xx too, but not for a proven refusal', async () => {
+    testCase.send.mockResolvedValue({
+      kind: 'UNAVAILABLE',
+      status: 429,
+      code: 'RATE_LIMIT_EXCEEDED',
+      correlationId: 'c6',
+    });
+    expect(await run()).toMatchObject({ kind: 'FAILED' });
+    expect([...jar.keys()]).toHaveLength(0);
+    testCase.send.mockResolvedValue({ kind: 'UNAVAILABLE', status: 503, correlationId: 'c8' });
+    expect(await run()).toEqual({ kind: 'UNCONFIRMED', correlationId: 'c8' });
+    expect([...jar.keys()]).toHaveLength(1);
+  });
+});
+
+describe('REGISTER — an unresolved write', () => {
+  const form = (fields: Record<string, string>) => {
+    const data = new FormData();
+    for (const [key, value] of Object.entries(fields)) data.set(key, value);
+    data.set(CSRF_FIELD, SESSION.csrfToken);
+    data.set(SUBMISSION_FIELD, mintSubmissionId(SESSION));
+    return data;
+  };
+  const submit = (fields: Record<string, string>) =>
+    actions.submitRegisterSupplier(IDLE_SUPPLIER_FORM as never, form(fields));
+  const VALID = { displayName: 'تعمیرگاه البرز', capabilities: 'WORKSHOP_SERVICE' };
+
+  it('keeps its warning through an invalid post and is released by reconciliation', async () => {
+    registerSupplier.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-reg' });
+    expect(await submit(VALID)).toEqual({ kind: 'UNCONFIRMED', correlationId: 'corr-reg' });
+    registerSupplier.mockClear();
+
+    expect(await submit({ displayName: '' })).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-reg',
+    });
+    expect(await submit(VALID)).toEqual({ kind: 'UNCONFIRMED', correlationId: 'corr-reg' });
+    expect(registerSupplier).not.toHaveBeenCalled();
+
+    const release = new FormData();
+    release.set(CSRF_FIELD, SESSION.csrfToken);
+    release.set(RECONCILED_FIELD, RECONCILED_VALUE);
+    expect((await redirectedTo(actions.reconcileSupplierWrite(null, release))).pathname).toBe(
+      '/suppliers',
+    );
+    registerSupplier.mockResolvedValue({
+      kind: 'CREATED',
+      data: { id: SUPPLIER_ID },
+      correlationId: 'c',
+    });
+    await redirectedTo(submit(VALID));
+    expect(registerSupplier).toHaveBeenCalledTimes(1);
   });
 });
 

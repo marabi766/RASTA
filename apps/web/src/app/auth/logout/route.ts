@@ -1,8 +1,10 @@
+import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
 import { webServerEnv } from '@/server/env';
 import { readSession } from '@/server/current-session';
 import { endpointsFor } from '@/server/oidc';
 import { SESSION_COOKIE, csrfMatches } from '@/server/session';
+import { UNRESOLVED_COOKIE_PREFIX } from '@/server/unresolved-request';
 
 /**
  * Ends the session (ADR-059 § 5).
@@ -38,5 +40,10 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   const response = NextResponse.redirect(endSession.toString());
   response.cookies.delete(SESSION_COOKIE);
+  // What an unresolved request left for this login (`server/unresolved-request.ts`)
+  // is no one else's to find: it would not open under another login anyway.
+  for (const { name } of (await cookies()).getAll()) {
+    if (name.startsWith(UNRESOLVED_COOKIE_PREFIX)) response.cookies.delete(name);
+  }
   return response;
 }
