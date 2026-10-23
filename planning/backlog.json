@@ -2,7 +2,7 @@
   "$schema": "./backlog.schema.json",
   "version": 2,
   "project": "RASTA",
-  "asOf": "2026-10-16",
+  "asOf": "2026-10-23",
   "governance": {
     "baselineState": "APPROVED",
     "approvedBy": "Product Owner",
@@ -576,14 +576,50 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 21,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Demand aggregation executes in the backend with configured windows and thresholds",
         "RFQ confidentiality, evaluation and purchase-order issuance are auditable"
       ],
       "dependencies": ["COM-005", "COM-006"],
       "sourceRefs": ["docs/17-mvp-scope.md#۱۷۲-p1--mvp-کامل-روز-۲۰"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/300",
+          "note": "Step 0, design only: the ADR-070 procurement-service boundary and lifecycle (demand aggregation, RFQ, purchase order). No code. Merge commit d036f79, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/327",
+          "note": "ADR-070 PR 1, first criterion, partial: procurement-service skeleton (D-045 owner/runtime split, ADR-050 outbox, OpenAPI diff-tested against the planned contract), demand requests and joining an aggregation. Merge commit 852118f, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/338",
+          "note": "ADR-070 PR 2, first criterion, partial: the end of the aggregation window on time - sweeper, bounded close and cancel. Merge commit 4f4d6a7, merged 2026-10-20."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/348",
+          "note": "ADR-070 PR 3, first criterion: per-organization aggregation settings (window hours, threshold, shortfall policy) as append-only versions, snapshotted when a window opens (Q-10, Q-119). Merge commit 5342a2b, merged 2026-10-22."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/333",
+          "note": "ADR-070 PR 4: bid sealing extracted into @rasta/sealing, the shared mechanism for RFQ confidentiality (second criterion groundwork). Merge commit bff5721, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/330",
+          "note": "ADR-070 PR 5: read ports in supplier-service and identity-service for procurement-service (supplier standing, identity). Merge commit 148440a, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/349",
+          "note": "ADR-070 PR 6, second criterion, partial: issue an RFQ (criteria frozen, invited suppliers checked against supplier-service standing), close it at its deadline, cancel it. NOT yet merged: RFQ evaluation and purchase-order issuance. Merge commit 54e834d, merged 2026-10-23."
+        }
+      ]
     },
     {
       "id": "COM-008",
@@ -769,14 +805,25 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 8,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Parts, insurance, maintenance, logistics, procurement, construction and marketplace service commissions use versioned configurable rules",
         "No commission rate is hard-coded"
       ],
       "dependencies": ["COM-001"],
       "sourceRefs": ["docs/adr/ADR-045-commission-business-lines.md"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/307",
+          "note": "PR 1/2 (ADR-045): commission by business line - versioned rules per line, NO_ACTIVE_RULE recorded; decided at one database instant under a per-scope lock. Merge commit 28b3797, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/308",
+          "note": "PR 2/2: GET /v1/commissions filters by businessLine and outcome (revenue per line and charges no rule priced); services/economic-service/test/commission-business-lines.int-spec.ts is the per-line evidence (journal balance, idempotency, reversal) for all seven lines. Merge commit 151b5ea, merged 2026-10-16."
+        }
+      ]
     },
     {
       "id": "COM-012",
@@ -785,14 +832,25 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 13,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "ParticipationScore is explained separately from spendable RewardPoints",
         "Basic levels and badges use versioned rules and avoid coercive game mechanics"
       ],
       "dependencies": ["COM-001", "COM-009"],
       "sourceRefs": ["docs/adr/ADR-047-participation-reward-ranking.md"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/328",
+          "note": "PR 1, first criterion (ADR-047): ParticipationScore breakdown explained apart from spendable RewardPoints, from a versioned platform-wide participation rule. Merge commit e240034, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/331",
+          "note": "PR 2, second criterion (Q-140 temporary decision): levels and badges as versioned configuration with the basis explicit in each version. Merge commit 96af476, merged 2026-10-17."
+        }
+      ]
     },
     {
       "id": "CON-001",
@@ -957,6 +1015,61 @@
           "kind": "DOCUMENT",
           "ref": "docs/adr/ADR-068-contract-service-boundary.md",
           "note": "Second criterion remains NOT STARTED as a feature: services/contract-service/src/ has no statement or settlement directory. ADR-068 §5-6 (StatementApprovalWorkflow, the pull-based settlement handshake with economic-service, the statement_approval table) is design only, and Q-95, Q-96 and Q-97 in docs/24-open-questions.md (contract signing/amount, statement two-chain approval and deductions, the settlement boundary with economic-service) are all still open (🟠) as of 2026-10-15. No contract-settlement integration code exists in economic-service."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/301",
+          "note": "Second criterion, step 1 (PR 4a, ADR-068 section 5): statements and deduction rules in the database. Merge commit f087986, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/302",
+          "note": "PR 4b: draft and submit statements over the API. Merge commit 3779ab4, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/312",
+          "note": "PR 5: submit a statement with both approval chains (technical and financial) snapshotted. Merge commit 1d556eb, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/315",
+          "note": "PR 6: decide a statement's approval chains - separation of duties and the cap. Merge commit a1ca661, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/320",
+          "note": "PR 6a: internal settlement read of a statement for economic-service. Merge commit 7da6e20, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/329",
+          "note": "PR 6b (economic-service): an approved contract statement becomes one settleable obligation. Merge commit 59785c2, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/340",
+          "note": "PR 6c prerequisite (economic-service): internal read of a statement's obligation for contract-service. Merge commit dbeac46, merged 2026-10-20."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/343",
+          "note": "PR 6c: statements and contracts become SETTLED on economic-service's confirmation (SETTLEMENT_COMPLETED consumer, dead-lettering to rasta.contract.v1.dlq). Merge commit 89a138e, merged 2026-10-22."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/321",
+          "note": "PR 7: the contract's statements end to end through the api-gateway (tests/e2e/specs/contract/01-contract-lifecycle.e2e-spec.ts). Merge commit f8d4b87, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/334",
+          "note": "Hardening: no caller pre-empts an obligation its owner records (source types MAINTENANCE_REQUEST, PAYMENT_INTENT, STATEMENT, ORDER are reserved). Merge commit 8d7f6ba, merged 2026-10-20."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/347",
+          "note": "Test fix after #334: the statement read's other-source case records an unreserved source type. Merge commit 58611da, merged 2026-10-22."
         }
       ]
     },
@@ -1213,6 +1326,21 @@
           "kind": "DOCUMENT",
           "ref": "apps/web/src/app",
           "note": "Checked on 2026-10-15: wallet, order and settlement screens exist and match the second criterion (no real-banking or auto-confirmation claim found in any of them). The first criterion is still only PARTIAL — a repository-wide search for dispute-related screens or server modules in apps/web found none; dispute state is not yet represented in the portal. Item stays IN_PROGRESS."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/319",
+          "note": "Transaction dispute view, open and resolve. Merge commit be0f5fa, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/325",
+          "note": "Roles are read from the access token on every screen; \"session ended\" is shown only on an authoritative answer. Merge commit c6336b8, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/336",
+          "note": "Returns in the portal: ask, decide, withdraw, and the goods' progress (RUN-005 states). Merge commit fb67aa0, merged 2026-10-23."
         }
       ]
     },
@@ -1255,6 +1383,46 @@
           "kind": "DOCUMENT",
           "ref": "apps/web/src/app",
           "note": "Checked on 2026-10-15: procurement, supplier and contract screens named in the first criterion do not exist anywhere in apps/web/src/app (only construction and logistics are built, and only read-only). Second criterion is covered at unit/component level (role-gated nav, fixed 403/404/5xx text, jest-axe per state) but has no live tenant-isolation E2E for any EXP-004 surface — apps/web/e2e/tenant-isolation.spec.ts has no project/tender/warehouse scenarios. Both criteria are PARTIAL; item moves from READY to IN_PROGRESS because real work has demonstrably started, not because either criterion is met."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/305",
+          "note": "First criterion, partial: read-only /contracts list and detail (EXP-004 slice 4). Supersedes the 2026-10-15 note that no contract screen exists. Merge commit 007bafb, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/309",
+          "note": "Read-only /suppliers directory and detail (slice 5). Merge commit ee33de5, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/332",
+          "note": "Contract statements on /contracts/[id]: read, draft, submit, decide. Merge commit 2979512, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/341",
+          "note": "Test fix: the contract statements spec gets room for its axe runs (main was red). Merge commit 2f456db, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/342",
+          "note": "Sign, cancel, amend and plan milestones on /contracts/[id]. Merge commit c505f84, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/344",
+          "note": "A contractor's own bid on /tenders/[id]: submit, replace, withdraw. Merge commit f74d23f, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/345",
+          "note": "The owner's side of a tender on /tenders/[id]: publish, close, open. Merge commit e20b240, merged 2026-10-18."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/346",
+          "note": "Evaluate and award a tender on /tenders/[id]. Merge commit a6ccde0, merged 2026-10-18."
         }
       ]
     },
@@ -1281,14 +1449,30 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 21,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Analytics projections are event-driven and tenant-safe",
         "Governance views are aggregate-only and missing baselines report INSUFFICIENT_BASELINE"
       ],
       "dependencies": ["COM-009"],
       "sourceRefs": ["docs/04-service-decomposition.md#analytics-service-p1"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/335",
+          "note": "Step 0, design only: ADR-071 analytics-service boundary and governed views. Merge commit 2a019b4, merged 2026-10-22."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/337",
+          "note": "PR 1, first criterion, partial: analytics-service skeleton and the first event-driven, tenant-safe projection (fact_maintenance from MAINTENANCE_COMPLETED). The governed-views criterion is not yet delivered. Merge commit ddf0b95, merged 2026-10-22."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/355",
+          "note": "CI: the analytics coverage gate (75% threshold) runs in integration-coverage. Merge commit e83929e, merged 2026-10-23."
+        }
+      ]
     },
     {
       "id": "RUN-002",
@@ -1376,14 +1560,40 @@
       "scope": "MVP",
       "priority": "P2",
       "points": 13,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Return request, reverse transport, inspection and disposition use explicit states",
         "Refund remains owned by economic-service and repeated events are idempotent"
       ],
       "dependencies": ["COM-006", "COM-001"],
       "sourceRefs": ["docs/adr/ADR-048-reverse-logistics-boundary.md"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/310",
+          "note": "PR 1 (ADR-048): marketplace ReturnRequest lifecycle REQUESTED to AUTHORIZED, REJECTED or CANCELLED. Merge commit be4df61, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/311",
+          "note": "PR 2a: inventory-service return shipments, IN_TRANSIT to RECEIVED. Merge commit 0c9cb6c, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/313",
+          "note": "PR 2b: inventory-service return inspection and disposition. Merge commit ece1ae6, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/323",
+          "note": "PR 3: marketplace mirrors the return shipment onto the return request, IN_TRANSIT to RESOLVED, idempotently from rasta.inventory.v1 events. Merge commit b294b2f, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/339",
+          "note": "Fix: the return request is verified before dispatch, and no cancellation once dispatch is reserved. Merge commit a0c3162, merged 2026-10-22."
+        }
+      ]
     },
     {
       "id": "RUN-006",
@@ -2354,6 +2564,46 @@
       "recordedBy": "Claude Opus 5.5",
       "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-16",
       "recordIds": ["COM-010"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "STATUS_CORRECTED",
+      "reason": "COM-007 moves from READY to IN_PROGRESS. Merged PRs #300, #327, #338, #348, #333, #330, #349 are recorded as evidence. ADR-070 plan PRs 1-6 are merged; evaluation and purchase-order issuance are not. No acceptance is claimed: the item earns zero points until the Product Owner accepts it.",
+      "recordedBy": "Claude Sonnet 5.5",
+      "approvalRef": "Project manager task 191 (docs/backlog-evidence-sync-2), evidence sync, owner approval 2026-10-23",
+      "recordIds": ["COM-007"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "STATUS_CORRECTED",
+      "reason": "COM-011 moves from READY to IN_PROGRESS. Merged PRs #307, #308 are recorded as evidence. Both PRs of the ADR-045 plan are merged. No acceptance is claimed: the item earns zero points until the Product Owner accepts it.",
+      "recordedBy": "Claude Sonnet 5.5",
+      "approvalRef": "Project manager task 191 (docs/backlog-evidence-sync-2), evidence sync, owner approval 2026-10-23",
+      "recordIds": ["COM-011"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "STATUS_CORRECTED",
+      "reason": "COM-012 moves from READY to IN_PROGRESS. Merged PRs #328, #331 are recorded as evidence. Both PRs of the ADR-047 plan are merged (criterion 1 and criterion 2). No acceptance is claimed: the item earns zero points until the Product Owner accepts it.",
+      "recordedBy": "Claude Sonnet 5.5",
+      "approvalRef": "Project manager task 191 (docs/backlog-evidence-sync-2), evidence sync, owner approval 2026-10-23",
+      "recordIds": ["COM-012"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "STATUS_CORRECTED",
+      "reason": "RUN-001 moves from READY to IN_PROGRESS. Merged PRs #335, #337, #355 are recorded as evidence. Only PR 1 (criterion 1, first projection) of the ADR-071 plan is merged. No acceptance is claimed: the item earns zero points until the Product Owner accepts it.",
+      "recordedBy": "Claude Sonnet 5.5",
+      "approvalRef": "Project manager task 191 (docs/backlog-evidence-sync-2), evidence sync, owner approval 2026-10-23",
+      "recordIds": ["RUN-001"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "STATUS_CORRECTED",
+      "reason": "RUN-005 moves from READY to IN_PROGRESS. Merged PRs #310, #311, #313, #323, #339 are recorded as evidence. PRs 1-3 are merged; the plan keeps refund in economic-service and no refund operation is part of this stack, so the second criterion's refund half is not evidenced here. No acceptance is claimed: the item earns zero points until the Product Owner accepts it.",
+      "recordedBy": "Claude Sonnet 5.5",
+      "approvalRef": "Project manager task 191 (docs/backlog-evidence-sync-2), evidence sync, owner approval 2026-10-23",
+      "recordIds": ["RUN-005"]
     }
   ]
 }
