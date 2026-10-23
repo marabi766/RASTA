@@ -805,7 +805,7 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 8,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Parts, insurance, maintenance, logistics, procurement, construction and marketplace service commissions use versioned configurable rules",
         "No commission rate is hard-coded"
@@ -822,6 +822,11 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/308",
           "note": "PR 2/2: GET /v1/commissions filters by businessLine and outcome (revenue per line and charges no rule priced); services/economic-service/test/commission-business-lines.int-spec.ts is the per-line evidence (journal balance, idempotency, reversal) for all seven lines. Merge commit 151b5ea, merged 2026-10-16."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-23, in the project-manager chat, on the evidence above (PR #307, #308): versioned per-line rules for all seven business lines with NO_ACTIVE_RULE recorded, and no hard-coded rate. Accepted with disclosed limitations: until Q-130 is answered only maintenance sends its business line, so the other sources arrive without one and are priced by type-only rules or recorded as NO_ACTIVE_RULE; the Q-29 production fail-closed rule and the Q-08 explicit 0% pilot rule (PO decisions 2026-10-23) are follow-up work, not part of this item."
         }
       ]
     },
@@ -832,7 +837,7 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 13,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "ParticipationScore is explained separately from spendable RewardPoints",
         "Basic levels and badges use versioned rules and avoid coercive game mechanics"
@@ -849,6 +854,11 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/331",
           "note": "PR 2, second criterion (Q-140 temporary decision): levels and badges as versioned configuration with the basis explicit in each version. Merge commit 96af476, merged 2026-10-17."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-23, in the project-manager chat, on the evidence above (PR #328, #331): ParticipationScore explained apart from spendable RewardPoints, and levels and badges as versioned configuration. Accepted with the disclosed limitation that the level and badge basis follows the Q-140 temporary decision; a different answer changes configuration only."
         }
       ]
     },
@@ -2604,6 +2614,22 @@
       "recordedBy": "Claude Sonnet 5.5",
       "approvalRef": "Project manager task 191 (docs/backlog-evidence-sync-2), evidence sync, owner approval 2026-10-23",
       "recordIds": ["RUN-005"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "ITEM_ACCEPTED",
+      "reason": "COM-011 (8 SP) moves from IN_PROGRESS to ACCEPTED. Both acceptance criteria are met on the recorded evidence (PR #307, #308). Accepted with disclosed limitations: per-line wiring of the source services waits on Q-130 (today only maintenance sends its line), and the Q-29 fail-closed and Q-08 0% pilot rule decisions of 2026-10-23 are follow-up work.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-23",
+      "recordIds": ["COM-011"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "ITEM_ACCEPTED",
+      "reason": "COM-012 (13 SP) moves from IN_PROGRESS to ACCEPTED. Both acceptance criteria are met on the recorded evidence (PR #328, #331). Accepted with the disclosed limitation that the level and badge basis follows the Q-140 temporary decision.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-23",
+      "recordIds": ["COM-012"]
     }
   ]
 }

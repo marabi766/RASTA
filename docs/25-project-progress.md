@@ -12,9 +12,9 @@
 
 | Horizon | Earned SP | Committed SP | Remaining SP | Progress | Accepted units | Active units | Features | Stories |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| MVP | 322 | 563 | 241 | 57.2% | 27 | 41 | 37 | 5 |
+| MVP | 343 | 563 | 220 | 60.9% | 29 | 41 | 37 | 5 |
 | Post-MVP only | 0 | 223 | 223 | 0% | 0 | 12 | 12 | 0 |
-| Full product | 322 | 786 | 464 | 41% | 27 | 53 | 49 | 5 |
+| Full product | 343 | 786 | 443 | 43.6% | 29 | 53 | 49 | 5 |
 
 ## Progress by epic
 
@@ -23,7 +23,7 @@
 | EP-PLATFORM | Platform foundation and engineering | MVP | 57 | 57 | 100% | 5 | 0 |
 | EP-CORE | Identity, organization and core fleet | MVP | 55 | 55 | 100% | 5 | 0 |
 | EP-OPERATIONS | Maintenance and field operations | MVP | 21 | 21 | 100% | 1 | 0 |
-| EP-COMMERCE | Economic, marketplace and supply chain | MVP | 105 | 181 | 58% | 12 | 5 |
+| EP-COMMERCE | Economic, marketplace and supply chain | MVP | 126 | 181 | 69.6% | 12 | 5 |
 | EP-CONSTRUCTION | Construction and contracts | MVP | 42 | 63 | 66.7% | 3 | 0 |
 | EP-EXPERIENCE | Web, mobile and user experience | MVP | 34 | 89 | 38.2% | 5 | 0 |
 | EP-OPERABILITY | Operability, hardening and pilot | MVP | 8 | 97 | 8.2% | 6 | 0 |
@@ -39,9 +39,9 @@
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
 | READY | 3 | 42 |
-| IN_PROGRESS | 11 | 194 |
+| IN_PROGRESS | 9 | 173 |
 | BLOCKED | 3 | 47 |
-| ACCEPTED | 27 | 322 |
+| ACCEPTED | 29 | 343 |
 | CANCELLED | 0 | 0 |
 
 A delivery unit is a User Story under a decomposed Feature, or the Feature itself while it has not yet been decomposed. This table is the accounting view and never double-counts parent and child points.
@@ -52,9 +52,9 @@ A delivery unit is a User Story under a decomposed Feature, or the Feature itsel
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
 | READY | 3 | 42 |
-| IN_PROGRESS | 11 | 194 |
+| IN_PROGRESS | 9 | 173 |
 | BLOCKED | 3 | 47 |
-| ACCEPTED | 23 | 322 |
+| ACCEPTED | 25 | 343 |
 | CANCELLED | 0 | 0 |
 
 ## User Story state
