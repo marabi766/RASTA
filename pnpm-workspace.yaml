@@ -84,11 +84,12 @@ overrides:
   # audit ignore is replaced by this pin.
   'source-map-js@<1.2.2': '1.2.2'
 
-# Advisories with NO patched release yet, accepted for a fixed time only. Each
-# entry names the advisory, why it cannot be fixed by an override, where it is
-# reached, and the date it must be re-checked; the CI "Dependency audit" step
-# fails again for it once removed. Remove the entry as soon as a patched
-# release exists (then pin it in overrides above instead).
+# Advisories that no override can fix yet (no patched release, or the patch is
+# only in a new major that needs a code migration), accepted for a fixed time
+# only. Each entry names the advisory, why it cannot be fixed by an override,
+# where it is reached, and the date it must be re-checked; the CI "Dependency
+# audit" step fails again for it once removed. Remove the entry as soon as the
+# fix lands (then pin it in overrides above instead).
 auditConfig:
   ignoreGhsas:
     # GHSA-vfj7-8cjw-p6xm (high) — braces <=3.0.3, stack exhaustion on crafted
@@ -99,6 +100,16 @@ auditConfig:
     # this repository, not by users. RE-CHECK BY 2026-10-17: if a patched
     # braces is out, pin it under overrides and delete this entry.
     - GHSA-vfj7-8cjw-p6xm
+    # GHSA-mrhx-c7xc-m3w5 (high, CVE-2023-54404) — zod <4.6.6: an array schema
+    # without a length cap collects one issue per failing element, so a huge
+    # array can exhaust memory. Advisory widened to every zod 3 release on
+    # 2026-10-23; the only fix is zod 4.6.6+, a major migration (~280 files,
+    # zod 3 internals in construction OpenAPI), not an override. Reached at
+    # runtime: every service validates request bodies with zod. Bounded by the
+    # JSON body limit each service sets in main.ts (16 kb to 512 kb; gateway
+    # 256 kb), so one request cannot allocate without limit. RE-CHECK BY
+    # 2026-10-30: the zod 4 migration must be merged and this entry deleted.
+    - GHSA-mrhx-c7xc-m3w5
 # A transitive dependency may not arrive from a git URL or a tarball over
 # http. Everything here comes from the registry, and a sub-dependency that
 # suddenly does not is worth stopping on.
