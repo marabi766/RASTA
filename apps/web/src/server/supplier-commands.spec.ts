@@ -15,8 +15,11 @@ import {
   canDecideAbout,
   canRegisterSupplier,
   isOwnCase,
+  latestSuspensionIdOf,
   offerableCapabilities,
   openSupplierBaseline,
+  openSuspensionIdOf,
+  provenUnwritten,
   registerSupplier,
   rejectQualification,
   reinstateSupplier,
@@ -164,6 +167,7 @@ describe('the baseline', () => {
     supplierId: 'SUP_1',
     command: 'APPROVE_QUALIFICATION',
     qualificationId: 'QUA_1',
+    suspensionId: null,
   } as const;
 
   it('opens for the session and command it was minted for, and carries the qualification', () => {
@@ -190,6 +194,77 @@ describe('the baseline', () => {
     const s = session();
     const token = signPayload(s, 'supplier-baseline', { ...BASE }, -1);
     expect(openSupplierBaseline(s, token, 'APPROVE_QUALIFICATION')).toBeNull();
+  });
+
+  it('carries the suspension episode it was drawn on, and opens only with one stated', () => {
+    const s = session();
+    const lifting = {
+      ...BASE,
+      command: 'REINSTATE',
+      qualificationId: null,
+      suspensionId: 'SSP_A',
+    } as const;
+    expect(openSupplierBaseline(s, sealSupplierBaseline(s, lifting), 'REINSTATE')).toEqual(lifting);
+    // A token minted before the episode was part of it names none, and is refused.
+    const older = { supplierId: lifting.supplierId, command: 'REINSTATE', qualificationId: null };
+    expect(
+      openSupplierBaseline(s, signPayload(s, 'supplier-baseline', older, 60), 'REINSTATE'),
+    ).toBeNull();
+  });
+});
+
+describe('the episode a suspension command is drawn on', () => {
+  const at = (id: string, suspendedAt: string, open = false) => ({ id, suspendedAt, open });
+
+  it('is the newest for a suspension — by instant, then by id — and none for an empty history', () => {
+    expect(latestSuspensionIdOf([])).toBeNull();
+    expect(
+      latestSuspensionIdOf([
+        at('SSP_A', '2026-05-01T00:00:00.000Z'),
+        at('SSP_C', '2026-07-01T00:00:00.000Z'),
+        at('SSP_B', '2026-06-01T00:00:00.000Z'),
+      ]),
+    ).toBe('SSP_C');
+    // Whatever order the read returned them in, and one instant in two zones.
+    expect(
+      latestSuspensionIdOf([
+        at('SSP_B', '2026-07-01T03:30:00.000+03:30'),
+        at('SSP_A', '2026-07-01T00:00:00.000Z'),
+      ]),
+    ).toBe('SSP_B');
+  });
+
+  it('is the open one for a reinstatement, and none when the record shows none open', () => {
+    expect(openSuspensionIdOf([at('SSP_A', '2026-05-01T00:00:00.000Z')])).toBeNull();
+    expect(
+      openSuspensionIdOf([
+        at('SSP_B', '2026-06-01T00:00:00.000Z', true),
+        at('SSP_A', '2026-05-01T00:00:00.000Z'),
+      ]),
+    ).toBe('SSP_B');
+  });
+});
+
+describe('which failed write may be said as "nothing changed" (Codex review of PR 366, finding 3)', () => {
+  it.each([
+    [401, 'TOKEN_EXPIRED'],
+    [401, 'UNAUTHENTICATED'],
+    [429, 'RATE_LIMIT_EXCEEDED'],
+    [413, 'PAYLOAD_TOO_LARGE'],
+  ])('a %i with the documented code %s is proven unwritten', (status, code) => {
+    expect(provenUnwritten(status, code)).toBe(true);
+  });
+
+  const AMBIGUOUS: readonly [number, string | undefined, string][] = [
+    [500, 'INTERNAL_ERROR', 'a post-commit read failed'],
+    [503, 'UPSTREAM_UNAVAILABLE', 'an upstream reset after the commit'],
+    [503, undefined, 'a 5xx carries no readable code'],
+    [502, undefined, 'a bad gateway'],
+    [413, undefined, 'a proxy page with no platform code'],
+    [418, 'NOT_A_PLATFORM_CODE', 'an undocumented code'],
+  ];
+  it.each(AMBIGUOUS)('a %i (%s) is not: %s', (status, code) => {
+    expect(provenUnwritten(status, code)).toBe(false);
   });
 });
 
@@ -278,14 +353,16 @@ describe('what is sent to the gateway', () => {
     {
       name: 'suspend',
       path: '/v1/suppliers/SUP_1/suspend',
-      body: { reason: 'شکایت تکراری' },
-      run: (impl) => suspendSupplier(S, 'SUP_1', { reason: 'شکایت تکراری' }, impl),
+      body: { reason: 'شکایت تکراری', latestSuspensionId: 'SSP_A' },
+      run: (impl) =>
+        suspendSupplier(S, 'SUP_1', { reason: 'شکایت تکراری', latestSuspensionId: 'SSP_A' }, impl),
     },
     {
       name: 'reinstate',
       path: '/v1/suppliers/SUP_1/reinstate',
-      body: { reason: 'شکایت برطرف شد' },
-      run: (impl) => reinstateSupplier(S, 'SUP_1', { reason: 'شکایت برطرف شد' }, impl),
+      body: { reason: 'شکایت برطرف شد', suspensionId: 'SSP_B' },
+      run: (impl) =>
+        reinstateSupplier(S, 'SUP_1', { reason: 'شکایت برطرف شد', suspensionId: 'SSP_B' }, impl),
     },
   ];
 
@@ -321,20 +398,36 @@ describe('what is sent to the gateway', () => {
   );
 
   it.each(CALLS)(
-    '$name: a 504 from the gateway is unconfirmed, a 503 and a 500 are unavailable',
+    '$name: a 504 is unconfirmed; a 503 and a 500 come back with their status and no code',
     async (call) => {
+      // The transport's answer. A 5xx body is not read, so it carries no code,
+      // and the runner says it as unconfirmed (`provenUnwritten`).
       expect((await call.run(gateway(504, problem('UPSTREAM_TIMEOUT', 'slow')).impl)).kind).toBe(
         'UNKNOWN_OUTCOME',
       );
-      expect(
-        await call.run(gateway(503, problem('UPSTREAM_UNAVAILABLE', 'down')).impl),
-      ).toMatchObject({ kind: 'UNAVAILABLE', status: 503 });
-      expect(await call.run(gateway(500, problem('INTERNAL_ERROR', 'boom')).impl)).toMatchObject({
+      expect(await call.run(gateway(503, problem('UPSTREAM_UNAVAILABLE', 'down')).impl)).toEqual({
+        kind: 'UNAVAILABLE',
+        status: 503,
+        correlationId: expect.any(String),
+      });
+      expect(await call.run(gateway(500, problem('INTERNAL_ERROR', 'boom')).impl)).toEqual({
         kind: 'UNAVAILABLE',
         status: 500,
+        correlationId: expect.any(String),
       });
     },
   );
+
+  it.each(CALLS)('$name: a 401 or 429 carries the documented code it came with', async (call) => {
+    expect(await call.run(gateway(401, problem('TOKEN_EXPIRED', 'expired')).impl)).toMatchObject({
+      kind: 'UNAVAILABLE',
+      status: 401,
+      code: 'TOKEN_EXPIRED',
+    });
+    expect(
+      await call.run(gateway(429, problem('RATE_LIMIT_EXCEEDED', 'slow down')).impl),
+    ).toMatchObject({ kind: 'UNAVAILABLE', status: 429, code: 'RATE_LIMIT_EXCEEDED' });
+  });
 
   it.each(CALLS)('$name: a dropped connection is unconfirmed', async (call) => {
     const impl = (async () => {
@@ -422,6 +515,45 @@ describe('what the service says, in fixed Persian words', () => {
     const result = await run(422, problem('BUSINESS_RULE_VIOLATION', sentence));
     expect(result).toMatchObject({ kind: 'INVALID', message: STALE_MESSAGE });
   });
+
+  it.each([
+    ['suspend', 'latestSuspensionId'],
+    ['reinstate', 'suspensionId'],
+  ])(
+    'says a %s whose episode moved on (409 SUSPENSION_EPISODE_CHANGED) as a stale record',
+    async (verb, path) => {
+      const { impl } = gateway(
+        409,
+        problem('OPTIMISTIC_LOCK_FAILED', 'The supplier’s suspension history changed', [
+          {
+            path,
+            message: 'This suspension is not open any more',
+            code: 'SUSPENSION_EPISODE_CHANGED',
+          },
+        ]),
+      );
+      const result =
+        verb === 'suspend'
+          ? await suspendSupplier(
+              S,
+              'SUP_1',
+              { reason: 'شکایت تکراری', latestSuspensionId: null },
+              impl,
+            )
+          : await reinstateSupplier(
+              S,
+              'SUP_1',
+              { reason: 'شکایت برطرف شد', suspensionId: 'SSP_A' },
+              impl,
+            );
+      expect(result).toEqual({
+        kind: 'INVALID',
+        fieldErrors: {},
+        message: STALE_MESSAGE,
+        correlationId: expect.any(String),
+      });
+    },
+  );
 
   it('says a 422 it does not know by its code, in fixed words', async () => {
     const result = await run(

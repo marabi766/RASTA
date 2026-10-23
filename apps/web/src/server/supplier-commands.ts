@@ -1,3 +1,4 @@
+import { ERROR_CODES } from '@rasta/contracts';
 import { z } from 'zod';
 
 import {
@@ -5,8 +6,10 @@ import {
   BUSINESS_RULE_MESSAGE,
   INVALID_INPUT_MESSAGE,
   MAX_EVIDENCE_ITEMS,
+  STALE_MESSAGE,
   SUPPLIER_422_PATTERNS,
   SUPPLIER_VALIDATION_MESSAGES,
+  SUSPENSION_EPISODE_CHANGED,
   isSupplierCommand,
   type ApproveBody,
   type ApproveField,
@@ -40,17 +43,21 @@ import { writeThroughGateway, type FieldMapping, type WriteResult } from './writ
  *
  * None of the six endpoints takes one — the controller reads none, the OpenAPI
  * document lists none, and the gateway's `suppliers` route does not require one.
- * So no key is sent, a lost answer is `UNCONFIRMED` (look at the record, then
- * decide), and what makes a double press harmless is the service's own state
- * rules: a second registration is `409`, a second submission, decision,
- * suspension or reinstatement is `422`. The page then says the record changed and
- * that nothing was written this time (`STALE_MESSAGE`).
+ * So every call here is `idempotency: 'NONE'` (`write.ts`: the one explicit
+ * exception to a required key), a lost or ambiguous answer is `UNCONFIRMED`
+ * (look at the record, then decide), and what makes a double press harmless is
+ * the service's own state rules: a second registration is `409`, a second
+ * submission, decision, suspension or reinstatement is `422` (or `409` for an
+ * episode that moved on). The page then says the record changed and that
+ * nothing was written this time (`STALE_MESSAGE`).
  *
  * ## What a command acts on
  *
- * Not a field of any form. The page signs `{supplier, command, qualification}`
- * for this session (`sealSupplierBaseline`); the action takes the supplier, and
- * for a decision the qualification, from that token alone.
+ * Not a field of any form. The page signs `{supplier, command, qualification,
+ * suspension}` for this session (`sealSupplierBaseline`); the action takes the
+ * supplier, for a decision the qualification, and for suspend and reinstate the
+ * episode, from that token alone — and supplier-service compares the episode
+ * atomically with the write (Codex review of PR 366, finding 2).
  */
 
 // ---------------------------------------------------------------------------
@@ -172,6 +179,10 @@ function mappingOf<F extends string>(paths: Record<string, F>): FieldMapping<F> 
       ALREADY_EXISTS: ALREADY_REGISTERED_MESSAGE,
       BUSINESS_RULE_VIOLATION: BUSINESS_RULE_MESSAGE,
     },
+    // 409 OPTIMISTIC_LOCK_FAILED on suspend and reinstate: the episode the form
+    // was drawn on is not the supplier's newest / open one any more, and nothing
+    // was written. The runner sends it to a fresh read like every stale answer.
+    byDetailCode: { [SUSPENSION_EPISODE_CHANGED]: STALE_MESSAGE },
     // Never the service's own sentence: a text field could echo a stranger's
     // characters, so the list of words stays closed.
     fallback: INVALID_INPUT_MESSAGE,
@@ -191,6 +202,28 @@ export const APPROVE_FIELD_MAPPING = mappingOf<ApproveField>({ note: 'note' });
 export const REJECT_FIELD_MAPPING = mappingOf<RejectField>({ reason: 'reason', note: 'note' });
 export const REASON_FIELD_MAPPING = mappingOf<ReasonField>({ reason: 'reason' });
 
+/** The platform's documented error codes (docs/06 § 6.7). */
+const DOCUMENTED_CODES: ReadonlySet<string> = new Set(Object.values(ERROR_CODES));
+
+/**
+ * Whether a failed write is **proven** not to have written anything, so the
+ * form may say "nothing changed": a `4xx` that carries one of the platform's
+ * documented error codes — a refusal by the gateway or the service, made before
+ * any state changed (every refusal in supplier-service is thrown before its
+ * transaction commits).
+ *
+ * Everything else is ambiguous and must be said as unconfirmed — look at the
+ * record first: a `5xx` (supplier-service answers `500` when the read after a
+ * committed write fails; the gateway answers `503` for an upstream connection
+ * reset, which can come after the commit), a timeout, a reset connection, and
+ * a `4xx` without a documented code (a proxy's page proves nothing about the
+ * service). No key is sent, so a resend is a second write (Codex review of
+ * PR 366, finding 3).
+ */
+export function provenUnwritten(status: number, code: string | undefined): boolean {
+  return status >= 400 && status < 500 && code !== undefined && DOCUMENTED_CODES.has(code);
+}
+
 // ---------------------------------------------------------------------------
 // Sending
 // ---------------------------------------------------------------------------
@@ -206,6 +239,7 @@ export const registerSupplier = (
   writeThroughGateway(session, {
     path: '/v1/suppliers',
     body,
+    idempotency: 'NONE',
     schema: answerSchema,
     mapping: REGISTER_FIELD_MAPPING,
     fetchImpl,
@@ -223,6 +257,7 @@ export const submitQualification = (
   writeThroughGateway(session, {
     path: `${supplierPath(supplierId)}/qualifications`,
     body,
+    idempotency: 'NONE',
     schema: answerSchema,
     mapping: SUBMIT_FIELD_MAPPING,
     fetchImpl,
@@ -241,6 +276,7 @@ export const approveQualification = (
   writeThroughGateway(session, {
     path: decisionPath(supplierId, qualificationId, 'approve'),
     body,
+    idempotency: 'NONE',
     schema: answerSchema,
     mapping: APPROVE_FIELD_MAPPING,
     fetchImpl,
@@ -256,6 +292,7 @@ export const rejectQualification = (
   writeThroughGateway(session, {
     path: decisionPath(supplierId, qualificationId, 'reject'),
     body,
+    idempotency: 'NONE',
     schema: answerSchema,
     mapping: REJECT_FIELD_MAPPING,
     fetchImpl,
@@ -264,12 +301,13 @@ export const rejectQualification = (
 export const suspendSupplier = (
   session: WebSession,
   supplierId: string,
-  body: { readonly reason: string },
+  body: { readonly reason: string; readonly latestSuspensionId: string | null },
   fetchImpl?: typeof fetch,
 ): Promise<WriteResult<WrittenSupplier, ReasonField>> =>
   writeThroughGateway(session, {
     path: `${supplierPath(supplierId)}/suspend`,
     body,
+    idempotency: 'NONE',
     schema: answerSchema,
     mapping: REASON_FIELD_MAPPING,
     fetchImpl,
@@ -278,12 +316,13 @@ export const suspendSupplier = (
 export const reinstateSupplier = (
   session: WebSession,
   supplierId: string,
-  body: { readonly reason: string },
+  body: { readonly reason: string; readonly suspensionId: string },
   fetchImpl?: typeof fetch,
 ): Promise<WriteResult<WrittenSupplier, ReasonField>> =>
   writeThroughGateway(session, {
     path: `${supplierPath(supplierId)}/reinstate`,
     body,
+    idempotency: 'NONE',
     schema: answerSchema,
     mapping: REASON_FIELD_MAPPING,
     fetchImpl,
@@ -309,19 +348,32 @@ const baselineSchema = z.object({
   command: z.string().refine(isSupplierCommand),
   /** The qualification a decision is about; null for every other command. */
   qualificationId: z.string().min(1).max(200).nullable(),
+  /** See {@link SupplierBaseline.suspensionId}. */
+  suspensionId: z.string().min(1).max(200).nullable(),
 });
 
 export interface SupplierBaseline {
   readonly supplierId: string;
   readonly command: SupplierCommand;
   readonly qualificationId: string | null;
+  /**
+   * The suspension episode the form was drawn on: for `REINSTATE` the open one
+   * it lifts, for `SUSPEND` the newest one the page showed (null when it showed
+   * none), null for every other command. Sent as `suspensionId` /
+   * `latestSuspensionId`, which supplier-service compares with the episode in
+   * the same transaction as the write — so a form read during one episode
+   * cannot act on another (Codex review of PR 366, finding 2).
+   */
+  readonly suspensionId: string | null;
 }
 
 /**
- * The supplier a command is for, the command and — for a decision — the
- * qualification, signed for this session. Bound to the **command** too, so the
- * token minted beside "approve" cannot be posted to the form that rejects, and
- * to the **qualification**, so approving one cannot be redirected to another.
+ * The supplier a command is for, the command, and what it was decided on — the
+ * qualification for a decision, the suspension episode for suspend and
+ * reinstate — signed for this session. Bound to the **command** too, so the
+ * token minted beside "approve" cannot be posted to the form that rejects, to
+ * the **qualification**, so approving one cannot be redirected to another, and
+ * to the **episode**, so lifting one cannot become lifting the next.
  */
 export function sealSupplierBaseline(session: WebSession, baseline: SupplierBaseline): string {
   return signPayload(session, BASELINE_PURPOSE, { ...baseline }, BASELINE_TTL_SECONDS);
@@ -343,5 +395,33 @@ export function openSupplierBaseline(
     supplierId: payload.supplierId,
     command,
     qualificationId: payload.qualificationId,
+    suspensionId: payload.suspensionId,
   };
+}
+
+/** One suspension episode as the supplier read returns it. */
+interface EpisodeOnRecord {
+  readonly id: string;
+  readonly suspendedAt: string;
+  readonly open: boolean;
+}
+
+/**
+ * The newest episode on the record — what supplier-service compares a
+ * suspension's `latestSuspensionId` with (newest `suspendedAt`, then the larger
+ * id, its own order) — or null when there is none.
+ */
+export function latestSuspensionIdOf(suspensions: readonly EpisodeOnRecord[]): string | null {
+  let latest: EpisodeOnRecord | null = null;
+  for (const episode of suspensions) {
+    const later =
+      latest === null ? 1 : Date.parse(episode.suspendedAt) - Date.parse(latest.suspendedAt);
+    if (later > 0 || (later === 0 && latest !== null && episode.id > latest.id)) latest = episode;
+  }
+  return latest?.id ?? null;
+}
+
+/** The open episode a reinstatement lifts, or null when the record shows none. */
+export function openSuspensionIdOf(suspensions: readonly EpisodeOnRecord[]): string | null {
+  return suspensions.find((episode) => episode.open)?.id ?? null;
 }

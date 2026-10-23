@@ -10,6 +10,7 @@ import {
 import { supplierCapabilityLabel } from '@/lib/supplier-fields';
 import type { ReadResult, SupplierDetail, SupplierPage } from '@/server/suppliers';
 import type { WebSession } from '@/server/session';
+import { openSupplierBaseline } from '@/server/supplier-commands';
 
 import { SupplierDetailScreen } from './[id]/SupplierDetailScreen';
 import { NO_COMMANDS, supplierCommandsFor } from './[id]/SupplierCommands';
@@ -171,8 +172,9 @@ describe.each(FORMS)('the $name form', (form) => {
     [{ kind: 'REFUSED', reason: 'SUBMISSION' } as const, /معتبر شناخته نشد/],
     [{ kind: 'FORBIDDEN', correlationId: 'corr-403' } as const, /corr-403/],
     [{ kind: 'NOT_FOUND', correlationId: 'corr-404' } as const, /corr-404/],
-    [{ kind: 'FAILED', status: 503, correlationId: 'corr-503' } as const, /پاسخ نمی‌دهد/],
-    [{ kind: 'FAILED', status: 500, correlationId: 'corr-500' } as const, /چیزی تغییر نکرد/],
+    // FAILED is only ever a 4xx with a documented code (`provenUnwritten`): a
+    // 5xx arrives as UNCONFIRMED (Codex review of PR 366, finding 3).
+    [{ kind: 'FAILED', status: 429, correlationId: 'corr-429' } as const, /چیزی تغییر نکرد/],
     [{ kind: 'FAILED', status: 401, correlationId: 'corr-401' } as const, /نشست شما پایان/],
     [{ kind: 'UNCONFIRMED', correlationId: 'corr-unk' } as const, /corr-unk/],
   ])('says %j in Persian, as an alert with no axe violation', async (state, expected) => {
@@ -392,6 +394,7 @@ const DETAIL: SupplierDetail = {
       submittedAt: '2026-08-02T08:00:00.000Z',
       decidedAt: '2026-08-03T08:00:00.000Z',
       decisionNote: null,
+      rejectionReason: null,
       evidence: [],
       evidenceCount: 0,
       current: true,
@@ -404,6 +407,7 @@ const DETAIL: SupplierDetail = {
       submittedAt: '2026-09-02T08:00:00.000Z',
       decidedAt: null,
       decisionNote: null,
+      rejectionReason: null,
       evidence: [
         { documentId: 'DOC_LICENCE_1', label: 'پروانه کسب' },
         { documentId: 'DOC_NO_LABEL', label: null },
@@ -536,6 +540,118 @@ describe('who is drawn which form on a supplier', () => {
     const { container } = drawn(detail, org, [...roles]);
     for (const summary of container.querySelectorAll('summary')) fireEvent.click(summary);
     expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe('the suspension episode each form is signed with (Codex review of PR 366, finding 2)', () => {
+  const CLOSED = (id: string, suspendedAt: string) => ({
+    id,
+    reason: 'شکایت تکراری',
+    suspendedAt,
+    reinstatedAt: '2026-09-20T08:00:00.000Z',
+    reinstatementNote: 'رفع شد',
+    open: false,
+  });
+
+  function signed(detail: SupplierDetail, command: 'SUSPEND' | 'REINSTATE') {
+    const session = sessionFor(tokenFor('ORG-UNION', ['UNION_ADMIN']));
+    const { container } = render(
+      <SupplierDetailScreen
+        result={{ kind: 'OK', data: detail }}
+        commands={supplierCommandsFor(session, detail)}
+      />,
+    );
+    return [...container.querySelectorAll(`input[name="${BASELINE_FIELD}"]`)]
+      .map((input) => openSupplierBaseline(session, (input as HTMLInputElement).value, command))
+      .filter((baseline) => baseline !== null);
+  }
+
+  it('signs the reinstatement with the open episode it lifts', () => {
+    expect(signed(SUSPENDED, 'REINSTATE')).toEqual([
+      expect.objectContaining({ command: 'REINSTATE', suspensionId: 'SUS_1' }),
+    ]);
+    // A second suspension: the open one, never an earlier closed one.
+    const again = {
+      ...SUSPENDED,
+      suspensions: [
+        { ...SUSPENDED.suspensions[0]!, id: 'SUS_2', suspendedAt: '2026-10-01T08:00:00.000Z' },
+        CLOSED('SUS_1', '2026-09-01T08:00:00.000Z'),
+      ],
+    };
+    expect(signed(again, 'REINSTATE')).toEqual([
+      expect.objectContaining({ command: 'REINSTATE', suspensionId: 'SUS_2' }),
+    ]);
+  });
+
+  it('signs the suspension with the newest episode on the record, or none', () => {
+    expect(signed(DETAIL, 'SUSPEND')).toEqual([
+      expect.objectContaining({ command: 'SUSPEND', suspensionId: null }),
+    ]);
+    const history = {
+      ...DETAIL,
+      suspensions: [
+        CLOSED('SUS_OLD', '2026-06-01T08:00:00.000Z'),
+        CLOSED('SUS_NEW', '2026-09-01T08:00:00.000Z'),
+      ],
+    };
+    expect(signed(history, 'SUSPEND')).toEqual([
+      expect.objectContaining({ command: 'SUSPEND', suspensionId: 'SUS_NEW' }),
+    ]);
+  });
+
+  it('draws no reinstatement on a suspended record that shows no open episode', () => {
+    drawn(
+      { ...SUSPENDED, suspensions: [CLOSED('SUS_1', '2026-09-01T08:00:00.000Z')] },
+      'ORG-UNION',
+      ['UNION_ADMIN'],
+    );
+    expect(buttons()).not.toContain('رفع تعلیق');
+  });
+});
+
+describe('what a decided qualification shows (Codex review of PR 366, findings 1 and 4)', () => {
+  const REJECTED = (over: Partial<SupplierDetail['qualifications'][number]>) => ({
+    ...DETAIL,
+    qualifications: [
+      {
+        ...DETAIL.qualifications[1]!,
+        state: 'REJECTED',
+        decidedAt: '2026-09-05T08:00:00.000Z',
+        rejectionReason: 'پروانه کسب منقضی شده است',
+        ...over,
+      },
+    ],
+  });
+
+  it('shows the rejection reason written for the supplier', () => {
+    render(<SupplierDetailScreen result={{ kind: 'OK', data: REJECTED({}) }} />);
+    expect(screen.getByText(/دلیل رد:/)).toHaveTextContent('پروانه کسب منقضی شده است');
+  });
+
+  it('says plainly when a rejection carries no recorded reason', () => {
+    render(
+      <SupplierDetailScreen result={{ kind: 'OK', data: REJECTED({ rejectionReason: null }) }} />,
+    );
+    expect(screen.getByText(/دلیل رد:/)).toHaveTextContent('دلیلی روی این پرونده ثبت نشده است.');
+  });
+
+  it('shows no reviewer note when the service sent none — the supplier’s own reading', () => {
+    const { container } = render(
+      <SupplierDetailScreen result={{ kind: 'OK', data: REJECTED({ decisionNote: undefined }) }} />,
+    );
+    expect(container).not.toHaveTextContent('یادداشت خصوصی بازبین');
+  });
+
+  it('shows the reviewer note, marked as the reviewers’ own, when the service sent it', () => {
+    render(
+      <SupplierDetailScreen
+        result={{ kind: 'OK', data: REJECTED({ decisionNote: 'با دفتر ثبت تماس گرفته شد' }) }}
+      />,
+    );
+    expect(screen.getByText(/یادداشت خصوصی بازبین/)).toHaveTextContent(
+      'فقط بازبینان پلتفرم می‌بینند',
+    );
+    expect(screen.getByText(/یادداشت خصوصی بازبین/)).toHaveTextContent('با دفتر ثبت تماس گرفته شد');
   });
 });
 

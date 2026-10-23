@@ -169,9 +169,14 @@ function QualificationRow({
         {qualification.current ? 'در حال حاضر معتبر' : 'در حال حاضر معتبر نیست'}
       </p>
       {qualification.statement ? <p className="mt-2 text-sm">{qualification.statement}</p> : null}
+      {qualification.state === 'REJECTED' ? (
+        <p className="mt-2 text-sm">
+          دلیل رد: {qualification.rejectionReason ?? 'دلیلی روی این پرونده ثبت نشده است.'}
+        </p>
+      ) : null}
       {qualification.decisionNote ? (
         <p className="mt-2 text-sm text-content-muted">
-          یادداشت بازبین: {qualification.decisionNote}
+          یادداشت خصوصی بازبین (فقط بازبینان پلتفرم می‌بینند): {qualification.decisionNote}
         </p>
       ) : null}
       <p className="mt-1 text-sm text-content-muted">

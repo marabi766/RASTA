@@ -47,8 +47,22 @@ export type WriteResult<T, F extends string> =
   /** The thing written *about* is not visible to this person — the platform's
    *  non-disclosure 404. */
   | { readonly kind: 'NOT_FOUND'; readonly correlationId: string }
-  /** Refused before it could act: nothing was written. */
-  | { readonly kind: 'UNAVAILABLE'; readonly status: number; readonly correlationId: string }
+  /**
+   * Any other refusal or failure the gateway answered with a status. A `4xx`
+   * is a refusal before anything was written; a `5xx` is **not** proof of that
+   * (a post-commit read can fail, an upstream reset after the commit surfaces
+   * as `503`). A keyed write may resend it under the same key, which replays
+   * rather than repeats; a key-less one (`idempotency: 'NONE'`) must treat a
+   * `5xx` as unconfirmed — `supplier-runner.ts` does (Codex review of PR 366,
+   * finding 3).
+   */
+  | {
+      readonly kind: 'UNAVAILABLE';
+      readonly status: number;
+      readonly correlationId: string;
+      /** The platform error `code` (docs/06 § 6.7), when the response — a `4xx` — carried one. */
+      readonly code?: string;
+    }
   /**
    * Sent, and possibly committed, but not confirmed (Codex post-merge review
    * of #106): the connection failed after dispatch, this portal's deadline
@@ -153,15 +167,9 @@ export function mapProblemToFields<F extends string>(
   return { fieldErrors, message: textOf(problem.message) };
 }
 
-export interface WriteCall<S extends z.ZodTypeAny, F extends string> {
+interface WriteCallBase<S extends z.ZodTypeAny, F extends string> {
   readonly path: string;
   readonly body: unknown;
-  /**
-   * The submission id — sent as `Idempotency-Key`; see `submission.ts`. Left out
-   * for a service that takes no key (supplier-service's six writes): sending one
-   * would suggest a retry is safe, and it is not.
-   */
-  readonly submissionId?: string;
   /** What the created resource must look like; everything else is dropped. */
   readonly schema: S;
   readonly mapping: FieldMapping<F>;
@@ -176,6 +184,35 @@ export interface WriteCall<S extends z.ZodTypeAny, F extends string> {
   readonly fetchImpl?: typeof fetch;
 }
 
+/**
+ * The default, and the shape every write takes unless it says otherwise: the
+ * submission id is **required** and sent as `Idempotency-Key` (see
+ * `submission.ts`), so a resend replays rather than repeats.
+ */
+interface KeyedWriteCall<S extends z.ZodTypeAny, F extends string> extends WriteCallBase<S, F> {
+  readonly idempotency?: 'KEYED';
+  readonly submissionId: string;
+}
+
+/**
+ * The one exception, stated at the call: an endpoint that takes no key
+ * (supplier-service's six writes). No key is sent — sending one would suggest a
+ * resend is safe, and it is not — and the caller owns what an ambiguous answer
+ * means. `submissionId` cannot be given here, so a key cannot be half-wired.
+ */
+interface UnkeyedWriteCall<S extends z.ZodTypeAny, F extends string> extends WriteCallBase<S, F> {
+  readonly idempotency: 'NONE';
+  readonly submissionId?: never;
+}
+
+/**
+ * A write. Leaving out `submissionId` does not compile unless the call says
+ * `idempotency: 'NONE'` (`write.type-spec.ts` proves both directions; Codex
+ * review of PR 366, finding 5).
+ */
+export type WriteCall<S extends z.ZodTypeAny, F extends string> =
+  KeyedWriteCall<S, F> | UnkeyedWriteCall<S, F>;
+
 export async function writeThroughGateway<S extends z.ZodTypeAny, F extends string>(
   session: WebSession,
   call: WriteCall<S, F>,
@@ -187,7 +224,7 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
       method: call.method ?? 'POST',
       body: call.body,
       accessToken: session.accessToken,
-      idempotencyKey: call.submissionId,
+      idempotencyKey: call.idempotency === 'NONE' ? undefined : call.submissionId,
       fetchImpl: call.fetchImpl,
     });
 
@@ -225,6 +262,11 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
     if ((status === 400 || status === 422 || status === 409) && problem) {
       return { kind: 'INVALID', correlationId, ...mapProblemToFields(problem, call.mapping) };
     }
-    return { kind: 'UNAVAILABLE', status, correlationId };
+    return {
+      kind: 'UNAVAILABLE',
+      status,
+      correlationId,
+      ...(problem ? { code: problem.code } : {}),
+    };
   }
 }

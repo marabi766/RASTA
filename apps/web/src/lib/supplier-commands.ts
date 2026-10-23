@@ -383,7 +383,14 @@ export const parseReinstateForm = (values: ReasonFormValues) =>
 export const ALREADY_REGISTERED_MESSAGE =
   'این سازمان پیش از این پرونده تامین‌کننده دارد و ثبت دوباره پذیرفته نمی‌شود. آن را در فهرست تامین‌کنندگان پیدا کنید؛ ردیف سازمان شما نشان دارد.';
 
-/** 422: a rule of the qualification or suspension state refuses the command. */
+/**
+ * The closed `details[].code` supplier-service answers with `409
+ * OPTIMISTIC_LOCK_FAILED` when a suspend or reinstate names an episode that is
+ * not the supplier's newest / open one any more (its `suspension.service.ts`).
+ */
+export const SUSPENSION_EPISODE_CHANGED = 'SUSPENSION_EPISODE_CHANGED';
+
+/** 422 (and the 409 above): a rule of the qualification or suspension state refuses the command. */
 export const STALE_MESSAGE =
   'وضعیت پرونده با این فرم نمی‌خواند: درخواست پیش‌تر تصمیم گرفته شده، درخواست دیگری برای همین دسته هست، یا وضعیت تعلیق عوض شده است. صفحه را تازه کنید.';
 
@@ -424,17 +431,26 @@ export const SUPPLIER_FORBIDDEN_MESSAGE =
   'اجازه این کار به شما داده نشده است. سازمان تامین‌کننده درباره صلاحیت، تعلیق یا رفع تعلیق خودش تصمیم نمی‌گیرد و اپراتور پلتفرم از طرف تامین‌کننده درخواست نمی‌فرستد.';
 export const SUPPLIER_NOT_FOUND_MESSAGE =
   'این تامین‌کننده یا درخواست پیدا نشد یا در سازمان فعال شما نیست.';
-export const SUPPLIER_UNAVAILABLE_MESSAGE =
-  'سرویس تامین‌کنندگان همین حالا پاسخ نمی‌دهد و چیزی ثبت نشد. کمی بعد دوباره تلاش کنید.';
+/**
+ * The reviewer note's promise, on both decision forms — and now a true one:
+ * supplier-service returns the note to platform reviewers outside the supplier's
+ * organization only, never to the supplier, and publishes it on no event (Codex
+ * review of PR 366, finding 1).
+ */
+export const REVIEWER_NOTE_HINT =
+  'اختیاری؛ فقط بازبینان پلتفرم آن را می‌بینند، نه تامین‌کننده، و در هیچ رویدادی منتشر نمی‌شود.';
+
 export const SUPPLIER_FAILED_MESSAGE = 'انجام نشد و چیزی تغییر نکرد. می‌توانید دوباره بفرستید.';
 
 /**
- * What a form says when the write was refused before it could act, by the
- * status the gateway answered: `401` (the token ran out), `503` (supplier-service
- * or the gateway is down — nothing was written), anything else (`500`, `429`, …).
+ * What a form says when the write was **proven** refused before it could act —
+ * a `4xx` carrying one of the platform's documented error codes
+ * (`provenUnwritten` in `server/supplier-commands.ts`): `401` (the token ran
+ * out) in the session's own words, anything else (`429`, `413`, …) as "nothing
+ * changed". A `5xx`, a reset connection or a timeout never reaches this: it may
+ * have committed, so it is `UNCONFIRMED` (Codex review of PR 366, finding 3).
  */
 export function supplierFailureText(status: number): string {
   if (status === 401) return SESSION_REFUSAL_MESSAGES.NO_SESSION;
-  if (status === 503) return SUPPLIER_UNAVAILABLE_MESSAGE;
   return SUPPLIER_FAILED_MESSAGE;
 }

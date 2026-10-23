@@ -23,6 +23,7 @@ import {
   MAX_REASON_LENGTH,
   MAX_STATEMENT_LENGTH,
   MIN_REASON_LENGTH,
+  REVIEWER_NOTE_HINT,
   SUPPLIER_COMMAND_CONSEQUENCES,
   SUPPLIER_FORBIDDEN_MESSAGE,
   SUPPLIER_NOT_FOUND_MESSAGE,
@@ -134,7 +135,7 @@ function Banner({ state }: { state: SupplierFormState<unknown, string> }) {
       return <UnconfirmedWriteAlert correlationId={state.correlationId} />;
     case 'FAILED':
       return (
-        <Alert tone={state.status === 503 ? 'warning' : 'danger'}>
+        <Alert tone="danger">
           {supplierFailureText(state.status)} کد پیگیری: {state.correlationId}
         </Alert>
       );
@@ -396,7 +397,7 @@ export function ApproveQualificationForm({
       <Field
         label={`یادداشت تایید ${capabilityLabel}`}
         error={errors.note}
-        hint="اختیاری؛ خصوصی است و منتشر نمی‌شود."
+        hint={REVIEWER_NOTE_HINT}
       >
         {(control) => (
           <textarea
@@ -439,7 +440,7 @@ export function RejectQualificationForm({
         label={`دلیل رد ${capabilityLabel}`}
         required
         error={errors.reason}
-        hint={`دست‌کم ${MIN_REASON_LENGTH} نویسه؛ برای تامین‌کننده منتشر می‌شود.`}
+        hint={`دست‌کم ${MIN_REASON_LENGTH} نویسه؛ روی پرونده تامین‌کننده نمایش داده و منتشر می‌شود.`}
       >
         {(control) => (
           <textarea
@@ -452,7 +453,7 @@ export function RejectQualificationForm({
           />
         )}
       </Field>
-      <Field label="یادداشت خصوصی بازبین" error={errors.note} hint="اختیاری؛ هرگز منتشر نمی‌شود.">
+      <Field label="یادداشت خصوصی بازبین" error={errors.note} hint={REVIEWER_NOTE_HINT}>
         {(control) => (
           <textarea
             {...control}

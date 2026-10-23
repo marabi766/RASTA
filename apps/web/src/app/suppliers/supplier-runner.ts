@@ -17,6 +17,7 @@ import type { WebSession } from '@/server/session';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import {
   openSupplierBaseline,
+  provenUnwritten,
   registerSupplier,
   type SupplierBaseline,
   type WrittenSupplier,
@@ -111,7 +112,12 @@ function failure<V, F extends string>(
     case 'NOT_FOUND':
       return { kind: 'NOT_FOUND', correlationId: result.correlationId };
     case 'UNAVAILABLE':
-      return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+      // "Nothing changed" only where the answer proves it (Codex review of
+      // PR 366, finding 3): a 500 can follow a commit whose answer failed to
+      // read back, and a 503 can be an upstream reset after the commit.
+      return provenUnwritten(result.status, result.code)
+        ? { kind: 'FAILED', status: result.status, correlationId: result.correlationId }
+        : { kind: 'UNCONFIRMED', correlationId: result.correlationId };
     case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
       // Sent, maybe committed, not confirmed: never "nothing was changed". The
@@ -170,6 +176,15 @@ export async function runOnSupplier<V, B, F extends string>(
   const decides =
     command.command === 'APPROVE_QUALIFICATION' || command.command === 'REJECT_QUALIFICATION';
   if (decides !== (baseline.qualificationId !== null)) {
+    return { kind: 'REFUSED', reason: 'BASELINE' };
+  }
+  // A reinstatement names the open episode it lifts; a suspension may name the
+  // newest one or none; nothing else names any.
+  if (
+    command.command === 'REINSTATE'
+      ? baseline.suspensionId === null
+      : command.command !== 'SUSPEND' && baseline.suspensionId !== null
+  ) {
     return { kind: 'REFUSED', reason: 'BASELINE' };
   }
 

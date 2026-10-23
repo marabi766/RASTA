@@ -21,8 +21,10 @@ import {
   REGISTER_FIELDS,
   REJECT_FIELDS,
   SUBMIT_FIELDS,
+  STALE_MESSAGE,
   SUPPLIER_422_PATTERNS,
   SUPPLIER_VALIDATION_MESSAGES,
+  SUSPENSION_EPISODE_CHANGED,
   approveFormSchema,
   registerFormSchema,
   rejectFormSchema,
@@ -50,8 +52,10 @@ import {
 
 import {
   PLATFORM_ROLES,
+  REASON_FIELD_MAPPING,
   SUPPLIER_SIDE_ROLES,
   approveQualification,
+  provenUnwritten,
   registerSupplier,
 } from './supplier-commands';
 
@@ -226,8 +230,10 @@ describe('the request bodies', () => {
     expect(keys('submitQualificationSchema')).toEqual([...SUBMIT_FIELDS].sort());
     expect(keys('approveQualificationSchema')).toEqual([...APPROVE_FIELDS].sort());
     expect(keys('rejectQualificationSchema')).toEqual([...REJECT_FIELDS].sort());
-    expect(keys('suspendSupplierSchema')).toEqual(['reason']);
-    expect(keys('reinstateSupplierSchema')).toEqual(['reason']);
+    // The episode is not a form field: it comes from the signed baseline
+    // (`suspensionId`), and the service compares it in the write's transaction.
+    expect(keys('suspendSupplierSchema')).toEqual(['latestSuspensionId', 'reason']);
+    expect(keys('reinstateSupplierSchema')).toEqual(['reason', 'suspensionId']);
     for (const name of [
       'registerSupplierSchema',
       'submitQualificationSchema',
@@ -456,8 +462,28 @@ describe('what the service refuses with a sentence, and how the portal says it',
       500: 'UNAVAILABLE',
     });
     expect(supplierFailureText(401)).toMatch(/نشست/);
-    expect(supplierFailureText(503)).toMatch(/پاسخ نمی‌دهد/);
-    expect(supplierFailureText(500)).toMatch(/چیزی تغییر نکرد/);
+    expect(supplierFailureText(429)).toMatch(/چیزی تغییر نکرد/);
+    // The documented 500 is what supplier-service answers when the read after a
+    // committed write fails (`viewOf`, `detailOf`): never "nothing changed"
+    // (Codex review of PR 366, finding 3).
+    expect(behaviour).toContain('disappeared immediately after being written');
+    expect(provenUnwritten(500, 'INTERNAL_ERROR')).toBe(false);
+    expect(provenUnwritten(500, undefined)).toBe(false);
+  });
+
+  it('an episode that moved on is the service’s 409 SUSPENSION_EPISODE_CHANGED, said as stale', () => {
+    const suspension = squash(readSource(...SERVICE, 'supplier', 'suspension.service.ts'));
+    expect(suspension).toContain(`SUSPENSION_EPISODE_CHANGED='${SUSPENSION_EPISODE_CHANGED}'`);
+    expect(suspension).toContain('ERROR_CODES.OPTIMISTIC_LOCK_FAILED');
+    expect(REASON_FIELD_MAPPING.byDetailCode).toEqual({
+      [SUSPENSION_EPISODE_CHANGED]: STALE_MESSAGE,
+    });
+  });
+
+  it('the detail’s decisionNote is optional and rejectionReason present, as the service declares', () => {
+    const view = squash(topLevelConst(dto, 'qualificationViewSchema').getText());
+    expect(view).toContain('decisionNote:z.string().nullable().optional()');
+    expect(view).toContain('rejectionReason:z.string().nullable()');
   });
 
   it('a decision names its qualification in the path, never in the body', async () => {

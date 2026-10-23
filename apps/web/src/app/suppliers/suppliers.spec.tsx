@@ -67,6 +67,7 @@ const DETAIL: SupplierDetail = {
       submittedAt: '2026-08-02T08:00:00.000Z',
       decidedAt: '2026-08-03T08:00:00.000Z',
       decisionNote: 'مستندات کامل بود',
+      rejectionReason: null,
       evidence: [{ documentId: 'DOC_1', label: 'پروانه کسب' }],
       evidenceCount: 1,
       current: true,
@@ -180,7 +181,9 @@ describe('the supplier detail', () => {
     expect(screen.getByText('تأییدشده')).toBeInTheDocument();
     expect(screen.getByText('در حال حاضر معتبر')).toBeInTheDocument();
     expect(screen.getByText('مجهز به دستگاه بالانس')).toBeInTheDocument();
-    expect(screen.getByText('یادداشت بازبین: مستندات کامل بود')).toBeInTheDocument();
+    expect(
+      screen.getByText('یادداشت خصوصی بازبین (فقط بازبینان پلتفرم می‌بینند): مستندات کامل بود'),
+    ).toBeInTheDocument();
     expect(screen.getByText(/۱ سند پیوست‌شده/)).toBeInTheDocument();
     expect(screen.getByText('شکایت تکراری مشتریان')).toBeInTheDocument();
     expect(screen.getByText('باز')).toBeInTheDocument();
@@ -376,6 +379,7 @@ describe('a missing required field, from the response to the page', () => {
     decidedBy: 'USR_A',
     decidedAt: '2026-08-03T08:00:00.000Z',
     decisionNote: 'مستندات کامل بود',
+    rejectionReason: null,
     evidence: [{ documentId: 'DOC_1', label: null }],
     current: true,
   };

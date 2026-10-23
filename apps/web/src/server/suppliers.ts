@@ -104,7 +104,14 @@ const rawQualificationSchema = z.object({
   statement: z.string().nullable(),
   submittedAt: utcInstant,
   decidedAt: utcInstant.nullable(),
-  decisionNote: z.string().nullable(),
+  /**
+   * The reviewer's private note — present only when the reader is a platform
+   * reviewer outside the supplier's organization; supplier-service leaves the
+   * key out for everyone else (Codex review of PR 366, finding 1).
+   */
+  decisionNote: z.string().nullable().optional(),
+  /** Why a rejection was made, written for the supplier; null on every other state. */
+  rejectionReason: z.string().nullable(),
   evidence: z.array(evidenceSchema),
   current: z.boolean(),
 });

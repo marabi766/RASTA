@@ -8,6 +8,8 @@ import {
   canDecideAbout,
   isOwnCase,
   offerableCapabilities,
+  latestSuspensionIdOf,
+  openSuspensionIdOf,
   sealSupplierBaseline,
   supplierActor,
   type SupplierActor,
@@ -80,12 +82,17 @@ export function supplierCommandsFor(
 
   const identity = (
     command: Parameters<typeof sealSupplierBaseline>[1]['command'],
-    qualificationId: string | null = null,
+    bound: { qualificationId?: string; suspensionId?: string | null } = {},
   ) => ({
     supplierId: supplier.id,
     csrfToken: session.csrfToken,
     submissionId: mintSubmissionId(session),
-    baseline: sealSupplierBaseline(session, { supplierId: supplier.id, command, qualificationId }),
+    baseline: sealSupplierBaseline(session, {
+      supplierId: supplier.id,
+      command,
+      qualificationId: bound.qualificationId ?? null,
+      suspensionId: bound.suspensionId ?? null,
+    }),
   });
 
   let submit: ReactNode = null;
@@ -111,27 +118,34 @@ export function supplierCommandsFor(
         <div className="flex flex-col gap-4">
           <Disclosure summary="تایید صلاحیت…">
             <ApproveQualificationForm
-              {...identity('APPROVE_QUALIFICATION', qualification.id)}
+              {...identity('APPROVE_QUALIFICATION', { qualificationId: qualification.id })}
               capabilityLabel={capabilityLabel}
             />
           </Disclosure>
           <Disclosure summary="رد صلاحیت…">
             <RejectQualificationForm
-              {...identity('REJECT_QUALIFICATION', qualification.id)}
+              {...identity('REJECT_QUALIFICATION', { qualificationId: qualification.id })}
               capabilityLabel={capabilityLabel}
             />
           </Disclosure>
         </div>
       );
     }
+    // Each signed with the episode it was drawn on (Codex review of PR 366,
+    // finding 2): the newest for a suspension, the open one for a lifting.
+    const open = openSuspensionIdOf(supplier.suspensions);
     if (supplier.status === 'ACTIVE') {
       suspension = (
         <Disclosure summary="تعلیق این تامین‌کننده…">
-          <SuspendSupplierForm {...identity('SUSPEND')} />
+          <SuspendSupplierForm
+            {...identity('SUSPEND', { suspensionId: latestSuspensionIdOf(supplier.suspensions) })}
+          />
         </Disclosure>
       );
-    } else if (supplier.status === 'SUSPENDED') {
-      suspension = <ReinstateSupplierForm {...identity('REINSTATE')} />;
+    } else if (supplier.status === 'SUSPENDED' && open !== null) {
+      // A suspended record showing no open episode names nothing to lift, so
+      // no form is drawn for it.
+      suspension = <ReinstateSupplierForm {...identity('REINSTATE', { suspensionId: open })} />;
     }
   }
 

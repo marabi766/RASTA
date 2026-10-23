@@ -78,6 +78,7 @@ const SUPPLIER_DETAIL = {
       decidedBy: 'USR_ACTOR_SECRET',
       decidedAt: '2026-08-03T08:00:00.000Z',
       decisionNote: 'مستندات کامل بود',
+      rejectionReason: null,
       evidence: [{ documentId: 'DOC_ACTOR_SECRET', label: 'مجوز' }],
       current: true,
     },
@@ -255,7 +256,7 @@ describe('a response missing a required field, not merely an invalid one', () =>
     'statement',
     'submittedAt',
     'decidedAt',
-    'decisionNote',
+    'rejectionReason',
     'evidence',
     'current',
   ] as const)('reads a qualification missing %s as MALFORMED', async (field) => {
@@ -272,6 +273,26 @@ describe('a response missing a required field, not merely an invalid one', () =>
       ).toBe('MALFORMED');
     },
   );
+
+  it('reads a qualification with no decisionNote key — the supplier’s own reading — and keeps the reason', async () => {
+    // supplier-service leaves the reviewer's note out for everyone but a
+    // reviewer (Codex review of PR 366, finding 1); absent is not malformed.
+    const result = await detailWith({
+      ...SUPPLIER_DETAIL,
+      qualifications: [
+        {
+          ...(omit(QUALIFICATION, 'decisionNote') as object),
+          state: 'REJECTED',
+          rejectionReason: 'پروانه منقضی شده است',
+        },
+      ],
+    });
+
+    expect(result.kind).toBe('OK');
+    if (result.kind !== 'OK') return;
+    expect(result.data.qualifications[0]).not.toHaveProperty('decisionNote');
+    expect(result.data.qualifications[0]!.rejectionReason).toBe('پروانه منقضی شده است');
+  });
 
   it('keeps an explicit [], false and null as the facts they are', async () => {
     const result = await detailWith({

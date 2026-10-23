@@ -73,10 +73,14 @@ const SESSION = {
 const SUPPLIER_ID = 'SUP_01J00000000000000000000000';
 const OTHER_SUPPLIER_ID = 'SUP_01J00000000000000000000099';
 const QUALIFICATION_ID = 'QUA_01J00000000000000000000000';
+/** The newest episode a suspend form was drawn on, and the open one a reinstate lifts. */
+const LATEST_EPISODE_ID = 'SSP_01J00000000000000000000001';
+const OPEN_EPISODE_ID = 'SSP_01J00000000000000000000002';
 
 interface Case {
   readonly command: SupplierCommand;
   readonly qualificationId: string | null;
+  readonly suspensionId: string | null;
   readonly submit: (supplierId: string, form: FormData) => Promise<unknown>;
   readonly send: jest.Mock;
   /** What a valid post of this form carries. */
@@ -93,6 +97,7 @@ const CASES: readonly Case[] = [
   {
     command: 'SUBMIT_QUALIFICATION',
     qualificationId: null,
+    suspensionId: null,
     submit: (id, form) => actions.submitQualificationRequest(id, IDLE_SUPPLIER_FORM, form),
     send: submitQualification,
     valid: {
@@ -116,6 +121,7 @@ const CASES: readonly Case[] = [
   {
     command: 'APPROVE_QUALIFICATION',
     qualificationId: QUALIFICATION_ID,
+    suspensionId: null,
     submit: (id, form) => actions.submitApproveQualification(id, IDLE_SUPPLIER_FORM, form),
     send: approveQualification,
     valid: { note: 'مستندات کامل بود' },
@@ -127,6 +133,7 @@ const CASES: readonly Case[] = [
   {
     command: 'REJECT_QUALIFICATION',
     qualificationId: QUALIFICATION_ID,
+    suspensionId: null,
     submit: (id, form) => actions.submitRejectQualification(id, IDLE_SUPPLIER_FORM, form),
     send: rejectQualification,
     valid: { reason: 'سند پیوست خوانا نیست' },
@@ -138,22 +145,24 @@ const CASES: readonly Case[] = [
   {
     command: 'SUSPEND',
     qualificationId: null,
+    suspensionId: LATEST_EPISODE_ID,
     submit: (id, form) => actions.submitSuspendSupplier(id, IDLE_SUPPLIER_FORM, form),
     send: suspendSupplier,
     valid: { reason: 'شکایت تکراری مشتریان' },
     notice: 'suspended',
-    args: [SUPPLIER_ID, { reason: 'شکایت تکراری مشتریان' }],
+    args: [SUPPLIER_ID, { reason: 'شکایت تکراری مشتریان', latestSuspensionId: LATEST_EPISODE_ID }],
     invalid: { reason: '' },
     invalidField: 'reason',
   },
   {
     command: 'REINSTATE',
     qualificationId: null,
+    suspensionId: OPEN_EPISODE_ID,
     submit: (id, form) => actions.submitReinstateSupplier(id, IDLE_SUPPLIER_FORM, form),
     send: reinstateSupplier,
     valid: { reason: 'شکایت‌ها بررسی و رفع شد' },
     notice: 'reinstated',
-    args: [SUPPLIER_ID, { reason: 'شکایت‌ها بررسی و رفع شد' }],
+    args: [SUPPLIER_ID, { reason: 'شکایت‌ها بررسی و رفع شد', suspensionId: OPEN_EPISODE_ID }],
     invalid: { reason: '' },
     invalidField: 'reason',
   },
@@ -168,6 +177,7 @@ function baselineFor(
     supplierId: SUPPLIER_ID,
     command: testCase.command,
     qualificationId: testCase.qualificationId,
+    suspensionId: testCase.suspensionId,
     ...over,
   });
 }
@@ -295,6 +305,19 @@ describe.each(CASES)('$command', (testCase) => {
       expect(sent()).toHaveLength(0);
     });
 
+    it('refuses a reinstatement naming no episode, and an episode on a command that names none', async () => {
+      // Codex review of PR 366, finding 2: the episode is what the command was
+      // decided on, so it comes from the signed baseline or the post is refused.
+      if (testCase.command === 'SUSPEND') return; // its "none" is a real answer; below
+      const wrong = baselineFor(testCase, {
+        suspensionId: testCase.suspensionId === null ? 'SSP_SMUGGLED' : null,
+      });
+      expect(
+        await testCase.submit(SUPPLIER_ID, formData(testCase, undefined, { baseline: wrong })),
+      ).toEqual({ kind: 'REFUSED', reason: 'BASELINE' });
+      expect(sent()).toHaveLength(0);
+    });
+
     it('keeps what was typed and says which field when the form is invalid — nothing is sent', async () => {
       const state = (await testCase.submit(SUPPLIER_ID, formData(testCase, testCase.invalid))) as {
         kind: string;
@@ -331,6 +354,8 @@ describe.each(CASES)('$command', (testCase) => {
         supplierId: OTHER_SUPPLIER_ID,
         id: OTHER_SUPPLIER_ID,
         qualificationId: 'QUA_FORGED',
+        suspensionId: 'SSP_FORGED',
+        latestSuspensionId: 'SSP_FORGED',
       };
       await redirectedTo(testCase.submit(SUPPLIER_ID, formData(testCase, fields)));
       expect(testCase.send.mock.calls[0]!.slice(1)).toEqual(testCase.args);
@@ -380,9 +405,37 @@ describe.each(CASES)('$command', (testCase) => {
         { kind: 'NOT_FOUND', correlationId: 'c2' },
         { kind: 'NOT_FOUND', correlationId: 'c2' },
       ],
+      // Proven unwritten: a 4xx with a documented code — "nothing changed".
       [
-        { kind: 'UNAVAILABLE', status: 503, correlationId: 'c3' },
-        { kind: 'FAILED', status: 503, correlationId: 'c3' },
+        { kind: 'UNAVAILABLE', status: 401, code: 'TOKEN_EXPIRED', correlationId: 'c3' },
+        { kind: 'FAILED', status: 401, correlationId: 'c3' },
+      ],
+      [
+        { kind: 'UNAVAILABLE', status: 429, code: 'RATE_LIMIT_EXCEEDED', correlationId: 'c6' },
+        { kind: 'FAILED', status: 429, correlationId: 'c6' },
+      ],
+      // Ambiguous (Codex review of PR 366, finding 3): a 500 after a commit whose
+      // read-back failed, a 503 for an upstream reset after the commit, a 502, a
+      // 4xx with no code or an undocumented one — never "nothing changed".
+      [
+        { kind: 'UNAVAILABLE', status: 500, correlationId: 'c7' },
+        { kind: 'UNCONFIRMED', correlationId: 'c7' },
+      ],
+      [
+        { kind: 'UNAVAILABLE', status: 503, correlationId: 'c8' },
+        { kind: 'UNCONFIRMED', correlationId: 'c8' },
+      ],
+      [
+        { kind: 'UNAVAILABLE', status: 502, correlationId: 'c9' },
+        { kind: 'UNCONFIRMED', correlationId: 'c9' },
+      ],
+      [
+        { kind: 'UNAVAILABLE', status: 413, correlationId: 'c10' },
+        { kind: 'UNCONFIRMED', correlationId: 'c10' },
+      ],
+      [
+        { kind: 'UNAVAILABLE', status: 418, code: 'NOT_A_PLATFORM_CODE', correlationId: 'c11' },
+        { kind: 'UNCONFIRMED', correlationId: 'c11' },
       ],
       [
         { kind: 'UNKNOWN_OUTCOME', correlationId: 'c4' },
@@ -397,6 +450,20 @@ describe.each(CASES)('$command', (testCase) => {
       expect(await run()).toEqual(expected);
       expect(testCase.send).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe('SUSPEND on a supplier never suspended before', () => {
+  it('sends latestSuspensionId null — "none" is what the page showed, and the service checks it', async () => {
+    const testCase = CASES.find((c) => c.command === 'SUSPEND')!;
+    const baseline = baselineFor(testCase, { suspensionId: null });
+
+    await redirectedTo(testCase.submit(SUPPLIER_ID, formData(testCase, undefined, { baseline })));
+
+    expect(suspendSupplier.mock.calls[0]!.slice(1)).toEqual([
+      SUPPLIER_ID,
+      { reason: 'شکایت تکراری مشتریان', latestSuspensionId: null },
+    ]);
   });
 });
 

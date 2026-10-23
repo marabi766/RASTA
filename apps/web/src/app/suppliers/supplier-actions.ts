@@ -77,6 +77,10 @@ export async function submitQualificationRequest(
 const qualificationOf = (baseline: { qualificationId: string | null }): string =>
   baseline.qualificationId ?? '';
 
+/** Never empty for REINSTATE: the runner refuses a baseline without its episode. */
+const episodeOf = (baseline: { suspensionId: string | null }): string =>
+  baseline.suspensionId ?? '';
+
 export async function submitApproveQualification(
   supplierId: string,
   _previous: State<ApproveFormValues, ApproveField>,
@@ -126,7 +130,13 @@ export async function submitSuspendSupplier(
       notice: 'suspended',
       valuesOf: reasonFormValues,
       parse: parseSuspendForm,
-      send: (session, baseline, body) => suspendSupplier(session, baseline.supplierId, body),
+      // The newest episode the page showed, as signed; the service refuses the
+      // suspension if a newer one was recorded since.
+      send: (session, baseline, body) =>
+        suspendSupplier(session, baseline.supplierId, {
+          ...body,
+          latestSuspensionId: baseline.suspensionId,
+        }),
     },
     supplierId,
     form,
@@ -144,7 +154,13 @@ export async function submitReinstateSupplier(
       notice: 'reinstated',
       valuesOf: reasonFormValues,
       parse: parseReinstateForm,
-      send: (session, baseline, body) => reinstateSupplier(session, baseline.supplierId, body),
+      // The open episode the page showed, as signed; the service refuses the
+      // lifting if another episode is open now.
+      send: (session, baseline, body) =>
+        reinstateSupplier(session, baseline.supplierId, {
+          ...body,
+          suspensionId: episodeOf(baseline),
+        }),
     },
     supplierId,
     form,
