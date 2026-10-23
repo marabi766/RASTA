@@ -231,12 +231,12 @@
     "NOTIFICATION_RESOLUTION_BATCH_SIZE": ["dev", "test", "test:integration"],
     "NOTIFICATION_RESOLUTION_LEASE_SECONDS": ["dev", "test", "test:integration"],
     "NOTIFICATION_RESOLUTION_POLL_INTERVAL_MS": ["dev", "test", "test:integration"],
-    "NOTIFICATION_SMTP_HOST": ["dev", "test", "test:integration"],
-    "NOTIFICATION_SMTP_PASSWORD": ["dev", "test", "test:integration"],
-    "NOTIFICATION_SMTP_PORT": ["dev", "test", "test:integration"],
-    "NOTIFICATION_SMTP_SECURE": ["dev", "test", "test:integration"],
-    "NOTIFICATION_SMTP_TIMEOUT_MS": ["dev", "test", "test:integration"],
-    "NOTIFICATION_SMTP_USER": ["dev", "test", "test:integration"]
+    "NOTIFICATION_SMTP_HOST": ["dev"],
+    "NOTIFICATION_SMTP_PASSWORD": ["dev"],
+    "NOTIFICATION_SMTP_PORT": ["dev"],
+    "NOTIFICATION_SMTP_SECURE": ["dev"],
+    "NOTIFICATION_SMTP_TIMEOUT_MS": ["dev"],
+    "NOTIFICATION_SMTP_USER": ["dev"]
   },
   "organization-service": {
     "GOVERNANCE_POLICY_SETTER_ROLES": ["dev", "test", "test:integration"],
