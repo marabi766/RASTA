@@ -83,6 +83,8 @@ overrides:
   # 2026-09-30) is now past the seven-day minimum release age, so the time-boxed
   # audit ignore is replaced by this pin.
   'source-map-js@<1.2.2': '1.2.2'
+  # GHSA-27r3-jxmh-p828: keep compressed request-body parsing on the patched 2.x release.
+  'body-parser@>=2.0.0 <2.4.0': '2.4.0'
 
 # Advisories that no override can fix yet (no patched release, or the patch is
 # only in a new major that needs a code migration), accepted for a fixed time
@@ -131,9 +133,11 @@ minimumReleaseAge: 10080
 minimumReleaseAgeStrict: true
 # Named exceptions only — a package that must track the newest release goes
 # here with the advisory or reason that justifies it, pinned to a version so
-# the exception dies with it. Empty today: deepmerge-ts@8.0.2, the security
-# pin that once needed one, aged out of the window on its own.
-minimumReleaseAgeExclude: []
+# the exception dies with it.
+minimumReleaseAgeExclude:
+  # GHSA-27r3-jxmh-p828: upstream security release, verified against v2.4.0.
+  # Published 2026-10-22; remove this exact exception after 2026-10-29.
+  - body-parser@2.4.0
 
 # Refuse a version whose publish carried weaker trust evidence (no provenance
 # attestation) than an earlier-published version of the same package — the
