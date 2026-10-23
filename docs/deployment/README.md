@@ -215,7 +215,9 @@ spec:
 
 جزئیات، بدنهٔ درخواست و پاسخ به `409`: Runbook [`settlement-no-active-rule`](../runbooks/settlement-no-active-rule.md). اگر انتشار
 زودتر برسد پولی جابه‌جا نمی‌شود، ولی تسویهٔ خطوط بی‌قاعده تا ساخت قاعده رد می‌شود و هشدار `RastaSettlementNoActiveRule` می‌آید.
-تراکنش بی خط (امروز سفارش Marketplace و صورت‌وضعیت) رد نمی‌شود و مانند پیش با صفر تسویه می‌شود (تا پاسخ Q-130).
+از همین انتشار تعهد **تازه** بی `businessLine` در `POST /v1/transactions` با `422 BUSINESS_LINE_REQUIRED` رد می‌شود، جز سفارش
+Marketplace که خود marketplace-service ثبت می‌کند؛ هر فراخوان دیگری که امروز بی خط می‌فرستد پیش از انتشار باید خط را بفرستد.
+ردیف‌های بی‌خطِ پیشین، سفارش Marketplace و صورت‌وضعیت (تا پاسخ Q-130) رد نمی‌شوند و مانند پیش با صفر تسویه می‌شوند.
 
 ## Rollback
 

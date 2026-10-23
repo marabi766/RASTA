@@ -14,12 +14,18 @@
 با `ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE` روشن — پیش‌فرض هر `NODE_ENV` جز `development` و `test` — تسویهٔ تراکنشی
 که خط کسب‌وکار دارد و هیچ قاعدهٔ کارمزد فعالی آن خط را نمی‌پوشاند **رد می‌شود** (`422 NO_ACTIVE_RULE`). هیچ چیزی نوشته
 نمی‌شود: نه Journal، نه کارمزد، نه تسویه؛ تراکنش در `PENDING_SETTLEMENT` و Hold در `ACTIVE` می‌ماند. شمارنده بالا می‌رود
-و رویداد `SETTLEMENT_REFUSED` (پرداخت‌کننده، دریافت‌کننده، نوع، خط، چه کسی، کِی) در تراکنشی جدا ثبت می‌شود.
+و رویداد `SETTLEMENT_REFUSED` (پرداخت‌کننده، دریافت‌کننده، نوع، خط، چه کسی، کِی) در **همان** تراکنش، پس از برگشت کار تسویه به
+Savepoint، Commit می‌شود و فقط پس از آن `422` پاسخ داده می‌شود. اگر رکورد نوشته نشود پاسخ `500` است و هیچ چیز نمانده؛ همان
+درخواست با همان کلید دوباره امن است.
 
 - **همهٔ خطوط کارمزد دارند** تا پاسخ docs/24 Q-130 (`COMMISSION_BEARING_LINES` در `settlement.service.ts`).
-- **تراکنش بی خط رد نمی‌شود.** از D-057 قاعدهٔ بی‌خط ساخته نمی‌شود، پس چنین تراکنشی هرگز تسویه نمی‌شد؛ مانند پیش با
-  صفر و `NO_ACTIVE_RULE` تسویه می‌شود. امروز سفارش Marketplace و صورت‌وضعیت (تا `ECONOMIC_STATEMENT_BUSINESS_LINE`
-  تنظیم نشده) بی خط ثبت می‌شوند. گزارش: `GET /v1/commissions?outcome=NO_ACTIVE_RULE`.
+- **تعهد تازه خط می‌خواهد.** `POST /v1/transactions` بی `businessLine` → `422 BUSINESS_LINE_REQUIRED`، هیچ چیز ثبت یا
+  Hold نمی‌شود: تعهد بی خط را هیچ قاعده‌ای قیمت نمی‌کند (D-057) و با صفر تسویه می‌شد. فراخوانی که این کد را گرفت باید خط را
+  بفرستد؛ قاعده نساز و سیاست را خاموش نکن.
+- **تنها جریان‌های بی‌خط مجاز** (docs/24 Q-130، با منبع راستی‌آزمایی‌شده): سفارش Marketplace (`ORDER` که فقط
+  marketplace-service ثبت می‌کند) و تعهد صورت‌وضعیت (تا `ECONOMIC_STATEMENT_BUSINESS_LINE` تنظیم نشده). این‌ها و **ردیف‌های
+  بی‌خطی که پیش‌تر ثبت شده‌اند** رد نمی‌شوند و مانند پیش با صفر و `NO_ACTIVE_RULE` تسویه می‌شوند. گزارش:
+  `GET /v1/commissions?outcome=NO_ACTIVE_RULE`.
 - **خاموش‌کردن در Production ممکن نیست:** `false` بیرون از `development`/`test` هنگام راه‌اندازی رد می‌شود.
 - **قاعدهٔ صفر درصد قاعده است:** منطبق می‌شود و تسویه `commissionRuleMatched: true` با کارمزد صفر برمی‌گرداند (Q-08).
 
@@ -54,8 +60,11 @@
 
 ## وقتی هشدار آمد
 
-1. **کدام خط؟** رویدادهای `SETTLEMENT_REFUSED` در audit-service (`action=SETTLEMENT_REFUSED`، منبع `Transaction`/شناسهٔ
-   تراکنش) خط و نوع را دارند؛ Log سرویس هم `Settlement of <TXN> failed (no_active_rule)` می‌نویسد. هشدار شناسه‌ای ندارد.
+1. **کدام خط؟** از audit-service با کاربر `SYSTEM_ADMIN` (همهٔ سازمان‌ها):
+   `GET /v1/audit-events?outcome=REFUSED&action=SETTLEMENT_REFUSED&from=<شروع هشدار منهای ۱۵ دقیقه>&to=<اکنون>` — هر ردیف
+   `reason: NO_ACTIVE_RULE`، `resourceId` = شناسهٔ تراکنش و `changes` = `businessLine` و `transactionType` (بدون تغییر:
+   `from` = `to`) را دارد. تاریخچهٔ یک تراکنش: `?resourceType=Transaction&resourceId=<TXN>`. Log سرویس هم
+   `Settlement of <TXN> failed (no_active_rule)` می‌نویسد. هشدار شناسه‌ای ندارد.
 2. **چرا قاعده نیست؟** `GET /v1/commissions/rules?businessLine=<LINE>`: قاعدهٔ سراسری بسته شده (`validTo` گذشته)، هرگز
    ساخته نشده، یا فقط قاعدهٔ سازمانی دیگری هست.
 3. **تصمیم با کیست؟** در پایلوت، قاعدهٔ صفر همان خط (گام پایلوت ۳). جز آن، کارگروه راهبری: نرخی اختراع نکن.
