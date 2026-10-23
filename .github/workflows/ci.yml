@@ -121,6 +121,9 @@ jobs:
         # psql that records every call.
         run: pnpm run test:infra-preflight
 
+      - name: Backup restore drill comparisons and cleanup
+        run: pnpm run test:backup-restore-drill-lib
+
       - name: Database runtime-role rules (D-045)
         # Every service is placed exactly once — split or audit — and one in
         # neither fails; the migration ledger revoke
@@ -1660,6 +1663,15 @@ jobs:
         # clean, its rows intact and its trigger out of the runtime role's reach.
         timeout-minutes: 5
         run: pnpm run test:db-runtime-privileges
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+
+      - name: Backup restore SQL on a disposable database
+        timeout-minutes: 5
+        run: pnpm run test:backup-restore-drill-pg
         env:
           PGHOST: localhost
           PGPORT: '5432'

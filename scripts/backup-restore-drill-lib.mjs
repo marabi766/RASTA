@@ -12,7 +12,18 @@ function validateSnapshot(snapshot) {
   }
   const tables = Object.entries(snapshot.tables);
   if (!tables.length) throw new Error('Empty table inventory');
-  for (const [, rows] of tables) count(rows);
+  for (const [, table] of tables) {
+    count(table.rows);
+    if (
+      !['application', 'migration', 'extension'].includes(table.kind) ||
+      !/^[a-f0-9]{32}$/.test(table.digest)
+    )
+      throw new Error('Invalid table evidence');
+  }
+  const state = snapshot.databaseState;
+  if (!state?.owner || !Object.hasOwn(state, 'acl') || !Array.isArray(state.settings)) {
+    throw new Error('Missing database state');
+  }
   if (!Array.isArray(snapshot.migrations) || !snapshot.migrations.length) {
     throw new Error('Missing migration ledger');
   }
@@ -30,12 +41,23 @@ export function compareSnapshots(source, restored) {
   return {
     tablesEqual: isDeepStrictEqual(source.tables, restored.tables),
     migrationsEqual: isDeepStrictEqual(source.migrations, restored.migrations),
+    databaseStateEqual: isDeepStrictEqual(source.databaseState, restored.databaseState),
   };
 }
 
 /** Missing coverage is a failure: the drill always installs its synthetic postings fixture. */
 export function ledgerPassed(ledger) {
-  if (!ledger) throw new Error('Missing ledger result');
+  if (
+    !ledger ||
+    !Array.isArray(ledger.amountsByCurrency) ||
+    !ledger.amountsByCurrency.length ||
+    ledger.fixtureAmount !== '9007199254740993'
+  )
+    throw new Error('Missing ledger amounts');
+  for (const row of ledger.amountsByCurrency) {
+    if (!row.currency) throw new Error('Missing currency');
+    count(row.total);
+  }
   return (
     count(ledger.journalsChecked) > 0n &&
     count(ledger.walletsChecked) > 0n &&
@@ -45,11 +67,78 @@ export function ledgerPassed(ledger) {
   );
 }
 
+export function compareLedgers(source, restored) {
+  return ledgerPassed(source) && ledgerPassed(restored) && isDeepStrictEqual(source, restored);
+}
+
+/** The same acceptance gate is exercised by the SQL drift tests and the operator command. */
+export function drillPassed(databases, expectedCount, sourceLedger, restoredLedger) {
+  return (
+    expectedCount > 0 &&
+    databases.length === expectedCount &&
+    databases.every((db) => db.tablesEqual && db.migrationsEqual && db.databaseStateEqual) &&
+    compareLedgers(sourceLedger, restoredLedger)
+  );
+}
+
+// Explicit exclusions are bootstrap infrastructure, never service databases.
+export const EXCLUDED_DATABASES = {
+  keycloak: 'identity-provider storage; outside logical service drill',
+  temporal: 'workflow engine storage; outside logical service drill',
+  temporal_visibility: 'workflow visibility storage; outside logical service drill',
+};
+export const DATABASES_SQL = `SELECT coalesce(json_agg(datname ORDER BY datname), '[]'::json)
+FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres';`;
+
+export function checkDatabaseCoverage(actual, expected) {
+  if (
+    !Array.isArray(actual) ||
+    !actual.length ||
+    !expected.length ||
+    new Set(actual).size !== actual.length ||
+    !isDeepStrictEqual(
+      actual.filter((db) => !Object.hasOwn(EXCLUDED_DATABASES, db)).sort(),
+      [...expected].sort(),
+    )
+  )
+    throw new Error('Database coverage mismatch');
+}
+
+export const DATABASE_STATE_SQL = `
+SELECT json_build_object('owner', pg_get_userbyid(d.datdba),
+  'acl', (SELECT json_agg(a::text ORDER BY a::text COLLATE "C") FROM unnest(d.datacl) a),
+  'settings', coalesce((SELECT json_agg(json_build_object(
+    'role', CASE WHEN s.setrole = 0 THEN '*' ELSE pg_get_userbyid(s.setrole) END,
+    'config', (SELECT json_agg(v ORDER BY v COLLATE "C") FROM unnest(s.setconfig) v))
+    ORDER BY s.setrole = 0 DESC, pg_get_userbyid(s.setrole) COLLATE "C")
+    FROM pg_db_role_setting s WHERE s.setdatabase = d.oid), '[]'::json))
+FROM pg_database d WHERE d.datname = current_database();
+`;
+
+export function summarizeTables(tables) {
+  const summary = {};
+  for (const kind of ['application', 'migration', 'extension']) {
+    const selected = Object.values(tables).filter((table) => table.kind === kind);
+    summary[kind] = {
+      tables: selected.length,
+      nonEmptyTables: selected.filter((table) => count(table.rows) > 0n).length,
+      rows: selected.reduce((total, table) => total + count(table.rows), 0n).toString(),
+    };
+  }
+  return summary;
+}
+
 // All non-system tables, across schemas (including extension tables, audit and _prisma_migrations).
 // format(%I) quotes catalog identifiers; no operator-supplied SQL is interpolated.
 export const INVENTORY_SQL = `
-SELECT format('SELECT %L AS name, count(*)::text AS rows FROM %I.%I',
-              n.nspname || '.' || c.relname, n.nspname, c.relname)
+SELECT format('SELECT json_build_object(''name'', %L, ''rows'', count(*)::text,
+  ''kind'', %L, ''digest'', md5(coalesce(string_agg(row_to_json(t)::text, E''\\n''
+  ORDER BY row_to_json(t)::text COLLATE "C"), ''''))) FROM %I.%I t',
+  n.nspname || '.' || c.relname,
+  CASE WHEN EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass
+    AND d.objid = c.oid AND d.deptype = 'e') THEN 'extension'
+    WHEN c.relname = '_prisma_migrations' THEN 'migration' ELSE 'application' END,
+  n.nspname, c.relname)
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition
   AND n.nspname NOT IN ('pg_catalog', 'information_schema')
@@ -68,7 +157,7 @@ FROM "${schema}"._prisma_migrations m;
 // WALLET = available, ESCROW = pending, sum = ledger), and balance-audit.ts:235-273.
 // Journal sums follow services/economic-service/prisma/migrations/
 // 20260828202043_init_economic/migration.sql:596-627 (per journal AND currency).
-// numeric SUM avoids bigint overflow; only counts leave this read-only query.
+// numeric SUM avoids bigint overflow; counts and amounts leave PostgreSQL as text.
 export const LEDGER_SQL = `
 WITH bad_journals AS (
   SELECT j.id FROM public.journal j LEFT JOIN public.ledger_entry e ON e.journal_id = j.id
@@ -104,13 +193,17 @@ SELECT json_build_object(
   'entriesChecked', (SELECT count(*)::text FROM public.ledger_entry),
   'walletsChecked', (SELECT count(*)::text FROM public.wallet),
   'journalMismatches', (SELECT count(*)::text FROM bad_journals),
-  'walletMismatches', (SELECT count(*)::text FROM bad_wallets));
+  'walletMismatches', (SELECT count(*)::text FROM bad_wallets),
+  'amountsByCurrency', (SELECT json_agg(t ORDER BY currency) FROM
+    (SELECT currency, sum(amount_minor::numeric)::text AS total FROM public.ledger_entry
+     GROUP BY currency) t),
+  'fixtureAmount', (SELECT amount_minor::text FROM public.ledger_entry WHERE id = 'LGE_DRILL_CREDIT'));
 `;
 
 // The dev seed intentionally has no wallets/postings (economic prisma/seed.ts:30).
 // Synthetic backup-test data ONLY, in a fresh owned cluster: no provider, rate, event or API.
 // Like test/helpers.ts:324-350, a wallet balance must be justified by postings.
-// The amount exceeds Number.MAX_SAFE_INTEGER to exercise exact restore/comparison.
+// The fixture amount is compared as text, alongside table digests and per-currency sums.
 export const FIXTURE_SQL = `
 BEGIN;
 INSERT INTO public.ledger_account

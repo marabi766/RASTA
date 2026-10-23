@@ -18,6 +18,12 @@ import YAML from 'yaml';
 import { servicesFromLibrary } from './infra-preflight-lib.mjs';
 import {
   compareSnapshots,
+  drillPassed,
+  checkDatabaseCoverage,
+  summarizeTables,
+  DATABASE_STATE_SQL,
+  DATABASES_SQL,
+  EXCLUDED_DATABASES,
   ledgerPassed,
   INVENTORY_SQL,
   MIGRATIONS_SQL,
@@ -34,14 +40,16 @@ if (args.length !== 2 || args[0] !== '--report') {
 // Exclusive creation avoids overwriting an operator's file (including through a symlink).
 const reportPath = resolve(args[1]);
 const reportFd = openSync(reportPath, 'wx', 0o600);
-const temporary = mkdtempSync(join(tmpdir(), 'rasta-restore-drill-'));
-const project = `restore-drill-${randomBytes(8).toString('hex')}`;
-const composeFile = join(temporary, 'compose.json');
-const services = servicesFromLibrary();
-// No inherited connection strings, production flags, Docker context, or local env files.
+let temporary;
+let project;
+let composeFile;
+let services;
+// Only explicit local Docker endpoint/context; HOME is retained for pnpm, not daemon selection.
 const env = {
   PATH: process.env.PATH,
   HOME: process.env.HOME,
+  DOCKER_CONTEXT: 'default',
+  DOCKER_HOST: 'unix:///var/run/docker.sock',
   LANG: 'C.UTF-8',
   NODE_ENV: 'development',
   RASTA_ALLOW_DEMO_SEED: 'true',
@@ -51,8 +59,7 @@ let interrupted = false;
 let active;
 let composeReady = false;
 const report = {
-  version: 1,
-  project,
+  version: 2,
   startedAt: new Date().toISOString(),
   passed: false,
   fixture: 'existing demo seeds plus synthetic 9007199254740993 IRR journal and wallet',
@@ -69,7 +76,7 @@ function stopActive() {
     }
   }
 }
-for (const signal of ['SIGINT', 'SIGTERM']) {
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
     interrupted = true;
     stopActive();
@@ -159,10 +166,16 @@ const psql = (container, database, input) =>
 async function snapshot(container, service) {
   const database = `rasta_${service}`;
   const inventory = await psql(container, database, INVENTORY_SQL);
-  const tables = Object.fromEntries(inventory.split('\n').map((line) => line.split('|')));
+  const tables = Object.fromEntries(
+    inventory.split('\n').map((line) => {
+      const { name, ...table } = JSON.parse(line);
+      return [name, table];
+    }),
+  );
+  const databaseState = JSON.parse(await psql(container, database, DATABASE_STATE_SQL));
   const schema = service === 'audit' ? 'audit' : 'public';
   const migrations = JSON.parse(await psql(container, database, MIGRATIONS_SQL(schema)));
-  return { tables, migrations };
+  return { tables, migrations, databaseState, summary: summarizeTables(tables) };
 }
 
 function progress(value) {
@@ -171,6 +184,11 @@ function progress(value) {
 }
 
 try {
+  temporary = mkdtempSync(join(tmpdir(), 'rasta-restore-drill-'));
+  project = `restore-drill-${randomBytes(8).toString('hex')}`;
+  report.project = project;
+  composeFile = join(temporary, 'compose.json');
+  services = servicesFromLibrary();
   for (const path of [
     join(ROOT, '.env'),
     join(ROOT, '.env.migrator'),
@@ -272,6 +290,12 @@ try {
   }
   progress('install synthetic postings fixture');
   await psql(source, 'rasta_economic', FIXTURE_SQL);
+  report.sourceDatabases = JSON.parse(await psql(source, 'postgres', DATABASES_SQL));
+  report.excludedDatabases = EXCLUDED_DATABASES;
+  checkDatabaseCoverage(
+    report.sourceDatabases,
+    services.map((s) => `rasta_${s}`),
+  );
   report.sourceLedger = JSON.parse(await psql(source, 'rasta_economic', LEDGER_SQL));
   if (!ledgerPassed(report.sourceLedger)) throw new Error('Source ledger invariant failed');
   // No running services or writers: all snapshots and dumps see this quiescent fixture.
@@ -296,13 +320,9 @@ try {
   await compose(['up', '-d', '--wait', '--wait-timeout', '300', 'restored']);
   for (const [index, service] of services.entries()) {
     progress(`restore and compare rasta_${service}`);
-    // Bootstrap supplies identical local roles. Restore into an EMPTY database, retaining
-    // ownership/ACLs from the archive; no --no-owner, no trigger disabling, no ignored errors.
-    await psql(
-      restored,
-      'postgres',
-      `DROP DATABASE "rasta_${service}"; CREATE DATABASE "rasta_${service}" TEMPLATE template0;`,
-    );
+    // Bootstrap supplies roles; --create restores database owner, ACL and database/role settings.
+    // CREATE DATABASE cannot run inside --single-transaction. Every restore error still fails.
+    await psql(restored, 'postgres', `DROP DATABASE "rasta_${service}";`);
     const fd = openSync(join(temporary, `${service}.dump`), 'r');
     try {
       await run(
@@ -315,9 +335,9 @@ try {
           '-U',
           'rasta',
           '--exit-on-error',
-          '--single-transaction',
+          '--create',
           '-d',
-          `rasta_${service}`,
+          'postgres',
         ],
         { inputFd: fd },
       );
@@ -329,10 +349,12 @@ try {
     Object.assign(report.databases[index], { after, ...result });
   }
   report.restoredLedger = JSON.parse(await psql(restored, 'rasta_economic', LEDGER_SQL));
-  report.passed =
-    report.databases.length === services.length &&
-    report.databases.every((db) => db.tablesEqual && db.migrationsEqual) &&
-    ledgerPassed(report.restoredLedger);
+  report.passed = drillPassed(
+    report.databases,
+    services.length,
+    report.sourceLedger,
+    report.restoredLedger,
+  );
 } catch (error) {
   // Command failures retain bounded diagnostics with database URLs redacted.
   report.error = { stage, message: error.message };
@@ -343,21 +365,23 @@ try {
     if (composeReady)
       await compose(['down', '--volumes', '--timeout', '15'], { cleanup: true, timeout: 60_000 });
     // Confirm no owned resources survived (never enumerate/remove another project's resources).
-    const resources = await Promise.all(
-      ['container', 'volume', 'network'].map((kind) =>
-        run(
-          'docker',
-          [kind, 'ls', '--quiet', '--filter', `label=com.docker.compose.project=${project}`],
-          { cleanup: true, timeout: 15_000 },
-        ),
-      ),
-    );
+    const resources = project
+      ? await Promise.all(
+          ['container', 'volume', 'network'].map((kind) =>
+            run(
+              'docker',
+              [kind, 'ls', '--quiet', '--filter', `label=com.docker.compose.project=${project}`],
+              { cleanup: true, timeout: 15_000 },
+            ),
+          ),
+        )
+      : [];
     if (resources.some(Boolean)) {
       report.cleanup = { passed: false, project, temporary };
       report.passed = false;
     } else {
       report.cleanup.passed = true;
-      rmSync(temporary, { recursive: true, force: true });
+      if (temporary) rmSync(temporary, { recursive: true, force: true });
     }
   } catch {
     report.cleanup = { passed: false, project, temporary };
