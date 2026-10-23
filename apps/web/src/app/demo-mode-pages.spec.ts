@@ -67,6 +67,10 @@ const { ProjectsScreen } =
   require('./projects/ProjectsScreen') as typeof import('./projects/ProjectsScreen');
 const { TimelineScreen } =
   require('./assets/[id]/timeline/TimelineScreen') as typeof import('./assets/[id]/timeline/TimelineScreen');
+const { RequestDetailScreen } =
+  require('./maintenance/[id]/RequestDetailScreen') as typeof import('./maintenance/[id]/RequestDetailScreen');
+const { UsageForm } = require('./usage/UsageForm') as typeof import('./usage/UsageForm');
+const { MoneyActionWithheld } = require('./DemoModeNotice') as typeof import('./DemoModeNotice');
 const fixtures =
   require('@/test/contract-command-fixtures') as typeof import('@/test/contract-command-fixtures');
 /* eslint-enable @typescript-eslint/no-require-imports */
@@ -369,6 +373,124 @@ describe('/marketplace/[productId] while the provider is unknown (finding 1)', (
     const screen = drawn(await read({ status: 200, body: { simulated: true } }), OffersScreen);
     expect(screen.html).toContain(LABEL);
     expect(screen.html).toContain('name="offerId"');
+  });
+});
+
+/**
+ * The two reward triggers (review of PR 361 r3): completing a repair publishes
+ * MAINTENANCE_COMPLETED and recording usage USAGE_RECORDED, and under a
+ * monetised reward rule economic-service credits the wallet with no further
+ * act. Which rules apply is economic-service's configuration — say one grants a
+ * point at 1,000 rials — and the portal neither can nor does read it: withheld
+ * whatever the rules are, so no answer here names one.
+ */
+describe('the reward triggers while the provider is unknown (Codex PR-361 r3)', () => {
+  const asksRewards = () => asked.some(({ path }) => /reward/i.test(path));
+
+  describe('/maintenance/[id], a repair in progress', () => {
+    const ORDER_ID = 'RPO_01J00000000000000000000000';
+    const REQUEST = {
+      id: 'MREQ_1',
+      assetId: 'AST_1',
+      scheduleId: null,
+      type: 'PREVENTIVE',
+      status: 'IN_PROGRESS',
+      severity: null,
+      title: 'سرویس دوره‌ای',
+      reportedAt: '2026-02-01T08:00:00.000Z',
+      dueDate: null,
+      totalCostMinor: '2400000',
+      description: null,
+      reportedBy: 'USR_9',
+      outOfServiceAt: '2026-02-01T08:00:00.000Z',
+      returnedToServiceAt: null,
+      downtimeMinutes: null,
+      startedAt: '2026-02-02T08:00:00.000Z',
+      completedAt: null,
+      approvedAt: null,
+      approvalNotes: null,
+      cancelledAt: null,
+      cancellationReason: null,
+      repairOrders: [
+        {
+          id: ORDER_ID,
+          status: 'IN_PROGRESS',
+          workshopName: 'تعمیرگاه مرکزی',
+          workSummary: null,
+          workPerformed: null,
+          assignedAt: '2026-02-02T08:00:00.000Z',
+          startedAt: '2026-02-02T09:00:00.000Z',
+          completedAt: null,
+          cancelledAt: null,
+          cancellationReason: null,
+          partsCostMinor: '700000',
+          labourCostMinor: '1200000',
+          otherCostMinor: '500000',
+          totalCostMinor: '2400000',
+        },
+      ],
+      costBreakdown: [],
+    };
+    /** A line only the completion form draws. */
+    const COMPLETION_FORM = 'با تکمیل، هزینهٔ این ارجاع';
+
+    const read = (disclosure: Answer) => {
+      signedIn('ORG-DEH-0001', ['FLEET_MANAGER']);
+      answers['/v1/maintenance-requests/MREQ_1'] = { status: 200, body: REQUEST };
+      answers[DISCLOSURE] = disclosure;
+      return run('./maintenance/[id]/page', { id: 'MREQ_1' });
+    };
+
+    it.each(FAILURES)(
+      'withholds completing the repair when the read is %s, and keeps the cost commands',
+      async (_, disclosure) => {
+        const screen = drawn(await read(disclosure), RequestDetailScreen);
+        expect(screen.props.demoMode).toBe('UNKNOWN');
+        expect(screen.html).toContain(UNKNOWN);
+        expect(screen.html).toContain('تکمیل تعمیر اکنون در دسترس نیست');
+        expect(screen.html).not.toContain(COMPLETION_FORM);
+        // Recording a part, labour or a charge only records it: still offered.
+        expect(screen.html).toContain('ثبت قطعه');
+        expect(asksRewards()).toBe(false);
+      },
+    );
+
+    it.each([
+      ['simulated', true],
+      ['real', false],
+    ] as const)('offers it while the provider is %s', async (_, simulated) => {
+      const screen = drawn(await read({ status: 200, body: { simulated } }), RequestDetailScreen);
+      expect(screen.html).toContain(COMPLETION_FORM);
+      expect(screen.html).not.toContain('اکنون در دسترس نیست');
+    });
+  });
+
+  describe('/usage', () => {
+    const read = (disclosure: Answer) => {
+      signedIn('ORG-DEH-0001', ['OPERATOR']);
+      answers[DISCLOSURE] = disclosure;
+      return run('./usage/page', {});
+    };
+    const forms = (tree: ReactElement) =>
+      elements(tree).filter((element) => element.type === UsageForm);
+
+    it.each(FAILURES)('withholds the usage form when the read is %s', async (_, disclosure) => {
+      const tree = await read(disclosure);
+      expect(forms(tree)).toHaveLength(0);
+      expect(drawn(tree, MoneyActionWithheld).html).toContain('ثبت کارکرد اکنون در دسترس نیست');
+      expect(drawn(tree, DemoModeNotice).props.mode).toBe('UNKNOWN');
+      expect(asksRewards()).toBe(false);
+    });
+
+    it.each([
+      ['simulated', true, 'SIMULATED'],
+      ['real', false, 'REAL'],
+    ] as const)('offers it while the provider is %s', async (_, simulated, mode) => {
+      const tree = await read({ status: 200, body: { simulated } });
+      expect(forms(tree)).toHaveLength(1);
+      expect(elements(tree).some((element) => element.type === MoneyActionWithheld)).toBe(false);
+      expect(drawn(tree, DemoModeNotice).props.mode).toBe(mode);
+    });
   });
 });
 

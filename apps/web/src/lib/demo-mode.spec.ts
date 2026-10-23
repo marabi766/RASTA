@@ -16,6 +16,8 @@ describe('mayOffer', () => {
     ['UNKNOWN', 'SETTLEMENT', false],
     ['UNKNOWN', 'REFUND', false],
     ['UNKNOWN', 'SETTLEMENT_OR_REFUND', false],
+    ['UNKNOWN', 'REWARD_CREDIT', false],
+    ['REAL', 'REWARD_CREDIT', true],
     ['UNKNOWN', 'NONE', true],
   ] as const)('%s, %s → %s', (mode, effect, offered) => {
     expect(mayOffer(mode, effect)).toBe(offered);
@@ -45,5 +47,14 @@ describe('MONEY_EFFECTS', () => {
       expect(mayOffer('UNKNOWN', MONEY_EFFECTS.statement[command])).toBe(true);
     }
     expect(mayOffer('UNKNOWN', MONEY_EFFECTS.maintenanceApproval)).toBe(true);
+  });
+
+  it('withholds the two reward triggers: a monetised rule credits the wallet unasked (Codex PR-361 r3)', () => {
+    expect(MONEY_EFFECTS.repairCompletion).toBe<MoneyEffect>('REWARD_CREDIT');
+    expect(MONEY_EFFECTS.usageRecord).toBe<MoneyEffect>('REWARD_CREDIT');
+    expect(mayOffer('UNKNOWN', MONEY_EFFECTS.repairCompletion)).toBe(false);
+    expect(mayOffer('UNKNOWN', MONEY_EFFECTS.usageRecord)).toBe(false);
+    expect(mayOffer('SIMULATED', MONEY_EFFECTS.repairCompletion)).toBe(true);
+    expect(mayOffer('REAL', MONEY_EFFECTS.usageRecord)).toBe(true);
   });
 });

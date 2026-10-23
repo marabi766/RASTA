@@ -24,14 +24,21 @@ export type DemoMode = 'SIMULATED' | 'REAL' | 'UNKNOWN';
  * - `SETTLEMENT` — starts the release of escrow to the seller.
  * - `REFUND` — starts the return of escrow to the buyer.
  * - `SETTLEMENT_OR_REFUND` — one or the other, by the choice made in the form.
+ * - `REWARD_CREDIT` — the fact it records is a reward trigger: economic-service
+ *   grants by itself whatever reward rule applies, and a monetised one credits
+ *   the organization's wallet. No rule, no money — but the portal cannot see
+ *   the rules, so it counts the credit as possible.
  */
-export type MoneyEffect = 'NONE' | 'HOLD' | 'SETTLEMENT' | 'REFUND' | 'SETTLEMENT_OR_REFUND';
+export type MoneyEffect =
+  'NONE' | 'HOLD' | 'SETTLEMENT' | 'REFUND' | 'SETTLEMENT_OR_REFUND' | 'REWARD_CREDIT';
 
 interface MoneyEffects {
   readonly order: Readonly<Record<OrderCommand, MoneyEffect>>;
   readonly placeOrder: MoneyEffect;
   readonly statement: Readonly<Record<StatementCommand, MoneyEffect>>;
   readonly maintenanceApproval: MoneyEffect;
+  readonly repairCompletion: MoneyEffect;
+  readonly usageRecord: MoneyEffect;
 }
 
 /**
@@ -39,6 +46,12 @@ interface MoneyEffects {
  * provider is `UNKNOWN`, `mayOffer` withholds exactly the ones that are not
  * `NONE`, and nothing else — a disclosure outage must not stop work that moves
  * no money. Each entry names the service method whose effect it records.
+ *
+ * Every event an economic-service consumer acts on is here, by the command
+ * that publishes it (review of PR 361 r3): `MAINTENANCE_APPROVED`
+ * (`maintenanceApproval`), `STATEMENT_APPROVED` (`statement.APPROVE`),
+ * `MAINTENANCE_COMPLETED` (`repairCompletion`) and `USAGE_RECORDED`
+ * (`usageRecord`) — `CONSUMED_EVENTS`, economic-service `events/consumed.ts`.
  *
  * The wallet's top-up is not here: it takes money in through the provider and
  * is withheld by the wallet's own provider read, whose sentence it needs.
@@ -91,6 +104,16 @@ export const MONEY_EFFECTS: MoneyEffects = {
   // PENDING_SETTLEMENT obligation and "moves no money" (ADR-032), settled by
   // the same separate `POST /v1/settlements`.
   maintenanceApproval: 'NONE',
+  // maintenance-service `RepairOrderService.complete` publishes
+  // MAINTENANCE_COMPLETED; economic-service `RewardTriggerConsumer` confirms it
+  // with its owner and grants every applicable reward rule, unasked
+  // (`RewardService.grantFor`): a monetised one (`creditPerPointMinor`) credits
+  // the wallet with a REWARD_GRANT journal. Withheld whatever the rules are —
+  // reading them to offer it anyway would be a second read that can fail too.
+  repairCompletion: 'REWARD_CREDIT',
+  // fleet-service `UsageService.record` publishes USAGE_RECORDED, the other
+  // reward trigger of the same consumer, with the same credit.
+  usageRecord: 'REWARD_CREDIT',
 };
 
 /** Whether a screen may offer an action: one that moves money, not while the provider is unknown. */

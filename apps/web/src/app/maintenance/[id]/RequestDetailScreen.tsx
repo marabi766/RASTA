@@ -242,11 +242,13 @@ function RepairOrderCard({
   order,
   detail,
   forms,
+  demoMode,
 }: {
   order: RepairOrderSummary;
   /** `undefined` when the page did not read it, `null` when it could not. */
   detail?: RepairOrderDetail | null;
   forms?: OrderForms;
+  demoMode: DemoMode;
 }) {
   const open = repairCommandsFor(order.status);
   const has = (command: RepairCommandName) => Boolean(forms?.[command]) && open.includes(command);
@@ -300,7 +302,14 @@ function RepairOrderCard({
       {work.length > 0 || cost.length > 0 || has('cancel') ? (
         <div className="mt-6 flex flex-col gap-4 border-t border-border pt-4">
           {work.map((command) => (
-            <div key={command}>{forms?.[command]}</div>
+            <div key={command}>
+              {/* Withheld while the provider is unknown (Q-14): completing is a reward trigger, and a monetised rule credits the wallet. */}
+              {command === 'complete' && !mayOffer(demoMode, MONEY_EFFECTS.repairCompletion) ? (
+                <MoneyActionWithheld title="تکمیل تعمیر اکنون در دسترس نیست" />
+              ) : (
+                forms?.[command]
+              )}
+            </div>
           ))}
           {cost.map((command) => (
             <div key={command}>{forms?.[command]}</div>
@@ -483,6 +492,7 @@ export function RequestDetailScreen({
                 order={order}
                 detail={orderDetails?.[order.id]}
                 forms={orderForms?.[order.id]}
+                demoMode={demoMode}
               />
             ))}
           </ul>

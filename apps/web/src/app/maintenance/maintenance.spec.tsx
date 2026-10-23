@@ -1,8 +1,9 @@
-import { cleanup as cleanupRender, render } from '@testing-library/react';
+import { cleanup as cleanupRender, render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
 import { MaintenanceScreen } from './MaintenanceScreen';
 import { RequestDetailScreen } from './[id]/RequestDetailScreen';
+import type { DemoMode } from '@/lib/demo-mode';
 import type {
   MaintenanceRequestDetail,
   MaintenanceRequestPage,
@@ -545,10 +546,10 @@ describe('the repair orders on a request', () => {
     COMMANDS.map((command) => [command, <div key={command}>فرم {command} نمونه</div>]),
   );
 
-  const offered = (orderStatus: string) => {
+  const offered = (orderStatus: string, demoMode: DemoMode = 'REAL') => {
     const { queryByText } = render(
       <RequestDetailScreen
-        demoMode="REAL"
+        demoMode={demoMode}
         result={ok(request('IN_PROGRESS', orderStatus))}
         requestId="MREQ_1"
         orderForms={{ RPO_1: forms }}
@@ -568,6 +569,25 @@ describe('the repair orders on a request', () => {
       expect(offered(status)).toEqual(
         [...expected].sort((a, b) => COMMANDS.indexOf(a) - COMMANDS.indexOf(b)),
       );
+    },
+  );
+
+  // Completing publishes MAINTENANCE_COMPLETED, a reward trigger: under a monetised rule
+  // economic-service credits the wallet by itself, and the portal cannot see the rules
+  // (Codex PR-361 r3). The other order commands record work and cost, and stay.
+  it('withholds completing the repair while the provider is unknown, and nothing else on the order', () => {
+    expect(offered('IN_PROGRESS', 'UNKNOWN')).toEqual(['cancel', 'part', 'labour', 'cost']);
+    expect(screen.getByText('تکمیل تعمیر اکنون در دسترس نیست')).toBeInTheDocument();
+    expect(screen.getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
+    cleanupRender();
+    expect(offered('OPEN', 'UNKNOWN')).toEqual(['start', 'cancel', 'part', 'labour', 'cost']);
+  });
+
+  it.each(['SIMULATED', 'REAL'] as const)(
+    'offers completing the repair while the provider is %s',
+    (demoMode) => {
+      expect(offered('IN_PROGRESS', demoMode)).toContain('complete');
+      expect(screen.queryByText(/اکنون در دسترس نیست/)).toBeNull();
     },
   );
 
