@@ -2,7 +2,7 @@ import { RastaError } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { UsageService, usageRequestHash } from '../src/fleet/usage.service';
-import type { RecordUsageDto } from '../src/fleet/dto';
+import { recordUsageSchema, type RecordUsageDto, type UsageRecordView } from '../src/fleet/dto';
 import { asActor, cleanup, id, newPrisma, tenants, type ActorOptions } from './helpers';
 
 /**
@@ -27,6 +27,7 @@ describe('usage replay binding', () => {
 
   const assetId = id('AST');
   const otherAssetId = id('AST');
+  const transferredAssetId = id('AST');
   const driverA = id('DRV');
   const driverB = id('DRV');
   const suffix = id('X').slice(-8);
@@ -70,7 +71,7 @@ describe('usage replay binding', () => {
           },
         });
       }
-      for (const asset of [assetId, otherAssetId]) {
+      for (const asset of [assetId, otherAssetId, transferredAssetId]) {
         await prisma.client.assetRef.create({
           data: {
             id: asset,
@@ -247,6 +248,108 @@ describe('usage replay binding', () => {
     await refused(asActor(driverUserA, () => service.record(body)));
   });
 
+  it('replays the same reading in another spelling, and keeps the canonical one (#372 r1 F1)', async () => {
+    const base = reading();
+    const first = recordUsageSchema.parse({
+      ...base,
+      periodStart: base.periodStart.replace('.000Z', 'Z'),
+      hours: '7.50',
+      notes: 'shift A\r\nmeter checked',
+    });
+    const again = recordUsageSchema.parse({
+      ...base,
+      hours: '7.5',
+      notes: 'shift A\nmeter checked',
+    });
+
+    const a = await asActor(supervisor, () => service.record(first));
+    await expect(asActor(supervisor, () => service.record(again))).resolves.toEqual(a);
+    expect(a).toMatchObject({ hours: '7.5', notes: 'shift A\nmeter checked' });
+    expect(await eventsFor(a.id)).toBe(1);
+
+    // Omitted is not zero.
+    await refused(
+      asActor(supervisor, () =>
+        service.record(recordUsageSchema.parse({ ...again, kilometres: '0' })),
+      ),
+    );
+  });
+
+  describe('a twin committed, then the state changed, before this request was validated (#372 r1 F2)', () => {
+    /**
+     * Lets this request's look before validation run and find nothing, then —
+     * before it goes on — runs `meanwhile`: the twin commits, the state moves.
+     */
+    function afterFirstLookup(meanwhile: () => Promise<void>) {
+      const lookup = repository.findUsageByClientReference.bind(repository);
+      jest
+        .spyOn(repository, 'findUsageByClientReference')
+        .mockImplementationOnce(async (reference, tx) => {
+          const found = await lookup(reference, tx);
+          await meanwhile();
+          return found;
+        });
+    }
+
+    it('replays to a DRIVER whose assignment ended after the twin committed, not 404', async () => {
+      const assignment = await asActor({ organizationId: org.a }, () =>
+        prisma.client.assignment.create({
+          data: {
+            id: id('ASG'),
+            organizationId: org.a,
+            driverId: driverA,
+            assetId,
+            startedAt: new Date(Date.UTC(2026, 0, 1)),
+            assignedBy: 'ITEST',
+          },
+        }),
+      );
+      const body = reading();
+      let a!: UsageRecordView;
+      afterFirstLookup(async () => {
+        a = await asActor(driverUserA, () => service.record(body));
+        await prisma.client.$executeRawUnsafe(
+          `UPDATE assignment SET ended_at = now(), end_reason = 'COMPLETED', ended_by = 'ITEST' WHERE id = $1`,
+          assignment.id,
+        );
+      });
+
+      const b = await asActor(driverUserA, () => service.record(body));
+
+      expect(a.assignmentId).toBe(assignment.id);
+      expect(b).toEqual(a);
+      expect(await rowsUnder(body.clientReference!)).toHaveLength(1);
+      expect(await eventsFor(a.id)).toBe(1);
+      // Without a twin, the same state is the refusal it always was.
+      await expect(asActor(driverUserA, () => service.record(reading()))).rejects.toMatchObject({
+        status: 404,
+      });
+    });
+
+    it('replays after the machine transferred to another organization, not 404', async () => {
+      const body = reading({ assetId: transferredAssetId });
+      let a!: UsageRecordView;
+      afterFirstLookup(async () => {
+        a = await asActor(supervisor, () => service.record(body));
+        await prisma.client.$executeRawUnsafe(
+          `UPDATE asset_ref SET organization_id = $2 WHERE id = $1`,
+          transferredAssetId,
+          org.b,
+        );
+      });
+
+      const b = await asActor(supervisor, () => service.record(body));
+
+      expect(b).toEqual(a);
+      expect(await eventsFor(a.id)).toBe(1);
+      // Another caller, the same window: the same 409 as ever, not the record.
+      await refused(asActor(colleague, () => service.record(body)));
+      await expect(
+        asActor(supervisor, () => service.record(reading({ assetId: transferredAssetId }))),
+      ).rejects.toMatchObject({ status: 404 });
+    });
+  });
+
   describe('a row recorded before the binding (request_hash NULL)', () => {
     it('replays to the user who recorded it when every field is equal', async () => {
       const body = reading();
@@ -256,6 +359,31 @@ describe('usage replay binding', () => {
         id: stored.id,
         hours: '7.5',
       });
+    });
+
+    it('refuses a supervisor who omits driverId when the row names a driver (#372 r1 F3)', async () => {
+      // Driver B holds the machine now: a fresh request without `driverId`
+      // would be filed under B, so A's record is not its answer.
+      const assignment = await asActor({ organizationId: org.a }, () =>
+        prisma.client.assignment.create({
+          data: {
+            id: id('ASG'),
+            organizationId: org.a,
+            driverId: driverB,
+            assetId: otherAssetId,
+            startedAt: new Date(Date.UTC(2026, 0, 1)),
+            assignedBy: 'ITEST',
+          },
+        }),
+      );
+      const body = reading({ assetId: otherAssetId });
+      const stored = await seed(supervisor, body, { legacy: true, driverId: driverA });
+
+      await refused(asActor(supervisor, () => service.record(body)));
+      await expect(
+        asActor(supervisor, () => service.record({ ...body, driverId: driverA })),
+      ).resolves.toMatchObject({ id: stored.id, driverId: driverA });
+      await prisma.client.$executeRawUnsafe(`DELETE FROM assignment WHERE id = $1`, assignment.id);
     });
 
     it('refuses that user with another reading, and refuses everyone else', async () => {

@@ -87,14 +87,18 @@ export class UsageController {
       'record and publishes nothing further, which is what lets the field application queue ' +
       'readings offline. The reference is bound to its first request, as an Idempotency-Key ' +
       'is: a replay is answered only to the same caller (the user; for a service caller, the ' +
-      'same service) sending an equivalent body (keys in any order, defaults applied), and ' +
+      'same service) sending an equivalent body (keys in any order, defaults applied, each ' +
+      'quantity by exact value so "7.50" equals "7.5", each instant in one UTC spelling so ' +
+      '"…:00Z" equals "…:00.000Z", notes with CRLF read as LF; an omitted quantity is not ' +
+      '"0"), and ' +
       'only while that caller may still read the record by the rule of GET ' +
       '/v1/usage-records/{id}. Any other request under a reference already taken — another ' +
       'body, another caller, a caller who may not read the record — gets one and the same ' +
       '`409 IDEMPOTENCY_KEY_REUSED`, which carries nothing of the stored record and does not ' +
       'say which of these it was; send a new reference. A record created before this binding ' +
       'replays only to the user who recorded it, and only when every stored field equals the ' +
-      "request's; one a service recorded then never replays.",
+      "request's — an omitted `driverId` only for the caller's own driver record, or for a " +
+      'supervisor where the record names no driver; one a service recorded then never replays.',
   })
   record(@Body(zodPipe(recordUsageSchema)) dto: RecordUsageDto) {
     return this.usage.record(dto);

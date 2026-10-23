@@ -6,10 +6,17 @@ import { usageDuplicatesTotal, usageRecordsTotal } from '../observability/metric
 import { FleetRepository, isUniqueViolation } from './fleet.repository';
 import { FLEET_EVENTS, validateFleetPayload } from './events';
 import { FLEET_TOPIC, SERVICE_NAME } from '../config/env';
-import { currentFleetScope } from './access';
+import { currentFleetScope, type FleetScope } from './access';
 import { hashRequest } from './idempotency';
 import { Prisma } from '../generated/prisma';
-import type { ListUsageQuery, RecordUsageDto, UsageRecordView } from './dto';
+import {
+  canonicalInstant,
+  canonicalLineEndings,
+  canonicalQuantity,
+  type ListUsageQuery,
+  type RecordUsageDto,
+  type UsageRecordView,
+} from './dto';
 
 /**
  * Usage recording — the busiest write path in the fleet domain.
@@ -92,7 +99,10 @@ export class UsageService {
   // Writes
   // =========================================================================
 
-  async record(dto: RecordUsageDto): Promise<UsageRecordView> {
+  async record(request: RecordUsageDto): Promise<UsageRecordView> {
+    // The validation pipe has already canonicalized; again here so that
+    // what is compared, hashed and stored never depends on the path in.
+    const dto = canonicalUsageRequest(request);
     const organizationId = getOrganizationId();
     const actor = getContext().userId ?? 'SYSTEM';
 
@@ -113,14 +123,31 @@ export class UsageService {
       if (existing) return this.replay(existing, dto, binding.hash);
     }
 
-    const asset = await this.repository.findAssetRef(organizationId, dto.assetId);
-    if (!asset) {
-      // Absent, not forbidden — the same non-disclosure rule the rest of the
-      // platform follows for a resource in another tenant.
-      throw RastaError.notFound('Asset', dto.assetId);
-    }
+    let operator: { driverId: string | null; assignmentId: string | null };
+    try {
+      const asset = await this.repository.findAssetRef(organizationId, dto.assetId);
+      if (!asset) {
+        // Absent, not forbidden — the same non-disclosure rule the rest of the
+        // platform follows for a resource in another tenant.
+        throw RastaError.notFound('Asset', dto.assetId);
+      }
 
-    const { driverId, assignmentId } = await this.resolveOperator(dto);
+      operator = await this.resolveOperator(dto);
+    } catch (refusal) {
+      // Refused on the machine's or the operator's state *now*. A twin of
+      // this request may have committed after the look above and before that
+      // state changed — the assignment ended, the machine transferred — and
+      // then this is a replay the state no longer matters to (#372 r1 F2).
+      // So the reference once more, under the asset lock a twin in flight
+      // holds until it commits, and with the same binding and read rule;
+      // only a reference still free lets the refusal stand.
+      if (binding && refusal instanceof RastaError) {
+        const settled = await this.findUnderAssetLock(dto.assetId, binding.reference);
+        if (settled) return this.replay(settled, dto, binding.hash);
+      }
+      throw refusal;
+    }
+    const { driverId, assignmentId } = operator;
 
     const periodStart = new Date(dto.periodStart);
     const periodEnd = new Date(dto.periodEnd);
@@ -256,6 +283,14 @@ export class UsageService {
     }
   }
 
+  /** The record a reference names, read under the asset's lock: after any twin in flight. */
+  private async findUnderAssetLock(assetId: string, reference: string): Promise<UsageRow | null> {
+    return this.repository.transaction(async (tx) => {
+      await this.repository.lockAssetRef(tx, assetId);
+      return this.repository.findUsageByClientReference(reference, tx);
+    });
+  }
+
   /**
    * The record a reference already names, returned only to the request that
    * created it, and only while that caller may still read it. Every refusal —
@@ -274,7 +309,7 @@ export class UsageService {
   ): Promise<UsageRecordView> {
     const bound =
       existing.requestHash === null
-        ? sameLegacyRequest(existing, dto, getContext())
+        ? sameLegacyRequest(existing, dto, getContext(), currentFleetScope())
         : existing.requestHash === requestHash;
     if (!bound || !(await this.mayRead(existing))) throw usageReferenceReused(existing.id);
 
@@ -345,14 +380,42 @@ const FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
  * What a `clientReference` is bound to: SHA-256 over the validated body (keys
  * sorted, defaults applied) and the caller who sent it — the shape
  * `IdempotencyStore.hash` gives an `Idempotency-Key`, through the same
- * {@link hashRequest}. Equivalent means canonically equal: key order does not
- * matter, but `"7.5"` and `"7.50"` are two requests, as they are two strings.
+ * {@link hashRequest}. Equivalent means canonically equal, one spelling per
+ * value ({@link canonicalUsageRequest}): key order, `"7.50"` against `"7.5"`,
+ * `…:00Z` against `…:00.000Z`, CRLF against LF in the notes — none of these
+ * makes another request. An omitted quantity and `"0"` still do.
  *
  * The caller is the user; a service caller, which has no user, is its service
  * — so a record one service filed replays to that service and to no other.
  */
 export function usageRequestHash(dto: RecordUsageDto): string {
-  return hashRequest({ caller: usageCaller(getContext()), body: dto });
+  return hashRequest({ caller: usageCaller(getContext()), body: canonicalUsageRequest(dto) });
+}
+
+/**
+ * The request in its canonical spelling — the forms `recordUsageSchema`
+ * already gives it (./dto.ts), applied again so a caller that did not come
+ * through the pipe hashes and compares the same. Each form is idempotent, and
+ * only a value present is touched: omitted stays omitted.
+ */
+function canonicalUsageRequest(dto: RecordUsageDto): RecordUsageDto {
+  const quantity = (value: string | undefined) =>
+    value === undefined ? undefined : canonicalQuantity(value);
+  return {
+    ...dto,
+    periodStart: canonicalInstant(dto.periodStart),
+    periodEnd: canonicalInstant(dto.periodEnd),
+    ...present('hours', quantity(dto.hours)),
+    ...present('kilometres', quantity(dto.kilometres)),
+    ...present('hourMeter', quantity(dto.hourMeter)),
+    ...present('odometer', quantity(dto.odometer)),
+    ...present('notes', dto.notes === undefined ? undefined : canonicalLineEndings(dto.notes)),
+  };
+}
+
+/** `{ [key]: value }` when there is a value; nothing, so the key stays absent, when not. */
+function present<K extends string>(key: K, value: string | undefined): Partial<Record<K, string>> {
+  return value === undefined ? {} : ({ [key]: value } as Record<K, string>);
 }
 
 function usageCaller(context: RequestContext): Record<string, string> {
@@ -366,18 +429,22 @@ function usageCaller(context: RequestContext): Record<string, string> {
  * stored — so the stored columns stand in, compared one by one. It replays
  * only to the **same user** (`recordedBy`) sending the **same reading**:
  *
- * - asset, period, source and notes equal; each quantity present on both
- *   sides and equal as a number (`7.50` and `7.5`: the column kept no more),
- *   or absent on both;
- * - `driverId` equal when the request names one. A request that named none
- *   had it resolved by the server, which is what the stored value is.
+ * - asset, period, source and notes (line endings as LF) equal; each
+ *   quantity present on both sides and equal as a number (`7.50` and `7.5`:
+ *   the column kept no more), or absent on both;
+ * - the driver: see {@link sameLegacyOperator}.
  *
  * A row recorded by a service caller (`recordedBy` `SYSTEM`) never replays:
  * which service filed it was not stored. Anything else is a mismatch, `409`.
  * Today's "every resend replays" is not kept for these rows: it is the very
  * defect the binding removes.
  */
-function sameLegacyRequest(row: UsageRow, dto: RecordUsageDto, context: RequestContext): boolean {
+function sameLegacyRequest(
+  row: UsageRow,
+  dto: RecordUsageDto,
+  context: RequestContext,
+  scope: FleetScope,
+): boolean {
   if (!context.userId || row.recordedBy !== context.userId) return false;
   return (
     row.assetId === dto.assetId &&
@@ -388,9 +455,32 @@ function sameLegacyRequest(row: UsageRow, dto: RecordUsageDto, context: RequestC
     sameQuantity(row.hourMeter, dto.hourMeter) &&
     sameQuantity(row.odometer, dto.odometer) &&
     row.source === dto.source &&
-    row.notes === (dto.notes ?? null) &&
-    (dto.driverId === undefined || row.driverId === dto.driverId)
+    (row.notes === null ? null : canonicalLineEndings(row.notes)) === (dto.notes ?? null) &&
+    sameLegacyOperator(row.driverId, dto.driverId, scope)
   );
+}
+
+/**
+ * The driver a legacy row stores against the one a request names. Named: they
+ * must be equal. Omitted, the server resolved it, and the row cannot say
+ * whether its own request omitted the driver too or named the one stored —
+ * which matters, because an omitted driver resolves to whoever holds the
+ * machine *now* (#372 r1 F3: a supervisor's resend without `driverId` would
+ * otherwise be answered with driver A's record while driver B holds it).
+ *
+ * - DRIVER/OPERATOR (`SELF`): omitted and named resolve alike, to the caller's
+ *   own driver record — and {@link UsageService.mayRead} admits the row only
+ *   if that is the one stored. Reconstructable.
+ * - Supervisor or service: only a row stored with no driver is unambiguous —
+ *   a request naming one would have stored it. A stored driver is refused.
+ */
+function sameLegacyOperator(
+  stored: string | null,
+  sent: string | undefined,
+  scope: FleetScope,
+): boolean {
+  if (sent !== undefined) return stored === sent;
+  return scope.kind === 'SELF' || stored === null;
 }
 
 function sameQuantity(stored: DecimalLike | null, sent: string | undefined): boolean {

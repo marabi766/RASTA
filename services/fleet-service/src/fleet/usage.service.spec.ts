@@ -1,7 +1,7 @@
 import { Prisma } from '../generated/prisma';
 import { RastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
 import type { FleetRepository } from './fleet.repository';
-import type { RecordUsageDto } from './dto';
+import { recordUsageSchema, type RecordUsageDto } from './dto';
 import { UsageService, usageRequestHash } from './usage.service';
 
 /**
@@ -179,6 +179,38 @@ describe('UsageService replay binding', () => {
       });
     });
 
+    it('recognises the same reading in another spelling (#372 r1 F1)', async () => {
+      // Quantities by exact value, instants in one UTC spelling, notes with
+      // LF: what the column keeps, and what the response gives back.
+      const request = dto({ notes: 'shift A\r\nmeter checked' });
+      const { usage } = setup({ before: storedRow(supervisor1, request) });
+
+      for (const spelling of [
+        dto({ notes: 'shift A\nmeter checked', hours: '7.5' }),
+        dto({ notes: 'shift A\rmeter checked', hours: '07.50' }),
+        dto({
+          notes: 'shift A\r\nmeter checked',
+          periodStart: '2026-08-01T06:00:00Z',
+          periodEnd: '2026-08-01T14:00:00.000000Z',
+        }),
+      ]) {
+        await expect(as(supervisor1, () => usage.record(spelling))).resolves.toMatchObject({
+          id: 'USG_STORED',
+        });
+      }
+    });
+
+    it('still tells an omitted quantity from zero', async () => {
+      const { usage } = setup({ before: storedRow(supervisor1, dto()) });
+      await refusal(as(supervisor1, () => usage.record(dto({ kilometres: '0' }))));
+
+      const zero = setup({ before: storedRow(supervisor1, dto({ kilometres: '0.00' })) });
+      await refusal(as(supervisor1, () => zero.usage.record(dto())));
+      await expect(
+        as(supervisor1, () => zero.usage.record(dto({ kilometres: '0' }))),
+      ).resolves.toMatchObject({ id: 'USG_STORED' });
+    });
+
     it('refuses the same caller sending another body, with nothing of the record', async () => {
       const { usage, repository } = setup({ before: storedRow(supervisor1, dto()) });
 
@@ -240,8 +272,44 @@ describe('UsageService replay binding', () => {
       // `7.5` stored, `7.50` sent: the column kept the number, not the text.
       const { usage } = setup({ before: legacy(supervisor1) });
 
-      await expect(as(supervisor1, () => usage.record(dto()))).resolves.toMatchObject({
-        id: 'USG_STORED',
+      await expect(
+        as(supervisor1, () => usage.record(dto({ driverId: DRIVER_A }))),
+      ).resolves.toMatchObject({ id: 'USG_STORED' });
+    });
+
+    it('compares notes with LF line endings on both sides', async () => {
+      const { usage } = setup({
+        before: legacy(supervisor1, { driverId: null, notes: 'shift A\r\nchecked' }),
+      });
+
+      await expect(
+        as(supervisor1, () => usage.record(dto({ notes: 'shift A\nchecked' }))),
+      ).resolves.toMatchObject({ id: 'USG_STORED' });
+    });
+
+    describe('an omitted driverId (#372 r1 F3)', () => {
+      it('refuses a supervisor when the row names a driver: named then, or resolved then, is unknown', async () => {
+        // Driver A stored; driver B may hold the machine now, and a fresh
+        // request without `driverId` would be filed under B.
+        const { usage } = setup({ before: legacy(supervisor1, { driverId: DRIVER_A }) });
+
+        await refusal(as(supervisor1, () => usage.record(dto())));
+      });
+
+      it('matches a supervisor when the row names no driver: a named one would have been stored', async () => {
+        const { usage } = setup({ before: legacy(supervisor1, { driverId: null }) });
+
+        await expect(as(supervisor1, () => usage.record(dto()))).resolves.toMatchObject({
+          id: 'USG_STORED',
+        });
+      });
+
+      it('matches a DRIVER on their own record: omitted is their own, as named would be', async () => {
+        const { usage } = setup({ before: legacy(driverA, { driverId: DRIVER_A }) });
+
+        await expect(as(driverA, () => usage.record(dto()))).resolves.toMatchObject({
+          id: 'USG_STORED',
+        });
       });
     });
 
@@ -292,6 +360,64 @@ describe('UsageService replay binding', () => {
     });
   });
 
+  describe('refused on the state now, with the reference taken meanwhile (#372 r1 F2)', () => {
+    // The look before validation found nothing; the twin committed; then the
+    // state changed. The refusal must not be the answer to a replay.
+    it('replays to a DRIVER whose assignment ended after the twin committed, not 404', async () => {
+      const request = dto();
+      const { usage, repository, tx } = setup({
+        underLock: storedRow(driverA, request, { driverId: DRIVER_A }),
+      });
+      repository.findActiveAssignmentForDriver.mockResolvedValueOnce(null as never);
+
+      await expect(as(driverA, () => usage.record(request))).resolves.toMatchObject({
+        id: 'USG_STORED',
+      });
+      expect(repository.lockAssetRef).toHaveBeenCalledWith(tx, ASSET);
+      expect(tx.usageRecord.create).not.toHaveBeenCalled();
+    });
+
+    it('replays to a supervisor after the machine transferred, not 404', async () => {
+      const request = dto();
+      const { usage, repository } = setup({ underLock: storedRow(supervisor1, request) });
+      repository.findAssetRef.mockResolvedValueOnce(null as never);
+
+      await expect(as(supervisor1, () => usage.record(request))).resolves.toMatchObject({
+        id: 'USG_STORED',
+      });
+    });
+
+    it('applies the same binding and read rule there', async () => {
+      const { usage, repository } = setup({ underLock: storedRow(supervisor2, dto()) });
+      repository.findAssetRef.mockResolvedValueOnce(null as never);
+      await refusal(as(supervisor1, () => usage.record(dto())));
+
+      const other = setup({ underLock: storedRow(driverA, dto(), { driverId: DRIVER_A }) });
+      other.repository.findActiveAssignmentForDriver.mockResolvedValueOnce(null as never);
+      await refusal(as(driverB, () => other.usage.record(dto())));
+    });
+
+    it('lets the refusal stand while the reference is still free', async () => {
+      const { usage, repository } = setup();
+      repository.findAssetRef.mockResolvedValueOnce(null as never);
+
+      await expect(as(supervisor1, () => usage.record(dto()))).rejects.toMatchObject({
+        status: 404,
+      });
+      expect(repository.lockAssetRef).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not look without a reference', async () => {
+      const { usage, repository } = setup();
+      repository.findAssetRef.mockResolvedValueOnce(null as never);
+
+      await expect(
+        as(supervisor1, () => usage.record(dto({ clientReference: undefined }))),
+      ).rejects.toMatchObject({ status: 404 });
+      expect(repository.transaction).not.toHaveBeenCalled();
+    });
+  });
+
   describe('after a unique violation', () => {
     it('replays the winner to the same caller with the same body', async () => {
       const request = dto();
@@ -333,6 +459,51 @@ describe('UsageService replay binding', () => {
     const data = tx.usageRecord.create.mock.calls[0]![0].data;
     expect(data.requestHash).toBe(runWithContext(supervisor1, () => usageRequestHash(request)));
     expect(data.requestHash).not.toBe(runWithContext(supervisor2, () => usageRequestHash(request)));
+  });
+
+  it('stores the canonical spelling', async () => {
+    const { usage, tx } = setup();
+
+    await as(supervisor1, () =>
+      usage.record(dto({ hours: '007.50', periodStart: '2026-08-01T06:00:00Z', notes: 'a\r\nb' })),
+    );
+
+    expect(tx.usageRecord.create.mock.calls[0]![0].data).toMatchObject({
+      hours: '7.5',
+      notes: 'a\nb',
+      periodStart: new Date('2026-08-01T06:00:00.000Z'),
+    });
+  });
+
+  describe('recordUsageSchema canonicalizes before it validates', () => {
+    const raw = {
+      assetId: 'AST_01HZZZZZZZZZZZZZZZZZZZZZZZ',
+      periodStart: '2026-08-01T06:00:00Z',
+      periodEnd: '2026-08-01T14:00:00.000Z',
+      hours: '7.50',
+      kilometres: '0.00',
+      notes: 'a\r\nb',
+    };
+
+    it('gives one spelling per value, omitted kept omitted', () => {
+      const parsed = recordUsageSchema.parse(raw);
+      expect(parsed).toMatchObject({
+        periodStart: '2026-08-01T06:00:00.000Z',
+        periodEnd: '2026-08-01T14:00:00.000Z',
+        hours: '7.5',
+        kilometres: '0',
+        notes: 'a\nb',
+      });
+      expect('odometer' in parsed).toBe(false);
+    });
+
+    it('counts a note by its LF form, and leading zeros not as digits', () => {
+      // 1201 characters with CRLF, 801 with LF: within the 1000 limit.
+      const notes = 'a\r\n'.repeat(400) + 'a';
+      expect(recordUsageSchema.safeParse({ ...raw, notes }).success).toBe(true);
+      expect(recordUsageSchema.safeParse({ ...raw, hours: '000000007.5' }).success).toBe(true);
+      expect(recordUsageSchema.safeParse({ ...raw, hours: '123456789' }).success).toBe(false);
+    });
   });
 
   it('stores no binding on a record with no reference', async () => {

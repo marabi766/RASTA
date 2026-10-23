@@ -59,9 +59,53 @@ const quantity = (maxIntegerDigits: number) =>
     .string()
     .trim()
     .regex(/^\d+(\.\d{1,2})?$/, 'Expected a non-negative number with at most two decimals')
+    .transform(canonicalQuantity)
     .refine((value) => (value.split('.')[0] ?? '').length <= maxIntegerDigits, {
       message: `At most ${maxIntegerDigits} digits before the decimal point`,
     });
+
+// ---------------------------------------------------------------------------
+// Canonical forms
+//
+// One value, one spelling — before a value is length-checked, compared, hashed
+// or stored. A `clientReference` replays only to an equal request (UsageService),
+// and two spellings of the same reading must not be told apart there (#372 r1
+// F1). Each is exact: no float, no rounding. Omitted stays omitted: these apply
+// to values present, so "no hours" and "0 hours" remain two requests.
+// ---------------------------------------------------------------------------
+
+/**
+ * A quantity's digits, by exact value: `"7.50"`, `"07.5"` → `"7.5"`; `"7.00"` →
+ * `"7"`; `"0.0"` → `"0"`. String work on a value `quantity` has already matched,
+ * never a float.
+ */
+export function canonicalQuantity(value: string): string {
+  const [integer = '', fraction = ''] = value.split('.');
+  const whole = integer.replace(/^0+(?=\d)/, '');
+  const decimals = fraction.replace(/0+$/, '');
+  return decimals ? `${whole}.${decimals}` : whole;
+}
+
+/**
+ * An instant in one UTC spelling, `toISOString()`'s: `"…06:00:00Z"` and
+ * `"…06:00:00.000Z"` → `"…06:00:00.000Z"`. That is also exactly what the
+ * column keeps — a JS `Date`, milliseconds — so a finer fraction the stored
+ * value cannot tell apart is not told apart here either.
+ */
+export function canonicalInstant(value: string): string {
+  return new Date(value).toISOString();
+}
+
+/** CRLF and lone CR → LF. */
+export function canonicalLineEndings(value: string): string {
+  return value.replace(/\r\n?/g, '\n');
+}
+
+/**
+ * An instant as `datetime()` accepts it (UTC, `Z`), in its canonical spelling.
+ * `datetime()` has already refused a date `Date` could not represent.
+ */
+const instant = () => z.string().datetime().transform(canonicalInstant);
 
 // ---------------------------------------------------------------------------
 // Driver
@@ -188,8 +232,8 @@ export const recordUsageSchema = z
      */
     driverId: driverId.optional(),
 
-    periodStart: z.string().datetime(),
-    periodEnd: z.string().datetime(),
+    periodStart: instant(),
+    periodEnd: instant(),
 
     /** Engine hours consumed during the period. */
     hours: quantity(8).optional(),
@@ -201,7 +245,13 @@ export const recordUsageSchema = z
     odometer: quantity(10).optional(),
 
     source: usageSourceSchema.default('MANUAL'),
-    notes: displayText(1, 1000).optional(),
+    /** Line endings made LF first, so CRLF is neither counted twice nor a different request. */
+    notes: z
+      .preprocess(
+        (value) => (typeof value === 'string' ? canonicalLineEndings(value) : value),
+        displayText(1, 1000),
+      )
+      .optional(),
 
     /**
      * Deduplication key for offline capture.
