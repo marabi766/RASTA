@@ -84,10 +84,12 @@ import { OrganizationHierarchy } from '../organization/organization-hierarchy';
  * development and test — a transaction whose business line no active rule
  * prices is not settled: `422 NO_ACTIVE_RULE`, nothing written, the funds where
  * they were, `rasta_economic_settlement_failures_total{reason="no_active_rule"}`
- * and a `SETTLEMENT_REFUSED` record of who tried and why. Settling it again
- * once a rule for the line is in force succeeds at that rule — a 0% rule
- * included, which is how the pilot runs (Q-08). Every line bears commission
- * until docs/24 Q-130 says otherwise ({@link COMMISSION_BEARING_LINES}). Off —
+ * and a `SETTLEMENT_REFUSED` record of who tried and why — committed before
+ * the 422 is answered, in the same transaction rolled back to its savepoint.
+ * Settling it again once a rule for the line is in force succeeds at that
+ * rule — a 0% rule included, which is how the pilot runs (Q-08). Every line
+ * bears commission until docs/24 Q-130 says otherwise
+ * ({@link COMMISSION_BEARING_LINES}). Off —
  * development and test unless turned on — it settles at zero, recorded
  * `NO_ACTIVE_RULE`, as it always has.
  *
@@ -132,12 +134,29 @@ export class SettlementService {
     });
 
     try {
-      const { settled: result, authority } = await withFinancialSpan('economic.settle', () =>
-        this.prisma.transaction(async (tx) => {
-          const within = await this.settleWithin(tx, transactionId, settledBy);
-          await answer?.respond(tx, within.settled);
-          return within;
-        }),
+      const { settled: result, authority } = await withFinancialSpan(
+        'economic.settle',
+        async () => {
+          const outcome = await this.prisma.transaction(async (tx) => {
+            let within: Awaited<ReturnType<SettlementService['settleWithin']>>;
+            try {
+              within = await this.settleWithin(tx, transactionId, settledBy);
+            } catch (error) {
+              if (!(error instanceof NoActiveRuleRefusal)) throw error;
+              // Undo everything the settlement wrote before it was refused
+              // (`settleWithin`'s savepoint), and commit the refusal's record
+              // in its place (docs/24 Q-29; review of #364 round 1, F2).
+              await tx.$executeRaw`ROLLBACK TO SAVEPOINT settlement_priced`;
+              await this.recordRefusal(tx, error, settledBy);
+              return { refused: error };
+            }
+            await answer?.respond(tx, within.settled);
+            return within;
+          });
+          // Only once the refusal's record has committed: no 422 without it.
+          if ('refused' in outcome) throw outcome.refused;
+          return outcome;
+        },
       );
       settlementsCompletedTotal.inc({ service: SERVICE_NAME, type: result.transactionType });
       recordFinancialCommand(transactionId, authority);
@@ -149,7 +168,6 @@ export class SettlementService {
       this.logger.warn(
         `Settlement of ${transactionId} failed (${reasonOf(error)}); funds remain held for review`,
       );
-      if (error instanceof NoActiveRuleRefusal) await this.recordRefusal(error, settledBy);
       throw error;
     } finally {
       stop();
@@ -161,6 +179,10 @@ export class SettlementService {
     transactionId: string,
     settledBy: string,
   ): Promise<{ settled: SettlementResult; authority: FinancialAuthority }> {
+    // Until the commission is decided, a refusal for want of a rule
+    // (`NoActiveRuleRefusal`, Q-29) rolls back to here and `settle` records it
+    // in this same transaction; past it, the savepoint is released below.
+    await tx.$executeRaw`SAVEPOINT settlement_priced`;
     const transaction = await this.transactions.lockForUpdate(tx, transactionId);
     if (!transaction) throw RastaError.notFound('Transaction', transactionId);
 
@@ -230,6 +252,11 @@ export class SettlementService {
     // and, failing closed where that found no rule, the rule in force now or a
     // refusal (`charge`, docs/24 Q-29).
     const decision = await this.charge(tx, transaction, payeeOrganizationId);
+    // Priced: nothing below is refused and recorded, so the savepoint goes.
+    // It has to — a journal must be opened by the transaction that posts its
+    // entries, read from the journal row's xmin (`trg_journal_has_entries`),
+    // and a row inserted under a savepoint carries the subtransaction's.
+    await tx.$executeRaw`RELEASE SAVEPOINT settlement_priced`;
 
     const netAmountMinor = transaction.grossAmountMinor - decision.amountMinor;
     if (netAmountMinor < 0n) {
@@ -420,41 +447,39 @@ export class SettlementService {
   }
 
   /**
-   * The audit record of a refused settlement (`SETTLEMENT_REFUSED`), in a
-   * transaction of its own: the settlement's rolled back with everything it
-   * would have written, this record included had it been there. Recorded once
-   * the refusal is certain, and only then — it moves nothing.
-   *
-   * A failure to record it does not replace the refusal the caller is owed:
-   * it is logged, and the metric has already counted the refusal.
+   * The audit record of a refused settlement (`SETTLEMENT_REFUSED`), written
+   * in the settlement's own transaction once everything the settlement wrote
+   * has been rolled back to its savepoint — so the record and the refusal are
+   * one commit. The 422 is answered only after that commit: a record that
+   * cannot be written (the outbox, the connection, the process) fails the
+   * whole request with a 5xx and nothing at all committed, and the settlement
+   * can be retried under the same key — the refusal was never stored as its
+   * answer. Each committed record is one refused attempt; nothing here
+   * retries, so none is written twice (review of #364 round 1, F2).
    */
-  private async recordRefusal(refusal: NoActiveRuleRefusal, refusedBy: string): Promise<void> {
+  private async recordRefusal(
+    tx: ExtendedPrismaClient,
+    refusal: NoActiveRuleRefusal,
+    refusedBy: string,
+  ): Promise<void> {
     const { subject } = refusal;
-    try {
-      await this.prisma.transaction(async (tx) => {
-        const refusedAt = await databaseNow(tx);
-        await this.ledger.enqueue(tx, {
-          eventName: ECONOMIC_EVENTS.SETTLEMENT_REFUSED,
-          aggregateId: subject.transactionId,
-          organizationId: subject.organizationId,
-          payload: {
-            transactionId: subject.transactionId,
-            organizationId: subject.organizationId,
-            payerOrganizationId: subject.organizationId,
-            payeeOrganizationId: subject.payeeOrganizationId,
-            transactionType: subject.transactionType,
-            businessLine: subject.businessLine,
-            reason: 'NO_ACTIVE_RULE',
-            refusedBy,
-            refusedAt: refusedAt.toISOString(),
-          },
-        });
-      });
-    } catch (error) {
-      this.logger.error(
-        `The refusal of settlement ${subject.transactionId} (NO_ACTIVE_RULE) was not recorded (${(error as Error).name})`,
-      );
-    }
+    const refusedAt = await databaseNow(tx);
+    await this.ledger.enqueue(tx, {
+      eventName: ECONOMIC_EVENTS.SETTLEMENT_REFUSED,
+      aggregateId: subject.transactionId,
+      organizationId: subject.organizationId,
+      payload: {
+        transactionId: subject.transactionId,
+        organizationId: subject.organizationId,
+        payerOrganizationId: subject.organizationId,
+        payeeOrganizationId: subject.payeeOrganizationId,
+        transactionType: subject.transactionType,
+        businessLine: subject.businessLine,
+        reason: 'NO_ACTIVE_RULE',
+        refusedBy,
+        refusedAt: refusedAt.toISOString(),
+      },
+    });
   }
 
   /**

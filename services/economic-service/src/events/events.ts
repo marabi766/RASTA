@@ -617,25 +617,44 @@ export const settlementCompletedPayload = z.object({
 export const SETTLEMENT_REFUSAL_REASONS = ['NO_ACTIVE_RULE'] as const;
 
 /**
+ * The transaction types a settlement can be refused for: every type an
+ * obligation is recorded as (`TRANSACTION_TYPES`, `transaction/dto.ts` —
+ * `events.spec.ts` holds the two equal); a top-up never settles. A closed list
+ * here because audit-service stores the type of a refusal it projects, and
+ * stores only what it can name (`settlement-refusal-projection.ts`).
+ */
+export const SETTLEMENT_REFUSAL_TRANSACTION_TYPES = [
+  'MARKETPLACE_ORDER',
+  'MAINTENANCE_SERVICE',
+  'LOGISTICS',
+  'CONSTRUCTION_STATEMENT',
+  'PROCUREMENT_ORDER',
+] as const;
+
+/**
  * A settlement was refused, and nothing it would have written was: no journal,
  * no commission, no settlement, the transaction and the hold as they were.
  *
- * The audit record of the refusal (AGENTS.md S-06), written in a transaction of
- * its own once the settlement's has rolled back — the one it would have shared
- * left nothing behind by design. One per refused attempt. audit-service is the
- * consumer; an operator reads `reason` to know what to configure.
+ * The audit record of the refusal (AGENTS.md S-06), written in the
+ * settlement's own transaction once everything it wrote has been rolled back
+ * to a savepoint, and committed before the 422 is answered: no refusal is
+ * answered without its record. One per refused attempt. audit-service is the
+ * consumer and projects it as `outcome=REFUSED` with the reason, the line and
+ * the transaction type; an operator reads `reason` to know what to configure.
  */
-export const settlementRefusedPayload = z.object({
-  transactionId: z.string(),
-  organizationId: z.string(),
-  payerOrganizationId: z.string(),
-  payeeOrganizationId: z.string(),
-  transactionType: z.string(),
-  businessLine: z.string(),
-  reason: z.enum(SETTLEMENT_REFUSAL_REASONS),
-  refusedBy: z.string(),
-  refusedAt: z.string(),
-});
+export const settlementRefusedPayload = z
+  .object({
+    transactionId: z.string(),
+    organizationId: z.string(),
+    payerOrganizationId: z.string(),
+    payeeOrganizationId: z.string(),
+    transactionType: z.enum(SETTLEMENT_REFUSAL_TRANSACTION_TYPES),
+    businessLine: z.enum(BUSINESS_LINES),
+    reason: z.enum(SETTLEMENT_REFUSAL_REASONS),
+    refusedBy: z.string(),
+    refusedAt: z.string(),
+  })
+  .strict();
 
 /**
  * A journal was posted.

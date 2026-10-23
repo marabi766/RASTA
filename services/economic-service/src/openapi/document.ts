@@ -220,6 +220,15 @@ const STATUS_TEXT: Record<number, string> = {
  * own that a client branches on.
  */
 const ROUTE_STATUS_TEXT: Record<string, Partial<Record<number, string>>> = {
+  'POST /v1/transactions': {
+    422:
+      'A business rule refuses the obligation, and nothing was recorded: INSUFFICIENT_BALANCE ' +
+      '(holdFunds), a domain rule (BUSINESS_RULE_VIOLATION) — or BUSINESS_LINE_REQUIRED: ' +
+      'settlement fails closed without a commission rule (docs/24 Q-29; on outside development ' +
+      'and test, `ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE`), so a new obligation must name ' +
+      '`businessLine`. Only marketplace-service recording its own `ORDER` may leave it out ' +
+      '(docs/24 Q-130)',
+  },
   'POST /v1/settlements': {
     422:
       'A business rule refuses the settlement, and nothing moved: INSUFFICIENT_BALANCE, ' +

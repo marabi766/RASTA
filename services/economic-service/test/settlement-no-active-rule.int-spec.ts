@@ -4,8 +4,10 @@ import type { BusinessLine } from '@rasta/contracts';
 import { runUnscoped } from '@rasta/nest-common';
 import { settlementFailuresTotal } from '../src/observability/metrics';
 import { NO_ACTIVE_RULE_MESSAGE } from '../src/settlement/settlement.service';
+import { BUSINESS_LINE_REQUIRED_MESSAGE } from '../src/transaction/recorded-sources';
+import { LedgerService } from '../src/ledger/ledger.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
-import { admin, apiTenant, startApi, type ApiHarness } from './api-helpers';
+import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
 import {
   asActor,
   cleanup,
@@ -33,6 +35,15 @@ import {
  * nothing charged — "decided zero", never "not configured". Off — development
  * and test, unless turned on — nothing changes: the same settlement goes
  * through at zero, `NO_ACTIVE_RULE`, as it always has.
+ *
+ * Nor can leaving the line out choose that zero: with the policy on, a new
+ * obligation without a line is `422 BUSINESS_LINE_REQUIRED` — but for
+ * marketplace-service's own `ORDER`, the one disclosed flow that records
+ * without one (docs/24 Q-130). Rows already recorded without a line settle as
+ * they always have.
+ *
+ * No 422 is answered without its record: the record commits with the refused
+ * attempt, and a record that cannot be written is a 5xx the caller retries.
  *
  * And a rule ended while a settlement is being made never lets it through at
  * a zero nobody chose: ended before the settlement's pricing lock, the
@@ -111,6 +122,9 @@ describe('settlement without an active commission rule (docs/24 Q-29, Q-08)', ()
   const retryPayee = apiTenant('NAR-RETRY');
   const zeroPayee = apiTenant('NAR-ZERO');
   const linelessPayee = apiTenant('NAR-LINELESS');
+  const orderPayee = apiTenant('NAR-ORDER');
+  const manualPayee = apiTenant('NAR-MANUAL');
+  const unrecordedPayee = apiTenant('NAR-UNRECORDED');
   const lenientPayee = apiTenant('NAR-LENIENT');
 
   const as = (organizationId: string) => `Bearer ${admin(organizationId)}`;
@@ -134,7 +148,16 @@ describe('settlement without an active commission rule (docs/24 Q-29, Q-08)', ()
       .set('idempotency-key', id('nar-fund'))
       .send({ amountMinor: String(GROSS * 20n) })
       .expect(201);
-    for (const payee of [unpricedPayee, retryPayee, zeroPayee, linelessPayee, lenientPayee]) {
+    for (const payee of [
+      unpricedPayee,
+      retryPayee,
+      zeroPayee,
+      linelessPayee,
+      orderPayee,
+      manualPayee,
+      unrecordedPayee,
+      lenientPayee,
+    ]) {
       await request(http).get('/v1/wallets/me').set('authorization', as(payee)).expect(200);
     }
   });
@@ -146,6 +169,9 @@ describe('settlement without an active commission rule (docs/24 Q-29, Q-08)', ()
       retryPayee,
       zeroPayee,
       linelessPayee,
+      orderPayee,
+      manualPayee,
+      unrecordedPayee,
       lenientPayee,
     ]);
     await lenient.close();
@@ -344,8 +370,119 @@ describe('settlement without an active commission rule (docs/24 Q-29, Q-08)', ()
     expect(await outbox(strict.prisma, 'SETTLEMENT_REFUSED', transactionId)).toEqual([]);
   });
 
-  it('does not refuse a transaction recorded without a line: no rule can price one (Q-130)', async () => {
-    const transactionId = await authorised(http, 'lineless', {
+  /** Every row recorded for the payer to `payee`, whatever its status. */
+  const rowsTo = (payee: string) =>
+    runUnscoped('the suite looks for anything recorded to the payee', () =>
+      strict.prisma.client.transaction.findMany({
+        where: { organizationId: payer, counterpartyOrganizationId: payee },
+      }),
+    );
+
+  it('refuses a new manual obligation without a line: 422 BUSINESS_LINE_REQUIRED, nothing recorded or held (review of #364 round 1, F1)', async () => {
+    const balancesBefore = await payerBalances();
+    // The request of the review, verbatim: an organization administrator's
+    // obligation with no line, which would have settled at a zero nobody chose.
+    const codexRequest = {
+      transactionType: 'LOGISTICS',
+      counterpartyOrganizationId: manualPayee,
+      grossAmountMinor: '2000000',
+      holdFunds: true,
+    };
+    const refused = await request(http)
+      .post('/v1/transactions')
+      .set('authorization', as(payer))
+      .set('idempotency-key', id('nar-manual'))
+      .send(codexRequest)
+      .expect(422);
+    expect(refused.body).toMatchObject({
+      code: 'BUSINESS_LINE_REQUIRED',
+      message: BUSINESS_LINE_REQUIRED_MESSAGE,
+    });
+    expect(refused.body.details).toBeUndefined();
+
+    // Every other caller the route admits, without a line: the same. A
+    // service is not trusted to leave it out by being a service.
+    for (const service of ['contract-service', 'procurement-service', 'marketplace-service']) {
+      const asService = await internalToken(service, { organizationId: payer });
+      const response = await request(http)
+        .post('/v1/transactions')
+        .set('x-internal-token', asService)
+        .set('idempotency-key', id(`nar-manual-${service}`))
+        .send({ ...codexRequest, sourceType: 'E2E', sourceReference: id('nar-ref') })
+        .expect(422);
+      expect(response.body.code).toBe('BUSINESS_LINE_REQUIRED');
+    }
+    expect(await rowsTo(manualPayee)).toEqual([]);
+    expect(await payerBalances()).toEqual(balancesBefore);
+
+    // An invalid line is no line either: 400 on the field, as it always was.
+    await request(http)
+      .post('/v1/transactions')
+      .set('authorization', as(payer))
+      .set('idempotency-key', id('nar-manual-bad-line'))
+      .send({ ...codexRequest, businessLine: 'TAXI' })
+      .expect(400);
+
+    // Naming the line records it — and its settlement then fails closed.
+    const lined = await request(http)
+      .post('/v1/transactions')
+      .set('authorization', as(payer))
+      .set('idempotency-key', id('nar-manual-lined'))
+      .send({ ...codexRequest, businessLine: 'LOGISTICS' })
+      .expect(201);
+    expect(lined.body).toMatchObject({ businessLine: 'LOGISTICS', status: 'HELD' });
+    await request(http)
+      .post(`/v1/transactions/${lined.body.id}/authorise-settlement`)
+      .set('authorization', as(payer))
+      .set('idempotency-key', id('nar-manual-lined-auth'))
+      .expect(200);
+    const settled = await settle(http, lined.body.id as string, id('nar-manual-lined-settle'));
+    expect(settled.status).toBe(422);
+    expect(settled.body.code).toBe('NO_ACTIVE_RULE');
+  });
+
+  it('records marketplace-service’s own ORDER without a line, and settles it at zero as before (Q-130)', async () => {
+    const orderId = id('nar-order');
+    const saga = await internalToken('marketplace-service', { organizationId: payer });
+    const created = await request(http)
+      .post('/v1/transactions')
+      .set('x-internal-token', saga)
+      .set('idempotency-key', `order:${orderId}:hold`)
+      .send({
+        transactionType: 'MARKETPLACE_ORDER',
+        counterpartyOrganizationId: orderPayee,
+        grossAmountMinor: String(GROSS),
+        currency: 'IRR',
+        sourceType: 'ORDER',
+        sourceReference: orderId,
+        holdFunds: true,
+      })
+      .expect(201);
+    expect(created.body.businessLine).toBeNull();
+    await request(http)
+      .post(`/v1/transactions/${created.body.id}/authorise-settlement`)
+      .set('authorization', as(payer))
+      .set('idempotency-key', id('nar-order-auth'))
+      .expect(200);
+
+    const settled = await settle(http, created.body.id as string, id('nar-order-settle')).expect(
+      201,
+    );
+    expect(settled.body).toMatchObject({
+      commissionAmountMinor: '0',
+      commissionRuleMatched: false,
+      commissionOutcome: 'NO_ACTIVE_RULE',
+      businessLine: null,
+    });
+    expect(await outbox(strict.prisma, 'SETTLEMENT_REFUSED', created.body.id as string)).toEqual(
+      [],
+    );
+  });
+
+  it('settles a row already recorded without a line as it always has: no rule can price one', async () => {
+    // Recorded where the policy is off — as every line-less row recorded
+    // before it was turned on — and settled where it is on.
+    const transactionId = await authorised(lenient.app.getHttpServer() as Server, 'lineless', {
       counterpartyOrganizationId: linelessPayee,
     });
     const settled = await settle(http, transactionId, id('nar-lineless-settle')).expect(201);
@@ -357,6 +494,43 @@ describe('settlement without an active commission rule (docs/24 Q-29, Q-08)', ()
       businessLine: null,
     });
     expect(await outbox(strict.prisma, 'SETTLEMENT_REFUSED', transactionId)).toEqual([]);
+  });
+
+  it('answers no 422 without its record: a record that cannot be written is a 500, retried under the same key (review of #364 round 1, F2)', async () => {
+    const transactionId = await authorised(http, 'unrecorded', {
+      counterpartyOrganizationId: unrecordedPayee,
+      businessLine: UNPRICED_LINE,
+    });
+    const before = await readAll(strict.prisma, transactionId);
+    const key = id('nar-unrecorded-settle');
+    const ledger = strict.app.get(LedgerService);
+    const enqueue = ledger.enqueue.bind(ledger);
+    const spy = jest.spyOn(ledger, 'enqueue').mockImplementation(async (tx, input) => {
+      if (input.eventName === 'SETTLEMENT_REFUSED') throw new Error('injected outbox failure');
+      return enqueue(tx, input);
+    });
+
+    let failed: request.Response;
+    try {
+      failed = await settle(http, transactionId, key);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // Not the refusal: nothing says it was refused, because nothing recorded it.
+    expect(failed.status).toBe(500);
+    expect(failed.body.code).toBe('INTERNAL_ERROR');
+    expect(await outbox(strict.prisma, 'SETTLEMENT_REFUSED', transactionId)).toEqual([]);
+    expect(await readAll(strict.prisma, transactionId)).toEqual(before);
+
+    // The same request again: refused, and recorded once — for the one attempt
+    // that was refused.
+    const refused = await settle(http, transactionId, key).expect(422);
+    expect(refused.body.code).toBe('NO_ACTIVE_RULE');
+    const records = await outbox(strict.prisma, 'SETTLEMENT_REFUSED', transactionId);
+    expect(records).toHaveLength(1);
+    expect(records[0]?.payload).toMatchObject({ transactionId, businessLine: UNPRICED_LINE });
+    expect(await readAll(strict.prisma, transactionId)).toEqual(before);
   });
 
   it('keeps development and test as they were: the same unpriced line settles at zero, NO_ACTIVE_RULE', async () => {
@@ -541,21 +715,63 @@ describe('a rule ended while a settlement is made, failing closed (docs/24 Q-29)
     });
   });
 
-  it('still answers the refusal when its record cannot be written', async () => {
-    const payee = `${payer}-UNRECORDED`;
+  it('commits the refusal and its record together: a commit that fails answers no refusal', async () => {
+    const payee = `${payer}-UNCOMMITTED`;
     const transactionId = await authorised(payee);
-    const enqueue = wiring.ledger.enqueue.bind(wiring.ledger);
-    jest.spyOn(wiring.ledger, 'enqueue').mockImplementation(async (tx, input) => {
-      if (input.eventName === 'SETTLEMENT_REFUSED') throw new Error('injected outbox failure');
-      return enqueue(tx, input);
-    });
+    const before = await readAll(prisma, transactionId);
 
+    // The record is written, and then the transaction it is in never commits
+    // — the connection or the process lost after the refusal was decided.
+    const transaction = prisma.transaction.bind(prisma);
+    jest.spyOn(prisma, 'transaction').mockImplementationOnce((fn) =>
+      transaction(async (tx) => {
+        await fn(tx);
+        throw new Error('injected commit failure');
+      }),
+    );
+
+    await expect(asPayer(() => wiring.settlements.settle(transactionId, actor))).rejects.toThrow(
+      'injected commit failure',
+    );
+    expect(await outbox(prisma, 'SETTLEMENT_REFUSED', transactionId)).toEqual([]);
+    expect(await readAll(prisma, transactionId)).toEqual(before);
+
+    // Retried: refused, with exactly one record.
     await expect(
       asPayer(() => wiring.settlements.settle(transactionId, actor)),
     ).rejects.toMatchObject({ code: 'NO_ACTIVE_RULE' });
+    expect(await outbox(prisma, 'SETTLEMENT_REFUSED', transactionId)).toHaveLength(1);
+    expect(await readAll(prisma, transactionId)).toEqual(before);
+  });
 
-    expect(await outbox(prisma, 'SETTLEMENT_REFUSED', transactionId)).toEqual([]);
-    expect((await readAll(prisma, transactionId)).transaction.status).toBe('PENDING_SETTLEMENT');
+  it('rolls back everything the refused settlement wrote before the refusal, keeping only its record', async () => {
+    // A payee with no wallet yet: settlement opens one before it prices, and
+    // that write is undone with the rest.
+    const payee = `${payer}-NOWALLET`;
+    await fundWallet(wiring, payer, GROSS);
+    const created = await asPayer(() =>
+      wiring.transactions.create({
+        transactionType: 'MAINTENANCE_SERVICE',
+        businessLine: RACE_LINE,
+        counterpartyOrganizationId: payee,
+        grossAmountMinor: String(GROSS),
+        currency: 'IRR',
+        holdFunds: true,
+      }),
+    );
+    await asPayer(() => wiring.transactions.authoriseSettlement(created.id));
+    const walletsOfPayee = () =>
+      runUnscoped('the suite checks the payee has no wallet', () =>
+        prisma.client.wallet.count({ where: { organizationId: payee } }),
+      );
+    expect(await walletsOfPayee()).toBe(0);
+
+    await expect(asPayer(() => wiring.settlements.settle(created.id, actor))).rejects.toMatchObject(
+      { code: 'NO_ACTIVE_RULE' },
+    );
+
+    expect(await walletsOfPayee()).toBe(0);
+    expect(await outbox(prisma, 'SETTLEMENT_REFUSED', created.id)).toHaveLength(1);
   });
 
   it('charges the rule recorded with the fact even after it ended, and refuses nothing (docs/23 D-057)', async () => {

@@ -1,4 +1,5 @@
 import { Counter, Gauge, Histogram, registry } from '@rasta/observability';
+import { SERVICE_NAME } from '../config/env';
 
 /**
  * Metrics owned by economic-service.
@@ -147,6 +148,12 @@ export const settlementFailuresTotal = new Counter({
   labelNames: ['service', 'reason'] as const,
   registers: [registry],
 });
+
+// Exported at zero from the first scrape after startup, rather than created at
+// one by the first refusal: `increase()` sees no increase in a series whose
+// first sample is already 1, so `RastaSettlementNoActiveRule` would miss an
+// isolated refusal after every start (docs/24 Q-29; review of #364 round 1, F4).
+settlementFailuresTotal.inc({ service: SERVICE_NAME, reason: 'no_active_rule' }, 0);
 
 export const holdsRefusedTotal = new Counter({
   name: 'rasta_economic_holds_refused_total',
