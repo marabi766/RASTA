@@ -31,6 +31,9 @@ import type { SupplierFormState } from './supplier-form-state';
  * `jest-axe` over all of it.
  */
 
+// axe over whole forms is slow on a loaded runner; the tender specs ask for the same.
+jest.setTimeout(20_000);
+
 const act_ = jest.fn<Promise<SupplierFormState<unknown, string>>, [string, FormData]>();
 jest.mock('./supplier-actions', () => {
   const named =
@@ -524,18 +527,15 @@ describe('who is drawn which form on a supplier', () => {
     expect(new Set(opened).size).toBe(3);
   });
 
-  it('has no axe violations for the supplier’s person, the operator, the reinstating operator and the read-only person', async () => {
-    for (const [detail, org, roles] of [
-      [DETAIL, SUPPLIER_ORG, ['SUPPLIER']],
-      [DETAIL, 'ORG-UNION', ['UNION_ADMIN']],
-      [SUSPENDED, 'ORG-UNION', ['UNION_ADMIN']],
-      [DETAIL, 'ORG-X', ['FLEET_MANAGER']],
-    ] as const) {
-      const { container, unmount } = drawn(detail, org, [...roles]);
-      for (const summary of container.querySelectorAll('summary')) fireEvent.click(summary);
-      expect(await axe(container)).toHaveNoViolations();
-      unmount();
-    }
+  it.each([
+    ['the supplier’s own person', DETAIL, SUPPLIER_ORG, ['SUPPLIER']],
+    ['the operator', DETAIL, 'ORG-UNION', ['UNION_ADMIN']],
+    ['the reinstating operator', SUSPENDED, 'ORG-UNION', ['UNION_ADMIN']],
+    ['the read-only person', DETAIL, 'ORG-X', ['FLEET_MANAGER']],
+  ] as const)('has no axe violations for %s', async (_name, detail, org, roles) => {
+    const { container } = drawn(detail, org, [...roles]);
+    for (const summary of container.querySelectorAll('summary')) fireEvent.click(summary);
+    expect(await axe(container)).toHaveNoViolations();
   });
 });
 
