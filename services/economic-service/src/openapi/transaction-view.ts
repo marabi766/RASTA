@@ -113,8 +113,8 @@ export const TRANSACTION_VIEW_SCHEMAS: Record<string, JsonSchema> = {
         'if never resolved, and where the resolution is not attributed by identity: a ' +
         'transaction resolved before this field existed that could not be attributed for ' +
         'certain, or not yet, and a command’s answer stored before it existed and replayed ' +
-        'under its `Idempotency-Key`. There, a resolution older than `disputedAt` is an ' +
-        'earlier dispute’s (docs/23 D-060).',
+        'under its `Idempotency-Key`. There, which dispute it decided is not recorded, and ' +
+        'the instants do not establish it either (docs/23 D-060).',
     ),
     legs: {
       type: 'array',

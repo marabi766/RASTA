@@ -227,7 +227,9 @@ export function TransactionDetailScreen({
  * dispute is not this one's (see {@link resolutionOfShownDispute}). A row
  * resolved before D-060 holds the resolution in `disputeReason` with
  * `disputeResolution` null — there the screen cannot tell which text it is, and
- * says so instead of guessing.
+ * says so instead of guessing. A resolution whose dispute economic did not
+ * record is shown as the transaction's last one, under its own names, and the
+ * screen says it cannot tell which dispute it decided.
  */
 function DisputeState({ transaction: t }: { transaction: Transaction }) {
   if (t.status === 'DISPUTED') {
@@ -250,8 +252,10 @@ function DisputeState({ transaction: t }: { transaction: Transaction }) {
   }
 
   if (t.disputedAt !== null) {
-    const resolvedAt = resolutionOfShownDispute(t);
-    const legacy = resolvedAt !== null && t.disputeResolution === null;
+    const resolution = resolutionOfShownDispute(t);
+    const own = resolution.kind === 'OWN';
+    const unattributed = resolution.kind === 'UNATTRIBUTED';
+    const legacy = resolution.kind !== 'NONE' && t.disputeResolution === null;
     return (
       <div className="flex flex-col gap-3">
         <p className="text-sm">
@@ -264,19 +268,34 @@ function DisputeState({ transaction: t }: { transaction: Transaction }) {
               <IsolatedText>{t.disputeReason}</IsolatedText>
             </Row>
           ) : null}
-          {resolvedAt !== null ? (
-            <Row term="زمان رسیدگی">{formatJalaliDateLong(resolvedAt)}</Row>
+          {resolution.kind !== 'NONE' ? (
+            <Row term={own ? 'زمان رسیدگی' : 'زمان آخرین رسیدگی'}>
+              {formatJalaliDateLong(resolution.at)}
+            </Row>
           ) : null}
-          {resolvedAt !== null && t.disputeResolution !== null ? (
-            <Row term="شرح تصمیم">
+          {resolution.kind !== 'NONE' && t.disputeResolution !== null ? (
+            <Row term={own ? 'شرح تصمیم' : 'شرح آخرین تصمیم'}>
               <IsolatedText>{t.disputeResolution}</IsolatedText>
             </Row>
           ) : null}
         </dl>
-        {legacy ? (
+        {own && legacy ? (
           <p className="text-sm text-content-muted">
             به این اعتراض پیش از آنکه سامانه شرح تصمیم را جدا نگه دارد رسیدگی شده است؛ این متن یا
             دلیل اعتراض است یا شرح تصمیم، و این صفحه نمی‌تواند بگوید کدام است.
+          </p>
+        ) : null}
+        {unattributed && legacy ? (
+          <p className="text-sm text-content-muted">
+            پیش از آنکه سامانه شرح تصمیم را جدا نگه دارد، به اعتراضی روی این تراکنش رسیدگی شده است و
+            ثبت نشده که آن تصمیم برای کدام اعتراض بوده است. این متن یا دلیل اعتراض است یا شرح تصمیم،
+            و این صفحه نمی‌تواند بگوید کدام است.
+          </p>
+        ) : null}
+        {unattributed && !legacy ? (
+          <p className="text-sm text-content-muted">
+            سامانه ثبت نکرده است که این تصمیم برای کدام اعتراض گرفته شده است: ممکن است برای همین
+            اعتراض باشد یا برای اعتراضی پیش از آن، و این صفحه نمی‌تواند بگوید کدام است.
           </p>
         ) : null}
       </div>
@@ -287,21 +306,26 @@ function DisputeState({ transaction: t }: { transaction: Transaction }) {
 }
 
 /**
- * When the dispute the screen shows was resolved, or `null` if the recorded
- * resolution is not that dispute's.
+ * Whose the recorded resolution is, as far as the record says.
  *
- * By identity: economic-service records which dispute the resolution decided
- * (`resolvedDisputeId`) beside the latest dispute's (`disputeId`). Times do not
+ * By identity only: economic-service records which dispute the resolution
+ * decided (`resolvedDisputeId`) beside the latest dispute's (`disputeId`) —
+ * `OWN` when they match, `NONE` when it was an earlier dispute's. Times do not
  * establish it — a re-dispute that waited behind a resolution could be dated
  * before it, and the earlier dispute's decision then read as the new one's
- * (Codex on PR 322 round 4, finding 1). Only a row resolved before the identity
- * was kept, which economic could not attribute for certain, has no
- * `resolvedDisputeId`; for it the times are all there is, as before.
+ * (Codex on PR 322 round 4, finding 1). A row resolved before the identity was
+ * kept that economic could not attribute for certain (a refunded one never is,
+ * a settled one not until the backfill) has no `resolvedDisputeId`; the same
+ * race makes its times prove nothing either way (Codex on PR 352 round 2), so
+ * its resolution is `UNATTRIBUTED`: shown, never as the shown dispute's.
  */
-function resolutionOfShownDispute(t: Transaction): string | null {
-  if (t.disputeResolvedAt === null || t.disputedAt === null) return null;
-  if (t.resolvedDisputeId !== null) {
-    return t.resolvedDisputeId === t.disputeId ? t.disputeResolvedAt : null;
-  }
-  return Date.parse(t.disputeResolvedAt) >= Date.parse(t.disputedAt) ? t.disputeResolvedAt : null;
+type ShownResolution =
+  { readonly kind: 'NONE' } | { readonly kind: 'OWN' | 'UNATTRIBUTED'; readonly at: string };
+
+function resolutionOfShownDispute(t: Transaction): ShownResolution {
+  if (t.disputeResolvedAt === null) return { kind: 'NONE' };
+  if (t.resolvedDisputeId === null) return { kind: 'UNATTRIBUTED', at: t.disputeResolvedAt };
+  return t.resolvedDisputeId === t.disputeId
+    ? { kind: 'OWN', at: t.disputeResolvedAt }
+    : { kind: 'NONE' };
 }
