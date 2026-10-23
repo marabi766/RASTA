@@ -34,6 +34,9 @@ jest.mock('@/server/current-session', () => ({
   currentSession: async () => mockSession.current,
   missingSessionReason: async () => 'NO_SESSION',
 }));
+jest.mock('next/headers', () => ({
+  cookies: async () => ({ get: () => undefined, getAll: () => [] }),
+}));
 jest.mock('next/navigation', () => ({
   redirect: (url: string) => {
     throw new Error(`NEXT_REDIRECT:${url}`);

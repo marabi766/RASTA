@@ -57,9 +57,11 @@ describe('the create replay window', () => {
     expect(checkCreateStamp(SESSION, replay, id, end + 1, ENV)).toBe('EXPIRED');
   });
 
-  it('applies the window as configured now, not as it was when the page was drawn', () => {
-    const { id, replay } = mintCreateSubmission(SESSION, T0);
+  it('may be shortened by the settings as configured now', () => {
+    // Issued at two hours, then lowered to one: the shorter window applies at once.
+    const { id, replay } = mintCreateSubmission(SESSION, T0, ENV);
     const shorter = { ...ENV, WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: 1 };
+    expect(checkCreateStamp(SESSION, replay, id, T0 + 3000_000, shorter)).toBe('OK');
     expect(checkCreateStamp(SESSION, replay, id, T0 + 3000_000 + 1, shorter)).toBe('EXPIRED');
   });
 
