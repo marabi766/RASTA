@@ -25,11 +25,11 @@ test('the repository baseline is valid and preserves the approved horizons', () 
   // is accepted, so they are updated in the same commit as the acceptance —
   // that coupling is the point: a status change nobody meant to make fails here.
   assert.equal(progress.mvp.committed, 563);
-  assert.equal(progress.mvp.earned, 343);
-  assert.equal(progress.mvp.percent, 60.9);
+  assert.equal(progress.mvp.earned, 372);
+  assert.equal(progress.mvp.percent, 66.1);
   assert.equal(progress.fullProduct.committed, 786);
-  assert.equal(progress.fullProduct.earned, 343);
-  assert.equal(progress.fullProduct.percent, 43.6);
+  assert.equal(progress.fullProduct.earned, 372);
+  assert.equal(progress.fullProduct.percent, 47.3);
 });
 
 test('a logged acceptance names who decided and only records that are ACCEPTED', () => {
@@ -210,7 +210,12 @@ test('decomposed features contribute child stories exactly once', () => {
     documentStories.reduce((sum, story) => sum + story.points, 0),
     documentFeature.points,
   );
-  assert.equal(progress.fullProduct.units, baseline.items.length - 1 + baseline.stories.length);
+  // Each decomposed feature (COM-004, RUN-005) leaves the count and its stories join it.
+  const decomposed = new Set(baseline.stories.map((story) => story.parentItemId)).size;
+  assert.equal(
+    progress.fullProduct.units,
+    baseline.items.length - decomposed + baseline.stories.length,
+  );
   assert.equal(progress.fullProduct.committed, 786);
 });
 
