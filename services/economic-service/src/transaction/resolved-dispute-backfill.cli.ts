@@ -1,3 +1,7 @@
+import { assertNoMigratorCredentials } from '@rasta/config';
+import { preflightRuntimeRole } from '@rasta/nest-common';
+import { PrismaClient } from '../generated/prisma';
+import { SERVICE_NAME } from '../config/env';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   backfillResolvedDisputes,
@@ -10,16 +14,21 @@ import {
  * [--lock-timeout-ms n]` — see resolved-dispute-backfill.ts and docs/23 D-060.
  *
  * Connects as the service's runtime role, through `DATABASE_URL_ECONOMIC`,
- * and refuses any other (D-045). Prints NDJSON, counts and ids only; exits 1
- * unless the run planned or finished.
+ * and refuses an owner's credential in its environment or on the connection
+ * (D-045). Prints NDJSON, counts and ids only; exits 1 unless the run planned
+ * or finished.
  */
 async function main(): Promise<number> {
   const options = parseResolvedDisputeBackfillArgs(process.argv.slice(2));
+  assertNoMigratorCredentials(process.env);
   const url = process.env.DATABASE_URL_ECONOMIC;
   if (!url) throw new Error('DATABASE_URL_ECONOMIC is not set');
+  await preflightRuntimeRole(() => new PrismaClient({ datasources: { db: { url } } }), {
+    service: SERVICE_NAME,
+    runtimeVariable: 'DATABASE_URL_ECONOMIC',
+  });
   const prisma = new PrismaService(url);
   try {
-    await prisma.assertRuntimeRole();
     const summary = await backfillResolvedDisputes(prisma.client, options, (event) =>
       process.stdout.write(`${JSON.stringify(event)}\n`),
     );
