@@ -314,7 +314,8 @@ Tag روی main (v0.x.y)
 مالی، و **اثبات توازن دفتر کل**.
 
 Runbookها: [`runbooks/restore-database.md`](runbooks/restore-database.md) ·
-[`runbooks/disaster-recovery.md`](runbooks/disaster-recovery.md)
+[`runbooks/disaster-recovery.md`](runbooks/disaster-recovery.md) ·
+[`runbooks/backup-restore-drill.md`](runbooks/backup-restore-drill.md) (تمرین محلی با گزارش JSON)
 
 ### سناریوهای فاجعه
 
