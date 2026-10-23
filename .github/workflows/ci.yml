@@ -1238,6 +1238,22 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      # notification-service's SMTP suites (`email-delivery`, `mail-channel`)
+      # read the messages back through Mailpit's HTTP API. Same image and
+      # digest as `docker-compose.yml`. The steps that run them set
+      # REQUIRE_MAILPIT=1, so an unreachable Mailpit fails the suite instead of
+      # skipping it (`services/notification-service/test/mailpit.ts`).
+      mailpit:
+        image: axllent/mailpit:v1.22@sha256:f7f7c31de4de59540ad6515a0ca057a77525bca2069b6e747d873ca66c10fe08
+        ports:
+          - 1025:1025
+          - 8025:8025
+        options: >-
+          --health-cmd "/mailpit readyz"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -1515,6 +1531,10 @@ jobs:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
+          REQUIRE_MAILPIT: '1'
+          MAILPIT_API_URL: http://localhost:8025
+          NOTIFICATION_SMTP_HOST: localhost
+          NOTIFICATION_SMTP_PORT: '1025'
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
@@ -2251,6 +2271,22 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      # notification-service's SMTP suites (`email-delivery`, `mail-channel`)
+      # read the messages back through Mailpit's HTTP API. Same image and
+      # digest as `docker-compose.yml`. The steps that run them set
+      # REQUIRE_MAILPIT=1, so an unreachable Mailpit fails the suite instead of
+      # skipping it (`services/notification-service/test/mailpit.ts`).
+      mailpit:
+        image: axllent/mailpit:v1.22@sha256:f7f7c31de4de59540ad6515a0ca057a77525bca2069b6e747d873ca66c10fe08
+        ports:
+          - 1025:1025
+          - 8025:8025
+        options: >-
+          --health-cmd "/mailpit readyz"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -2600,6 +2636,10 @@ jobs:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
+          REQUIRE_MAILPIT: '1'
+          MAILPIT_API_URL: http://localhost:8025
+          NOTIFICATION_SMTP_HOST: localhost
+          NOTIFICATION_SMTP_PORT: '1025'
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
 

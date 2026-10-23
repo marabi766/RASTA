@@ -1,5 +1,6 @@
 import { SmtpMailChannel } from '../src/channels/smtp.mail.channel';
 import type { MailMessage } from '../src/channels/mail.channel.port';
+import { MAILPIT_API, mailpitReachable, requireMailpitOrWarn } from './mailpit';
 
 /**
  * The SMTP adapter against a real server (ADR-054 § 6, `docs/24` Q-37).
@@ -19,14 +20,15 @@ import type { MailMessage } from '../src/channels/mail.channel.port';
  * suite asserts that too — if that flag were ever wrong, these tests would be
  * mailing strangers.
  *
- * ## Why it skips instead of failing
+ * ## Why it skips locally but fails in CI without Mailpit
  *
  * `docker-compose.yml` puts Mailpit behind the `tools`/`all` profiles, so
  * `pnpm infra:up` does not start it. A suite that failed without it would be
- * red on a correct default stack. It skips visibly, and says how to start it.
+ * red on a correct default stack: locally it skips visibly and says how to
+ * start it. CI sets `REQUIRE_MAILPIT=1`, which turns the skip into an error
+ * (`./mailpit.ts`).
  */
 
-const MAILPIT_API = process.env.MAILPIT_API_URL ?? 'http://localhost:8025';
 const SMTP_HOST = process.env.NOTIFICATION_SMTP_HOST ?? 'localhost';
 const SMTP_PORT = Number(process.env.NOTIFICATION_SMTP_PORT ?? 1025);
 
@@ -52,15 +54,6 @@ interface MailpitMessage {
   From: { Address: string; Name: string };
 }
 
-async function mailpitReachable(): Promise<boolean> {
-  try {
-    const response = await fetch(`${MAILPIT_API}/api/v1/messages?limit=1`);
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
 /** Every message Mailpit holds whose subject contains the marker. */
 async function findBySubject(marker: string): Promise<MailpitMessage[]> {
   const response = await fetch(
@@ -78,13 +71,7 @@ describe('the SMTP mail channel against a real server', () => {
 
   beforeAll(async () => {
     available = await mailpitReachable();
-    if (!available) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `Mailpit is not reachable at ${MAILPIT_API}; skipping. Start it with ` +
-          '`docker compose --profile tools up -d mailpit`.',
-      );
-    }
+    requireMailpitOrWarn(available);
   }, 30_000);
 
   afterAll(async () => {

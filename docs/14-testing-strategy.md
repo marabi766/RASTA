@@ -959,6 +959,8 @@ Broker و — فقط جایی که Suiteهایش می‌خوانند — MinIO،
 test:ci-integration-split` (در Job کیفیت) رد می‌کند اگر Job ‏`integration-*`ی بیرون از آن بماند، گامی از کار قدیم در هیچ
 Jobی یا در دو Job اجرا شود، یا گامی بدون زیرساختی که می‌خواند اجرا شود.
 
+**Mailpit برای Suiteهای SMTP اعلان (از 2026-10-23).** `email-delivery.int-spec.ts` و `mail-channel.int-spec.ts` (notification-service) پیام را از API خود Mailpit می‌خوانند. `integration-suites` و `integration-coverage` آن را به‌صورت Service container با همان ایمیج و Digest فایل compose بالا می‌آورند (پورت‌های ۱۰۲۵ و ۸۰۲۵، Health check با `/mailpit readyz`) و گام‌های «Integration tests» و «Notification coverage gate» `REQUIRE_MAILPIT=1` دارند: در CI نبودن Mailpit در `beforeAll` **خطا** می‌دهد (`test/mailpit.ts`)، نه Skip؛ محلی و بدون این متغیر همان Skip + هشدار می‌ماند (`docker compose --profile tools up -d mailpit`). `test:ci-integration-split` گام بدون `REQUIRE_MAILPIT` یا بدون Service را رد می‌کند.
+
 **Pull ایمیج در CI و خطای گذرای Registry (از 2026-10-15).** `docker run` در گام «Start Keycloak with the platform realm»
 با کد ۱۲۵ شکست خورد چون quay.io برای Manifest پاسخ `502 Bad Gateway` داد (#279)؛ گام Retry نداشت. اکنون پیش از گام‌هایی
 که کانتینر بالا می‌آورند، یک گام «Pre-pull …» ‏`scripts/ci-pull-image.sh <image@sha256:…> …` را اجرا می‌کند و گام اصلی

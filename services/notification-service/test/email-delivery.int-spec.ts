@@ -15,6 +15,7 @@ import { seedEmailTemplates } from '../src/channels/template.seeder';
 import { templateReader } from '../src/channels/template.reader';
 import { EventPublisher } from '../src/events/publisher';
 import type { NotificationEnv } from '../src/config/env';
+import { MAILPIT_API, mailpitReachable, requireMailpitOrWarn } from './mailpit';
 
 /**
  * NTF-004 end to end: an event becomes a message a mail server accepted, and
@@ -28,14 +29,14 @@ import type { NotificationEnv } from '../src/config/env';
  * subject that arrived mangled, a recipient nobody asked for — and none of
  * them is visible to a test that stubs the transport.
  *
- * ## Why it skips rather than fails without Mailpit
+ * ## Why it skips locally but fails in CI without Mailpit
  *
  * `docker-compose.yml` puts Mailpit behind the `tools`/`all` profiles, so
  * `pnpm infra:up` does not start it. A suite that failed without it would be
- * red on a correct default stack.
+ * red on a correct default stack. CI provisions Mailpit and sets
+ * `REQUIRE_MAILPIT=1`, which turns the skip into an error (`./mailpit.ts`).
  */
 
-const MAILPIT_API = process.env.MAILPIT_API_URL ?? 'http://localhost:8025';
 const SMTP_HOST = process.env.NOTIFICATION_SMTP_HOST ?? 'localhost';
 const SMTP_PORT = Number(process.env.NOTIFICATION_SMTP_PORT ?? 1025);
 
@@ -45,14 +46,6 @@ interface MailpitSummary {
   To: { Address: string }[];
   Bcc: { Address: string }[];
   From: { Address: string };
-}
-
-async function mailpitReachable(): Promise<boolean> {
-  try {
-    return (await fetch(`${MAILPIT_API}/api/v1/messages?limit=1`)).ok;
-  } catch {
-    return false;
-  }
 }
 
 async function findMessage(to: string): Promise<MailpitSummary | undefined> {
@@ -115,12 +108,7 @@ describe('an email that actually leaves the platform', () => {
     // the same call `AppModule.onModuleInit` makes, for the same reason.
     await seedEmailTemplates(w.prisma.client);
     available = await mailpitReachable();
-    if (!available) {
-      console.warn(
-        `Mailpit is not reachable at ${MAILPIT_API}; skipping. ` +
-          'Start it with: docker compose --profile tools up -d mailpit',
-      );
-    }
+    requireMailpitOrWarn(available);
   }, 120_000);
 
   afterAll(async () => {
@@ -128,14 +116,14 @@ describe('an email that actually leaves the platform', () => {
     await w.prisma.onModuleDestroy();
   }, 120_000);
 
-  function mailWorker(port = SMTP_PORT): MailWorker {
+  function mailWorker(port = SMTP_PORT, now?: () => Date): MailWorker {
     const publisher = new EventPublisher({ SERVICE_VERSION: '0.1.0' } as NotificationEnv);
     return new MailWorker(
       w.repository,
       channelAt(port),
       publisher,
       templateReader(w.prisma),
-      mailOptions,
+      now ? { ...mailOptions, now } : mailOptions,
       silent as never,
     );
   }
@@ -325,22 +313,26 @@ describe('an email that actually leaves the platform', () => {
     const address = `${user.toLowerCase()}@example.invalid`;
 
     await queueOne(org, { userId: user, email: address });
-    // A window covering the whole day, so the test does not depend on when it
-    // runs. Written directly, the way the API writes it.
+    // A window of 22:00-07:00 Tehran and a pinned clock inside it, so the test
+    // does not depend on when it runs (the end of a window is exclusive, so
+    // no stored window can cover every minute). Written directly, the way the
+    // API writes it.
     await runUnscoped('the test stores a quiet window the way the API does', () =>
       w.prisma.client.notificationQuietHours.create({
         data: {
           organizationId: org,
           userId: user,
-          startMinute: 0,
-          endMinute: 1439,
+          startMinute: 22 * 60,
+          endMinute: 7 * 60,
           timezone: 'Asia/Tehran',
           updatedBy: user,
         },
       }),
     );
 
-    await mailWorker().tick();
+    // 23:59 Tehran (UTC+3:30, no DST): the minute the old whole-day window missed.
+    const insideWindow = () => new Date('2026-10-23T20:29:30Z');
+    await mailWorker(SMTP_PORT, insideWindow).tick();
 
     const [delivery] = await deliveriesFor(org, 'EMAIL');
     // Deferred, not attempted: a night must not spend a rung of the retry
