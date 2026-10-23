@@ -4,6 +4,7 @@
 import {
   checkCreateStamp,
   createReplayWindowSeconds,
+  createStampDeadline,
   mintCreateStamp,
   mintCreateSubmission,
 } from './project-create-replay';
@@ -49,7 +50,7 @@ describe('the create replay window', () => {
   });
 
   it('is OK up to the end of the window and EXPIRED after it', () => {
-    const { id, replay } = mintCreateSubmission(SESSION, T0);
+    const { id, replay } = mintCreateSubmission(SESSION, T0, ENV);
     const end = T0 + (2 * 3600 - 600) * 1000;
     expect(checkCreateStamp(SESSION, replay, id, T0, ENV)).toBe('OK');
     expect(checkCreateStamp(SESSION, replay, id, end, ENV)).toBe('OK');
@@ -60,6 +61,20 @@ describe('the create replay window', () => {
     const { id, replay } = mintCreateSubmission(SESSION, T0);
     const shorter = { ...ENV, WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: 1 };
     expect(checkCreateStamp(SESSION, replay, id, T0 + 3000_000 + 1, shorter)).toBe('EXPIRED');
+  });
+
+  it('never extends the deadline when the settings are raised after issue', () => {
+    const issuedAt = { ...ENV, WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: 1 };
+    const { id, replay } = mintCreateSubmission(SESSION, T0, issuedAt);
+    // Both settings doubled to two hours: minute 65 is past the service's 60.
+    const raised = {
+      WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: 2,
+      WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: 600,
+    };
+    const issuedEnd = T0 + (3600 - 600) * 1000;
+    expect(checkCreateStamp(SESSION, replay, id, issuedEnd, raised)).toBe('OK');
+    expect(checkCreateStamp(SESSION, replay, id, T0 + 65 * 60_000, raised)).toBe('EXPIRED');
+    expect(createStampDeadline(SESSION, replay, id, T0)).toBe(issuedEnd);
   });
 
   it('is still EXPIRED, not forged, a day after the window', () => {

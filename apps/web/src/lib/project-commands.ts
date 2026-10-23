@@ -599,6 +599,16 @@ export const CREATE_EXPIRED_MESSAGE =
   'این فرم مدت زیادی باز مانده و دیگر فرستاده نمی‌شود، چون ممکن است فرستادن پیشین آن پروژه را ساخته باشد. ' +
   'نخست فهرست پروژه‌ها را بررسی کنید. اگر پروژه در فهرست نبود، صفحه را تازه کنید و دوباره ثبت کنید.';
 
+/** An unresolved create exists and this post carries other values than it did. */
+export const HELD_CHANGED_MESSAGE =
+  'درخواست پیشین این فرم هنوز روشن نشده است و با مقدارهای دیگری فرستاده می‌شد. نمی‌توان آن را با مقدارهای تازه فرستاد: ' +
+  'همان مقدارها را دوباره بفرستید، یا پس از بررسی فهرست کامل پروژه‌ها، با پذیرفتن خطر تکرار، درخواست تازه بفرستید.';
+
+/** An unresolved create exists and this post is a different request. */
+export const HELD_OTHER_MESSAGE =
+  'درخواست پیشینی هنوز روشن نشده است و درخواست دیگری فرستاده نشد. صفحه را تازه کنید؛ ' +
+  'نخست همان درخواست را بفرستید یا پس از بررسی فهرست کامل پروژه‌ها، با پذیرفتن خطر تکرار، درخواست تازه بفرستید.';
+
 /**
  * Whether a refusal status proves the command was not applied. Only a 4xx does:
  * the gateway or the service answered before doing anything. A 5xx may follow a

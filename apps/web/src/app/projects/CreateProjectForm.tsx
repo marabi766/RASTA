@@ -13,6 +13,8 @@ import {
   MAX_SCOPE_LENGTH,
   MAX_TITLE_LENGTH,
   CREATE_EXPIRED_MESSAGE,
+  HELD_CHANGED_MESSAGE,
+  HELD_OTHER_MESSAGE,
   PROJECT_FORBIDDEN_MESSAGE,
   projectFailureText,
   type ProjectField,
@@ -21,12 +23,7 @@ import {
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
 import { submitCreateProject } from './actions';
-import {
-  CREATE_INTENT_FIELD,
-  EDIT_AS_NEW_INTENT,
-  IDLE_CREATE_PROJECT_FORM,
-  type CreateProjectFormState,
-} from './form-state';
+import { IDLE_CREATE_PROJECT_FORM, type CreateProjectFormState } from './form-state';
 
 /**
  * The create form (ثبت پروژه). A plain `<form>` around a server action, so it
@@ -50,7 +47,7 @@ function valuesOf(state: CreateProjectFormState): ProjectFormValues {
   if (
     state.kind === 'INVALID' ||
     state.kind === 'IN_PROGRESS' ||
-    state.kind === 'EDITING' ||
+    state.kind === 'HELD' ||
     state.kind === 'EXPIRED'
   ) {
     return state.values;
@@ -78,7 +75,7 @@ export function CreateProjectForm({
   const values = valuesOf(state);
   const errors = state.kind === 'INVALID' ? state.fieldErrors : {};
   const current =
-    state.kind === 'INVALID' || state.kind === 'IN_PROGRESS' || state.kind === 'EDITING'
+    state.kind === 'INVALID' || state.kind === 'IN_PROGRESS'
       ? { id: state.submissionId, replay: state.replay }
       : submission;
   const expired = state.kind === 'EXPIRED';
@@ -87,7 +84,7 @@ export function CreateProjectForm({
   // changed body under the same id is refused as IDEMPOTENCY_KEY_REUSED rather
   // than answered with the first result. The controls are disabled — so they post
   // nothing — and the original values travel in hidden fields; changing them is
-  // "edit and send as new".
+  // "send as new" in the unresolved-request notice above, which asks first.
   const locked = state.kind === 'IN_PROGRESS';
 
   return (
@@ -177,17 +174,6 @@ export function CreateProjectForm({
         <Button type="submit" disabled={pending || waiting || expired}>
           {pending ? 'در حال ثبت…' : waiting ? 'کمی صبر کنید…' : 'ثبت پروژه'}
         </Button>
-        {locked && (
-          <Button
-            type="submit"
-            tone="secondary"
-            name={CREATE_INTENT_FIELD}
-            value={EDIT_AS_NEW_INTENT}
-            disabled={pending}
-          >
-            ویرایش و ارسال جدید
-          </Button>
-        )}
       </div>
     </form>
   );
@@ -233,11 +219,10 @@ function FormBanner({ state }: { state: CreateProjectFormState }) {
     return <Alert tone="warning">{CREATE_EXPIRED_MESSAGE}</Alert>;
   }
 
-  if (state.kind === 'EDITING') {
+  if (state.kind === 'HELD') {
     return (
-      <Alert tone="info">
-        این یک درخواست تازه است. درخواستی که پیش‌تر فرستادید ممکن است همچنان ثبت شود؛ پیش از ارسال،
-        فهرست پروژه‌ها را بررسی کنید.
+      <Alert tone="warning">
+        {state.reason === 'CHANGED_BODY' ? HELD_CHANGED_MESSAGE : HELD_OTHER_MESSAGE}
       </Alert>
     );
   }

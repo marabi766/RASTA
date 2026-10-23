@@ -16,12 +16,14 @@ import {
   type ProjectListQuery,
 } from '@/server/projects';
 import type { WebSession } from '@/server/session';
-import { mintCreateSubmission } from '@/server/project-create-replay';
+import { mintCreateSubmission, PROJECT_CREATE_UNRESOLVED } from '@/server/project-create-replay';
+import { readUnresolved } from '@/server/unresolved-request';
 import { mintSubmissionId } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ApprovalInbox } from './ApprovalInbox';
 import { CreateProjectForm } from './CreateProjectForm';
+import { UnresolvedCreateNotice } from './UnresolvedCreateNotice';
 import { ProjectsScreen } from './ProjectsScreen';
 import type { DecisionTokens } from './[id]/ProjectApprovals';
 
@@ -77,10 +79,12 @@ export default async function ProjectsPage({
     cursor: one(params.cursor),
   };
 
-  const [result, inbox] = await Promise.all([
+  const [result, inbox, unresolved] = await Promise.all([
     fetchProjects(session, query),
     fetchApprovalInbox(session),
+    readUnresolved(session, PROJECT_CREATE_UNRESOLVED),
   ]);
+  const now = Date.now();
   const notice = readFlash(session, one(params[FLASH_PARAM]), INBOX_FLASH_SUBJECT, PROJECT_NOTICES);
 
   return (
@@ -116,10 +120,25 @@ export default async function ProjectsPage({
           description="پروژه به صورت پیش‌نویس ساخته می‌شود؛ درخواست موافقت از صفحه خود پروژه است."
         >
           {canWriteProjects(tokenWriteRoles(session.accessToken), webServerEnv()) ? (
-            <CreateProjectForm
-              csrfToken={session.csrfToken}
-              submission={mintCreateSubmission(session)}
-            />
+            <>
+              {unresolved ? (
+                <UnresolvedCreateNotice
+                  request={unresolved}
+                  csrfToken={session.csrfToken}
+                  now={now}
+                />
+              ) : null}
+              <CreateProjectForm
+                csrfToken={session.csrfToken}
+                // An unresolved create keeps its key and its signed deadline: the
+                // form is that request, never a fresh one.
+                submission={
+                  unresolved?.ref
+                    ? { id: unresolved.key, replay: unresolved.ref }
+                    : mintCreateSubmission(session)
+                }
+              />
+            </>
           ) : (
             <EmptyState
               title="ثبت پروژه برای نقش شما در دسترس نیست"

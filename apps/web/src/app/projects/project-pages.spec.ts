@@ -31,6 +31,15 @@ jest.mock('@/server/current-session', () => ({
   currentSession: async () => mockSession.current,
   missingSessionReason: async () => 'NO_SESSION',
 }));
+const jar = new Map<string, string>();
+jest.mock('next/headers', () => ({
+  cookies: async () => ({
+    get: (name: string) => (jar.has(name) ? { name, value: jar.get(name)! } : undefined),
+    getAll: () => [...jar].map(([name, value]) => ({ name, value })),
+    set: (name: string, value: string) => void jar.set(name, value),
+    delete: (name: string) => void jar.delete(name),
+  }),
+}));
 jest.mock('next/navigation', () => ({
   redirect: (url: string) => {
     throw new Error(`NEXT_REDIRECT:${url}`);
@@ -70,6 +79,12 @@ const { CreateProjectForm } =
 const { openProjectBaseline } =
   require('@/server/project-commands') as typeof import('@/server/project-commands');
 const { mintFlash } = require('@/server/flash') as typeof import('@/server/flash');
+const { rememberUnresolved } =
+  require('@/server/unresolved-request') as typeof import('@/server/unresolved-request');
+const { PROJECT_CREATE_UNRESOLVED, mintCreateSubmission } =
+  require('@/server/project-create-replay') as typeof import('@/server/project-create-replay');
+const { UnresolvedCreateNotice } =
+  require('./UnresolvedCreateNotice') as typeof import('./UnresolvedCreateNotice');
 /* eslint-enable @typescript-eslint/no-require-imports */
 
 const jwt = (claims: unknown): string =>
@@ -388,7 +403,11 @@ describe('/projects/[id]', () => {
 });
 
 describe('/projects', () => {
-  async function list(options: { inbox?: unknown; flash?: string } = {}) {
+  beforeEach(() => jar.clear());
+
+  async function list(
+    options: { inbox?: unknown; flash?: string; search?: Record<string, string | undefined> } = {},
+  ) {
     mockAnswers['fetchProjects'] = {
       kind: 'OK',
       data: { items: [], nextCursor: null, hasMore: false },
@@ -398,7 +417,9 @@ describe('/projects', () => {
       data: { items: [], nextCursor: null, hasMore: false },
     };
     return ListPage({
-      searchParams: Promise.resolve(options.flash ? { flash: options.flash } : {}),
+      searchParams: Promise.resolve(
+        options.flash ? { ...options.search, flash: options.flash } : (options.search ?? {}),
+      ),
     });
   }
 
@@ -430,6 +451,52 @@ describe('/projects', () => {
     mockSession.current = signedInWith(roles, organization);
     const tree = await list();
     expect(ofType(tree, CreateProjectForm)).toHaveLength(0);
+  });
+
+  describe('an unresolved create', () => {
+    const remember = async (session = signedInWith(['ORGANIZATION_ADMIN'])) => {
+      const sent = mintCreateSubmission(session);
+      await rememberUnresolved(session, PROJECT_CREATE_UNRESOLVED, {
+        key: sent.id,
+        digest: 'digest',
+        deadline: Date.now() + 60_000,
+        ref: sent.replay,
+      });
+      return sent;
+    };
+
+    it('keeps the warning and the OLD key on a reload with a filter that hides the new draft', async () => {
+      const sent = await remember();
+      for (const search of [{}, { status: 'APPROVED' }] as Record<string, string>[]) {
+        const tree = await list({ search });
+        expect(ofType(tree, UnresolvedCreateNotice)).toHaveLength(1);
+        const form = propsOf<{ submission: { id: string; replay: string } }>(
+          ofType(tree, CreateProjectForm)[0],
+        );
+        expect(form.submission).toEqual(sent);
+      }
+    });
+
+    it('is not shown to another person, another organization, or a later login', async () => {
+      await remember();
+      const base = signedInWith(['ORGANIZATION_ADMIN']);
+      for (const other of [
+        { ...base, subject: 'user-2' },
+        { ...signedInWith(['ORGANIZATION_ADMIN'], 'ORG-2') },
+        { ...base, csrfToken: 'a-later-login' },
+      ]) {
+        mockSession.current = other;
+        const tree = await list();
+        expect(ofType(tree, UnresolvedCreateNotice)).toHaveLength(0);
+        expect(
+          propsOf<{ submission: { id: string } }>(ofType(tree, CreateProjectForm)[0]).submission.id,
+        ).toMatch(/^sub_/);
+      }
+    });
+
+    it('draws no notice when nothing is unresolved', async () => {
+      expect(ofType(await list(), UnresolvedCreateNotice)).toHaveLength(0);
+    });
   });
 
   it('gives the inbox a decision for each step the person is the authority of, and the list its own read', async () => {

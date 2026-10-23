@@ -3,12 +3,17 @@
  */
 import { REPLAY_FIELD } from '@/lib/form-fields';
 import { CSRF_FIELD } from '@/server/csrf';
-import { mintCreateStamp } from '@/server/project-create-replay';
+import { mintCreateStamp, PROJECT_CREATE_UNRESOLVED } from '@/server/project-create-replay';
+import { readUnresolved } from '@/server/unresolved-request';
 import { readFlash } from '@/server/flash';
 import { SUBMISSION_FIELD, isBoundSubmissionId, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
-import { CREATE_INTENT_FIELD, EDIT_AS_NEW_INTENT, IDLE_CREATE_PROJECT_FORM } from './form-state';
+import {
+  CONFIRM_DUPLICATE_FIELD,
+  CONFIRM_DUPLICATE_VALUE,
+  IDLE_CREATE_PROJECT_FORM,
+} from './form-state';
 
 /**
  * The create form's write path: the order is the assertion (session, CSRF,
@@ -26,6 +31,16 @@ jest.mock('@/server/current-session', () => ({
   currentSession: () => currentSession(),
   missingSessionReason: async () => 'NO_SESSION',
 }));
+// A cookie jar the action writes and the next request reads, as a browser would.
+const jar = new Map<string, string>();
+jest.mock('next/headers', () => ({
+  cookies: async () => ({
+    get: (name: string) => (jar.has(name) ? { name, value: jar.get(name)! } : undefined),
+    getAll: () => [...jar].map(([name, value]) => ({ name, value })),
+    set: (name: string, value: string) => void jar.set(name, value),
+    delete: (name: string) => void jar.delete(name),
+  }),
+}));
 jest.mock('next/navigation', () => ({ redirect: (url: string) => redirect(url) }));
 jest.mock('@/server/project-commands', () => {
   const actual = jest.requireActual('@/server/project-commands');
@@ -40,8 +55,9 @@ Object.assign(process.env, {
   WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
 });
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { submitCreateProject } = require('./actions') as typeof import('./actions');
+const { releaseUnresolvedCreate, submitCreateProject } =
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  require('./actions') as typeof import('./actions');
 
 const SESSION = {
   subject: 'user-1',
@@ -98,6 +114,7 @@ beforeEach(() => {
     correlationId: 'corr-sample',
   });
   redirect.mockClear();
+  jar.clear();
 });
 
 describe('what is refused before anything is sent', () => {
@@ -231,17 +248,6 @@ describe('what is sent', () => {
     await submit(formData({ ...VALID, estimatedCost: '' })).catch(() => undefined);
     expect(createProject.mock.calls[0]![1]).not.toHaveProperty('estimatedCostMinor');
   });
-
-  it('sends nothing, and mints a new id, when the person asks to edit and send as new', async () => {
-    const form = formData();
-    form.set(CREATE_INTENT_FIELD, EDIT_AS_NEW_INTENT);
-    const state = (await submit(form)) as { kind: string; submissionId: string; values: unknown };
-    expect(state.kind).toBe('EDITING');
-    expect(state.submissionId).not.toBe(form.get(SUBMISSION_FIELD));
-    expect(isBoundSubmissionId(state.submissionId, SESSION)).toBe(true);
-    expect(state.values).toMatchObject({ title: 'بازسازی پل' });
-    expect(createProject).not.toHaveBeenCalled();
-  });
 });
 
 describe('a form left open past the service’s idempotency retention', () => {
@@ -278,19 +284,9 @@ describe('a form left open past the service’s idempotency retention', () => {
     expect(createProject).not.toHaveBeenCalled();
   });
 
-  it('carries its stamp on to a form shown again, and mints a fresh one for edit-and-send-as-new', async () => {
+  it('carries its stamp on to a form shown again', async () => {
     const invalid = (await submit(formData({ ...VALID, title: 'ا' }))) as { replay: string };
     expect(invalid.replay).toEqual(expect.stringMatching(/\./));
-
-    const form = formData(VALID, { replay: Date.now() - 51 * MINUTE });
-    form.set(CREATE_INTENT_FIELD, EDIT_AS_NEW_INTENT);
-    const editing = (await submit(form)) as { kind: string; submissionId: string; replay: string };
-    expect(editing.kind).toBe('EDITING');
-    // The fresh stamp is good for the fresh id: sending it is not expired.
-    await submit(
-      formData(VALID, { submission: editing.submissionId, replay: editing.replay }),
-    ).catch(() => undefined);
-    expect(createProject).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -367,5 +363,139 @@ describe('what comes back', () => {
     });
     await submit(form).catch(() => undefined);
     expect(createProject.mock.calls[1]![2]).toBe(form.get(SUBMISSION_FIELD));
+  });
+});
+
+describe('an unresolved create outlives the form that sent it', () => {
+  const unconfirmed = { kind: 'UNKNOWN_OUTCOME', correlationId: 'lost' };
+  const scope = PROJECT_CREATE_UNRESOLVED;
+
+  async function sendAndLose(fields = VALID) {
+    createProject.mockResolvedValue(unconfirmed);
+    const form = formData(fields);
+    expect(await submit(form)).toMatchObject({ kind: 'UNCONFIRMED' });
+    return form;
+  }
+
+  it.each([
+    ['UNKNOWN_OUTCOME', { kind: 'UNKNOWN_OUTCOME', correlationId: 'c' }],
+    ['a 5xx', { kind: 'UNAVAILABLE', status: 502, correlationId: 'c' }],
+    ['IN_PROGRESS', { kind: 'IN_PROGRESS', retryAfterSeconds: 1, correlationId: 'c' }],
+  ])('is remembered after %s: key, body digest and the signed deadline', async (_name, result) => {
+    createProject.mockResolvedValue(result);
+    const form = formData();
+    await submit(form);
+    const kept = await readUnresolved(SESSION, scope);
+    expect(kept).toMatchObject({ key: form.get(SUBMISSION_FIELD), ref: form.get(REPLAY_FIELD) });
+    expect(kept!.deadline).toBeGreaterThan(Date.now());
+    // The body itself is not in the cookie, only a digest of it.
+    expect(JSON.stringify([...jar.values()])).not.toContain('بازسازی');
+  });
+
+  it.each([
+    ['a proven refusal', { kind: 'UNAVAILABLE', status: 429, correlationId: 'c' }],
+    ['a forbidden', { kind: 'FORBIDDEN', correlationId: 'c' }],
+  ])('is not made by %s', async (_name, result) => {
+    createProject.mockResolvedValue(result);
+    await submit(formData());
+    expect(await readUnresolved(SESSION, scope)).toBeNull();
+  });
+
+  it('keeps the old key after a reload: a form with a fresh key is held, nothing is sent', async () => {
+    const first = await sendAndLose();
+    createProject.mockClear();
+    // The reload drew a fresh form (new key) over the same values.
+    const again = await submit(formData());
+    expect(again).toMatchObject({ kind: 'HELD', reason: 'OTHER_REQUEST' });
+    expect(createProject).not.toHaveBeenCalled();
+    expect((await readUnresolved(SESSION, scope))!.key).toBe(first.get(SUBMISSION_FIELD));
+  });
+
+  it('resends the SAME request: same key, same body, and a created answer clears it', async () => {
+    const first = await sendAndLose();
+    createProject.mockResolvedValue({
+      kind: 'CREATED',
+      data: { id: PROJECT_ID },
+      correlationId: 'c',
+    });
+    await submit(first).catch(() => undefined);
+    expect(createProject.mock.calls[1]![2]).toBe(first.get(SUBMISSION_FIELD));
+    expect(createProject.mock.calls[1]![1]).toEqual(createProject.mock.calls[0]![1]);
+    expect(await readUnresolved(SESSION, scope)).toBeNull();
+  });
+
+  it('refuses other values under the remembered key', async () => {
+    const first = await sendAndLose();
+    createProject.mockClear();
+    first.set('title', 'عنوان دیگر');
+    expect(await submit(first)).toMatchObject({ kind: 'HELD', reason: 'CHANGED_BODY' });
+    expect(createProject).not.toHaveBeenCalled();
+  });
+
+  it('is not sent past its deadline, and stays remembered', async () => {
+    createProject.mockResolvedValue(unconfirmed);
+    // Drawn 40 minutes ago: ten minutes of the 50-minute window are left.
+    const form = formData(VALID, { replay: Date.now() - 40 * 60_000 });
+    await submit(form);
+    createProject.mockClear();
+    const real = Date.now();
+    jest.spyOn(Date, 'now').mockReturnValue(real + 15 * 60_000);
+    try {
+      expect(await submit(form)).toMatchObject({ kind: 'EXPIRED' });
+    } finally {
+      jest.restoreAllMocks();
+    }
+    expect(createProject).not.toHaveBeenCalled();
+    expect(await readUnresolved(SESSION, scope)).not.toBeNull();
+  });
+
+  describe('send as new', () => {
+    const release = (fields: Record<string, string>) => {
+      const form = new FormData();
+      form.set(CSRF_FIELD, SESSION.csrfToken);
+      for (const [name, value] of Object.entries(fields)) form.set(name, value);
+      return releaseUnresolvedCreate(form).catch((error: Error) => error.message);
+    };
+
+    it('does nothing without the confirmation that names the duplicate risk', async () => {
+      await sendAndLose();
+      expect(await release({})).toBe('NEXT_REDIRECT:/projects');
+      expect(await release({ [CONFIRM_DUPLICATE_FIELD]: 'no' })).toBe('NEXT_REDIRECT:/projects');
+      expect(await readUnresolved(SESSION, scope)).not.toBeNull();
+    });
+
+    it('does nothing without the CSRF token', async () => {
+      await sendAndLose();
+      const form = new FormData();
+      form.set(CONFIRM_DUPLICATE_FIELD, CONFIRM_DUPLICATE_VALUE);
+      await releaseUnresolvedCreate(form).catch(() => undefined);
+      expect(await readUnresolved(SESSION, scope)).not.toBeNull();
+    });
+
+    it('with the confirmation forgets it, and a fresh key is then sent', async () => {
+      await sendAndLose();
+      await release({ [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE });
+      expect(await readUnresolved(SESSION, scope)).toBeNull();
+      createProject.mockClear();
+      createProject.mockResolvedValue({
+        kind: 'CREATED',
+        data: { id: PROJECT_ID },
+        correlationId: 'c',
+      });
+      await submit(formData()).catch(() => undefined);
+      expect(createProject).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('who sees it', () => {
+    it.each([
+      ['another person', { ...SESSION, subject: 'user-2' }],
+      ['the same person after a new login', { ...SESSION, csrfToken: 'a-later-login' }],
+      ['the same person acting for another organization', { ...SESSION, organizationId: 'ORG-2' }],
+    ])('is not seen by %s', async (_name, other) => {
+      await sendAndLose();
+      expect(await readUnresolved(other, scope)).toBeNull();
+      expect(await readUnresolved(SESSION, scope)).not.toBeNull();
+    });
   });
 });

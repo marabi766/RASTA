@@ -47,23 +47,23 @@ export type CreateProjectFormState =
    */
   | { readonly kind: 'EXPIRED'; readonly values: ProjectFormValues }
   /**
-   * The person chose to change what they sent while it was still in flight: their
-   * values again, under a **new** bound submission id. An edited form is a new
-   * request — never a changed body under the first one's id, which the service
-   * refuses as IDEMPOTENCY_KEY_REUSED.
+   * An earlier request of this form is unresolved (`server/unresolved-request.ts`)
+   * and this post is not exactly that request: another key (`OTHER_REQUEST`) or
+   * other values under the same key (`CHANGED_BODY`). Nothing was sent. Only
+   * "send as new", with its confirmation, replaces the unresolved request.
    */
   | {
-      readonly kind: 'EDITING';
-      readonly submissionId: string;
-      readonly replay: string;
+      readonly kind: 'HELD';
+      readonly reason: 'OTHER_REQUEST' | 'CHANGED_BODY';
       readonly values: ProjectFormValues;
     };
 
 export const IDLE_CREATE_PROJECT_FORM: CreateProjectFormState = { kind: 'IDLE' };
 
 /**
- * The submit button that asks for a new submission id instead of sending —
- * "edit and send as new" while a submission is in flight.
+ * The checkbox that must be ticked to let go of an unresolved create: the person
+ * checked the full project list and accepts that creating it again may leave two
+ * projects.
  */
-export const CREATE_INTENT_FIELD = 'intent';
-export const EDIT_AS_NEW_INTENT = 'edit-as-new';
+export const CONFIRM_DUPLICATE_FIELD = 'confirmDuplicate';
+export const CONFIRM_DUPLICATE_VALUE = 'yes';

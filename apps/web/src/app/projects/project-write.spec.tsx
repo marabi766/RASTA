@@ -453,35 +453,14 @@ describe('the create form while a request is in flight', () => {
     }
   });
 
-  it('offers “edit and send as new”, which takes a new id and unlocks the fields', async () => {
-    act_.mockResolvedValueOnce({
-      kind: 'IN_PROGRESS',
-      submissionId: SUBMISSION,
-      replay: 'replay-token',
-      values,
-      retryAfterSeconds: 60,
-      correlationId: 'corr-wait',
-    });
-    act_.mockResolvedValueOnce({
-      kind: 'EDITING',
-      submissionId: 'sub_CCCCCCCCCCCCCCCCCCCC',
-      replay: 'fresh-replay-token',
-      values,
-    });
+  it('says nothing was sent when an unresolved earlier request holds the form', async () => {
+    act_.mockResolvedValueOnce({ kind: 'HELD', reason: 'OTHER_REQUEST', values });
     const { container } = render(
       <CreateProjectForm csrfToken={CSRF} submission={CREATE_SUBMISSION} />,
     );
     await send(container);
-    await screen.findByRole('status');
-    const edit = screen.getByRole('button', { name: 'ویرایش و ارسال جدید' });
-    await act(async () => {
-      fireEvent.click(edit);
-    });
-    expect(await screen.findByText(/این یک درخواست تازه است/)).toBeInTheDocument();
-    expect(field(container, SUBMISSION_FIELD)).toHaveValue('sub_CCCCCCCCCCCCCCCCCCCC');
-    expect(field(container, REPLAY_FIELD)).toHaveValue('fresh-replay-token');
-    const title = container.querySelector('input[name="title"]:not([type="hidden"])');
-    expect(title).not.toBeDisabled();
+    expect(await screen.findByText(/هنوز روشن نشده است/)).toBeInTheDocument();
+    expect(container.querySelector('input[name="title"]')).toHaveValue('بازسازی پل');
     expect(await axe(container)).toHaveNoViolations();
   });
 });
