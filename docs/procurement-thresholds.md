@@ -45,10 +45,16 @@ on the approval round and shown in approval detail and the web authority screen 
 Retries and subsequent reads retain that round's snapshot. No estimate or threshold amounts are added
 to approval detail.
 
-Execution reads the effective policy again. If the outcome differs from what the approver saw, the
-persisted tender and audited `TENDER_PUBLISHED` metadata are the **execution** result and policy id;
-the approval round keeps its original snapshot. A newly rejecting execution is refused and audited,
-leaving the tender DRAFT and the approval unused. A policy update does not by itself reopen the round.
+Execution reads the effective policy again. The round covers publication only when its tender version,
+threshold warning and threshold policy id match the current execution binding (omitted fields compare
+as null). A warning or policy-id change ends an approved round as stale and returns 409
+`APPROVAL_STALE`; the next attempt opens a new round with the current snapshot. A pending round with
+a changed snapshot is ended and replaced immediately by a new 202 round. This applies in both
+directions, including WARN to PASS, and when a table is first configured after approval. Nothing is
+published until the matching round is approved. The ended round retains its immutable snapshot; a
+replay of its original idempotency key still returns that stored response. A newly rejecting execution
+is refused and audited before resolving the gate, leaving the tender DRAFT and the approval unused.
+A policy update with the same warning and policy id does not reopen the round.
 
 Both amount and nature can change only in DRAFT. Publication checks their current locked values;
 changes invalidate existing approvals through the existing tender version checks. After publication,

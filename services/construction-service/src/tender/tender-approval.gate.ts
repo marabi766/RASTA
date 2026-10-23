@@ -241,7 +241,12 @@ export class TenderApprovalGate {
     if (request.tenderVersion !== version) return false;
     switch (binding.workflowKey) {
       case 'tender.publication':
-        return true;
+        return (
+          (request.procurementThresholdWarning ?? null) ===
+            (binding.procurementThresholdWarning ?? null) &&
+          (request.procurementThresholdPolicyId ?? null) ===
+            (binding.procurementThresholdPolicyId ?? null)
+        );
       case 'tender.award':
         return (
           request.bidId === binding.bidId &&

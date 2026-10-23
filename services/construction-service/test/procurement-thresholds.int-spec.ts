@@ -170,7 +170,7 @@ describe('procurement amount thresholds at publication', () => {
     ).toContainEqual(expect.objectContaining({ refusalCode: 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE' }));
   });
 
-  it('returns WARN in 202 and approval detail, retaining the original snapshot when execution becomes PASS', async () => {
+  it('ends WARN approval as stale when execution becomes PASS, retaining the original snapshot', async () => {
     const { organizationId, tender, version } = await draft('21', 'INQUIRY');
     const asked = await asAdmin(
       organizationId,
@@ -212,11 +212,29 @@ describe('procurement amount thresholds at publication', () => {
       'USR-task804-requester',
     );
     expect(retry).toEqual(asked);
+    await expect(
+      asAdmin(organizationId, () => w.publication.publish(tender.id, { expectedVersion: version })),
+    ).rejects.toMatchObject({ status: 409, message: expect.stringContaining('APPROVAL_STALE') });
+    await expectUnpublished(organizationId, tender.id, version, asked.request.id);
+    const next = await asAdmin(organizationId, () =>
+      w.publication.publish(tender.id, { expectedVersion: version }),
+    );
+    if (next.executed) throw new Error('expected new approval request');
+    expect(next.request.id).not.toBe(asked.request.id);
+    expect(next.request).not.toHaveProperty('procurementThresholdWarning');
+    expect(next.request.procurementThresholdPolicyId).toBe(changedPolicy.id);
+    expect(
+      (await asApprover(organizationId, () => w.approvals.get(asked.request.steps[0]!.approvalId)))
+        .request,
+    ).toMatchObject({
+      procurementThresholdWarning: 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE',
+      procurementThresholdPolicyId: policy.id,
+    });
+    await asAdmin(organizationId, () => grantRequest(w, next.request));
     const executed = await asAdmin(organizationId, () =>
       w.publication.publish(tender.id, { expectedVersion: version }),
     );
-    expect(executed.executed).toBe(true);
-    if (!executed.executed) throw new Error('expected publication');
+    if (!executed.executed) throw new Error('expected publication after new approval');
     expect(executed.result).not.toHaveProperty('procurementThresholdWarning');
     const row = await asAdmin(
       organizationId,
@@ -234,13 +252,101 @@ describe('procurement amount thresholds at publication', () => {
     expect(eventEnvelopeSchema.parse(event.payload).payload).not.toHaveProperty(
       'procurementThresholdWarning',
     );
-    expect(
-      (await asApprover(organizationId, () => w.approvals.get(asked.request.steps[0]!.approvalId)))
-        .request,
-    ).toMatchObject({
-      procurementThresholdWarning: 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE',
-      procurementThresholdPolicyId: policy.id,
+  });
+
+  async function expectUnpublished(
+    organizationId: string,
+    tenderId: string,
+    version: number,
+    staleRequestId: string,
+  ) {
+    expect(await asAdmin(organizationId, () => w.tenders.get(tenderId))).toMatchObject({
+      status: 'DRAFT',
+      version,
     });
+    expect(
+      await asAdmin(
+        organizationId,
+        async () =>
+          await w.prisma.client.tenderApprovalRequest.findFirstOrThrow({
+            where: { organizationId, id: staleRequestId },
+          }),
+      ),
+    ).toMatchObject({ endedReason: 'STALE', consumedAt: null });
+    expect(
+      (await outboxFor(w.prisma, organizationId)).filter(
+        (event) => event.eventName === 'TENDER_PUBLISHED',
+      ),
+    ).toHaveLength(0);
+    expect(
+      await asAdmin(
+        organizationId,
+        async () => await w.prisma.client.tenderKey.count({ where: { organizationId, tenderId } }),
+      ),
+    ).toBe(0);
+  }
+
+  const transitions = [
+    {
+      name: 'PASS to WARN under the same policy id',
+      before: {
+        ...policy,
+        value: { ...policy.value, INQUIRY: { ...range, maxAmountMinor: '30' } },
+      },
+      after: policy,
+      // Isolates warning equality even if a provider returns changed contents under the same id.
+    },
+    { name: 'WARN(A) to WARN(B)', before: policy, after: { ...policy, id: 'POL-task805-B' } },
+    { name: 'table configured after approval', before: null, after: policy },
+  ];
+
+  describe.each(transitions)('$name', ({ before, after }) => {
+    it.each(['APPROVED', 'PENDING'] as const)(
+      'invalidates a %s round without publishing and exposes the new snapshot',
+      async (status) => {
+        const { organizationId, tender, version } = await draft('21', 'INQUIRY');
+        w.thresholds.get = async () => before;
+        const asked = await asAdmin(organizationId, () =>
+          w.publication.publish(tender.id, { expectedVersion: version }),
+        );
+        if (asked.executed) throw new Error('expected approval request');
+        if (status === 'APPROVED') {
+          await asAdmin(organizationId, () => grantRequest(w, asked.request));
+        }
+        w.thresholds.get = async () => after;
+        if (status === 'APPROVED') {
+          await expect(
+            asAdmin(organizationId, () =>
+              w.publication.publish(tender.id, { expectedVersion: version }),
+            ),
+          ).rejects.toMatchObject({
+            status: 409,
+            message: expect.stringContaining('APPROVAL_STALE'),
+          });
+        }
+        const next = await asAdmin(organizationId, () =>
+          w.publication.publish(tender.id, { expectedVersion: version }),
+        );
+        if (next.executed) throw new Error('expected replacement approval request');
+        expect(next.request).toMatchObject({
+          round: asked.request.round + 1,
+          status: 'PENDING',
+          procurementThresholdWarning: 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE',
+          procurementThresholdPolicyId: after.id,
+        });
+        expect(next.request.id).not.toBe(asked.request.id);
+        await expectUnpublished(organizationId, tender.id, version, asked.request.id);
+        const repeat = await asAdmin(organizationId, () =>
+          w.publication.publish(tender.id, { expectedVersion: version }),
+        );
+        expect(repeat).toEqual(next);
+        await asAdmin(organizationId, () => grantRequest(w, next.request));
+        const executed = await asAdmin(organizationId, () =>
+          w.publication.publish(tender.id, { expectedVersion: version }),
+        );
+        expect(executed.executed).toBe(true);
+      },
+    );
   });
 
   it('publishes WARN, returns and retains the warning, and audits the policy id and warning', async () => {
