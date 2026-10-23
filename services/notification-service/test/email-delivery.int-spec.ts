@@ -116,14 +116,14 @@ describe('an email that actually leaves the platform', () => {
     await w.prisma.onModuleDestroy();
   }, 120_000);
 
-  function mailWorker(port = SMTP_PORT): MailWorker {
+  function mailWorker(port = SMTP_PORT, now?: () => Date): MailWorker {
     const publisher = new EventPublisher({ SERVICE_VERSION: '0.1.0' } as NotificationEnv);
     return new MailWorker(
       w.repository,
       channelAt(port),
       publisher,
       templateReader(w.prisma),
-      mailOptions,
+      now ? { ...mailOptions, now } : mailOptions,
       silent as never,
     );
   }
@@ -313,22 +313,26 @@ describe('an email that actually leaves the platform', () => {
     const address = `${user.toLowerCase()}@example.invalid`;
 
     await queueOne(org, { userId: user, email: address });
-    // A window covering the whole day, so the test does not depend on when it
-    // runs. Written directly, the way the API writes it.
+    // A window of 22:00-07:00 Tehran and a pinned clock inside it, so the test
+    // does not depend on when it runs (the end of a window is exclusive, so
+    // no stored window can cover every minute). Written directly, the way the
+    // API writes it.
     await runUnscoped('the test stores a quiet window the way the API does', () =>
       w.prisma.client.notificationQuietHours.create({
         data: {
           organizationId: org,
           userId: user,
-          startMinute: 0,
-          endMinute: 1439,
+          startMinute: 22 * 60,
+          endMinute: 7 * 60,
           timezone: 'Asia/Tehran',
           updatedBy: user,
         },
       }),
     );
 
-    await mailWorker().tick();
+    // 23:59 Tehran (UTC+3:30, no DST): the minute the old whole-day window missed.
+    const insideWindow = () => new Date('2026-10-23T20:29:30Z');
+    await mailWorker(SMTP_PORT, insideWindow).tick();
 
     const [delivery] = await deliveriesFor(org, 'EMAIL');
     // Deferred, not attempted: a night must not spend a rung of the retry
