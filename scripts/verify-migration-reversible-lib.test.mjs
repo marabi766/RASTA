@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { parse as parseYaml } from 'yaml';
 
 import {
   EXPECTED,
@@ -30,6 +31,13 @@ import {
   verifierConnection,
   verifierRoleProblem,
 } from './verify-migration-reversible-lib.mjs';
+import {
+  AGGREGATE_JOB,
+  CHAIN_JOB,
+  GUARDS_JOB,
+  chainShards,
+  checkMigrationReversibility,
+} from './ci-migration-reversibility-lib.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -709,16 +717,129 @@ test('a kept extension is excused by exact name, and only as its exact post-depl
   );
 });
 
-test('every service with migrations is in EXPECTED and in test:migration', () => {
+// CI runs the whole-chain check as a matrix of shards (task 082), so a service
+// is verified there only if a shard lists it; `test:migration` is the same set
+// in one sequence, for a developer. Both are read here, from the files CI and a
+// developer run.
+function migrationGate() {
+  const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8'));
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
-  const verified = [
-    ...pkg.scripts['test:migration'].matchAll(/verify-migration-reversible\.mjs (\S+)/g),
-  ].map((m) => m[1]);
+  return { workflow, testMigration: pkg.scripts['test:migration'] };
+}
 
+const gateProblems = ({ workflow, testMigration }) =>
+  checkMigrationReversibility(workflow, { services: servicesWithMigrations(), testMigration });
+
+test('every service with migrations is in EXPECTED, in one CI shard and in test:migration', () => {
   for (const service of servicesWithMigrations()) {
     assert.ok(EXPECTED[service], `${service} has no EXPECTED entry`);
-    assert.ok(verified.includes(service), `${service} is not in the root test:migration chain`);
   }
+  assert.deepEqual(gateProblems(migrationGate()), []);
+  assert.deepEqual(
+    chainShards(migrationGate().workflow)
+      .flatMap((shard) => shard.services)
+      .sort(),
+    servicesWithMigrations(),
+  );
+});
+
+test('the migration gate refuses a shard list, job or aggregate that would verify less', () => {
+  const refuses = (mutate, pattern) => {
+    const gate = structuredClone(migrationGate());
+    mutate(gate, gate.workflow.jobs);
+    const problems = gateProblems(gate);
+    assert.ok(
+      problems.some((problem) => pattern.test(problem)),
+      `expected ${pattern}, got:\n${problems.join('\n')}`,
+    );
+  };
+  const include = (jobs) => jobs[CHAIN_JOB].strategy.matrix.include;
+  const step = (job, name) => job.steps.find((candidate) => candidate.name === name);
+  const dropped = (services, name) =>
+    services
+      .split(/\s+/)
+      .filter((service) => service !== name)
+      .join(' ');
+
+  // A service dropped from its shard, moved into a second one, or a shard emptied.
+  refuses((_, jobs) => {
+    const entry = include(jobs).find((candidate) => candidate.services.includes('economic'));
+    entry.services = dropped(entry.services, 'economic');
+  }, /^economic has migrations and is in no shard/);
+  refuses((_, jobs) => {
+    include(jobs)[1].services += ' ' + include(jobs)[0].services.split(' ')[0];
+  }, /is in shards/);
+  refuses((_, jobs) => {
+    include(jobs)[0].services = '';
+  }, /lists no services/);
+  refuses((_, jobs) => {
+    include(jobs)[0].services += ' payments';
+  }, /lists payments, which is not a service with migrations/);
+  refuses((_, jobs) => {
+    jobs[CHAIN_JOB].strategy.matrix.extra = ['a', 'b'];
+  }, /beside include/);
+  // The whole chain no longer run, or run so that a failure passes.
+  refuses((_, jobs) => {
+    step(jobs[CHAIN_JOB], 'Migration reversibility, whole chain').run += ' || true';
+  }, /whole chain" must run exactly/);
+  refuses((_, jobs) => {
+    step(jobs[CHAIN_JOB], 'Migration reversibility, whole chain')['continue-on-error'] = true;
+  }, /sets continue-on-error/);
+  refuses((_, jobs) => {
+    delete step(jobs[CHAIN_JOB], 'Migration reversibility, whole chain').env.MIGRATION_SERVICES;
+  }, /must set MIGRATION_SERVICES/);
+  // A by-name verifier or a database guard dropped, or run before what it reads.
+  refuses((_, jobs) => {
+    const verifiers = step(jobs[GUARDS_JOB], 'Migration reversibility, by-name verifiers');
+    verifiers.run = verifiers.run.replace(/.*--in-place\n/, '');
+  }, /by-name verifiers" must run exactly/);
+  refuses((_, jobs) => {
+    const steps = jobs[GUARDS_JOB].steps;
+    steps.splice(
+      steps.findIndex(
+        (candidate) => candidate.name === 'Demo seeds refuse outside development and test',
+      ),
+      1,
+    );
+  }, /does not run "Demo seeds refuse/);
+  refuses((_, jobs) => {
+    const steps = jobs[GUARDS_JOB].steps;
+    const at = steps.findIndex((candidate) => candidate.name === 'Apply migrations');
+    steps.push(...steps.splice(at, 1));
+  }, /out of order|must be its last step/);
+  refuses((_, jobs) => {
+    delete step(jobs[GUARDS_JOB], 'Migration verifier library, against PostgreSQL').env
+      .MIGRATION_LIB_TEST_DATABASE_REQUIRED;
+  }, /must set MIGRATION_LIB_TEST_DATABASE_REQUIRED/);
+  // The required check passing without every job here.
+  refuses((_, jobs) => {
+    jobs[AGGREGATE_JOB].needs = [CHAIN_JOB];
+  }, /must need exactly/);
+  refuses((_, jobs) => {
+    delete jobs[AGGREGATE_JOB].if;
+  }, /must run if/);
+  refuses((_, jobs) => {
+    jobs[AGGREGATE_JOB].name = 'Migration reversibility';
+  }, /must be named "Migration reversibility and database guards"/);
+  refuses((_, jobs) => {
+    jobs[AGGREGATE_JOB].steps[0].run = jobs[AGGREGATE_JOB].steps[0].run.replace(
+      'needs[name].result !== "success"',
+      'needs[name].result === "failure"',
+    );
+  }, /passes when migration-reversibility-chain skipped/);
+  // The developer's full run losing a service or a by-name verifier.
+  refuses((gate) => {
+    gate.testMigration = gate.testMigration.replace(
+      'node scripts/verify-migration-reversible.mjs analytics && ',
+      '',
+    );
+  }, /^analytics is not in the root test:migration chain/);
+  refuses((gate) => {
+    gate.testMigration = gate.testMigration.replace(
+      ' && node scripts/verify-audit-correction-command-migration.mjs',
+      '',
+    );
+  }, /test:migration must end with/);
 });
 
 // ---------------------------------------------------------------------------
