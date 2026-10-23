@@ -298,7 +298,8 @@ describe('POST /v1/contracts/{id}/sign', () => {
         const again = await sign(id, revoked, {}, key()).expect(status);
         expect(bare(again.body)).toEqual(bare(read.body));
         expect(again.body).not.toHaveProperty('id');
-        expect(JSON.stringify(again.body)).not.toMatch(/amount|DRAFT/i);
+        // The error's `path` echoes the contract's ULID: look at what the body says, not where it was asked.
+        expect(JSON.stringify(bare(again.body))).not.toMatch(/amount|DRAFT/i);
       }
 
       const signatures = await signaturesOf(id);

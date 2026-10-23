@@ -716,8 +716,21 @@ describe('return inspection and resolution', () => {
         ) as { returnShipmentVersion: number };
         expect(payload.returnShipmentVersion).toBe(index + 1);
       }
-      const serialised = JSON.stringify(rows.map((r) => r.payload));
-      expect(serialised).not.toMatch(/cracked|Road freight|WB-2001|refund|amount/i);
+      // By key and by value, ids left out: shipment ids (`RSH_<ulid>`) can contain any short word by chance.
+      const forbidden = /cracked|Road freight|WB-2001|refund|amount/i;
+      const walk = (key: string, value: unknown): void => {
+        if (Array.isArray(value)) return value.forEach((item) => walk(key, item));
+        if (value !== null && typeof value === 'object') {
+          for (const [k, v] of Object.entries(value)) {
+            expect(k).not.toMatch(forbidden);
+            walk(k, v);
+          }
+          return;
+        }
+        if (/^id$|(Id|Key|By|At)$/.test(key)) return;
+        if (typeof value === 'string') expect(value).not.toMatch(forbidden);
+      };
+      rows.forEach((r) => walk('', r.payload));
     });
 
     it('writes nothing when a command is refused', async () => {

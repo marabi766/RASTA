@@ -492,7 +492,17 @@ describe('levels and badges (COM-012 criterion 2)', () => {
       const text = JSON.stringify(response.body);
       expect(text).not.toContain('سطح سه');
       expect(text).not.toContain('SAMPLE_FIFTY');
-      expect(text).not.toMatch(/next|remaining|streak|progress|benefit/i);
+      // By field, not by text: the rule's id (`RCR_<ulid>`) can contain any short word by chance.
+      const keys: string[] = [];
+      JSON.stringify(response.body, (key, value: unknown) => {
+        if (key !== '') keys.push(key);
+        return value;
+      });
+      expect(Object.keys(response.body).sort()).toEqual(
+        ['asOf', 'badges', 'basis', 'level', 'organizationId', 'rule', 'status', 'userId'].sort(),
+      );
+      expect(Object.keys(response.body.level).sort()).toEqual(['name', 'rank', 'threshold']);
+      expect(keys.filter((key) => /next|remaining|streak|progress|benefit/i.test(key))).toEqual([]);
     });
 
     it('is the same person’s, but another organization’s, in B (tenant isolation)', async () => {

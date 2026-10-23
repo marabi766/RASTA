@@ -27,24 +27,69 @@ import {
   type Wiring,
 } from './helpers';
 
-/**
- * Every key and every leaf value of a payload. Content is looked for as a whole value, never as a
- * substring of the serialised text: the payload carries random ULIDs that contain any short run of
- * digits by chance (CI flake on 2026-10-22: "2027" inside a milestone id).
- */
-function keysAndValues(payload: unknown): { keys: string[]; values: unknown[] } {
-  const keys: string[] = [];
-  const values: unknown[] = [];
-  JSON.stringify(payload, (key, value: unknown) => {
-    if (key !== '') keys.push(key);
-    values.push(value);
-    return value;
-  });
-  return { keys, values };
+/** The user id a harness token (`person()`) carries: what the events must name as the actor. */
+const actorOf = (token: string): string =>
+  (
+    JSON.parse(Buffer.from(token.slice('test.'.length), 'base64url').toString('utf8')) as {
+      rastaUserId: string;
+    }
+  ).rastaUserId;
+
+/** A valid ISO instant that lies within the test window [from, to] (epoch ms). */
+function expectInstantWithin(value: unknown, from: number, to: number): void {
+  expect(typeof value).toBe('string');
+  const at = Date.parse(value as string);
+  expect(new Date(at).toISOString()).toBe(value);
+  expect(at).toBeGreaterThanOrEqual(from);
+  expect(at).toBeLessThanOrEqual(to);
 }
 
-/** The planned day as the API says it or as the database stores it; a timestamp of today is not it. */
-const dayForms = (day: string) => [day, `${day}T00:00:00.000Z`];
+/**
+ * Every key and every string or number leaf of a payload that is NOT a known identifier or an
+ * instant: ids (`id`, `...Id`, `...By`) are random ULIDs/UUIDs that contain any short run of digits
+ * or letters by chance (CI flake on 2026-10-22: "2027" inside a milestone id), and instants are
+ * pinned structurally by `expectInstantWithin`. Content is looked for in what is left.
+ */
+function contentOf(payload: unknown): { keys: string[]; leaves: (string | number)[] } {
+  const keys: string[] = [];
+  const leaves: (string | number)[] = [];
+  const walk = (key: string, value: unknown): void => {
+    if (Array.isArray(value)) return value.forEach((item) => walk(key, item));
+    if (value !== null && typeof value === 'object') {
+      for (const [k, v] of Object.entries(value)) {
+        keys.push(k);
+        walk(k, v);
+      }
+      return;
+    }
+    if (/^id$|Id$|By$|At$/.test(key)) return;
+    if (typeof value === 'string' || typeof value === 'number') leaves.push(value);
+  };
+  walk('', payload);
+  return { keys, leaves };
+}
+
+/** The milestone's title, planned day (in any date form) and share must appear nowhere in `events`. */
+function expectNoMilestoneContent(
+  events: unknown,
+  content: { titleFragment: string; day: string; shareBp: number },
+): void {
+  const { keys, leaves } = contentOf(events);
+  for (const key of ['title', 'plannedDate', 'plannedShareBp']) expect(keys).not.toContain(key);
+  const [year, month, day] = content.day.split('-');
+  const date = new RegExp(`${year}[-/.]?${month}[-/.]?${day}`);
+  const share = new RegExp(`(?<![0-9])${content.shareBp}(?![0-9])`);
+  const fragment = content.titleFragment.toLowerCase();
+  for (const leaf of leaves) {
+    if (typeof leaf === 'number') {
+      expect(leaf).not.toBe(content.shareBp);
+      continue;
+    }
+    expect(leaf.toLowerCase()).not.toContain(fragment);
+    expect(leaf).not.toMatch(date);
+    expect(leaf).not.toMatch(share);
+  }
+}
 
 /**
  * CON-003 PR 3 (ADR-068 § 9, Q-100): the planned milestones of a SIGNED contract, from the real
@@ -127,6 +172,7 @@ describe('milestones of a signed contract', () => {
   describe('POST /v1/contracts/{id}/milestones', () => {
     it('the employer plans one: a date, not an instant, with its event and no free text on the topic', async () => {
       const c = await signed();
+      const from = Date.now();
       const res = await plan(c.id, c.employerToken, body({ plannedShareBp: 2500 })).expect(201);
       expect(res.body).toMatchObject({
         contractId: c.id,
@@ -145,20 +191,21 @@ describe('milestones of a signed contract', () => {
 
       const events = await eventsOf(w.prisma, c.employer, 'CONTRACT_MILESTONE_PLANNED');
       expect(events).toHaveLength(1);
-      expect(events[0]!.payload).toEqual({
+      const { plannedAt, ...planned } = events[0]!.payload;
+      expect(planned).toEqual({
         contractId: c.id,
         milestoneId: res.body.id,
         organizationId: c.employer,
         contractorOrganizationId: c.contractor,
-        plannedBy: expect.any(String),
-        plannedAt: expect.any(String),
+        plannedBy: actorOf(c.employerToken),
       });
-      const { keys, values } = keysAndValues(events);
-      for (const key of ['title', 'plannedDate', 'plannedShareBp']) expect(keys).not.toContain(key);
-      expect(values.filter((v) => typeof v === 'string' && v.includes('Foundation'))).toEqual([]);
-      for (const form of dayForms('2026-12-01')) expect(values).not.toContain(form);
-      expect(values).not.toContain(2500);
-      expect(values).not.toContain('2500');
+      expectInstantWithin(plannedAt, from, Date.now());
+      expectInstantWithin(events[0]!.occurredAt, from, Date.now());
+      expectNoMilestoneContent(events, {
+        titleFragment: 'Foundation',
+        day: '2026-12-01',
+        shareBp: 2500,
+      });
     });
 
     it('the share is optional, and a day is exact whatever the time zone: the calendar edges and a leap day', async () => {
@@ -288,6 +335,7 @@ describe('milestones of a signed contract', () => {
   describe('PATCH /v1/contracts/{id}/milestones/{milestoneId}', () => {
     it('changes what is given and leaves the rest; the version moves; the event names no content', async () => {
       const c = await signed();
+      const from = Date.now();
       const made = (await plan(c.id, c.employerToken, body({ plannedShareBp: 1000 })).expect(201))
         .body;
 
@@ -315,13 +363,25 @@ describe('milestones of a signed contract', () => {
       expect(row!.plannedDate.toISOString()).toBe('2027-01-15T00:00:00.000Z');
 
       const events = await eventsOf(w.prisma, c.employer, 'CONTRACT_MILESTONE_CHANGED');
-      expect(events.map((e) => e.payload.version)).toEqual([2, 3]);
-      const { keys, values } = keysAndValues(events);
-      for (const key of ['title', 'plannedDate', 'plannedShareBp']) expect(keys).not.toContain(key);
-      expect(values.filter((v) => typeof v === 'string' && v.includes('Piles'))).toEqual([]);
-      for (const form of dayForms('2027-01-15')) expect(values).not.toContain(form);
-      expect(values).not.toContain(1000);
-      expect(values).not.toContain('1000');
+      expect(events).toHaveLength(2);
+      events.forEach((event, n) => {
+        const { changedAt, ...changed } = event.payload;
+        expect(changed).toEqual({
+          contractId: c.id,
+          milestoneId: made.id,
+          organizationId: c.employer,
+          contractorOrganizationId: c.contractor,
+          version: n + 2,
+          changedBy: actorOf(c.employerToken),
+        });
+        expectInstantWithin(changedAt, from, Date.now());
+        expectInstantWithin(event.occurredAt, from, Date.now());
+      });
+      expectNoMilestoneContent(events, {
+        titleFragment: 'Piles',
+        day: '2027-01-15',
+        shareBp: 1000,
+      });
     });
 
     it('a change that changes nothing answers the milestone as it is and writes nothing: no version, no event', async () => {

@@ -111,8 +111,14 @@ describe('idempotent replays: caller-bound, re-authorized; claims lapse (real da
       .set('idempotency-key', key)
       .send(body);
 
-  /** Nothing of the owner's offer in what a refused caller received. */
-  function expectNothingOf(text: string, draft: { id: string; price: string }) {
+  /**
+   * Nothing of the owner's offer in what a refused caller received. The error body echoes the
+   * request `path` (the offer's own ULID) and the request's `correlationId`: random ids that can
+   * contain `DRAFT` or the price's digits by chance, so the content is looked for without them.
+   */
+  function expectNothingOf(body: Record<string, unknown>, draft: { id: string; price: string }) {
+    const { path: _path, correlationId: _correlationId, ...answered } = body;
+    const text = JSON.stringify(answered);
     expect(text).not.toContain(ownerOrg);
     expect(text).not.toContain(draft.price);
     expect(text).not.toContain('DRAFT');
@@ -141,7 +147,7 @@ describe('idempotent replays: caller-bound, re-authorized; claims lapse (real da
         key,
       ).expect(409);
       expect(replayAttempt.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
-      expectNothingOf(JSON.stringify(replayAttempt.body), draft);
+      expectNothingOf(replayAttempt.body, draft);
 
       // What that supplier is told live, with a key of its own: the offer is
       // not theirs, and its existence is not confirmed either.
@@ -151,7 +157,7 @@ describe('idempotent replays: caller-bound, re-authorized; claims lapse (real da
         body,
         apiKey('rpl-f1-live'),
       ).expect(404);
-      expectNothingOf(JSON.stringify(live.body), draft);
+      expectNothingOf(live.body, draft);
     });
 
     it('the same user replays as before: the stored response, nothing written again', async () => {
@@ -187,7 +193,7 @@ describe('idempotent replays: caller-bound, re-authorized; claims lapse (real da
       expect(live.status).toBe(404);
       expect(replay.status).toBe(live.status);
       expect(replay.body.code).toBe(live.body.code);
-      expectNothingOf(JSON.stringify(replay.body), draft);
+      expectNothingOf(replay.body, draft);
     });
 
     it('a created offer is replayed to its creator only while the creator may still manage it', async () => {
