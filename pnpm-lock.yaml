@@ -1998,6 +1998,9 @@ importers:
       '@rasta/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      '@rasta/sealing':
+        specifier: workspace:*
+        version: link:../../packages/sealing
       helmet:
         specifier: ^8.0.0
         version: 8.3.0

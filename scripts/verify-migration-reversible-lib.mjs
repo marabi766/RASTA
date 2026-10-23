@@ -3159,6 +3159,10 @@ export const EXPECTED = {
       'idempotency_key',
       'outbox_message',
       'outbox_stream_sequence',
+      // COM-007 PR 6: an RFQ, its frozen criteria and its explicit invitations.
+      'rfq',
+      'rfq_criterion',
+      'rfq_invitation',
     ],
     types: [],
     triggers: [
@@ -3168,11 +3172,27 @@ export const EXPECTED = {
       'tg_demand_request_guard',
       'tg_demand_request_no_truncate',
       'tg_demand_request_totals_check',
+      // COM-007 PR 6: born PUBLISHED of a READY aggregation, its lifecycle and deadline, issued
+      // atomically with its aggregation's READY -> RFQ_ISSUED, its criteria and invitations frozen.
+      'tg_rfq_born',
+      'tg_rfq_guard',
+      'tg_rfq_no_truncate',
+      'tg_rfq_issue_check',
+      'tg_rfq_criterion_guard',
+      'tg_rfq_criterion_no_truncate',
+      'tg_rfq_criterion_count_check',
+      'tg_rfq_invitation_guard',
+      'tg_rfq_invitation_no_truncate',
+      'tg_rfq_invitation_count_check',
     ],
     functions: [
       'demand_aggregation_guard',
       'demand_request_guard',
       'demand_aggregation_totals_check',
+      'rfq_born_guard',
+      'rfq_guard',
+      'rfq_child_guard',
+      'rfq_issue_check',
     ],
     indexes: [
       'ux_demand_aggregation_org_id',
@@ -3185,9 +3205,22 @@ export const EXPECTED = {
       // COM-007 PR 2: the window sweeper's two queues.
       'ix_demand_aggregation_sweep_open',
       'ix_demand_aggregation_sweep_follow',
+      // COM-007 PR 6: one RFQ per aggregation, the RFQ close sweeper's queue, the supplier's reads.
+      'ux_rfq_aggregation',
+      'ux_rfq_org_id_aggregation',
+      'ix_rfq_close_due',
+      'ix_rfq_invitation_supplier',
     ],
     constraints: [
       'fk_demand_request_aggregation',
+      // COM-007 PR 6: an RFQ and its aggregation name each other; the buyer never invites itself.
+      'fk_rfq_aggregation',
+      'fk_demand_aggregation_rfq',
+      'ck_rfq_status',
+      'ck_rfq_closed',
+      'ck_rfq_cancelled',
+      'ck_rfq_invitation_not_buyer',
+      'ck_rfq_criterion_values',
       // COM-007 PR 2: demands still to follow an ended window, the sweeper's claim, a cancellation.
       'ck_demand_aggregation_follow',
       'ck_demand_aggregation_sweep_claim',

@@ -51,9 +51,19 @@ import { AggregationController, DemandController } from './demand/demand.control
 import { DatabaseClock } from './shared/clock';
 import { IdempotencyStore } from './shared/idempotency';
 import { HealthController, MetricsController } from './health/health.controller';
-import { ENV, LOGGER } from './tokens';
+import { ENV, LOGGER, RFQ_KEY_PROVIDER, SUPPLIER_STANDING } from './tokens';
+import { AggregationRfqController, RfqController } from './rfq/rfq.controller';
+import { RfqRepository } from './rfq/rfq.repository';
+import { RfqClose } from './rfq/rfq-close';
+import { RfqService } from './rfq/rfq.service';
+import { RfqCloseService } from './rfq/rfq-close.service';
+import { RfqCloseSweeper } from './rfq/rfq-close.sweeper';
+import { SupplierStandingClient } from './rfq/supplier-standing.client';
+import { EnvKekProvider } from './rfq/key-provider';
 import { loadProcurementEnv, SERVICE_NAME, type ProcurementEnv } from './config/env';
 import {
+  rfqCloseDue,
+  rfqCloseOldestDueAgeSeconds,
   windowDemandsToFollow,
   windowMaxExtensionCount,
   windowSweepDue,
@@ -62,7 +72,7 @@ import {
 } from './observability/metrics';
 
 /**
- * procurement-service wiring (COM-007 PRs 1 and 2, ADR-070).
+ * procurement-service wiring (COM-007 PRs 1 to 3 and 6, ADR-070).
  *
  * ## No consumer, no workflow — by decision
  *
@@ -71,13 +81,21 @@ import {
  * § 11: a window is a column and every decision reads the database clock after the lock) and no
  * consumer (nothing here listens to another service yet). A window whose end has passed is ended
  * on time by the leased, fenced `AggregationWindowSweeper` (plan PR 2) — or first by the next
- * demand for its product, in that demand's transaction, with the same transition. Nothing here
- * calls another service.
+ * demand for its product, in that demand's transaction, with the same transition.
+ *
+ * ## One call out: supplier-service, at an RFQ's issue (plan PR 6)
+ *
+ * Issuing an RFQ asks supplier-service for each invitee's standing now — an authoritative read
+ * before the issue's transaction, fail closed (ADR-070 § 7) — with a tenant-less internal token.
+ * An RFQ closes at its deadline by the leased, fenced `RfqCloseSweeper`, or by a person of the
+ * buyer after it: the same command.
  */
 @Module({
   controllers: [
     DemandController,
     AggregationController,
+    AggregationRfqController,
+    RfqController,
     AggregationSettingController,
     HealthController,
     MetricsController,
@@ -146,6 +164,33 @@ import {
         }),
     },
 
+    // ADR-070 § 3, plan PR 6: RFQs, their invitees' standing (supplier-service, fail closed) and
+    // their sealing keys (wrapped by PROCUREMENT_RFQ_KEKS; none configured, no RFQ is issued).
+    RfqRepository,
+    RfqClose,
+    RfqService,
+    RfqCloseService,
+    SupplierStandingClient,
+    { provide: SUPPLIER_STANDING, useExisting: SupplierStandingClient },
+    {
+      provide: RFQ_KEY_PROVIDER,
+      inject: [ENV],
+      useFactory: (env: ProcurementEnv) =>
+        new EnvKekProvider(env.PROCUREMENT_RFQ_KEKS, env.PROCUREMENT_RFQ_KEK_CURRENT),
+    },
+    {
+      provide: RfqCloseSweeper,
+      inject: [RfqRepository, RfqCloseService, ENV],
+      useFactory: (repository: RfqRepository, service: RfqCloseService, env: ProcurementEnv) =>
+        new RfqCloseSweeper(repository, service, {
+          intervalMs: env.PROCUREMENT_RFQ_CLOSE_SWEEP_INTERVAL_MS,
+          batchSize: env.PROCUREMENT_RFQ_CLOSE_SWEEP_BATCH_SIZE,
+          leaseSeconds: env.PROCUREMENT_RFQ_CLOSE_SWEEP_LEASE_SECONDS,
+          retryBackoffBaseSeconds: env.PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_BASE_SECONDS,
+          retryBackoffMaxSeconds: env.PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_MAX_SECONDS,
+        }),
+    },
+
     // Idempotent commands (docs/06 § 6.8): this service's own store for every command.
     {
       provide: IdempotencyStore,
@@ -156,7 +201,7 @@ import {
     {
       // The auth guard verifies a service's internal token too: no route accepts one today
       // (ProcurementAccess refuses a service caller), but a request bearing one is judged, not
-      // misread as anonymous.
+      // misread as anonymous. The same service mints the token supplier-service is asked with.
       provide: InternalTokenService,
       inject: [ENV],
       useFactory: (env: ProcurementEnv) =>
@@ -210,7 +255,7 @@ import {
         }),
     },
     {
-      // D-052: the relay, the purge and the window sweeper stop together in the destroy phase, by
+      // D-052: the relay, the purge and both sweepers stop together in the destroy phase, by
       // one deadline inside SHUTDOWN_TIMEOUT_MS — so no sweep writes an outbox row after the relay
       // drained; the publisher closes last, by the same deadline (D-052 phase 4b).
       provide: OutboxShutdown,
@@ -218,6 +263,7 @@ import {
         OutboxRelay,
         OutboxPurgeScheduler,
         AggregationWindowSweeper,
+        RfqCloseSweeper,
         KafkaEventPublisher,
         ENV,
       ],
@@ -225,13 +271,14 @@ import {
         relay: OutboxRelay,
         purge: OutboxPurgeScheduler,
         sweeper: AggregationWindowSweeper,
+        rfqSweeper: RfqCloseSweeper,
         publisher: KafkaEventPublisher,
         env: ProcurementEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
-          workers: [sweeper],
+          workers: [sweeper, rfqSweeper],
           publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
@@ -273,6 +320,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly idempotency: IdempotencyStore,
     private readonly sweeper: AggregationWindowSweeper,
     private readonly sweeps: WindowSweepRepository,
+    private readonly rfqSweeper: RfqCloseSweeper,
+    private readonly rfqs: RfqRepository,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -288,6 +337,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.prisma.assertRuntimeRole();
 
     this.sweeper.start();
+    this.rfqSweeper.start();
     this.relay.start();
     this.purge.start();
 
@@ -307,6 +357,10 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
         windowDemandsToFollow.set({ service: SERVICE_NAME }, backlog.demandsToFollow);
         windowSweepMaxAttempts.set({ service: SERVICE_NAME }, backlog.maxAttempts);
         windowMaxExtensionCount.set({ service: SERVICE_NAME }, backlog.maxExtensionCount);
+        // PUBLISHED RFQs past their deadline not yet closed (plan PR 6).
+        const rfqBacklog = await this.rfqs.closeBacklog();
+        rfqCloseDue.set({ service: SERVICE_NAME }, rfqBacklog.due);
+        rfqCloseOldestDueAgeSeconds.set({ service: SERVICE_NAME }, rfqBacklog.oldestDueAgeSeconds);
       } catch {
         // Upkeep must never take the service down. The relay's own logging covers a
         // persistent database problem.
@@ -327,7 +381,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
-    // The relay, the purge and the sweeper already stopped in OutboxShutdown's onModuleDestroy,
+    // The relay, the purge and the sweepers already stopped in OutboxShutdown's onModuleDestroy,
     // by one deadline; this joins that stop and returns at once.
     await this.outboxShutdown.stop();
   }

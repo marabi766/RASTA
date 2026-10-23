@@ -9,6 +9,8 @@ import {
 } from './events';
 
 const PRODUCT = 'PRD_01JABCDEFGHJKMNPQRSTVWXYZ0';
+const RFQ = 'RFQ_01JABCDEFGHJKMNPQRSTVWXYZ2';
+const AGGREGATION = 'AGG_01JABCDEFGHJKMNPQRSTVWXYZ3';
 const AT = '2026-10-16T10:00:00.000Z';
 
 const window = {
@@ -88,10 +90,51 @@ const PUBLISHED: Record<ProcurementEventName, Record<string, unknown>> = {
     recordedBy: 'USR_1',
     recordedAt: AT,
   },
+  RFQ_ISSUED: {
+    rfqId: RFQ,
+    organizationId: 'ORG_BUYER',
+    aggregationId: AGGREGATION,
+    rfqVersion: 1,
+    productId: PRODUCT,
+    totalQuantity: 12,
+    procurementNature: 'INQUIRY',
+    quotationClosingAt: '2026-10-30T10:00:00.000Z',
+    invitedSupplierOrganizationIds: ['ORG_01JABCDEFGHJKMNPQRSTVWXYZ1'],
+    criteriaCount: 1,
+    criteriaDigest: 'b'.repeat(64),
+    keyId: 'RFK_1',
+    issuedBy: 'USR_1',
+    issuedAt: AT,
+  },
+  RFQ_CLOSED: {
+    rfqId: RFQ,
+    organizationId: 'ORG_BUYER',
+    aggregationId: AGGREGATION,
+    rfqVersion: 2,
+    quotationClosingAt: '2026-10-30T10:00:00.000Z',
+    trigger: 'SWEEPER',
+    closedBy: null,
+    closedAt: '2026-10-30T10:00:01.000Z',
+    quotationCount: 0,
+  },
+  RFQ_CANCELLED: {
+    rfqId: RFQ,
+    organizationId: 'ORG_BUYER',
+    aggregationId: AGGREGATION,
+    rfqVersion: 2,
+    previousStatus: 'PUBLISHED',
+    reasonCode: 'BUYER_REQUEST',
+    cancelledBy: 'USR_1',
+    cancelledAt: AT,
+  },
 };
 
-describe('the procurement events (ADR-070 § 9, PRs 1 and 2)', () => {
-  it('are the demand’s two, the four of a window’s end and the cancellation, each with a schema and an aggregate', () => {
+/** What each event is keyed by: the aggregation, a setting's organization, an RFQ's id. */
+const KEY_OF = (name: ProcurementEventName): string =>
+  name === 'AGGREGATION_SETTING_CHANGED' ? 'ORG_BUYER' : name.startsWith('RFQ_') ? RFQ : 'AGG_1';
+
+describe('the procurement events (ADR-070 § 9, PRs 1 to 3 and 6)', () => {
+  it('are the demand’s two, the four of a window’s end, the cancellation, the setting and the RFQ’s three, each with a schema and an aggregate', () => {
     const names = [
       'DEMAND_SUBMITTED',
       'DEMAND_WITHDRAWN',
@@ -101,6 +144,9 @@ describe('the procurement events (ADR-070 § 9, PRs 1 and 2)', () => {
       'AGGREGATION_LAPSED',
       'AGGREGATION_CANCELLED',
       'AGGREGATION_SETTING_CHANGED',
+      'RFQ_ISSUED',
+      'RFQ_CLOSED',
+      'RFQ_CANCELLED',
     ];
     expect(Object.keys(PROCUREMENT_EVENTS)).toEqual(names);
     expect(Object.keys(PROCUREMENT_EVENT_SCHEMAS)).toEqual(names);
@@ -108,12 +154,10 @@ describe('the procurement events (ADR-070 § 9, PRs 1 and 2)', () => {
   });
 
   it.each(Object.keys(PUBLISHED) as ProcurementEventName[])(
-    '%s accepts its payload as published and is keyed by the aggregation — a setting by its organization',
+    '%s accepts its payload as published and is keyed by the aggregation — a setting by its organization, an RFQ’s by the RFQ',
     (name) => {
       const payload = validateProcurementPayload(name, PUBLISHED[name]);
-      expect(resolvePartitionKey(name, payload).key).toBe(
-        name === 'AGGREGATION_SETTING_CHANGED' ? 'ORG_BUYER' : 'AGG_1',
-      );
+      expect(resolvePartitionKey(name, payload).key).toBe(KEY_OF(name));
     },
   );
 
@@ -231,6 +275,31 @@ describe('routing', () => {
 
   it('refuses an event that names no aggregation to key it by', () => {
     expect(() => resolvePartitionKey('DEMAND_SUBMITTED', {})).toThrow(/no aggregationId/);
+  });
+
+  it('keys an RFQ’s events by the RFQ — with the aggregation it came from in the payload — and refuses one that names none (plan PR 6)', () => {
+    for (const name of ['RFQ_ISSUED', 'RFQ_CLOSED', 'RFQ_CANCELLED'] as const) {
+      expect(AGGREGATE_OF[name]).toBe('Rfq');
+      expect(() => resolvePartitionKey(name, { aggregationId: AGGREGATION })).toThrow(/no rfqId/);
+    }
+  });
+
+  it('an RFQ’s events carry no label, reason text or amount, and a close names its person only when a person closed it', () => {
+    for (const extra of [{ criteria: [] }, { cancelReason: 'over budget' }, { amountMinor: '1' }]) {
+      for (const name of ['RFQ_ISSUED', 'RFQ_CLOSED', 'RFQ_CANCELLED'] as const) {
+        expect(() => validateProcurementPayload(name, { ...PUBLISHED[name], ...extra })).toThrow();
+      }
+    }
+    expect(() =>
+      validateProcurementPayload('RFQ_CLOSED', { ...PUBLISHED.RFQ_CLOSED, closedBy: 'USR_1' }),
+    ).toThrow();
+    expect(
+      validateProcurementPayload('RFQ_CLOSED', {
+        ...PUBLISHED.RFQ_CLOSED,
+        trigger: 'MANUAL',
+        closedBy: 'USR_1',
+      }),
+    ).toMatchObject({ trigger: 'MANUAL' });
   });
 
   it('keys a setting version by its organization, and refuses one that names none (plan PR 3)', () => {

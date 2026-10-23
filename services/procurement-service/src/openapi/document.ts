@@ -20,6 +20,9 @@ import {
   submitDemandSchema,
   withdrawDemandSchema,
 } from '../demand/dto';
+import { AggregationRfqController, RfqController } from '../rfq/rfq.controller';
+import { RfqService } from '../rfq/rfq.service';
+import { cancelRfqSchema, issueRfqSchema, listRfqsQuerySchema, rfqViewSchema } from '../rfq/dto';
 import { IdempotencyStore } from '../shared/idempotency';
 import { REFUSAL_REASONS, type RefusalArea } from '../shared/refusal';
 
@@ -29,7 +32,7 @@ import { REFUSAL_REASONS, type RefusalArea } from '../shared/refusal';
  * `docs/api/procurement-service.openapi.json` is committed, so an API change shows in a PR's
  * diff and a client can be generated without running anything. It is the slice of the planned
  * contract (`docs/api/procurement-service.planned.openapi.json`, the operations of ADR-070 plan
- * PR 1) that exists. Three checks keep it honest, the arrangement construction-service made:
+ * PRs 1 to 3 and 6) that exists. Three checks keep it honest, the arrangement construction-service made:
  *
  *   - `document.spec.ts` regenerates it from the documentation module below and requires the
  *     committed bytes to match;
@@ -80,6 +83,11 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'POST /v1/aggregations/{id}/cancel': { status: '200', schema: aggregationViewSchema },
   'GET /v1/aggregation-settings': { status: '200', schema: aggregationSettingViewSchema },
   'POST /v1/aggregation-settings': { status: '201', schema: aggregationSettingViewSchema },
+  'POST /v1/aggregations/{id}/rfq': { status: '201', schema: rfqViewSchema },
+  'GET /v1/rfqs': { status: '200', schema: cursorPageOf(rfqViewSchema) },
+  'GET /v1/rfqs/{id}': { status: '200', schema: rfqViewSchema },
+  'POST /v1/rfqs/{id}/close': { status: '200', schema: rfqViewSchema },
+  'POST /v1/rfqs/{id}/cancel': { status: '200', schema: rfqViewSchema },
 };
 
 /** Every command takes a strict body. */
@@ -88,16 +96,33 @@ const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'POST /v1/demand-requests/{id}/withdraw': withdrawDemandSchema,
   'POST /v1/aggregations/{id}/cancel': cancelAggregationSchema,
   'POST /v1/aggregation-settings': recordAggregationSettingSchema,
+  'POST /v1/aggregations/{id}/rfq': issueRfqSchema,
+  'POST /v1/rfqs/{id}/cancel': cancelRfqSchema,
 };
 
-/** The commands that require an `Idempotency-Key` (docs/06 § 6.8): every one. */
-const IDEMPOTENT_COMMANDS: ReadonlySet<string> = new Set(Object.keys(REQUEST_BODIES));
+/**
+ * The commands that require an `Idempotency-Key` (docs/06 § 6.8): every one — those with a body,
+ * and the close of an RFQ, which has none (the RFQ in the path is all it names).
+ */
+const IDEMPOTENT_COMMANDS: ReadonlySet<string> = new Set([
+  ...Object.keys(REQUEST_BODIES),
+  'POST /v1/rfqs/{id}/close',
+]);
+
+/**
+ * The commands that ask another service before they write, fail closed (ADR-070 § 7): issuing an
+ * RFQ asks supplier-service for each invitee's standing (and needs a configured KEK).
+ */
+const UPSTREAM_COMMANDS: ReadonlySet<string> = new Set(['POST /v1/aggregations/{id}/rfq']);
 
 /** The area whose closed reasons a command's refusals carry in `details[].code` (docs/06 § 6.7). */
 const REFUSAL_AREA_OF: Record<string, RefusalArea> = {
   'POST /v1/demand-requests': 'submission',
   'POST /v1/demand-requests/{id}/withdraw': 'withdrawal',
   'POST /v1/aggregations/{id}/cancel': 'cancellation',
+  'POST /v1/aggregations/{id}/rfq': 'rfqIssue',
+  'POST /v1/rfqs/{id}/close': 'rfqClose',
+  'POST /v1/rfqs/{id}/cancel': 'rfqCancellation',
 };
 
 /** `Retry-After` on a command's in-flight 409: optional, only that 409 carries it. */
@@ -105,8 +130,8 @@ const RETRY_AFTER_HEADER = {
   required: false,
   description:
     'Sent only when this Idempotency-Key is still being processed, or the window of the product ' +
-    'changed meanwhile (CONFLICT): the seconds to wait before retrying with the same key. Absent ' +
-    'on every other 409.',
+    'changed meanwhile, or the end of the aggregation is still being recorded (CONFLICT): the ' +
+    'seconds to wait before retrying. Absent on every other 409.',
   schema: { type: 'integer', minimum: RETRY_AFTER_MIN_SECONDS, maximum: RETRY_AFTER_MAX_SECONDS },
 };
 
@@ -133,23 +158,27 @@ function refusalErrorSchema(area: RefusalArea, status: number): z.ZodTypeAny | u
 
 const REFUSAL_DETAILS_NOTE =
   ' When refused for a closed reason, `details` names it: one entry, `path` the area ' +
-  '(submission, withdrawal or cancellation) and `code` the reason, one of those listed here. ' +
+  '(submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the ' +
+  'reason, one of those listed here. ' +
   'Branch on `code` and ' +
   '`details[].code`, never on `message`.';
 
 const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/demand-requests': listDemandsQuerySchema,
   'GET /v1/aggregations': listAggregationsQuerySchema,
+  'GET /v1/rfqs': listRfqsQuerySchema,
 };
 
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
   400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
-  403: 'Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.',
-  404: 'Not found — also returned for a demand or aggregation of any other organization, so its existence is never disclosed.',
-  409: 'On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on cancel, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry).',
-  422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY).',
+  403: 'Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.',
+  404: 'Not found — also returned for a demand, aggregation or RFQ of any other organization, and for an RFQ that does not invite the caller’s organization (on an RFQ’s close and cancel, an invited supplier too), so its existence is never disclosed.',
+  409: 'On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.',
+  422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, a reason code not on PROCUREMENT_RFQ_CANCELLATION_CODES or an AWARDED or CANCELLED RFQ (CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE).',
   500: 'Unexpected server error.',
+  503: 'A service this command must ask first, fail closed, is unavailable, and nothing is written (UPSTREAM_UNAVAILABLE): supplier-service, for an invitee’s standing — unreachable, or answering anything but its contract — or no key-encryption key configured (PROCUREMENT_RFQ_KEKS) to wrap the RFQ’s sealing key.',
+  504: 'supplier-service did not answer an invitee’s standing within PROCUREMENT_SUPPLIER_REQUEST_TIMEOUT_MS (UPSTREAM_TIMEOUT); nothing is written.',
 };
 
 const DESCRIPTION =
@@ -162,12 +191,15 @@ const DESCRIPTION =
   'and reaches its threshold (a quantity, never an amount), otherwise its snapshot’s shortfall ' +
   'policy: EXTEND, REFER (a fact only) or CLOSE — before joining the window that follows. A ' +
   'window no demand arrives after is ended on time by the window sweeper, with the same ' +
-  'transition. A READY aggregation may be cancelled with a reason by a role of the RFQ issuer. ' +
+  'transition. A READY aggregation may be cancelled with a reason by a role of the RFQ issuer, or an RFQ issued from it: by a person of the buyer, with its procurement ' +
+  'nature, deadline, frozen criteria and explicit invitations, each invitee’s standing asked of ' +
+  'supplier-service at that moment (fail closed). An invited supplier reads the RFQ; it is closed ' +
+  'at its deadline by the RFQ close sweeper, or after it by the buyer, and may be cancelled. ' +
   'Each aggregation keeps the settings it opened with. Aggregation never spans organizations (Q-119); ' +
   'only the buyer’s own organization reads or changes its demands, anyone else gets 404. Every ' +
   'change is an event on rasta.procurement.v1 — identifiers, quantities and instants, never a ' +
-  'note, a reason or an amount — and so an audit record. RFQs, sealed quotations, evaluation and ' +
-  'purchase orders follow (ADR-070 plan PRs 2 to 14); nothing here moves money.';
+  'note, a reason, a label or an amount — and so an audit record. Sealed quotations, evaluation ' +
+  'and purchase orders follow (ADR-070 plan PRs 7 to 14); nothing here moves money.';
 
 /** Builds the finished document for a booted application. */
 export function buildProcurementOpenApiDocument(app: INestApplication): OpenAPIObject {
@@ -188,9 +220,16 @@ export function buildProcurementOpenApiDocument(app: INestApplication): OpenAPIO
  * endpoint and produces the same bytes on every machine.
  */
 @Module({
-  controllers: [DemandController, AggregationController, AggregationSettingController],
+  controllers: [
+    DemandController,
+    AggregationController,
+    AggregationRfqController,
+    RfqController,
+    AggregationSettingController,
+  ],
   providers: [
     { provide: DemandService, useValue: {} },
+    { provide: RfqService, useValue: {} },
     { provide: AggregationSettingService, useValue: {} },
     { provide: IdempotencyStore, useValue: {} },
   ],
@@ -265,10 +304,13 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       for (const [status, description] of Object.entries(ERROR_DESCRIPTIONS)) {
         // A route with no `{id}` names no existing row, so it cannot answer 404.
         if (status === '404' && !path.includes('{id}')) continue;
-        // Only a route with a query or a body can answer 400 (the id is an opaque string).
-        if (status === '400' && !query && !body) continue;
+        // Only a route with a query, a body or an Idempotency-Key can answer 400 (the id is an
+        // opaque string).
+        if (status === '400' && !query && !body && !idempotent) continue;
         // 409 and 422 are a command's: a read has no state to move and no rule to refuse.
-        if ((status === '409' || status === '422') && !body) continue;
+        if ((status === '409' || status === '422') && !idempotent) continue;
+        // 503 and 504 are a command's that asks another service first.
+        if ((status === '503' || status === '504') && !UPSTREAM_COMMANDS.has(key)) continue;
         // 422 is a business rule's: a command with no closed refusal reason has none to answer
         // (recording a setting: its bounds are 400, a stale version 409).
         if (status === '422' && !REFUSAL_AREA_OF[key]) continue;

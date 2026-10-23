@@ -256,13 +256,16 @@ export class DemandService {
       if (!window) throw RastaError.notFound('DemandAggregation', id);
       assertOwnedBy(window, acting, 'DemandAggregation');
 
+      // The version the caller read first (plan PR 6): a READY aggregation an RFQ issue moved
+      // meanwhile is a stale view — 409, whichever of the two commands won the lock — and only a
+      // caller that read the current version is told the lifecycle's rule (422).
+      if (window.version !== dto.expectedVersion) {
+        throw RastaError.optimisticLockFailed('DemandAggregation', id);
+      }
       if (window.status !== 'READY') {
         throw ruleRefusal('Only a READY aggregation is cancelled', 'cancellation', [
           'AGGREGATION_NOT_READY',
         ]);
-      }
-      if (window.version !== dto.expectedVersion) {
-        throw RastaError.optimisticLockFailed('DemandAggregation', id);
       }
       // The window's end is still being carried on: its digest, and so its DEMAND_AGGREGATED, are
       // not out yet, and nothing moves a window on before its end's event (WindowEnd). The next

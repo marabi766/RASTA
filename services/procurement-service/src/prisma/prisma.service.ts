@@ -21,6 +21,9 @@ export const TENANT_SCOPED_MODELS = [
   'DemandAggregation',
   'DemandRequest',
   'IdempotencyKey',
+  'Rfq',
+  'RfqCriterion',
+  'RfqInvitation',
 ] as const;
 
 /**

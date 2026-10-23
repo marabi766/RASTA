@@ -130,6 +130,12 @@ export async function seedOpenWindow(input: {
 
 /** The guards the cleanup lifts, by table, children first. */
 const GUARDED = [
+  // An RFQ's frozen children, then the RFQ (plan PR 6). The RFQ and its aggregation name each other:
+  // the aggregation's reference (`fk_demand_aggregation_rfq`) is deferred for the cleanup's
+  // transaction, so the RFQ goes first and its aggregation after.
+  ['rfq_criterion', ['tg_rfq_criterion_guard']],
+  ['rfq_invitation', ['tg_rfq_invitation_guard']],
+  ['rfq', ['tg_rfq_guard']],
   ['demand_request', ['tg_demand_request_guard', 'tg_demand_request_totals_check']],
   ['demand_aggregation', ['tg_demand_aggregation_guard', 'tg_demand_aggregation_totals_check']],
   // After the windows that name its versions (fk_demand_aggregation_setting).
@@ -149,14 +155,22 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
     // Long enough for a suite that seeded a window of hundreds of thousands of demands.
     await owner.$transaction(
       async (tx) => {
+        // Every guard is lifted before the first delete and put back after the deferred reference
+        // was checked: a table with a pending (deferred) trigger event cannot be altered.
         for (const [table, triggers] of GUARDED) {
           for (const trigger of triggers) {
             await tx.$executeRawUnsafe(`ALTER TABLE "${table}" DISABLE TRIGGER "${trigger}"`);
           }
+        }
+        await tx.$executeRawUnsafe('SET CONSTRAINTS "fk_demand_aggregation_rfq" DEFERRED');
+        for (const [table] of GUARDED) {
           await tx.$executeRawUnsafe(
             `DELETE FROM "${table}" WHERE "organization_id" = ANY($1::text[])`,
             organizationIds,
           );
+        }
+        await tx.$executeRawUnsafe('SET CONSTRAINTS ALL IMMEDIATE');
+        for (const [table, triggers] of GUARDED) {
           for (const trigger of triggers) {
             await tx.$executeRawUnsafe(`ALTER TABLE "${table}" ENABLE TRIGGER "${trigger}"`);
           }

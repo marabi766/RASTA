@@ -110,7 +110,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -120,11 +120,11 @@
             }
           },
           "409": {
-            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on cancel, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry).",
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
             "headers": {
               "Retry-After": {
                 "required": false,
-                "description": "Sent only when this Idempotency-Key is still being processed, or the window of the product changed meanwhile (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "description": "Sent only when this Idempotency-Key is still being processed, or the window of the product changed meanwhile, or the end of the aggregation is still being recorded (CONFLICT): the seconds to wait before retrying. Absent on every other 409.",
                 "schema": {
                   "type": "integer",
                   "minimum": 1,
@@ -141,7 +141,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal or cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (submission: AGGREGATION_QUANTITY_LIMIT_EXCEEDED, AGGREGATION_DEMAND_LIMIT_REACHED)",
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, a reason code not on PROCUREMENT_RFQ_CANCELLATION_CODES or an AWARDED or CANCELLED RFQ (CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (submission: AGGREGATION_QUANTITY_LIMIT_EXCEEDED, AGGREGATION_DEMAND_LIMIT_REACHED)",
             "content": {
               "application/json": {
                 "schema": {
@@ -387,7 +387,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -512,7 +512,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -522,7 +522,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a demand or aggregation of any other organization, so its existence is never disclosed.",
+            "description": "Not found — also returned for a demand, aggregation or RFQ of any other organization, and for an RFQ that does not invite the caller’s organization (on an RFQ’s close and cancel, an invited supplier too), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -668,7 +668,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -678,7 +678,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a demand or aggregation of any other organization, so its existence is never disclosed.",
+            "description": "Not found — also returned for a demand, aggregation or RFQ of any other organization, and for an RFQ that does not invite the caller’s organization (on an RFQ’s close and cancel, an invited supplier too), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -688,11 +688,11 @@
             }
           },
           "409": {
-            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on cancel, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry).",
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
             "headers": {
               "Retry-After": {
                 "required": false,
-                "description": "Sent only when this Idempotency-Key is still being processed, or the window of the product changed meanwhile (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "description": "Sent only when this Idempotency-Key is still being processed, or the window of the product changed meanwhile, or the end of the aggregation is still being recorded (CONFLICT): the seconds to wait before retrying. Absent on every other 409.",
                 "schema": {
                   "type": "integer",
                   "minimum": 1,
@@ -709,7 +709,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal or cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (withdrawal: DEMAND_NOT_SUBMITTED, AGGREGATION_WINDOW_ENDED)",
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, a reason code not on PROCUREMENT_RFQ_CANCELLATION_CODES or an AWARDED or CANCELLED RFQ (CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (withdrawal: DEMAND_NOT_SUBMITTED, AGGREGATION_WINDOW_ENDED)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1003,7 +1003,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1176,7 +1176,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1186,7 +1186,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a demand or aggregation of any other organization, so its existence is never disclosed.",
+            "description": "Not found — also returned for a demand, aggregation or RFQ of any other organization, and for an RFQ that does not invite the caller’s organization (on an RFQ’s close and cancel, an invited supplier too), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1380,7 +1380,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1390,7 +1390,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a demand or aggregation of any other organization, so its existence is never disclosed.",
+            "description": "Not found — also returned for a demand, aggregation or RFQ of any other organization, and for an RFQ that does not invite the caller’s organization (on an RFQ’s close and cancel, an invited supplier too), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1400,11 +1400,11 @@
             }
           },
           "409": {
-            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on cancel, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry).",
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
             "headers": {
               "Retry-After": {
                 "required": false,
-                "description": "Sent only when this Idempotency-Key is still being processed, or the window of the product changed meanwhile (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "description": "Sent only when this Idempotency-Key is still being processed, or the window of the product changed meanwhile, or the end of the aggregation is still being recorded (CONFLICT): the seconds to wait before retrying. Absent on every other 409.",
                 "schema": {
                   "type": "integer",
                   "minimum": 1,
@@ -1421,7 +1421,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal or cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (cancellation: AGGREGATION_NOT_READY)",
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, a reason code not on PROCUREMENT_RFQ_CANCELLATION_CODES or an AWARDED or CANCELLED RFQ (CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (cancellation: AGGREGATION_NOT_READY)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1519,6 +1519,1549 @@
         }
       }
     },
+    "/v1/aggregations/{id}/rfq": {
+      "post": {
+        "description": "A human command — nothing is issued automatically (ADR-070 § 3, ADR-043). procurementNature, quotationClosingAt, the criteria and the invitees are required and have no default. Before anything is written: the aggregation as the caller read it (`expectedVersion` that is not the current version is 409 OPTIMISTIC_LOCK_FAILED; one that is not READY 422 AGGREGATION_NOT_READY; a READY one whose end is still being recorded 409 CONFLICT with Retry-After); each invited organization’s standing, asked of supplier-service now — an approved GOODS_SUPPLY qualification and no open suspension, or 422 INVITEE_NOT_ELIGIBLE; supplier-service unreachable or answering anything but its contract is 503 UPSTREAM_UNAVAILABLE (504 UPSTREAM_TIMEOUT past PROCUREMENT_SUPPLIER_REQUEST_TIMEOUT_MS), and nothing is written; the buyer itself is 422 INVITEE_IS_BUYER, more than PROCUREMENT_RFQ_MAX_INVITEES (default 200) 422 INVITEE_LIMIT_EXCEEDED. The RFQ’s sealing key pair is made then, its private half wrapped by a KEK of PROCUREMENT_RFQ_KEKS (none configured: 503). Then, under the aggregation’s row lock, the same checks again, the deadline against the database clock (not after it: 422 QUOTATION_CLOSING_NOT_IN_FUTURE), and in one transaction the RFQ with its frozen criteria and invitations, the aggregation READY → RFQ_ISSUED and RFQ_ISSUED (identifiers, the quantity, the nature, the deadline, the invitees, the criteria by count and digest — never a label). One RFQ per aggregation. The caller holds a role PROCUREMENT_RFQ_ISSUER_ROLES names (default ORGANIZATION_ADMIN) in the organization the request acts for — any other role is 403 INSUFFICIENT_ROLE before anything is read — and the aggregation is that organization’s: one of any other organization and one that does not exist are both 404 (S-03). AUDITOR, the platform administrator and a service token are refused (403) before anything is read. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same request from the same user answers the original response and does nothing again; the same key with another request or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id (403 otherwise).",
+        "operationId": "AggregationRfqController_issue_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for PROCUREMENT_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The buyer."
+                    },
+                    "aggregationId": {
+                      "type": "string"
+                    },
+                    "productId": {
+                      "type": "string"
+                    },
+                    "totalQuantity": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 2147483647,
+                      "description": "The aggregation's total, frozen at issue: the quantity every quotation prices."
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "PUBLISHED",
+                        "CLOSED",
+                        "EVALUATING",
+                        "EVALUATED",
+                        "AWARDED",
+                        "CANCELLED"
+                      ]
+                    },
+                    "procurementNature": {
+                      "type": "string",
+                      "enum": ["FORMAL_TENDER", "INQUIRY", "RFP", "MARKETPLACE_DEAL"]
+                    },
+                    "quotationClosingAt": {
+                      "type": "string",
+                      "description": "The quotation deadline, exclusive (UTC, ISO 8601 with Z)."
+                    },
+                    "criteria": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,49}$",
+                            "description": "Identifies the criterion within the RFQ; what scores will refer to."
+                          },
+                          "label": {
+                            "type": "string",
+                            "pattern": "^[^\\p{Bidi_Control}]*$",
+                            "minLength": 1,
+                            "maxLength": 200,
+                            "description": "Trimmed, 1 to 200 characters, without bidirectional control characters."
+                          },
+                          "weightBp": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 10000,
+                            "description": "Provisional (docs/24 Q-88, ADR-067 § 1): the weight in basis points; an RFQ's weights sum to 10000."
+                          },
+                          "scoringMethod": {
+                            "type": "string",
+                            "enum": ["MANUAL_SCORE", "PASS_FAIL"],
+                            "description": "Provisional (docs/24 Q-88, ADR-067 § 1): MANUAL_SCORE (0..maxScore) or PASS_FAIL (0 or 1)."
+                          },
+                          "maxScore": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 1000000,
+                            "description": "Provisional (docs/24 Q-88, ADR-067 § 1): the whole-number maximum; 1 for PASS_FAIL."
+                          }
+                        },
+                        "required": ["code", "label", "weightBp", "scoringMethod", "maxScore"],
+                        "additionalProperties": false
+                      },
+                      "description": "Frozen at issue, in the order it listed them."
+                    },
+                    "criteriaDigest": {
+                      "type": "string",
+                      "description": "SHA-256 (hex) of the criteria’s canonical form: what RFQ_ISSUED names them by."
+                    },
+                    "invitedSupplierOrganizationIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Buyer side only: the organizations invited, by organization id."
+                    },
+                    "issuedAt": {
+                      "type": "string",
+                      "description": "When it was issued, by the database clock (UTC, ISO 8601 with Z)."
+                    },
+                    "closedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When it was closed (UTC, ISO 8601 with Z), or null."
+                    },
+                    "cancelledAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When it was cancelled (UTC, ISO 8601 with Z), or null."
+                    },
+                    "cancelReasonCode": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "The reason code it was cancelled for, or null."
+                    },
+                    "cancelReason": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Buyer side only: why it was cancelled, or null."
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "aggregationId",
+                    "productId",
+                    "totalQuantity",
+                    "status",
+                    "procurementNature",
+                    "quotationClosingAt",
+                    "criteria",
+                    "criteriaDigest",
+                    "issuedAt",
+                    "closedAt",
+                    "cancelledAt",
+                    "cancelReasonCode",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a demand, aggregation or RFQ of any other organization, and for an RFQ that does not invite the caller’s organization (on an RFQ’s close and cancel, an invited supplier too), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed, or the window of the product changed meanwhile, or the end of the aggregation is still being recorded (CONFLICT): the seconds to wait before retrying. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, a reason code not on PROCUREMENT_RFQ_CANCELLATION_CODES or an AWARDED or CANCELLED RFQ (CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (rfqIssue: AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "rfqIssue"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "AGGREGATION_NOT_READY",
+                              "QUOTATION_CLOSING_NOT_IN_FUTURE",
+                              "INVITEE_NOT_ELIGIBLE",
+                              "INVITEE_IS_BUYER",
+                              "INVITEE_LIMIT_EXCEEDED"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "traceId": {
+                      "type": "string"
+                    },
+                    "timestamp": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "path": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["code", "message", "correlationId", "timestamp"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A service this command must ask first, fail closed, is unavailable, and nothing is written (UPSTREAM_UNAVAILABLE): supplier-service, for an invitee’s standing — unreachable, or answering anything but its contract — or no key-encryption key configured (PROCUREMENT_RFQ_KEKS) to wrap the RFQ’s sealing key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "supplier-service did not answer an invitee’s standing within PROCUREMENT_SUPPLIER_REQUEST_TIMEOUT_MS (UPSTREAM_TIMEOUT); nothing is written.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Issue the RFQ of a READY aggregation: READY → RFQ_ISSUED and a PUBLISHED RFQ, at once",
+        "tags": ["aggregations"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The `version` of the aggregation the caller read: the issue applies only to that version (409 OPTIMISTIC_LOCK_FAILED otherwise)."
+                  },
+                  "procurementNature": {
+                    "type": "string",
+                    "enum": ["FORMAL_TENDER", "INQUIRY", "RFP", "MARKETPLACE_DEAL"],
+                    "description": "Required, with no default (ADR-023, Q-03)."
+                  },
+                  "quotationClosingAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "The quotation deadline (UTC, ISO 8601 with Z; kept to the millisecond). Must be after the database clock at the issue; no minimum or maximum is invented (Q-121 (2)). Quotations are taken before it; the RFQ is closed at or after it."
+                  },
+                  "criteria": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,49}$",
+                          "description": "Identifies the criterion within the RFQ; what scores will refer to."
+                        },
+                        "label": {
+                          "type": "string",
+                          "pattern": "^[^\\p{Bidi_Control}]*$",
+                          "minLength": 1,
+                          "maxLength": 200,
+                          "description": "Trimmed, 1 to 200 characters, without bidirectional control characters."
+                        },
+                        "weightBp": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 10000,
+                          "description": "Provisional (docs/24 Q-88, ADR-067 § 1): the weight in basis points; an RFQ's weights sum to 10000."
+                        },
+                        "scoringMethod": {
+                          "type": "string",
+                          "enum": ["MANUAL_SCORE", "PASS_FAIL"],
+                          "description": "Provisional (docs/24 Q-88, ADR-067 § 1): MANUAL_SCORE (0..maxScore) or PASS_FAIL (0 or 1)."
+                        },
+                        "maxScore": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 1000000,
+                          "description": "Provisional (docs/24 Q-88, ADR-067 § 1): the whole-number maximum; 1 for PASS_FAIL."
+                        }
+                      },
+                      "required": ["code", "label", "weightBp", "scoringMethod", "maxScore"],
+                      "additionalProperties": false
+                    },
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "description": "Copied into the RFQ and frozen with it (ADR-067 § 1): 1 to 50, unique codes, weights summing to exactly 10000."
+                  },
+                  "invitedSupplierOrganizationIds": {
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "description": "ORG identifier"
+                        },
+                        {
+                          "type": "string",
+                          "pattern": "^ORG-[A-Z0-9-]{1,48}$"
+                        }
+                      ]
+                    },
+                    "minItems": 1,
+                    "maxItems": 500,
+                    "description": "The organizations invited to quote (Q-121 (1): invitation only). Each must hold an approved GOODS_SUPPLY qualification and no open suspension now, by supplier-service (422 INVITEE_NOT_ELIGIBLE; unreachable, 503). Never the buyer. At most PROCUREMENT_RFQ_MAX_INVITEES (default 200; 422 INVITEE_LIMIT_EXCEEDED above it), and never more than 500."
+                  }
+                },
+                "required": [
+                  "expectedVersion",
+                  "procurementNature",
+                  "quotationClosingAt",
+                  "criteria",
+                  "invitedSupplierOrganizationIds"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/rfqs": {
+      "get": {
+        "description": "side is required. The buyer reads its own RFQs by a role PROCUREMENT_DEMAND_ROLES or PROCUREMENT_RFQ_ISSUER_ROLES names (`docs/09`: PROCUREMENT_USER has rfq:read); another role of the buyer is 403. An invited supplier reads the RFQs that invite its organization, by a role PROCUREMENT_SUPPLIER_ROLES names (default SUPPLIER): the product, the total quantity, the criteria and the deadline — never the other invitees, the cancellation’s text, nor who registered the demands. Anyone else — an organization the RFQ does not invite, a third organization, an id that does not exist — gets the same 404 (S-03). AUDITOR, the platform administrator (SYSTEM_ADMIN) and a service token are refused (403) before anything is read.",
+        "operationId": "RfqController_list_v1",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25
+            }
+          },
+          {
+            "name": "side",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": ["BUYER", "SUPPLIER"],
+              "description": "BUYER: the RFQs of the caller organization. SUPPLIER: the RFQs the caller organization is invited to, and nothing else."
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["PUBLISHED", "CLOSED", "EVALUATING", "EVALUATED", "AWARDED", "CANCELLED"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "organizationId": {
+                            "type": "string",
+                            "description": "The buyer."
+                          },
+                          "aggregationId": {
+                            "type": "string"
+                          },
+                          "productId": {
+                            "type": "string"
+                          },
+                          "totalQuantity": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 2147483647,
+                            "description": "The aggregation's total, frozen at issue: the quantity every quotation prices."
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "PUBLISHED",
+                              "CLOSED",
+                              "EVALUATING",
+                              "EVALUATED",
+                              "AWARDED",
+                              "CANCELLED"
+                            ]
+                          },
+                          "procurementNature": {
+                            "type": "string",
+                            "enum": ["FORMAL_TENDER", "INQUIRY", "RFP", "MARKETPLACE_DEAL"]
+                          },
+                          "quotationClosingAt": {
+                            "type": "string",
+                            "description": "The quotation deadline, exclusive (UTC, ISO 8601 with Z)."
+                          },
+                          "criteria": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "code": {
+                                  "type": "string",
+                                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,49}$",
+                                  "description": "Identifies the criterion within the RFQ; what scores will refer to."
+                                },
+                                "label": {
+                                  "type": "string",
+                                  "pattern": "^[^\\p{Bidi_Control}]*$",
+                                  "minLength": 1,
+                                  "maxLength": 200,
+                                  "description": "Trimmed, 1 to 200 characters, without bidirectional control characters."
+                                },
+                                "weightBp": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 10000,
+                                  "description": "Provisional (docs/24 Q-88, ADR-067 § 1): the weight in basis points; an RFQ's weights sum to 10000."
+                                },
+                                "scoringMethod": {
+                                  "type": "string",
+                                  "enum": ["MANUAL_SCORE", "PASS_FAIL"],
+                                  "description": "Provisional (docs/24 Q-88, ADR-067 § 1): MANUAL_SCORE (0..maxScore) or PASS_FAIL (0 or 1)."
+                                },
+                                "maxScore": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1000000,
+                                  "description": "Provisional (docs/24 Q-88, ADR-067 § 1): the whole-number maximum; 1 for PASS_FAIL."
+                                }
+                              },
+                              "required": [
+                                "code",
+                                "label",
+                                "weightBp",
+                                "scoringMethod",
+                                "maxScore"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "description": "Frozen at issue, in the order it listed them."
+                          },
+                          "criteriaDigest": {
+                            "type": "string",
+                            "description": "SHA-256 (hex) of the criteria’s canonical form: what RFQ_ISSUED names them by."
+                          },
+                          "invitedSupplierOrganizationIds": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            },
+                            "description": "Buyer side only: the organizations invited, by organization id."
+                          },
+                          "issuedAt": {
+                            "type": "string",
+                            "description": "When it was issued, by the database clock (UTC, ISO 8601 with Z)."
+                          },
+                          "closedAt": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "When it was closed (UTC, ISO 8601 with Z), or null."
+                          },
+                          "cancelledAt": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "When it was cancelled (UTC, ISO 8601 with Z), or null."
+                          },
+                          "cancelReasonCode": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "The reason code it was cancelled for, or null."
+                          },
+                          "cancelReason": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "Buyer side only: why it was cancelled, or null."
+                          },
+                          "version": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "organizationId",
+                          "aggregationId",
+                          "productId",
+                          "totalQuantity",
+                          "status",
+                          "procurementNature",
+                          "quotationClosingAt",
+                          "criteria",
+                          "criteriaDigest",
+                          "issuedAt",
+                          "closedAt",
+                          "cancelledAt",
+                          "cancelReasonCode",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  },
+                  "required": ["items", "nextCursor"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List RFQs, newest first: the caller organization’s (side=BUYER) or the ones it is invited to (side=SUPPLIER)",
+        "tags": ["rfqs"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/rfqs/{id}": {
+      "get": {
+        "description": "The buyer reads its own RFQs by a role PROCUREMENT_DEMAND_ROLES or PROCUREMENT_RFQ_ISSUER_ROLES names (`docs/09`: PROCUREMENT_USER has rfq:read); another role of the buyer is 403. An invited supplier reads the RFQs that invite its organization, by a role PROCUREMENT_SUPPLIER_ROLES names (default SUPPLIER): the product, the total quantity, the criteria and the deadline — never the other invitees, the cancellation’s text, nor who registered the demands. Anyone else — an organization the RFQ does not invite, a third organization, an id that does not exist — gets the same 404 (S-03). AUDITOR, the platform administrator (SYSTEM_ADMIN) and a service token are refused (403) before anything is read.",
+        "operationId": "RfqController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The buyer."
+                    },
+                    "aggregationId": {
+                      "type": "string"
+                    },
+                    "productId": {
+                      "type": "string"
+                    },
+                    "totalQuantity": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 2147483647,
+                      "description": "The aggregation's total, frozen at issue: the quantity every quotation prices."
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "PUBLISHED",
+                        "CLOSED",
+                        "EVALUATING",
+                        "EVALUATED",
+                        "AWARDED",
+                        "CANCELLED"
+                      ]
+                    },
+                    "procurementNature": {
+                      "type": "string",
+                      "enum": ["FORMAL_TENDER", "INQUIRY", "RFP", "MARKETPLACE_DEAL"]
+                    },
+                    "quotationClosingAt": {
+                      "type": "string",
+                      "description": "The quotation deadline, exclusive (UTC, ISO 8601 with Z)."
+                    },
+                    "criteria": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,49}$",
+                            "description": "Identifies the criterion within the RFQ; what scores will refer to."
+                          },
+                          "label": {
+                            "type": "string",
+                            "pattern": "^[^\\p{Bidi_Control}]*$",
+                            "minLength": 1,
+                            "maxLength": 200,
+                            "description": "Trimmed, 1 to 200 characters, without bidirectional control characters."
+                          },
+                          "weightBp": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 10000,
+                            "description": "Provisional (docs/24 Q-88, ADR-067 § 1): the weight in basis points; an RFQ's weights sum to 10000."
+                          },
+                          "scoringMethod": {
+                            "type": "string",
+                            "enum": ["MANUAL_SCORE", "PASS_FAIL"],
+                            "description": "Provisional (docs/24 Q-88, ADR-067 § 1): MANUAL_SCORE (0..maxScore) or PASS_FAIL (0 or 1)."
+                          },
+                          "maxScore": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 1000000,
+                            "description": "Provisional (docs/24 Q-88, ADR-067 § 1): the whole-number maximum; 1 for PASS_FAIL."
+                          }
+                        },
+                        "required": ["code", "label", "weightBp", "scoringMethod", "maxScore"],
+                        "additionalProperties": false
+                      },
+                      "description": "Frozen at issue, in the order it listed them."
+                    },
+                    "criteriaDigest": {
+                      "type": "string",
+                      "description": "SHA-256 (hex) of the criteria’s canonical form: what RFQ_ISSUED names them by."
+                    },
+                    "invitedSupplierOrganizationIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Buyer side only: the organizations invited, by organization id."
+                    },
+                    "issuedAt": {
+                      "type": "string",
+                      "description": "When it was issued, by the database clock (UTC, ISO 8601 with Z)."
+                    },
+                    "closedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When it was closed (UTC, ISO 8601 with Z), or null."
+                    },
+                    "cancelledAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When it was cancelled (UTC, ISO 8601 with Z), or null."
+                    },
+                    "cancelReasonCode": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "The reason code it was cancelled for, or null."
+                    },
+                    "cancelReason": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Buyer side only: why it was cancelled, or null."
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "aggregationId",
+                    "productId",
+                    "totalQuantity",
+                    "status",
+                    "procurementNature",
+                    "quotationClosingAt",
+                    "criteria",
+                    "criteriaDigest",
+                    "issuedAt",
+                    "closedAt",
+                    "cancelledAt",
+                    "cancelReasonCode",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a demand, aggregation or RFQ of any other organization, and for an RFQ that does not invite the caller’s organization (on an RFQ’s close and cancel, an invited supplier too), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read one RFQ, as its buyer or as an invited supplier",
+        "tags": ["rfqs"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/rfqs/{id}/close": {
+      "post": {
+        "description": "PUBLISHED → CLOSED, only at or after quotationClosingAt by the database clock read under the RFQ’s lock (before it: 422 QUOTATION_DEADLINE_NOT_REACHED). The command the close sweeper runs on its own within PROCUREMENT_RFQ_CLOSE_SWEEP_INTERVAL_MS of the deadline; idempotent — an RFQ already closed answers as it is, with no second RFQ_CLOSED. A cancelled RFQ is 422 RFQ_CANCELLED. Closing discloses nothing and needs no new role. The buyer’s own RFQ only, by a role PROCUREMENT_RFQ_ISSUER_ROLES names (default ORGANIZATION_ADMIN) in its organization: another role of the buyer is 403 INSUFFICIENT_ROLE; an invited supplier, any third organization and an id that does not exist are the same 404 (S-03). AUDITOR, the platform administrator and a service token are refused (403) before anything is read. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same request from the same user answers the original response and does nothing again; the same key with another request or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id (403 otherwise).",
+        "operationId": "RfqController_close_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for PROCUREMENT_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The buyer."
+                    },
+                    "aggregationId": {
+                      "type": "string"
+                    },
+                    "productId": {
+                      "type": "string"
+                    },
+                    "totalQuantity": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 2147483647,
+                      "description": "The aggregation's total, frozen at issue: the quantity every quotation prices."
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "PUBLISHED",
+                        "CLOSED",
+                        "EVALUATING",
+                        "EVALUATED",
+                        "AWARDED",
+                        "CANCELLED"
+                      ]
+                    },
+                    "procurementNature": {
+                      "type": "string",
+                      "enum": ["FORMAL_TENDER", "INQUIRY", "RFP", "MARKETPLACE_DEAL"]
+                    },
+                    "quotationClosingAt": {
+                      "type": "string",
+                      "description": "The quotation deadline, exclusive (UTC, ISO 8601 with Z)."
+                    },
+                    "criteria": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,49}$",
+                            "description": "Identifies the criterion within the RFQ; what scores will refer to."
+                          },
+                          "label": {
+                            "type": "string",
+                            "pattern": "^[^\\p{Bidi_Control}]*$",
+                            "minLength": 1,
+                            "maxLength": 200,
+                            "description": "Trimmed, 1 to 200 characters, without bidirectional control characters."
+                          },
+                          "weightBp": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 10000,
+                            "description": "Provisional (docs/24 Q-88, ADR-067 § 1): the weight in basis points; an RFQ's weights sum to 10000."
+                          },
+                          "scoringMethod": {
+                            "type": "string",
+                            "enum": ["MANUAL_SCORE", "PASS_FAIL"],
+                            "description": "Provisional (docs/24 Q-88, ADR-067 § 1): MANUAL_SCORE (0..maxScore) or PASS_FAIL (0 or 1)."
+                          },
+                          "maxScore": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 1000000,
+                            "description": "Provisional (docs/24 Q-88, ADR-067 § 1): the whole-number maximum; 1 for PASS_FAIL."
+                          }
+                        },
+                        "required": ["code", "label", "weightBp", "scoringMethod", "maxScore"],
+                        "additionalProperties": false
+                      },
+                      "description": "Frozen at issue, in the order it listed them."
+                    },
+                    "criteriaDigest": {
+                      "type": "string",
+                      "description": "SHA-256 (hex) of the criteria’s canonical form: what RFQ_ISSUED names them by."
+                    },
+                    "invitedSupplierOrganizationIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Buyer side only: the organizations invited, by organization id."
+                    },
+                    "issuedAt": {
+                      "type": "string",
+                      "description": "When it was issued, by the database clock (UTC, ISO 8601 with Z)."
+                    },
+                    "closedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When it was closed (UTC, ISO 8601 with Z), or null."
+                    },
+                    "cancelledAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When it was cancelled (UTC, ISO 8601 with Z), or null."
+                    },
+                    "cancelReasonCode": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "The reason code it was cancelled for, or null."
+                    },
+                    "cancelReason": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Buyer side only: why it was cancelled, or null."
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "aggregationId",
+                    "productId",
+                    "totalQuantity",
+                    "status",
+                    "procurementNature",
+                    "quotationClosingAt",
+                    "criteria",
+                    "criteriaDigest",
+                    "issuedAt",
+                    "closedAt",
+                    "cancelledAt",
+                    "cancelReasonCode",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a demand, aggregation or RFQ of any other organization, and for an RFQ that does not invite the caller’s organization (on an RFQ’s close and cancel, an invited supplier too), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed, or the window of the product changed meanwhile, or the end of the aggregation is still being recorded (CONFLICT): the seconds to wait before retrying. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, a reason code not on PROCUREMENT_RFQ_CANCELLATION_CODES or an AWARDED or CANCELLED RFQ (CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (rfqClose: QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "rfqClose"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["QUOTATION_DEADLINE_NOT_REACHED", "RFQ_CANCELLED"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "traceId": {
+                      "type": "string"
+                    },
+                    "timestamp": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "path": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["code", "message", "correlationId", "timestamp"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Close an RFQ at or after its quotation deadline",
+        "tags": ["rfqs"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/rfqs/{id}/cancel": {
+      "post": {
+        "description": "Any status but AWARDED → CANCELLED (ADR-070 § 3): an AWARDED or CANCELLED RFQ is 422 RFQ_NOT_CANCELLABLE; `expectedVersion` that is not the current version is 409 OPTIMISTIC_LOCK_FAILED. The aggregation stays RFQ_ISSUED (Q-121 (4)): its requesters register new demands. RFQ_CANCELLED carries the code, never the reason. The buyer’s own RFQ only, by a role PROCUREMENT_RFQ_ISSUER_ROLES names (default ORGANIZATION_ADMIN) in its organization: another role of the buyer is 403 INSUFFICIENT_ROLE; an invited supplier, any third organization and an id that does not exist are the same 404 (S-03). AUDITOR, the platform administrator and a service token are refused (403) before anything is read. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same request from the same user answers the original response and does nothing again; the same key with another request or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id (403 otherwise).",
+        "operationId": "RfqController_cancel_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for PROCUREMENT_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The buyer."
+                    },
+                    "aggregationId": {
+                      "type": "string"
+                    },
+                    "productId": {
+                      "type": "string"
+                    },
+                    "totalQuantity": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 2147483647,
+                      "description": "The aggregation's total, frozen at issue: the quantity every quotation prices."
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "PUBLISHED",
+                        "CLOSED",
+                        "EVALUATING",
+                        "EVALUATED",
+                        "AWARDED",
+                        "CANCELLED"
+                      ]
+                    },
+                    "procurementNature": {
+                      "type": "string",
+                      "enum": ["FORMAL_TENDER", "INQUIRY", "RFP", "MARKETPLACE_DEAL"]
+                    },
+                    "quotationClosingAt": {
+                      "type": "string",
+                      "description": "The quotation deadline, exclusive (UTC, ISO 8601 with Z)."
+                    },
+                    "criteria": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,49}$",
+                            "description": "Identifies the criterion within the RFQ; what scores will refer to."
+                          },
+                          "label": {
+                            "type": "string",
+                            "pattern": "^[^\\p{Bidi_Control}]*$",
+                            "minLength": 1,
+                            "maxLength": 200,
+                            "description": "Trimmed, 1 to 200 characters, without bidirectional control characters."
+                          },
+                          "weightBp": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 10000,
+                            "description": "Provisional (docs/24 Q-88, ADR-067 § 1): the weight in basis points; an RFQ's weights sum to 10000."
+                          },
+                          "scoringMethod": {
+                            "type": "string",
+                            "enum": ["MANUAL_SCORE", "PASS_FAIL"],
+                            "description": "Provisional (docs/24 Q-88, ADR-067 § 1): MANUAL_SCORE (0..maxScore) or PASS_FAIL (0 or 1)."
+                          },
+                          "maxScore": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 1000000,
+                            "description": "Provisional (docs/24 Q-88, ADR-067 § 1): the whole-number maximum; 1 for PASS_FAIL."
+                          }
+                        },
+                        "required": ["code", "label", "weightBp", "scoringMethod", "maxScore"],
+                        "additionalProperties": false
+                      },
+                      "description": "Frozen at issue, in the order it listed them."
+                    },
+                    "criteriaDigest": {
+                      "type": "string",
+                      "description": "SHA-256 (hex) of the criteria’s canonical form: what RFQ_ISSUED names them by."
+                    },
+                    "invitedSupplierOrganizationIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Buyer side only: the organizations invited, by organization id."
+                    },
+                    "issuedAt": {
+                      "type": "string",
+                      "description": "When it was issued, by the database clock (UTC, ISO 8601 with Z)."
+                    },
+                    "closedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When it was closed (UTC, ISO 8601 with Z), or null."
+                    },
+                    "cancelledAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When it was cancelled (UTC, ISO 8601 with Z), or null."
+                    },
+                    "cancelReasonCode": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "The reason code it was cancelled for, or null."
+                    },
+                    "cancelReason": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Buyer side only: why it was cancelled, or null."
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "aggregationId",
+                    "productId",
+                    "totalQuantity",
+                    "status",
+                    "procurementNature",
+                    "quotationClosingAt",
+                    "criteria",
+                    "criteriaDigest",
+                    "issuedAt",
+                    "closedAt",
+                    "cancelledAt",
+                    "cancelReasonCode",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a demand, aggregation or RFQ of any other organization, and for an RFQ that does not invite the caller’s organization (on an RFQ’s close and cancel, an invited supplier too), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed, or the window of the product changed meanwhile, or the end of the aggregation is still being recorded (CONFLICT): the seconds to wait before retrying. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, a reason code not on PROCUREMENT_RFQ_CANCELLATION_CODES or an AWARDED or CANCELLED RFQ (CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE). When refused for a closed reason, `details` names it: one entry, `path` the area (submission, withdrawal, cancellation, rfqIssue, rfqClose or rfqCancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (rfqCancellation: CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "rfqCancellation"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["CANCELLATION_CODE_NOT_ALLOWED", "RFQ_NOT_CANCELLABLE"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "traceId": {
+                      "type": "string"
+                    },
+                    "timestamp": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "path": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["code", "message", "correlationId", "timestamp"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Cancel an RFQ, with a closed reason code and a reason",
+        "tags": ["rfqs"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The `version` of the RFQ the caller read (409 OPTIMISTIC_LOCK_FAILED otherwise)."
+                  },
+                  "reasonCode": {
+                    "type": "string",
+                    "pattern": "^[A-Z][A-Z0-9_]{1,63}$",
+                    "description": "One of the codes PROCUREMENT_RFQ_CANCELLATION_CODES names (a closed list from configuration, BUYER_REQUEST by default; another is 422 CANCELLATION_CODE_NOT_ALLOWED). The event carries it."
+                  },
+                  "reason": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "minLength": 0,
+                    "maxLength": 500,
+                    "description": "Optional: why, up to 500 characters, trimmed, without bidirectional control characters (empty is none). Kept with the RFQ and read by the buyer through this API; never on an event."
+                  }
+                },
+                "required": ["expectedVersion", "reasonCode"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/aggregation-settings": {
       "get": {
         "description": "The current setting version, or the environment defaults of Q-10 (settingVersion and recordedAt null) if the organization has recorded none. A window keeps the settings it opened with; this is what the next one takes. The caller holds a role PROCUREMENT_AGGREGATION_SETTING_ROLES (default ORGANIZATION_ADMIN) or PROCUREMENT_DEMAND_ROLES names in the organization. Closed by default (S-02). One setting for the whole organization, every product (Q-119 (3)). The buyer’s own organization only: the organization the request acts for. AUDITOR, the platform administrator (SYSTEM_ADMIN, whatever organization it selected — the operator does not write a tenant’s business configuration, Q-119 (2)) and a service token are refused (403) before anything is read.",
@@ -1580,7 +3123,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1690,7 +3233,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on cancel, PROCUREMENT_RFQ_ISSUER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
+            "description": "Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1700,11 +3243,11 @@
             }
           },
           "409": {
-            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on cancel, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry).",
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
             "headers": {
               "Retry-After": {
                 "required": false,
-                "description": "Sent only when this Idempotency-Key is still being processed, or the window of the product changed meanwhile (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "description": "Sent only when this Idempotency-Key is still being processed, or the window of the product changed meanwhile, or the end of the aggregation is still being recorded (CONFLICT): the seconds to wait before retrying. Absent on every other 409.",
                 "schema": {
                   "type": "integer",
                   "minimum": 1,
@@ -1785,7 +3328,7 @@
   },
   "info": {
     "title": "Rasta — Procurement Service",
-    "description": "The procurement boundary (COM-007, ADR-070). An organization registers its needs — a quantity of a product, the product an opaque marketplace identifier that is never checked there (Q-105) — and each joins the one OPEN aggregation of (organization, product), or opens it. A window is open from its first demand for PROCUREMENT_AGGREGATION_WINDOW_HOURS (Q-10), half-open [openedAt, closesAt) by the database clock read after the aggregation’s lock: a demand at or after closesAt never joins it, and ends it instead — READY when it holds a demand and reaches its threshold (a quantity, never an amount), otherwise its snapshot’s shortfall policy: EXTEND, REFER (a fact only) or CLOSE — before joining the window that follows. A window no demand arrives after is ended on time by the window sweeper, with the same transition. A READY aggregation may be cancelled with a reason by a role of the RFQ issuer. Each aggregation keeps the settings it opened with. Aggregation never spans organizations (Q-119); only the buyer’s own organization reads or changes its demands, anyone else gets 404. Every change is an event on rasta.procurement.v1 — identifiers, quantities and instants, never a note, a reason or an amount — and so an audit record. RFQs, sealed quotations, evaluation and purchase orders follow (ADR-070 plan PRs 2 to 14); nothing here moves money.",
+    "description": "The procurement boundary (COM-007, ADR-070). An organization registers its needs — a quantity of a product, the product an opaque marketplace identifier that is never checked there (Q-105) — and each joins the one OPEN aggregation of (organization, product), or opens it. A window is open from its first demand for PROCUREMENT_AGGREGATION_WINDOW_HOURS (Q-10), half-open [openedAt, closesAt) by the database clock read after the aggregation’s lock: a demand at or after closesAt never joins it, and ends it instead — READY when it holds a demand and reaches its threshold (a quantity, never an amount), otherwise its snapshot’s shortfall policy: EXTEND, REFER (a fact only) or CLOSE — before joining the window that follows. A window no demand arrives after is ended on time by the window sweeper, with the same transition. A READY aggregation may be cancelled with a reason by a role of the RFQ issuer, or an RFQ issued from it: by a person of the buyer, with its procurement nature, deadline, frozen criteria and explicit invitations, each invitee’s standing asked of supplier-service at that moment (fail closed). An invited supplier reads the RFQ; it is closed at its deadline by the RFQ close sweeper, or after it by the buyer, and may be cancelled. Each aggregation keeps the settings it opened with. Aggregation never spans organizations (Q-119); only the buyer’s own organization reads or changes its demands, anyone else gets 404. Every change is an event on rasta.procurement.v1 — identifiers, quantities and instants, never a note, a reason, a label or an amount — and so an audit record. Sealed quotations, evaluation and purchase orders follow (ADR-070 plan PRs 7 to 14); nothing here moves money.",
     "version": "0.1.0",
     "contact": {}
   },

@@ -1,9 +1,11 @@
+import { randomBytes } from 'node:crypto';
 import { MAX_QUANTITY } from '../demand/dto';
 import {
   corsOrigins,
   loadProcurementEnv,
   MAX_FOLLOW_BATCH_SIZE,
   DEFAULT_MAX_LIVE_DEMANDS,
+  MAX_INVITEES_LIMIT,
   MAX_LIVE_DEMANDS_LIMIT,
 } from './env';
 import { procurementOperationBudgets } from './operation-budgets';
@@ -65,10 +67,15 @@ describe('the provisional defaults (Q-10, Q-119, ADR-070 § 2)', () => {
     expect(env.KAFKA_CLIENT_ID).toBe('procurement-service');
   });
 
-  it('has no setting that names an amount, an approver or a supplier', () => {
-    expect(Object.keys(env).filter((name) => /AMOUNT|APPROV|SUPPLIER|PRICE/.test(name))).toEqual(
-      [],
-    );
+  it('has no setting that names an amount, an approver or a supplier organization', () => {
+    // The supplier side's roles, where supplier-service answers and how long it may take (plan
+    // PR 6): none names a supplier.
+    const named = Object.keys(env).filter((name) => /AMOUNT|APPROV|SUPPLIER|PRICE/.test(name));
+    expect(named.sort()).toEqual([
+      'PROCUREMENT_SUPPLIER_REQUEST_TIMEOUT_MS',
+      'PROCUREMENT_SUPPLIER_ROLES',
+      'SUPPLIER_SERVICE_URL',
+    ]);
   });
 });
 
@@ -222,5 +229,90 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)'
       /DATABASE_STATEMENT_TIMEOUT_MS: \(12500 ms\) is not above OUTBOX_CLAIM_LEASE_SECONDS, 12500 ms/,
     );
     expect(() => load({ DATABASE_STATEMENT_TIMEOUT_MS: '12501' })).not.toThrow();
+  });
+});
+
+describe('the RFQ settings (ADR-070 § 3, § 4; plan PR 6)', () => {
+  const kek = () => randomBytes(32).toString('base64');
+
+  it('invites at most 200 by default, bounded 1 to 500; the supplier side is SUPPLIER; the sweeper is the window’s shape', () => {
+    const env = load();
+    expect(env.PROCUREMENT_RFQ_MAX_INVITEES).toBe(200);
+    expect(env.PROCUREMENT_SUPPLIER_ROLES).toEqual(['SUPPLIER']);
+    expect(env.SUPPLIER_SERVICE_URL).toBe('http://localhost:3108');
+    expect(env.PROCUREMENT_SUPPLIER_REQUEST_TIMEOUT_MS).toBe(5000);
+    expect([
+      env.PROCUREMENT_RFQ_CLOSE_SWEEP_INTERVAL_MS,
+      env.PROCUREMENT_RFQ_CLOSE_SWEEP_BATCH_SIZE,
+      env.PROCUREMENT_RFQ_CLOSE_SWEEP_LEASE_SECONDS,
+      env.PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_BASE_SECONDS,
+      env.PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_MAX_SECONDS,
+    ]).toEqual([5000, 20, 60, 10, 900]);
+    const atMost = load({ PROCUREMENT_RFQ_MAX_INVITEES: String(MAX_INVITEES_LIMIT) });
+    expect(atMost.PROCUREMENT_RFQ_MAX_INVITEES).toBe(500);
+    for (const bad of ['0', String(MAX_INVITEES_LIMIT + 1)]) {
+      expect(() => load({ PROCUREMENT_RFQ_MAX_INVITEES: bad })).toThrow(
+        /PROCUREMENT_RFQ_MAX_INVITEES/,
+      );
+    }
+  });
+
+  it('cancels for BUYER_REQUEST by default; the closed list is the client’s (the planned CancelRfq)', () => {
+    expect(load().PROCUREMENT_RFQ_CANCELLATION_CODES).toEqual(['BUYER_REQUEST']);
+    expect(
+      load({ PROCUREMENT_RFQ_CANCELLATION_CODES: ' BUYER_REQUEST , BUDGET_WITHDRAWN ' })
+        .PROCUREMENT_RFQ_CANCELLATION_CODES,
+    ).toEqual(['BUYER_REQUEST', 'BUDGET_WITHDRAWN']);
+  });
+
+  it.each([
+    ['', /at least one code/],
+    ['buyer_request', /upper-case words/],
+    ['BUYER REQUEST', /upper-case words/],
+    [`B${'X'.repeat(64)}`, /upper-case words/],
+    ['BUYER_REQUEST,BUYER_REQUEST', /names a code twice/],
+    // Before evaluation (plan PR 10) nothing checks that no quotation qualified.
+    ['BUYER_REQUEST,NO_QUALIFIED_QUOTATION', /NO_QUALIFIED_QUOTATION/],
+  ])('refuses PROCUREMENT_RFQ_CANCELLATION_CODES=%p at startup', (codes, message) => {
+    expect(() => load({ PROCUREMENT_RFQ_CANCELLATION_CODES: codes })).toThrow(message);
+  });
+
+  it.each(['AUDITOR', 'SYSTEM_ADMIN'])('refuses %s on the supplier side at startup', (role) => {
+    expect(() => load({ PROCUREMENT_SUPPLIER_ROLES: `SUPPLIER,${role}` })).toThrow(
+      /PROCUREMENT_SUPPLIER_ROLES/,
+    );
+  });
+
+  it('has no RFQ key by default: no KEK, nothing wraps (the issue is then 503)', () => {
+    const env = load();
+    expect(env.PROCUREMENT_RFQ_KEKS).toBeUndefined();
+    expect(env.PROCUREMENT_RFQ_KEK_CURRENT).toBeUndefined();
+  });
+
+  it('accepts KEKs with the current one among them, and refuses any other pairing without repeating a key', () => {
+    const first = kek();
+    const second = kek();
+    const both = load({
+      PROCUREMENT_RFQ_KEKS: `v1:${first},v2:${second}`,
+      PROCUREMENT_RFQ_KEK_CURRENT: 'v2',
+    });
+    expect(both.PROCUREMENT_RFQ_KEK_CURRENT).toBe('v2');
+    const wrong: [string, string | undefined][] = [
+      [`v1:${first}`, 'v2'],
+      [`v1:${first}`, undefined],
+      ['', 'v1'],
+      [`v1:${first.slice(4)}`, 'v1'],
+      [`v1:${first}`, 'V1'],
+    ];
+    for (const [keys, current] of wrong) {
+      let message = '';
+      try {
+        load({ PROCUREMENT_RFQ_KEKS: keys, PROCUREMENT_RFQ_KEK_CURRENT: current });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toMatch(/PROCUREMENT_RFQ_KEK/);
+      expect(message).not.toContain(first);
+    }
   });
 });

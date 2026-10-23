@@ -155,6 +155,106 @@ model DemandRequest {
   @@map("demand_request")
 }
 
+/// A request for quotation issued from a READY aggregation (ADR-070 § 3, COM-007 plan PR 6): one
+/// per aggregation, born PUBLISHED in the transaction that moves the aggregation to RFQ_ISSUED.
+/// Its criteria and invitations are frozen with it (`tg_rfq_issue_check` and the count checks); its
+/// deadline is a column judged on the database clock (`rfq_guard` refuses a close before it). The
+/// relations to the aggregation are declared in SQL only (`fk_rfq_aggregation`,
+/// `fk_demand_aggregation_rfq`).
+model Rfq {
+  id             String @id
+  organizationId String @map("organization_id")
+  aggregationId  String @map("aggregation_id")
+  productId      String @map("product_id")
+
+  /// The aggregation's total, frozen at issue: the quantity every quotation prices (Q-122).
+  totalQuantity     Int    @map("total_quantity")
+  /// FORMAL_TENDER | INQUIRY | RFP | MARKETPLACE_DEAL, required, no default (ADR-023, Q-03).
+  procurementNature String @map("procurement_nature")
+  /// PUBLISHED | CLOSED | EVALUATING | EVALUATED | AWARDED | CANCELLED (CHECK ck_rfq_status).
+  status            String
+
+  /// Quotations are taken before it, the RFQ is closed at or after it: [issuedAt, quotationClosingAt).
+  quotationClosingAt DateTime @map("quotation_closing_at") @db.Timestamptz(3)
+
+  criteriaCount   Int    @map("criteria_count")
+  /// SHA-256 (hex) of the criteria's canonical form (`criteriaDigest`): what RFQ_ISSUED names them by.
+  criteriaDigest  String @map("criteria_digest")
+  invitationCount Int    @map("invitation_count")
+
+  /// The RFQ's sealing key (ADR-066 § 2): the public half in the clear, the private half only
+  /// wrapped by a KEK of PROCUREMENT_RFQ_KEKS. Never changed.
+  keyId             String @unique(map: "ux_rfq_key_id") @map("key_id")
+  publicKeyPem      String @map("public_key_pem")
+  kekId             String @map("kek_id")
+  wrapNonce         Bytes  @map("wrap_nonce")
+  wrappedPrivateKey Bytes  @map("wrapped_private_key")
+  wrapTag           Bytes  @map("wrap_tag")
+
+  issuedAt            DateTime @map("issued_at") @db.Timestamptz(3)
+  issuedBy            String   @map("issued_by")
+  issuedCorrelationId String   @map("issued_correlation_id")
+
+  /// PUBLISHED → CLOSED: when, and by whom — null when the close sweeper closed it.
+  closedAt DateTime? @map("closed_at") @db.Timestamptz(3)
+  closedBy String?   @map("closed_by")
+
+  /// → CANCELLED: when, who, the reason code (from the configured list) and the buyer's optional text
+  /// (API only, never an event).
+  cancelledAt      DateTime? @map("cancelled_at") @db.Timestamptz(3)
+  cancelledBy      String?   @map("cancelled_by")
+  cancelReasonCode String?   @map("cancel_reason_code")
+  cancelReason     String?   @map("cancel_reason")
+
+  /// The close sweeper's claim (lease + fence) and its failed attempts with their backoff.
+  /// Bookkeeping: changing it moves no version.
+  sweepLeaseUntil    DateTime? @map("sweep_lease_until") @db.Timestamptz(3)
+  sweepFence         String?   @map("sweep_fence")
+  sweepAttempts      Int       @default(0) @map("sweep_attempts")
+  sweepNextAttemptAt DateTime? @map("sweep_next_attempt_at") @db.Timestamptz(3)
+
+  createdAt DateTime @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @map("updated_at") @db.Timestamptz(3)
+  version   Int      @default(1)
+
+  @@unique([organizationId, id], map: "ux_rfq_org_id")
+  @@unique([organizationId, aggregationId], map: "ux_rfq_aggregation")
+  @@unique([organizationId, id, aggregationId], map: "ux_rfq_org_id_aggregation")
+  @@index([organizationId, status, id], map: "ix_rfq_org_status")
+  @@map("rfq")
+}
+
+/// A criterion of an RFQ (ADR-067 § 1), copied in by the issue and frozen with it.
+model RfqCriterion {
+  organizationId String @map("organization_id")
+  rfqId          String @map("rfq_id")
+  /// 1-based, the order the issue listed them in.
+  position       Int
+  code           String
+  label          String
+  weightBp       Int    @map("weight_bp")
+  /// MANUAL_SCORE | PASS_FAIL (Q-88).
+  scoringMethod  String @map("scoring_method")
+  maxScore       Int    @map("max_score")
+
+  @@id([organizationId, rfqId, position], map: "rfq_criterion_pkey")
+  @@unique([organizationId, rfqId, code], map: "ux_rfq_criterion_code")
+  @@map("rfq_criterion")
+}
+
+/// An explicit invitation (Q-121 (1)). The tenant is the buyer; the invited supplier is another
+/// organization, which reads its RFQs by `supplierOrganizationId` across the tenant guard.
+model RfqInvitation {
+  organizationId         String   @map("organization_id")
+  rfqId                  String   @map("rfq_id")
+  supplierOrganizationId String   @map("supplier_organization_id")
+  invitedAt              DateTime @map("invited_at") @db.Timestamptz(3)
+
+  @@id([organizationId, rfqId, supplierOrganizationId], map: "rfq_invitation_pkey")
+  @@index([supplierOrganizationId, rfqId], map: "ix_rfq_invitation_supplier")
+  @@map("rfq_invitation")
+}
+
 /// Idempotent commands (docs/06 § 6.8): this service's own store.
 model IdempotencyKey {
   key            String @map("key")
@@ -190,7 +290,8 @@ model OutboxMessage {
   eventVersion  Int    @default(1) @map("event_version")
 
   topic        String
-  /// `aggregationId` for every event this service publishes today (docs/07 § 7.7, ADR-070 § 9).
+  /// `aggregationId` for a demand's and a window's events, the organization for a setting's,
+  /// `rfqId` for an RFQ's (docs/07 § 7.7, ADR-070 § 9).
   partitionKey String @map("partition_key")
 
   payload Json

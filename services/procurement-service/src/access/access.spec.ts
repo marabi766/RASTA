@@ -135,6 +135,71 @@ describe('ProcurementAccess.assertRfqIssuer (cancelling an aggregation, ADR-070 
   });
 });
 
+describe('ProcurementAccess on an RFQ (ADR-070 § 3, § 10; plan PR 6)', () => {
+  const access = new ProcurementAccess(env());
+  const attempt = <T>(overrides: Partial<RequestContext>, act: () => T) =>
+    runWithContext(context(overrides), () => {
+      try {
+        return { value: act() };
+      } catch (error) {
+        if (!isRastaError(error)) throw error;
+        return { code: error.code };
+      }
+    });
+
+  it.each([
+    ['the oversight role', { roles: ['AUDITOR', 'SUPPLIER'] }],
+    [
+      'the platform administrator, even beside a supplier role',
+      { roles: ['SYSTEM_ADMIN', 'SUPPLIER'] },
+    ],
+    ['a service token', { authType: 'SERVICE', roles: ['SUPPLIER'] }],
+    ['a person acting for no organization', { roles: ['SUPPLIER'], organizationId: undefined }],
+  ] as const)('refuses %s before anything is read, on either side', (_label, overrides) => {
+    const asked = overrides as Partial<RequestContext>;
+    expect(attempt(asked, () => access.assertRfqCaller())).toEqual({ code: 'FORBIDDEN' });
+    expect(attempt(asked, () => access.assertRfqSupplierReader())).toEqual({ code: 'FORBIDDEN' });
+  });
+
+  it('judges the buyer’s role once its RFQ is found: commands by the issuer roles, reads by those and the demand roles', () => {
+    const judged = (roles: string[], grant: 'read' | 'command') =>
+      attempt({ roles }, () => {
+        const caller = access.assertRfqCaller();
+        access.assertRfqBuyerRole(caller, grant);
+        return caller.organizationId;
+      });
+    expect(judged(['ORGANIZATION_ADMIN'], 'command')).toEqual({ value: ORG });
+    expect(judged(['PROCUREMENT_USER'], 'command')).toEqual({ code: 'INSUFFICIENT_ROLE' });
+    expect(judged(['PROCUREMENT_USER'], 'read')).toEqual({ value: ORG });
+    expect(judged(['SUPPLIER'], 'read')).toEqual({ code: 'INSUFFICIENT_ROLE' });
+  });
+
+  it('reads as an invited supplier by PROCUREMENT_SUPPLIER_ROLES only, from configuration', () => {
+    const supplierSide = (target: ProcurementAccess, roles: string[]) =>
+      attempt({ roles }, () => target.mayReadAsSupplier(target.assertRfqCaller()));
+    expect(supplierSide(access, ['SUPPLIER'])).toEqual({ value: true });
+    expect(supplierSide(access, ['ORGANIZATION_ADMIN'])).toEqual({ value: false });
+    expect(
+      attempt({ roles: ['ORGANIZATION_ADMIN'] }, () => access.assertRfqSupplierReader()),
+    ).toEqual({ code: 'INSUFFICIENT_ROLE' });
+    expect(attempt({ roles: ['SUPPLIER'] }, () => access.assertRfqSupplierReader())).toEqual({
+      value: { organizationId: ORG },
+    });
+    const configured = new ProcurementAccess(env({ PROCUREMENT_SUPPLIER_ROLES: 'WORKSHOP' }));
+    expect(supplierSide(configured, ['SUPPLIER'])).toEqual({ value: false });
+    expect(supplierSide(configured, ['WORKSHOP'])).toEqual({ value: true });
+  });
+
+  it('lists the buyer’s RFQs by the read roles, judged first', () => {
+    expect(attempt({ roles: ['PROCUREMENT_USER'] }, () => access.assertRfqBuyerReader())).toEqual({
+      value: { organizationId: ORG },
+    });
+    expect(attempt({ roles: ['SUPPLIER'] }, () => access.assertRfqBuyerReader())).toEqual({
+      code: 'INSUFFICIENT_ROLE',
+    });
+  });
+});
+
 describe('assertOwnedBy', () => {
   it('passes the buyer’s own row and answers 404 — never 403 — for another organization’s', () => {
     expect(() =>

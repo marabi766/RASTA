@@ -7,6 +7,8 @@ import { buildProcurementOpenApiDocument, formatDocument } from '../src/openapi/
 import { actor, buyer, client, key, startApi, TestClock, type ApiHarness } from './api-helpers';
 import { cleanup, newOrganizationId, newProductId } from './helpers';
 import { responseSchemaOf, validateBody } from './openapi-body';
+import { kekEnvironment } from './rfq-helpers';
+import { startSupplierStub, type SupplierStub } from './supplier-stub';
 
 /**
  * The published contract, checked against the service that answers it (the arrangement
@@ -18,7 +20,7 @@ import { responseSchemaOf, validateBody } from './openapi-body';
  *
  *   **It describes exactly the routes the application serves**, read from the Express router.
  *   The statuses it documents are provoked by `demand.int-spec.ts`, `window.int-spec.ts`,
- *   `aggregation-cancel.int-spec.ts` and `tenancy.int-spec.ts`.
+ *   `aggregation-cancel.int-spec.ts`, `tenancy.int-spec.ts` and the `rfq-*.int-spec.ts` suites.
  *
  *   **It accepts what the application answers** (PR-327 r1 F3): every documented status of every
  *   route, provoked here once, has its real body validated against the document's own schema for
@@ -31,15 +33,21 @@ describe('the published OpenAPI contract (real application)', () => {
   let api: ApiHarness;
   let document: OpenAPIObject;
   const organizations: string[] = [];
-  /** The database clock, pinned only to make a READY aggregation for the cancel route. */
+  /** The database clock, pinned only to make READY aggregations for the cancel and RFQ routes. */
   const clock = new TestClock();
+  /** supplier-service, for an RFQ's invitees (plan PR 6): its 503 and 504 are provoked too. */
+  let supplier: SupplierStub;
 
   beforeAll(async () => {
+    supplier = await startSupplierStub({ slowMs: 1500 });
     api = await startApi(
       {
         PROCUREMENT_AGGREGATION_WINDOW_HOURS: '168',
         PROCUREMENT_AGGREGATION_MIN_QUANTITY: '0',
         PROCUREMENT_AGGREGATION_SHORTFALL_POLICY: 'EXTEND',
+        SUPPLIER_SERVICE_URL: supplier.url,
+        PROCUREMENT_SUPPLIER_REQUEST_TIMEOUT_MS: '1000',
+        ...kekEnvironment(),
       },
       { clock },
     );
@@ -49,6 +57,7 @@ describe('the published OpenAPI contract (real application)', () => {
   afterAll(async () => {
     await cleanup(organizations);
     await api.close();
+    await supplier.close();
   });
 
   const runtimeRoutes = () => {
@@ -112,7 +121,7 @@ describe('the published OpenAPI contract (real application)', () => {
     const WITHDRAW = '/v1/demand-requests/{id}/withdraw';
     const AGGREGATIONS = '/v1/aggregations';
     const AGGREGATION = '/v1/aggregations/{id}';
-    const missing = { demand: `DMD_${ulid()}`, aggregation: `AGG_${ulid()}` };
+    const missing = { demand: `DMD_${ulid()}`, aggregation: `AGG_${ulid()}`, rfq: `RFQ_${ulid()}` };
 
     const demand = documentedAs(
       'POST',
@@ -194,7 +203,9 @@ describe('the published OpenAPI contract (real application)', () => {
     );
     documentedAs('POST', CANCEL, await as.cancel(ready.id, ready.version));
     documentedAs('POST', CANCEL, await issuer.cancel(missing.aggregation, 1));
-    documentedAs('POST', CANCEL, await issuer.cancel(aggregationId, 1));
+    // The OPEN window at its current version: the version is judged first (409), the status then.
+    const openVersion = (await as.aggregation(aggregationId)).body.version as number;
+    documentedAs('POST', CANCEL, await issuer.cancel(aggregationId, openVersion));
     documentedAs('POST', CANCEL, await issuer.cancel(ready.id, ready.version));
     clock.set(null);
 
@@ -212,6 +223,105 @@ describe('the published OpenAPI contract (real application)', () => {
     );
     documentedAs('POST', SETTINGS, await as.recordSetting({ expectedCurrentVersion: 1 }));
     documentedAs('POST', SETTINGS, await issuer.recordSetting({ expectedCurrentVersion: null }));
+
+    // An RFQ (plan PR 6): issued from a READY aggregation, read, closed at its deadline, cancelled.
+    const ISSUE = '/v1/aggregations/{id}/rfq';
+    const RFQS = '/v1/rfqs';
+    const RFQ = '/v1/rfqs/{id}';
+    const CLOSE = '/v1/rfqs/{id}/close';
+    const CANCEL_RFQ = '/v1/rfqs/{id}/cancel';
+    const rfqProduct = newProductId();
+    // In the past: the database judges a close's deadline on its own clock (`ck_rfq_deadline`).
+    clock.set(new Date('2021-01-01T08:00:00.000Z'));
+    const opening = (await as.submit({ productId: rfqProduct, quantity: 4 })).body;
+    clock.set(new Date('2021-01-08T08:00:00.000Z'));
+    await as.submit({ productId: rfqProduct, quantity: 1 });
+    clock.set(new Date('2021-01-09T08:00:00.000Z'));
+    const forRfq = (await as.aggregation(opening.aggregationId as string)).body;
+    expect(forRfq.status).toBe('READY');
+    const issueBody = (overrides: Record<string, unknown> = {}) => ({
+      expectedVersion: forRfq.version,
+      procurementNature: 'INQUIRY',
+      quotationClosingAt: '2021-01-10T08:00:00.000Z',
+      criteria: [
+        {
+          code: 'Q',
+          label: 'Quality',
+          weightBp: 10000,
+          scoringMethod: 'MANUAL_SCORE',
+          maxScore: 10,
+        },
+      ],
+      invitedSupplierOrganizationIds: [supplier.organization()],
+      ...overrides,
+    });
+    const issuePath = `${AGGREGATIONS}/${forRfq.id as string}/rfq`;
+    documentedAs(
+      'POST',
+      ISSUE,
+      await issuer.post(issuePath, issueBody({ procurementNature: undefined })),
+    );
+    documentedAs(
+      'POST',
+      ISSUE,
+      await anonymous().post(issuePath).set('idempotency-key', key()).send({}),
+    );
+    documentedAs('POST', ISSUE, await as.issueRfq(forRfq.id, issueBody()));
+    documentedAs('POST', ISSUE, await issuer.issueRfq(missing.aggregation, issueBody()));
+    documentedAs(
+      'POST',
+      ISSUE,
+      await issuer.issueRfq(forRfq.id, issueBody({ expectedVersion: forRfq.version + 1 })),
+    );
+    for (const standing of ['SUSPENDED', 'DOWN', 'SLOW'] as const) {
+      const invitees = [supplier.organization(standing)];
+      documentedAs(
+        'POST',
+        ISSUE,
+        await issuer.issueRfq(forRfq.id, issueBody({ invitedSupplierOrganizationIds: invitees })),
+      );
+    }
+    const issued = documentedAs('POST', ISSUE, await issuer.issueRfq(forRfq.id, issueBody()));
+    const rfqId = issued.body.id as string;
+
+    documentedAs('GET', RFQS, await as.rfqs('?side=BUYER'));
+    documentedAs('GET', RFQS, await as.rfqs(''));
+    documentedAs('GET', RFQS, await anonymous().get(`${RFQS}?side=BUYER`));
+    documentedAs('GET', RFQS, await other.rfqs('?side=BUYER'));
+
+    documentedAs('GET', RFQ, await as.rfq(rfqId));
+    documentedAs('GET', RFQ, await anonymous().get(`${RFQS}/${rfqId}`));
+    documentedAs('GET', RFQ, await other.rfq(rfqId));
+    documentedAs('GET', RFQ, await as.rfq(missing.rfq));
+
+    const closePath = `${RFQS}/${rfqId}/close`;
+    documentedAs('POST', CLOSE, await issuer.closeRfq(rfqId));
+    documentedAs('POST', CLOSE, await issuer.post(closePath, {}, 'short'));
+    documentedAs(
+      'POST',
+      CLOSE,
+      await anonymous().post(closePath).set('idempotency-key', key()).send({}),
+    );
+    documentedAs('POST', CLOSE, await as.closeRfq(rfqId));
+    documentedAs('POST', CLOSE, await issuer.closeRfq(missing.rfq));
+    clock.set(new Date('2021-01-10T08:00:00.000Z'));
+    const closeKey = key();
+    documentedAs('POST', CLOSE, await issuer.closeRfq(rfqId, closeKey));
+    documentedAs('POST', CLOSE, await issuer.closeRfq(missing.rfq, closeKey));
+
+    const cancelRfqPath = `${RFQS}/${rfqId}/cancel`;
+    documentedAs('POST', CANCEL_RFQ, await issuer.cancelRfq(rfqId, 1));
+    documentedAs('POST', CANCEL_RFQ, await issuer.post(cancelRfqPath, { expectedVersion: 2 }));
+    documentedAs(
+      'POST',
+      CANCEL_RFQ,
+      await anonymous().post(cancelRfqPath).set('idempotency-key', key()).send({}),
+    );
+    documentedAs('POST', CANCEL_RFQ, await as.cancelRfq(rfqId, 2));
+    documentedAs('POST', CANCEL_RFQ, await issuer.cancelRfq(missing.rfq, 1));
+    documentedAs('POST', CANCEL_RFQ, await issuer.cancelRfq(rfqId, 2));
+    documentedAs('POST', CANCEL_RFQ, await issuer.cancelRfq(rfqId, 3));
+    clock.set(null);
 
     expect(problems).toEqual([]);
     // Every status the document gives a route was answered here, but the 500 nothing provokes.

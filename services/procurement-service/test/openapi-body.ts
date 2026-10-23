@@ -26,6 +26,7 @@ const KNOWN = new Set([
   'maximum',
   'minLength',
   'maxLength',
+  'pattern',
   'anyOf',
   'description',
 ]);
@@ -103,6 +104,9 @@ function check(
       }
       if (typeof schema.maxLength === 'number' && value.length > schema.maxLength) {
         problems.push(`${at}: longer than ${schema.maxLength}`);
+      }
+      if (typeof schema.pattern === 'string' && !new RegExp(schema.pattern, 'u').test(value)) {
+        problems.push(`${at}: does not match ${schema.pattern}`);
       }
       return;
     case 'integer':

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { PROCUREMENT_RFQ_EVENTS, PROCUREMENT_RFQ_EVENT_SCHEMAS } from '@rasta/contracts';
 
 /**
  * Events published by procurement-service, on `rasta.procurement.v1` (ADR-070 § 9).
@@ -11,6 +12,12 @@ import { z } from 'zod';
  * PR 2 ends windows with the same four, and PR 2 adds `AGGREGATION_CANCELLED` (READY →
  * CANCELLED). Every state change has its event, and so its audit record. The names marked new in
  * ADR-070 § 9 are the project manager's to confirm.
+ *
+ * Plan PR 6 adds the RFQ's — `RFQ_ISSUED` (with the aggregation's READY → RFQ_ISSUED), `RFQ_CLOSED`
+ * and `RFQ_CANCELLED`. Their names and payload schemas are cross-service contracts in
+ * `@rasta/contracts` (`events/procurement-rfq.ts`: audit-service's RFQ evidence consumer, plan PR 7,
+ * reads them), composed into the one table below so every event this service publishes is
+ * validated the same way.
  *
  * The payloads are defined here because this service owns them (ADR-032); the only cross-service
  * contract in `packages/contracts` is the audit trail.
@@ -32,6 +39,7 @@ export const PROCUREMENT_EVENTS = {
   AGGREGATION_LAPSED: 'AGGREGATION_LAPSED',
   AGGREGATION_CANCELLED: 'AGGREGATION_CANCELLED',
   AGGREGATION_SETTING_CHANGED: 'AGGREGATION_SETTING_CHANGED',
+  ...PROCUREMENT_RFQ_EVENTS,
 } as const;
 
 export type ProcurementEventName = keyof typeof PROCUREMENT_EVENTS;
@@ -199,6 +207,7 @@ export const PROCUREMENT_EVENT_SCHEMAS = {
   AGGREGATION_LAPSED: aggregationLapsedPayload,
   AGGREGATION_CANCELLED: aggregationCancelledPayload,
   AGGREGATION_SETTING_CHANGED: aggregationSettingChangedPayload,
+  ...PROCUREMENT_RFQ_EVENT_SCHEMAS,
 } as const satisfies Record<ProcurementEventName, z.ZodTypeAny>;
 
 export type ProcurementEventPayload<N extends ProcurementEventName> = z.infer<

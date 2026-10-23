@@ -104,7 +104,8 @@
         "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
         "ANALYTICS_*",
         "CORS_ORIGINS",
-        "PROCUREMENT_*"
+        "PROCUREMENT_*",
+        "SUPPLIER_SERVICE_URL"
       ]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
@@ -178,7 +179,8 @@
         "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
         "ANALYTICS_*",
         "CORS_ORIGINS",
-        "PROCUREMENT_*"
+        "PROCUREMENT_*",
+        "SUPPLIER_SERVICE_URL"
       ]
     },
     // identity-service's two 500-write aggregation proofs, run alone after the
@@ -300,6 +302,11 @@
     // so none of its settings may join the withheld list — its own settings and
     // the CORS list every service reads are declared here, which takes
     // CORS_ORIGINS off every other service's withheld entry too.
+    //
+    // SUPPLIER_SERVICE_URL (COM-007 PR 6): procurement-service now asks
+    // supplier-service for an RFQ invitee's standing, so the URL is declared
+    // here for every task that starts it — which takes it off
+    // construction-service's withheld entry too.
     "dev": {
       "cache": false,
       "persistent": true,
@@ -339,7 +346,8 @@
         "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
         "ANALYTICS_*",
         "CORS_ORIGINS",
-        "PROCUREMENT_*"
+        "PROCUREMENT_*",
+        "SUPPLIER_SERVICE_URL"
       ]
     },
     "clean": { "cache": false }

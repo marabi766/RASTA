@@ -2,6 +2,7 @@ import {
   isCheckViolation,
   isGuardRefusal,
   isUniqueViolation,
+  isUniqueViolationOf,
   violatedConstraint,
 } from './prisma-errors';
 
@@ -28,6 +29,42 @@ describe('unique violations', () => {
       expect(isUniqueViolation(value)).toBe(false);
     },
   );
+});
+
+describe('a unique violation of one index', () => {
+  const index = {
+    name: 'ux_rfq_aggregation',
+    model: 'Rfq',
+    columns: ['organization_id', 'aggregation_id'],
+  };
+  // What Prisma 6 throws for `ux_rfq_aggregation` (captured in test/rfq-issue.int-spec.ts).
+  const p2002 = (meta: unknown) => ({ code: 'P2002', meta });
+
+  it.each([
+    p2002({ modelName: 'Rfq', target: ['organization_id', 'aggregation_id'] }),
+    p2002({ modelName: 'Rfq', target: ['aggregation_id', 'organization_id'] }),
+    p2002({ modelName: 'Rfq', target: 'ux_rfq_aggregation' }),
+  ])('recognises %j', (error) => {
+    expect(isUniqueViolationOf(error, index)).toBe(true);
+  });
+
+  it.each([
+    // Another unique index of the same table, and one that only contains the key.
+    p2002({ modelName: 'Rfq', target: ['key_id'] }),
+    p2002({ modelName: 'Rfq', target: ['organization_id', 'id', 'aggregation_id'] }),
+    p2002({ modelName: 'Rfq', target: ['organization_id'] }),
+    p2002({ modelName: 'Rfq', target: 'ux_rfq_key_id' }),
+    // The same columns of another table.
+    p2002({ modelName: 'OutboxMessage', target: ['id'] }),
+    p2002({ modelName: 'RfqInvitation', target: ['organization_id', 'aggregation_id'] }),
+    // No metadata to tell which index it was.
+    p2002(undefined),
+    p2002({ target: ['organization_id', 'aggregation_id'] }),
+    p2002({ modelName: 'Rfq' }),
+    { code: 'P2003', meta: { modelName: 'Rfq', target: ['organization_id', 'aggregation_id'] } },
+  ])('does not recognise %j', (error) => {
+    expect(isUniqueViolationOf(error, index)).toBe(false);
+  });
 });
 
 describe('check violations', () => {
