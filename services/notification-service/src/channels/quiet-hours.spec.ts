@@ -66,7 +66,11 @@ describe('the minutes either side of midnight', () => {
   });
 
   it('leaves 23:59 outside a window that ends at 23:59, the way a stored [0, 1439) does', () => {
-    const almostWholeDay: QuietWindow = { startMinute: 0, endMinute: 1439, timezone: 'Asia/Tehran' };
+    const almostWholeDay: QuietWindow = {
+      startMinute: 0,
+      endMinute: 1439,
+      timezone: 'Asia/Tehran',
+    };
     expect(isInsideWindow(23 * 60 + 58, almostWholeDay)).toBe(true);
     expect(isInsideWindow(23 * 60 + 59, almostWholeDay)).toBe(false);
     expect(applyQuietHours(tehran(23, 59), 'INFO', almostWholeDay).deferred).toBe(false);
