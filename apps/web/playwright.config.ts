@@ -15,7 +15,7 @@ import { defineConfig, devices } from '@playwright/test';
  */
 /** The specs that also run at a phone's viewport: read-only, see the project. */
 const MOBILE_SPECS =
-  /(accessibility|tenant-isolation|asset-lifecycle|asset-records|asset-documents-availability)\.spec\.ts$/;
+  /(accessibility|tenant-isolation|asset-lifecycle|asset-records|asset-documents-availability|inventory-commands)\.spec\.ts$/;
 
 export default defineConfig({
   testDir: './e2e',
@@ -51,6 +51,8 @@ export default defineConfig({
       // and `asset-documents-availability.spec.ts` share nothing: every test
       // registers its own machine, so a phone is a second viewport and not a
       // second writer.
+      // `inventory-commands.spec.ts` is of the same kind: every run creates its own
+      // warehouse, so a phone is a second viewport and not a second writer.
       // Accessibility and tenant isolation are exactly what a second viewport
       // can change — layout, reflow, what is reachable — so those run on both.
       name: 'mobile',
