@@ -11,7 +11,7 @@
  */
 import { idempotencyClaimOperationBudget, type OperationBudget } from '@rasta/config';
 import { outboxRenewalOperationBudget } from '@rasta/nest-common';
-import type { EconomicEnv } from './env';
+import type { EconomicEnvInput } from './env';
 
 /**
  * The most one claim waits on another transaction's lock on its key, over all
@@ -38,7 +38,7 @@ export const CONTENTION_TRANSACTION_TIMEOUT_MS = 60_000;
 export const AUDIT_TX_MAX_WAIT_MS = 30_000;
 export const AUDIT_TX_TIMEOUT_MS = 120_000;
 
-export function economicOperationBudgets(env: EconomicEnv): readonly OperationBudget[] {
+export function economicOperationBudgets(env: EconomicEnvInput): readonly OperationBudget[] {
   return [
     idempotencyClaimOperationBudget('CLAIM_WAIT_MS', CLAIM_WAIT_MS, WAIT_TRANSACTION_SLACK_MS),
     {

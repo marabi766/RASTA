@@ -48,8 +48,8 @@ const AT = new Date('2026-06-01T00:00:00.000Z');
 
 describe('selectRule', () => {
   it('returns null when nothing is configured', () => {
-    // The MVP's real state. docs/24 Q-08 is open and no commercial rate is
-    // seeded, so this is the path every settlement takes today.
+    // No commercial rate is seeded: an unconfigured line takes this path
+    // (and in production its settlement is refused, docs/24 Q-29).
     expect(selectRule([], subject('ORG-A'), AT)).toBeNull();
   });
 

@@ -628,7 +628,7 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 13,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Domain events produce idempotent in-app notifications",
         "Email delivery respects user preferences and records delivery outcome"
@@ -708,6 +708,16 @@
           "kind": "DOCUMENT",
           "ref": "docs/24-open-questions.md",
           "note": "Q-37 remains open and all three locks hold: deliversToRealRecipients is a constant false in app.module.ts, the shipped sender is an RFC 2606 .invalid address, and env.spec.ts proves no environment variable matching REAL_RECIPIENT|PRODUCTION_MAIL|MAIL_ENABLED|SEND_REAL exists. No email has reached a real person. Whether COM-008 may be ACCEPTED while the procurement half of Q-37 — which provider, which domain, which sender identity — is unanswered is a product-owner decision and is not assumed here."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/365",
+          "note": "CI evidence gap closed (Codex acceptance audit of 2026-10-23): Mailpit runs as a pinned service container in both integration jobs and REQUIRE_MAILPIT=1 makes the email-delivery and mail-channel specs fail rather than skip when it is unreachable; the quiet-hours case now pins the worker clock. Merge commit e8286f2, merged 2026-10-23."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-23, in the project-manager chat, on the evidence above, the Codex acceptance audit of 2026-10-23 and its re-check on PR #365 (both criteria met: idempotent in-app notifications from domain events; email that respects preferences and records the delivery outcome, asserted in CI against a real Mailpit). Accepted with disclosed limitations: email is development-only until Q-37 (provider, domain and sender) is answered, and deliversToRealRecipients stays false; three notification rules; SMTP delivery is at-least-once; the ADR-054 per-channel circuit breaker, outbound rate limit and template diagnostics are not built."
         }
       ]
     },
@@ -2744,6 +2754,14 @@
       "recordedBy": "Claude Opus 5.5",
       "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-23",
       "recordIds": ["RLG-001"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "ITEM_ACCEPTED",
+      "reason": "COM-008 (13 SP) is ACCEPTED: idempotent in-app notifications and preference-aware email with recorded delivery outcome, proven in CI against a real Mailpit after PR #365. Limitations: development-only email until Q-37, three rules, at-least-once SMTP, no per-channel circuit breaker, rate limit or template diagnostics.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-23",
+      "recordIds": ["COM-008"]
     }
   ]
 }

@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { ulid } from 'ulid';
-import { ID_PREFIXES } from '@rasta/contracts';
+import { ERROR_CODES, ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
@@ -30,6 +30,7 @@ import { ENV } from '../tokens';
 import type { IdempotentAnswer } from '../shared/idempotency';
 import { databaseNow } from '../shared/database-clock';
 import type { BusinessLine, Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
+import { BUSINESS_LINE_REQUIRED_MESSAGE, mayRecordWithoutLine } from './recorded-sources';
 import {
   STATEMENT_SOURCE_TYPE,
   type CreateTransactionDto,
@@ -92,6 +93,17 @@ export class TransactionService {
     }
     if (dto.holdFunds && !dto.counterpartyOrganizationId) {
       throw RastaError.businessRule('Funds can only be held against a transaction with a payee');
+    }
+    // Failing closed at settlement (docs/24 Q-29) means nothing at all if
+    // leaving the line out is enough to be charged nothing: a new obligation
+    // names its line, but for the source flows `recorded-sources.ts` names,
+    // identified by who verifiably records them (review of #364 round 1, F1).
+    if (
+      this.env.ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE &&
+      dto.businessLine === undefined &&
+      !mayRecordWithoutLine(getContext(), dto.sourceType, dto.transactionType)
+    ) {
+      throw new RastaError(ERROR_CODES.BUSINESS_LINE_REQUIRED, BUSINESS_LINE_REQUIRED_MESSAGE);
     }
 
     // Resolved *before* the transaction opens, and that placement is the fix

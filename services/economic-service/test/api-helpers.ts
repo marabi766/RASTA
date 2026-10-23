@@ -12,7 +12,8 @@ import { SettlementAuthorityConsumer } from '../src/consumers/settlement-authori
 import { StatementSettlementConsumer } from '../src/consumers/statement-settlement.consumer';
 import { RewardTriggerConsumer } from '../src/consumers/reward-trigger.consumer';
 import { AppModule } from '../src/app.module';
-import { PAYMENT_PROVIDER } from '../src/tokens';
+import { ENV, PAYMENT_PROVIDER } from '../src/tokens';
+import { loadEconomicEnv } from '../src/config/env';
 import type { PaymentProvider } from '../src/payment/provider';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl, PLATFORM_ORGANIZATION_ID } from './helpers';
@@ -263,6 +264,12 @@ export function verifyInternalToken(token: string, audience: string) {
 
 export interface StartApiOptions {
   /**
+   * Settings this app is built with over the suite's own, read through the
+   * same `loadEconomicEnv` the service boots with — so a value it refuses at
+   * boot is refused here too. Nothing else in the process sees them.
+   */
+  environment?: NodeJS.ProcessEnv;
+  /**
    * Replaces the payment provider bound at `PAYMENT_PROVIDER`.
    *
    * The provider is the one genuinely external thing in this service — a
@@ -287,6 +294,12 @@ export async function startApi(options: StartApiOptions = {}): Promise<ApiHarnes
   const publisher = new InMemoryEventPublisher();
 
   let builder = Test.createTestingModule({ imports: [AppModule] });
+  if (options.environment) {
+    const environment = { ...process.env, ...options.environment };
+    builder = builder
+      .overrideProvider(ENV)
+      .useFactory({ factory: () => loadEconomicEnv(environment) });
+  }
   if (options.paymentProvider) {
     builder = builder.overrideProvider(PAYMENT_PROVIDER).useValue(options.paymentProvider);
   }

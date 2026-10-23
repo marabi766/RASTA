@@ -63,9 +63,14 @@ export const createTransactionSchema = z
      * owns the fact knows it. Never inferred from the type here: an order may
      * sell parts or broker a service.
      *
-     * Optional for now (docs/24 Q-130): a transaction without a line is priced
-     * only by the type-only rules that predate business lines, and with none
-     * its commission is recorded as `NO_ACTIVE_RULE`.
+     * Optional in the schema while docs/24 Q-130 is open: a transaction
+     * without a line is priced only by the type-only rules that predate
+     * business lines, and with none its commission is recorded as
+     * `NO_ACTIVE_RULE`. Where settlement fails closed (Q-29,
+     * `ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE`) a new obligation must
+     * name it — 422 `BUSINESS_LINE_REQUIRED` otherwise — but for the source
+     * flows `recorded-sources.ts` names (`LINE_LESS_SOURCE_TYPES`), identified
+     * by their verified caller.
      */
     businessLine: businessLineSchema.optional(),
     counterpartyOrganizationId: organizationIdSchema.optional(),
