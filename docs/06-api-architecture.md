@@ -862,6 +862,7 @@ GET    /v1/projects/{id}/fleet-analysis  تحلیل ناوگان داخلی در
 
 ```
 GET    /v1/wallets/provider                        ارائه‌دهنده پرداخت و اینکه شبیه‌سازی است
+GET    /v1/wallets/provider/disclosure             فقط simulated، برای هر عضو سازمان (برچسب «حالت نمایشی»، Q-14)
 GET    /v1/wallets/me                              کیف پول سازمان جاری (در نخستین استفاده باز می‌شود)
 GET    /v1/wallets/{id}                            یک کیف پول
 GET    /v1/wallets/{id}/holds                      Holdهای امانت
