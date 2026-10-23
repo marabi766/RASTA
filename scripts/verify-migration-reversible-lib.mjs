@@ -2922,6 +2922,38 @@ export const EXPECTED = {
     ],
   },
   /**
+   * analytics-service (RUN-001 PR 1, ADR-071). The first fact and the consumer's idempotency
+   * marker; no outbox — the service publishes nothing — so `verify-outbox-claim-migration.mjs`
+   * has nothing of it to fold.
+   *
+   * The objects listed carry the claims a dashboard rests on: one fact per completion
+   * (`fact_maintenance_pkey` on organization + request), a fact is never changed or erased (both
+   * halves of the append-only control, since a row trigger does not cover TRUNCATE), and nothing
+   * stored is a negative cost or downtime, a non-code type or a non-ISO currency.
+   */
+  analytics: {
+    // D-045: the runtime role owns nothing and lost CREATEDB, so the scratch schema is created —
+    // and migrated — as the migrator, which owns rasta_analytics.
+    connectAs: 'migrator',
+    tables: ['fact_maintenance', 'processed_event'],
+    types: [],
+    triggers: [
+      'tg_fact_maintenance_append_only',
+      'tg_fact_maintenance_no_truncate',
+      'tg_fact_maintenance_recorded_at',
+    ],
+    functions: ['fact_maintenance_append_only', 'fact_recorded_at_now'],
+    indexes: ['fact_maintenance_pkey', 'ix_fact_maintenance_org_completed', 'processed_event_pkey'],
+    constraints: [
+      'ck_processed_event_ids',
+      'ck_fact_maintenance_ids',
+      'ck_fact_maintenance_type',
+      'ck_fact_maintenance_downtime_nonneg',
+      'ck_fact_maintenance_cost_nonneg',
+      'ck_fact_maintenance_currency',
+    ],
+  },
+  /**
    * procurement-service (COM-007 PR 1, ADR-070). One initial migration that folds the domain
    * schema, the idempotency store and the outbox together, as inventory's does, so its outbox
    * objects are verified here rather than by the by-name outbox verifiers
@@ -2943,6 +2975,10 @@ export const EXPECTED = {
       'idempotency_key',
       'outbox_message',
       'outbox_stream_sequence',
+      // COM-007 PR 6: an RFQ, its frozen criteria and its explicit invitations.
+      'rfq',
+      'rfq_criterion',
+      'rfq_invitation',
     ],
     types: [],
     triggers: [
@@ -2952,11 +2988,27 @@ export const EXPECTED = {
       'tg_demand_request_guard',
       'tg_demand_request_no_truncate',
       'tg_demand_request_totals_check',
+      // COM-007 PR 6: born PUBLISHED of a READY aggregation, its lifecycle and deadline, issued
+      // atomically with its aggregation's READY -> RFQ_ISSUED, its criteria and invitations frozen.
+      'tg_rfq_born',
+      'tg_rfq_guard',
+      'tg_rfq_no_truncate',
+      'tg_rfq_issue_check',
+      'tg_rfq_criterion_guard',
+      'tg_rfq_criterion_no_truncate',
+      'tg_rfq_criterion_count_check',
+      'tg_rfq_invitation_guard',
+      'tg_rfq_invitation_no_truncate',
+      'tg_rfq_invitation_count_check',
     ],
     functions: [
       'demand_aggregation_guard',
       'demand_request_guard',
       'demand_aggregation_totals_check',
+      'rfq_born_guard',
+      'rfq_guard',
+      'rfq_child_guard',
+      'rfq_issue_check',
     ],
     indexes: [
       'ux_demand_aggregation_org_id',
@@ -2969,9 +3021,22 @@ export const EXPECTED = {
       // COM-007 PR 2: the window sweeper's two queues.
       'ix_demand_aggregation_sweep_open',
       'ix_demand_aggregation_sweep_follow',
+      // COM-007 PR 6: one RFQ per aggregation, the RFQ close sweeper's queue, the supplier's reads.
+      'ux_rfq_aggregation',
+      'ux_rfq_org_id_aggregation',
+      'ix_rfq_close_due',
+      'ix_rfq_invitation_supplier',
     ],
     constraints: [
       'fk_demand_request_aggregation',
+      // COM-007 PR 6: an RFQ and its aggregation name each other; the buyer never invites itself.
+      'fk_rfq_aggregation',
+      'fk_demand_aggregation_rfq',
+      'ck_rfq_status',
+      'ck_rfq_closed',
+      'ck_rfq_cancelled',
+      'ck_rfq_invitation_not_buyer',
+      'ck_rfq_criterion_values',
       // COM-007 PR 2: demands still to follow an ended window, the sweeper's claim, a cancellation.
       'ck_demand_aggregation_follow',
       'ck_demand_aggregation_sweep_claim',

@@ -116,6 +116,9 @@ export class EventPublisher {
 export const ID_PREFIX = {
   demandRequest: ID_PREFIXES.demandRequest,
   aggregation: 'AGG',
+  rfq: ID_PREFIXES.rfq,
+  /** An RFQ's sealing key pair (the shape of construction's `TKY`): this service's own. */
+  rfqKey: 'RFK',
 } as const;
 
 export function newId(prefix: (typeof ID_PREFIX)[keyof typeof ID_PREFIX]): string {

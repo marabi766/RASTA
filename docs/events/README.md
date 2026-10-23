@@ -278,6 +278,14 @@ Consumer Group: `fleet-service.asset-sync`. Topicها: `rasta.asset.v1` ·
 | `REPAIR_LABOUR_RECORDED`       | RepairOrder         | **audit** · analytics                        | پایهٔ سطر هزینه + `laborEntryId`, `hours`, **`hourlyRateMinor`**, **`totalCostMinor`**, `performedAt`                                               |
 | `REPAIR_COST_RECORDED`         | RepairOrder         | **audit** · analytics                        | پایهٔ سطر هزینه + `category`, **`amountMinor`**                                                                                                     |
 
+**analytics در این جدول (RUN-001، ADR-071).** از میان ستون «مصرف‌کنندگان»، فقط `MAINTENANCE_COMPLETED` امروز واقعاً به
+analytics می‌رسد (PR 1): گروه `analytics-service.maintenance-facts`، DLQ ـِ `rasta.analytics.v1.dlq`، هر تکمیل یک ردیف
+`fact_maintenance` با کلید (سازمان، `requestId`)، مستأجر فقط از Envelope. تحویل دوباره بی‌اثر است؛ رویداد دیگری با همان
+واقعیت بی‌اثر و با نشانگر؛ رویدادی که با واقعیت ثبت‌شده نمی‌خواند `BUSINESS_RULE_VIOLATION` (واقعیت نخست می‌ماند). analytics
+از maintenance-service هیچ نمی‌پرسد (اثر مالی ندارد، ADR-071 § ۱). مصرف‌کننده پیش‌فرض خاموش است و فقط با اتصال احرازشده به
+بروکر روشن می‌شود (`ANALYTICS_MAINTENANCE_FACTS_CONSUMER_ENABLED`). بقیهٔ «analytics»های این جدول و جدول‌های دیگر هنوز مقصد
+معماری‌اند و هرکدام با PR خودش می‌آید (ADR-071 § ۳).
+
 **`MAINTENANCE_SCHEDULE_CHANGED` رویداد دهم است و برای بستن `D-011` اضافه شد.**
 برنامهٔ سرویس تعیین می‌کند دستگاهی هر چند وقت سرویس می‌شود؛ تا پیش از این،
 ساخت، ویرایش و خاموش‌کردن آن هیچ رویدادی تولید نمی‌کرد و دلیلش فقط به ستون
@@ -518,6 +526,18 @@ Envelope باید سازمان Payload (تأمین‌کننده) باشد و ت�
 > نمی‌گیرد هم پایان می‌یابد)، و ابطال تجمیع `READY` رویداد `AGGREGATION_CANCELLED` را (بی دلیل ابطال). رویداد پایان پنجرهٔ `REFERRED`/`LAPSED`
 > همهٔ نیازهایش را از همان آغاز با شمار و Digest نام می‌برد، حتی وقتی نیازهای پنجرهٔ بزرگ دسته‌دسته دنبالش می‌روند؛ جابه‌جایی آن دسته‌ها
 > رویداد تازه‌ای ندارد.
+>
+> **COM-007 PR 6 (2026-10-22).** سه رویداد RFQ، این بار **قرارداد میان‌سرویسی در `@rasta/contracts`**
+> (`packages/contracts/src/events/procurement-rfq.ts`؛ مصرف‌کنندهٔ شواهد audit-service در PR 7 همان Schema را می‌خواند) و در جدول رویدادهای
+> procurement ترکیب شده؛ کلید پارتیشن `rfqId` (ADR-070 § ۹) و `rfqVersion` جایگاه RFQ در تاریخچهٔ خودش است. هیچ‌کدام برچسب معیار، متن دلیل ابطال
+> یا مبلغ ندارد: معیارها با شمار و `criteriaDigest` (SHA-256 هگز شکل Canonical فهرست، به ترتیب) نام برده می‌شوند. `RFQ_ISSUED` هم‌زمان گذار
+> `READY → RFQ_ISSUED` تجمیع را اعلام می‌کند و تأمین‌کنندگان دعوت‌شده را نام می‌برد (D-044 (ب)، D-055).
+>
+> | رویداد          | Payload                                                                                                                                                                                                      |
+> | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+> | `RFQ_ISSUED`    | شناسه‌ها و `rfqVersion` (۱)، `productId`, `totalQuantity`, `procurementNature`, `quotationClosingAt`, `invitedSupplierOrganizationIds[]`, `criteriaCount`, `criteriaDigest`, `keyId`, `issuedBy`, `issuedAt` |
+> | `RFQ_CLOSED`    | `rfqId`, `organizationId`, `aggregationId`, `rfqVersion`, `quotationClosingAt`, `trigger` (`SWEEPER` \| `MANUAL`), `closedBy`, `closedAt`, `quotationCount` (ADR-070 § ۹؛ تا PR 8 صفر)                       |
+> | `RFQ_CANCELLED` | `rfqId`, `organizationId`, `aggregationId`, `rfqVersion`, `previousStatus`, `reasonCode` (فهرست بستهٔ `PROCUREMENT_RFQ_CANCELLATION_CODES`، پیش‌فرض `BUYER_REQUEST`), `cancelledBy`, `cancelledAt`           |
 
 ## Supplier — `rasta.supplier.v1`
 

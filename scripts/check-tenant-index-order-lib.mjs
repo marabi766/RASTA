@@ -51,6 +51,7 @@ export const SERVICES = [
   'construction',
   'contract',
   'inventory',
+  'analytics',
   'procurement',
   'organization',
   'fleet',
@@ -224,6 +225,17 @@ export const EXEMPTIONS = {
       index: 'demand_aggregation (closes_at, id)',
       reason:
         'the window sweeper claims ended windows whose demands are still following them for every tenant at once (WindowSweepRepository.claimDue, runUnscoped); a partial index on demands_to_follow > 0, empty but for windows larger than one batch, and each is then worked under its own organization_id',
+    },
+    // COM-007 PR 6 (ADR-070 § 3, § 10): the RFQ close sweeper's queue, and the invited supplier's reads.
+    ix_rfq_close_due: {
+      index: 'rfq (quotation_closing_at, id)',
+      reason:
+        'the RFQ close sweeper claims PUBLISHED RFQs past their deadline for every tenant at once, earliest deadline first (RfqRepository.claimDue, runUnscoped); a partial index on status = PUBLISHED, and each RFQ is then closed under its own organization_id',
+    },
+    ix_rfq_invitation_supplier: {
+      index: 'rfq_invitation (supplier_organization_id, rfq_id)',
+      reason:
+        "an invited supplier's own RFQs (GET /v1/rfqs?side=SUPPLIER, GET /v1/rfqs/{id}; ADR-070 § 10): an invitation belongs to the buyer's organization, but the supplier asking is another tenant, whose organization is supplier_organization_id — the column this index leads with, and the predicate of that read (RfqRepository, runUnscoped)",
     },
   },
   contract: {

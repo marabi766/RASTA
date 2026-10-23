@@ -13,6 +13,9 @@ export const REFUSAL_AREAS = {
   submission: 'Demand cannot be submitted',
   withdrawal: 'Demand cannot be withdrawn',
   cancellation: 'Aggregation cannot be cancelled',
+  rfqIssue: 'RFQ cannot be issued',
+  rfqClose: 'RFQ cannot be closed',
+  rfqCancellation: 'RFQ cannot be cancelled',
 } as const;
 export type RefusalArea = keyof typeof REFUSAL_AREAS;
 
@@ -58,6 +61,44 @@ export const REFUSAL_REASONS = {
      * sweeper's, or the next demand's), and REFERRED, LAPSED, RFQ_ISSUED and CANCELLED are final.
      */
     AGGREGATION_NOT_READY: 422,
+  },
+  /** Issuing an RFQ from an aggregation (ADR-070 § 3, plan PR 6). */
+  rfqIssue: {
+    /**
+     * Only a READY aggregation is issued from: an OPEN window has not ended, and RFQ_ISSUED,
+     * REFERRED, LAPSED and CANCELLED are final (one RFQ per aggregation; a cancelled RFQ leaves its
+     * aggregation RFQ_ISSUED, Q-121 (4)).
+     */
+    AGGREGATION_NOT_READY: 422,
+    /** `quotationClosingAt` is not after the database clock read under the aggregation's lock (Q-121 (2)). */
+    QUOTATION_CLOSING_NOT_IN_FUTURE: 422,
+    /**
+     * An invited organization holds no approved GOODS_SUPPLY qualification, or is suspended, by
+     * supplier-service's answer at the issue (Q-121 (1)). Which one, and why, is not said: the
+     * standing is supplier-service's to tell.
+     */
+    INVITEE_NOT_ELIGIBLE: 422,
+    /** The buyer invited itself (ADR-070 § 3). */
+    INVITEE_IS_BUYER: 422,
+    /** More invitees than `PROCUREMENT_RFQ_MAX_INVITEES` (Q-121 (1): protection, not a rule). */
+    INVITEE_LIMIT_EXCEEDED: 422,
+  },
+  /** Closing an RFQ at its deadline (ADR-070 § 3, plan PR 6). */
+  rfqClose: {
+    /** The database clock, read after the RFQ's lock, is before `quotationClosingAt`. */
+    QUOTATION_DEADLINE_NOT_REACHED: 422,
+    /** A cancelled RFQ is final; it is never closed. */
+    RFQ_CANCELLED: 422,
+  },
+  /** Cancelling an RFQ (ADR-070 § 3, plan PR 6). */
+  rfqCancellation: {
+    /**
+     * `reasonCode` is not on `PROCUREMENT_RFQ_CANCELLATION_CODES`, the configured closed list
+     * (the planned `CancelRfq`). Judged once the RFQ is found to be the caller's, in any state.
+     */
+    CANCELLATION_CODE_NOT_ALLOWED: 422,
+    /** AWARDED and CANCELLED are final. */
+    RFQ_NOT_CANCELLABLE: 422,
   },
 } as const satisfies Record<RefusalArea, Record<string, 403 | 409 | 422>>;
 

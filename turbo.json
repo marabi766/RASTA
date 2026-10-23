@@ -102,8 +102,10 @@
         "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
         "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
         "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
+        "ANALYTICS_*",
         "CORS_ORIGINS",
-        "PROCUREMENT_*"
+        "PROCUREMENT_*",
+        "SUPPLIER_SERVICE_URL"
       ]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
@@ -175,8 +177,10 @@
         "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
         "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
         "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
+        "ANALYTICS_*",
         "CORS_ORIGINS",
-        "PROCUREMENT_*"
+        "PROCUREMENT_*",
+        "SUPPLIER_SERVICE_URL"
       ]
     },
     // identity-service's two 500-write aggregation proofs, run alone after the
@@ -279,6 +283,12 @@
     // MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED (Q-133 (8)): false by default —
     // a return shipment names exactly what was authorized.
     //
+    // ANALYTICS_* (RUN-001, ADR-071): analytics-service's own settings — the
+    // fleet dashboard's readers and the projection switch — declared from its
+    // first commit. CORS_ORIGINS with them: every service's schema reads it, and
+    // declaring it for analytics declares it for all, so it leaves the withheld
+    // list in the three tasks above (identity's aggregation-stress task still
+    // withholds it).
     // CONTRACT_SERVICE_URL and ECONOMIC_STATEMENT_BUSINESS_LINE (CON-003 PR 6b):
     // economic-service's statement owner (A-13) and the line a statement's
     // obligation is recorded under (Q-130, unset by default); the same rule.
@@ -292,6 +302,11 @@
     // so none of its settings may join the withheld list — its own settings and
     // the CORS list every service reads are declared here, which takes
     // CORS_ORIGINS off every other service's withheld entry too.
+    //
+    // SUPPLIER_SERVICE_URL (COM-007 PR 6): procurement-service now asks
+    // supplier-service for an RFQ invitee's standing, so the URL is declared
+    // here for every task that starts it — which takes it off
+    // construction-service's withheld entry too.
     "dev": {
       "cache": false,
       "persistent": true,
@@ -329,8 +344,10 @@
         "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
         "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
         "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
+        "ANALYTICS_*",
         "CORS_ORIGINS",
-        "PROCUREMENT_*"
+        "PROCUREMENT_*",
+        "SUPPLIER_SERVICE_URL"
       ]
     },
     "clean": { "cache": false }

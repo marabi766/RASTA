@@ -15,6 +15,15 @@ import type { ProcurementEnv } from '../config/env';
  * parent-organization visibility (Q-119 note of 2026-10-16: no union exception) and no service
  * caller.
  *
+ * ## The invited supplier, the one other organization (plan PR 6)
+ *
+ * An RFQ is its buyer's too, and one other kind of organization reads it: one the RFQ invites,
+ * through a person holding a role `PROCUREMENT_SUPPLIER_ROLES` names there (default `SUPPLIER`).
+ * That read crosses the tenant guard with a written reason (`RfqRepository`), its predicate always
+ * the invitation of the organization the token names (ADR-070 § 10). An RFQ that does not invite
+ * it is 404, like one that does not exist. A supplier never commands an RFQ: on the buyer's
+ * commands it is 404 too, as is any third organization; another role of the buyer is 403.
+ *
  * ## Who, from configuration
  *
  * The roles come from `PROCUREMENT_DEMAND_ROLES` (and, for cancelling an aggregation,
@@ -41,16 +50,84 @@ export interface Acting {
   readonly organizationId: string;
 }
 
+/** A person acting for an organization, whose role is judged once the RFQ is found (plan PR 6). */
+export interface RfqCaller extends Acting {
+  readonly roles: readonly string[];
+}
+
+/** Which grant a buyer-side RFQ route needs. */
+export type RfqBuyerGrant = 'read' | 'command';
+
 @Injectable()
 export class ProcurementAccess {
   private readonly demandRoles: readonly string[];
   private readonly rfqIssuerRoles: readonly string[];
   private readonly settingRoles: readonly string[];
+  private readonly supplierRoles: readonly string[];
 
   constructor(@Inject(ENV) env: ProcurementEnv) {
     this.demandRoles = env.PROCUREMENT_DEMAND_ROLES;
     this.rfqIssuerRoles = env.PROCUREMENT_RFQ_ISSUER_ROLES;
     this.settingRoles = env.PROCUREMENT_AGGREGATION_SETTING_ROLES;
+    this.supplierRoles = env.PROCUREMENT_SUPPLIER_ROLES;
+  }
+
+  /**
+   * The caller of an RFQ route, judged before anything is read: a signed-in person acting for an
+   * organization — never the oversight role, a service or the platform operator, which are neither
+   * a buyer nor a supplier (ADR-070 § 4, § 10). Its role is judged by {@link assertRfqBuyerRole}
+   * once the RFQ is found in its own organization, or by {@link mayReadAsSupplier} for an RFQ it is
+   * invited to — so a supplier and a third organization get, on the buyer's commands, the same 404
+   * a missing id gets (ADR-070 § 3).
+   */
+  assertRfqCaller(): RfqCaller {
+    assertNotAuditor();
+    assertNotServiceCaller();
+    const context = getContext();
+    if (context.roles.includes(PLATFORM_ROLE)) {
+      throw RastaError.forbidden(
+        'The platform administrator is neither the buyer nor a supplier of an RFQ',
+      );
+    }
+    if (!context.organizationId) {
+      throw RastaError.forbidden('An RFQ is read and changed for an organization');
+    }
+    return { organizationId: context.organizationId, roles: context.roles };
+  }
+
+  /**
+   * The buyer side of an RFQ found in the caller's own organization: commands (close, cancel) by
+   * `PROCUREMENT_RFQ_ISSUER_ROLES`; reads by those and `PROCUREMENT_DEMAND_ROLES` (`docs/09` gives
+   * `PROCUREMENT_USER` `rfq:read`). Any other role of the buyer is 403.
+   */
+  assertRfqBuyerRole(caller: RfqCaller, grant: RfqBuyerGrant): void {
+    const granted = grant === 'command' ? this.rfqIssuerRoles : this.rfqReaderRoles();
+    if (!granted.some((role) => caller.roles.includes(role))) {
+      throw RastaError.insufficientRole(granted, [...caller.roles]);
+    }
+  }
+
+  /** Whether the caller holds, in its own organization, a role that reads the RFQs it is invited to. */
+  mayReadAsSupplier(caller: RfqCaller): boolean {
+    return this.supplierRoles.some((role) => caller.roles.includes(role));
+  }
+
+  /** The buyer's list of its RFQs: the read roles, judged first (there is no row to find). */
+  assertRfqBuyerReader(): Acting {
+    return this.assertBuyerRole(this.rfqReaderRoles());
+  }
+
+  /** The supplier's list of the RFQs it is invited to: `PROCUREMENT_SUPPLIER_ROLES`, judged first. */
+  assertRfqSupplierReader(): Acting {
+    const caller = this.assertRfqCaller();
+    if (!this.mayReadAsSupplier(caller)) {
+      throw RastaError.insufficientRole(this.supplierRoles, [...caller.roles]);
+    }
+    return { organizationId: caller.organizationId };
+  }
+
+  private rfqReaderRoles(): readonly string[] {
+    return [...new Set([...this.rfqIssuerRoles, ...this.demandRoles])];
   }
 
   /**
@@ -124,7 +201,7 @@ export function assertNotServiceCaller(): void {
 export function assertOwnedBy(
   row: { id: string; organizationId: string },
   acting: Acting,
-  resource: 'DemandRequest' | 'DemandAggregation',
+  resource: 'DemandRequest' | 'DemandAggregation' | 'Rfq',
 ): void {
   if (row.organizationId !== acting.organizationId) {
     throw RastaError.notFound(resource, row.id);

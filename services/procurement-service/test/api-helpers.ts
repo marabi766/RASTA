@@ -22,6 +22,9 @@ import {
 } from '../src/demand/aggregation-window.sweeper';
 import { WindowSweepRepository } from '../src/demand/window-sweep.repository';
 import { WindowSweepService } from '../src/demand/window-sweep.service';
+import { RfqCloseSweeper, type RfqCloseSweeperOptions } from '../src/rfq/rfq-close.sweeper';
+import { RfqRepository } from '../src/rfq/rfq.repository';
+import { RfqCloseService } from '../src/rfq/rfq-close.service';
 import { databaseUrl, newProductId } from './helpers';
 
 /**
@@ -43,6 +46,10 @@ export interface ApiHarness {
   publisher: InMemoryEventPublisher;
   /** A real window sweeper over this app's real repository and service; never started. */
   sweeper(overrides?: Partial<AggregationWindowSweeperOptions>): AggregationWindowSweeper;
+  /** A real RFQ close sweeper over this app's real repository and service; never started. */
+  rfqSweeper(overrides?: Partial<RfqCloseSweeperOptions>): RfqCloseSweeper;
+  /** Any provider of the real application, for a suite that spies on one. */
+  get<T>(token: abstract new (...args: never[]) => T): T;
   close(): Promise<void>;
 }
 
@@ -171,6 +178,8 @@ export async function startApi(
     // a suite ends by a demand is never ended first by a sweep it did not ask for.
     .overrideProvider(AggregationWindowSweeper)
     .useValue(inert)
+    .overrideProvider(RfqCloseSweeper)
+    .useValue(inert)
     .overrideProvider(AUTH_OPTIONS)
     .useFactory({
       factory: (): AuthGuardOptions => ({
@@ -243,6 +252,16 @@ export async function startApi(
           ...overrides,
         },
       ),
+    rfqSweeper: (overrides = {}) =>
+      new RfqCloseSweeper(moduleRef.get(RfqRepository), moduleRef.get(RfqCloseService), {
+        intervalMs: 60_000,
+        batchSize: 20,
+        leaseSeconds: 60,
+        retryBackoffBaseSeconds: 10,
+        retryBackoffMaxSeconds: 900,
+        ...overrides,
+      }),
+    get: (token) => moduleRef.get(token),
     close: async () => {
       await app.close();
       restoreEnvironment();
@@ -280,6 +299,17 @@ export function client(api: ApiHarness, token: string, headers: Record<string, s
     aggregations: (query = '') => get(`/v1/aggregations${query}`),
     cancel: (id: string, expectedVersion: number, reason = 'the need went away', k?: string) =>
       post(`/v1/aggregations/${id}/cancel`, { expectedVersion, reason }, k),
+    issueRfq: (aggregationId: string, body: object, k?: string) =>
+      post(`/v1/aggregations/${aggregationId}/rfq`, body, k),
+    rfq: (id: string) => get(`/v1/rfqs/${id}`),
+    rfqs: (query = '?side=BUYER') => get(`/v1/rfqs${query}`),
+    closeRfq: (id: string, k?: string) => post(`/v1/rfqs/${id}/close`, {}, k),
+    cancelRfq: (
+      id: string,
+      expectedVersion: number,
+      reason = 'the budget was withdrawn',
+      k?: string,
+    ) => post(`/v1/rfqs/${id}/cancel`, { expectedVersion, reasonCode: 'BUYER_REQUEST', reason }, k),
     setting: () => get('/v1/aggregation-settings'),
     recordSetting: (
       body: {

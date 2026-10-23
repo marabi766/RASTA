@@ -28,6 +28,17 @@ const GUARDS = [
   ['demand_request', 'tg_demand_request_guard'],
   ['demand_request', 'tg_demand_request_no_truncate'],
   ['demand_request', 'tg_demand_request_totals_check'],
+  // Plan PR 6: an RFQ, its frozen criteria and invitations.
+  ['rfq', 'tg_rfq_born'],
+  ['rfq', 'tg_rfq_guard'],
+  ['rfq', 'tg_rfq_issue_check'],
+  ['rfq', 'tg_rfq_no_truncate'],
+  ['rfq_criterion', 'tg_rfq_criterion_count_check'],
+  ['rfq_criterion', 'tg_rfq_criterion_guard'],
+  ['rfq_criterion', 'tg_rfq_criterion_no_truncate'],
+  ['rfq_invitation', 'tg_rfq_invitation_count_check'],
+  ['rfq_invitation', 'tg_rfq_invitation_guard'],
+  ['rfq_invitation', 'tg_rfq_invitation_no_truncate'],
 ] as const;
 
 describe('the runtime role cannot lift an integrity guard (D-045)', () => {
@@ -140,6 +151,9 @@ describe('the runtime role cannot lift an integrity guard (D-045)', () => {
       'idempotency_key',
       'outbox_message',
       'outbox_stream_sequence',
+      'rfq',
+      'rfq_criterion',
+      'rfq_invitation',
     ]);
     for (const { table, privileges } of rows) {
       expect([table, privileges]).toEqual([
