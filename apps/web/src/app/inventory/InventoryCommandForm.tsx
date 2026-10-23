@@ -396,6 +396,7 @@ function CommandFields({
             {(control) => (
               <select
                 {...control}
+                key={typed(STOCK_ITEM_FIELD)}
                 name={STOCK_ITEM_FIELD}
                 defaultValue={typed(STOCK_ITEM_FIELD)}
                 className={controlClassName}
@@ -414,6 +415,7 @@ function CommandFields({
             {(control) => (
               <select
                 {...control}
+                key={typed(DIRECTION_FIELD)}
                 name={DIRECTION_FIELD}
                 defaultValue={typed(DIRECTION_FIELD)}
                 className={controlClassName}

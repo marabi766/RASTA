@@ -251,7 +251,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
       await page.goto(shipmentPath);
       await expect(page.getByRole('heading', { level: 1 })).toHaveText('اطلاعات محموله');
       await expect(page.getByText(INVENTORY_CONSIGNEE_NOTE)).toBeVisible();
-      await expect(page.getByRole('form')).toHaveCount(0);
+      await expect(page.locator('main form')).toHaveCount(0);
       await expect(page.getByRole('region', { name: 'پیگیری محموله' })).toContainText('ایجادشده');
       await expectAccessible(page);
 
@@ -315,7 +315,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
       await expect(page.getByText(INVENTORY_DONE_MESSAGES.DELIVER_SHIPMENT)).toBeVisible();
       await expect(page.getByText('تحویل‌شده').first()).toBeVisible();
       await expect(page.getByText(INVENTORY_SHIPMENT_FINISHED_NOTE)).toBeVisible();
-      await expect(page.getByRole('form')).toHaveCount(0);
+      await expect(page.locator('main form')).toHaveCount(0);
       const tracking = page.getByRole('region', { name: 'پیگیری محموله' });
       await expect(tracking.getByRole('listitem')).toHaveCount(3);
       await expectAccessible(page);
@@ -351,7 +351,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
     const { page, close } = await as(browser, 'orgAdmin');
     try {
       await page.goto(shipmentPath);
-      await expect(page.getByRole('form')).toHaveCount(0);
+      await expect(page.locator('main form')).toHaveCount(0);
       await expect(page.locator('main')).not.toContainText('SHIPMENT_NOT_CREATED');
     } finally {
       await close();

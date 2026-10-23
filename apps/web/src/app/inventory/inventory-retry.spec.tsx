@@ -546,3 +546,61 @@ describe('one unresolved command per warehouse', () => {
     ).toBe('UNAVAILABLE');
   });
 });
+
+/**
+ * Found by the live run of `e2e/inventory-commands.spec.ts`: React resets an
+ * uncontrolled form once its action has answered, and a `<select>` whose
+ * default changed on the way back came back empty, so a corrected second
+ * submission posted no item and no direction. A refusal must leave the form as
+ * it was typed.
+ */
+describe('a refused form is drawn again as it was typed', () => {
+  const ADJUST_KEY = 'sub_ADJUSTKEYADJUSTKEYADJ';
+
+  it('the selects and the text keep their values, and the corrected submission posts them', async () => {
+    submit.mockImplementationOnce(async (_scope, _previous, form) => ({
+      kind: 'INVALID',
+      command: 'ADJUST_STOCK',
+      submissionId: String(form.get('submission')),
+      values: {
+        [STOCK_ITEM_FIELD]: String(form.get(STOCK_ITEM_FIELD)),
+        [DIRECTION_FIELD]: String(form.get(DIRECTION_FIELD)),
+        [AMOUNT_FIELD]: String(form.get(AMOUNT_FIELD)),
+      },
+      fieldErrors: {},
+      message: 'refused',
+    }));
+    submit.mockResolvedValueOnce({ kind: 'IDLE' });
+    const { container } = render(
+      <InventoryCommandForm
+        scope={WAREHOUSE}
+        command="ADJUST_STOCK"
+        csrfToken="csrf"
+        submissionId={ADJUST_KEY}
+        replay={STAMP}
+        binding={BINDING}
+        sessionMaxAgeSeconds={SESSION_MAX_AGE}
+        items={ITEMS}
+        pageHref="/x"
+      />,
+    );
+    const field = (name: string) => container.querySelector(`[name="${name}"]`) as HTMLInputElement;
+    fireEvent.change(field(STOCK_ITEM_FIELD), { target: { value: ITEM_ID } });
+    fireEvent.change(field(DIRECTION_FIELD), { target: { value: 'DECREASE' } });
+    fireEvent.change(field(AMOUNT_FIELD), { target: { value: '1000' } });
+    await send(container.querySelector('form'));
+    await screen.findByText('refused');
+    expect(field(STOCK_ITEM_FIELD).value).toBe(ITEM_ID);
+    expect(field(DIRECTION_FIELD).value).toBe('DECREASE');
+    expect(field(AMOUNT_FIELD).value).toBe('1000');
+
+    fireEvent.change(field(AMOUNT_FIELD), { target: { value: '8' } });
+    await send(container.querySelector('form'));
+    const second = submit.mock.calls[1]![2];
+    expect(second.get(STOCK_ITEM_FIELD)).toBe(ITEM_ID);
+    expect(second.get(DIRECTION_FIELD)).toBe('DECREASE');
+    expect(second.get(AMOUNT_FIELD)).toBe('8');
+    // The same submission id: a refusal frees the service's claim, so the corrected form may reuse it.
+    expect(second.get('submission')).toBe(ADJUST_KEY);
+  });
+});
