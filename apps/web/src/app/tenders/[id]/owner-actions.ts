@@ -9,7 +9,7 @@ import {
   ownerValuesOf,
   parseOwnerForm,
 } from '@/lib/tender-owner-input';
-import { UNREPEATABLE_OWNER_COMMANDS } from '@/lib/tender-owner-fields';
+import { UNREPEATABLE_OWNER_COMMANDS, resentOutcome } from '@/lib/tender-owner-fields';
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
 import { webServerEnv } from '@/server/env';
@@ -43,11 +43,11 @@ export async function submitOwnerCommand(
 ): Promise<OwnerFormState> {
   // A view-only record is never sent again, whatever the form posts.
   if (previous.kind === 'UNCONFIRMED' && previous.viewOnly) return previous;
-  const state = await attempt(tenderId, form);
+  const state = await attempt(tenderId, form, previous.kind === 'UNCONFIRMED');
   return previous.kind === 'UNCONFIRMED' ? afterRetry(previous, state) : state;
 }
 
-async function attempt(tenderId: string, form: FormData): Promise<OwnerFormState> {
+async function attempt(tenderId: string, form: FormData, resent: boolean): Promise<OwnerFormState> {
   const session = await currentSession();
   if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
@@ -88,10 +88,14 @@ async function attempt(tenderId: string, form: FormData): Promise<OwnerFormState
 
   const result = await issueOwnerCommand(session, tenderId, stamp, request, submissionId);
   switch (result.kind) {
-    case 'CREATED':
+    case 'CREATED': {
+      // A re-send's answer may be the first send's, replayed under its key: the flash says so.
+      const outcome = outcomeOf(command, result.data);
+      const done = resent ? resentOutcome(outcome) : outcome;
       return redirect(
-        `/tenders/${encodeURIComponent(tenderId)}?view=own&${FLASH_PARAM}=${mintFlash(session, tenderId, outcomeOf(command, result.data))}`,
+        `/tenders/${encodeURIComponent(tenderId)}?view=own&${FLASH_PARAM}=${mintFlash(session, tenderId, done)}`,
       );
+    }
     case 'INVALID':
       return {
         kind: 'INVALID',

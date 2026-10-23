@@ -209,7 +209,7 @@ export function parseOwnerForm(
       return { ok: true, input: { scores }, values };
     }
     case 'AWARD': {
-      if (context.executes) return { ok: true, input: {}, values: null };
+      if (context.executes) return { ok: true, input: {}, values };
       const justification = text(JUSTIFICATION_FIELD).trim();
       if (justification.length > JUSTIFICATION_MAX) {
         return fail({ [JUSTIFICATION_FIELD]: OWNER_INPUT_MESSAGES.justificationLength });

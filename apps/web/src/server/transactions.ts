@@ -103,7 +103,9 @@ const transactionSchema = z.object({
    * (task 061, docs/23 D-060): equal to `disputeId`, the resolution is the
    * latest dispute's; different, an earlier one's. `null` before any
    * resolution, and on rows resolved before it was kept that economic could
-   * not attribute for certain — there the screen falls back to comparing times.
+   * not attribute for certain — there the screen shows the resolution as the
+   * transaction's last, says it cannot tell which dispute it decided, and
+   * never infers it from the times (Codex on PR 352 round 2).
    */
   resolvedDisputeId: z.string().min(1).nullable(),
   settledAt: utcInstant.nullable(),
