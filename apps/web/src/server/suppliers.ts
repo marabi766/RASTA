@@ -11,10 +11,8 @@ export type { ReadResult };
 /**
  * Reading suppliers through the gateway (EXP-004 slice 5, `docs/04` § 4.10).
  *
- * Read-only: no command is issued from this module — registering a profile,
- * submitting, approving or rejecting a qualification, suspending and
- * reinstating are all out of scope here — so there is no Idempotency-Key.
- * Reads follow `projects.ts` and `contracts.ts`.
+ * Read-only: no command is issued from this module — the six commands are in
+ * `supplier-commands.ts`. Reads follow `projects.ts` and `contracts.ts`.
  *
  * ## The two views, and the wall between them (`supplier-service/views.ts`)
  *
@@ -32,9 +30,9 @@ export type { ReadResult };
  * qualification's `submittedBy` and `decidedBy`, a suspension's
  * `suspendedBy` and `reinstatedBy` — is dropped here, the same choice
  * `projects.ts` made for `createdBy` and `statusChangedBy`: an id nobody
- * reads should not travel with the page. Evidence document ids are dropped
- * too; they are opaque document-service handles this slice has no viewer
- * for, so only how many is kept.
+ * reads should not travel with the page. Evidence references are kept as the
+ * API returns them (the write screens' reviewer reads which documents were
+ * attached): document-service ids and labels, by id only.
  *
  * ## Nothing required is defaulted
  *
@@ -85,11 +83,20 @@ export type SupplierPage = z.infer<typeof supplierPageSchema>;
 /**
  * One capability's qualification history.
  *
- * `evidence` arrives as a list of document-service handles (`documentId`,
- * `label`); none of that reaches what this module returns — like
- * `projects.ts` dropping the operating-area polygon for a `hasArea` flag,
- * only `evidenceCount` survives the transform below.
+ * `evidence` is the list of document-service handles the API returns
+ * (`documentId`, `label`), kept as the API gives them: an id and the
+ * submitter's own label, shown as text. Nothing here fetches, opens or
+ * resolves a document — supplier-service never does either — so the record says
+ * only which ids were attached. This private view reaches the caller's own
+ * organization and platform operators; the directory carries none of it.
  */
+const evidenceSchema = z.object({
+  documentId: z.string(),
+  label: z.string().nullable(),
+});
+
+export type EvidenceReference = z.infer<typeof evidenceSchema>;
+
 const rawQualificationSchema = z.object({
   id: z.string(),
   capability,
@@ -98,13 +105,13 @@ const rawQualificationSchema = z.object({
   submittedAt: utcInstant,
   decidedAt: utcInstant.nullable(),
   decisionNote: z.string().nullable(),
-  evidence: z.array(z.unknown()),
+  evidence: z.array(evidenceSchema),
   current: z.boolean(),
 });
 
-const qualificationSchema = rawQualificationSchema.transform(({ evidence, ...rest }) => ({
-  ...rest,
-  evidenceCount: evidence.length,
+const qualificationSchema = rawQualificationSchema.transform((record) => ({
+  ...record,
+  evidenceCount: record.evidence.length,
 }));
 
 export type QualificationRecord = z.infer<typeof qualificationSchema>;

@@ -6,7 +6,7 @@ import type { WebSession } from './session';
 
 /**
  * Reading suppliers. The cases that would be silent if wrong: an actor id or
- * a raw evidence document id reaching the page, a malformed timestamp
+ * an evidence entry without its id, a malformed timestamp
  * crashing the render instead of answering `MALFORMED`, and a 404 (another
  * tenant's supplier) told apart from a refusal.
  */
@@ -134,14 +134,16 @@ describe('reading suppliers', () => {
     expect(urls[0]).toBe('http://gateway.test:3000/v1/suppliers/..%2Fx%3Fy');
   });
 
-  it('never lets an actor id or a raw evidence document id into what the screen receives', async () => {
+  it('never lets an actor id into what the screen receives, and keeps evidence as the API returns it', async () => {
     const { impl } = answering(SUPPLIER_DETAIL);
     const result = await withFetch(impl, () => fetchSupplier(SESSION, 'SUP_1'));
 
     expect(result.kind).toBe('OK');
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toContain('USR_ACTOR_SECRET');
-    expect(serialized).not.toContain('DOC_ACTOR_SECRET');
+    expect(JSON.stringify(result)).not.toContain('USR_ACTOR_SECRET');
+    // By id and label only: the portal never fetches or resolves a document.
+    expect(result.kind === 'OK' && result.data.qualifications[0]?.evidence).toEqual([
+      { documentId: 'DOC_ACTOR_SECRET', label: 'مجوز' },
+    ]);
     expect(result.kind === 'OK' && result.data.qualifications[0]?.evidenceCount).toBe(1);
   });
 
@@ -307,6 +309,7 @@ describe('a response missing a required field, not merely an invalid one', () =>
       statement: null,
       decidedAt: null,
       decisionNote: null,
+      evidence: [],
       evidenceCount: 0,
       current: false,
     });

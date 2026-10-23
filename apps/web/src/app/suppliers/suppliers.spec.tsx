@@ -17,8 +17,8 @@ import { SupplierDetailScreen } from './[id]/SupplierDetailScreen';
  * What `/suppliers` and `/suppliers/[id]` render: every outcome the server
  * read can hand back (empty, permission, degraded, absent), the directory's
  * catalogue-safe fields, and the private record's qualification and
- * suspension history — with no actor id and no raw evidence document id
- * anywhere in the rendered text.
+ * suspension history — with no actor id anywhere in the rendered text and each
+ * evidence document by its id and label only, as the API returns it.
  */
 
 // A plain anchor: `next/link` prefetches through an intersection observer whose
@@ -67,6 +67,7 @@ const DETAIL: SupplierDetail = {
       submittedAt: '2026-08-02T08:00:00.000Z',
       decidedAt: '2026-08-03T08:00:00.000Z',
       decisionNote: 'مستندات کامل بود',
+      evidence: [{ documentId: 'DOC_1', label: 'پروانه کسب' }],
       evidenceCount: 1,
       current: true,
     },

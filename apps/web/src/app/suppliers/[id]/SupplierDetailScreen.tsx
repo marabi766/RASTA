@@ -1,10 +1,22 @@
-import { EmptyState, ErrorState, Identifier, NoAccessState, Section, StatusBadge } from '@/ui';
+import type { ReactNode } from 'react';
+
+import {
+  Alert,
+  EmptyState,
+  ErrorState,
+  Identifier,
+  NoAccessState,
+  Section,
+  StatusBadge,
+} from '@/ui';
 import { formatJalaliDateLong, toPersianDigits } from '@/lib/format';
 import {
   qualificationStateLabel,
   supplierCapabilityLabel,
   supplierStatusLabel,
 } from '@/lib/supplier-fields';
+import { SUPPLIER_NOTICE_TEXT, type SupplierNotice } from '@/lib/supplier-commands';
+import { NO_COMMANDS, type SupplierCommandsView } from './SupplierCommands';
 import type {
   QualificationRecord,
   ReadResult,
@@ -13,9 +25,10 @@ import type {
 } from '@/server/suppliers';
 
 /**
- * The supplier's private record (docs/16 § ۱۶٫۶, `/suppliers/[id]`),
- * read-only: qualification history per category and every suspension
- * episode, with its reason and whether it is still open.
+ * The supplier's private record (docs/16 § ۱۶٫۶, `/suppliers/[id]`):
+ * qualification history per category and every suspension episode, with its
+ * reason and whether it is still open — and the commands the page was given
+ * (`SupplierCommands.tsx`), each drawn only for a person the service would admit.
  *
  * Every outcome the server can hand back is rendered. A supplier of another
  * organization answers 404 from the service, and is shown with the same
@@ -25,9 +38,20 @@ import type {
 
 export interface SupplierDetailScreenProps {
   readonly result: ReadResult<SupplierDetail>;
+  /**
+   * What the write that sent the person here did — decided by the page, which
+   * accepts it only from a flash the server signed for this session and this
+   * supplier (`server/flash.ts`), never from a bare query value.
+   */
+  readonly notice?: SupplierNotice;
+  readonly commands?: SupplierCommandsView;
 }
 
-export function SupplierDetailScreen({ result }: SupplierDetailScreenProps) {
+export function SupplierDetailScreen({
+  result,
+  notice,
+  commands = NO_COMMANDS,
+}: SupplierDetailScreenProps) {
   if (result.kind === 'FORBIDDEN') {
     return <NoAccessState description="این تأمین‌کننده در اختیار شما نیست." />;
   }
@@ -54,6 +78,9 @@ export function SupplierDetailScreen({ result }: SupplierDetailScreenProps) {
 
   return (
     <div className="flex flex-col gap-6">
+      {notice ? (
+        <Alert tone={SUPPLIER_NOTICE_TEXT[notice].tone}>{SUPPLIER_NOTICE_TEXT[notice].text}</Alert>
+      ) : null}
       <Section headingId="supplier-summary" title={supplier.displayName}>
         <div className="flex flex-wrap items-center gap-3">
           <StatusBadge status={supplier.status} label={supplierStatusLabel(supplier.status)} />
@@ -92,13 +119,43 @@ export function SupplierDetailScreen({ result }: SupplierDetailScreenProps) {
         </dl>
       </Section>
 
-      <QualificationsSection qualifications={supplier.qualifications} />
-      <SuspensionsSection suspensions={supplier.suspensions} />
+      <QualificationsSection
+        qualifications={supplier.qualifications}
+        decisions={commands.decisions}
+        submit={commands.submit}
+      />
+      <SuspensionsSection suspensions={supplier.suspensions} suspension={commands.suspension} />
+      {commands.note ? <p className="text-sm text-content-muted">{commands.note}</p> : null}
     </div>
   );
 }
 
-function QualificationRow({ qualification }: { qualification: QualificationRecord }) {
+function EvidenceList({ evidence }: { evidence: QualificationRecord['evidence'] }) {
+  if (evidence.length === 0) return null;
+  return (
+    <div className="mt-2">
+      <p className="text-sm text-content-muted">
+        سند پیوست‌شده (فقط شناسه در سرویس اسناد؛ سامانه آن را نگشوده و نسنجیده است):
+      </p>
+      <ul className="mt-1 flex flex-col gap-1 text-sm">
+        {evidence.map((item) => (
+          <li key={item.documentId} className="flex flex-wrap items-baseline gap-2">
+            {item.label ? <span>{item.label}</span> : null}
+            <Identifier>{item.documentId}</Identifier>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function QualificationRow({
+  qualification,
+  decision,
+}: {
+  qualification: QualificationRecord;
+  decision: ReactNode;
+}) {
   return (
     <li className="rounded-lg border border-border bg-surface-raised p-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -127,14 +184,20 @@ function QualificationRow({ qualification }: { qualification: QualificationRecor
           ? 'بدون سند پیوست‌شده'
           : `${toPersianDigits(String(qualification.evidenceCount))} سند پیوست‌شده`}
       </p>
+      <EvidenceList evidence={qualification.evidence} />
+      {decision ? <div className="mt-4 border-t border-border pt-4">{decision}</div> : null}
     </li>
   );
 }
 
 function QualificationsSection({
   qualifications,
+  decisions,
+  submit,
 }: {
   qualifications: readonly QualificationRecord[];
+  decisions: Readonly<Record<string, ReactNode>>;
+  submit: ReactNode;
 }) {
   return (
     <Section headingId="supplier-qualifications" title="صلاحیت‌ها">
@@ -146,10 +209,20 @@ function QualificationsSection({
       ) : (
         <ul className="flex flex-col gap-3">
           {qualifications.map((qualification) => (
-            <QualificationRow key={qualification.id} qualification={qualification} />
+            <QualificationRow
+              key={qualification.id}
+              qualification={qualification}
+              decision={decisions[qualification.id] ?? null}
+            />
           ))}
         </ul>
       )}
+      {submit ? (
+        <div className="mt-6 border-t border-border pt-4">
+          <h3 className="mb-3 text-base font-semibold text-content">ارسال درخواست صلاحیت</h3>
+          {submit}
+        </div>
+      ) : null}
     </Section>
   );
 }
@@ -174,7 +247,13 @@ function SuspensionRow({ suspension }: { suspension: SuspensionRecord }) {
   );
 }
 
-function SuspensionsSection({ suspensions }: { suspensions: readonly SuspensionRecord[] }) {
+function SuspensionsSection({
+  suspensions,
+  suspension,
+}: {
+  suspensions: readonly SuspensionRecord[];
+  suspension: ReactNode;
+}) {
   return (
     <Section headingId="supplier-suspensions" title="تاریخچهٔ تعلیق">
       {suspensions.length === 0 ? (
@@ -184,11 +263,12 @@ function SuspensionsSection({ suspensions }: { suspensions: readonly SuspensionR
         />
       ) : (
         <ul className="flex flex-col gap-3">
-          {suspensions.map((suspension) => (
-            <SuspensionRow key={suspension.id} suspension={suspension} />
+          {suspensions.map((episode) => (
+            <SuspensionRow key={episode.id} suspension={episode} />
           ))}
         </ul>
       )}
+      {suspension ? <div className="mt-6 border-t border-border pt-4">{suspension}</div> : null}
     </Section>
   );
 }

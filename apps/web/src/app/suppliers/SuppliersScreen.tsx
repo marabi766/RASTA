@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import type { ReactNode } from 'react';
 
 import {
   ButtonLink,
@@ -42,6 +43,13 @@ import type {
 export interface SuppliersScreenProps {
   readonly result: ReadResult<SupplierPage>;
   readonly query: SupplierListQuery;
+  /**
+   * The organization this session acts for: its own row is marked, because the
+   * API has no "my supplier" lookup and this is the only way to find it.
+   */
+  readonly ownOrganizationId?: string | null;
+  /** The registration form, when the page found the person may register (`page.tsx`). */
+  readonly register?: ReactNode;
 }
 
 function hrefWith(query: SupplierListQuery, changes: Partial<SupplierListQuery>): string {
@@ -98,7 +106,7 @@ function CapabilityFilter({ query }: { query: SupplierListQuery }) {
   );
 }
 
-function SupplierRow({ supplier }: { supplier: SupplierSummary }) {
+function SupplierRow({ supplier, own }: { supplier: SupplierSummary; own: boolean }) {
   return (
     <li className="rounded-lg border border-border bg-surface-raised p-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -108,6 +116,7 @@ function SupplierRow({ supplier }: { supplier: SupplierSummary }) {
         >
           {supplier.displayName}
         </Link>
+        {own ? <span className="text-sm font-medium">سازمان شما</span> : null}
         <StatusBadge status={supplier.status} label={supplierStatusLabel(supplier.status)} />
       </div>
       <p className="mt-2 text-sm text-content-muted">
@@ -133,17 +142,31 @@ function SupplierRow({ supplier }: { supplier: SupplierSummary }) {
   );
 }
 
-export function SuppliersScreen({ result, query }: SuppliersScreenProps) {
+export function SuppliersScreen({
+  result,
+  query,
+  ownOrganizationId = null,
+  register = null,
+}: SuppliersScreenProps) {
   return (
     <div className="flex flex-col gap-4">
+      {register ? (
+        <Section headingId="supplier-register" title="ثبت پرونده تامین‌کننده برای سازمان شما">
+          {register}
+        </Section>
+      ) : null}
       <StatusFilter query={query} />
       <CapabilityFilter query={query} />
-      <SuppliersBody result={result} query={query} />
+      <SuppliersBody result={result} query={query} ownOrganizationId={ownOrganizationId} />
     </div>
   );
 }
 
-function SuppliersBody({ result, query }: SuppliersScreenProps) {
+function SuppliersBody({
+  result,
+  query,
+  ownOrganizationId,
+}: SuppliersScreenProps & { ownOrganizationId: string | null }) {
   if (result.kind === 'FORBIDDEN') {
     return <NoAccessState description="فهرست تأمین‌کنندگان در اختیار شما نیست." />;
   }
@@ -183,7 +206,11 @@ function SuppliersBody({ result, query }: SuppliersScreenProps) {
           </p>
           <ul className="flex flex-col gap-3">
             {page.items.map((supplier) => (
-              <SupplierRow key={supplier.id} supplier={supplier} />
+              <SupplierRow
+                key={supplier.id}
+                supplier={supplier}
+                own={ownOrganizationId !== null && supplier.organizationId === ownOrganizationId}
+              />
             ))}
           </ul>
         </>

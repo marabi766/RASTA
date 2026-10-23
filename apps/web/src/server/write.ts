@@ -156,8 +156,12 @@ export function mapProblemToFields<F extends string>(
 export interface WriteCall<S extends z.ZodTypeAny, F extends string> {
   readonly path: string;
   readonly body: unknown;
-  /** The submission id — sent as `Idempotency-Key`; see `submission.ts`. */
-  readonly submissionId: string;
+  /**
+   * The submission id — sent as `Idempotency-Key`; see `submission.ts`. Left out
+   * for a service that takes no key (supplier-service's six writes): sending one
+   * would suggest a retry is safe, and it is not.
+   */
+  readonly submissionId?: string;
   /** What the created resource must look like; everything else is dropped. */
   readonly schema: S;
   readonly mapping: FieldMapping<F>;

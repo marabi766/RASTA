@@ -4,16 +4,23 @@ import { AppShell, Button, PageHeader, TopBar } from '@/ui';
 import { isSupplierCapability, isSupplierStatus } from '@/lib/supplier-fields';
 import { currentSession } from '@/server/current-session';
 import { fetchSuppliers, type SupplierListQuery } from '@/server/suppliers';
+import { mintSubmissionId } from '@/server/submission';
+import { canRegisterSupplier, supplierActor } from '@/server/supplier-commands';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
+import { RegisterSupplierForm } from './SupplierForms';
 import { SuppliersScreen } from './SuppliersScreen';
 
 /**
- * The `/suppliers` route — تأمین‌کنندگان (docs/16 § ۱۶٫۶). Read-only.
+ * The `/suppliers` route — تأمین‌کنندگان (docs/16 § ۱۶٫۶): the directory, and
+ * the form that registers this organization's own profile.
  *
- * **No access decision here**, as on every portal route: whether this caller
- * may browse the directory is supplier-service's answer, against the roles
- * in their token, and a refusal is rendered as an outcome (`docs/16` § ۱۶٫۱۱).
+ * **No access decision for the directory here**, as on every portal route:
+ * whether this caller may browse it is supplier-service's answer, against the
+ * roles in their token, and a refusal is rendered as an outcome
+ * (`docs/16` § ۱۶٫۱۱). The registration form is drawn only for a person the
+ * service would admit (`canRegisterSupplier`: a supplier-side role and an
+ * organization); the service refuses again on the send.
  */
 export const dynamic = 'force-dynamic';
 
@@ -43,6 +50,7 @@ export default async function SuppliersPage({
   };
 
   const result = await fetchSuppliers(session, query);
+  const actor = supplierActor(session.accessToken);
 
   return (
     <AppShell
@@ -63,7 +71,19 @@ export default async function SuppliersPage({
         description="تأمین‌کنندگان کالا، تعمیرگاه‌ها و پیمانکارانی که این سازمان می‌تواند ببیند."
       />
       <div className="mt-4">
-        <SuppliersScreen result={result} query={query} />
+        <SuppliersScreen
+          result={result}
+          query={query}
+          ownOrganizationId={actor?.organizationId ?? null}
+          register={
+            actor && canRegisterSupplier(actor) ? (
+              <RegisterSupplierForm
+                csrfToken={session.csrfToken}
+                submissionId={mintSubmissionId(session)}
+              />
+            ) : null
+          }
+        />
       </div>
     </AppShell>
   );

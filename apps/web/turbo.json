@@ -127,7 +127,17 @@
         "$TURBO_ROOT$/services/marketplace-service/src/returns/return.controller.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/returns/return.service.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/returns/state-machine.ts",
-        "$TURBO_ROOT$/services/marketplace-service/src/returns/views.ts"
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/views.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/access/access.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/openapi/document.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/capabilities.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/dto.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/qualification.service.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/qualification.state-machine.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/supplier.controller.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/supplier.service.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/suspension.service.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/suspension.state-machine.ts"
       ]
     },
     "test:unit": {
@@ -246,7 +256,17 @@
         "$TURBO_ROOT$/services/marketplace-service/src/returns/return.controller.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/returns/return.service.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/returns/state-machine.ts",
-        "$TURBO_ROOT$/services/marketplace-service/src/returns/views.ts"
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/views.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/access/access.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/openapi/document.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/capabilities.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/dto.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/qualification.service.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/qualification.state-machine.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/supplier.controller.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/supplier.service.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/suspension.service.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/suspension.state-machine.ts"
       ]
     }
   }
