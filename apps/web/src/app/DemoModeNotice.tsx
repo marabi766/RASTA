@@ -27,6 +27,21 @@ export function DemoModeNotice({ mode }: { readonly mode: DemoMode }) {
 }
 
 /**
+ * What a form that moves money says when its server action refused it because
+ * the provider could not be read when it came back (`mayDispatch`,
+ * `PROVIDER_UNKNOWN`): the page's own "not known" words, and that nothing was
+ * sent. One notice for every such form, whatever the read failed with.
+ */
+export function ProviderUnknownRefusal() {
+  return (
+    <Alert tone="warning" title="وضعیت درگاه پرداخت معلوم نیست">
+      خوانده نشد که پرداخت‌ها شبیه‌سازی‌شده‌اند یا واقعی، پس این فرم فرستاده نشد و چیزی تغییر نکرد.
+      بعداً صفحه را تازه کنید.
+    </Alert>
+  );
+}
+
+/**
  * In place of an action that moves money while the provider is `UNKNOWN`
  * (`mayOffer`): the wallet's own "withheld" state for its top-up form, so
  * every screen withholds the same way.

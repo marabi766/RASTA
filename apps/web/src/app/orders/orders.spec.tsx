@@ -213,6 +213,14 @@ describe('the command forms', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
+  it('says the provider could not be read and nothing was sent when the action withheld a money command (PR 361 r4)', () => {
+    currentState = { kind: 'REFUSED', reason: 'PROVIDER_UNKNOWN' };
+    renderDetail({ ...ORDER, availableActions: ['CONFIRM_RECEIPT'] });
+    expect(screen.getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
+    expect(screen.getByText(/فرستاده نشد و چیزی تغییر نکرد/)).toBeInTheDocument();
+    expect(screen.queryByText(/این درخواست معتبر شناخته نشد/)).toBeNull();
+  });
+
   it('renders a refusal with its correlation id', () => {
     currentState = { kind: 'FORBIDDEN', correlationId: 'corr-7' };
     renderDetail({ ...ORDER, availableActions: ['CONFIRM_RECEIPT'] });

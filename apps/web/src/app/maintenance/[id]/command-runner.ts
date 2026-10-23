@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation';
 
+import type { MoneyEffect } from '@/lib/demo-mode';
 import { FLASH_PARAM } from '@/lib/form-fields';
 import type { RequestCommandNotice } from '@/lib/maintenance-fields';
 import type { RepairCommandNotice } from '@/lib/repair-order-fields';
@@ -7,6 +8,7 @@ import { verifyCsrf } from '@/server/csrf';
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { mintFlash } from '@/server/flash';
 import { commandRequestId } from '@/server/maintenance-commands';
+import { mayDispatch } from '@/server/money-gate';
 import type { WebSession } from '@/server/session';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import type { WriteResult } from '@/server/write';
@@ -19,7 +21,8 @@ import type { RequestCommandFormState } from './form-state';
  *
  * Same order as every write in this portal (ADR-059 § 3, § 5): session, CSRF,
  * the submission id, the request the command is about, what the command
- * confirms, the form, and only then the gateway. Each refusal is decided before
+ * confirms, the form, for a command that moves money the provider read again
+ * (`moneyEffect`), and only then the gateway. Each refusal is decided before
  * the next step runs, so a refused post never reaches it — which the specs
  * beside these files assert for each command.
  *
@@ -53,6 +56,13 @@ export interface Command<V, B, F extends string, C = undefined> {
     form: FormData,
     requestId: string,
   ) => Confirmed<C> | null;
+  /**
+   * The command's `MONEY_EFFECTS` entry, for one the table lists: unless it is
+   * `NONE`, the provider is read again just before the send, and while it is
+   * unknown nothing is sent (`mayDispatch`) — the page withheld the form, and a
+   * form drawn before it did must not get through either.
+   */
+  readonly moneyEffect?: MoneyEffect;
   readonly valuesOf: (form: FormData) => V;
   readonly parse: (values: V) => Parsed<B, F>;
   readonly send: (
@@ -103,6 +113,10 @@ export async function run<V, B, F extends string, C = undefined>(
       fieldErrors: parsed.fieldErrors,
       message: null,
     };
+  }
+
+  if (command.moneyEffect !== undefined && !(await mayDispatch(session, command.moneyEffect))) {
+    return { kind: 'REFUSED', reason: 'PROVIDER_UNKNOWN' };
   }
 
   const result = await command.send(

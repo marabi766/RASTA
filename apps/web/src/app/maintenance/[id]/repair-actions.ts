@@ -1,5 +1,6 @@
 'use server';
 
+import { MONEY_EFFECTS } from '@/lib/demo-mode';
 import { BASELINE_FIELD } from '@/lib/form-fields';
 import type {
   CancelRepairField,
@@ -100,6 +101,8 @@ export async function submitCompleteRepair(
     {
       notice: 'repairCompleted',
       confirmed: forOrder('complete'),
+      // MAINTENANCE_COMPLETED is a reward trigger.
+      moneyEffect: MONEY_EFFECTS.repairCompletion,
       valuesOf: completeRepairFormValues,
       parse: parseCompleteRepairForm,
       // The total the page showed goes back with the completion, and the

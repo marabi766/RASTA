@@ -1,3 +1,4 @@
+import type { ProviderRefusal } from '@/lib/demo-mode';
 import type { SessionRefusal } from '@/lib/session-refusal';
 import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type { UsageField, UsageFormValues } from '@/lib/usage-fields';
@@ -25,7 +26,10 @@ export type UsageFormState =
       readonly message: string | null;
     }
   /** The request could not be trusted as this person's own. */
-  | { readonly kind: 'REFUSED'; readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION' }
+  | {
+      readonly kind: 'REFUSED';
+      readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION' | ProviderRefusal;
+    }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   | {
       readonly kind: 'NOT_FOUND';

@@ -141,6 +141,7 @@ describe.each(FORMS)('$name', (form) => {
     [{ kind: 'REFUSED', reason: 'NO_SESSION' } as const, /نشست شما پایان یافته/],
     [{ kind: 'REFUSED', reason: 'BASELINE' } as const, /منقضی شده است/],
     [{ kind: 'REFUSED', reason: 'CSRF' } as const, /معتبر شناخته نشد/],
+    [{ kind: 'REFUSED', reason: 'PROVIDER_UNKNOWN' } as const, /فرستاده نشد و چیزی تغییر نکرد/],
     [{ kind: 'FORBIDDEN', correlationId: 'corr-403' } as const, /corr-403/],
     [{ kind: 'NOT_FOUND', correlationId: null } as const, /پیدا نشد یا در سازمان فعال شما نیست/],
     [{ kind: 'FAILED', status: 503, correlationId: 'corr-503' } as const, /corr-503/],

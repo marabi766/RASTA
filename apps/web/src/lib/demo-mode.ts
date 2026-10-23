@@ -28,9 +28,10 @@ export type DemoMode = 'SIMULATED' | 'REAL' | 'UNKNOWN';
  *   grants by itself whatever reward rule applies, and a monetised one credits
  *   the organization's wallet. No rule, no money — but the portal cannot see
  *   the rules, so it counts the credit as possible.
+ * - `DEPOSIT` — takes money into the wallet through the provider.
  */
 export type MoneyEffect =
-  'NONE' | 'HOLD' | 'SETTLEMENT' | 'REFUND' | 'SETTLEMENT_OR_REFUND' | 'REWARD_CREDIT';
+  'NONE' | 'HOLD' | 'SETTLEMENT' | 'REFUND' | 'SETTLEMENT_OR_REFUND' | 'REWARD_CREDIT' | 'DEPOSIT';
 
 interface MoneyEffects {
   readonly order: Readonly<Record<OrderCommand, MoneyEffect>>;
@@ -39,6 +40,7 @@ interface MoneyEffects {
   readonly maintenanceApproval: MoneyEffect;
   readonly repairCompletion: MoneyEffect;
   readonly usageRecord: MoneyEffect;
+  readonly walletTopUp: MoneyEffect;
 }
 
 /**
@@ -47,14 +49,20 @@ interface MoneyEffects {
  * `NONE`, and nothing else — a disclosure outage must not stop work that moves
  * no money. Each entry names the service method whose effect it records.
  *
+ * The same entry decides twice: when the page draws the form, and again when
+ * the form comes back, in its server action just before the command is sent
+ * (`mayDispatch`, `server/money-gate.ts`) — a form drawn while the provider was
+ * known is not a licence to move money once it is not (review of PR 361 r4).
+ *
  * Every event an economic-service consumer acts on is here, by the command
  * that publishes it (review of PR 361 r3): `MAINTENANCE_APPROVED`
  * (`maintenanceApproval`), `STATEMENT_APPROVED` (`statement.APPROVE`),
  * `MAINTENANCE_COMPLETED` (`repairCompletion`) and `USAGE_RECORDED`
  * (`usageRecord`) — `CONSUMED_EVENTS`, economic-service `events/consumed.ts`.
  *
- * The wallet's top-up is not here: it takes money in through the provider and
- * is withheld by the wallet's own provider read, whose sentence it needs.
+ * The wallet's top-up (`walletTopUp`) is drawn by the wallet's own provider
+ * read, whose sentence it needs, rather than by this entry; its action asks
+ * that same read again before it sends.
  */
 export const MONEY_EFFECTS: MoneyEffects = {
   order: {
@@ -114,10 +122,22 @@ export const MONEY_EFFECTS: MoneyEffects = {
   // fleet-service `UsageService.record` publishes USAGE_RECORDED, the other
   // reward trigger of the same consumer, with the same credit.
   usageRecord: 'REWARD_CREDIT',
+  // economic-service `PaymentService.topUp`: a capture through the provider
+  // onto the wallet.
+  walletTopUp: 'DEPOSIT',
 };
 
-/** Whether a screen may offer an action: one that moves money, not while the provider is unknown. */
-export function mayOffer(mode: DemoMode, effect: MoneyEffect): boolean {
+/**
+ * Why a server action refused a form `mayOffer` would now withhold
+ * (`mayDispatch`, `server/money-gate.ts`): nothing was sent.
+ */
+export type ProviderRefusal = 'PROVIDER_UNKNOWN';
+
+/**
+ * Whether a screen may offer an action: one that moves money, not while the
+ * provider is unknown. An effect the table does not name counts as money.
+ */
+export function mayOffer(mode: DemoMode, effect: MoneyEffect | undefined): boolean {
   return effect === 'NONE' || mode !== 'UNKNOWN';
 }
 

@@ -18,7 +18,11 @@ describe('mayOffer', () => {
     ['UNKNOWN', 'SETTLEMENT_OR_REFUND', false],
     ['UNKNOWN', 'REWARD_CREDIT', false],
     ['REAL', 'REWARD_CREDIT', true],
+    ['UNKNOWN', 'DEPOSIT', false],
     ['UNKNOWN', 'NONE', true],
+    // An effect the table does not name counts as money (PR 361 r4).
+    ['UNKNOWN', undefined, false],
+    ['REAL', undefined, true],
   ] as const)('%s, %s → %s', (mode, effect, offered) => {
     expect(mayOffer(mode, effect)).toBe(offered);
   });
@@ -56,5 +60,10 @@ describe('MONEY_EFFECTS', () => {
     expect(mayOffer('UNKNOWN', MONEY_EFFECTS.usageRecord)).toBe(false);
     expect(mayOffer('SIMULATED', MONEY_EFFECTS.repairCompletion)).toBe(true);
     expect(mayOffer('REAL', MONEY_EFFECTS.usageRecord)).toBe(true);
+  });
+
+  it('withholds the wallet top-up: a deposit through the provider (PR 361 r4)', () => {
+    expect(MONEY_EFFECTS.walletTopUp).toBe<MoneyEffect>('DEPOSIT');
+    expect(mayOffer('UNKNOWN', MONEY_EFFECTS.walletTopUp)).toBe(false);
   });
 });
