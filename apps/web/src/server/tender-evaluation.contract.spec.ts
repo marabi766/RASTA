@@ -361,7 +361,7 @@ describe('every closed reason has fixed words', () => {
 });
 
 describe('which commands may be sent again after a lost answer', () => {
-  it('a score is kept under its Idempotency-Key — the only one of these', () => {
+  it('a score is kept under its Idempotency-Key, and — since task 060 — an award; a decision on a bid and the completion are not', () => {
     expect(decoratorOf(evaluationController, 'score', 'Post')).toBeDefined();
     expect(squash(evaluationController.getText())).toContain(
       "@Body(zodPipe(scoreBidSchema))dto:ScoreBidDto,@Headers('idempotency-key')idempotencyKey?:string,",
@@ -372,9 +372,12 @@ describe('which commands may be sent again after a lost answer', () => {
     for (const name of ['qualify', 'evaluate']) {
       expect(method(evaluationServiceTree, name)).not.toContain('idempotency');
     }
-    expect(squash(awardController.getText())).not.toContain("@Headers('idempotency-key')");
-    expect(awardServiceText).not.toContain('IdempotencyStore');
-    expect(awardServiceText).not.toContain('idempotency.run(');
+    // The server keeps an award's first answer — a round rejected since included (task 060). The
+    // portal does not send one again yet: that is its own follow-up (REPEATABLE_OWNER_COMMANDS below).
+    expect(squash(awardController.getText())).toContain("@Headers('idempotency-key')");
+    expect(method(awardServiceTree, 'award')).toContain(
+      'returnthis.idempotency.execute<Outcome>(AWARD_TENDER_ENDPOINT,idempotencyKey,',
+    );
   });
 
   it('a decision on a bid, the completion and an award keep no result for a re-send: only a score may be sent again', () => {

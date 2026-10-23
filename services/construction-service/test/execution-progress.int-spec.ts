@@ -7,6 +7,7 @@ import {
   asUser,
   cleanup,
   newOrganizationId,
+  newUserId,
   outboxFor,
   readyProject,
   testEnv,
@@ -225,25 +226,30 @@ describe('execution, progress and completion', () => {
       ).resolves.toMatchObject({ submissionSequence: 3 });
     });
 
-    it('drafting with an Idempotency-Key: a retry returns the first draft, a new body is refused', async () => {
+    it('drafting with an Idempotency-Key: a retry returns the first draft, a new body or another person is refused', async () => {
       const a = org();
       const project = await startedProject(a);
       const body = { progressBasisPoints: 1500, assetsUsed: [] };
-      const first = await asAdmin(a, () => w.progress.draft(project.id, body, 'draft-key'));
-      const again = await asAdmin(a, () => w.progress.draft(project.id, body, 'draft-key'));
+      const author = newUserId();
+      const draft = (projectId: string, dto: typeof body, user = author) =>
+        asAdmin(a, () => w.progress.draft(projectId, dto, 'draft-key'), user);
+      const first = await draft(project.id, body);
+      const again = await draft(project.id, body);
       expect(again).toEqual(first);
 
       await expect(
-        asAdmin(a, () =>
-          w.progress.draft(project.id, { progressBasisPoints: 1600, assetsUsed: [] }, 'draft-key'),
-        ),
+        draft(project.id, { progressBasisPoints: 1600, assetsUsed: [] }),
       ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
 
       // The same body for another project is another request, too.
       const other = await startedProject(a);
-      await expect(
-        asAdmin(a, () => w.progress.draft(other.id, body, 'draft-key')),
-      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+      await expect(draft(other.id, body)).rejects.toMatchObject({
+        code: 'IDEMPOTENCY_KEY_REUSED',
+      });
+      // And so is another person's, the same key, project and body (PR-350 r1 F3): not the author's draft.
+      await expect(draft(project.id, body, newUserId())).rejects.toMatchObject({
+        code: 'IDEMPOTENCY_KEY_REUSED',
+      });
 
       const page = await asAdmin(a, () => w.progress.list(project.id, { limit: 25 }));
       expect(page.items.map((item) => item.id)).toEqual([first.id]);

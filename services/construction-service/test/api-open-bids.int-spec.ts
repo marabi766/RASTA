@@ -29,6 +29,11 @@ import {
  * refuse, and no content in any answer before the opening.
  */
 
+/** A well-formed name of a proposal, for the requests refused before it is looked at. */
+const ANY_PROPOSAL = { proposedAt: '2026-01-01T00:00:00.000Z' };
+let keys = 0;
+const ulidKey = () => `open-bids-api-${Date.now()}-${(keys += 1)}`;
+
 describe('open-bids API', () => {
   let api: ApiHarness;
   let w: Wiring;
@@ -87,7 +92,9 @@ describe('open-bids API', () => {
     ['get', `/v1/tenders/${tenderId}/bid-access-log`],
   ];
   const call = (method: string, path: string, token?: string) => {
-    const req = (http() as unknown as Record<string, (p: string) => request.Test>)[method]!(path);
+    const made = (http() as unknown as Record<string, (p: string) => request.Test>)[method]!(path);
+    // A withdrawal names a proposal (task 060): a well-formed one, so the refusal is the route's own.
+    const req = path.endsWith('/proposal/withdraw') ? made.send(ANY_PROPOSAL) : made;
     return token ? req.set(as(token)) : req;
   };
 
@@ -242,6 +249,15 @@ describe('open-bids API', () => {
       .set(as(proposer));
     expect(proposal.status).toBe(200);
     expect(proposal.body).toMatchObject({ tenderId, alreadyProposed: false });
+    // The owner's read says which proposal stands: what a withdrawal names (task 060).
+    expect(
+      (
+        await http()
+          .get(`/v1/tenders/${tenderId}/bids`)
+          .set(as(orgAdmin(owner)))
+      ).body.proposal,
+    ).toEqual({ proposedBy: proposal.body.proposedBy, proposedAt: proposal.body.proposedAt });
+    const named = { proposedAt: proposal.body.proposedAt };
     const self = await http().post(`/v1/tenders/${tenderId}/open-bids`).set(as(proposer));
     expect(self.status).toBe(422);
     expect(self.body.message).toContain('SECOND_PERSON_REQUIRED');
@@ -249,13 +265,24 @@ describe('open-bids API', () => {
     // Only the proposer may take it back; then anyone eligible proposes afresh.
     const stranger = await http()
       .post(`/v1/tenders/${tenderId}/open-bids/proposal/withdraw`)
-      .set(as(orgAdmin(owner)));
+      .set(as(orgAdmin(owner)))
+      .send(named);
     expect(stranger.status).toBe(403);
+    // A withdrawal names what it takes back: none named is 400, nothing withdrawn.
+    const unnamed = await http()
+      .post(`/v1/tenders/${tenderId}/open-bids/proposal/withdraw`)
+      .set(as(proposer))
+      .send({});
+    expect({ status: unnamed.status, code: unnamed.body.code }).toEqual({
+      status: 400,
+      code: 'VALIDATION_FAILED',
+    });
     const withdrawn = await http()
       .post(`/v1/tenders/${tenderId}/open-bids/proposal/withdraw`)
-      .set(as(proposer));
+      .set(as(proposer))
+      .send(named);
     expect(withdrawn.status).toBe(200);
-    expect(withdrawn.body).toMatchObject({ tenderId });
+    expect(withdrawn.body).toMatchObject({ tenderId, proposedAt: named.proposedAt });
     expect(
       (await http().post(`/v1/tenders/${tenderId}/open-bids/proposal`).set(as(proposer))).body,
     ).toMatchObject({ alreadyProposed: false });
@@ -312,6 +339,49 @@ describe('open-bids API', () => {
       ]),
     );
     expect(JSON.stringify(log.body)).not.toMatch(/1250000000|Licence 1234/);
+  });
+
+  it('a withdrawal names its proposal: a stale one is 409 PROPOSAL_SUPERSEDED with its code, and a retry under its key is its first answer (task 060)', async () => {
+    const { owner, tenderId } = await closed('withdraw-named');
+    const proposer = orgAdmin(owner);
+    const route = `/v1/tenders/${tenderId}/open-bids/proposal`;
+    const propose = () => http().post(route).set(as(proposer)).set('Idempotency-Key', ulidKey());
+    const withdraw = (proposedAt: string, key: string) =>
+      http()
+        .post(`${route}/withdraw`)
+        .set(as(proposer))
+        .set('Idempotency-Key', key)
+        .send({ proposedAt });
+
+    const first = (await propose()).body as { proposedAt: string };
+    const withdrawn = await withdraw(first.proposedAt, 'withdraw-named-1');
+    expect(withdrawn.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = (await propose()).body as { proposedAt: string; proposedBy: string };
+    expect(second.proposedAt).not.toBe(first.proposedAt);
+
+    // The lost answer's retry: the first answer, and the proposal made since stands.
+    const replay = await withdraw(first.proposedAt, 'withdraw-named-1');
+    expect({ status: replay.status, body: replay.body }).toEqual({
+      status: 200,
+      body: withdrawn.body,
+    });
+    // The same withdrawal sent as a new request: refused, nothing withdrawn.
+    const stale = await withdraw(first.proposedAt, 'withdraw-named-2');
+    expect({ status: stale.status, code: stale.body.code, reasons: reasonsOf(stale.body) }).toEqual(
+      {
+        status: 409,
+        code: 'CONFLICT',
+        reasons: ['opening:PROPOSAL_SUPERSEDED'],
+      },
+    );
+    const bids = await http()
+      .get(`/v1/tenders/${tenderId}/bids`)
+      .set(as(orgAdmin(owner)));
+    expect(bids.body.proposal).toEqual({
+      proposedBy: second.proposedBy,
+      proposedAt: second.proposedAt,
+    });
   });
 
   it('answers another organization 404 on every route, and 403 to a member of a bidding organization', async () => {

@@ -635,6 +635,18 @@ jobs:
           # that does not exist.
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
 
+      - name: Load the completed orders the return scenarios act on
+        # `e2e/returns.spec.ts` (EXP-003, RUN-005): a return is asked only of
+        # a COMPLETED order, which only a settlement this job never runs makes.
+        # The fixture says why it is rows, and writes them as the service's own
+        # runtime role through every CHECK the tables keep; on the seed's
+        # tenants and cement offer, so after the seed.
+        env:
+          PGPASSWORD: rasta_marketplace_dev_password
+        run: >-
+          psql -v ON_ERROR_STOP=1 -h localhost -U rasta_marketplace -d rasta_marketplace
+          -f apps/web/e2e/fixtures/marketplace-returns.sql
+
       - name: Build portal and live-path services
         # Build the exact deployable artifacts this job starts, plus their
         # workspace dependencies. Services run from dist, never watch mode.
@@ -826,12 +838,17 @@ jobs:
           # mode, so an order stays PENDING: no saga runs and no wallet is
           # touched — the suite places orders and reads them, and cannot move
           # money (economic-service is in this stack for the settlement
-          # scenarios only, and no order reaches it).
+          # scenarios only, and no order reaches it). The return window is a
+          # value for this throwaway stack only — Q-132 leaves the real one
+          # open, and with none set every return is refused — so the return
+          # scenarios (`e2e/returns.spec.ts`) have a window to be inside of,
+          # and one the fixture's old order is past.
           ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service marketplace-service)" && \
             eval "${kafka_credentials}" && \
             cd services/marketplace-service && \
             PORT=3106 SERVICE_NAME=marketplace-service \
             MARKETPLACE_TEMPORAL_ENABLED=false \
+            MARKETPLACE_RETURN_WINDOW_DAYS=30 \
             DATABASE_URL=postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public \
             node dist/main.js > /tmp/rasta-web-e2e-logs/marketplace.log 2>&1 & )
 
@@ -1045,6 +1062,12 @@ jobs:
           # identity-service and give each a password through Keycloak's admin
           # API, with this run's KEYCLOAK_ADMIN_PASSWORD (job environment).
           WEB_LIVE_STACK_E2E_CONTRACTS: 'true'
+          # EXP-003 returns: the fixture's completed orders are loaded and
+          # marketplace-service has a return window (above). The scenario
+          # provisions its third organization's person through identity-service
+          # and the Keycloak admin API, with this run's KEYCLOAK_ADMIN_PASSWORD
+          # (job environment).
+          WEB_LIVE_STACK_E2E_RETURNS: 'true'
           # The contract command scenarios write their own contract per test, as
           # contract-service's runtime role (`e2e/contract-fixture.ts`), so a
           # retry runs against new state (PR 342 review 1, finding 2).
@@ -2206,7 +2229,7 @@ jobs:
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
 
   integration-coverage:
-    name: Coverage gates (economic, marketplace, document, supplier, audit, notification, organization, procurement)
+    name: Coverage gates (economic, marketplace, document, supplier, audit, notification, organization, procurement, analytics)
     runs-on: ubuntu-latest
     # About 10.5 minutes on main run 38600385830 (setup ~4m, the seven gates
     # 399 s together, economic the longest at 115 s). Each keeps its own 8.
@@ -2622,6 +2645,23 @@ jobs:
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
+
+      - name: Analytics coverage gate
+        # `docs/14` § 14.2 puts analytics-service in the 75% band, set in its `jest.config.js`
+        # (ADR-071 PR 1). Both projects: the append-only fact tables, the runtime-role
+        # refusals and the shutdown ordering are exercised only by the integration suites
+        # against a real PostgreSQL, so a unit-only number would not be the service's.
+        timeout-minutes: 8
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm --filter @rasta/analytics-service run test:coverage
+        env:
+          KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
 
   # The check branch protection and the merge queue require by name. It runs
   # always(), not on the default success(): a job skipped because a job it

@@ -21,7 +21,7 @@ import {
   UNREPEATABLE_OWNER_COMMANDS,
   type OwnerCommand,
 } from '@/lib/tender-owner-fields';
-import { APPROVAL_ID, OWNER, PENDING_REQUEST, TENDER_ID } from '@/test/owner-fixtures';
+import { APPROVAL_ID, OWNER, PENDING_REQUEST, PROPOSED_AT, TENDER_ID } from '@/test/owner-fixtures';
 
 import {
   IDLE_OWNER_FORM,
@@ -88,6 +88,8 @@ const OPEN: OwnerTarget = {
   approvalId: null,
   expectedVersion: null,
 };
+/** A withdrawal drawn while the proposal made at `PROPOSED_AT` stood. */
+const WITHDRAW: OwnerTarget = { ...OPEN, command: 'WITHDRAW_PROPOSAL', proposedAt: PROPOSED_AT };
 
 interface Sent {
   readonly url: string;
@@ -252,6 +254,59 @@ describe('what is sent, and what comes back', () => {
     });
   });
 
+  it('a withdrawal names the proposal its form was drawn with — from the stamp, whatever the form posts (PR-350 r1 F1)', async () => {
+    answer = () => json(200, { tenderId: TENDER_ID, withdrawnProposal: 'USR-AUTHOR' });
+    const data = form({ proposedAt: '2026-10-21T00:00:00.000Z' }, WITHDRAW);
+    await expect(send(data)).rejects.toThrow('NEXT_REDIRECT');
+    expect(sent).toEqual([
+      {
+        url: `http://gateway.test:3000/v1/tenders/${TENDER_ID}/open-bids/proposal/withdraw`,
+        key: data.get(SUBMISSION_FIELD),
+        body: { proposedAt: PROPOSED_AT },
+      },
+    ]);
+    const url = new URL(redirect.mock.calls[0]![0], 'http://portal.test');
+    expect(
+      readFlash(SESSION, url.searchParams.get('flash'), TENDER_ID, ['WITHDRAW_PROPOSAL']),
+    ).toBe('WITHDRAW_PROPOSAL');
+  });
+
+  it('a withdrawal of a proposal replaced since is 409 PROPOSAL_SUPERSEDED, said in Persian; the same form sent again names the same proposal, never the newer one', async () => {
+    // Someone withdrew this proposal and another was made since the page was drawn.
+    answer = () => problem(409, 'CONFLICT', 'PROPOSAL_SUPERSEDED');
+    const data = form({}, WITHDRAW);
+    const refused = await send(data);
+    expect(refused).toMatchObject({
+      kind: 'INVALID',
+      command: 'WITHDRAW_PROPOSAL',
+      message: OPENING_REFUSAL_TEXT.PROPOSAL_SUPERSEDED,
+    });
+    expect(OPENING_REFUSAL_TEXT.PROPOSAL_SUPERSEDED).toMatch(/[\u0600-\u06FF]/);
+
+    // Sent again — the same form, its key and its stamp: the proposal it was drawn with, read from
+    // nowhere but the stamp (no read of the bids at submission).
+    expect(await send(data, refused)).toMatchObject({ kind: 'INVALID' });
+    expect(sent.map((request) => request.body)).toEqual([
+      { proposedAt: PROPOSED_AT },
+      { proposedAt: PROPOSED_AT },
+    ]);
+    expect(sent.every((request) => request.url.endsWith('/open-bids/proposal/withdraw'))).toBe(
+      true,
+    );
+    expect(new Set(sent.map((request) => request.key))).toEqual(
+      new Set([data.get(SUBMISSION_FIELD)]),
+    );
+  });
+
+  it('a withdrawal form without a proposal, or one whose stamp predates the binding, is refused unsent', async () => {
+    const unnamed = { ...OPEN, command: 'WITHDRAW_PROPOSAL' as const };
+    expect(await send(form({ proposedAt: PROPOSED_AT }, unnamed))).toEqual({
+      kind: 'REFUSED',
+      reason: 'REPLAY',
+    });
+    expect(sent).toHaveLength(0);
+  });
+
   it('a 403 keeps its command and closed reasons; a 404 is NOT_FOUND', async () => {
     answer = () => problem(403, 'FORBIDDEN', 'CONFLICT_OF_INTEREST');
     expect(await send(form({}, OPEN))).toMatchObject({
@@ -290,7 +345,7 @@ describe('unconfirmed', () => {
       REJECT,
       PROPOSE_OPENING: { ...OPEN, command: 'PROPOSE_OPENING' },
       OPEN_BIDS: OPEN,
-      WITHDRAW_PROPOSAL: { ...OPEN, command: 'WITHDRAW_PROPOSAL' },
+      WITHDRAW_PROPOSAL: WITHDRAW,
       QUALIFY: { ...bid, command: 'QUALIFY' },
       DISQUALIFY: { ...bid, command: 'DISQUALIFY' },
       EVALUATE: { ...OPEN, command: 'EVALUATE' },

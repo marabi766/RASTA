@@ -29,6 +29,9 @@ const NAV_BEFORE_PROJECTS: readonly SidebarItem[] = [
   { href: '/marketplace', label: 'بازار' },
 ];
 
+/** Shown only to a role that may read return requests (`server/returns.ts`, `canReadReturns`). */
+export const RETURNS_NAV_ITEM: SidebarItem = { href: '/returns', label: 'بازگشت کالا' };
+
 /** Shown only to a role that may read projects (`server/portal-nav.ts`). */
 const PROJECTS_ITEM: SidebarItem = { href: '/projects', label: 'پروژه‌های عمرانی' };
 
@@ -66,9 +69,15 @@ export function portalNavFor(options: {
   readonly canReadSettlements?: boolean;
   readonly canReadInventory?: boolean;
   readonly canReadSuppliers?: boolean;
+  readonly canReadReturns?: boolean;
 }): readonly SidebarItem[] {
+  const before = options.canReadReturns
+    ? NAV_BEFORE_PROJECTS.flatMap((item) =>
+        item.href === '/orders' ? [item, RETURNS_NAV_ITEM] : [item],
+      )
+    : NAV_BEFORE_PROJECTS;
   const items = [
-    ...NAV_BEFORE_PROJECTS,
+    ...before,
     ...(options.canReadProjects ? [PROJECTS_ITEM] : []),
     ...(options.canReadTenders ? [TENDERS_ITEM] : []),
     ...(options.canReadContracts ? [CONTRACTS_ITEM] : []),

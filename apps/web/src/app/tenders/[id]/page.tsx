@@ -529,7 +529,7 @@ async function ownerSections(
   ]);
   const { offers, notes } = ownerOffers(
     caller,
-    { tender, publication, step },
+    { tender, publication, step, bids },
     settings,
     Date.now(),
   );

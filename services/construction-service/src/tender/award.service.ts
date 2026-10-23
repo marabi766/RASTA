@@ -38,6 +38,7 @@ import { readMatrixInput } from './matrix-input';
 import { storedActor, storedIdentityOf } from '../shared/stable-actor';
 import type { AwardTenderDto, TenderAwardView } from './award.dto';
 import { refusal, ruleRefusal } from '../shared/refusal';
+import { IdempotencyStore, targeted, type RecordCompletion } from '../shared/idempotency';
 
 /**
  * The closed reasons an award is refused for (ADR-067 § 3, § 4): the metric's label, the access
@@ -63,6 +64,9 @@ type Outcome =
   | { kind: 'PENDING'; request: TenderApprovalRequestView };
 
 const WORKFLOW = 'tender.award' as const;
+
+/** An award's first answer is kept by `Idempotency-Key` (task 060): a retry never opens a second round. */
+export const AWARD_TENDER_ENDPOINT = 'POST /v1/tenders/:id/award';
 
 /** What a tender and its bids come to once the command has judged them. */
 type Judged =
@@ -155,6 +159,7 @@ export class AwardService {
     @Inject(ENV) private readonly env: ConstructionEnv,
     private readonly gate: TenderApprovalGate,
     private readonly approvalRequests: TenderApprovalRepository,
+    private readonly idempotency: IdempotencyStore,
   ) {}
 
   /**
@@ -165,237 +170,274 @@ export class AwardService {
    * every step is granted the same command awards and uses the approval up in the same transaction, under
    * the tender's lock, **and asks supplier-service for the winner's standing now** — an approval never
    * replaces that. What changed since the approval is 409 `APPROVAL_STALE`: nothing is awarded.
+   *
+   * An optional `Idempotency-Key` keeps the first answer — 202 or 200 — with the round or the award it
+   * answers for (task 060). It is claimed after the caller is authorised, judged live and found not
+   * conflicted, inside the refusal audit, and the caller is part of the request.
    */
-  async award(tenderId: string, dto: AwardTenderDto): Promise<Gated<TenderAwardView>> {
+  async award(
+    tenderId: string,
+    dto: AwardTenderDto,
+    idempotencyKey?: string,
+  ): Promise<Gated<TenderAwardView>> {
     const caller = await this.authorize(tenderId, dto.bidId);
-    const outcome = await this.guarded(caller, tenderId, dto.bidId, async (): Promise<Outcome> => {
-      const principal = await this.identity.live(caller, 'AWARD_TENDER');
-      await this.assertNotConflicted(principal, tenderId);
-      const gateCaller: GateCaller = {
-        userId: principal.actor,
-        organizationId: principal.organizationId,
-        identity: storedIdentityOf(currentActor()),
-      };
-
-      // Fail closed, first (Q-84): no policy in force is no approval path, whatever else is true of the tender.
-      const confirmedPolicyId = await this.gate.confirmPolicy(principal.organizationId, WORKFLOW);
-      if (confirmedPolicyId === null) throw this.rule('APPROVAL_POLICY_REQUIRED');
-
-      // A first look decides everything it can without asking anyone: the tender, the bid, the
-      // conflict rules, the justification, a repeat. Advisory — it is all judged again under the lock.
-      const first = await this.prisma.transaction(async (tx) => {
-        const tender = await this.repo.lockSharedForRead(tx, principal.organizationId, tenderId);
-        if (!tender) throw RastaError.notFound('Tender', tenderId);
-        const bids = await this.repo.listBidSummaries(tx, tenderId);
-        return this.judge(tx, principal, tender, bids, dto);
-      });
-      if (first.replay) return { kind: 'REPLAY', view: first.replay };
-
-      // Outside any lock or transaction: supplier-service's word on the winner now (fail closed) — for
-      // the request, which is shown it, and for the execution, which an approval never replaces.
-      const { verdict, asOf } = await this.standing.decisionFor(first.bid.bidderOrganizationId);
-      if (verdict !== 'ELIGIBLE') throw this.rule('WINNER_NOT_ELIGIBLE', { verdict });
-      // The receipt chain as audit-service holds it, to read the winner's price against: only an
-      // approved request is executed, so only then is it worth asking.
-      const ready = await this.gate.hasApproved(principal.organizationId, tenderId, WORKFLOW);
-      const evidence = ready
-        ? await this.reader.readEvidence(principal.organizationId, tenderId)
-        : null;
-
-      const committed = await withFinancialSpan(
-        'construction.tender.award',
-        () =>
-          this.prisma.transaction(async (tx): Promise<Outcome | { kind: 'STALE' }> => {
-            const tender = await this.repo.lockForEvaluation(
-              tx,
-              principal.organizationId,
-              tenderId,
-            );
-            if (!tender) throw RastaError.notFound('Tender', tenderId);
-            const bids = await this.repo.listBidSummaries(tx, tenderId);
-            const judged = await this.judge(tx, principal, tender, bids, dto);
-            if (judged.replay) return { kind: 'REPLAY', view: judged.replay };
-
-            const at = await this.clock.decisionInstant(tx);
-            const winner = judged.bid;
-            const gateTender = {
-              organizationId: principal.organizationId,
-              id: tenderId,
-              projectId: tender.projectId,
-              version: tender.version,
-            };
-
-            const resolution = await this.gate.resolve(tx, {
-              tender: gateTender,
-              binding: {
-                workflowKey: WORKFLOW,
-                bidId: winner.id,
-                bidderOrganizationId: winner.bidderOrganizationId,
-                rank: judged.rank,
-                tied: judged.tied,
-                justification: judged.justification,
-                matrixDigest: judged.digest,
-                standingAsOf: asOf,
-              },
-              confirmedPolicyId,
-              caller: gateCaller,
-              at,
-            });
-            // Ended in this transaction (committed with it): the command answers 409 once it is.
-            if (resolution.kind === 'STALE') return { kind: 'STALE' };
-            if (resolution.kind === 'REQUESTED') {
-              return {
-                kind: 'PENDING',
-                request: toRequestView(
-                  resolution.request,
-                  await this.approvalRequests.steps(tx, resolution.request),
-                ),
-              };
-            }
-            // Approved between the first look and now: no price was read for it. Ask again.
-            if (!evidence) {
-              throw RastaError.optimisticLockFailed('TenderApprovalRequest', resolution.request.id);
-            }
-
-            // The winner's price: read from its sealed content against audit-service's receipts.
-            const key = await this.bids.findWrappedKey(tx, tenderId);
-            const sealed = await this.bids.findBidOf(tx, tenderId, winner.bidderOrganizationId);
-            if (!sealed || sealed.id !== winner.id) throw RastaError.notFound('Bid', winner.id);
-            let amountMinor: bigint | undefined;
-            this.reader.withPrivateKey(key, tenderId, (privateKey, keyId) => {
-              const content = this.reader.openOne(
-                privateKey,
-                keyId,
-                tenderId,
-                sealed,
-                evidence.receipts,
-              );
-              amountMinor = BigInt(content.priceMinor);
-            });
-            if (amountMinor === undefined) throw RastaError.internal('A bid was not opened');
-
-            const identity = storedIdentityOf(currentActor());
-            const id = newId(ID_PREFIX.award);
-            await this.awards.insertAward(tx, {
-              id,
-              organizationId: principal.organizationId,
-              tenderId,
-              bidId: winner.id,
-              bidderOrganizationId: winner.bidderOrganizationId,
-              amountMinor,
-              rank: judged.rank,
-              tied: judged.tied,
-              matrixDigest: judged.digest,
-              justification: judged.justification,
-              standingAsOf: asOf,
-              actor: principal.actor,
-              actorIssuer: identity.issuer,
-              actorSubject: identity.subject,
-              at,
-            });
-            // The standing check that follows (ADR-067 § 3, residual) is written here, in this commit:
-            // the database refuses an award without it, a sweeper makes it, and this response waits for nothing.
-            await this.awards.insertStandingCheck(tx, {
-              id: newId(ID_PREFIX.standingCheck),
-              organizationId: principal.organizationId,
-              tenderId,
-              projectId: tender.projectId,
-              bidId: winner.id,
-              winnerOrganizationId: winner.bidderOrganizationId,
-              awardedBy: principal.actor,
-              awardedAt: at,
-              windowStart: asOf,
-              at,
-            });
-            const matched = await this.awards.markTenderAwarded(tx, {
-              tenderId,
-              expectedVersion: tender.version,
-              actor: principal.actor,
-              at,
-            });
-            if (matched === 0) throw this.conflict('Tender', tenderId);
-            const won = await this.awards.markBidAwarded(tx, {
-              bidId: winner.id,
-              actor: principal.actor,
-              at,
-            });
-            if (won === 0) throw this.conflict('Bid', winner.id);
-            const losers = await this.awards.markOthersNotAwarded(tx, {
-              tenderId,
-              winnerBidId: winner.id,
-              actor: principal.actor,
-              at,
-            });
-            // The approval is used up here, once, in the transaction that awards (the database refuses an
-            // award without it, and a second use of it).
-            await this.gate.consume(tx, resolution.request, gateTender, gateCaller, at);
-
-            await this.events.enqueue(tx, {
-              eventName: 'TENDER_AWARDED',
-              aggregateId: tenderId,
-              organizationId: principal.organizationId,
-              payload: {
-                tenderId,
-                projectId: tender.projectId,
-                organizationId: principal.organizationId,
-                winningBidId: winner.id,
-                winnerOrganizationId: winner.bidderOrganizationId,
-                hasJustification: judged.justification !== null,
-                matrixDigest: judged.digest,
-                approvalRequestId: resolution.request.id,
-                awardedBy: principal.actor,
-                awardedAt: at.toISOString(),
-              },
-              occurredAt: at,
-            });
-            for (const loser of losers) {
-              await this.events.enqueue(tx, {
-                eventName: 'BID_NOT_AWARDED',
-                aggregateId: tenderId,
-                organizationId: principal.organizationId,
-                payload: {
-                  bidId: loser.id,
-                  tenderId,
-                  organizationId: principal.organizationId,
-                  bidderOrganizationId: loser.bidderOrganizationId,
-                  decidedAt: at.toISOString(),
-                },
-                occurredAt: at,
-              });
-            }
-            await this.record(tx, principal, tenderId, winner.id, at);
-
-            return {
-              kind: 'AWARDED',
-              view: {
-                tenderId,
-                projectId: tender.projectId,
-                status: 'AWARDED',
-                bidId: winner.id,
-                bidderOrganizationId: winner.bidderOrganizationId,
-                amountMinor: amountMinor.toString(),
-                rank: judged.rank,
-                tied: judged.tied,
-                justification: judged.justification,
-                matrixDigest: judged.digest,
-                standingAsOf: asOf.toISOString(),
-                awardedAt: at.toISOString(),
-                awardedBy: principal.actor,
-                alreadyAwarded: false,
-              },
-            };
-          }),
-        { 'rasta.tender.command': 'award' },
-      );
-      // Inside the envelope, so that a stale approval is audited like every other refusal.
-      if (committed.kind === 'STALE') throw approvalStale(WORKFLOW);
-      return committed;
-    });
+    const { result: outcome, executed } = await this.guarded(
+      caller,
+      tenderId,
+      dto.bidId,
+      async () => {
+        const principal = await this.identity.live(caller, 'AWARD_TENDER');
+        await this.assertNotConflicted(principal, tenderId);
+        return this.idempotency.execute<Outcome>(
+          AWARD_TENDER_ENDPOINT,
+          idempotencyKey,
+          targeted(tenderId, { requester: principal.actor, body: dto }),
+          200,
+          (record) => this.awardOnce(principal, tenderId, dto, record),
+        );
+      },
+    );
     if (outcome.kind === 'PENDING') return { executed: false, request: outcome.request };
-    if (outcome.kind === 'AWARDED') {
+    if (outcome.kind === 'AWARDED' && executed) {
       tenderTransitionsTotal.inc({ service: SERVICE_NAME, command: 'award' });
     }
     return { executed: true, result: outcome.view };
+  }
+
+  private async awardOnce(
+    principal: LivePrincipal,
+    tenderId: string,
+    dto: AwardTenderDto,
+    record: RecordCompletion<Outcome>,
+  ): Promise<Outcome> {
+    const gateCaller: GateCaller = {
+      userId: principal.actor,
+      organizationId: principal.organizationId,
+      identity: storedIdentityOf(currentActor()),
+    };
+
+    // Fail closed, first (Q-84): no policy in force is no approval path, whatever else is true of the tender.
+    const confirmedPolicyId = await this.gate.confirmPolicy(principal.organizationId, WORKFLOW);
+    if (confirmedPolicyId === null) throw this.rule('APPROVAL_POLICY_REQUIRED');
+
+    // A first look decides everything it can without asking anyone: the tender, the bid, the
+    // conflict rules, the justification, a repeat. Advisory — it is all judged again under the lock.
+    const first = await this.prisma.transaction(async (tx) => {
+      const tender = await this.repo.lockSharedForRead(tx, principal.organizationId, tenderId);
+      if (!tender) throw RastaError.notFound('Tender', tenderId);
+      const bids = await this.repo.listBidSummaries(tx, tenderId);
+      return this.judge(tx, principal, tender, bids, dto);
+    });
+    if (first.replay) {
+      // Nothing is written for a repeat; the key keeps its answer all the same.
+      const repeated: Outcome = { kind: 'REPLAY', view: first.replay };
+      await this.prisma.transaction((tx) => record(tx, tenderId, repeated));
+      return repeated;
+    }
+
+    // Outside any lock or transaction: supplier-service's word on the winner now (fail closed) — for
+    // the request, which is shown it, and for the execution, which an approval never replaces.
+    const { verdict, asOf } = await this.standing.decisionFor(first.bid.bidderOrganizationId);
+    if (verdict !== 'ELIGIBLE') throw this.rule('WINNER_NOT_ELIGIBLE', { verdict });
+    // The receipt chain as audit-service holds it, to read the winner's price against: only an
+    // approved request is executed, so only then is it worth asking.
+    const ready = await this.gate.hasApproved(principal.organizationId, tenderId, WORKFLOW);
+    const evidence = ready
+      ? await this.reader.readEvidence(principal.organizationId, tenderId)
+      : null;
+
+    const committed = await withFinancialSpan(
+      'construction.tender.award',
+      () =>
+        this.prisma.transaction(async (tx): Promise<Outcome | { kind: 'STALE' }> => {
+          const tender = await this.repo.lockForEvaluation(tx, principal.organizationId, tenderId);
+          if (!tender) throw RastaError.notFound('Tender', tenderId);
+          const bids = await this.repo.listBidSummaries(tx, tenderId);
+          const judged = await this.judge(tx, principal, tender, bids, dto);
+          if (judged.replay) {
+            const repeated: Outcome = { kind: 'REPLAY', view: judged.replay };
+            await record(tx, tenderId, repeated);
+            return repeated;
+          }
+
+          const at = await this.clock.decisionInstant(tx);
+          const winner = judged.bid;
+          const gateTender = {
+            organizationId: principal.organizationId,
+            id: tenderId,
+            projectId: tender.projectId,
+            version: tender.version,
+          };
+
+          const resolution = await this.gate.resolve(tx, {
+            tender: gateTender,
+            binding: {
+              workflowKey: WORKFLOW,
+              bidId: winner.id,
+              bidderOrganizationId: winner.bidderOrganizationId,
+              rank: judged.rank,
+              tied: judged.tied,
+              justification: judged.justification,
+              matrixDigest: judged.digest,
+              standingAsOf: asOf,
+            },
+            confirmedPolicyId,
+            caller: gateCaller,
+            at,
+          });
+          // Ended in this transaction (committed with it): the command answers 409 once it is.
+          if (resolution.kind === 'STALE') return { kind: 'STALE' };
+          if (resolution.kind === 'REQUESTED') {
+            const asked: Outcome = {
+              kind: 'PENDING',
+              request: toRequestView(
+                resolution.request,
+                await this.approvalRequests.steps(tx, resolution.request),
+              ),
+            };
+            await record(tx, tenderId, asked, 202);
+            return asked;
+          }
+          // Approved between the first look and now: no price was read for it. Ask again.
+          if (!evidence) {
+            throw RastaError.optimisticLockFailed('TenderApprovalRequest', resolution.request.id);
+          }
+
+          // The winner's price: read from its sealed content against audit-service's receipts.
+          const key = await this.bids.findWrappedKey(tx, tenderId);
+          const sealed = await this.bids.findBidOf(tx, tenderId, winner.bidderOrganizationId);
+          if (!sealed || sealed.id !== winner.id) throw RastaError.notFound('Bid', winner.id);
+          let amountMinor: bigint | undefined;
+          this.reader.withPrivateKey(key, tenderId, (privateKey, keyId) => {
+            const content = this.reader.openOne(
+              privateKey,
+              keyId,
+              tenderId,
+              sealed,
+              evidence.receipts,
+            );
+            amountMinor = BigInt(content.priceMinor);
+          });
+          if (amountMinor === undefined) throw RastaError.internal('A bid was not opened');
+
+          const identity = storedIdentityOf(currentActor());
+          const id = newId(ID_PREFIX.award);
+          await this.awards.insertAward(tx, {
+            id,
+            organizationId: principal.organizationId,
+            tenderId,
+            bidId: winner.id,
+            bidderOrganizationId: winner.bidderOrganizationId,
+            amountMinor,
+            rank: judged.rank,
+            tied: judged.tied,
+            matrixDigest: judged.digest,
+            justification: judged.justification,
+            standingAsOf: asOf,
+            actor: principal.actor,
+            actorIssuer: identity.issuer,
+            actorSubject: identity.subject,
+            at,
+          });
+          // The standing check that follows (ADR-067 § 3, residual) is written here, in this commit:
+          // the database refuses an award without it, a sweeper makes it, and this response waits for nothing.
+          await this.awards.insertStandingCheck(tx, {
+            id: newId(ID_PREFIX.standingCheck),
+            organizationId: principal.organizationId,
+            tenderId,
+            projectId: tender.projectId,
+            bidId: winner.id,
+            winnerOrganizationId: winner.bidderOrganizationId,
+            awardedBy: principal.actor,
+            awardedAt: at,
+            windowStart: asOf,
+            at,
+          });
+          const matched = await this.awards.markTenderAwarded(tx, {
+            tenderId,
+            expectedVersion: tender.version,
+            actor: principal.actor,
+            at,
+          });
+          if (matched === 0) throw this.conflict('Tender', tenderId);
+          const won = await this.awards.markBidAwarded(tx, {
+            bidId: winner.id,
+            actor: principal.actor,
+            at,
+          });
+          if (won === 0) throw this.conflict('Bid', winner.id);
+          const losers = await this.awards.markOthersNotAwarded(tx, {
+            tenderId,
+            winnerBidId: winner.id,
+            actor: principal.actor,
+            at,
+          });
+          // The approval is used up here, once, in the transaction that awards (the database refuses an
+          // award without it, and a second use of it).
+          await this.gate.consume(tx, resolution.request, gateTender, gateCaller, at);
+
+          await this.events.enqueue(tx, {
+            eventName: 'TENDER_AWARDED',
+            aggregateId: tenderId,
+            organizationId: principal.organizationId,
+            payload: {
+              tenderId,
+              projectId: tender.projectId,
+              organizationId: principal.organizationId,
+              winningBidId: winner.id,
+              winnerOrganizationId: winner.bidderOrganizationId,
+              hasJustification: judged.justification !== null,
+              matrixDigest: judged.digest,
+              approvalRequestId: resolution.request.id,
+              awardedBy: principal.actor,
+              awardedAt: at.toISOString(),
+            },
+            occurredAt: at,
+          });
+          for (const loser of losers) {
+            await this.events.enqueue(tx, {
+              eventName: 'BID_NOT_AWARDED',
+              aggregateId: tenderId,
+              organizationId: principal.organizationId,
+              payload: {
+                bidId: loser.id,
+                tenderId,
+                organizationId: principal.organizationId,
+                bidderOrganizationId: loser.bidderOrganizationId,
+                decidedAt: at.toISOString(),
+              },
+              occurredAt: at,
+            });
+          }
+          await this.record(tx, principal, tenderId, winner.id, at);
+
+          const awarded: Outcome = {
+            kind: 'AWARDED',
+            view: {
+              tenderId,
+              projectId: tender.projectId,
+              status: 'AWARDED',
+              bidId: winner.id,
+              bidderOrganizationId: winner.bidderOrganizationId,
+              amountMinor: amountMinor.toString(),
+              rank: judged.rank,
+              tied: judged.tied,
+              justification: judged.justification,
+              matrixDigest: judged.digest,
+              standingAsOf: asOf.toISOString(),
+              awardedAt: at.toISOString(),
+              awardedBy: principal.actor,
+              alreadyAwarded: false,
+            },
+          };
+          await record(tx, tenderId, awarded);
+          return awarded;
+        }),
+      { 'rasta.tender.command': 'award' },
+    );
+    // Inside the envelope, so that a stale approval is audited like every other refusal.
+    if (committed.kind === 'STALE') throw approvalStale(WORKFLOW);
+    return committed;
   }
 
   // -- reading the award -----------------------------------------------------------------

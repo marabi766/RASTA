@@ -9,7 +9,7 @@ import {
   type ActorIdentity,
 } from '@rasta/nest-common';
 import { withFinancialSpan } from '@rasta/observability';
-import type { CursorPage } from '@rasta/contracts';
+import { ERROR_CODES, type CursorPage } from '@rasta/contracts';
 import type { Bid } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { EventPublisher } from '../events/publisher';
@@ -48,10 +48,21 @@ import type {
   ListBidAccessLogQuery,
   OpenedBidView,
   TenderBidsView,
+  WithdrawProposalDto,
 } from './bid-opening.dto';
-import { ruleRefusal } from '../shared/refusal';
+import { refusal, ruleRefusal } from '../shared/refusal';
+import { IdempotencyStore, targeted, type RecordCompletion } from '../shared/idempotency';
 
-/** The closed reasons an opening or an owner read is refused for; the metric's label and the 422's code. */
+/** The opening's three commands keep their first answer by `Idempotency-Key` (task 060, docs/06 § 6.8). */
+export const OPEN_BIDS_ENDPOINT = 'POST /v1/tenders/:id/open-bids';
+export const PROPOSE_OPENING_ENDPOINT = 'POST /v1/tenders/:id/open-bids/proposal';
+export const WITHDRAW_PROPOSAL_ENDPOINT = 'POST /v1/tenders/:id/open-bids/proposal/withdraw';
+
+/**
+ * The closed reasons an opening or an owner read is refused for; the metric's label and the code in
+ * `details` — 422, except `PROPOSAL_SUPERSEDED`, a 409 (the proposal a withdrawal named is no longer
+ * the one that stands).
+ */
 export const OPENING_REFUSALS = [
   'NOT_CLOSED',
   'NOT_OPENED',
@@ -63,6 +74,7 @@ export const OPENING_REFUSALS = [
   'PROPOSAL_REQUIRED',
   'SECOND_PERSON_REQUIRED',
   'NO_PROPOSAL',
+  'PROPOSAL_SUPERSEDED',
   'TENDER_OVER_LIMIT',
 ] as const;
 export type OpeningRefusal = (typeof OPENING_REFUSALS)[number];
@@ -166,6 +178,21 @@ interface Opened {
  * `alreadyOpened`, reads nothing, writes nothing and publishes nothing: two callers, or
  * one retrying, end with one opening and one `BIDS_OPENED`.
  *
+ * ## A retry is the first request's (task 060)
+ *
+ * Opening, proposing and withdrawing a proposal take an optional `Idempotency-Key` (the gateway
+ * always sends one) and keep their first answer with the work it answers for, in the same
+ * transaction: a retry whose first attempt committed but whose answer was lost is that answer, and
+ * does nothing again — a retried proposal does not propose afresh after the first was withdrawn or
+ * cleared, a retried withdrawal does not take back a proposal made since. The key is claimed after
+ * `guarded`'s ownership and roles, the live identity and the conflict check, so a replay skips none
+ * of them; the caller is part of the request, so another person's request under the same key is
+ * `IDEMPOTENCY_KEY_REUSED`, never their answer.
+ *
+ * And a withdrawal **names** the proposal it takes back (`proposedAt`; the proposal is who and when,
+ * as for the approver below): another proposal standing — a fresh one by the same person included —
+ * is 409 `PROPOSAL_SUPERSEDED`, nothing is withdrawn, and the refusal is audited as every other is.
+ *
  * ## Who
  *
  * The configured roles (`CONSTRUCTION_TENDER_OPEN_ROLES`, by default the owner's own
@@ -237,49 +264,75 @@ export class TenderOpenService {
     private readonly reader: BidContentReader,
     private readonly identity: OwnerIdentity,
     @Inject(MEMBERSHIP_SOURCE) private readonly memberships: MembershipSource,
+    private readonly idempotency: IdempotencyStore,
   ) {}
 
   // -- open ---------------------------------------------------------------------
 
-  async open(tenderId: string): Promise<BidsOpenedView> {
-    const { view, opening } = await this.guarded(tenderId, 'OPEN_BIDS', async (caller, found) => {
+  async open(tenderId: string, idempotencyKey?: string): Promise<BidsOpenedView> {
+    const {
+      result: { view, opening },
+      executed,
+    } = await this.guarded(tenderId, 'OPEN_BIDS', async (caller, found) => {
       // The caller as they are now (identity-service, fail closed), on a repeat open too.
       const principal = await this.livePrincipal(caller);
       // First: a conflicted user is told nothing of the tender's state, not even that it is not closed.
       await this.assertNotConflicted(principal, tenderId);
-      // Outside any transaction and before any lock (see the class header). A tender
-      // already open needs no evidence; one that is not closed has none to ask for.
-      let evidence: Evidence | undefined;
-      let people: ApprovalPeople | undefined;
-      if (found.status === 'CLOSED') {
-        // Before anything is asked, written or decrypted: an opening the timeout cannot finish is
-        // refused at once, not rolled back after 30 s on every retry (Codex r3 on #250, F1).
-        await this.assertWithinStandingLimit(tenderId);
-        people = await this.readApprovalPeople(principal, found);
-        // A proposer who now belongs to a bidder, or who may no longer open these bids, neither
-        // stands nor blocks: the proposal is cleared.
-        if (people) await this.clearProposalOfIneligibleProposer(principal, tenderId, people);
-        // Nor does one who cannot be told apart from this approver (#188): cleared, then refused.
-        if (people) await this.clearProposalOfUnknownProposer(principal, tenderId, people);
-        evidence = await this.readEvidence(principal.organizationId, tenderId);
-      } else if (found.openedAt === null) {
-        throw this.refused('NOT_CLOSED');
-      }
-      return withFinancialSpan(
-        'construction.bid.open',
-        () =>
-          this.prisma.transaction((tx) => this.openIn(tx, principal, tenderId, evidence, people), {
-            timeoutMs: this.env.CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS,
-          }),
-        { 'rasta.tender.command': 'open-bids' },
+      // A replay of the first answer only now: every check above holds for it too. What is kept is the
+      // view; the facts for the check after the commit belong to the request that opened.
+      return this.idempotency.execute<Opened>(
+        OPEN_BIDS_ENDPOINT,
+        idempotencyKey,
+        targeted(tenderId, { requester: principal.actor }),
+        200,
+        (record) => this.openOnce(principal, tenderId, found, record),
       );
     });
-    if (!view.alreadyOpened) {
+    if (executed && !view.alreadyOpened) {
       tenderTransitionsTotal.inc({ service: SERVICE_NAME, command: 'open-bids' });
     }
     // After the commit and never in the way of the answer: the detective control (ADR-066 § 4).
-    if (opening) await this.checkOpeningForConflicts(opening);
+    if (executed && opening) await this.checkOpeningForConflicts(opening);
     return view;
+  }
+
+  private async openOnce(
+    principal: LivePrincipal,
+    tenderId: string,
+    found: TenderOwnership,
+    record: RecordCompletion<Opened>,
+  ): Promise<Opened> {
+    // Outside any transaction and before any lock (see the class header). A tender
+    // already open needs no evidence; one that is not closed has none to ask for.
+    let evidence: Evidence | undefined;
+    let people: ApprovalPeople | undefined;
+    if (found.status === 'CLOSED') {
+      // Before anything is asked, written or decrypted: an opening the timeout cannot finish is
+      // refused at once, not rolled back after 30 s on every retry (Codex r3 on #250, F1).
+      await this.assertWithinStandingLimit(tenderId);
+      people = await this.readApprovalPeople(principal, found);
+      // A proposer who now belongs to a bidder, or who may no longer open these bids, neither
+      // stands nor blocks: the proposal is cleared.
+      if (people) await this.clearProposalOfIneligibleProposer(principal, tenderId, people);
+      // Nor does one who cannot be told apart from this approver (#188): cleared, then refused.
+      if (people) await this.clearProposalOfUnknownProposer(principal, tenderId, people);
+      evidence = await this.readEvidence(principal.organizationId, tenderId);
+    } else if (found.openedAt === null) {
+      throw this.refused('NOT_CLOSED');
+    }
+    return withFinancialSpan(
+      'construction.bid.open',
+      () =>
+        this.prisma.transaction(
+          async (tx) => {
+            const opened = await this.openIn(tx, principal, tenderId, evidence, people);
+            await record(tx, tenderId, { view: opened.view });
+            return opened;
+          },
+          { timeoutMs: this.env.CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS },
+        ),
+      { 'rasta.tender.command': 'open-bids' },
+    );
   }
 
   private async openIn(
@@ -440,42 +493,75 @@ export class TenderOpenService {
   /**
    * The first of the two people (four-eyes, Q-91): records that the caller proposes opening
    * a CLOSED tender's bids. The first proposal stands; a second caller is answered with it
-   * and may then approve it by calling `open`. Reads and opens nothing.
+   * and may then approve it by calling `open`. Reads and opens nothing. Every answer says when the
+   * proposal that stands was made (`proposedAt`): what a withdrawal of it names.
    */
-  async proposeOpening(tenderId: string): Promise<BidOpeningProposalView> {
+  async proposeOpening(tenderId: string, idempotencyKey?: string): Promise<BidOpeningProposalView> {
     return this.guarded(tenderId, 'PROPOSE_OPENING', async (caller, found) => {
       const principal = await this.livePrincipal(caller);
       await this.assertNotConflicted(principal, tenderId);
-      if (found.status !== 'CLOSED') throw this.refused('NOT_CLOSED');
-      return this.prisma.transaction(async (tx) => {
-        const locked = await this.opens.lockForOpening(tx, principal.organizationId, tenderId);
-        if (!locked) throw RastaError.notFound('Tender', tenderId);
-        const bidders = await this.opens.listBidderOrganizationIds(tx, tenderId);
-        this.assertNoConflict(principal.organizationIds, bidders);
-        const at = await this.clock.decisionInstant(tx);
-        if (
-          locked.status !== 'CLOSED' ||
-          !locked.closedAt ||
-          !locked.bidClosingAt ||
-          at.getTime() < locked.bidClosingAt.getTime()
-        ) {
-          throw this.refused('NOT_CLOSED');
-        }
-        if (locked.openingProposedBy !== null) {
-          await this.recordProposal(tx, principal, tenderId, at);
-          return { tenderId, proposedBy: locked.openingProposedBy, alreadyProposed: true };
-        }
-        const matched = await this.opens.proposeOpening(tx, {
-          tenderId,
-          actor: principal.actor,
-          identity: storedIdentityOf(currentActor()),
-          at,
-        });
-        if (matched === 0) throw RastaError.optimisticLockFailed('Tender', tenderId);
-        // The evidence of the proposal, in the transaction that makes it: who proposed what, and when.
+      // The state is judged in the work, after the replay (PR-350 r1 F2): the first answer is kept
+      // whatever the tender has become since — opened, cancelled — as every check above still holds.
+      return this.idempotency.run(
+        PROPOSE_OPENING_ENDPOINT,
+        idempotencyKey,
+        targeted(tenderId, { requester: principal.actor }),
+        200,
+        (record) => {
+          if (found.status !== 'CLOSED') throw this.refused('NOT_CLOSED');
+          return this.proposeOnce(principal, tenderId, record);
+        },
+      );
+    });
+  }
+
+  private proposeOnce(
+    principal: LivePrincipal,
+    tenderId: string,
+    record: RecordCompletion<BidOpeningProposalView>,
+  ): Promise<BidOpeningProposalView> {
+    return this.prisma.transaction(async (tx) => {
+      const locked = await this.opens.lockForOpening(tx, principal.organizationId, tenderId);
+      if (!locked) throw RastaError.notFound('Tender', tenderId);
+      const bidders = await this.opens.listBidderOrganizationIds(tx, tenderId);
+      this.assertNoConflict(principal.organizationIds, bidders);
+      const at = await this.clock.decisionInstant(tx);
+      if (
+        locked.status !== 'CLOSED' ||
+        !locked.closedAt ||
+        !locked.bidClosingAt ||
+        at.getTime() < locked.bidClosingAt.getTime()
+      ) {
+        throw this.refused('NOT_CLOSED');
+      }
+      if (locked.openingProposedBy !== null && locked.openingProposedAt !== null) {
         await this.recordProposal(tx, principal, tenderId, at);
-        return { tenderId, proposedBy: principal.actor, alreadyProposed: false };
+        const standing: BidOpeningProposalView = {
+          tenderId,
+          proposedBy: locked.openingProposedBy,
+          proposedAt: locked.openingProposedAt.toISOString(),
+          alreadyProposed: true,
+        };
+        await record(tx, tenderId, standing);
+        return standing;
+      }
+      const matched = await this.opens.proposeOpening(tx, {
+        tenderId,
+        actor: principal.actor,
+        identity: storedIdentityOf(currentActor()),
+        at,
       });
+      if (matched === 0) throw RastaError.optimisticLockFailed('Tender', tenderId);
+      // The evidence of the proposal, in the transaction that makes it: who proposed what, and when.
+      await this.recordProposal(tx, principal, tenderId, at);
+      const proposed: BidOpeningProposalView = {
+        tenderId,
+        proposedBy: principal.actor,
+        proposedAt: at.toISOString(),
+        alreadyProposed: false,
+      };
+      await record(tx, tenderId, proposed);
+      return proposed;
     });
   }
 
@@ -483,47 +569,83 @@ export class TenderOpenService {
    * The proposer takes their proposal back (four-eyes, Q-91), so that the opening is not left
    * waiting on a person who cannot or will not follow it: nobody else may withdraw it, and
    * anyone eligible may then propose afresh. Audited like the proposal itself, with its event.
+   *
+   * The request names the proposal (`proposedAt`, task 060): only that one is taken back. Another
+   * standing — made since the caller looked, a fresh one by the same person included — is 409
+   * `PROPOSAL_SUPERSEDED` and nothing changes, so a late or repeated withdrawal never takes back a
+   * proposal it did not name. Judged under the tender's lock, before who may withdraw: the answer to
+   * a stale request is the same whoever sends it.
    */
-  async withdrawProposal(tenderId: string): Promise<BidOpeningProposalWithdrawnView> {
+  async withdrawProposal(
+    tenderId: string,
+    dto: WithdrawProposalDto,
+    idempotencyKey?: string,
+  ): Promise<BidOpeningProposalWithdrawnView> {
+    // The instant as the service keeps it (milliseconds, UTC): two spellings of it are one request.
+    const named = new Date(dto.proposedAt);
     return this.guarded(tenderId, 'WITHDRAW_PROPOSAL', async (caller) => {
       const principal = await this.livePrincipal(caller);
       await this.assertNotConflicted(principal, tenderId);
-      return this.prisma.transaction(async (tx) => {
-        const locked = await this.opens.lockForOpening(tx, principal.organizationId, tenderId);
-        if (!locked) throw RastaError.notFound('Tender', tenderId);
-        if (locked.status !== 'CLOSED' || locked.openedAt !== null)
-          throw this.refused('NOT_CLOSED');
-        // Both are set or neither (a CHECK); both are tested so that the proposal is one value.
-        if (locked.openingProposedBy === null || locked.openingProposedAt === null) {
-          throw this.refused('NO_PROPOSAL');
-        }
-        // The proposer, by the user id they proposed under or, when it shows them, by their
-        // stable identity (#188): a proposal written from a token without `rasta_uid` names the
-        // subject, and that person now arrives with a platform id. An ownership grant: an
-        // identity that cannot be shown to be theirs (UNKNOWN) withdraws nothing — the approval
-        // of a second person clears such a proposal instead.
-        const proposer = storedActor(
-          locked.openingProposedBy,
-          locked.openingProposedByIssuer,
-          locked.openingProposedBySubject,
+      return this.idempotency.run(
+        WITHDRAW_PROPOSAL_ENDPOINT,
+        idempotencyKey,
+        targeted(tenderId, { requester: principal.actor, proposedAt: named.toISOString() }),
+        200,
+        (record) => this.withdrawOnce(principal, tenderId, named, record),
+      );
+    });
+  }
+
+  private withdrawOnce(
+    principal: LivePrincipal,
+    tenderId: string,
+    named: Date,
+    record: RecordCompletion<BidOpeningProposalWithdrawnView>,
+  ): Promise<BidOpeningProposalWithdrawnView> {
+    return this.prisma.transaction(async (tx) => {
+      const locked = await this.opens.lockForOpening(tx, principal.organizationId, tenderId);
+      if (!locked) throw RastaError.notFound('Tender', tenderId);
+      if (locked.status !== 'CLOSED' || locked.openedAt !== null) throw this.refused('NOT_CLOSED');
+      // Both are set or neither (a CHECK); both are tested so that the proposal is one value.
+      if (locked.openingProposedBy === null || locked.openingProposedAt === null) {
+        throw this.refused('NO_PROPOSAL');
+      }
+      // Not the proposal the caller named: it was withdrawn or cleared, and another made since.
+      if (locked.openingProposedAt.getTime() !== named.getTime()) {
+        throw this.superseded();
+      }
+      // The proposer, by the user id they proposed under or, when it shows them, by their
+      // stable identity (#188): a proposal written from a token without `rasta_uid` names the
+      // subject, and that person now arrives with a platform id. An ownership grant: an
+      // identity that cannot be shown to be theirs (UNKNOWN) withdraws nothing — the approval
+      // of a second person clears such a proposal instead.
+      const proposer = storedActor(
+        locked.openingProposedBy,
+        locked.openingProposedByIssuer,
+        locked.openingProposedBySubject,
+      );
+      if (
+        locked.openingProposedBy !== principal.actor &&
+        compareActors(proposer, currentActor()) !== 'SAME'
+      ) {
+        throw RastaError.forbidden(
+          'Only the proposer may withdraw the proposal to open these bids',
         );
-        if (
-          locked.openingProposedBy !== principal.actor &&
-          compareActors(proposer, currentActor()) !== 'SAME'
-        ) {
-          throw RastaError.forbidden(
-            'Only the proposer may withdraw the proposal to open these bids',
-          );
-        }
-        await this.clearProposal(
-          tx,
-          principal,
-          locked,
-          { by: locked.openingProposedBy, at: locked.openingProposedAt },
-          'WITHDRAWN_BY_PROPOSER',
-        );
-        return { tenderId, withdrawnProposal: locked.openingProposedBy };
-      });
+      }
+      await this.clearProposal(
+        tx,
+        principal,
+        locked,
+        { by: locked.openingProposedBy, at: locked.openingProposedAt },
+        'WITHDRAWN_BY_PROPOSER',
+      );
+      const withdrawn: BidOpeningProposalWithdrawnView = {
+        tenderId,
+        withdrawnProposal: locked.openingProposedBy,
+        proposedAt: locked.openingProposedAt.toISOString(),
+      };
+      await record(tx, tenderId, withdrawn);
+      return withdrawn;
     });
   }
 
@@ -667,6 +789,15 @@ export class TenderOpenService {
           bidCount: standing.length,
           receivedAt: standing.map((bid) => bid.receivedAt.toISOString()).sort(),
           bids: [],
+          // What a withdrawal names (task 060). Who proposed is no news to these readers: the access
+          // log they may read names the PROPOSE_OPENING row's user.
+          proposal:
+            locked.openingProposedBy !== null && locked.openingProposedAt !== null
+              ? {
+                  proposedBy: locked.openingProposedBy,
+                  proposedAt: locked.openingProposedAt.toISOString(),
+                }
+              : null,
         },
       };
     }
@@ -713,6 +844,7 @@ export class TenderOpenService {
           contentCommitment: bid.contentCommitment,
           content: contentOf(contents, bid.id),
         })),
+        proposal: null,
       },
     };
   }
@@ -1253,6 +1385,18 @@ export class TenderOpenService {
       bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: reason.toLowerCase() });
     }
     return ruleRefusal(`Bids are not opened: ${reason}`, 'opening', [reason]);
+  }
+
+  /** 409 with a closed code: the proposal a withdrawal named is no longer the one that stands. */
+  private superseded(): RastaError {
+    bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'proposal_superseded' });
+    return refusal(
+      ERROR_CODES.CONFLICT,
+      'Proposal not withdrawn: PROPOSAL_SUPERSEDED. The proposal named is no longer the one that ' +
+        'stands; nothing was withdrawn',
+      'opening',
+      ['PROPOSAL_SUPERSEDED'],
+    );
   }
 }
 

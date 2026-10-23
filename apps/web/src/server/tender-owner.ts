@@ -137,6 +137,8 @@ export const OWNER_BIDS_SCHEMA = z.object({
   bidCount: z.number().int().min(0),
   receivedAt: z.array(utcInstant),
   bids: z.array(openedBidSchema),
+  /** The proposal to open that stands: what a withdrawal names (task 060, PR-350 r1 F1). */
+  proposal: z.object({ proposedBy: z.string(), proposedAt: utcInstant }).nullable().optional(),
 });
 
 export type OwnerBids = z.infer<typeof OWNER_BIDS_SCHEMA>;
@@ -402,7 +404,9 @@ export type OwnerOffer =
       readonly approvalId: string;
       readonly expectedVersion: number;
     }
-  | { readonly command: 'PROPOSE_OPENING' | 'OPEN_BIDS' | 'WITHDRAW_PROPOSAL' | 'EVALUATE' }
+  | { readonly command: 'PROPOSE_OPENING' | 'OPEN_BIDS' | 'EVALUATE' }
+  /** The proposal standing as the page read it: the one, and the only one, it takes back. */
+  | { readonly command: 'WITHDRAW_PROPOSAL'; readonly proposedAt: string }
   | { readonly command: 'QUALIFY' | 'DISQUALIFY'; readonly bidId: string }
   | {
       readonly command: 'SCORE';
@@ -436,6 +440,8 @@ export interface OwnerState {
   readonly publication: ReadResult<ApprovalRequest | null> | null;
   /** The step this caller may decide, read for its version; null when there is none to read. */
   readonly step: ReadResult<Approval> | null;
+  /** The owner's view of the bids, when it was asked for: whether a proposal to open stands. */
+  readonly bids?: ReadResult<OwnerBids> | null;
 }
 
 /**
@@ -450,9 +456,10 @@ export interface OwnerState {
  * - **decide** the pending step the caller is the authority of: reject always,
  *   grant only if they did not make the request;
  * - **open**, in two persons, a `CLOSED` tender: propose, open, withdraw one's
- *   own proposal. Which of the three applies the views do not say (whether a
- *   proposal stands, and whose), so all three are drawn and the service refuses
- *   the wrong one in fixed words.
+ *   own proposal. Propose and open are drawn whatever stands, and the service
+ *   refuses the wrong one in fixed words. A withdrawal names the proposal it
+ *   takes back (`proposedAt`, task 060), so it is drawn only when the bids view
+ *   shows one standing, bound to that one: whose it is is the service's to say.
  */
 export function ownerOffers(
   caller: OwnerCaller,
@@ -508,9 +515,7 @@ export function ownerOffers(
   }
 
   if (tender.status === 'CLOSED' && canOpenBids(caller, settings)) {
-    for (const command of ['PROPOSE_OPENING', 'OPEN_BIDS', 'WITHDRAW_PROPOSAL'] as const) {
-      offers.push({ command });
-    }
+    offers.push(...openingOffers(state.bids ?? null));
   }
 
   return { offers, notes };
@@ -543,11 +548,22 @@ export function openingOnlyOffers(
   settings: RoleSettings,
 ): readonly OwnerOffer[] {
   if (!canOpenBids(caller, settings) || bids.kind !== 'OK' || bids.data.opened) return [];
-  return [
-    { command: 'PROPOSE_OPENING' },
-    { command: 'OPEN_BIDS' },
-    { command: 'WITHDRAW_PROPOSAL' },
-  ];
+  return openingOffers(bids);
+}
+
+/**
+ * Propose and open, and — only when the bids view shows a proposal standing — its
+ * withdrawal, bound to that proposal's `proposedAt`. The binding is signed with the
+ * form and is what is sent, a re-send of the same form included: a withdrawal never
+ * reads the proposal again when it is sent, so it never names one its author did not
+ * see (task 060, PR-350 r1 F1). Another proposal standing by then is the service's
+ * `PROPOSAL_SUPERSEDED`, said in fixed words.
+ */
+function openingOffers(bids: ReadResult<OwnerBids> | null): OwnerOffer[] {
+  const offers: OwnerOffer[] = [{ command: 'PROPOSE_OPENING' }, { command: 'OPEN_BIDS' }];
+  const proposal = bids?.kind === 'OK' && !bids.data.opened ? bids.data.proposal : null;
+  if (proposal) offers.push({ command: 'WITHDRAW_PROPOSAL', proposedAt: proposal.proposedAt });
+  return offers;
 }
 
 /** Whether the owner's bids view is asked for: an opener, on a tender that has had bids. */
@@ -583,6 +599,8 @@ export interface OwnerBinding {
   /** A score's criteria and the revisions of the caller's own cells. */
   readonly scoring?: readonly ScoringCell[] | null;
   readonly award?: AwardTerms | null;
+  /** The proposal a withdrawal takes back, as the page read it (`proposedAt`); null otherwise. */
+  readonly proposedAt?: string | null;
 }
 
 export interface OwnerRequest {
@@ -618,6 +636,9 @@ export function ownerRequest(
   const bidId = binding.bidId ?? null;
   const scoring = binding.scoring ?? null;
   const award = binding.award ?? null;
+  const proposedAt = binding.proposedAt ?? null;
+  // Only a withdrawal names a proposal, and a withdrawal always names one.
+  if ((command === 'WITHDRAW_PROPOSAL') !== (proposedAt !== null)) return null;
   const bidPath = bidId === null ? null : `${base}/bids/${encodeURIComponent(bidId)}`;
   const plain = approvalId === null && expectedVersion === null;
   const onlyBid = plain && bidId !== null;
@@ -698,15 +719,14 @@ export function ownerRequest(
         mapping: mappingFor(command, { justification: JUSTIFICATION_FIELD }),
       };
     }
+    case 'WITHDRAW_PROPOSAL':
+      return unbound
+        ? { path: `${base}/open-bids/proposal/withdraw`, body: { proposedAt }, mapping }
+        : null;
     default:
       if (!unbound) return null;
       return {
-        path:
-          command === 'OPEN_BIDS'
-            ? `${base}/open-bids`
-            : command === 'PROPOSE_OPENING'
-              ? `${base}/open-bids/proposal`
-              : `${base}/open-bids/proposal/withdraw`,
+        path: command === 'OPEN_BIDS' ? `${base}/open-bids` : `${base}/open-bids/proposal`,
         body: {},
         mapping,
       };

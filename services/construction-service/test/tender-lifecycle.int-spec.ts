@@ -7,6 +7,7 @@ import {
   asAdmin,
   cleanup,
   newOrganizationId,
+  newUserId,
   outboxFor,
   untilASessionWaitsOnALock,
   wire,
@@ -150,21 +151,26 @@ describe('tender lifecycle', () => {
       expect(page.items).toEqual([]);
     });
 
-    it('is idempotent: a retry returns the first tender; the same key on another project is refused', async () => {
+    it('is idempotent: a retry returns the first tender; another body, or another person, under the key is refused', async () => {
       const a = org();
       const first = await approvedProject(w, a);
       const key = 'tender-create-key-1';
+      const author = newUserId();
 
-      const one = await asAdmin(a, () => w.tenders.create(first.id, TENDER, key));
-      const again = await asAdmin(a, () => w.tenders.create(first.id, TENDER, key));
-      expect(again.id).toBe(one.id);
+      const one = await asAdmin(a, () => w.tenders.create(first.id, TENDER, key), author);
+      const again = await asAdmin(a, () => w.tenders.create(first.id, TENDER, key), author);
+      expect(again).toEqual(one);
+      // Another person of the same organization, the same key, project and body (PR-350 r1 F3).
+      await expect(
+        asAdmin(a, () => w.tenders.create(first.id, TENDER, key), newUserId()),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
       expect((await asAdmin(a, () => w.tenders.list({ limit: 25 }))).items).toHaveLength(1);
       expect(
         (await outboxFor(w.prisma, a)).filter((row) => row.eventName === 'TENDER_CREATED'),
       ).toHaveLength(1);
 
       await expect(
-        asAdmin(a, () => w.tenders.create(first.id, { ...TENDER, title: 'Another' }, key)),
+        asAdmin(a, () => w.tenders.create(first.id, { ...TENDER, title: 'Another' }, key), author),
       ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
     });
   });

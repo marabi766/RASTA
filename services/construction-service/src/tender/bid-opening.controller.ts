@@ -1,8 +1,25 @@
-import { Controller, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
+import { parseIdempotencyKey } from '../project/project.controller';
 import { TenderOpenService } from './tender-open.service';
-import { listBidAccessLogQuerySchema, type ListBidAccessLogQuery } from './bid-opening.dto';
+import { RETRY_NOTE } from './retry-note';
+import {
+  listBidAccessLogQuerySchema,
+  withdrawProposalSchema,
+  type ListBidAccessLogQuery,
+  type WithdrawProposalDto,
+} from './bid-opening.dto';
 
 const OWNER_NOTE =
   'Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set ' +
@@ -55,10 +72,10 @@ export class BidOpeningController {
       'after they were submitted) is 422 `TENDER_OVER_LIMIT` at once, before audit-service is asked or ' +
       'any bid decrypted; the answer gives no count, nothing is opened, and what becomes of the tender ' +
       'is an operator’s decision (Q-117). ' +
-      `${AUDIT_NOTE} ${OWNER_NOTE}`,
+      `${RETRY_NOTE} ${AUDIT_NOTE} ${OWNER_NOTE}`,
   })
-  async open(@Param('id') id: string) {
-    return this.opening.open(id);
+  async open(@Param('id') id: string, @Headers('idempotency-key') idempotencyKey?: string) {
+    return this.opening.open(id, parseIdempotencyKey(idempotencyKey));
   }
 
   @Post('tenders/:id/open-bids/proposal')
@@ -70,11 +87,13 @@ export class BidOpeningController {
       'Records that the caller proposes opening the bids; a second authorised user then approves with ' +
       '`POST /tenders/:id/open-bids`. The first proposal stands: proposing again answers it with ' +
       '`alreadyProposed: true`. Neither proposer nor approver may be a member of an organization that ' +
-      'bid. Reads and opens nothing; a tender not yet CLOSED is 422 `NOT_CLOSED`. ' +
-      OWNER_NOTE,
+      'bid. Reads and opens nothing; a tender not yet CLOSED is 422 `NOT_CLOSED`. The answer says when ' +
+      'the proposal that stands was made (`proposedAt`): what withdrawing it names. A retried proposal ' +
+      'under its key never proposes afresh after the first was withdrawn or cleared. ' +
+      `${RETRY_NOTE} ${OWNER_NOTE}`,
   })
-  async propose(@Param('id') id: string) {
-    return this.opening.proposeOpening(id);
+  async propose(@Param('id') id: string, @Headers('idempotency-key') idempotencyKey?: string) {
+    return this.opening.proposeOpening(id, parseIdempotencyKey(idempotencyKey));
   }
 
   @Post('tenders/:id/open-bids/proposal/withdraw')
@@ -85,16 +104,25 @@ export class BidOpeningController {
     description:
       'The proposer takes their proposal back, so another eligible user can propose afresh; nobody ' +
       'else may (403). The proposer is recognised by the user id they proposed under or, where it ' +
-      'shows them, by their stable identity (issuer and subject, #188). No proposal is 422 `NO_PROPOSAL`; a tender not CLOSED, or already opened, is ' +
+      'shows them, by their stable identity (issuer and subject, #188). The body names the proposal ' +
+      'to withdraw by its `proposedAt` (as answered by proposing, or by GET /tenders/:id/bids): ' +
+      'another proposal standing — made since, a fresh one by the same person included — is 409 ' +
+      '`PROPOSAL_SUPERSEDED`, nothing is withdrawn and the refusal is audited (judged before who may ' +
+      'withdraw). No proposal is 422 `NO_PROPOSAL`; a tender not CLOSED, or already opened, is ' +
       '422 `NOT_CLOSED`. Audited like the proposal (an access row, BID_ACCESSED) with ' +
       '`BID_OPENING_PROPOSAL_WITHDRAWN`. An approval that finds the proposer a member of a bidding ' +
       'organization refuses (403) and clears the proposal the same way, as does one that finds no ' +
       'stable identity on record for the proposer (422 `ACTOR_IDENTITY_UNKNOWN`, reason ' +
-      '`PROPOSER_IDENTITY_UNKNOWN`). ' +
-      OWNER_NOTE,
+      '`PROPOSER_IDENTITY_UNKNOWN`). A retried withdrawal under its key is answered the first ' +
+      'answer and takes back nothing made since. ' +
+      `${RETRY_NOTE} ${OWNER_NOTE}`,
   })
-  async withdrawProposal(@Param('id') id: string) {
-    return this.opening.withdrawProposal(id);
+  async withdrawProposal(
+    @Param('id') id: string,
+    @Body(zodPipe(withdrawProposalSchema)) dto: WithdrawProposalDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    return this.opening.withdrawProposal(id, dto, parseIdempotencyKey(idempotencyKey));
   }
 
   @Get('tenders/:id/bids')

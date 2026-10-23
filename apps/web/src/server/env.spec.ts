@@ -155,6 +155,34 @@ describe('who is shown the Contracts link', () => {
   });
 });
 
+describe('the return replay deadline (EXP-003 returns)', () => {
+  it('defaults to marketplace-service’s floor, not its default, less ten minutes', () => {
+    const env = loadWebServerEnv(REQUIRED);
+    expect(env.WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS).toBe(1);
+    expect(env.WEB_RETURN_REPLAY_MARGIN_SECONDS).toBe(600);
+  });
+
+  it('mirrors the service’s bounds for the retention (1..168 hours)', () => {
+    for (const value of ['0', '169', 'soon']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS: value }),
+      ).toThrow('WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS');
+    }
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS: '24' })
+        .WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS,
+    ).toBe(24);
+  });
+
+  it('bounds the margin so the window is never shorter than half an hour', () => {
+    for (const value of ['59', '1801']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_RETURN_REPLAY_MARGIN_SECONDS: value }),
+      ).toThrow('WEB_RETURN_REPLAY_MARGIN_SECONDS');
+    }
+  });
+});
+
 describe('who is drawn the contract command forms, and with which reasons', () => {
   it("defaults to contract-service's own defaults", () => {
     const env = loadWebServerEnv(REQUIRED);

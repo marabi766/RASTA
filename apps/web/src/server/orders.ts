@@ -50,6 +50,11 @@ export type { ReadResult };
 const minorUnits = z.string().regex(/^-?\d+$/, 'amount must be whole minor units');
 
 const orderLineSchema = z.object({
+  /**
+   * The order line a return request names (RUN-005). A service that does not
+   * send it leaves the line out of every return form rather than guessed.
+   */
+  id: z.string().min(1).nullable().default(null),
   offerId: z.string(),
   productId: z.string(),
   productName: z.string(),

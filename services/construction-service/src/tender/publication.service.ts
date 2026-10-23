@@ -19,7 +19,7 @@ import { PublicationRepository } from './publication.repository';
 import { TenderApprovalGate, type GateCaller } from './tender-approval.gate';
 import { TenderApprovalRepository } from './tender-approval.repository';
 import { approvalStale } from './tender-approval.errors';
-import { toRequestView, type Gated, type TenderApprovalRequestView } from './tender-approval.dto';
+import { toRequestView, type Gated } from './tender-approval.dto';
 import { publicationRefusals, type PublicationRefusal } from './publication';
 import { assertTenderTransition } from './tender.state-machine';
 import { SealingError } from './sealing/errors';
@@ -34,8 +34,13 @@ import type {
   PublishTenderDto,
 } from './publication.dto';
 import { ruleRefusal } from '../shared/refusal';
+import { IdempotencyStore, targeted, type RecordCompletion } from '../shared/idempotency';
 
 const WORKFLOW = 'tender.publication' as const;
+
+/** The routes whose first answer is kept by `Idempotency-Key` (docs/06 § 6.8; the template, not the id). */
+export const PUBLISH_TENDER_ENDPOINT = 'POST /v1/tenders/:id/publish';
+export const INVITE_BIDDER_ENDPOINT = 'POST /v1/tenders/:id/invitations';
 
 /**
  * PublishTender and the invitations to a restricted tender (ADR-065, ADR-066).
@@ -63,6 +68,15 @@ const WORKFLOW = 'tender.publication' as const;
  * request; the same command publishes only when the request is APPROVED, using it up in the
  * publication's own transaction under the tender's lock, and refuses a stale one (409) — what the
  * authority approved is exactly what is published.
+ *
+ * ## A retry is the first request's (task 060)
+ *
+ * An optional `Idempotency-Key` (the gateway always sends one) keeps the first answer of `publish`
+ * and `invite` with the work it answers for — the completion is written in the same transaction as
+ * the round opened, the publication or the invitation. A retry whose first attempt committed but
+ * whose answer was lost is given that answer again, the 202 of a round since rejected included; it
+ * never opens a second round. The key is claimed only after the caller is authorised and the tender
+ * shown to be theirs, inside the gate's refusal audit, and the caller is part of the request.
  */
 @Injectable()
 export class PublicationService {
@@ -78,6 +92,7 @@ export class PublicationService {
     private readonly directory: OrganizationDirectory,
     private readonly gate: TenderApprovalGate,
     private readonly requests: TenderApprovalRepository,
+    private readonly idempotency: IdempotencyStore,
   ) {}
 
   /**
@@ -88,7 +103,11 @@ export class PublicationService {
    * version — publishes and uses the approval up in the same transaction (`executed: true`). A tender that
    * changed since the approval is 409 `APPROVAL_STALE`: nothing is published.
    */
-  async publish(tenderId: string, dto: PublishTenderDto): Promise<Gated<TenderView>> {
+  async publish(
+    tenderId: string,
+    dto: PublishTenderDto,
+    idempotencyKey?: string,
+  ): Promise<Gated<TenderView>> {
     const { organizationId, actor } = this.access.assertCanWrite();
     const caller: GateCaller = {
       userId: actor,
@@ -104,13 +123,22 @@ export class PublicationService {
     assertOwnTender(first, organizationId);
 
     const own = { organizationId, id: tenderId, projectId: first.projectId };
-    return this.gate.guarded(own, WORKFLOW, caller, () => this.publishGated(tenderId, dto, caller));
+    return this.gate.guarded(own, WORKFLOW, caller, () =>
+      this.idempotency.run(
+        PUBLISH_TENDER_ENDPOINT,
+        idempotencyKey,
+        targeted(tenderId, { requester: actor, body: dto }),
+        200,
+        (record) => this.publishGated(tenderId, dto, caller, record),
+      ),
+    );
   }
 
   private async publishGated(
     tenderId: string,
     dto: PublishTenderDto,
     caller: GateCaller,
+    record: RecordCompletion<Gated<TenderView>>,
   ): Promise<Gated<TenderView>> {
     const { organizationId, userId: actor } = caller;
     // Asked before any transaction: no row lock is held across a network call.
@@ -118,7 +146,7 @@ export class PublicationService {
     const ready =
       confirmedPolicyId !== null &&
       (await this.gate.hasApproved(organizationId, tenderId, WORKFLOW));
-    if (!ready) return this.askForApproval(tenderId, dto, caller, confirmedPolicyId);
+    if (!ready) return this.askForApproval(tenderId, dto, caller, confirmedPolicyId, record);
 
     const keyId = newId(ID_PREFIX.tenderKey);
     const { publicKeyPem, wrapped } = await this.makeKey(tenderId, keyId);
@@ -170,13 +198,15 @@ export class PublicationService {
           if (resolution.kind === 'STALE') return 'STALE';
           // Not approved (any more): no key was made for a request that is only now being asked.
           if (resolution.kind === 'REQUESTED') {
-            return {
+            const asked: Gated<TenderView> = {
               executed: false,
               request: toRequestView(
                 resolution.request,
                 await this.requests.steps(tx, resolution.request),
               ),
             };
+            await record(tx, tenderId, asked, 202);
+            return asked;
           }
 
           const matched = await this.tenders.publishTender(tx, {
@@ -228,7 +258,12 @@ export class PublicationService {
             },
             occurredAt: at,
           });
-          return { executed: true, result: await this.view(organizationId, tenderId, tx) };
+          const published: Gated<TenderView> = {
+            executed: true,
+            result: await this.view(organizationId, tenderId, tx),
+          };
+          await record(tx, tenderId, published, 200);
+          return published;
         }),
       { 'rasta.tender.command': 'publish' },
     );
@@ -248,10 +283,11 @@ export class PublicationService {
     dto: PublishTenderDto,
     caller: GateCaller,
     confirmedPolicyId: string | null,
+    record: RecordCompletion<Gated<TenderView>>,
   ): Promise<Gated<TenderView>> {
     const { organizationId } = caller;
     const outcome = await this.prisma.transaction(
-      async (tx): Promise<TenderApprovalRequestView | 'STALE'> => {
+      async (tx): Promise<Gated<TenderView> | 'STALE'> => {
         const locked = await this.lockOrNotFound(tx, organizationId, tenderId);
         if (locked.version !== dto.expectedVersion) {
           const stale = await this.gate.endIfBehind(
@@ -285,11 +321,19 @@ export class PublicationService {
         if (resolution.kind === 'APPROVED') {
           throw RastaError.optimisticLockFailed('TenderApprovalRequest', resolution.request.id);
         }
-        return toRequestView(resolution.request, await this.requests.steps(tx, resolution.request));
+        const asked: Gated<TenderView> = {
+          executed: false,
+          request: toRequestView(
+            resolution.request,
+            await this.requests.steps(tx, resolution.request),
+          ),
+        };
+        await record(tx, tenderId, asked, 202);
+        return asked;
       },
     );
     if (outcome === 'STALE') throw approvalStale(WORKFLOW);
-    return { executed: false, request: outcome };
+    return outcome;
   }
 
   // -- invitations ------------------------------------------------------------
@@ -297,20 +341,45 @@ export class PublicationService {
   /**
    * Invites an organization to a RESTRICTED tender, while it is a DRAFT or
    * PUBLISHED. The owner cannot invite itself; the same organization twice is
-   * `409`. An invitation is not a version change of the tender.
+   * `409` — unless it is the retry of the request that invited it, under the same
+   * `Idempotency-Key`, which is given the first answer. An invitation is not a
+   * version change of the tender.
    */
-  async invite(tenderId: string, dto: InviteBidderDto): Promise<InvitationView> {
+  async invite(
+    tenderId: string,
+    dto: InviteBidderDto,
+    idempotencyKey?: string,
+  ): Promise<InvitationView> {
     const { organizationId, actor } = this.access.assertCanWrite();
 
+    const first = await this.tenders.findTender(tenderId);
+    if (!first) throw RastaError.notFound('Tender', tenderId);
+    assertOwnTender(first, organizationId);
+
+    // Claimed once the tender is shown to be the caller's: the retry of a request that invited is its
+    // answer, whatever organization-service says by then.
+    return this.idempotency.run(
+      INVITE_BIDDER_ENDPOINT,
+      idempotencyKey,
+      targeted(tenderId, { requester: actor, body: dto }),
+      201,
+      (record) => this.inviteOnce(tenderId, dto, organizationId, actor, record),
+    );
+  }
+
+  private async inviteOnce(
+    tenderId: string,
+    dto: InviteBidderDto,
+    organizationId: string,
+    actor: string,
+    record: RecordCompletion<InvitationView>,
+  ): Promise<InvitationView> {
     // Does the invited organization exist? Asked of organization-service before the
     // transaction (a network call is never made under a row lock), and only after
     // the tender is shown to be the caller's, so a stranger learns nothing about
     // either. Fail closed: if it cannot be confirmed (503/504) nothing is invited.
     // Whether the invitee is *eligible* to bid (qualified, not suspended) is not
     // judged here: that is checked at bid time against the standing read model.
-    const first = await this.tenders.findTender(tenderId);
-    if (!first) throw RastaError.notFound('Tender', tenderId);
-    assertOwnTender(first, organizationId);
     if (
       dto.organizationId !== organizationId &&
       !(await this.directory.exists(dto.organizationId))
@@ -326,8 +395,9 @@ export class PublicationService {
     }
 
     const invitationId = newId(ID_PREFIX.invitation);
+    let invited: InvitationView;
     try {
-      await this.prisma.transaction(async (tx) => {
+      invited = await this.prisma.transaction(async (tx) => {
         const locked = await this.lockOrNotFound(tx, organizationId, tenderId);
         // After the lock, like a publication: the invitation is dated by the
         // moment it was decided, not by when the transaction began waiting.
@@ -373,6 +443,12 @@ export class PublicationService {
           },
           occurredAt: at,
         });
+        // The answer, read in the transaction that invites, and the key's completion with it.
+        const created = await this.publications.findInvitation(tenderId, invitationId, tx);
+        if (!created) throw RastaError.notFound('TenderInvitation', invitationId);
+        const view = toInvitationView(created);
+        await record(tx, invitationId, view);
+        return view;
       });
     } catch (error) {
       if (isUniqueViolation(error)) {
@@ -381,10 +457,7 @@ export class PublicationService {
       throw error;
     }
     tenderTransitionsTotal.inc({ service: SERVICE_NAME, command: 'invite' });
-
-    const created = await this.publications.findInvitation(tenderId, invitationId);
-    if (!created) throw RastaError.notFound('TenderInvitation', invitationId);
-    return toInvitationView(created);
+    return invited;
   }
 
   async listInvitations(
