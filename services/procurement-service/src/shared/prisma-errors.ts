@@ -14,6 +14,35 @@ export function isUniqueViolation(error: unknown): boolean {
   );
 }
 
+/** A unique index, as Prisma reports its violation: the model and the columns of its key. */
+export interface UniqueIndex {
+  /** The index's name in the migration, e.g. `ux_rfq_aggregation`. */
+  readonly name: string;
+  /** The Prisma model of its table, e.g. `Rfq`. */
+  readonly model: string;
+  /** The columns of its key, in the database's names. */
+  readonly columns: readonly string[];
+}
+
+/**
+ * A unique violation of `index` and of no other.
+ *
+ * Prisma 6 names the violated index by its model and its key's columns (`meta.modelName`,
+ * `meta.target: ['organization_id', 'aggregation_id']`), and on some paths by the index's name
+ * (`meta.target: 'ux_…'`); both are matched. A P2002 of another index of the same table, of
+ * another table, or one without metadata is not this one — it stays the failure it is.
+ */
+export function isUniqueViolationOf(error: unknown, index: UniqueIndex): boolean {
+  if (!isUniqueViolation(error)) return false;
+  const meta = (error as { meta?: { modelName?: unknown; target?: unknown } }).meta;
+  if (meta?.modelName !== index.model) return false;
+  const target = meta.target;
+  if (typeof target === 'string') return target === index.name;
+  if (!Array.isArray(target) || target.length !== index.columns.length) return false;
+  const named = new Set(target);
+  return index.columns.every((column) => named.has(column));
+}
+
 /** A CHECK constraint refused the row. */
 export function isCheckViolation(error: unknown): boolean {
   const message = (error as { message?: string } | null)?.message ?? '';

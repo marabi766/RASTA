@@ -47,14 +47,16 @@ describe('the committed OpenAPI document', () => {
     expect(readFileSync(committedPath, 'utf8')).toBe(generated);
   });
 
-  it('publishes exactly the operations the planned contract gives ADR-070 plan PRs 1 to 3, each closed', () => {
+  it('publishes exactly the operations the planned contract gives ADR-070 plan PRs 1 to 3 and 6, each closed', () => {
     const planned = JSON.parse(
       readFileSync(join(docs, 'procurement-service.planned.openapi.json'), 'utf8'),
     ) as { paths: Record<string, Record<string, { 'x-step'?: string }>> };
     const built = Object.entries(planned.paths)
       .flatMap(([path, item]) =>
         Object.entries(item)
-          .filter(([, operation]) => ['PR 1', 'PR 2', 'PR 3'].includes(operation['x-step'] ?? ''))
+          .filter(([, operation]) =>
+            ['PR 1', 'PR 2', 'PR 3', 'PR 6'].includes(operation['x-step'] ?? ''),
+          )
           .map(([method]) => `${method.toUpperCase()} ${path}`),
       )
       .sort();
@@ -64,7 +66,11 @@ describe('the committed OpenAPI document', () => {
     expect(published.map((o) => o.key).sort()).toEqual(Object.keys(RESPONSE_BODIES).sort());
     for (const { key, operation } of published) {
       expect({ key, security: operation.security }).toEqual({ key, security: [{ bearer: [] }] });
-      const created = ['POST /v1/demand-requests', 'POST /v1/aggregation-settings'].includes(key);
+      const created = [
+        'POST /v1/demand-requests',
+        'POST /v1/aggregation-settings',
+        'POST /v1/aggregations/{id}/rfq',
+      ].includes(key);
       expect(operation.responses['200'] !== undefined).toBe(!created);
       expect(operation.responses['201'] !== undefined).toBe(created);
     }

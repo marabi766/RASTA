@@ -526,6 +526,18 @@ Envelope باید سازمان Payload (تأمین‌کننده) باشد و ت�
 > نمی‌گیرد هم پایان می‌یابد)، و ابطال تجمیع `READY` رویداد `AGGREGATION_CANCELLED` را (بی دلیل ابطال). رویداد پایان پنجرهٔ `REFERRED`/`LAPSED`
 > همهٔ نیازهایش را از همان آغاز با شمار و Digest نام می‌برد، حتی وقتی نیازهای پنجرهٔ بزرگ دسته‌دسته دنبالش می‌روند؛ جابه‌جایی آن دسته‌ها
 > رویداد تازه‌ای ندارد.
+>
+> **COM-007 PR 6 (2026-10-22).** سه رویداد RFQ، این بار **قرارداد میان‌سرویسی در `@rasta/contracts`**
+> (`packages/contracts/src/events/procurement-rfq.ts`؛ مصرف‌کنندهٔ شواهد audit-service در PR 7 همان Schema را می‌خواند) و در جدول رویدادهای
+> procurement ترکیب شده؛ کلید پارتیشن `rfqId` (ADR-070 § ۹) و `rfqVersion` جایگاه RFQ در تاریخچهٔ خودش است. هیچ‌کدام برچسب معیار، متن دلیل ابطال
+> یا مبلغ ندارد: معیارها با شمار و `criteriaDigest` (SHA-256 هگز شکل Canonical فهرست، به ترتیب) نام برده می‌شوند. `RFQ_ISSUED` هم‌زمان گذار
+> `READY → RFQ_ISSUED` تجمیع را اعلام می‌کند و تأمین‌کنندگان دعوت‌شده را نام می‌برد (D-044 (ب)، D-055).
+>
+> | رویداد          | Payload                                                                                                                                                                                                      |
+> | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+> | `RFQ_ISSUED`    | شناسه‌ها و `rfqVersion` (۱)، `productId`, `totalQuantity`, `procurementNature`, `quotationClosingAt`, `invitedSupplierOrganizationIds[]`, `criteriaCount`, `criteriaDigest`, `keyId`, `issuedBy`, `issuedAt` |
+> | `RFQ_CLOSED`    | `rfqId`, `organizationId`, `aggregationId`, `rfqVersion`, `quotationClosingAt`, `trigger` (`SWEEPER` \| `MANUAL`), `closedBy`, `closedAt`, `quotationCount` (ADR-070 § ۹؛ تا PR 8 صفر)                       |
+> | `RFQ_CANCELLED` | `rfqId`, `organizationId`, `aggregationId`, `rfqVersion`, `previousStatus`, `reasonCode` (فهرست بستهٔ `PROCUREMENT_RFQ_CANCELLATION_CODES`، پیش‌فرض `BUYER_REQUEST`), `cancelledBy`, `cancelledAt`           |
 
 ## Supplier — `rasta.supplier.v1`
 
