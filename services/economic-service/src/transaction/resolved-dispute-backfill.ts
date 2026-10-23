@@ -81,7 +81,7 @@ export function parseResolvedDisputeBackfillArgs(
 ): ResolvedDisputeBackfillOptions {
   const options: ResolvedDisputeBackfillOptions = { ...RESOLVED_DISPUTE_BACKFILL_DEFAULTS };
   for (let i = 0; i < argv.length; i += 1) {
-    const flag = argv[i] ?? '';
+    const flag = String(argv[i]);
     if (flag === '--apply') {
       options.apply = true;
       continue;
@@ -162,11 +162,15 @@ async function batch(
   );
 }
 
+/** The PostgreSQL error a raw statement failed with — `55P03` lock, `57014` statement timeout — as Prisma reports it. */
 function sqlState(error: unknown): string | null {
-  const meta = (error as { meta?: { code?: unknown } } | null)?.meta;
-  if (typeof meta?.code === 'string') return meta.code;
-  const message = error instanceof Error ? error.message : '';
-  return /\b(55P03|57014)\b/.exec(message)?.[1] ?? null;
+  const code = (error as { meta?: { code?: unknown } } | null)?.meta?.code;
+  return typeof code === 'string' ? code : null;
+}
+
+/** The command's exit status: 0 only for a plan or a run that left nothing to attribute. */
+export function backfillExitCode(summary: { status: string }): number {
+  return summary.status === 'planned' || summary.status === 'done' ? 0 : 1;
 }
 
 /** Runs the backfill; every step is reported through `emit`, and the summary returned. */
