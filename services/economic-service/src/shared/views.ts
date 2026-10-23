@@ -299,6 +299,20 @@ export function toTransactionDetailView(
   };
 }
 
+/**
+ * A transaction command's stored answer, as it is replayed (Codex on #352,
+ * finding 2). One stored by the release before `resolvedDisputeId` existed
+ * lacks it, and the documented view requires it: it is replayed with `null`,
+ * which the view documents as "not attributed by identity", and a reader
+ * judges that answer's resolution by time, as that release's readers did. An
+ * answer that has the field is replayed as stored.
+ */
+export function storedTransactionDetailView(
+  answer: TransactionDetailView | Omit<TransactionDetailView, 'resolvedDisputeId'>,
+): TransactionDetailView {
+  return 'resolvedDisputeId' in answer ? answer : { ...answer, resolvedDisputeId: null };
+}
+
 // ---------------------------------------------------------------------------
 // Commission
 // ---------------------------------------------------------------------------

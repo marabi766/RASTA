@@ -257,9 +257,12 @@ export interface TransactionDetailView extends TransactionView {
    * The dispute the recorded resolution (`disputeResolvedAt`, `disputeResolvedBy`,
    * `disputeResolution`) decided. Equal to `disputeId`: it is the latest
    * dispute's resolution; different: an earlier dispute's, and the latest has
-   * none. Null if never resolved, and on a transaction resolved before the
-   * identity was kept that could not be attributed for certain — there,
-   * resolution and dispute are told apart by time (docs/23 D-060).
+   * none. Null if never resolved, and where the resolution is not attributed
+   * by identity: on a transaction resolved before the identity was kept that
+   * could not be attributed for certain (or is not yet — the backfill), and in
+   * a command's answer stored before the field existed, replayed
+   * (`storedTransactionDetailView`). There, resolution and dispute are told
+   * apart by time (docs/23 D-060).
    */
   resolvedDisputeId: string | null;
   legs: { role: string; organizationId: string; amountMinor: string; currency: string }[];

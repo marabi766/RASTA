@@ -658,6 +658,35 @@ describe('IdempotencyStore.run — a replay passes the endpoint’s object check
     ).rejects.toBe(notFound);
     expect(mayReplay).toHaveBeenCalledWith(undefined);
   });
+
+  it('brings a stored success to this release’s shape after the guard (Codex on #352, finding 2)', async () => {
+    const { store } = storedStore({ responseStatus: 200, responseBody: { id: 'TXN_STORED' } });
+    const mayReplay = jest.fn().mockResolvedValue(undefined);
+    const stored = jest.fn((answer: { id: string }) => ({ ...answer, added: null }));
+
+    await expect(
+      asTenant(() => store.run('POST /x', 'K', {}, 200, work, { mayReplay, stored })),
+    ).resolves.toEqual({ id: 'TXN_STORED', added: null });
+    // The guard saw the answer as stored.
+    expect(mayReplay).toHaveBeenCalledWith({ id: 'TXN_STORED' });
+    expect(stored).toHaveBeenCalledWith({ id: 'TXN_STORED' });
+  });
+
+  it('never passes a recorded refusal through `stored`', async () => {
+    const { store } = storedStore({ responseStatus: 422, responseBody: { refusal: 'DECLINED' } });
+    const stored = jest.fn();
+
+    await expect(
+      asTenant(() =>
+        store.run('POST /x', 'K', {}, 200, work, {
+          mayReplay: () => Promise.resolve(),
+          terminalRefusals: refusals,
+          stored,
+        }),
+      ),
+    ).rejects.toBeInstanceOf(TerminalRefusalError);
+    expect(stored).not.toHaveBeenCalled();
+  });
 });
 
 describe('hashRequestBody — every own key, whatever its name (#194)', () => {

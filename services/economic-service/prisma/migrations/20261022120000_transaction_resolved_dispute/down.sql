@@ -6,11 +6,16 @@
 -- and when stay on the row, and resolving names `dispute_id`, which this
 -- leaves alone. What is lost is the attribution of a refunded row's
 -- resolution, which readers then judge by time again, as for any row resolved
--- before this migration; a re-apply backfills the rows it can be sure of
--- (docs/23 D-060).
+-- before this migration; after a re-apply the trigger and the backfill
+-- attribute again the rows they can be sure of (docs/23 D-060). Catalogue
+-- changes only, bounded as `migration.sql` is: run it with
+-- `PGOPTIONS='-c rasta.migration_statement_timeout=<t>'` to raise the 5 s.
 BEGIN;
 
 SET LOCAL lock_timeout = '3s';
+SELECT set_config('statement_timeout',
+                  COALESCE(NULLIF(current_setting('rasta.migration_statement_timeout', true), ''), '5s'),
+                  true);
 
 DROP TRIGGER IF EXISTS "trg_transaction_resolved_dispute" ON "transaction";
 DROP FUNCTION IF EXISTS assign_transaction_resolved_dispute();

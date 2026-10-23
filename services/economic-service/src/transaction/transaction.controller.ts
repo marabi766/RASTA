@@ -7,6 +7,7 @@ import { IdempotencyStore, targeted } from '../shared/idempotency';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import { assertNotAuditor } from '../access/access';
 import {
+  storedTransactionDetailView,
   toTransactionDetailView,
   toTransactionView,
   type TransactionRowLike,
@@ -160,7 +161,10 @@ export class TransactionController {
       201,
       (answer) => this.transactions.create({ ...dto, idempotencyKey: key }, answer.map(detailView)),
       // No target in the path: the stored answer names the transaction it made.
-      { mayReplay: (stored) => this.transactions.assertMayReplay(createdId(stored), 'READ') },
+      {
+        mayReplay: (stored) => this.transactions.assertMayReplay(createdId(stored), 'READ'),
+        stored: storedTransactionDetailView,
+      },
     );
   }
 
@@ -188,7 +192,10 @@ export class TransactionController {
       targeted(id),
       200,
       (answer) => this.transactions.authoriseSettlement(id, answer.map(detailView), key),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'AUTHORISE_SETTLEMENT') },
+      {
+        mayReplay: () => this.transactions.assertMayReplay(id, 'AUTHORISE_SETTLEMENT'),
+        stored: storedTransactionDetailView,
+      },
     );
   }
 
@@ -221,7 +228,10 @@ export class TransactionController {
       targeted(id, dto),
       200,
       (answer) => this.transactions.dispute(id, dto, answer.map(detailView)),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'DISPUTE') },
+      {
+        mayReplay: () => this.transactions.assertMayReplay(id, 'DISPUTE'),
+        stored: storedTransactionDetailView,
+      },
     );
   }
 
@@ -257,7 +267,10 @@ export class TransactionController {
       targeted(id, dto),
       200,
       (answer) => this.transactions.resolveDispute(id, dto, answer.map(detailView)),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'RESOLVE_DISPUTE') },
+      {
+        mayReplay: () => this.transactions.assertMayReplay(id, 'RESOLVE_DISPUTE'),
+        stored: storedTransactionDetailView,
+      },
     );
   }
 
@@ -293,7 +306,10 @@ export class TransactionController {
       targeted(id, dto),
       200,
       (answer) => this.transactions.refund(id, dto.reason, answer.map(detailView)),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'REFUND') },
+      {
+        mayReplay: () => this.transactions.assertMayReplay(id, 'REFUND'),
+        stored: storedTransactionDetailView,
+      },
     );
   }
 
@@ -323,7 +339,10 @@ export class TransactionController {
       targeted(id, dto),
       200,
       (answer) => this.transactions.cancel(id, dto.reason, answer.map(detailView)),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'CANCEL') },
+      {
+        mayReplay: () => this.transactions.assertMayReplay(id, 'CANCEL'),
+        stored: storedTransactionDetailView,
+      },
     );
   }
 }

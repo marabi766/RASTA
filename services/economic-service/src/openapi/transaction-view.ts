@@ -110,9 +110,11 @@ export const TRANSACTION_VIEW_SCHEMAS: Record<string, JsonSchema> = {
     resolvedDisputeId: nullableText(
       'The dispute the recorded resolution decided. Equal to `disputeId`: the latest ' +
         'dispute’s resolution; different: an earlier dispute’s, and the latest has none. Null ' +
-        'if never resolved, and on a transaction resolved before this field existed that ' +
-        'could not be attributed for certain — there, a resolution older than `disputedAt` ' +
-        'is an earlier dispute’s (docs/23 D-060).',
+        'if never resolved, and where the resolution is not attributed by identity: a ' +
+        'transaction resolved before this field existed that could not be attributed for ' +
+        'certain, or not yet, and a command’s answer stored before it existed and replayed ' +
+        'under its `Idempotency-Key`. There, a resolution older than `disputedAt` is an ' +
+        'earlier dispute’s (docs/23 D-060).',
     ),
     legs: {
       type: 'array',

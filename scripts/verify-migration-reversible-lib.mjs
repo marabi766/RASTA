@@ -1107,6 +1107,14 @@ BEGIN
   END LOOP;
 END $$;`;
 
+const RSD_ROWS = ['PENDING', 'SETTLED', 'REFUNDED', 'OPEN', 'NEVER'].map(
+  (row) => `TXN_MIGCHECK_RSD_${row}`,
+);
+
+/** The backfill's write, to every probe row and without its filter: the trigger decides what is kept. */
+const RSD_ATTRIBUTE_ALL = `UPDATE "transaction" SET resolved_dispute_id = dispute_id
+  WHERE id LIKE 'TXN_MIGCHECK_RSD_%';`;
+
 /** The dispute fields of every probe row, exactly as the previous release wrote them. */
 const RSD_FIELDS_UNTOUCHED = `
 DO $$
@@ -1130,12 +1138,15 @@ END $$;`;
  * re-applied over transactions the previous release wrote: resolved and
  * waiting for settlement, resolved and settled, resolved then disputed again
  * and refunded from DISPUTED, resolved then disputed again and still open,
- * and one never disputed. Up attributes only what is certain — the first two,
- * whose latest dispute was resolved — and leaves the refunded and the open
- * ones NULL, the reasons and resolutions as they were. The trigger then
+ * and one never disputed. Up changes the catalogue and no row (Codex on #352,
+ * finding 1): every row NULL, the reasons and resolutions as they were. A
+ * write to every row — what the backfill (economic-service
+ * resolved-dispute-backfill.ts) and a later move do — attributes only what is
+ * certain, the first two, whose latest dispute was resolved, whatever it
+ * sets, and leaves the refunded and the open ones NULL. The trigger then
  * attributes a resolution written by anyone, and a write can neither forge nor
- * clear one. Down refuses nothing and leaves every other dispute field; a
- * second up attributes the same rows again.
+ * clear one. Down refuses nothing and leaves every other dispute field; after
+ * a second up the same write attributes the same rows again.
  */
 const TRANSACTION_RESOLVED_DISPUTE_STEPS = [
   {
@@ -1175,9 +1186,15 @@ const TRANSACTION_RESOLVED_DISPUTE_STEPS = [
   },
   { label: 'resolved dispute: up again over them', reapply: true },
   {
-    label: 'resolved dispute: only the certain rows attributed; every other field as it was',
+    label: 'resolved dispute: up writes no row; every field as it was',
     sql: `${RSD_FIELDS_UNTOUCHED}
-      ${RSD_EXPECT('after up', {
+      ${RSD_EXPECT('after up', { same: [], none: RSD_ROWS })}`,
+  },
+  {
+    label: 'resolved dispute: a write to every row attributes only the certain ones',
+    sql: `${RSD_ATTRIBUTE_ALL}
+      ${RSD_FIELDS_UNTOUCHED}
+      ${RSD_EXPECT('after the backfill’s write', {
         same: ['TXN_MIGCHECK_RSD_PENDING', 'TXN_MIGCHECK_RSD_SETTLED'],
         none: ['TXN_MIGCHECK_RSD_REFUNDED', 'TXN_MIGCHECK_RSD_OPEN', 'TXN_MIGCHECK_RSD_NEVER'],
       })}`,
@@ -1226,11 +1243,13 @@ const TRANSACTION_RESOLVED_DISPUTE_STEPS = [
   },
   { label: 'resolved dispute: up again', reapply: true },
   {
-    label: 'resolved dispute: the second up attributes the rows it can be sure of, again',
-    sql: RSD_EXPECT('after the second up', {
-      same: ['TXN_MIGCHECK_RSD_PENDING', 'TXN_MIGCHECK_RSD_SETTLED', 'TXN_MIGCHECK_RSD_OPEN'],
-      none: ['TXN_MIGCHECK_RSD_REFUNDED', 'TXN_MIGCHECK_RSD_NEVER'],
-    }),
+    label: 'resolved dispute: after the second up, the same write attributes the same rows again',
+    sql: `${RSD_EXPECT('after the second up', { same: [], none: RSD_ROWS })}
+      ${RSD_ATTRIBUTE_ALL}
+      ${RSD_EXPECT('after the second backfill’s write', {
+        same: ['TXN_MIGCHECK_RSD_PENDING', 'TXN_MIGCHECK_RSD_SETTLED', 'TXN_MIGCHECK_RSD_OPEN'],
+        none: ['TXN_MIGCHECK_RSD_REFUNDED', 'TXN_MIGCHECK_RSD_NEVER'],
+      })}`,
   },
   {
     label: 'resolved dispute: clean up the probe rows',

@@ -1,9 +1,15 @@
 import request from 'supertest';
 import type { Server } from 'node:http';
 import { runUnscoped } from '@rasta/nest-common';
+import { PrismaClient } from '../src/generated/prisma';
+import {
+  RESOLVED_DISPUTE_BACKFILL_DEFAULTS,
+  backfillResolvedDisputes,
+  type ResolvedDisputeBackfillEvent,
+} from '../src/transaction/resolved-dispute-backfill';
 import { TransactionRepository } from '../src/transaction/transaction.repository';
 import { admin, apiTenant, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, id } from './helpers';
+import { cleanup, id, ownerDatabaseUrl } from './helpers';
 
 /**
  * A resolution is attributed to the dispute it decided by identity, never by
@@ -30,6 +36,7 @@ describe('a dispute resolution is attributed by identity, not by time', () => {
   let harness: ApiHarness;
   let http: Server;
   let repository: TransactionRepository;
+  let owner: PrismaClient;
 
   const payer = apiTenant('RSDSP-PAYER');
   const payee = apiTenant('RSDSP-PAYEE');
@@ -47,6 +54,7 @@ describe('a dispute resolution is attributed by identity, not by time', () => {
     harness = await startApi();
     http = harness.app.getHttpServer() as Server;
     repository = harness.app.get(TransactionRepository);
+    owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
 
     const wallet = await request(http).get('/v1/wallets/me').set('authorization', asPayer());
     await request(http)
@@ -61,6 +69,7 @@ describe('a dispute resolution is attributed by identity, not by time', () => {
   afterEach(() => jest.restoreAllMocks());
 
   afterAll(async () => {
+    await owner.$disconnect();
     await cleanup(harness.prisma, [payer, payee, platform]);
     await harness.close();
   });
@@ -280,5 +289,224 @@ describe('a dispute resolution is attributed by identity, not by time', () => {
 
     await forge('alone');
     expect(await resolvedId()).toBe(a);
+  });
+
+  // ---- Rows resolved before the column (Codex on #352, finding 1) -----------
+
+  /**
+   * The row as the migration finds it: resolved, or resolved and moved on, by
+   * the previous release, with no identity. Written by the owner with the
+   * trigger lifted inside its own transaction, which no other session sees.
+   */
+  const asBeforeTheColumn = (transactionId: string) =>
+    owner.$transaction([
+      // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; this transaction
+      // bounds it, and re-enables the trigger before it commits.
+      owner.$executeRawUnsafe(
+        'ALTER TABLE "transaction" DISABLE TRIGGER "trg_transaction_resolved_dispute"',
+      ),
+      owner.$executeRaw`UPDATE "transaction" SET resolved_dispute_id = NULL WHERE id = ${transactionId}`,
+      owner.$executeRawUnsafe(
+        'ALTER TABLE "transaction" ENABLE TRIGGER "trg_transaction_resolved_dispute"',
+      ),
+    ]);
+
+  /** Resolved (A) before the column; returns A. */
+  async function resolvedBeforeTheColumn(transactionId: string): Promise<string> {
+    const a = await disputedOnce(transactionId);
+    expect((await resolve(transactionId, DECISION_A)).status).toBe(200);
+    await asBeforeTheColumn(transactionId);
+    expect(await read(transactionId)).toMatchObject({
+      status: 'PENDING_SETTLEMENT',
+      disputeId: a,
+      resolvedDisputeId: null,
+    });
+    return a;
+  }
+
+  const backfill = (
+    options: Partial<typeof RESOLVED_DISPUTE_BACKFILL_DEFAULTS>,
+    events: ResolvedDisputeBackfillEvent[] = [],
+  ) =>
+    backfillResolvedDisputes(
+      harness.prisma.client,
+      { ...RESOLVED_DISPUTE_BACKFILL_DEFAULTS, ...options },
+      (event) => events.push(event),
+    );
+
+  it('a resolution recorded before the column is attributed by the row’s next move', async () => {
+    // Disputed again by the API: the trigger names A, from the row under the
+    // lock, before the new dispute replaces `dispute_id`.
+    const redisputed = await heldObligation();
+    const a = await resolvedBeforeTheColumn(redisputed);
+    expect((await dispute(redisputed, REASON_B)).status).toBe(200);
+    const b = (await read(redisputed)).disputeId;
+    expect(b).not.toBe(a);
+    expect(await read(redisputed)).toMatchObject({ disputeId: b, resolvedDisputeId: a });
+    expect((await refund(redisputed)).status).toBe(200);
+    expect(await read(redisputed)).toMatchObject({
+      status: 'REFUNDED',
+      disputeId: b,
+      resolvedDisputeId: a,
+    });
+
+    // Refunded straight out of the queue: A's.
+    const refunded = await heldObligation();
+    const a2 = await resolvedBeforeTheColumn(refunded);
+    expect((await refund(refunded)).status).toBe(200);
+    expect(await read(refunded)).toMatchObject({ status: 'REFUNDED', resolvedDisputeId: a2 });
+  });
+
+  it('the backfill attributes the certain rows, in batches, and nothing else', async () => {
+    const queued = await heldObligation();
+    const a = await resolvedBeforeTheColumn(queued);
+
+    // Resolved (A), disputed again (B), refunded from DISPUTED — then the
+    // identity lost, as on a row of the previous release: which dispute the
+    // resolution decided is not on the row, so it stays unattributed.
+    const refunded = await heldObligation();
+    await disputedOnce(refunded);
+    expect((await resolve(refunded, DECISION_A)).status).toBe(200);
+    expect((await dispute(refunded, REASON_B)).status).toBe(200);
+    expect((await refund(refunded)).status).toBe(200);
+    await asBeforeTheColumn(refunded);
+    // Resolved, disputed again and still open: as unsure.
+    const open = await heldObligation();
+    await disputedOnce(open);
+    expect((await resolve(open, DECISION_A)).status).toBe(200);
+    expect((await dispute(open, REASON_B)).status).toBe(200);
+    await asBeforeTheColumn(open);
+    const never = await heldObligation();
+
+    // A plan counts and writes nothing.
+    const planned = await backfill({});
+    expect(planned).toMatchObject({ status: 'planned', batches: 0, attributed: 0 });
+    expect(planned.unattributed).toBeGreaterThanOrEqual(1);
+    expect((await read(queued)).resolvedDisputeId).toBeNull();
+
+    const events: ResolvedDisputeBackfillEvent[] = [];
+    const applied = await backfill({ apply: true, batchSize: 7 }, events);
+    expect(applied).toMatchObject({ status: 'done', unattributed: 0 });
+    expect(applied.attributed).toBeGreaterThanOrEqual(1);
+    const batches = events.filter((event) => event.event === 'batch');
+    expect(batches.length).toBe(applied.batches);
+    expect(batches.every((event) => event.scanned <= 7)).toBe(true);
+
+    expect(await read(queued)).toMatchObject({ disputeId: a, resolvedDisputeId: a });
+    for (const unsure of [refunded, open, never]) {
+      expect((await read(unsure)).resolvedDisputeId).toBeNull();
+    }
+    // Nor does any write attribute them: the trigger derives only the certain.
+    await runUnscoped(
+      'the suite writes an attribution onto the unsure rows',
+      () =>
+        harness.prisma.client.$executeRaw`UPDATE "transaction"
+         SET resolved_dispute_id = dispute_id WHERE id IN (${refunded}, ${open}, ${never})`,
+    );
+    for (const unsure of [refunded, open, never]) {
+      expect((await read(unsure)).resolvedDisputeId).toBeNull();
+    }
+
+    // Again: nothing left to do.
+    expect(await backfill({ apply: true })).toMatchObject({ status: 'done', attributed: 0 });
+  });
+
+  /** Disputes the row again (B) in a transaction held open until released. */
+  function redisputedAndHeld(transactionId: string) {
+    let release = (): void => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let written = (): void => undefined;
+    const moved = new Promise<void>((resolve) => {
+      written = resolve;
+    });
+    const done = harness.prisma.client.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`UPDATE "transaction"
+           SET status = 'DISPUTED', disputed_at = clock_timestamp(),
+               disputed_by = 'USR-CONCURRENT', dispute_reason = ${REASON_B}
+         WHERE id = ${transactionId}`;
+        written();
+        await gate;
+      },
+      { timeout: 30_000 },
+    );
+    return { moved, release, done };
+  }
+
+  /** Until some session waits on a row lock — the batch, behind the held move. */
+  async function untilWaitingOnARow(): Promise<void> {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const [row] = await owner.$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND locktype = 'transactionid'`;
+      if ((row?.n ?? 0) > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error('the batch never waited on the held row');
+  }
+
+  it('a move a batch may not wait for stops the run, writing nothing, resumable where it stopped', async () => {
+    const transactionId = await heldObligation();
+    const a = await resolvedBeforeTheColumn(transactionId);
+    // Just before the row, so the batch reads it first.
+    const after = transactionId.slice(0, -1);
+
+    const held = redisputedAndHeld(transactionId);
+    await held.moved;
+    const events: ResolvedDisputeBackfillEvent[] = [];
+    let summary: Awaited<ReturnType<typeof backfill>>;
+    try {
+      summary = await backfill(
+        { apply: true, after, batchSize: 5, maxBatches: 1, lockTimeoutMs: 200 },
+        events,
+      );
+    } finally {
+      held.release();
+    }
+    await held.done;
+
+    expect(summary).toMatchObject({ status: 'failed', batches: 0, attributed: 0, lastId: after });
+    expect(events).toContainEqual({ event: 'failed', batch: 1, after, code: '55P03' });
+    // Attributed by the move itself, from the row it locked.
+    const moved = await read(transactionId);
+    expect(moved.disputeId).not.toBe(a);
+    expect(moved).toMatchObject({ status: 'DISPUTED', resolvedDisputeId: a });
+  });
+
+  it('a move that commits while a batch waits on its row is attributed by the move, never by the batch', async () => {
+    const transactionId = await heldObligation();
+    const a = await resolvedBeforeTheColumn(transactionId);
+    const after = transactionId.slice(0, -1);
+
+    // The batch read the row as PENDING_SETTLEMENT with A; it waits; the move
+    // commits B. A batch that wrote `dispute_id` as it found it after the wait
+    // would name B — the dispute nobody resolved.
+    const held = redisputedAndHeld(transactionId);
+    await held.moved;
+    let running: ReturnType<typeof backfill> | undefined;
+    try {
+      running = backfill({
+        apply: true,
+        after,
+        batchSize: 5,
+        maxBatches: 1,
+        lockTimeoutMs: 10_000,
+      });
+      await untilWaitingOnARow();
+    } finally {
+      held.release();
+    }
+    await held.done;
+    expect((await running).status).not.toBe('failed');
+
+    const moved = await read(transactionId);
+    expect(moved.disputeId).toMatch(/^TXD_/);
+    expect(moved.disputeId).not.toBe(a);
+    expect(moved).toMatchObject({
+      status: 'DISPUTED',
+      disputeReason: REASON_B,
+      resolvedDisputeId: a,
+    });
   });
 });
