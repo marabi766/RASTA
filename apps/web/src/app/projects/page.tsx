@@ -16,6 +16,7 @@ import {
   type ProjectListQuery,
 } from '@/server/projects';
 import type { WebSession } from '@/server/session';
+import { mintCreateSubmission } from '@/server/project-create-replay';
 import { mintSubmissionId } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
@@ -117,7 +118,7 @@ export default async function ProjectsPage({
           {canWriteProjects(tokenWriteRoles(session.accessToken), webServerEnv()) ? (
             <CreateProjectForm
               csrfToken={session.csrfToken}
-              submissionId={mintSubmissionId(session)}
+              submission={mintCreateSubmission(session)}
             />
           ) : (
             <EmptyState

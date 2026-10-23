@@ -3,6 +3,7 @@
  */
 import {
   fetchApprovalInbox,
+  INBOX_MAX_PAGES,
   fetchExecutionPolicy,
   fetchProject,
   fetchProjectApprovals,
@@ -207,6 +208,62 @@ describe('the authority’s inbox', () => {
       'APR_1',
       'APR_2',
     ]);
+  });
+
+  function pages(bodies: unknown[]) {
+    const urls: string[] = [];
+    const impl = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      const body = bodies[Math.min(urls.length - 1, bodies.length - 1)];
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+    return { impl, urls };
+  }
+  const TENDER = (id: string) => ({ ...STEP, id, workflowKey: 'tender.award', tenderId: 'TND_1' });
+  const ids = (r: unknown): string[] =>
+    (r as { data: { items: { id: string }[] } }).data.items.map((i) => i.id);
+
+  it('follows the cursor past a page of tender steps to the project step on page 2', async () => {
+    const { impl, urls } = pages([
+      { items: [TENDER('T1'), TENDER('T2')], nextCursor: 'CUR_2', hasMore: true },
+      { items: [TENDER('T3'), STEP], nextCursor: null, hasMore: false },
+    ]);
+    const result = await withFetch(impl, () => fetchApprovalInbox(SESSION));
+    expect(urls).toEqual([
+      'http://gateway.test:3000/v1/approvals?status=PENDING&limit=50',
+      'http://gateway.test:3000/v1/approvals?status=PENDING&limit=50&cursor=CUR_2',
+    ]);
+    expect(ids(result)).toEqual(['APR_1']);
+    expect((result as { data: { hasMore: boolean } }).data.hasMore).toBe(false);
+  });
+
+  it('stops after the page limit and says more may exist, not that the inbox is empty', async () => {
+    const { impl, urls } = pages([{ items: [TENDER('T1')], nextCursor: 'CUR_N', hasMore: true }]);
+    const result = await withFetch(impl, () => fetchApprovalInbox(SESSION));
+    expect(urls).toHaveLength(INBOX_MAX_PAGES);
+    expect(ids(result)).toEqual([]);
+    expect((result as { data: { hasMore: boolean } }).data.hasMore).toBe(true);
+  });
+
+  it('is unavailable, not empty, when a later page cannot be read and no project step was found', async () => {
+    let call = 0;
+    const impl = (async () => {
+      call += 1;
+      return call === 1
+        ? new Response(
+            JSON.stringify({ items: [TENDER('T1')], nextCursor: 'CUR_2', hasMore: true }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          )
+        : new Response(JSON.stringify({ code: 'X', message: 'x' }), {
+            status: 503,
+            headers: { 'content-type': 'application/json' },
+          });
+    }) as typeof fetch;
+    const result = await withFetch(impl, () => fetchApprovalInbox(SESSION));
+    expect(result.kind).toBe('UNAVAILABLE');
   });
 
   it.each([

@@ -2,13 +2,14 @@
 
 import { redirect } from 'next/navigation';
 
-import { FLASH_PARAM } from '@/lib/form-fields';
-import { parseCreateForm, projectFormValues } from '@/lib/project-commands';
+import { FLASH_PARAM, REPLAY_FIELD } from '@/lib/form-fields';
+import { isProvenRefusalStatus, parseCreateForm, projectFormValues } from '@/lib/project-commands';
 import { verifyCsrf } from '@/server/csrf';
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { mintFlash } from '@/server/flash';
 import { createProject } from '@/server/project-commands';
-import { isBoundSubmissionId, mintSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
+import { checkCreateStamp, mintCreateSubmission } from '@/server/project-create-replay';
+import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 
 import { CREATE_INTENT_FIELD, EDIT_AS_NEW_INTENT, type CreateProjectFormState } from './form-state';
 
@@ -45,14 +46,26 @@ export async function submitCreateProject(
   // sent. The values come back editable under a new bound id, so the edited
   // form is a new request; the first keeps its own id and its own outcome.
   if (form.get(CREATE_INTENT_FIELD) === EDIT_AS_NEW_INTENT) {
-    return { kind: 'EDITING', submissionId: mintSubmissionId(session), values };
+    const fresh = mintCreateSubmission(session);
+    return { kind: 'EDITING', submissionId: fresh.id, replay: fresh.replay, values };
   }
+
+  // Until when this request may be sent under its key: the signed stamp the page
+  // drew the form with. Past it the service no longer remembers the key, and a
+  // send would be a second create of a request that may have committed.
+  const replay = form.get(REPLAY_FIELD);
+  const sendable = checkCreateStamp(session, replay, submissionId);
+  if (sendable === null || typeof replay !== 'string') {
+    return { kind: 'REFUSED', reason: 'SUBMISSION' };
+  }
+  if (sendable === 'EXPIRED') return { kind: 'EXPIRED', values };
 
   const parsed = parseCreateForm(values);
   if (!parsed.ok) {
     return {
       kind: 'INVALID',
       submissionId,
+      replay,
       values,
       fieldErrors: parsed.fieldErrors,
       message: null,
@@ -74,6 +87,7 @@ export async function submitCreateProject(
       return {
         kind: 'INVALID',
         submissionId,
+        replay,
         values,
         fieldErrors: result.fieldErrors,
         message: result.message,
@@ -86,6 +100,10 @@ export async function submitCreateProject(
       // write, so it is handled rather than assumed away.
       return { kind: 'FAILED', status: 404, correlationId: result.correlationId };
     case 'UNAVAILABLE':
+      // Only a 4xx proves nothing was created; a 5xx may follow the commit.
+      if (!isProvenRefusalStatus(result.status)) {
+        return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
+      }
       return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
     case 'UNKNOWN_OUTCOME':
       // Sent, maybe committed, not confirmed: never "nothing was saved".
@@ -98,6 +116,7 @@ export async function submitCreateProject(
       return {
         kind: 'IN_PROGRESS',
         submissionId,
+        replay,
         values,
         retryAfterSeconds: result.retryAfterSeconds,
         correlationId: result.correlationId,

@@ -5,6 +5,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import * as commands from './project-commands';
+import { IN_PROGRESS_WRITE_MESSAGE } from './in-progress-write';
+import { UNCONFIRMED_WRITE_MESSAGE } from './unconfirmed-write';
 import {
   CANCEL_UNCONFIRMED_MESSAGE,
   ESTIMATE_MESSAGE,
@@ -285,6 +287,15 @@ describe('the words', () => {
     expect(offending).toEqual([]);
   });
 
+  it('carries no hamza in the shared sentences these screens render', () => {
+    const shared = [
+      UNCONFIRMED_WRITE_MESSAGE,
+      IN_PROGRESS_WRITE_MESSAGE,
+      ...Object.values(SESSION_REFUSAL_MESSAGES),
+    ];
+    expect(shared.filter((text) => HAMZA.test(text))).toEqual([]);
+  });
+
   it.each([
     'src/lib/project-commands.ts',
     'src/server/project-commands.ts',
@@ -292,6 +303,7 @@ describe('the words', () => {
     'src/app/projects/actions.ts',
     'src/app/projects/form-state.ts',
     'src/app/projects/CreateProjectForm.tsx',
+    'src/server/project-create-replay.ts',
     'src/app/projects/ApprovalInbox.tsx',
     'src/app/projects/[id]/page.tsx',
     'src/app/projects/[id]/ProjectForms.tsx',

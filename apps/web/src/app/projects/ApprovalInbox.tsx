@@ -54,6 +54,16 @@ function InboxBody({ result, csrfToken, decisions }: ApprovalInboxProps) {
   }
 
   const { items, hasMore } = result.data;
+  if (items.length === 0 && hasMore) {
+    // Pages of steps that are not a project's were read and the service has
+    // more: not "nothing is waiting", only "none found so far".
+    return (
+      <EmptyState
+        title="در صفحه‌های خوانده‌شده تصمیمی برای پروژه نبود"
+        description="مرحله‌های بیشتری در صندوق هست که خوانده نشد؛ ممکن است تصمیمی برای شما میان آن‌ها باشد. کمی بعد صفحه را تازه کنید."
+      />
+    );
+  }
   if (items.length === 0) {
     return (
       <EmptyState

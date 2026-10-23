@@ -4,7 +4,7 @@ import { useActionState, useEffect, useState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
-import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
+import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { IN_PROGRESS_WRITE_MESSAGE } from '@/lib/in-progress-write';
 import {
   EMPTY_PROJECT_FORM,
@@ -12,6 +12,7 @@ import {
   MAX_OPERATION_TYPE_LENGTH,
   MAX_SCOPE_LENGTH,
   MAX_TITLE_LENGTH,
+  CREATE_EXPIRED_MESSAGE,
   PROJECT_FORBIDDEN_MESSAGE,
   projectFailureText,
   type ProjectField,
@@ -46,7 +47,12 @@ const LABELS: Record<ProjectField, string> = {
 };
 
 function valuesOf(state: CreateProjectFormState): ProjectFormValues {
-  if (state.kind === 'INVALID' || state.kind === 'IN_PROGRESS' || state.kind === 'EDITING') {
+  if (
+    state.kind === 'INVALID' ||
+    state.kind === 'IN_PROGRESS' ||
+    state.kind === 'EDITING' ||
+    state.kind === 'EXPIRED'
+  ) {
     return state.values;
   }
   return EMPTY_PROJECT_FORM;
@@ -54,25 +60,28 @@ function valuesOf(state: CreateProjectFormState): ProjectFormValues {
 
 export function CreateProjectForm({
   csrfToken,
-  submissionId,
+  submission,
 }: {
   csrfToken: string;
   /**
    * Minted for this render and bound to this session. A retry of the same form
    * carries the same reference as its `Idempotency-Key`, which
-   * construction-service honours on create: the same key and body answer the
-   * original 201 rather than creating a second project (see `server/submission.ts`).
+   * construction-service honours on create while it keeps the key: the same key
+   * and body answer the original 201 rather than creating a second project (see
+   * `server/submission.ts`). `replay` is the signed deadline for that
+   * (`server/project-create-replay.ts`).
    */
-  submissionId: string;
+  submission: { readonly id: string; readonly replay: string };
 }) {
   const [state, action, pending] = useActionState(submitCreateProject, IDLE_CREATE_PROJECT_FORM);
 
   const values = valuesOf(state);
   const errors = state.kind === 'INVALID' ? state.fieldErrors : {};
-  const currentSubmissionId =
+  const current =
     state.kind === 'INVALID' || state.kind === 'IN_PROGRESS' || state.kind === 'EDITING'
-      ? state.submissionId
-      : submissionId;
+      ? { id: state.submissionId, replay: state.replay }
+      : submission;
+  const expired = state.kind === 'EXPIRED';
   const waiting = useRetryAfter(state);
   // While a submission is in flight its retry must send exactly what was sent: a
   // changed body under the same id is refused as IDEMPOTENCY_KEY_REUSED rather
@@ -84,7 +93,8 @@ export function CreateProjectForm({
   return (
     <form action={action} className="flex flex-col gap-4">
       <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
-      <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId} />
+      <input type="hidden" name={SUBMISSION_FIELD} value={current.id} />
+      <input type="hidden" name={REPLAY_FIELD} value={current.replay} />
 
       <FormBanner state={state} />
       {locked && <SentValues values={values} />}
@@ -164,7 +174,7 @@ export function CreateProjectForm({
       </Field>
 
       <div className="flex flex-wrap items-center gap-2 pt-2">
-        <Button type="submit" disabled={pending || waiting}>
+        <Button type="submit" disabled={pending || waiting || expired}>
           {pending ? 'در حال ثبت…' : waiting ? 'کمی صبر کنید…' : 'ثبت پروژه'}
         </Button>
         {locked && (
@@ -217,6 +227,10 @@ function FormBanner({ state }: { state: CreateProjectFormState }) {
         {IN_PROGRESS_WRITE_MESSAGE} کد پیگیری: {state.correlationId}
       </Alert>
     );
+  }
+
+  if (state.kind === 'EXPIRED') {
+    return <Alert tone="warning">{CREATE_EXPIRED_MESSAGE}</Alert>;
   }
 
   if (state.kind === 'EDITING') {

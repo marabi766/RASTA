@@ -404,17 +404,22 @@ describe('/projects', () => {
 
   it('draws the create form for a writer, with a submission id of its own', async () => {
     const tree = await list();
-    const form = propsOf<{ submissionId: string; csrfToken: string }>(
+    const form = propsOf<{ submission: { id: string; replay: string }; csrfToken: string }>(
       ofType(tree, CreateProjectForm)[0],
     );
-    expect(form.submissionId).toMatch(/^sub_/);
+    expect(form.submission.id).toMatch(/^sub_/);
+    expect(form.submission.replay).toMatch(/\./);
     expect(form.csrfToken).toBe('csrf-token-for-this-session');
   });
 
   it('draws a fresh submission id on every render', async () => {
-    const first = propsOf<{ submissionId: string }>(ofType(await list(), CreateProjectForm)[0]);
-    const second = propsOf<{ submissionId: string }>(ofType(await list(), CreateProjectForm)[0]);
-    expect(first.submissionId).not.toBe(second.submissionId);
+    const first = propsOf<{ submission: { id: string } }>(
+      ofType(await list(), CreateProjectForm)[0],
+    );
+    const second = propsOf<{ submission: { id: string } }>(
+      ofType(await list(), CreateProjectForm)[0],
+    );
+    expect(first.submission.id).not.toBe(second.submission.id);
   });
 
   it.each([

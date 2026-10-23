@@ -445,8 +445,26 @@ describe.each(CASES)('$command', (testCase) => {
         { kind: 'NOT_FOUND', correlationId: 'c2' },
       ],
       [
+        { kind: 'UNAVAILABLE', status: 401, correlationId: 'c3' },
+        { kind: 'FAILED', status: 401, correlationId: 'c3' },
+      ],
+      [
+        { kind: 'UNAVAILABLE', status: 429, correlationId: 'c3' },
+        { kind: 'FAILED', status: 429, correlationId: 'c3' },
+      ],
+      // A 5xx may follow the commit (the answer is built by a read after it):
+      // never "nothing changed".
+      [
+        { kind: 'UNAVAILABLE', status: 500, correlationId: 'c3' },
+        { kind: 'UNCONFIRMED', correlationId: 'c3' },
+      ],
+      [
+        { kind: 'UNAVAILABLE', status: 502, correlationId: 'c3' },
+        { kind: 'UNCONFIRMED', correlationId: 'c3' },
+      ],
+      [
         { kind: 'UNAVAILABLE', status: 503, correlationId: 'c3' },
-        { kind: 'FAILED', status: 503, correlationId: 'c3' },
+        { kind: 'UNCONFIRMED', correlationId: 'c3' },
       ],
       [
         { kind: 'UNKNOWN_OUTCOME', correlationId: 'c4' },
@@ -496,6 +514,32 @@ describe('edit', () => {
     expect(state.kind).toBe('INVALID');
     expect(Object.keys(state.fieldErrors)).toEqual(['title']);
     expect(sent()).toHaveLength(0);
+  });
+
+  it('treats an untouched multiline scope as untouched however the browser posts its newlines', async () => {
+    // Stored by the API with LF; a browser posts the textarea back with CRLF.
+    const stored = { ...INITIAL, scopeOfWork: 'بند اول\nبند دوم' };
+    const baseline = baselineFor(edit, { digests: editDigests(stored) });
+    await redirectedTo(
+      edit.submit(
+        'project',
+        formData(
+          edit,
+          { ...stored, title: 'بازسازی پل شمالی', scopeOfWork: 'بند اول\r\nبند دوم' },
+          { baseline },
+        ),
+      ),
+    );
+    expect(updateProject.mock.calls[0]![2]).toEqual({ title: 'بازسازی پل شمالی' });
+  });
+
+  it('sends a changed multiline scope with LF, and counts a 5000-character one with LF', async () => {
+    const lf = `${'ا'.repeat(2499)}\n${'ب'.repeat(2500)}`;
+    expect(lf).toHaveLength(5000);
+    await redirectedTo(
+      edit.submit('project', formData(edit, { ...INITIAL, scopeOfWork: lf.replace('\n', '\r\n') })),
+    );
+    expect(updateProject.mock.calls[0]![2]).toEqual({ scopeOfWork: lf });
   });
 
   it('does not re-check a field the person did not touch', async () => {

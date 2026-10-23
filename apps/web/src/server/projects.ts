@@ -228,25 +228,47 @@ export function fetchProjectApprovals(
 }
 
 /**
+ * The most pages of the inbox one render follows looking for project steps.
+ * The inbox mixes every workflow (a tender's steps are decided on its tender's
+ * screen), and the service has no workflow filter on it (`inboxQuerySchema` is
+ * strict), so a page of nothing but tender steps says nothing about the next.
+ */
+export const INBOX_MAX_PAGES = 5;
+
+/**
  * The steps addressed to the organization the person acts for and to one of
  * their roles there, still undecided (`GET /v1/approvals`, PENDING by
  * default). Only the project workflows are kept: a tender's step is decided on
  * its tender's screen.
+ *
+ * The filter runs here, after the read, so a page may come back with no project
+ * step while the service still has more: the next pages are followed
+ * (`nextCursor`) until a project step is found, the steps run out, or
+ * `INBOX_MAX_PAGES` pages were read. Running out of pages is `hasMore: true`,
+ * never an empty inbox: "more may exist" is the honest answer.
  */
 export async function fetchApprovalInbox(session: WebSession): Promise<ReadResult<ApprovalInbox>> {
-  const result = await read(
-    session,
-    `/v1/approvals?status=PENDING&limit=${INBOX_LIMIT}`,
-    inboxSchema,
-  );
-  if (result.kind !== 'OK') return result;
-  return {
-    kind: 'OK',
-    data: {
-      ...result.data,
-      items: result.data.items.filter((step) => isProjectWorkflow(step.workflowKey)),
-    },
-  };
+  const items: ApprovalInbox['items'] = [];
+  let cursor: string | null = null;
+  for (let page = 1; ; page += 1) {
+    const search = new URLSearchParams({ status: 'PENDING', limit: String(INBOX_LIMIT) });
+    if (cursor) search.set('cursor', cursor);
+    const result = await read(session, `/v1/approvals?${search.toString()}`, inboxSchema);
+    if (result.kind !== 'OK') {
+      // A later page failing after project steps were found still shows them.
+      if (items.length > 0)
+        return { kind: 'OK', data: { items, nextCursor: cursor, hasMore: true } };
+      return result;
+    }
+    items.push(...result.data.items.filter((step) => isProjectWorkflow(step.workflowKey)));
+    if (!result.data.hasMore)
+      return { kind: 'OK', data: { items, nextCursor: null, hasMore: false } };
+    cursor = result.data.nextCursor;
+    // More exists; with no cursor it cannot be followed, which is still "more may exist".
+    if (cursor === null || items.length > 0 || page >= INBOX_MAX_PAGES) {
+      return { kind: 'OK', data: { items, nextCursor: cursor, hasMore: true } };
+    }
+  }
 }
 
 /**

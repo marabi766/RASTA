@@ -22,6 +22,7 @@ export type CreateProjectFormState =
   | {
       readonly kind: 'INVALID';
       readonly submissionId: string;
+      readonly replay: string;
       readonly values: ProjectFormValues;
       readonly fieldErrors: Partial<Record<ProjectField, string>>;
       /** A problem the service did not attach to a field. */
@@ -37,7 +38,14 @@ export type CreateProjectFormState =
    * The same submission is still being processed: kept as typed, with the same
    * submission id, for a retry after `Retry-After`.
    */
-  | InProgressWriteState<ProjectFormValues>
+  | (InProgressWriteState<ProjectFormValues> & { readonly replay: string })
+  /**
+   * The form was left open past the time the service keeps its record of the
+   * request's key (`server/project-create-replay.ts`): nothing was sent, and the
+   * person is told to check the project list first, because an earlier press of
+   * this form may have created the project.
+   */
+  | { readonly kind: 'EXPIRED'; readonly values: ProjectFormValues }
   /**
    * The person chose to change what they sent while it was still in flight: their
    * values again, under a **new** bound submission id. An edited form is a new
@@ -47,6 +55,7 @@ export type CreateProjectFormState =
   | {
       readonly kind: 'EDITING';
       readonly submissionId: string;
+      readonly replay: string;
       readonly values: ProjectFormValues;
     };
 

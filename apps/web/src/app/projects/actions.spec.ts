@@ -1,7 +1,9 @@
 /**
  * @jest-environment node
  */
+import { REPLAY_FIELD } from '@/lib/form-fields';
 import { CSRF_FIELD } from '@/server/csrf';
+import { mintCreateStamp } from '@/server/project-create-replay';
 import { readFlash } from '@/server/flash';
 import { SUBMISSION_FIELD, isBoundSubmissionId, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
@@ -63,7 +65,12 @@ const VALID = {
 
 function formData(
   fields: Record<string, string> = VALID,
-  options: { csrf?: string | null; submission?: string | null } = {},
+  options: {
+    csrf?: string | null;
+    submission?: string | null;
+    /** `undefined`: the stamp this server signs for the submission id; a number: issued at that time. */
+    replay?: string | null | number;
+  } = {},
 ): FormData {
   const form = new FormData();
   for (const [key, value] of Object.entries(fields)) form.set(key, value);
@@ -72,6 +79,11 @@ function formData(
   const submission =
     options.submission === undefined ? mintSubmissionId(SESSION) : options.submission;
   if (submission !== null) form.set(SUBMISSION_FIELD, submission);
+  const replay =
+    options.replay === undefined || typeof options.replay === 'number'
+      ? mintCreateStamp(SESSION, submission ?? '', options.replay)
+      : options.replay;
+  if (replay !== null) form.set(REPLAY_FIELD, replay);
   return form;
 }
 
@@ -110,6 +122,33 @@ describe('what is refused before anything is sent', () => {
       expect(createProject).not.toHaveBeenCalled();
     },
   );
+
+  it.each([null, 'garbage', 'AAAA.BBBB'])('refuses replay stamp %j', async (replay) => {
+    expect(await submit(formData(VALID, { replay }))).toEqual({
+      kind: 'REFUSED',
+      reason: 'SUBMISSION',
+    });
+    expect(createProject).not.toHaveBeenCalled();
+  });
+
+  it('refuses a stamp signed for another submission id', async () => {
+    const other = mintCreateStamp(SESSION, mintSubmissionId(SESSION));
+    expect(await submit(formData(VALID, { replay: other }))).toEqual({
+      kind: 'REFUSED',
+      reason: 'SUBMISSION',
+    });
+    expect(createProject).not.toHaveBeenCalled();
+  });
+
+  it('refuses a stamp from another login', async () => {
+    const submission = mintSubmissionId(SESSION);
+    const earlier = mintCreateStamp({ ...SESSION, csrfToken: 'an-earlier-login' }, submission);
+    expect(await submit(formData(VALID, { submission, replay: earlier }))).toEqual({
+      kind: 'REFUSED',
+      reason: 'SUBMISSION',
+    });
+    expect(createProject).not.toHaveBeenCalled();
+  });
 
   it('refuses another login’s submission id', async () => {
     const earlier = mintSubmissionId({ ...SESSION, csrfToken: 'an-earlier-login' });
@@ -180,6 +219,14 @@ describe('what is sent', () => {
     ]);
   });
 
+  it('sends a multiline scope with LF however the browser posted its newlines, 5000 characters included', async () => {
+    const lf = `${'ا'.repeat(2499)}\n${'ب'.repeat(2500)}`;
+    await submit(formData({ ...VALID, scopeOfWork: lf.replace('\n', '\r\n') })).catch(
+      () => undefined,
+    );
+    expect(createProject.mock.calls[0]![1]).toMatchObject({ scopeOfWork: lf });
+  });
+
   it('leaves the estimate out when it is empty', async () => {
     await submit(formData({ ...VALID, estimatedCost: '' })).catch(() => undefined);
     expect(createProject.mock.calls[0]![1]).not.toHaveProperty('estimatedCostMinor');
@@ -194,6 +241,56 @@ describe('what is sent', () => {
     expect(isBoundSubmissionId(state.submissionId, SESSION)).toBe(true);
     expect(state.values).toMatchObject({ title: 'بازسازی پل' });
     expect(createProject).not.toHaveBeenCalled();
+  });
+});
+
+describe('a form left open past the service’s idempotency retention', () => {
+  // WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS=1 less the 10-minute margin: 50 minutes.
+  const MINUTE = 60_000;
+
+  it('is not sent after the window — it says to check the project list, and no create runs', async () => {
+    const state = await submit(formData(VALID, { replay: Date.now() - 51 * MINUTE }));
+    expect(state).toMatchObject({ kind: 'EXPIRED', values: { title: 'بازسازی پل' } });
+    expect(createProject).not.toHaveBeenCalled();
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it('is still sent just inside the window, with the same key', async () => {
+    const submission = mintSubmissionId(SESSION);
+    await submit(formData(VALID, { submission, replay: Date.now() - 49 * MINUTE })).catch(
+      () => undefined,
+    );
+    expect(createProject).toHaveBeenCalledTimes(1);
+    expect(createProject.mock.calls[0]![2]).toBe(submission);
+  });
+
+  it('is not sent after the window on a retry of an in-progress answer either', async () => {
+    const submission = mintSubmissionId(SESSION);
+    const stamp = mintCreateStamp(SESSION, submission, Date.now() - 51 * MINUTE);
+    createProject.mockResolvedValue({
+      kind: 'IN_PROGRESS',
+      retryAfterSeconds: 1,
+      correlationId: 'c',
+    });
+    expect(await submit(formData(VALID, { submission, replay: stamp }))).toMatchObject({
+      kind: 'EXPIRED',
+    });
+    expect(createProject).not.toHaveBeenCalled();
+  });
+
+  it('carries its stamp on to a form shown again, and mints a fresh one for edit-and-send-as-new', async () => {
+    const invalid = (await submit(formData({ ...VALID, title: 'ا' }))) as { replay: string };
+    expect(invalid.replay).toEqual(expect.stringMatching(/\./));
+
+    const form = formData(VALID, { replay: Date.now() - 51 * MINUTE });
+    form.set(CREATE_INTENT_FIELD, EDIT_AS_NEW_INTENT);
+    const editing = (await submit(form)) as { kind: string; submissionId: string; replay: string };
+    expect(editing.kind).toBe('EDITING');
+    // The fresh stamp is good for the fresh id: sending it is not expired.
+    await submit(
+      formData(VALID, { submission: editing.submissionId, replay: editing.replay }),
+    ).catch(() => undefined);
+    expect(createProject).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -226,8 +323,17 @@ describe('what comes back', () => {
       { kind: 'FAILED', status: 404, correlationId: 'c2' },
     ],
     [
+      { kind: 'UNAVAILABLE', status: 429, correlationId: 'c3' },
+      { kind: 'FAILED', status: 429, correlationId: 'c3' },
+    ],
+    // A 5xx may follow the commit: never "nothing was saved".
+    [
+      { kind: 'UNAVAILABLE', status: 500, correlationId: 'c3' },
+      { kind: 'UNCONFIRMED', correlationId: 'c3' },
+    ],
+    [
       { kind: 'UNAVAILABLE', status: 503, correlationId: 'c3' },
-      { kind: 'FAILED', status: 503, correlationId: 'c3' },
+      { kind: 'UNCONFIRMED', correlationId: 'c3' },
     ],
     [
       { kind: 'UNKNOWN_OUTCOME', correlationId: 'c4' },

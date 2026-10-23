@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
-import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
+import { BASELINE_FIELD, CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import {
   PROJECT_NOTICES,
   PROJECT_NOTICE_TEXT,
@@ -76,6 +76,7 @@ jest.mock('next/link', () => ({
 
 const CSRF = 'csrf-token-for-this-session';
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
+const CREATE_SUBMISSION = { id: SUBMISSION, replay: 'replay-token' };
 const BASELINE = 'signed-baseline-token';
 const PROJECT_ID = 'PRJ_01J00000000000000000000000';
 const IDENTITY = {
@@ -106,10 +107,16 @@ const field = (container: HTMLElement, name: string) =>
 
 beforeEach(() => act_.mockReset());
 
+/** Built from code points so this file carries none: hamza, its carriers, and the combining hamza. */
+const HAMZA = new RegExp(
+  `[${[0x0621, 0x0623, 0x0624, 0x0625, 0x0626, 0x0654].map((c) => String.fromCodePoint(c)).join('')}]`,
+  'u',
+);
+
 const FORMS = [
   {
     name: 'create',
-    render: () => render(<CreateProjectForm csrfToken={CSRF} submissionId={SUBMISSION} />),
+    render: () => render(<CreateProjectForm csrfToken={CSRF} submission={CREATE_SUBMISSION} />),
     named: false,
     values: {
       title: '',
@@ -217,6 +224,25 @@ describe.each(FORMS)('the $name form', (form) => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
+  // The rule for new text on these screens (no hamza, no combining hamza) covers
+  // what they render from shared modules too, not only their own source files:
+  // the unconfirmed alert, the session refusals, the in-progress sentence.
+  it.each([
+    { kind: 'REFUSED', reason: 'NO_SESSION' } as const,
+    { kind: 'REFUSED', reason: 'SESSION_UNAVAILABLE' } as const,
+    { kind: 'REFUSED', reason: 'CSRF' } as const,
+    { kind: 'FORBIDDEN', correlationId: 'c' } as const,
+    { kind: 'FAILED', status: 503, correlationId: 'c' } as const,
+    { kind: 'FAILED', status: 429, correlationId: 'c' } as const,
+    { kind: 'UNCONFIRMED', correlationId: 'c' } as const,
+  ])('renders %j without a hamza', async (state) => {
+    act_.mockResolvedValueOnce(state);
+    const { container } = form.render();
+    await send(container);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).not.toMatch(HAMZA);
+  });
+
   it('says a refusal the service put on no field in a message, with no axe violation', async () => {
     act_.mockImplementationOnce(async (_name, sent) => ({
       kind: 'INVALID',
@@ -271,7 +297,9 @@ describe('a refused form is drawn again as it was typed', () => {
       message: null,
     }));
     act_.mockResolvedValueOnce({ kind: 'IDLE' });
-    const { container } = render(<CreateProjectForm csrfToken={CSRF} submissionId={SUBMISSION} />);
+    const { container } = render(
+      <CreateProjectForm csrfToken={CSRF} submission={CREATE_SUBMISSION} />,
+    );
     fireEvent.change(field(container, 'title'), { target: { value: 'ا' } });
     fireEvent.change(field(container, 'operationType'), { target: { value: 'خاکبرداری' } });
     fireEvent.change(field(container, 'locationDescription'), { target: { value: 'محل' } });
@@ -365,6 +393,27 @@ describe('a refused form is drawn again as it was typed', () => {
   });
 });
 
+describe('the create form left open past the service’s retention', () => {
+  it('carries the signed replay deadline', () => {
+    const { container } = render(
+      <CreateProjectForm csrfToken={CSRF} submission={CREATE_SUBMISSION} />,
+    );
+    expect(field(container, REPLAY_FIELD)).toHaveValue('replay-token');
+  });
+
+  it('tells the person to check the project list first, keeps what was typed, and cannot send', async () => {
+    act_.mockResolvedValueOnce({ kind: 'EXPIRED', values: { ...INITIAL } });
+    const { container } = render(
+      <CreateProjectForm csrfToken={CSRF} submission={CREATE_SUBMISSION} />,
+    );
+    await send(container);
+    expect(await screen.findByText(/فهرست پروژه‌ها را بررسی کنید/)).toBeInTheDocument();
+    expect(container.querySelector('input[name="title"]')).toHaveValue('بازسازی پل');
+    expect(screen.getByRole('button', { name: 'ثبت پروژه' })).toBeDisabled();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
 describe('the create form while a request is in flight', () => {
   const values = { ...INITIAL };
 
@@ -374,12 +423,13 @@ describe('the create form while a request is in flight', () => {
       act_.mockResolvedValueOnce({
         kind: 'IN_PROGRESS',
         submissionId: SUBMISSION,
+        replay: 'replay-token',
         values,
         retryAfterSeconds: 1,
         correlationId: 'corr-wait',
       });
       const { container } = render(
-        <CreateProjectForm csrfToken={CSRF} submissionId={SUBMISSION} />,
+        <CreateProjectForm csrfToken={CSRF} submission={CREATE_SUBMISSION} />,
       );
       await send(container);
       expect(await screen.findByRole('status')).toHaveTextContent('corr-wait');
@@ -407,6 +457,7 @@ describe('the create form while a request is in flight', () => {
     act_.mockResolvedValueOnce({
       kind: 'IN_PROGRESS',
       submissionId: SUBMISSION,
+      replay: 'replay-token',
       values,
       retryAfterSeconds: 60,
       correlationId: 'corr-wait',
@@ -414,9 +465,12 @@ describe('the create form while a request is in flight', () => {
     act_.mockResolvedValueOnce({
       kind: 'EDITING',
       submissionId: 'sub_CCCCCCCCCCCCCCCCCCCC',
+      replay: 'fresh-replay-token',
       values,
     });
-    const { container } = render(<CreateProjectForm csrfToken={CSRF} submissionId={SUBMISSION} />);
+    const { container } = render(
+      <CreateProjectForm csrfToken={CSRF} submission={CREATE_SUBMISSION} />,
+    );
     await send(container);
     await screen.findByRole('status');
     const edit = screen.getByRole('button', { name: 'ویرایش و ارسال جدید' });
@@ -425,6 +479,7 @@ describe('the create form while a request is in flight', () => {
     });
     expect(await screen.findByText(/این یک درخواست تازه است/)).toBeInTheDocument();
     expect(field(container, SUBMISSION_FIELD)).toHaveValue('sub_CCCCCCCCCCCCCCCCCCCC');
+    expect(field(container, REPLAY_FIELD)).toHaveValue('fresh-replay-token');
     const title = container.querySelector('input[name="title"]:not([type="hidden"])');
     expect(title).not.toBeDisabled();
     expect(await axe(container)).toHaveNoViolations();
@@ -632,6 +687,14 @@ describe('the authority’s inbox', () => {
   it('says nothing waits, and that this is not a decision', async () => {
     const { container } = draw(ok([]));
     expect(container).toHaveTextContent('تصمیمی منتظر شما نیست');
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('does not say nothing waits when only other workflows were read and the service has more', async () => {
+    const { container } = draw(ok([], true));
+    expect(container).not.toHaveTextContent('تصمیمی منتظر شما نیست');
+    expect(container).toHaveTextContent('خوانده نشد');
+    expect(container.textContent).not.toMatch(HAMZA);
     expect(await axe(container)).toHaveNoViolations();
   });
 

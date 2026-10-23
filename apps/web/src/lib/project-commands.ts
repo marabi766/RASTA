@@ -229,6 +229,17 @@ const textOf = (form: FormData, name: string): string => {
 };
 
 /**
+ * A multi-line text with one line ending: CRLF and a lone CR become LF. A browser
+ * posts a textarea's newlines as CRLF while the API stores whatever it was given
+ * (LF), so the same text would otherwise differ between the page that drew it, the
+ * baseline digest, the length rule and the body sent — an untouched scope would look
+ * edited, and a 5000-character one with a newline would be 5001.
+ */
+export function canonicalLines(value: string): string {
+  return value.replace(/\r\n?/g, '\n');
+}
+
+/**
  * A project's text the way a form reads it back: lines normalised, the rest
  * trimmed. The edit form's baseline digests the record this way, so a field the
  * person did not touch compares equal to what the page drew.
@@ -238,7 +249,7 @@ export function normalizeProjectValues(values: ProjectFormValues): ProjectFormVa
     title: normalizePersianText(values.title),
     operationType: normalizePersianText(values.operationType),
     locationDescription: normalizePersianText(values.locationDescription),
-    scopeOfWork: values.scopeOfWork.trim(),
+    scopeOfWork: canonicalLines(values.scopeOfWork).trim(),
     estimatedCost: values.estimatedCost.trim(),
   };
 }
@@ -254,17 +265,17 @@ export function projectFormValues(form: FormData): ProjectFormValues {
 }
 
 export const cancelFormValues = (form: FormData): CancelFormValues => ({
-  reason: textOf(form, 'reason').trim(),
+  reason: canonicalLines(textOf(form, 'reason')).trim(),
   confirm: textOf(form, 'confirm'),
 });
 
 export const grantFormValues = (form: FormData): GrantFormValues => ({
   decisionNumber: textOf(form, 'decisionNumber').trim(),
-  conditions: textOf(form, 'conditions').trim(),
+  conditions: canonicalLines(textOf(form, 'conditions')).trim(),
 });
 
 export const rejectFormValues = (form: FormData): RejectFormValues => ({
-  reason: textOf(form, 'reason').trim(),
+  reason: canonicalLines(textOf(form, 'reason')).trim(),
 });
 
 export const noFormValues = (): NoFormValues => ({});
@@ -580,6 +591,26 @@ export const PROJECT_FAILED_MESSAGE = 'انجام نشد و چیزی تغییر 
  * status the gateway answered: `401` (the token ran out), `503` (the service,
  * the gateway or a service it asks is down — nothing was written), anything else.
  */
+/**
+ * What the create form says when it was left open longer than the service keeps
+ * a request's key: nothing was sent, and an earlier press may have made the project.
+ */
+export const CREATE_EXPIRED_MESSAGE =
+  'این فرم مدت زیادی باز مانده و دیگر فرستاده نمی‌شود، چون ممکن است فرستادن پیشین آن پروژه را ساخته باشد. ' +
+  'نخست فهرست پروژه‌ها را بررسی کنید. اگر پروژه در فهرست نبود، صفحه را تازه کنید و دوباره ثبت کنید.';
+
+/**
+ * Whether a refusal status proves the command was not applied. Only a 4xx does:
+ * the gateway or the service answered before doing anything. A 5xx may follow a
+ * commit — construction-service commits, then reads the record again to answer,
+ * and that read can fail, as can the gateway while relaying the answer — so no
+ * 5xx (503 included: the portal cannot tell the gateway's from the service's) is
+ * "nothing changed". Those are unconfirmed.
+ */
+export function isProvenRefusalStatus(status: number): boolean {
+  return status >= 400 && status < 500;
+}
+
 export function projectFailureText(status: number): string {
   if (status === 401) return SESSION_REFUSAL_MESSAGES.NO_SESSION;
   if (status === 503) return PROJECT_UNAVAILABLE_MESSAGE;
