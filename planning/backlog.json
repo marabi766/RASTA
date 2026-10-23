@@ -805,7 +805,7 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 8,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Parts, insurance, maintenance, logistics, procurement, construction and marketplace service commissions use versioned configurable rules",
         "No commission rate is hard-coded"
@@ -822,6 +822,11 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/308",
           "note": "PR 2/2: GET /v1/commissions filters by businessLine and outcome (revenue per line and charges no rule priced); services/economic-service/test/commission-business-lines.int-spec.ts is the per-line evidence (journal balance, idempotency, reversal) for all seven lines. Merge commit 151b5ea, merged 2026-10-16."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-23, in the project-manager chat, on the evidence above (PR #307, #308): versioned per-line rules for all seven business lines with NO_ACTIVE_RULE recorded, and no hard-coded rate. Accepted with disclosed limitations: until Q-130 is answered only maintenance sends its business line, so the other sources arrive without one and are priced by type-only rules or recorded as NO_ACTIVE_RULE; the Q-29 production fail-closed rule and the Q-08 explicit 0% pilot rule (PO decisions 2026-10-23) are follow-up work, not part of this item."
         }
       ]
     },
@@ -832,7 +837,7 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 13,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "ParticipationScore is explained separately from spendable RewardPoints",
         "Basic levels and badges use versioned rules and avoid coercive game mechanics"
@@ -849,6 +854,11 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/331",
           "note": "PR 2, second criterion (Q-140 temporary decision): levels and badges as versioned configuration with the basis explicit in each version. Merge commit 96af476, merged 2026-10-17."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-23, in the project-manager chat, on the evidence above (PR #328, #331): ParticipationScore explained apart from spendable RewardPoints, and levels and badges as versioned configuration. Accepted with the disclosed limitation that the level and badge basis follows the Q-140 temporary decision; a different answer changes configuration only."
         }
       ]
     },
@@ -1274,7 +1284,7 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 21,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Wallet, order, dispute and settlement states match implemented backend contracts",
         "No UI claims real banking, automatic confirmation or unimplemented supplier capabilities"
@@ -1341,6 +1351,11 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/336",
           "note": "Returns in the portal: ask, decide, withdraw, and the goods' progress (RUN-005 states). Merge commit fb67aa0, merged 2026-10-23."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-23, in the project-manager chat, on the evidence above and the Codex acceptance audit of 2026-10-23 (both criteria met): wallet, order, dispute and settlement screens follow backend contracts (availableActions, backend balances and settlement records), and no screen claims real banking, automatic confirmation or supplier qualification. Accepted with disclosed limitations: finance is simulated (mock provider only), and the Q-14 decision of 2026-10-23 (the demo-mode label on every money screen, e.g. order detail) is follow-up work in PR #361, not part of this item."
         }
       ]
     },
@@ -2396,6 +2411,91 @@
           "note": "Both migrations reversed up to down to up against a throwaway schema, including a data-rollback probe the empty-schema reversal cannot make: an INFECTED document with no quarantine record — which the init schema permitted — is seeded, the forward migration is applied over it, and it is asserted to come through quarantined rather than aborting halfway. Twelve invariant-carrying CHECK constraints verified present, gone and back."
         }
       ]
+    },
+    {
+      "id": "RLG-001",
+      "parentItemId": "RUN-005",
+      "title": "Physical reverse logistics: request, transport, inspection and disposition",
+      "userStory": {
+        "asA": "buyer or supplier organization with a completed order",
+        "iWant": "to request a return and follow the goods through authorization, reverse transport, inspection and disposition",
+        "soThat": "every returned item has an explicit, auditable physical outcome before any money question is decided"
+      },
+      "points": 8,
+      "status": "ACCEPTED",
+      "acceptanceCriteria": [
+        {
+          "given": "a COMPLETED marketplace order",
+          "when": "a return is requested, authorized or rejected, shipped, received, inspected and given a disposition",
+          "then": "marketplace-service and inventory-service move through explicit state machines, and disposition quantities are recorded per line"
+        },
+        {
+          "given": "the same inventory return event is delivered again, concurrently or out of order",
+          "when": "marketplace-service mirrors it onto the return request",
+          "then": "the mirror change and the processed marker commit together, so the event has exactly one effect"
+        }
+      ],
+      "dependencies": ["COM-006"],
+      "sourceRefs": ["docs/adr/ADR-048-reverse-logistics-boundary.md"],
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/310",
+          "note": "PR 1 (ADR-048): marketplace ReturnRequest lifecycle REQUESTED to AUTHORIZED, REJECTED or CANCELLED. Merge commit be4df61, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/311",
+          "note": "PR 2a: inventory-service return shipments, IN_TRANSIT to RECEIVED. Merge commit 0c9cb6c, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/313",
+          "note": "PR 2b: inventory-service return inspection and disposition. Merge commit ece1ae6, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/323",
+          "note": "PR 3: marketplace mirrors the return shipment onto the return request, IN_TRANSIT to RESOLVED, idempotently from rasta.inventory.v1 events. Merge commit b294b2f, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/339",
+          "note": "Fix: the return request is verified before dispatch, and no cancellation once dispatch is reserved. Merge commit a0c3162, merged 2026-10-22."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-23, in the project-manager chat, on the PRs above and the Codex acceptance audit of 2026-10-23 (explicit request, transport, inspection and disposition states; idempotent mirror). Accepted with disclosed limitations: RESTOCK records a disposition without increasing stock and resolution needs configured allowed dispositions (Q-133); no refund is part of this story (RLG-002)."
+        }
+      ]
+    },
+    {
+      "id": "RLG-002",
+      "parentItemId": "RUN-005",
+      "title": "Economic-owned refund or correction for a resolved return",
+      "userStory": {
+        "asA": "buyer whose return was resolved in its favour",
+        "iWant": "economic-service to refund or correct the settled order",
+        "soThat": "money follows the physical outcome under one ledger owner, without the marketplace or inventory moving money"
+      },
+      "points": 5,
+      "status": "BLOCKED",
+      "acceptanceCriteria": [
+        {
+          "given": "a return resolved with a refundable disposition on a SETTLED order",
+          "when": "economic-service receives the confirmed outcome",
+          "then": "it applies the refund or correction defined by the Q-76 decision with balanced journals, and the order learns the result"
+        },
+        {
+          "given": "the same outcome event is delivered again or concurrently",
+          "when": "economic-service processes it",
+          "then": "exactly one refund or correction is recorded"
+        }
+      ],
+      "dependencies": ["RLG-001", "COM-001"],
+      "sourceRefs": ["docs/adr/ADR-048-reverse-logistics-boundary.md", "docs/24-open-questions.md"],
+      "evidence": []
     }
   ],
   "changeLog": [
@@ -2604,6 +2704,46 @@
       "recordedBy": "Claude Sonnet 5.5",
       "approvalRef": "Project manager task 191 (docs/backlog-evidence-sync-2), evidence sync, owner approval 2026-10-23",
       "recordIds": ["RUN-005"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "ITEM_ACCEPTED",
+      "reason": "COM-011 (8 SP) moves from IN_PROGRESS to ACCEPTED. Both acceptance criteria are met on the recorded evidence (PR #307, #308). Accepted with disclosed limitations: per-line wiring of the source services waits on Q-130 (today only maintenance sends its line), and the Q-29 fail-closed and Q-08 0% pilot rule decisions of 2026-10-23 are follow-up work.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-23",
+      "recordIds": ["COM-011"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "ITEM_ACCEPTED",
+      "reason": "COM-012 (13 SP) moves from IN_PROGRESS to ACCEPTED. Both acceptance criteria are met on the recorded evidence (PR #328, #331). Accepted with the disclosed limitation that the level and badge basis follows the Q-140 temporary decision.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-23",
+      "recordIds": ["COM-012"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "ITEM_ACCEPTED",
+      "reason": "EXP-003 (21 SP) moves from IN_PROGRESS to ACCEPTED. Both acceptance criteria are met on the recorded evidence and the Codex acceptance audit of 2026-10-23. Accepted with disclosed limitations: simulated finance only, and the Q-14 demo-mode label on every money screen is follow-up work (PR #361).",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-23",
+      "recordIds": ["EXP-003"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "ITEM_DECOMPOSED",
+      "reason": "RUN-005 (13 SP, unchanged) is decomposed into RLG-001 physical reverse logistics (8 SP) and RLG-002 economic-owned refund (5 SP). The refund half of the second criterion is deliberately unbuilt until Q-76 is answered; the split keeps it visible as its own BLOCKED story instead of holding the delivered physical workflow at zero. No scope or estimate change.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) decision in the project-manager chat, 2026-10-23, on the PM recommendation after the Codex acceptance audit",
+      "recordIds": ["RUN-005", "RLG-001", "RLG-002"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "ITEM_ACCEPTED",
+      "reason": "RLG-001 (8 SP) is ACCEPTED: explicit request, transport, inspection and disposition states and idempotent event mirroring are met on PR #310, #311, #313, #323, #339 and the Codex acceptance audit of 2026-10-23. Limitations: RESTOCK does not increase stock (Q-133); refund is RLG-002, blocked on Q-76.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-23",
+      "recordIds": ["RLG-001"]
     }
   ]
 }
