@@ -4,6 +4,7 @@ import { AppShell, Button, PageHeader, TopBar } from '@/ui';
 import { isProjectStatus } from '@/lib/project-fields';
 import { currentSession } from '@/server/current-session';
 import { fetchProjects, type ProjectListQuery } from '@/server/projects';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ProjectsScreen } from './ProjectsScreen';
@@ -40,7 +41,10 @@ export default async function ProjectsPage({
     cursor: one(params.cursor),
   };
 
-  const result = await fetchProjects(session, query);
+  const [result, demoMode] = await Promise.all([
+    fetchProjects(session, query),
+    fetchDemoMode(session),
+  ]);
 
   return (
     <AppShell
@@ -61,7 +65,7 @@ export default async function ProjectsPage({
         description="پروژه‌هایی که این سازمان ثبت کرده و مرحله‌ای که هر کدام در آن است."
       />
       <div className="mt-4">
-        <ProjectsScreen result={result} query={query} />
+        <ProjectsScreen result={result} query={query} demoMode={demoMode} />
       </div>
     </AppShell>
   );

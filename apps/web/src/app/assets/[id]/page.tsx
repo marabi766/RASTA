@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchDossier, type AssetSummary } from '@/server/assets';
+import { fetchDemoMode } from '@/server/demo-mode';
 import {
   canRecordAssetCompliance,
   fetchInspections,
@@ -128,12 +129,13 @@ export default async function AssetDossierPage({
   // judged against this instant, here and not in the browser.
   const now = new Date();
 
-  const [result, policies, inspections, availability, windows] = await Promise.all([
+  const [result, policies, inspections, availability, windows, demoMode] = await Promise.all([
     fetchDossier(session, id),
     fetchInsurancePolicies(session, id),
     fetchInspections(session, id),
     fetchAvailability(session, id),
     fetchAvailabilityWindows(session, id),
+    fetchDemoMode(session),
   ]);
 
   // A Route Guard as UX, not as security (`docs/16 § ۱۶٫۱۱`): a token whose roles
@@ -213,6 +215,7 @@ export default async function AssetDossierPage({
       <DossierScreen
         result={result}
         assetId={id}
+        demoMode={demoMode}
         notice={readFlash(
           session,
           typeof query[FLASH_PARAM] === 'string' ? query[FLASH_PARAM] : undefined,

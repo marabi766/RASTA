@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, PageHeader, TopBar } from '@/ui';
 import { isContractStatus } from '@/lib/contract-fields';
 import { currentSession } from '@/server/current-session';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { fetchContracts, type ContractListQuery } from '@/server/contracts';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
@@ -44,6 +45,8 @@ export default async function ContractsPage({
 
   const result = await fetchContracts(session, query);
 
+  const demoMode = await fetchDemoMode(session);
+
   return (
     <AppShell
       topBar={
@@ -63,7 +66,7 @@ export default async function ContractsPage({
         description="قراردادهایی که این سازمان طرف آن‌هاست — به‌عنوان کارفرما یا پیمانکار."
       />
       <div className="mt-4">
-        <ContractsScreen result={result} query={query} />
+        <ContractsScreen result={result} query={query} demoMode={demoMode} />
       </div>
     </AppShell>
   );
