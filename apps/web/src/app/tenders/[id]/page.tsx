@@ -40,6 +40,7 @@ import {
   fetchAwardRequest,
   fetchOwnerBids,
   fetchPublicationRequest,
+  fetchThresholdPreview,
   openingOnlyOffers,
   ownerCallerOf,
   ownerOffers,
@@ -510,11 +511,12 @@ async function ownerSections(
   const caller = ownerCallerOf(session.accessToken);
   const draft = tender.status === 'DRAFT';
   const awarding = tender.status === 'EVALUATED' || tender.status === 'AWARDED';
-  const [publication, bids, matrix, awardRequest] = await Promise.all([
+  const [publication, bids, matrix, awardRequest, thresholdPreview] = await Promise.all([
     draft ? fetchPublicationRequest(session, id) : null,
     readsOwnerBids(caller, tender.status, settings) ? fetchOwnerBids(session, id) : null,
     readsEvaluation(caller, tender.status, settings) ? fetchEvaluation(session, id) : null,
     awarding ? fetchAwardRequest(session, id) : null,
+    draft ? fetchThresholdPreview(session, id) : null,
   ]);
   const decidable =
     publication?.kind === 'OK' ? decidableStep(caller, publication.data, tender.version) : null;
@@ -588,6 +590,8 @@ async function ownerSections(
       {draft ? (
         <PublicationSection
           request={publication}
+          thresholdPreview={thresholdPreview}
+          tenderVersion={tender.version}
           notes={notes.filter((note) => note !== 'AWAITING_CLOSE')}
           commands={group(forms.publication, restoredIn === 'publication')}
         />

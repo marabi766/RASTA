@@ -116,6 +116,7 @@ describe('publication API', () => {
       ['post', '/v1/tenders/TND_x/publish', { expectedVersion: 1 }],
       ['post', '/v1/tenders/TND_x/invitations', { organizationId: 'ORG_X' }],
       ['get', '/v1/tenders/TND_x/invitations', {}],
+      ['get', '/v1/tenders/TND_x/procurement-threshold-preview', {}],
     ];
     for (const [method, path, body] of routes) {
       const call = (token?: string) => {
@@ -127,6 +128,71 @@ describe('publication API', () => {
       expect((await call()).status).toBe(401);
       expect((await call(auditorActor(a))).status).toBe(403);
       expect((await call(actor(a, ['DRIVER']))).status).toBe(403);
+    }
+  });
+
+  it('previews owner draft WARN/REJECT and returns the stored warning to the requester and approver', async () => {
+    const a = org('threshold-preview');
+    const { id, version, token } = await tenderFor(a, {
+      procurementNature: 'INQUIRY',
+      estimatedCostMinor: '21',
+    });
+    const range = { minAmountMinor: '10', maxAmountMinor: '20', mode: 'WARN' as const };
+    const get = jest.spyOn(api.app.get(ProcurementThresholdPolicy), 'get').mockResolvedValue({
+      id: 'POL-preview',
+      value: { FORMAL_TENDER: range, INQUIRY: range, RFP: range, MARKETPLACE_DEAL: range },
+    });
+    try {
+      const preview = await http()
+        .get(`/v1/tenders/${id}/procurement-threshold-preview`)
+        .set(as(token));
+      expect(preview.status).toBe(200);
+      expect(preview.body).toEqual({
+        tenderVersion: version,
+        decision: 'WARN',
+        procurementThresholdPolicyId: 'POL-preview',
+      });
+      get.mockResolvedValueOnce({
+        id: 'POL-preview',
+        value: {
+          FORMAL_TENDER: range,
+          INQUIRY: { ...range, mode: 'REJECT' },
+          RFP: range,
+          MARKETPLACE_DEAL: range,
+        },
+      });
+      expect(
+        (await http().get(`/v1/tenders/${id}/procurement-threshold-preview`).set(as(token))).body
+          .decision,
+      ).toBe('REJECT');
+      get.mockClear();
+      expect(
+        (
+          await http()
+            .get(`/v1/tenders/${id}/procurement-threshold-preview`)
+            .set(as(orgAdmin(org('stranger'))))
+        ).status,
+      ).toBe(404);
+      expect(get).not.toHaveBeenCalled();
+      await activatePublicationPolicy(w, a);
+      const asked = await http()
+        .post(`/v1/tenders/${id}/publish`)
+        .set(as(token))
+        .send({ expectedVersion: version });
+      expect(asked.status).toBe(202);
+      expect(asked.body).toMatchObject({
+        procurementThresholdWarning: 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE',
+        procurementThresholdPolicyId: 'POL-preview',
+      });
+      const step = await http()
+        .get(`/v1/approvals/${asked.body.steps[0].approvalId as string}`)
+        .set(as(orgAdmin(a)));
+      expect(step.status).toBe(200);
+      expect(step.body.request).toMatchObject({
+        procurementThresholdWarning: 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE',
+      });
+    } finally {
+      get.mockRestore();
     }
   });
 

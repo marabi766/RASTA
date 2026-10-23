@@ -12,6 +12,10 @@ amounts from the employer's procurement bylaws through the existing organization
 which retains its setter roles, audit, validity periods, nearest-ancestor inheritance and overrides.
 No threshold amounts are seeded. No sample table is installed.
 
+Policy writes for this key are validated in organization-service using the same strict schema as the
+consumer (`@rasta/contracts`); malformed tables are refused before any row is written. Consumer
+validation remains fail-closed for legacy or corrupted rows.
+
 The consumer contract is `GET /v1/organizations/{id}/procurement-thresholds`, with a construction-service
 internal token signed for exactly that organization. The narrow answer is
 `{ organizationId, policy: { id, value } }`, or `{ organizationId, policy: null }` when no effective table
@@ -27,11 +31,24 @@ estimates are refused with 422 `BUSINESS_RULE_VIOLATION` and details code
 `PROCUREMENT_AMOUNT_OUTSIDE_RANGE`. Malformed or unavailable policy responses fail closed with
 503/504; a 404 is not treated as no configuration.
 
+The owner DRAFT screen reads `GET /v1/tenders/{id}/procurement-threshold-preview` and shows WARN or
+REJECT before submission (or a missing-estimate message). It is an advisory read bound to the returned
+`tenderVersion`; a mismatched or unreadable preview is shown as unknown. It neither opens an approval
+nor publishes. Publication always rechecks the policy and the tender under its normal version checks.
+
 An out-of-range WARN allows publication after its normal approval gate, preserves the manual choice,
 and returns `procurementThresholdWarning: "PROCUREMENT_AMOUNT_OUTSIDE_RANGE"` on the executed
 publication result and owner detail. The tender retains the warning and policy id even if configuration
 later changes. The web owner screen displays a fixed Persian warning explaining that this is no legal
-judgment. A 202 approval request is not publication; the persisted warning is written on execution.
+judgment. The 202 approval-request response also carries the warning and policy id, stored immutably
+on the approval round and shown in approval detail and the web authority screen before a decision.
+Retries and subsequent reads retain that round's snapshot. No estimate or threshold amounts are added
+to approval detail.
+
+Execution reads the effective policy again. If the outcome differs from what the approver saw, the
+persisted tender and audited `TENDER_PUBLISHED` metadata are the **execution** result and policy id;
+the approval round keeps its original snapshot. A newly rejecting execution is refused and audited,
+leaving the tender DRAFT and the approval unused. A policy update does not by itself reopen the round.
 
 Both amount and nature can change only in DRAFT. Publication checks their current locked values;
 changes invalidate existing approvals through the existing tender version checks. After publication,
@@ -40,5 +57,6 @@ post-publication amount/nature edit path to revalidate.
 
 WARN is audited through optional closed-code and policy-id metadata on the transactional
 `TENDER_PUBLISHED` event. REJECT uses the existing separate best-effort refusal transaction and
-`TENDER_APPROVAL_ACTION` event. No amounts are placed on audit events or refusal error messages.
+`TENDER_APPROVAL_ACTION` event. Threshold refusals are placed first when multiple rules fail, so
+the audit records the threshold reason while the 422 response still lists all refusals. No amounts are placed on audit events or refusal error messages.
 The same audit availability limitation as other approval-gate refusals applies.

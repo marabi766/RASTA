@@ -206,6 +206,7 @@ export interface Wiring {
   policies: PolicyService;
   /** The organization hierarchy these suites see instead of organization-service. */
   hierarchy: FakeHierarchy;
+  gate: TenderApprovalGate;
   thresholds: { get(organizationId: string): Promise<ThresholdPolicy | null> };
   execution: ExecutionService;
   progress: ProgressService;
@@ -532,6 +533,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       idempotency,
     ),
     hierarchy,
+    gate,
     thresholds,
     execution: new ExecutionService(
       prisma,

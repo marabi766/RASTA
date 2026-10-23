@@ -3,6 +3,7 @@ import {
   checkProcurementThreshold,
   PROCUREMENT_THRESHOLD_WARNING,
   type ThresholdPolicy,
+  type ThresholdPreview,
 } from './procurement-thresholds';
 import { Inject, Injectable } from '@nestjs/common';
 import { RastaError, currentActor } from '@rasta/nest-common';
@@ -141,6 +142,26 @@ export class PublicationService {
     );
   }
 
+  /** Advisory owner-only read. Publication rechecks the policy and the locked tender. */
+  async thresholdPreview(tenderId: string): Promise<ThresholdPreview> {
+    const { organizationId } = this.access.assertCanRead();
+    const tender = await this.tenders.findTender(tenderId);
+    if (!tender) throw RastaError.notFound('Tender', tenderId);
+    assertOwnTender(tender, organizationId);
+    if (tender.status !== 'DRAFT')
+      throw RastaError.businessRule('Threshold preview requires a draft tender');
+    const policy = await this.thresholdPolicies.get(organizationId);
+    return {
+      tenderVersion: tender.version,
+      decision: checkProcurementThreshold(
+        policy,
+        tender.procurementNature,
+        tender.estimatedCostMinor,
+      ),
+      procurementThresholdPolicyId: policy?.id ?? null,
+    };
+  }
+
   private async publishGated(
     tenderId: string,
     dto: PublishTenderDto,
@@ -203,7 +224,12 @@ export class PublicationService {
               projectId: locked.projectId,
               version: locked.version,
             },
-            binding: { workflowKey: WORKFLOW },
+            binding: {
+              workflowKey: WORKFLOW,
+              procurementThresholdWarning:
+                thresholdDecision === 'WARN' ? PROCUREMENT_THRESHOLD_WARNING : null,
+              procurementThresholdPolicyId: thresholdPolicy?.id ?? null,
+            },
             confirmedPolicyId: confirmedPolicyId as string,
             caller,
             at,
@@ -322,7 +348,7 @@ export class PublicationService {
           throw this.conflict(tenderId);
         }
         assertTenderTransition(tenderId, locked.status, 'PUBLISHED');
-        const { refusals, at } = await this.judge(
+        const { refusals, at, thresholdDecision } = await this.judge(
           tx,
           tenderId,
           confirmedPolicyId !== null,
@@ -338,7 +364,12 @@ export class PublicationService {
             projectId: locked.projectId,
             version: locked.version,
           },
-          binding: { workflowKey: WORKFLOW },
+          binding: {
+            workflowKey: WORKFLOW,
+            procurementThresholdWarning:
+              thresholdDecision === 'WARN' ? PROCUREMENT_THRESHOLD_WARNING : null,
+            procurementThresholdPolicyId: thresholdPolicy?.id ?? null,
+          },
           confirmedPolicyId,
           caller,
           at,
@@ -541,8 +572,9 @@ export class PublicationService {
       row.procurementNature,
       row.estimatedCostMinor,
     );
-    if (thresholdDecision === 'REJECT') refusals.push('PROCUREMENT_AMOUNT_OUTSIDE_RANGE');
-    if (thresholdDecision === 'ESTIMATE_REQUIRED') refusals.push('PROCUREMENT_ESTIMATE_REQUIRED');
+    if (thresholdDecision === 'REJECT') refusals.unshift('PROCUREMENT_AMOUNT_OUTSIDE_RANGE');
+    if (thresholdDecision === 'ESTIMATE_REQUIRED')
+      refusals.unshift('PROCUREMENT_ESTIMATE_REQUIRED');
     return { row, criteria, refusals, at, thresholdDecision };
   }
 

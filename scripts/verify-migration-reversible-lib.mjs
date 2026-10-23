@@ -2628,6 +2628,7 @@ export const EXPECTED = {
     // 20260930180000_tender_publication: a tender's key is never deleted and its
     // public half never changes.
     triggers: [
+      'tg_approval_threshold_snapshot',
       'tg_tender_procurement_estimate',
       'tg_tender_criterion_freeze',
       'tg_tender_publish_requires_criteria',

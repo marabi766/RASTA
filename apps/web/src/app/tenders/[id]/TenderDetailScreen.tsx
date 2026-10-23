@@ -178,7 +178,7 @@ export function OwnTenderDetailScreen({ result, criteria, owner }: OwnTenderDeta
           <div role="alert" className="mt-4 rounded-lg border border-border p-4">
             <p className="font-semibold">هشدار مبلغ و نوع فرایند</p>
             <p>
-              مبلغ برآوردی با بازه پیکربندی شده برای نوع فرایند انتخابی سازگار نیست. انتخاب نوع
+              مبلغ برآوردی با بازه پیکربندی‌شده برای نوع فرایند انتخابی سازگار نیست. انتخاب نوع
               فرایند دستی است و این هشدار حکم حقوقی نیست.
             </p>
           </div>

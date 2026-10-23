@@ -1,8 +1,17 @@
+import { z } from 'zod';
 import type { ProcurementThresholds } from '@rasta/contracts';
 export { PROCUREMENT_THRESHOLDS_KEY, procurementThresholdsSchema } from '@rasta/contracts';
 export type { ProcurementThresholds } from '@rasta/contracts';
 
 export const PROCUREMENT_THRESHOLD_WARNING = 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE';
+export const thresholdPreviewSchema = z
+  .object({
+    tenderVersion: z.number().int(),
+    decision: z.enum(['PASS', 'WARN', 'REJECT', 'ESTIMATE_REQUIRED']),
+    procurementThresholdPolicyId: z.string().nullable(),
+  })
+  .strict();
+export type ThresholdPreview = z.infer<typeof thresholdPreviewSchema>;
 
 export interface ThresholdPolicy {
   readonly id: string;

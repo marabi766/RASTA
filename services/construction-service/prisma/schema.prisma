@@ -1207,6 +1207,10 @@ model TenderApprovalRequest {
   reason               String?
   reasonCode           String?   @map("reason_code")
 
+  /// Publication threshold snapshot shown to approvers; execution checks the policy again.
+  procurementThresholdWarning String? @map("procurement_threshold_warning")
+  procurementThresholdPolicyId String? @map("procurement_threshold_policy_id")
+
   requestedBy            String   @map("requested_by")
   /// The requester's stable identity (#188), both or neither: what the approver is compared with.
   requestedByIssuer      String?  @map("requested_by_issuer")

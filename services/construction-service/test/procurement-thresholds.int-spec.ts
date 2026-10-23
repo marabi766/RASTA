@@ -1,8 +1,11 @@
+import { RastaError } from '@rasta/nest-common';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import {
   activatePublicationPolicy,
   approvedProject,
   asAdmin,
+  asApprover,
+  grantRequest,
   cleanup,
   newOrganizationId,
   outboxFor,
@@ -98,6 +101,146 @@ describe('procurement amount thresholds at publication', () => {
         refusalCode: 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE',
       }),
     );
+  });
+
+  it('fails closed before confirming approval policy when the threshold provider is unavailable', async () => {
+    const { organizationId, tender, version } = await draft();
+    const confirm = jest.spyOn(w.gate, 'confirmPolicy');
+    w.thresholds.get = async () => {
+      throw RastaError.upstreamUnavailable('organization-service');
+    };
+    try {
+      await expect(
+        asAdmin(organizationId, () =>
+          w.publication.publish(tender.id, { expectedVersion: version }),
+        ),
+      ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE', status: 503 });
+      expect(confirm).not.toHaveBeenCalled();
+      expect(await asAdmin(organizationId, () => w.tenders.get(tender.id))).toMatchObject({
+        status: 'DRAFT',
+        version,
+      });
+      expect(
+        await asAdmin(
+          organizationId,
+          async () =>
+            await w.prisma.client.tenderApprovalRequest.count({
+              where: { organizationId, tenderId: tender.id },
+            }),
+        ),
+      ).toBe(0);
+      const events = await outboxFor(w.prisma, organizationId);
+      expect(events.some((event) => event.eventName === 'TENDER_PUBLISHED')).toBe(false);
+      expect(
+        events
+          .filter((event) => event.eventName === 'TENDER_APPROVAL_ACTION')
+          .map((event) => eventEnvelopeSchema.parse(event.payload).payload),
+      ).toContainEqual(
+        expect.objectContaining({ outcome: 'REFUSED', refusalCode: 'UPSTREAM_UNAVAILABLE' }),
+      );
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
+  it('audits the threshold refusal first when other publication rules also fail', async () => {
+    const { organizationId, tender, version } = await draft();
+    const changed = await asAdmin(organizationId, () =>
+      w.tenders.update(tender.id, {
+        expectedVersion: version,
+        bidOpeningAt: null,
+        bidClosingAt: null,
+      }),
+    );
+    await expect(
+      asAdmin(organizationId, () =>
+        w.publication.publish(tender.id, { expectedVersion: changed.version }),
+      ),
+    ).rejects.toMatchObject({
+      details: [
+        expect.objectContaining({ code: 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE' }),
+        expect.anything(),
+      ],
+    });
+    const events = await outboxFor(w.prisma, organizationId);
+    expect(
+      events
+        .filter((event) => event.eventName === 'TENDER_APPROVAL_ACTION')
+        .map((event) => eventEnvelopeSchema.parse(event.payload).payload),
+    ).toContainEqual(expect.objectContaining({ refusalCode: 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE' }));
+  });
+
+  it('returns WARN in 202 and approval detail, retaining the original snapshot when execution becomes PASS', async () => {
+    const { organizationId, tender, version } = await draft('21', 'INQUIRY');
+    const asked = await asAdmin(
+      organizationId,
+      () => w.publication.publish(tender.id, { expectedVersion: version }, 'task804-warning'),
+      'USR-task804-requester',
+    );
+    if (asked.executed) throw new Error('expected approval request');
+    expect(asked.request).toMatchObject({
+      procurementThresholdWarning: 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE',
+      procurementThresholdPolicyId: policy.id,
+    });
+    const detail = await asApprover(organizationId, () =>
+      w.approvals.get(asked.request.steps[0]!.approvalId),
+    );
+    expect(detail.request).toMatchObject({
+      procurementThresholdWarning: 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE',
+      procurementThresholdPolicyId: policy.id,
+    });
+    await expect(
+      asAdmin(
+        organizationId,
+        async () =>
+          await w.prisma.client.tenderApprovalRequest.updateMany({
+            where: { organizationId, id: asked.request.id },
+            data: { procurementThresholdWarning: null },
+          }),
+      ),
+    ).rejects.toThrow('ck_tender_approval_threshold_snapshot_immutable');
+    await asAdmin(organizationId, () => grantRequest(w, asked.request));
+    const changedPolicy = {
+      ...policy,
+      id: 'POL-task804-pass',
+      value: { ...policy.value, INQUIRY: { ...range, maxAmountMinor: '30' } },
+    };
+    w.thresholds.get = async () => changedPolicy;
+    const retry = await asAdmin(
+      organizationId,
+      () => w.publication.publish(tender.id, { expectedVersion: version }, 'task804-warning'),
+      'USR-task804-requester',
+    );
+    expect(retry).toEqual(asked);
+    const executed = await asAdmin(organizationId, () =>
+      w.publication.publish(tender.id, { expectedVersion: version }),
+    );
+    expect(executed.executed).toBe(true);
+    if (!executed.executed) throw new Error('expected publication');
+    expect(executed.result).not.toHaveProperty('procurementThresholdWarning');
+    const row = await asAdmin(
+      organizationId,
+      async () =>
+        await w.prisma.client.tender.findFirstOrThrow({ where: { organizationId, id: tender.id } }),
+    );
+    expect(row.procurementThresholdWarning).toBeNull();
+    expect(row.procurementThresholdPolicyId).toBe(changedPolicy.id);
+    const event = (await outboxFor(w.prisma, organizationId)).find(
+      (event) => event.eventName === 'TENDER_PUBLISHED',
+    )!;
+    expect(eventEnvelopeSchema.parse(event.payload).payload).toMatchObject({
+      procurementThresholdPolicyId: changedPolicy.id,
+    });
+    expect(eventEnvelopeSchema.parse(event.payload).payload).not.toHaveProperty(
+      'procurementThresholdWarning',
+    );
+    expect(
+      (await asApprover(organizationId, () => w.approvals.get(asked.request.steps[0]!.approvalId)))
+        .request,
+    ).toMatchObject({
+      procurementThresholdWarning: 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE',
+      procurementThresholdPolicyId: policy.id,
+    });
   });
 
   it('publishes WARN, returns and retains the warning, and audits the policy id and warning', async () => {
