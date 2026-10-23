@@ -496,12 +496,18 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 | `REWARD_GRANTED`                         | economic | notification · analytics                            |
 | `REWARD_LEVEL_CHANGED`                   | economic | notification                                        |
 | `SETTLEMENT_COMPLETED`                   | economic | marketplace · supplier · notification               |
+| `SETTLEMENT_REFUSED`                     | economic | audit                                               |
 | `JOURNAL_POSTED`                         | economic | audit · analytics                                   |
 | `COMMISSION_RULE_CHANGED`                | economic | audit                                               |
 | `REWARD_RULE_CHANGED`                    | economic | audit                                               |
 | `PARTICIPATION_RULE_CHANGED`             | economic | audit                                               |
 | `RECOGNITION_RULE_CHANGED`               | economic | audit                                               |
 | `TRANSACTION_STATUS_CHANGED`             | economic | audit                                               |
+
+> **افزوده (2026-10-23).** `SETTLEMENT_REFUSED` رکورد Audit تسویه‌ای است که با `422 NO_ACTIVE_RULE` رد شد (docs/24
+> Q-29): هیچ چیز جابه‌جا نشده، پس در تراکنشی جدا پس از Rollback تسویه نوشته می‌شود — یکی برای هر تلاش. `reason` فهرستی
+> بسته است (امروز فقط `NO_ACTIVE_RULE`). audit-service آن را با نام خودش (`action=SETTLEMENT_REFUSED`) نگه می‌دارد؛ نگاشتش به
+> `outcome=REFUSED` مانند ردهای contract پیگیری audit-service است.
 
 > **افزوده (2026-09-26).** `TRANSACTION_STATUS_CHANGED` رکورد Audit هر گام چرخهٔ
 > عمر تراکنش است که رویداد پولی خودش را ندارد: ثبت، ثبت تعهد از رویداد، تأیید
