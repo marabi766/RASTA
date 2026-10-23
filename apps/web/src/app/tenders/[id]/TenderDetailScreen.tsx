@@ -174,6 +174,15 @@ export function OwnTenderDetailScreen({ result, criteria, owner }: OwnTenderDeta
             شناسه <Identifier>{tender.id}</Identifier>
           </span>
         </div>
+        {tender.procurementThresholdWarning ? (
+          <div role="alert" className="mt-4 rounded-lg border border-border p-4">
+            <p className="font-semibold">هشدار مبلغ و نوع فرایند</p>
+            <p>
+              مبلغ برآوردی با بازه پیکربندی شده برای نوع فرایند انتخابی سازگار نیست. انتخاب نوع
+              فرایند دستی است و این هشدار حکم حقوقی نیست.
+            </p>
+          </div>
+        ) : null}
         {reasonCode ? <p className="mt-2 text-sm">دلیل: {reasonCode}</p> : null}
         {tender.statusReason ? (
           <p className="mt-2 text-sm">توضیح ثبت‌شده برای این وضعیت: {tender.statusReason}</p>

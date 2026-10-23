@@ -110,6 +110,20 @@ const sides = (
   open: ReadResult<OpenTenderPage> | null,
 ): TendersView => ({ kind: 'SIDES', own, open });
 
+it('shows the persisted procurement threshold warning on the tender screen', () => {
+  render(
+    <OwnTenderDetailScreen
+      result={{
+        kind: 'OK',
+        data: { ...OWN_DETAIL, procurementThresholdWarning: 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE' },
+      }}
+      criteria={null}
+    />,
+  );
+  expect(screen.getByRole('alert')).toHaveTextContent('هشدار مبلغ و نوع فرایند');
+  expect(screen.getByRole('alert')).toHaveTextContent('انتخاب نوع فرایند دستی است');
+});
+
 describe('the tender list, owner side', () => {
   it('shows each tender with a status word, a Jalali window in Persian digits and a link to it', () => {
     const { container } = render(<TendersScreen view={sides(ownPage([OWN]), null)} query={{}} />);
