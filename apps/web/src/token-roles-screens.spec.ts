@@ -66,6 +66,8 @@ jest.mock('next/navigation', () => ({
     throw new Error(`NEXT_REDIRECT:${url}`);
   },
 }));
+// The provider read, answered without a gateway: what it draws is `demo-mode-pages.spec.ts`'s subject.
+jest.mock('@/server/demo-mode', () => ({ fetchDemoMode: async () => 'SIMULATED' }));
 jest.mock('@/server/assets', () => mockStubFetchers('@/server/assets'));
 jest.mock('@/server/asset-records', () => mockStubFetchers('@/server/asset-records'));
 jest.mock('@/server/fleet-availability', () => mockStubFetchers('@/server/fleet-availability'));

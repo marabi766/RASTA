@@ -3,6 +3,10 @@ import type { Server } from 'node:http';
 import { admin, apiTenant, auditor, bearer, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, id } from './helpers';
 import { runUnscoped } from '@rasta/nest-common';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { enrichOpenApiDocument } from '../src/openapi/document';
+import { schemaMismatches } from '../src/openapi/schema-mismatches';
+import type { JsonSchema } from '../src/openapi/zod-schema';
 
 /**
  * The wallet and payment HTTP surface, every path including the refusals.
@@ -43,6 +47,73 @@ describe('wallet API', () => {
 
     expect(response.body.simulated).toBe(true);
     expect(response.body.provider).toBe('mock');
+  });
+
+  describe('the disclosure every money screen asks (Q-14)', () => {
+    const asked = (token: string) =>
+      request(http).get('/v1/wallets/provider/disclosure').set('authorization', `Bearer ${token}`);
+
+    it.each([
+      ['a contractor, with no other role', ['CONTRACTOR']],
+      ['a plain member: a driver', ['DRIVER']],
+      ['a plain member: an operator', ['OPERATOR']],
+      ['a workshop', ['WORKSHOP']],
+      ['a supplier', ['SUPPLIER']],
+      ['a procurement user', ['PROCUREMENT_USER']],
+      ['a fleet manager', ['FLEET_MANAGER']],
+      ['an organization administrator', ['ORGANIZATION_ADMIN']],
+    ])('answers %s with `simulated` alone', async (_who, roles) => {
+      const response = await asked(admin(org, roles)).expect(200);
+      // Not the provider's name or notice: those stay behind `GET /v1/wallets/provider`.
+      expect(response.body).toEqual({ simulated: true });
+    });
+
+    it('widens nothing else: the same contractor and driver are still refused the provider and the wallet', async () => {
+      for (const roles of [['CONTRACTOR'], ['DRIVER']]) {
+        const token = `Bearer ${admin(org, roles)}`;
+        await request(http).get('/v1/wallets/provider').set('authorization', token).expect(403);
+        await request(http).get('/v1/wallets/me').set('authorization', token).expect(403);
+      }
+    });
+
+    it('is tenant-scoped: refused for an organization the caller is not a member of, and to the oversight role', async () => {
+      const response = await request(http)
+        .get('/v1/wallets/provider/disclosure')
+        .set('authorization', `Bearer ${admin(org, ['CONTRACTOR'])}`)
+        .set('x-organization-id', other)
+        .expect(403);
+      expect(response.body.code).toBe('TENANT_MISMATCH');
+      await asked(auditor(org)).expect(403);
+      // A membership that grants no role grants nothing on the platform (ADR-060 § 4), this read
+      // included: such a caller reaches no money screen to label.
+      expect((await asked(admin(org, [])).expect(403)).body.code).toBe('TENANT_MISMATCH');
+      await request(http).get('/v1/wallets/provider/disclosure').expect(401);
+    });
+
+    it('answers what the OpenAPI document says, both ways', async () => {
+      const document = enrichOpenApiDocument(
+        SwaggerModule.createDocument(
+          harness.app,
+          new DocumentBuilder().setTitle('t').setVersion('0.0.0').build(),
+        ),
+      );
+      const responses = document.paths['/v1/wallets/provider/disclosure']?.get?.responses ?? {};
+      expect(Object.keys(responses).sort()).toEqual(['200', '401', '403', '500']);
+      const schema = (
+        responses['200'] as unknown as { content: Record<string, { schema: JsonSchema }> }
+      ).content['application/json']!.schema;
+      expect(schema).toEqual({ $ref: '#/components/schemas/PaymentDisclosure' });
+
+      const response = await asked(admin(org, ['CONTRACTOR'])).expect(200);
+      const components = (document.components?.schemas ?? {}) as Record<string, JsonSchema>;
+      expect(
+        schemaMismatches(schema, response.body, 'GET /v1/wallets/provider/disclosure', components),
+      ).toEqual([]);
+      // And the check is not vacuous: a field the document does not carry is refused.
+      expect(
+        schemaMismatches(schema, { ...response.body, provider: 'mock' }, 'x', components),
+      ).not.toEqual([]);
+    });
   });
 
   // -------------------------------------------------------------------------

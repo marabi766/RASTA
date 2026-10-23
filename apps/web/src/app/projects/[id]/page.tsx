@@ -29,6 +29,7 @@ import {
 } from '@/server/projects';
 import type { WebSession } from '@/server/session';
 import { mintSubmissionId } from '@/server/submission';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ApprovalsSection, ProjectApprovals, type DecisionTokens } from './ProjectApprovals';
@@ -131,9 +132,10 @@ export default async function ProjectPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/projects/${id}`)}`);
 
-  const [result, approvals] = await Promise.all([
+  const [result, approvals, demoMode] = await Promise.all([
     fetchProject(session, id),
     fetchProjectApprovals(session, id),
+    fetchDemoMode(session),
   ]);
 
   const project = result.kind === 'OK' ? result.data : null;
@@ -183,6 +185,7 @@ export default async function ProjectPage({
       <div className="mt-4">
         <ProjectDetailScreen
           result={result}
+          demoMode={demoMode}
           notice={readFlash(
             session,
             typeof flash === 'string' ? flash : undefined,

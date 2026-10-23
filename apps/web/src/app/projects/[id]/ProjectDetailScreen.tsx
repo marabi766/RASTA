@@ -13,6 +13,8 @@ import { formatJalaliDateLong, toPersianDigits } from '@/lib/format';
 import { PROJECT_NOTICE_TEXT, type ProjectNotice } from '@/lib/project-commands';
 import { projectStatusLabel } from '@/lib/project-fields';
 import type { ProjectDetail, ReadResult } from '@/server/projects';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
+import type { DemoMode } from '@/lib/demo-mode';
 
 import { formatEstimate } from '../ProjectsScreen';
 
@@ -38,6 +40,8 @@ export interface ProjectDetailScreenProps {
    * project (`readFlash`).
    */
   readonly notice?: ProjectNotice;
+  /** What the provider says (`fetchDemoMode`, Q-14), over the estimate. Nothing here moves money. */
+  readonly demoMode: DemoMode;
   /** The approval policy's state and the rounds, built by the page. */
   readonly approvals?: ReactNode;
   /** The commands the status offers, built by the page from the same read. */
@@ -46,6 +50,7 @@ export interface ProjectDetailScreenProps {
 
 export function ProjectDetailScreen({
   result,
+  demoMode,
   notice,
   approvals,
   commands,
@@ -77,6 +82,7 @@ export function ProjectDetailScreen({
 
   return (
     <div className="flex flex-col gap-6">
+      <DemoModeNotice mode={demoMode} />
       {notice ? (
         <Alert tone={PROJECT_NOTICE_TEXT[notice].tone}>{PROJECT_NOTICE_TEXT[notice].text}</Alert>
       ) : null}

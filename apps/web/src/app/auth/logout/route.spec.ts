@@ -15,11 +15,12 @@ jest.mock('next/headers', () => ({
 
 beforeEach(() => {
   Object.assign(process.env, {
-  API_GATEWAY_URL: 'http://gateway.test:3000',
-  OIDC_ISSUER_URL: 'http://keycloak.test/realms/rasta',
-  OIDC_CLIENT_ID: 'rasta-web',
-  WEB_PUBLIC_ORIGIN: 'http://localhost:3200',
-  WEB_LOGIN_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
+    API_GATEWAY_URL: 'http://gateway.test:3000',
+    OIDC_ISSUER_URL: 'http://keycloak.test/realms/rasta',
+    OIDC_CLIENT_ID: 'rasta-web',
+    WEB_PUBLIC_ORIGIN: 'http://localhost:3200',
+    WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
+  });
 });
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports

@@ -156,6 +156,7 @@ const LIST = [...COMMON, 400] as const;
 
 const ERRORS: Record<string, readonly number[]> = {
   'GET /v1/wallets/provider': COMMON,
+  'GET /v1/wallets/provider/disclosure': COMMON,
   'GET /v1/wallets/me': COMMON,
   'GET /v1/wallets/{id}': READ_ONE,
   'GET /v1/wallets/{id}/holds': READ_ONE,
@@ -280,14 +281,43 @@ const RETRY_AFTER_HEADER = {
   schema: { type: 'integer', minimum: RETRY_AFTER_MIN_SECONDS, maximum: RETRY_AFTER_MAX_SECONDS },
 };
 
+/**
+ * Success bodies outside the transaction views (`transaction-view.ts`), by
+ * component name, and the routes that send them. Held to the route's answer
+ * by `api-wallet.int-spec.ts` with `schemaMismatches`, both ways.
+ */
+const OTHER_VIEW_SCHEMAS: Record<string, JsonSchema> = {
+  PaymentDisclosure: {
+    type: 'object',
+    required: ['simulated'],
+    properties: {
+      simulated: {
+        type: 'boolean',
+        description:
+          'True while no real money moves (the simulated provider, ADR-024): a screen that ' +
+          'shows or moves money draws «حالت نمایشی» (Q-14).',
+      },
+    },
+  },
+};
+
+const OTHER_RESPONSES: Record<string, string> = {
+  'GET /v1/wallets/provider/disclosure': 'PaymentDisclosure',
+};
+
+const RESPONSES: Record<string, string> = { ...TRANSACTION_RESPONSES, ...OTHER_RESPONSES };
+
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
   // The one error shape every Rasta service returns. Referenced rather than
   // inlined per response, so a client generates a single error type.
   document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
-  // The transaction a response carries — referenced for the same reason.
-  for (const [name, schema] of Object.entries(TRANSACTION_VIEW_SCHEMAS)) {
+  // The transaction a response carries, and the disclosure — referenced for the same reason.
+  for (const [name, schema] of Object.entries({
+    ...TRANSACTION_VIEW_SCHEMAS,
+    ...OTHER_VIEW_SCHEMAS,
+  })) {
     document.components.schemas[name] = schema as never;
   }
   document.components.securitySchemes ??= {};
@@ -336,7 +366,7 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       // The success body, under the status the handler answers with.
       const success = successStatus(key, operation);
-      const view = TRANSACTION_RESPONSES[key];
+      const view = RESPONSES[key];
       operation.responses ??= {};
       operation.responses[success] = {
         description: 'Success',

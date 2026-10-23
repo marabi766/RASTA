@@ -19,6 +19,7 @@ import type { WebSession } from '@/server/session';
 import { mintCreateSubmission, PROJECT_CREATE_UNRESOLVED } from '@/server/project-create-replay';
 import { readUnresolved } from '@/server/unresolved-request';
 import { mintSubmissionId } from '@/server/submission';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ApprovalInbox } from './ApprovalInbox';
@@ -79,10 +80,11 @@ export default async function ProjectsPage({
     cursor: one(params.cursor),
   };
 
-  const [result, inbox, unresolved] = await Promise.all([
+  const [result, inbox, unresolved, demoMode] = await Promise.all([
     fetchProjects(session, query),
     fetchApprovalInbox(session),
     readUnresolved(session, PROJECT_CREATE_UNRESOLVED),
+    fetchDemoMode(session),
   ]);
   const now = Date.now();
   const notice = readFlash(session, one(params[FLASH_PARAM]), INBOX_FLASH_SUBJECT, PROJECT_NOTICES);
@@ -146,7 +148,7 @@ export default async function ProjectsPage({
             />
           )}
         </Section>
-        <ProjectsScreen result={result} query={query} />
+        <ProjectsScreen result={result} query={query} demoMode={demoMode} />
       </div>
     </AppShell>
   );

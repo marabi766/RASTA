@@ -729,7 +729,11 @@ describe('the project page itself', () => {
     'says the confirmation %s, and only that',
     async (notice: ProjectNotice) => {
       const { container } = render(
-        <ProjectDetailScreen result={{ kind: 'OK', data: detail }} notice={notice} />,
+        <ProjectDetailScreen
+          demoMode="REAL"
+          result={{ kind: 'OK', data: detail }}
+          notice={notice}
+        />,
       );
       const alert = screen.getByRole(
         PROJECT_NOTICE_TEXT[notice].tone === 'warning' ? 'alert' : 'status',
@@ -740,7 +744,9 @@ describe('the project page itself', () => {
   );
 
   it('shows no notice, no approvals and no commands when it was given none', () => {
-    const { container } = render(<ProjectDetailScreen result={{ kind: 'OK', data: detail }} />);
+    const { container } = render(
+      <ProjectDetailScreen demoMode="REAL" result={{ kind: 'OK', data: detail }} />,
+    );
     expect(container.querySelectorAll('form')).toHaveLength(0);
     expect(screen.queryByRole('status')).toBeNull();
   });
@@ -748,6 +754,7 @@ describe('the project page itself', () => {
   it('draws the slots it was given after the record', () => {
     render(
       <ProjectDetailScreen
+        demoMode="REAL"
         result={{ kind: 'OK', data: detail }}
         approvals={<p>موافقت‌ها اینجا</p>}
         commands={<p>اقدام‌ها اینجا</p>}
@@ -765,6 +772,7 @@ describe('the project page itself', () => {
   ])('writes nothing and draws no slot for %j', (result, expected) => {
     const { container } = render(
       <ProjectDetailScreen
+        demoMode="REAL"
         result={result}
         notice="updated"
         approvals={<p>موافقت‌ها اینجا</p>}

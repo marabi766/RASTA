@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, ButtonLink, PageHeader, TopBar } from '@/ui';
 import { isOrderCommand } from '@/lib/order-fields';
 import { currentSession } from '@/server/current-session';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { webServerEnv } from '@/server/env';
 import { fetchOrder } from '@/server/orders';
 import { mintReturnSubmission } from '@/server/return-replay';
@@ -99,6 +100,8 @@ export default async function OrderPage({
     }
   }
 
+  const demoMode = await fetchDemoMode(session);
+
   return (
     <AppShell
       topBar={
@@ -130,6 +133,7 @@ export default async function OrderPage({
           done={done}
           placed={placed}
           returns={returns}
+          demoMode={demoMode}
         />
       </div>
     </AppShell>
