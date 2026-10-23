@@ -93,6 +93,10 @@ test.describe.serial('Economic critical path', () => {
     const disclosure = await tenantA.get('/v1/wallets/provider');
     expect(disclosure.status).toBe(200);
     expect((disclosure.body as { simulated: boolean }).simulated).toBe(true);
+    // The same flag alone, through the gateway, for every money screen's reader (Q-14).
+    const members = await tenantA.get('/v1/wallets/provider/disclosure');
+    expect(members.status).toBe(200);
+    expect(members.body).toEqual({ simulated: true });
 
     const response = await tenantA.post(`/v1/wallets/${payerBefore.walletId}/top-up`, {
       idempotencyKey: idempotencyKey('topup'),

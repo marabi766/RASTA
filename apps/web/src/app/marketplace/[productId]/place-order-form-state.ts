@@ -1,3 +1,4 @@
+import type { ProviderRefusal } from '@/lib/demo-mode';
 import type { SessionRefusal } from '@/lib/session-refusal';
 import type { PlaceOrderField, PlaceOrderFormValues } from '@/lib/place-order-fields';
 
@@ -21,7 +22,10 @@ export type PlaceOrderFormState =
       /** A refusal the service did not attach to a field — most often a business rule. */
       readonly message: string | null;
     }
-  | { readonly kind: 'REFUSED'; readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION' }
+  | {
+      readonly kind: 'REFUSED';
+      readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION' | ProviderRefusal;
+    }
   /** Nothing was sent: this browser could not keep a record of the order, so it could not be placed safely. */
   | { readonly kind: 'STORAGE_UNAVAILABLE' }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
