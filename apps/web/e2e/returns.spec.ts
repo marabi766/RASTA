@@ -338,8 +338,8 @@ test.describe.serial('returns, live (EXP-003)', () => {
     try {
       await buyer.page.goto(returnPath);
       const goods = buyer.page.getByRole('region', { name: 'جابه‌جایی و بازرسی کالا' });
-      await expect(goods).toContainText(RETURN_SHIPMENT_UNVERIFIED);
       await expect(goods).toContainText('هنوز محموله‌ای');
+      await expect(goods).not.toContainText(RETURN_SHIPMENT_UNVERIFIED);
       expect(await goods.innerText()).not.toContain('باربری جعلی');
       // Authorized: no withdrawal in the portal, whatever inventory lists.
       await expect(buyer.page.getByRole('form', { name: 'لغو درخواست بازگشت' })).toHaveCount(0);
