@@ -1,3 +1,4 @@
+import { ProcurementThresholdPolicy } from '../src/organization/procurement-threshold-policy';
 import request from 'supertest';
 import {
   reasonsOf,
@@ -66,6 +67,37 @@ describe('publication API', () => {
     }
     return { id: created.body.id as string, version, token };
   }
+
+  it('returns documented 422 codes for procurement thresholds and missing estimates', async () => {
+    const a = org('threshold-422');
+    await activatePublicationPolicy(w, a);
+    const range = { minAmountMinor: '10', maxAmountMinor: '20', mode: 'REJECT' as const };
+    const source = api.app.get(ProcurementThresholdPolicy);
+    const get = jest.spyOn(source, 'get').mockResolvedValue({
+      id: 'POL-api-threshold',
+      value: { FORMAL_TENDER: range, INQUIRY: range, RFP: range, MARKETPLACE_DEAL: range },
+    });
+    try {
+      for (const [amount, code] of [
+        ['21', 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE'],
+        [undefined, 'PROCUREMENT_ESTIMATE_REQUIRED'],
+      ] as const) {
+        const tender = await tenderFor(
+          a,
+          amount === undefined ? {} : { estimatedCostMinor: amount },
+        );
+        const response = await http()
+          .post(`/v1/tenders/${tender.id}/publish`)
+          .set(as(tender.token))
+          .send({ expectedVersion: tender.version });
+        expect(response.status).toBe(422);
+        expect(response.body.code).toBe('BUSINESS_RULE_VIOLATION');
+        expect(reasonsOf(response.body)).toEqual([`publication:${code}`]);
+      }
+    } finally {
+      get.mockRestore();
+    }
+  });
 
   beforeAll(async () => {
     api = await startApi();

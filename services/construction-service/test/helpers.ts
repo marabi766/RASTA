@@ -1,3 +1,5 @@
+import { ProcurementThresholdPolicy } from '../src/organization/procurement-threshold-policy';
+import type { ThresholdPolicy } from '../src/tender/procurement-thresholds';
 import { withUtcSession } from '@rasta/config';
 import {
   RastaError,
@@ -204,6 +206,7 @@ export interface Wiring {
   policies: PolicyService;
   /** The organization hierarchy these suites see instead of organization-service. */
   hierarchy: FakeHierarchy;
+  thresholds: { get(organizationId: string): Promise<ThresholdPolicy | null> };
   execution: ExecutionService;
   progress: ProgressService;
   /** Q-83: policies follow an ORGANIZATION_MOVED. */
@@ -278,6 +281,9 @@ export class TestTenderClock extends TenderClock {
 export function wire(env: ConstructionEnv = testEnv()): Wiring {
   const prisma = new PrismaService(databaseUrl(), env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS);
   const hierarchy = new FakeHierarchy();
+  const thresholds = {
+    get: async (_organizationId: string): Promise<ThresholdPolicy | null> => null,
+  };
   const events = new EventPublisher(env);
   const repository = new ProjectRepository(prisma);
   const access = new ProjectAccess(env);
@@ -503,6 +509,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       gate,
       tenderApprovalRepository,
       idempotency,
+      thresholds as ProcurementThresholdPolicy,
     ),
     criteriaRepository,
     criteria: new CriteriaService(
@@ -525,6 +532,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       idempotency,
     ),
     hierarchy,
+    thresholds,
     execution: new ExecutionService(
       prisma,
       repository,
