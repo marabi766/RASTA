@@ -82,6 +82,10 @@
         "ORGANIZATION_SERVICE_URL",
         "FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS",
         "INVENTORY_LOCK_TIMEOUT_MS",
+        "INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS",
+        "MARKETPLACE_SERVICE_URL",
+        "INVENTORY_SERVICE_URL",
+        "MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
@@ -98,6 +102,7 @@
         "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
         "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
         "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
+        "ANALYTICS_*",
         "CORS_ORIGINS",
         "PROCUREMENT_*"
       ]
@@ -151,6 +156,10 @@
         "ORGANIZATION_SERVICE_URL",
         "FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS",
         "INVENTORY_LOCK_TIMEOUT_MS",
+        "INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS",
+        "MARKETPLACE_SERVICE_URL",
+        "INVENTORY_SERVICE_URL",
+        "MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
@@ -167,6 +176,7 @@
         "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
         "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
         "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
+        "ANALYTICS_*",
         "CORS_ORIGINS",
         "PROCUREMENT_*"
       ]
@@ -271,6 +281,12 @@
     // MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED (Q-133 (8)): false by default —
     // a return shipment names exactly what was authorized.
     //
+    // ANALYTICS_* (RUN-001, ADR-071): analytics-service's own settings — the
+    // fleet dashboard's readers and the projection switch — declared from its
+    // first commit. CORS_ORIGINS with them: every service's schema reads it, and
+    // declaring it for analytics declares it for all, so it leaves the withheld
+    // list in the three tasks above (identity's aggregation-stress task still
+    // withholds it).
     // CONTRACT_SERVICE_URL and ECONOMIC_STATEMENT_BUSINESS_LINE (CON-003 PR 6b):
     // economic-service's statement owner (A-13) and the line a statement's
     // obligation is recorded under (Q-130, unset by default); the same rule.
@@ -301,6 +317,10 @@
         "ORGANIZATION_SERVICE_URL",
         "FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS",
         "INVENTORY_LOCK_TIMEOUT_MS",
+        "INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS",
+        "MARKETPLACE_SERVICE_URL",
+        "INVENTORY_SERVICE_URL",
+        "MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
@@ -317,6 +337,7 @@
         "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
         "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
         "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
+        "ANALYTICS_*",
         "CORS_ORIGINS",
         "PROCUREMENT_*"
       ]

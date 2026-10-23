@@ -42,6 +42,7 @@ x-kafka-credentials: &kafka-credentials
   KAFKA_SASL_PASSWORD_NOTIFICATION: ${KAFKA_SASL_PASSWORD_NOTIFICATION:-rasta_notification_kafka_dev_password}
   KAFKA_SASL_PASSWORD_DOCUMENT: ${KAFKA_SASL_PASSWORD_DOCUMENT:-rasta_document_kafka_dev_password}
   KAFKA_SASL_PASSWORD_AUDIT: ${KAFKA_SASL_PASSWORD_AUDIT:-rasta_audit_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_ANALYTICS: ${KAFKA_SASL_PASSWORD_ANALYTICS:-rasta_analytics_kafka_dev_password}
   KAFKA_SASL_PASSWORD_KAFKA_UI: ${KAFKA_SASL_PASSWORD_KAFKA_UI:-rasta_kafka_ui_kafka_dev_password}
   KAFKA_SASL_PASSWORD_KAFKA_EXPORTER: ${KAFKA_SASL_PASSWORD_KAFKA_EXPORTER:-rasta_kafka_exporter_kafka_dev_password}
 

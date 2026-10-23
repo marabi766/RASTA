@@ -106,6 +106,11 @@ function roleList(name: string) {
  *                                       disposition. **Unset: false** — it stays INSPECTED and
  *                                       its resolution is refused by name. Never a way around
  *                                       an empty INVENTORY_RETURN_DISPOSITIONS_ALLOWED.
+ *   MARKETPLACE_SERVICE_URL / INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS
+ *                                       Where the return request is read and its dispatch
+ *                                       reserved before a return shipment is recorded (A-13,
+ *                                       Q-133 (5)), and how long each exchange may take. Not a
+ *                                       business setting: nothing is recorded without an answer.
  *   INVENTORY_LOCK_TIMEOUT_MS          How long a command waits for a stock item another command
  *                                       holds before it answers 409 CONFLICT with Retry-After —
  *                                       never an unbounded wait (ADR-056 § 3).
@@ -190,6 +195,24 @@ export const inventoryEnvSchema = baseEnvSchema
       .transform((value) => value === 'true'),
 
     INVENTORY_LOCK_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
+
+    /**
+     * marketplace-service, which owns the return request (ADR-048 § 2). Before a return shipment
+     * is recorded, the request is read there and its dispatch reserved (A-13, ADR-061 § 4; Codex
+     * r1 on #336) — over REST with an internal token signed for the supplier, never its database.
+     */
+    MARKETPLACE_SERVICE_URL: z.string().url().default('http://localhost:3106'),
+    /**
+     * How long each of those two exchanges may take, body included. Both run before the
+     * command's transaction, never inside it; one that does not answer in time refuses the
+     * dispatch (504 UPSTREAM_TIMEOUT) and nothing is written.
+     */
+    INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(200)
+      .max(10_000)
+      .default(3000),
 
     INVENTORY_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
     INVENTORY_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce

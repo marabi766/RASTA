@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import {
+  INVENTORY_RETURN_DISPATCH_EVENTS,
+  INVENTORY_RETURN_DISPATCH_EVENT_SCHEMAS,
   INVENTORY_RETURN_EVENTS,
   INVENTORY_RETURN_EVENT_SCHEMAS,
   INVENTORY_SHIPMENT_EVENTS,
@@ -42,6 +44,7 @@ export const INVENTORY_EVENTS = {
   STOCK_ISSUED: 'STOCK_ISSUED',
   ...INVENTORY_SHIPMENT_EVENTS,
   ...INVENTORY_RETURN_EVENTS,
+  ...INVENTORY_RETURN_DISPATCH_EVENTS,
 } as const;
 
 export type InventoryEventName = keyof typeof INVENTORY_EVENTS;
@@ -161,6 +164,7 @@ export const INVENTORY_EVENT_SCHEMAS = {
   STOCK_ISSUED: stockIssuedPayload,
   ...INVENTORY_SHIPMENT_EVENT_SCHEMAS,
   ...INVENTORY_RETURN_EVENT_SCHEMAS,
+  ...INVENTORY_RETURN_DISPATCH_EVENT_SCHEMAS,
 } as const satisfies Record<InventoryEventName, z.ZodTypeAny>;
 
 export type InventoryEventPayload<N extends InventoryEventName> = z.infer<

@@ -128,6 +128,13 @@ export const TOPIC_CONSUMERS = Object.freeze({
     subscribes: EVERY_DECLARED_TOPIC,
     deadLetterTopic: 'rasta.audit.v1.dlq',
   }),
+  // RUN-001 (ADR-071 § 1): read models built from events only, never from another service's
+  // database. PR 1 reads MAINTENANCE_COMPLETED into `fact_maintenance`; each later projection
+  // adds its topic here when it lands (ADR-071 § 3), never before.
+  'analytics-service': Object.freeze({
+    subscribes: Object.freeze(['rasta.maintenance.v1'] as const),
+    deadLetterTopic: 'rasta.analytics.v1.dlq',
+  }),
 });
 
 export type DeclaredConsumer = keyof typeof TOPIC_CONSUMERS;
