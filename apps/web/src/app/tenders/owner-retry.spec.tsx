@@ -57,7 +57,13 @@ const SCORE_ROWS = [
 ];
 const BINDING = '{"scoring":[{"criterionCode":"technical"}],"award":null}';
 
-function renderForm(command: OwnerCommand = 'REJECT') {
+function renderForm(
+  command: OwnerCommand = 'REJECT',
+  award: { justificationRequired: boolean; execution: { justification: string | null } | null } = {
+    justificationRequired: false,
+    execution: null,
+  },
+) {
   return render(
     <OwnerCommandForm
       tenderId={TENDER_ID}
@@ -68,9 +74,7 @@ function renderForm(command: OwnerCommand = 'REJECT') {
       owner={OWNER}
       pageHref={PAGE}
       {...(command === 'SCORE' ? { scoreRows: SCORE_ROWS, binding: BINDING } : {})}
-      {...(command === 'AWARD'
-        ? { award: { justificationRequired: false, execution: null }, binding: BINDING }
-        : {})}
+      {...(command === 'AWARD' ? { award, binding: BINDING } : {})}
     />,
   );
 }
@@ -157,6 +161,57 @@ it('every command the service answers again under its key, its call lost, is re-
     expect(second!.get('submission')).toBe(KEY);
     expect(second!.get('replay')).toBe(STAMP.token);
     unmount();
+  }
+});
+
+describe('executing an approved award, its response lost', () => {
+  const LOST = new Error('An unexpected response was received from the server.');
+  const APPROVED = [null, 'آنچه موافقت شد'];
+
+  for (const justification of APPROVED) {
+    const terms = { justificationRequired: true, execution: { justification } };
+
+    it(`re-sends the same key, stamp and binding after a transport error (approved justification ${justification === null ? 'null' : 'set'})`, async () => {
+      action.mockRejectedValueOnce(LOST);
+      sessionProbe.mockResolvedValue({ status: 503 });
+      const { container } = renderForm('AWARD', terms);
+      await submit(container);
+      expect(stored()).toMatchObject({ command: 'AWARD', submissionId: KEY });
+      action.mockRejectedValueOnce(LOST);
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' }));
+      });
+      expect(action).toHaveBeenCalledTimes(2);
+      const [first, second] = action.mock.calls.map(([, , form]) => form);
+      expect(first!.get('binding')).toBe(BINDING);
+      expect(second!.get('submission')).toBe(KEY);
+      expect(second!.get('replay')).toBe(STAMP.token);
+      expect(second!.get('binding')).toBe(BINDING);
+      expect(second!.get('justification')).toBeNull();
+      expect(first!.get('justification')).toBeNull();
+    });
+
+    it(`re-sends from the state the server returned for an unknown outcome (approved justification ${justification === null ? 'null' : 'set'})`, async () => {
+      action.mockImplementationOnce(async (_t, _p, form) => ({
+        kind: 'UNCONFIRMED',
+        command: 'AWARD',
+        correlationId: 'COR_LOST',
+        submissionId: KEY,
+        values: { binding: String(form.get('binding')) },
+        replay: STAMP,
+      }));
+      const { container } = renderForm('AWARD', terms);
+      await submit(container);
+      action.mockRejectedValueOnce(LOST);
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' }));
+      });
+      const [first, second] = action.mock.calls.map(([, , form]) => form);
+      expect(second!.get('submission')).toBe(KEY);
+      expect(second!.get('replay')).toBe(STAMP.token);
+      expect(second!.get('binding')).toBe(first!.get('binding'));
+      expect(second!.get('binding')).toBe(BINDING);
+    });
   }
 });
 

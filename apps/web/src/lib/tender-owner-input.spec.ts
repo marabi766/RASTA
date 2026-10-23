@@ -125,10 +125,11 @@ describe('the evaluation’s and the award’s forms, as their DTOs read them', 
       ok: false,
     });
     // Executing an approved request: the request's justification, not the form's.
-    expect(parseOwnerForm('AWARD', {}, { executes: true })).toEqual({
+    // Its hidden binding is kept: a lost response is re-sent with the body it was sent with.
+    expect(parseOwnerForm('AWARD', { [BINDING_FIELD]: '{"b":1}' }, { executes: true })).toEqual({
       ok: true,
       input: {},
-      values: null,
+      values: { [BINDING_FIELD]: '{"b":1}' },
     });
     expect(ownerFields('AWARD', { executes: true })).toEqual([BINDING_FIELD]);
   });

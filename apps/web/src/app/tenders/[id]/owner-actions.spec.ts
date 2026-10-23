@@ -485,6 +485,42 @@ describe('unconfirmed', () => {
       },
     ];
 
+    it.each([null, 'آنچه موافقت شد'])(
+      'executing an approved award (approved justification %p): a lost answer keeps the binding, and the retry rebuilt from the returned state sends the same key and body',
+      async (approved) => {
+        const executes: OwnerTarget = {
+          ...bid,
+          command: 'AWARD',
+          award: { justificationRequired: true, execution: { justification: approved } },
+        };
+        answer = () => problem(504, 'UPSTREAM_TIMEOUT');
+        const data = form({}, executes);
+        const lost = (await send(data)) as UnconfirmedOwnerCommand;
+        expect(lost).toMatchObject({
+          kind: 'UNCONFIRMED',
+          command: 'AWARD',
+          values: { [BINDING_FIELD]: data.get(BINDING_FIELD) },
+        });
+        expect(lost.viewOnly).toBeUndefined();
+
+        // The retry form posts the stamp, the key and exactly the returned values.
+        const retry = new FormData();
+        retry.set(CSRF_FIELD, SESSION.csrfToken);
+        retry.set(SUBMISSION_FIELD, lost.submissionId);
+        retry.set(REPLAY_FIELD, lost.replay!.token);
+        for (const [name, value] of Object.entries(lost.values ?? {})) retry.set(name, value);
+        answer = () => json(202, awardRequest);
+        await expect(send(retry, lost)).rejects.toThrow('NEXT_REDIRECT');
+        const body =
+          approved === null ? { bidId: 'BID_1' } : { bidId: 'BID_1', justification: approved };
+        expect(sent.map((request) => request.body)).toEqual([body, body]);
+        expect(new Set(sent.map((request) => request.key))).toEqual(
+          new Set([data.get(SUBMISSION_FIELD)]),
+        );
+        expect(new Set(rawBodies).size).toBe(1);
+      },
+    );
+
     it('the commands are exactly the ones the service replays, plus the score', () => {
       expect([...new Set(cases.map((c) => c.command))].sort()).toEqual(
         REPEATABLE_OWNER_COMMANDS.filter((command) => command !== 'SCORE').sort(),
