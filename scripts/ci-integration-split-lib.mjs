@@ -135,6 +135,7 @@ export const STEP_INVENTORY = Object.freeze({
   'Notification coverage gate': coverageGate('notification'),
   'Organization coverage gate': coverageGate('organization'),
   'Procurement coverage gate': coverageGate('procurement'),
+  'Analytics coverage gate': coverageGate('analytics'),
   'Test independence (F-25)': {
     run: withKafka('tests', 'pnpm run test:independence'),
     env: { ...KAFKA_TESTS, ...databases('MAINTENANCE') },

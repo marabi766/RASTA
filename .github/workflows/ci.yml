@@ -2206,7 +2206,7 @@ jobs:
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
 
   integration-coverage:
-    name: Coverage gates (economic, marketplace, document, supplier, audit, notification, organization, procurement)
+    name: Coverage gates (economic, marketplace, document, supplier, audit, notification, organization, procurement, analytics)
     runs-on: ubuntu-latest
     # About 10.5 minutes on main run 38600385830 (setup ~4m, the seven gates
     # 399 s together, economic the longest at 115 s). Each keeps its own 8.
@@ -2622,6 +2622,23 @@ jobs:
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
+
+      - name: Analytics coverage gate
+        # `docs/14` § 14.2 puts analytics-service in the 75% band, set in its `jest.config.js`
+        # (ADR-071 PR 1). Both projects: the append-only fact tables, the runtime-role
+        # refusals and the shutdown ordering are exercised only by the integration suites
+        # against a real PostgreSQL, so a unit-only number would not be the service's.
+        timeout-minutes: 8
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm --filter @rasta/analytics-service run test:coverage
+        env:
+          KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
 
   # The check branch protection and the merge queue require by name. It runs
   # always(), not on the default success(): a job skipped because a job it
