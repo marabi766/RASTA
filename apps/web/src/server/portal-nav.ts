@@ -4,6 +4,7 @@ import type { SidebarItem } from '@/ui';
 
 import { webServerEnv, type WebServerEnv } from './env';
 import { tokenRoles } from './realm-roles';
+import { canReadReturns } from './returns';
 import type { WebSession } from './session';
 
 /**
@@ -214,5 +215,6 @@ export function portalNavForSession(
     canReadSettlements: canReadSettlements(read),
     canReadInventory: canReadInventory(roles, env),
     canReadSuppliers: canReadSuppliers(roles),
+    canReadReturns: canReadReturns(read),
   });
 }

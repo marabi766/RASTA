@@ -7,6 +7,7 @@ import { ECONOMIC_EVENTS } from '../events/events';
 import { SERVICE_NAME } from '../config/env';
 import type { Prisma } from '../generated/prisma';
 import type { IdempotentAnswer } from '../shared/idempotency';
+import { databaseNow } from '../shared/database-clock';
 import {
   parseContributions,
   participationWindow,
@@ -253,11 +254,4 @@ function ruleTerms(rule: ParticipationRuleView) {
     contributions: rule.contributions.map((contribution) => ({ ...contribution })),
     label: rule.label,
   };
-}
-
-/** The instant a score is taken at: the database's, as every other window here. */
-export async function databaseNow(tx: ExtendedPrismaClient): Promise<Date> {
-  const [row] = await tx.$queryRaw<{ now: Date }[]>`SELECT clock_timestamp() AS now`;
-  if (!row) throw RastaError.internal('The database returned no clock reading');
-  return row.now;
 }

@@ -87,7 +87,7 @@ const transactionSchema = z.object({
    * migration, which hold the resolution here with `disputeResolution` null.
    */
   disputeReason: z.string().nullable(),
-  /** When the last resolution was decided; it may precede a later dispute. */
+  /** When the last resolution was decided; it may be an earlier dispute's. */
   disputeResolvedAt: utcInstant.nullable(),
   /** The last resolution's text, in its own field (D-060); null before it. */
   disputeResolution: z.string().nullable(),
@@ -98,6 +98,14 @@ const transactionSchema = z.object({
    * a transaction never disputed.
    */
   disputeId: z.string().min(1).nullable(),
+  /**
+   * The dispute the last resolution decided, recorded by economic-service
+   * (task 061, docs/23 D-060): equal to `disputeId`, the resolution is the
+   * latest dispute's; different, an earlier one's. `null` before any
+   * resolution, and on rows resolved before it was kept that economic could
+   * not attribute for certain — there the screen falls back to comparing times.
+   */
+  resolvedDisputeId: z.string().min(1).nullable(),
   settledAt: utcInstant.nullable(),
   /** The cancellation, refund or failure reason. */
   failureReason: z.string().nullable(),

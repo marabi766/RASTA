@@ -7,7 +7,8 @@ import { ECONOMIC_EVENTS } from '../events/events';
 import { SERVICE_NAME } from '../config/env';
 import type { Prisma } from '../generated/prisma';
 import type { IdempotentAnswer } from '../shared/idempotency';
-import { ParticipationService, assertReplacing, databaseNow } from './participation.service';
+import { ParticipationService, assertReplacing } from './participation.service';
+import { databaseNow } from '../shared/database-clock';
 import {
   parseRecognitionTerms,
   recognise,

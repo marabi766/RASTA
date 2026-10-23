@@ -7,6 +7,7 @@ import { IdempotencyStore, targeted } from '../shared/idempotency';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import { assertNotAuditor } from '../access/access';
 import {
+  storedTransactionDetailView,
   toTransactionDetailView,
   toTransactionView,
   type TransactionRowLike,
@@ -109,10 +110,13 @@ export class TransactionController {
     description:
       'Visible to the payer and to the payee. Anyone else gets 404, never 403 — a 403 would ' +
       'confirm that the transaction exists. The dispute fields describe the latest dispute: ' +
-      'who raised it and why, and who resolved it, when and how. A resolution older than ' +
-      '`disputedAt` belongs to an earlier dispute. A transaction resolved before the ' +
-      'resolution had a field of its own holds the resolution text in `disputeReason`, with ' +
-      '`disputeResolution` null and `disputeResolvedAt` set (docs/23 D-060).',
+      'who raised it and why, and who resolved it, when and how. `resolvedDisputeId` names ' +
+      'the dispute that resolution decided: equal to `disputeId`, it is the latest dispute’s; ' +
+      'different, an earlier one’s. Null on a transaction resolved before it was kept and not ' +
+      'attributable for certain — there, a resolution older than `disputedAt` belongs to an ' +
+      'earlier dispute. A transaction resolved before the resolution had a field of its own ' +
+      'holds the resolution text in `disputeReason`, with `disputeResolution` null and ' +
+      '`disputeResolvedAt` set (docs/23 D-060).',
   })
   async get(@Param('id') id: string) {
     const transaction = await this.transactions.get(id);
@@ -157,7 +161,10 @@ export class TransactionController {
       201,
       (answer) => this.transactions.create({ ...dto, idempotencyKey: key }, answer.map(detailView)),
       // No target in the path: the stored answer names the transaction it made.
-      { mayReplay: (stored) => this.transactions.assertMayReplay(createdId(stored), 'READ') },
+      {
+        mayReplay: (stored) => this.transactions.assertMayReplay(createdId(stored), 'READ'),
+        stored: storedTransactionDetailView,
+      },
     );
   }
 
@@ -185,7 +192,10 @@ export class TransactionController {
       targeted(id),
       200,
       (answer) => this.transactions.authoriseSettlement(id, answer.map(detailView), key),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'AUTHORISE_SETTLEMENT') },
+      {
+        mayReplay: () => this.transactions.assertMayReplay(id, 'AUTHORISE_SETTLEMENT'),
+        stored: storedTransactionDetailView,
+      },
     );
   }
 
@@ -218,7 +228,10 @@ export class TransactionController {
       targeted(id, dto),
       200,
       (answer) => this.transactions.dispute(id, dto, answer.map(detailView)),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'DISPUTE') },
+      {
+        mayReplay: () => this.transactions.assertMayReplay(id, 'DISPUTE'),
+        stored: storedTransactionDetailView,
+      },
     );
   }
 
@@ -254,7 +267,10 @@ export class TransactionController {
       targeted(id, dto),
       200,
       (answer) => this.transactions.resolveDispute(id, dto, answer.map(detailView)),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'RESOLVE_DISPUTE') },
+      {
+        mayReplay: () => this.transactions.assertMayReplay(id, 'RESOLVE_DISPUTE'),
+        stored: storedTransactionDetailView,
+      },
     );
   }
 
@@ -290,7 +306,10 @@ export class TransactionController {
       targeted(id, dto),
       200,
       (answer) => this.transactions.refund(id, dto.reason, answer.map(detailView)),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'REFUND') },
+      {
+        mayReplay: () => this.transactions.assertMayReplay(id, 'REFUND'),
+        stored: storedTransactionDetailView,
+      },
     );
   }
 
@@ -320,7 +339,10 @@ export class TransactionController {
       targeted(id, dto),
       200,
       (answer) => this.transactions.cancel(id, dto.reason, answer.map(detailView)),
-      { mayReplay: () => this.transactions.assertMayReplay(id, 'CANCEL') },
+      {
+        mayReplay: () => this.transactions.assertMayReplay(id, 'CANCEL'),
+        stored: storedTransactionDetailView,
+      },
     );
   }
 }

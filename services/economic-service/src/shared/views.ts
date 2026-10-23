@@ -260,6 +260,7 @@ export function toTransactionDetailView(
     settlementAuthorisedService?: string | null;
     settlementAuthorisationKey?: string | null;
     disputeId?: string | null;
+    resolvedDisputeId?: string | null;
   },
 ): TransactionDetailView {
   return {
@@ -272,6 +273,7 @@ export function toTransactionDetailView(
         }
       : null,
     disputeId: row.disputeId ?? null,
+    resolvedDisputeId: row.resolvedDisputeId ?? null,
     legs: row.legs.map((leg) => ({
       role: leg.role,
       organizationId: leg.organizationId,
@@ -295,6 +297,20 @@ export function toTransactionDetailView(
         }
       : null,
   };
+}
+
+/**
+ * A transaction command's stored answer, as it is replayed (Codex on #352,
+ * finding 2). One stored by the release before `resolvedDisputeId` existed
+ * lacks it, and the documented view requires it: it is replayed with `null`,
+ * which the view documents as "not attributed by identity", and a reader
+ * judges that answer's resolution by time, as that release's readers did. An
+ * answer that has the field is replayed as stored.
+ */
+export function storedTransactionDetailView(
+  answer: TransactionDetailView | Omit<TransactionDetailView, 'resolvedDisputeId'>,
+): TransactionDetailView {
+  return 'resolvedDisputeId' in answer ? answer : { ...answer, resolvedDisputeId: null };
 }
 
 // ---------------------------------------------------------------------------

@@ -10,8 +10,9 @@ import type { JsonSchema } from './zod-schema';
  *
  * The view is an interface, so the document cannot be derived from it; this
  * is what keeps the two from drifting. Every documented property must be one
- * the view writes, with a value of the documented type — for a row with every
- * field set and for one with every optional field empty.
+ * the view writes, with a value of the documented type, and every property
+ * the view writes must be documented — for a row with every field set and for
+ * one with every optional field empty.
  */
 describe('the documented transaction view', () => {
   const at = new Date('2026-10-16T10:00:00.000Z');
@@ -40,6 +41,11 @@ describe('the documented transaction view', () => {
     failureReason: 'none',
     createdAt: at,
     createdBy: 'USR-PAYER',
+    settlementAuthorisedAt: at,
+    settlementAuthorisedService: 'marketplace-service',
+    settlementAuthorisationKey: 'order:ORD_1:authorise-settlement',
+    disputeId: 'TXD_B',
+    resolvedDisputeId: 'TXD_A',
     legs: [{ organizationId: 'ORG-A', role: 'PAYER', amountMinor: 1n, currency: 'IRR' }],
     commission: {
       id: 'CMS_1',
@@ -65,6 +71,11 @@ describe('the documented transaction view', () => {
     disputeResolution: null,
     settledAt: null,
     failureReason: null,
+    settlementAuthorisedAt: null,
+    settlementAuthorisedService: null,
+    settlementAuthorisationKey: null,
+    disputeId: null,
+    resolvedDisputeId: null,
     legs: [],
     commission: { ...full.commission, ruleId: null },
     settlement: null,
@@ -89,6 +100,52 @@ describe('the documented transaction view', () => {
     const page = { items: [toTransactionView(row)], nextCursor: null, hasMore: false };
     const schema = TRANSACTION_VIEW_SCHEMAS.TransactionPage as JsonSchema;
     expect(mismatches(schema, page, 'page')).toEqual([]);
+  });
+
+  it('documents what the saga’s recovery reads, and which dispute a resolution decided', () => {
+    // Written by the view and read by marketplace (D-053, D-060), but missing
+    // from the document until the check looked both ways (Codex on #322 r3/r4).
+    const view = toTransactionDetailView(full);
+    expect(view).toMatchObject({
+      settlementAuthorisation: {
+        authorisedAt: at.toISOString(),
+        service: 'marketplace-service',
+        idempotencyKey: 'order:ORD_1:authorise-settlement',
+      },
+      disputeId: 'TXD_B',
+      resolvedDisputeId: 'TXD_A',
+    });
+    const properties = TRANSACTION_VIEW_SCHEMAS.TransactionDetailView?.properties as Record<
+      string,
+      JsonSchema
+    >;
+    for (const field of ['settlementAuthorisation', 'disputeId', 'resolvedDisputeId']) {
+      expect(properties[field]).toEqual(expect.objectContaining({ nullable: true }));
+    }
+    expect(toTransactionDetailView(empty)).toMatchObject({
+      settlementAuthorisation: null,
+      disputeId: null,
+      resolvedDisputeId: null,
+    });
+  });
+
+  it('reports a property the view writes and the document does not name', () => {
+    const schema = TRANSACTION_VIEW_SCHEMAS.TransactionDetailView as JsonSchema;
+    const written = { ...toTransactionDetailView(full), addedLater: 'x' };
+    expect(mismatches(schema, written, 'detail')).toEqual([
+      'detail.addedLater: written, never documented',
+    ]);
+    // Nested objects too.
+    const nested = {
+      ...toTransactionDetailView(full),
+      settlementAuthorisation: {
+        ...toTransactionDetailView(full).settlementAuthorisation,
+        by: 'x',
+      },
+    };
+    expect(mismatches(schema, nested, 'detail')).toEqual([
+      'detail.settlementAuthorisation.by: written, never documented',
+    ]);
   });
 
   it('writes and documents the dispute, its reason and its resolution apart', () => {

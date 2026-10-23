@@ -19,6 +19,7 @@ import type { Order, ReadResult } from '@/server/orders';
 
 import { formatOrderAmount } from '../OrdersScreen';
 import { OrderCommandForm } from './OrderCommandForm';
+import { OrderReturns, type OrderReturnsProps } from './OrderReturns';
 
 /**
  * One order: where it is, what it contains, and what **this viewer** may do
@@ -47,6 +48,8 @@ export interface OrderDetailScreenProps {
   readonly done?: OrderCommand;
   /** The order was just placed from the offers page (`?placed=1`). */
   readonly placed?: boolean;
+  /** Its return requests and the request form (EXP-003); null for a viewer who is neither party. */
+  readonly returns?: Omit<OrderReturnsProps, 'orderId' | 'csrfToken'> | null;
 }
 
 const STEP_CLASSES: Readonly<Record<StepState, string>> = {
@@ -172,6 +175,7 @@ export function OrderDetailScreen({
   mintSubmissionId,
   done,
   placed,
+  returns = null,
 }: OrderDetailScreenProps) {
   if (result.kind === 'NOT_FOUND') {
     // One message for "does not exist" and "not yours": marketplace-service
@@ -244,6 +248,12 @@ export function OrderDetailScreen({
       <Section headingId="order-lines" title="اقلام و مبلغ">
         <Lines order={order} />
       </Section>
+
+      {returns ? (
+        <Section headingId="order-returns" title="بازگشت کالا">
+          <OrderReturns {...returns} orderId={order.id} csrfToken={csrfToken} />
+        </Section>
+      ) : null}
     </div>
   );
 }
