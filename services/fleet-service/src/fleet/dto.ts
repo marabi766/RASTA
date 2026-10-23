@@ -209,7 +209,9 @@ export const recordUsageSchema = z
      * The product asks for a field PWA that queues readings and syncs later
      * (docs/17), which means the same reading will be submitted twice. A
      * resubmission carrying the same reference returns the original record
-     * instead of creating a second one.
+     * instead of creating a second one — to the same caller sending the same
+     * body only; anything else under a taken reference is `409
+     * IDEMPOTENCY_KEY_REUSED` (UsageService).
      */
     clientReference: plainText().min(8).max(128).optional(),
   })

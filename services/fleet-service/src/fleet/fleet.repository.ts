@@ -310,8 +310,13 @@ export class FleetRepository {
     return this.client.usageRecord.findFirst({ where: { id } });
   }
 
-  async findUsageByClientReference(clientReference: string) {
-    return this.client.usageRecord.findFirst({ where: { clientReference } });
+  /**
+   * Scoped: a reference is the tenant's. With `tx`, read inside the usage
+   * transaction — after the asset lock, so a twin request that held the lock
+   * and committed is seen.
+   */
+  async findUsageByClientReference(clientReference: string, tx?: ExtendedPrismaClient) {
+    return (tx ?? this.client).usageRecord.findFirst({ where: { clientReference } });
   }
 
   /**

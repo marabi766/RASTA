@@ -1,0 +1,332 @@
+import { RastaError } from '@rasta/nest-common';
+import { PrismaService } from '../src/prisma/prisma.service';
+import { FleetRepository } from '../src/fleet/fleet.repository';
+import { UsageService, usageRequestHash } from '../src/fleet/usage.service';
+import type { RecordUsageDto } from '../src/fleet/dto';
+import { asActor, cleanup, id, newPrisma, tenants, type ActorOptions } from './helpers';
+
+/**
+ * A `clientReference` is bound to the request that took it (ADR-073 plan, PR 1
+ * "fleet A"), against a real database.
+ *
+ * Before the binding, any submission whose reference was taken got the stored
+ * record back: a resend with another body was told its new reading was saved,
+ * and a colleague who knew the reference read the record through `POST`. And
+ * two identical submissions racing each other could not replay at all: the
+ * second waited on the asset lock, then found its twin's period overlapping its
+ * own and was refused `422 USAGE_PERIOD_OVERLAP` before the unique index that
+ * would have replayed it was ever reached (review of #368, F3). The two
+ * interleavings that matter are driven here step by step, with the first
+ * request held inside its transaction until the second is seen waiting.
+ */
+describe('usage replay binding', () => {
+  const org = tenants();
+  let prisma: PrismaService;
+  let repository: FleetRepository;
+  let service: UsageService;
+
+  const assetId = id('AST');
+  const otherAssetId = id('AST');
+  const driverA = id('DRV');
+  const driverB = id('DRV');
+  const suffix = id('X').slice(-8);
+
+  const supervisor: ActorOptions = { organizationId: org.a, userId: `USR-ITEST-SUP1-${suffix}` };
+  const colleague: ActorOptions = {
+    organizationId: org.a,
+    userId: `USR-ITEST-SUP2-${suffix}`,
+    roles: ['ORGANIZATION_ADMIN'],
+  };
+  const driverUserA: ActorOptions = {
+    organizationId: org.a,
+    userId: `USR-ITEST-DRVA-${suffix}`,
+    roles: ['DRIVER'],
+  };
+  const driverUserB: ActorOptions = {
+    organizationId: org.a,
+    userId: `USR-ITEST-DRVB-${suffix}`,
+    roles: ['DRIVER'],
+  };
+
+  beforeAll(async () => {
+    prisma = newPrisma();
+    await prisma.onModuleInit();
+    repository = new FleetRepository(prisma);
+    service = new UsageService(repository);
+    await cleanup(prisma, [org.a, org.b]);
+
+    await asActor({ organizationId: org.a }, async () => {
+      for (const [driverId, actor] of [
+        [driverA, driverUserA],
+        [driverB, driverUserB],
+      ] as const) {
+        await prisma.client.driver.create({
+          data: {
+            organizationId: org.a,
+            id: driverId,
+            userId: actor.userId!,
+            createdBy: 'ITEST',
+            updatedBy: 'ITEST',
+          },
+        });
+      }
+      for (const asset of [assetId, otherAssetId]) {
+        await prisma.client.assetRef.create({
+          data: {
+            id: asset,
+            organizationId: org.a,
+            status: 'ACTIVE',
+            syncedAt: new Date(),
+            sourceEvent: 'ITEST',
+          },
+        });
+      }
+    });
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  afterAll(async () => {
+    await cleanup(prisma, [org.a, org.b]);
+    await prisma.onModuleDestroy();
+  });
+
+  // A fresh 8-hour window per call, a day apart, so no two tests overlap.
+  let day = 0;
+  const reading = (overrides: Partial<RecordUsageDto> = {}): RecordUsageDto => {
+    const base = Date.UTC(2026, 6, 1, 6, 0, 0) + day++ * 24 * 60 * 60 * 1000;
+    return {
+      assetId,
+      periodStart: new Date(base).toISOString(),
+      periodEnd: new Date(base + 8 * 60 * 60 * 1000).toISOString(),
+      hours: '7.50',
+      source: 'MANUAL',
+      clientReference: `bind-${id('R')}`,
+      ...overrides,
+    };
+  };
+
+  /** A row as `creator` would have filed it, written directly. */
+  async function seed(
+    creator: ActorOptions,
+    body: RecordUsageDto,
+    row: { driverId?: string | null; legacy?: boolean } = {},
+  ) {
+    const requestHash = row.legacy
+      ? null
+      : await asActor(creator, async () => usageRequestHash(body));
+    return asActor({ organizationId: org.a }, () =>
+      prisma.client.usageRecord.create({
+        data: {
+          id: id('USG'),
+          organizationId: org.a,
+          assetId: body.assetId,
+          driverId: row.driverId ?? null,
+          periodStart: new Date(body.periodStart),
+          periodEnd: new Date(body.periodEnd),
+          hours: body.hours ?? null,
+          source: body.source,
+          clientReference: body.clientReference ?? null,
+          requestHash,
+          recordedBy: creator.userId!,
+        },
+      }),
+    );
+  }
+
+  const rowsUnder = (clientReference: string) =>
+    asActor({ organizationId: org.a }, () =>
+      prisma.client.usageRecord.findMany({ where: { clientReference } }),
+    );
+
+  const eventsFor = (usageRecordId: string) =>
+    prisma.client.outboxMessage.count({
+      where: { organizationId: org.a, aggregateId: usageRecordId },
+    });
+
+  async function refused(promise: Promise<unknown>): Promise<RastaError> {
+    const error = await promise.then(
+      () => {
+        throw new Error('expected 409 IDEMPOTENCY_KEY_REUSED');
+      },
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(RastaError);
+    expect(error).toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED', status: 409 });
+    expect((error as RastaError).details).toBeUndefined();
+    return error as RastaError;
+  }
+
+  /** Until `n` sessions of this database wait on a lock. */
+  async function waitForBlocked(n: number) {
+    for (let attempt = 0; attempt < 400; attempt++) {
+      const found = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM pg_stat_activity
+         WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+      );
+      if (found[0]!.n >= n) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`fewer than ${n} sessions ever blocked`);
+  }
+
+  /**
+   * Holds the next submission inside its transaction, just after its insert,
+   * until released: its asset lock and its uncommitted row stay in place.
+   */
+  function holdNextSubmission() {
+    const enqueue = repository.enqueueEvent.bind(repository);
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let inserted!: () => void;
+    const held = new Promise<void>((resolve) => (inserted = resolve));
+    jest.spyOn(repository, 'enqueueEvent').mockImplementationOnce(async (tx, event) => {
+      inserted();
+      await released;
+      return enqueue(tx, event);
+    });
+    return { held, release };
+  }
+
+  it('replays to the same caller sending the same body, and publishes nothing further', async () => {
+    const body = reading();
+    const first = await asActor(supervisor, () => service.record(body));
+    const again = await asActor(supervisor, () => service.record({ ...body }));
+
+    expect(again).toEqual(first);
+    expect(await eventsFor(first.id)).toBe(1);
+  });
+
+  it('refuses the same caller sending another body, and keeps the first reading', async () => {
+    const body = reading();
+    const first = await asActor(supervisor, () => service.record(body));
+
+    await refused(asActor(supervisor, () => service.record({ ...body, hours: '9.25' })));
+
+    const rows = await rowsUnder(body.clientReference!);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.hours!.toString()).toBe('7.5');
+    expect(await eventsFor(first.id)).toBe(1);
+  });
+
+  it('refuses another user sending the same body, exactly as a changed body', async () => {
+    const body = reading();
+    await asActor(supervisor, () => service.record(body));
+
+    const changed = await refused(
+      asActor(supervisor, () => service.record({ ...body, hours: '1.00' })),
+    );
+    const other = await refused(asActor(colleague, () => service.record(body)));
+
+    // Nothing tells the colleague the reference names a record, let alone what.
+    expect({ code: other.code, message: other.message }).toEqual({
+      code: changed.code,
+      message: changed.message,
+    });
+  });
+
+  it("refuses a DRIVER replaying another driver's reference, and replays it to its own driver", async () => {
+    const body = reading();
+    const stored = await seed(driverUserA, body, { driverId: driverA });
+
+    await refused(asActor(driverUserB, () => service.record(body)));
+    // Before any validation: driver A holds no assignment now, and still gets
+    // back the reading accepted then.
+    await expect(asActor(driverUserA, () => service.record(body))).resolves.toMatchObject({
+      id: stored.id,
+    });
+  });
+
+  it('refuses the very request that took the reference once its caller may no longer read the record', async () => {
+    // Filed by this user as a supervisor, under driver B; the user is now a
+    // DRIVER with record A. `GET` answers 404, so the replay returns nothing
+    // either, though the binding alone matches.
+    const body = reading();
+    await seed(driverUserA, body, { driverId: driverB });
+
+    await refused(asActor(driverUserA, () => service.record(body)));
+  });
+
+  describe('a row recorded before the binding (request_hash NULL)', () => {
+    it('replays to the user who recorded it when every field is equal', async () => {
+      const body = reading();
+      const stored = await seed(supervisor, body, { legacy: true });
+
+      await expect(asActor(supervisor, () => service.record(body))).resolves.toMatchObject({
+        id: stored.id,
+        hours: '7.5',
+      });
+    });
+
+    it('refuses that user with another reading, and refuses everyone else', async () => {
+      const body = reading();
+      await seed(supervisor, body, { legacy: true });
+
+      await refused(asActor(supervisor, () => service.record({ ...body, hours: '7.75' })));
+      await refused(asActor(colleague, () => service.record(body)));
+      expect(await rowsUnder(body.clientReference!)).toHaveLength(1);
+    });
+  });
+
+  describe('concurrent twins', () => {
+    it('replays a twin that committed while this request waited for the asset lock, not USAGE_PERIOD_OVERLAP', async () => {
+      // A takes the lock and inserts, and is held there. B passes the first
+      // lookup (A is uncommitted), then waits on A's lock. A commits. B now
+      // holds the lock with A's overlapping period committed — and must replay
+      // A's record, not refuse it.
+      const body = reading();
+      const { held, release } = holdNextSubmission();
+      const first = asActor(supervisor, () => service.record(body));
+      await held;
+
+      const lookups = jest.spyOn(repository, 'findUsageByClientReference');
+      const second = asActor(supervisor, () => service.record(body));
+      await waitForBlocked(1);
+      // B's look before validation found nothing: only the one under the lock can.
+      expect(lookups).toHaveBeenCalledTimes(1);
+      await expect(lookups.mock.results[0]!.value).resolves.toBeNull();
+
+      release();
+      const [a, b] = await Promise.all([first, second]);
+
+      expect(b).toEqual(a);
+      expect(await rowsUnder(body.clientReference!)).toHaveLength(1);
+      expect(await eventsFor(a.id)).toBe(1);
+    });
+
+    it("refuses another caller's twin under the lock the same way", async () => {
+      const body = reading();
+      const { held, release } = holdNextSubmission();
+      const first = asActor(supervisor, () => service.record(body));
+      await held;
+
+      const second = asActor(colleague, () => service.record(body));
+      await waitForBlocked(1);
+      release();
+
+      await first;
+      await refused(second);
+    });
+
+    it('binds the unique-violation path too: a twin under the same reference on another machine', async () => {
+      // Two machines, two locks: B is not serialised behind A, passes both
+      // lookups while A is uncommitted, and its insert waits on A's row in the
+      // unique index. A commits; B's insert fails, and the row it then finds
+      // is another request's.
+      const body = reading();
+      const { held, release } = holdNextSubmission();
+      const first = asActor(supervisor, () => service.record(body));
+      await held;
+
+      const second = asActor(supervisor, () => service.record({ ...body, assetId: otherAssetId }));
+      await waitForBlocked(1);
+      release();
+
+      const a = await first;
+      await refused(second);
+      const rows = await rowsUnder(body.clientReference!);
+      expect(rows.map((row) => row.id)).toEqual([a.id]);
+      expect(rows[0]!.assetId).toBe(assetId);
+    });
+  });
+});
