@@ -35,6 +35,15 @@ const actorOf = (token: string): string =>
     }
   ).rastaUserId;
 
+/**
+ * PostgreSQL's clock: the producers stamp a milestone and its event with the transaction's `now()`
+ * (`src/shared/clock.ts`), so the test window is read from the same clock, not from Node's.
+ */
+const databaseNow = async (w: Wiring): Promise<number> =>
+  (
+    await w.prisma.client.$queryRawUnsafe<{ now: Date }[]>('SELECT clock_timestamp() AS now')
+  )[0]!.now.getTime();
+
 /** A valid ISO instant that lies within the test window [from, to] (epoch ms). */
 function expectInstantWithin(value: unknown, from: number, to: number): void {
   expect(typeof value).toBe('string');
@@ -172,8 +181,9 @@ describe('milestones of a signed contract', () => {
   describe('POST /v1/contracts/{id}/milestones', () => {
     it('the employer plans one: a date, not an instant, with its event and no free text on the topic', async () => {
       const c = await signed();
-      const from = Date.now();
+      const from = await databaseNow(w);
       const res = await plan(c.id, c.employerToken, body({ plannedShareBp: 2500 })).expect(201);
+      const to = await databaseNow(w);
       expect(res.body).toMatchObject({
         contractId: c.id,
         organizationId: c.employer,
@@ -188,6 +198,7 @@ describe('milestones of a signed contract', () => {
       const [row] = await milestoneRows(w, c.id);
       expect(row!.plannedDate.toISOString()).toBe('2026-12-01T00:00:00.000Z');
       expect(row!.firstReferencedAt).toBeNull();
+      expect(res.body.createdAt).toBe(row!.createdAt.toISOString());
 
       const events = await eventsOf(w.prisma, c.employer, 'CONTRACT_MILESTONE_PLANNED');
       expect(events).toHaveLength(1);
@@ -199,8 +210,10 @@ describe('milestones of a signed contract', () => {
         contractorOrganizationId: c.contractor,
         plannedBy: actorOf(c.employerToken),
       });
-      expectInstantWithin(plannedAt, from, Date.now());
-      expectInstantWithin(events[0]!.occurredAt, from, Date.now());
+      // One instant, the one the milestone was stored with (D-5), inside the window.
+      expectInstantWithin(plannedAt, from, to);
+      expect(plannedAt).toBe(row!.createdAt.toISOString());
+      expect(events[0]!.occurredAt).toBe(plannedAt);
       expectNoMilestoneContent(events, {
         titleFragment: 'Foundation',
         day: '2026-12-01',
@@ -335,7 +348,7 @@ describe('milestones of a signed contract', () => {
   describe('PATCH /v1/contracts/{id}/milestones/{milestoneId}', () => {
     it('changes what is given and leaves the rest; the version moves; the event names no content', async () => {
       const c = await signed();
-      const from = Date.now();
+      const from = await databaseNow(w);
       const made = (await plan(c.id, c.employerToken, body({ plannedShareBp: 1000 })).expect(201))
         .body;
 
@@ -358,9 +371,11 @@ describe('milestones of a signed contract', () => {
         plannedShareBp: null,
         version: 3,
       });
+      const to = await databaseNow(w);
       const [row] = await milestoneRows(w, c.id);
       expect(row).toMatchObject({ title: 'Piles complete', plannedShareBp: null, version: 3 });
       expect(row!.plannedDate.toISOString()).toBe('2027-01-15T00:00:00.000Z');
+      expect(moved.body.updatedAt).toBe(row!.updatedAt.toISOString());
 
       const events = await eventsOf(w.prisma, c.employer, 'CONTRACT_MILESTONE_CHANGED');
       expect(events).toHaveLength(2);
@@ -374,8 +389,10 @@ describe('milestones of a signed contract', () => {
           version: n + 2,
           changedBy: actorOf(c.employerToken),
         });
-        expectInstantWithin(changedAt, from, Date.now());
-        expectInstantWithin(event.occurredAt, from, Date.now());
+        // One instant, the one the change was stored with (D-5), inside the window.
+        expectInstantWithin(changedAt, from, to);
+        expect(changedAt).toBe([renamed, moved][n]!.body.updatedAt);
+        expect(event.occurredAt).toBe(changedAt);
       });
       expectNoMilestoneContent(events, {
         titleFragment: 'Piles',

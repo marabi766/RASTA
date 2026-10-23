@@ -3,10 +3,13 @@ import { ulid } from 'ulid';
 import type { PrismaClient } from '../src/generated/prisma';
 import { validateInventoryPayload, type InventoryEventName } from '../src/events/events';
 import { ReturnShipmentRepository } from '../src/return-shipment/return-shipment.repository';
+import { ENV } from '../src/tokens';
+import type { InventoryEnv } from '../src/config/env';
 import { actor, client, key, orgAdmin, startApi, type ApiHarness } from './api-helpers';
 import {
   cleanup,
   newOrderLineId,
+  newOrderReference,
   newOrganizationId,
   newProductId,
   newReturnRequestId,
@@ -67,19 +70,29 @@ describe('return inspection and resolution', () => {
     await closed.close();
   });
 
-  /** A RECEIVED return shipment of two lines (3 and 5 expected; `arrived` received). */
+  /**
+   * A RECEIVED return shipment of two lines (3 and 5 expected; `arrived` received), and what the
+   * suite chose for it — the person, the request, the order, the products — and the correlation id
+   * each request was answered under: the values its events must carry, known without reading them.
+   */
   async function received(harness: ApiHarness = api, arrived: [number, number] = [3, 5]) {
     const owner = org();
     const buyer = org();
-    const ops = client(harness, orgAdmin(owner));
+    const userId = `USR-APITEST-${ulid().slice(-8)}`;
+    const ops = client(harness, actor(owner, ['ORGANIZATION_ADMIN'], { rastaUserId: userId }));
     const warehouseId = (await ops.createWarehouse()).body.id as string;
     const lineA = newOrderLineId();
     const lineB = newOrderLineId();
+    const productA = newProductId();
+    const productB = newProductId();
+    const returnRequestId = newReturnRequestId();
+    const orderId = newOrderReference();
     const created = await ops.dispatchReturn(warehouseId, buyer, {
-      returnRequestId: newReturnRequestId(),
+      returnRequestId,
+      orderId,
       lines: [
-        { orderLineId: lineA, productId: newProductId(), quantity: 3 },
-        { orderLineId: lineB, productId: newProductId(), quantity: 5 },
+        { orderLineId: lineA, productId: productA, quantity: 3 },
+        { orderLineId: lineB, productId: productB, quantity: 5 },
       ],
     });
     expect(created.status).toBe(201);
@@ -91,7 +104,23 @@ describe('return inspection and resolution', () => {
       ],
     });
     expect(receipt.status).toBe(200);
-    return { owner, buyer, ops, warehouseId, lineA, lineB, id, harness };
+    const correlations = [created, receipt].map((r) => r.headers['x-correlation-id'] as string);
+    return {
+      owner,
+      buyer,
+      userId,
+      ops,
+      warehouseId,
+      lineA,
+      lineB,
+      productA,
+      productB,
+      returnRequestId,
+      orderId,
+      correlations,
+      id,
+      harness,
+    };
   }
 
   async function inspected(harness: ApiHarness = api, arrived: [number, number] = [3, 5]) {
@@ -105,6 +134,9 @@ describe('return inspection and resolution', () => {
       where: { organizationId, aggregateType: 'ReturnShipment', aggregateId },
       orderBy: [{ createdAt: 'asc' }, { streamSeq: 'asc' }],
     });
+  /** PostgreSQL's clock, which stamps every row and event of this service. */
+  const databaseNow = async (): Promise<Date> =>
+    (await raw.$queryRaw<{ now: Date }[]>`SELECT clock_timestamp() AS "now"`)[0]!.now;
   const stockRows = async (organizationId: string) =>
     raw.$queryRaw<{ n: bigint }[]>`
       SELECT (SELECT count(*) FROM "stock_item" WHERE "organization_id" = ${organizationId})
@@ -685,14 +717,19 @@ describe('return inspection and resolution', () => {
 
   describe('the STRICT returnShipmentId stream, to its end', () => {
     it('writes four events in one stream, consecutive from 1, every one valid against its contract', async () => {
+      // The window the events must be stamped in, read from the clock that stamps them
+      // (PostgreSQL, `src/shared/clock.ts`), not from this process's.
+      const from = await databaseNow();
       const s = await received();
-      await s.ops.inspectReturn(s.id, { note: 'cracked housing' });
-      await s.ops.resolveReturn(s.id, {
+      const inspection = await s.ops.inspectReturn(s.id, { note: 'cracked housing' });
+      const resolution = await s.ops.resolveReturn(s.id, {
         dispositions: [
           { orderLineId: s.lineA, disposition: 'RESTOCK', quantity: 3 },
           { orderLineId: s.lineB, disposition: 'SCRAP', quantity: 5 },
         ],
       });
+      expect([inspection.status, resolution.status]).toEqual([200, 200]);
+      const to = await databaseNow();
 
       const rows = await outboxOf(api, s.owner, s.id);
 
@@ -716,7 +753,110 @@ describe('return inspection and resolution', () => {
         ) as { returnShipmentVersion: number };
         expect(payload.returnShipmentVersion).toBe(index + 1);
       }
-      // By key and by value, ids left out: shipment ids (`RSH_<ulid>`) can contain any short word by chance.
+
+      // Every event whole, every field against what is known without reading the events: the
+      // suite's own choices, the tracking events and the shipment as the API reports them, the
+      // correlation id each request was answered under. An identifier, an actor or an instant is
+      // therefore exactly the one expected — none of them can carry anything else, a note included.
+      const tracking = (await s.ops.returnTracking(s.id)).body.events as {
+        id: string;
+        type: string;
+        occurredAt: string;
+      }[];
+      expect(tracking.map((t) => t.type)).toEqual([
+        'IN_TRANSIT',
+        'RECEIVED',
+        'INSPECTED',
+        'RESOLVED',
+      ]);
+      const shipment = (await s.ops.returnShipment(s.id)).body as Record<string, unknown>;
+      const at = tracking.map((t) => t.occurredAt);
+      expect([shipment.receivedAt, shipment.inspectedAt, shipment.resolvedAt]).toEqual(at.slice(1));
+      for (const instant of at) {
+        expect(new Date(instant).toISOString()).toBe(instant);
+        expect(Date.parse(instant)).toBeGreaterThanOrEqual(from.getTime());
+        expect(Date.parse(instant)).toBeLessThanOrEqual(to.getTime());
+      }
+      const correlations = [
+        ...s.correlations,
+        inspection.headers['x-correlation-id'] as string,
+        resolution.headers['x-correlation-id'] as string,
+      ];
+      const facts = (index: number) => ({
+        returnShipmentId: s.id,
+        organizationId: s.owner,
+        returnRequestId: s.returnRequestId,
+        orderId: s.orderId,
+        buyerOrganizationId: s.buyer,
+        destinationWarehouseId: s.warehouseId,
+        trackingEventId: tracking[index]!.id,
+        returnShipmentVersion: index + 1,
+      });
+      const lines = [
+        { orderLineId: s.lineA, productId: s.productA, expectedQuantity: 3 },
+        { orderLineId: s.lineB, productId: s.productB, expectedQuantity: 5 },
+      ];
+      const payloads = [
+        { ...facts(0), lines, dispatchedBy: s.userId, dispatchedAt: at[0] },
+        {
+          ...facts(1),
+          lines: lines.map((line) => ({ ...line, receivedQuantity: line.expectedQuantity })),
+          receivedBy: s.userId,
+          receivedAt: at[1],
+        },
+        { ...facts(2), reportDocumentId: null, inspectedBy: s.userId, inspectedAt: at[2] },
+        {
+          ...facts(3),
+          dispositions: [
+            { orderLineId: s.lineA, disposition: 'RESTOCK', quantity: 3 },
+            { orderLineId: s.lineB, disposition: 'SCRAP', quantity: 5 },
+          ],
+          resolvedBy: s.userId,
+          resolvedAt: at[3],
+        },
+      ];
+      const producerVersion = api.app.get<InventoryEnv>(ENV).SERVICE_VERSION;
+      // The contract orders neither the lines nor the dispositions: compared by order line.
+      const byLine = (payload: Record<string, unknown>) => {
+        const sorted = (rows: unknown) =>
+          [...(rows as { orderLineId: string }[])].sort((a, b) =>
+            a.orderLineId.localeCompare(b.orderLineId),
+          );
+        return {
+          ...payload,
+          ...('lines' in payload ? { lines: sorted(payload.lines) } : {}),
+          ...('dispositions' in payload ? { dispositions: sorted(payload.dispositions) } : {}),
+        };
+      };
+      rows.forEach((row, index) => {
+        const { traceparent, payload, ...envelope } = row.payload as Record<string, unknown>;
+        // Present only when the request was traced; never anything but the W3C form.
+        if (traceparent !== undefined) {
+          expect(traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+        }
+        expect(envelope).toEqual({
+          eventId: row.id,
+          eventName: row.eventName,
+          eventVersion: 1,
+          occurredAt: at[index],
+          producer: 'inventory-service',
+          producerVersion,
+          aggregateType: 'ReturnShipment',
+          aggregateId: s.id,
+          tenantId: s.owner,
+          correlationId: correlations[index],
+          actor: { type: 'USER', id: s.userId },
+          streamSeq: index + 1,
+          streamKey: s.id,
+        });
+        expect(byLine(payload as Record<string, unknown>)).toEqual(byLine(payloads[index]!));
+      });
+      expect(rows.map((row) => row.id)).toEqual(
+        rows.map(() => expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/)),
+      );
+
+      // And by key and by value, the pinned ids, actors and instants left out: shipment ids
+      // (`RSH_<ulid>`) can contain any short word by chance.
       const forbidden = /cracked|Road freight|WB-2001|refund|amount/i;
       const walk = (key: string, value: unknown): void => {
         if (Array.isArray(value)) return value.forEach((item) => walk(key, item));

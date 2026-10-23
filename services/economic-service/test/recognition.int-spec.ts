@@ -444,6 +444,8 @@ describe('levels and badges (COM-012 criterion 2)', () => {
 
   describe('the caller standing', () => {
     let pointsVersion: number;
+    /** The rule version as it was created: what the standing must name, known without reading it. */
+    let pointsRule: { id: string; createdAt: string };
 
     beforeAll(async () => {
       // Twenty-five reward points per usage record, in orgA only.
@@ -452,8 +454,9 @@ describe('levels and badges (COM-012 criterion 2)', () => {
         .set('authorization', asRuleAdmin())
         .send({ organizationId: orgA, triggerEvent: 'USAGE_RECORDED', points: 25 })
         .expect(201);
-      pointsVersion = (await createVersion(await againstCurrent(POINTS_VERSION)).expect(201)).body
-        .version as number;
+      const created = (await createVersion(await againstCurrent(POINTS_VERSION)).expect(201)).body;
+      pointsVersion = created.version as number;
+      pointsRule = { id: created.id as string, createdAt: created.createdAt as string };
 
       await usage(orgA, ALICE);
       // Alice in B: a fact, but no rule pays points there.
@@ -492,10 +495,18 @@ describe('levels and badges (COM-012 criterion 2)', () => {
       const text = JSON.stringify(response.body);
       expect(text).not.toContain('سطح سه');
       expect(text).not.toContain('SAMPLE_FIFTY');
-      // By field, not by text: the rule's id (`RCR_<ulid>`) can contain any short word by chance.
+      // By field and by value, not by text: the rule's id (`RCR_<ulid>`) can contain any short word
+      // by chance. What is left out of the values looked at is pinned exactly instead: the rule as it
+      // was created, the organization and the person asked about, and a valid ISO instant.
+      expect(response.body.rule).toMatchObject(pointsRule);
+      expect(response.body).toMatchObject({ organizationId: orgA, userId: ALICE });
+      expect(new Date(response.body.asOf).toISOString()).toBe(response.body.asOf);
       const keys: string[] = [];
+      const values: string[] = [];
       JSON.stringify(response.body, (key, value: unknown) => {
         if (key !== '') keys.push(key);
+        const pinned = /^(id|createdAt|asOf|organizationId|userId)$/.test(key);
+        if (typeof value === 'string' && !pinned) values.push(value);
         return value;
       });
       expect(Object.keys(response.body).sort()).toEqual(
@@ -503,6 +514,10 @@ describe('levels and badges (COM-012 criterion 2)', () => {
       );
       expect(Object.keys(response.body.level).sort()).toEqual(['name', 'rank', 'threshold']);
       expect(keys.filter((key) => /next|remaining|streak|progress|benefit/i.test(key))).toEqual([]);
+      expect(values.length).toBeGreaterThan(0);
+      expect(
+        values.filter((value) => /next|remaining|streak|progress|benefit/i.test(value)),
+      ).toEqual([]);
     });
 
     it('is the same person’s, but another organization’s, in B (tenant isolation)', async () => {
