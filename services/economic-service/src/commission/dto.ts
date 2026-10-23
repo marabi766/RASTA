@@ -9,8 +9,10 @@ import { cursorQueryParameter } from '../shared/cursor';
  *
  * **The rate is a required integer in basis points.** No default is offered
  * here and none is filled in downstream: the product document says the precise
- * rate "ساختگی و پیشینی نیست" and docs/24 Q-08 is open, so a schema default
- * would be this service inventing the very number it is forbidden to invent.
+ * rate "ساختگی و پیشینی نیست", and docs/24 Q-08's answer is a rule the operator
+ * writes (0% per line for the pilot), so a schema default would be this
+ * service inventing the very number it is forbidden to invent. `0` is a rate
+ * like any other: accepted, matched, and reported as matched.
  *
  * `rateBasisPoints` is an integer for the reason ADR-022 gives: 2.5% must be
  * exactly 250, and a decimal percentage cannot promise that.

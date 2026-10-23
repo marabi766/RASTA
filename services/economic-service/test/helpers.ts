@@ -182,8 +182,8 @@ export interface Wiring {
  * also starts two Kafka consumers, an outbox relay and a reconciliation timer;
  * a suite that wanted a repository would be starting a broker subscription.
  */
-export function wire(prisma: PrismaService): Wiring {
-  const env = testEnv();
+/** `env` defaults to {@link testEnv}; a suite that needs another setting passes its own. */
+export function wire(prisma: PrismaService, env: EconomicEnv = testEnv()): Wiring {
   const ledgerRepository = new LedgerRepository(prisma);
   const ledger = new LedgerService(ledgerRepository, prisma, env, silentLogger);
   const walletRepository = new WalletRepository(prisma);
@@ -213,6 +213,7 @@ export function wire(prisma: PrismaService): Wiring {
     transactionRepository,
     commissions,
     hierarchy,
+    env,
   );
 
   const paymentReconciliation = new PaymentReconciliationRepository(prisma, env);

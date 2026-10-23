@@ -227,6 +227,17 @@ const PAYLOADS = {
     currency: 'IRR',
     settledAt: '2026-08-29T00:00:05.000Z',
   },
+  SETTLEMENT_REFUSED: {
+    transactionId: TXN,
+    organizationId: ORG,
+    payerOrganizationId: ORG,
+    payeeOrganizationId: 'ORG-B',
+    transactionType: 'MARKETPLACE_ORDER',
+    businessLine: 'PARTS',
+    reason: 'NO_ACTIVE_RULE' as const,
+    refusedBy: 'USR-1',
+    refusedAt: '2026-08-29T00:00:05.000Z',
+  },
   JOURNAL_POSTED: {
     journalId: JOURNAL,
     organizationId: ORG,
@@ -353,6 +364,7 @@ const EXPECTED: { [N in EconomicEventName]: { scope: PartitionScope; key: string
   REWARD_GRANTED: { scope: 'REWARD', key: 'RWD_1' },
   REWARD_LEVEL_CHANGED: { scope: 'REWARD_SUBJECT', key: `${ORG}:USR-1` },
   SETTLEMENT_COMPLETED: { scope: 'TRANSACTION', key: TXN },
+  SETTLEMENT_REFUSED: { scope: 'TRANSACTION', key: TXN },
   JOURNAL_POSTED: { scope: 'TRANSACTION', key: TXN },
   COMMISSION_RULE_CHANGED: { scope: 'RULE', key: 'CMR_1' },
   REWARD_RULE_CHANGED: { scope: 'RULE', key: 'RWR_1' },
@@ -373,13 +385,13 @@ describe('every published economic event has a partition decision', () => {
     expect(resolve(name)).toEqual(EXPECTED[name]);
   });
 
-  it('covers exactly the twenty-three events the catalogue publishes', () => {
+  it('covers exactly the twenty-four events the catalogue publishes', () => {
     // Guards the table above against drift in both directions: an event added
     // to the catalogue without a row here, and a row left behind for an event
     // that no longer exists.
     expect(Object.keys(EXPECTED).sort()).toEqual([...NAMES].sort());
     expect(Object.keys(PARTITION_KEY_POLICY).sort()).toEqual([...NAMES].sort());
-    expect(NAMES).toHaveLength(23);
+    expect(NAMES).toHaveLength(24);
   });
 });
 
@@ -393,6 +405,7 @@ describe('a transaction is one ordered stream', () => {
       'PAYMENT_COMPLETED',
       'COMMISSION_APPLIED',
       'SETTLEMENT_COMPLETED',
+      'SETTLEMENT_REFUSED',
       'JOURNAL_POSTED',
       'TRANSACTION_STATUS_CHANGED',
     ] as const;
@@ -519,6 +532,7 @@ describe('aggregate identity is untouched by this change', () => {
       REWARD_GRANTED: 'Reward',
       REWARD_LEVEL_CHANGED: 'RewardBalance',
       SETTLEMENT_COMPLETED: 'Settlement',
+      SETTLEMENT_REFUSED: 'Transaction',
       JOURNAL_POSTED: 'Journal',
       COMMISSION_RULE_CHANGED: 'CommissionRule',
       REWARD_RULE_CHANGED: 'RewardRule',

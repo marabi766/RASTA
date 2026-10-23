@@ -1,5 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
+import { BUSINESS_LINES, ERROR_CODES, type BusinessLine } from '@rasta/contracts';
 import { RastaError, runUnscoped } from '@rasta/nest-common';
 import { withFinancialSpan } from '@rasta/observability';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
@@ -11,19 +12,21 @@ import {
   type LockedTransaction,
 } from '../transaction/transaction.repository';
 import { CommissionService } from '../commission/commission.service';
-import type { CommissionOutcome } from '../commission/rule-engine';
+import type { CommissionDecision, CommissionOutcome } from '../commission/rule-engine';
 import { assertSufficient, balancesFrom } from '../wallet/balances';
 import { nextStatus } from '../transaction/state-machine';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { formatMinor } from '../shared/money';
 import { after, resolveCursor } from '../shared/cursor';
+import { databaseNow } from '../shared/database-clock';
 import type { Prisma } from '../generated/prisma';
 import {
   financialTransactionDuration,
   settlementFailuresTotal,
   settlementsCompletedTotal,
 } from '../observability/metrics';
-import { SERVICE_NAME } from '../config/env';
+import { SERVICE_NAME, type EconomicEnv } from '../config/env';
+import { ENV } from '../tokens';
 import type { DraftEntry } from '../ledger/journal';
 import type { IdempotentAnswer } from '../shared/idempotency';
 import {
@@ -55,6 +58,7 @@ import { OrganizationHierarchy } from '../organization/organization-hierarchy';
  *   check the state machine                        ← never from DISPUTED
  *   lock both wallets, in ascending id order       ← no deadlock, ever
  *   charge the pricing recorded with the fact      ← not at today's rate
+ *     (none recorded, and a line: the rule in force now, or refuse — Q-29)
  *   post ONE balanced journal                      ← escrow → payee + revenue
  *   release the hold                               ← no second journal
  *   recompute both balances from the ledger        ← never incremented
@@ -73,6 +77,19 @@ import { OrganizationHierarchy } from '../organization/organization-hierarchy';
  * response to an unexplained failure is a larger risk than the failure. The
  * funds stay in escrow, `rasta_economic_settlement_failures_total` rises, and
  * a person decides.
+ *
+ * ## No rule for the line: refused, not settled at zero (docs/24 Q-29)
+ *
+ * With `ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE` on — the default outside
+ * development and test — a transaction whose business line no active rule
+ * prices is not settled: `422 NO_ACTIVE_RULE`, nothing written, the funds where
+ * they were, `rasta_economic_settlement_failures_total{reason="no_active_rule"}`
+ * and a `SETTLEMENT_REFUSED` record of who tried and why. Settling it again
+ * once a rule for the line is in force succeeds at that rule — a 0% rule
+ * included, which is how the pilot runs (Q-08). Every line bears commission
+ * until docs/24 Q-130 says otherwise ({@link COMMISSION_BEARING_LINES}). Off —
+ * development and test unless turned on — it settles at zero, recorded
+ * `NO_ACTIVE_RULE`, as it always has.
  *
  * ## The reward step is deliberately outside
  *
@@ -93,6 +110,7 @@ export class SettlementService {
     private readonly transactions: TransactionRepository,
     private readonly commissions: CommissionService,
     private readonly hierarchy: OrganizationHierarchy,
+    @Inject(ENV) private readonly env: EconomicEnv,
   ) {}
 
   /**
@@ -131,6 +149,7 @@ export class SettlementService {
       this.logger.warn(
         `Settlement of ${transactionId} failed (${reasonOf(error)}); funds remain held for review`,
       );
+      if (error instanceof NoActiveRuleRefusal) await this.recordRefusal(error, settledBy);
       throw error;
     } finally {
       stop();
@@ -207,17 +226,10 @@ export class SettlementService {
     }
 
     // What was decided when the source fact was recorded (docs/23 D-057);
-    // decided now, at `occurredAt`, only for an obligation older than that.
-    const decision = await this.commissions.chargeFor(tx, {
-      organizationId: payeeOrganizationId,
-      transactionType: transaction.transactionType,
-      businessLine: transaction.businessLine,
-      occurredAt: transaction.occurredAt,
-      grossAmountMinor: transaction.grossAmountMinor,
-      currency: transaction.currency,
-      pricingOutcome: transaction.pricingOutcome,
-      pricingRuleId: transaction.pricingRuleId,
-    });
+    // decided now, at `occurredAt`, only for an obligation older than that —
+    // and, failing closed where that found no rule, the rule in force now or a
+    // refusal (`charge`, docs/24 Q-29).
+    const decision = await this.charge(tx, transaction, payeeOrganizationId);
 
     const netAmountMinor = transaction.grossAmountMinor - decision.amountMinor;
     if (netAmountMinor < 0n) {
@@ -350,6 +362,99 @@ export class SettlementService {
       },
       authority,
     };
+  }
+
+  /**
+   * The commission this settlement charges, or the fail-closed refusal
+   * (docs/24 Q-29).
+   *
+   * The pricing recorded with the fact decides (docs/23 D-057). When it found
+   * no rule, the transaction has a line and the policy is on, the rule in
+   * force for the line now decides instead ({@link CommissionService.decideAtSettlement}),
+   * in this transaction and under the pricing lock — and with none, nothing is
+   * settled. A transaction recorded without a line is not refused: no rule can
+   * be written for one any more (D-057), so it could never settle.
+   */
+  private async charge(
+    tx: ExtendedPrismaClient,
+    transaction: LockedTransaction,
+    payeeOrganizationId: string,
+  ): Promise<CommissionDecision> {
+    const recorded = await this.commissions.chargeFor(tx, {
+      organizationId: payeeOrganizationId,
+      transactionType: transaction.transactionType,
+      businessLine: transaction.businessLine,
+      occurredAt: transaction.occurredAt,
+      grossAmountMinor: transaction.grossAmountMinor,
+      currency: transaction.currency,
+      pricingOutcome: transaction.pricingOutcome,
+      pricingRuleId: transaction.pricingRuleId,
+    });
+    const line = transaction.businessLine;
+    if (recorded.matched || !this.requiresRule(line)) return recorded;
+
+    const now = await this.commissions.decideAtSettlement(tx, {
+      organizationId: payeeOrganizationId,
+      transactionType: transaction.transactionType,
+      businessLine: line,
+      grossAmountMinor: transaction.grossAmountMinor,
+      currency: transaction.currency,
+    });
+    if (now.matched) return now;
+    throw new NoActiveRuleRefusal({
+      transactionId: transaction.id,
+      organizationId: transaction.organizationId,
+      payeeOrganizationId,
+      transactionType: transaction.transactionType,
+      businessLine: line,
+    });
+  }
+
+  /** Whether a settlement of this line must find a rule (Q-29): the policy is on and the line bears commission. */
+  private requiresRule(line: BusinessLine | null): line is BusinessLine {
+    return (
+      this.env.ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE &&
+      line !== null &&
+      COMMISSION_BEARING_LINES.has(line)
+    );
+  }
+
+  /**
+   * The audit record of a refused settlement (`SETTLEMENT_REFUSED`), in a
+   * transaction of its own: the settlement's rolled back with everything it
+   * would have written, this record included had it been there. Recorded once
+   * the refusal is certain, and only then — it moves nothing.
+   *
+   * A failure to record it does not replace the refusal the caller is owed:
+   * it is logged, and the metric has already counted the refusal.
+   */
+  private async recordRefusal(refusal: NoActiveRuleRefusal, refusedBy: string): Promise<void> {
+    const { subject } = refusal;
+    try {
+      await this.prisma.transaction(async (tx) => {
+        const refusedAt = await databaseNow(tx);
+        await this.ledger.enqueue(tx, {
+          eventName: ECONOMIC_EVENTS.SETTLEMENT_REFUSED,
+          aggregateId: subject.transactionId,
+          organizationId: subject.organizationId,
+          payload: {
+            transactionId: subject.transactionId,
+            organizationId: subject.organizationId,
+            payerOrganizationId: subject.organizationId,
+            payeeOrganizationId: subject.payeeOrganizationId,
+            transactionType: subject.transactionType,
+            businessLine: subject.businessLine,
+            reason: 'NO_ACTIVE_RULE',
+            refusedBy,
+            refusedAt: refusedAt.toISOString(),
+          },
+        });
+      });
+    } catch (error) {
+      this.logger.error(
+        `The refusal of settlement ${subject.transactionId} (NO_ACTIVE_RULE) was not recorded (${(error as Error).name})`,
+      );
+    }
   }
 
   /**
@@ -539,6 +644,44 @@ export interface SettlementResult {
 }
 
 /**
+ * The business lines that bear commission, so that settling one without an
+ * active rule is refused (docs/24 Q-29): **all of them**, until docs/24 Q-130
+ * says which do not. Answering it is narrowing this set — and the docs/24 entry
+ * of each line taken out.
+ */
+export const COMMISSION_BEARING_LINES: ReadonlySet<BusinessLine> = new Set(BUSINESS_LINES);
+
+/** The fixed text of the refusal; nothing of the request is in it (S-09). */
+export const NO_ACTIVE_RULE_MESSAGE =
+  'No active commission rule covers this transaction’s business line, so it was not settled and nothing moved. ' +
+  'Settle it again once a rule for the line — a 0% rule included — is in force';
+
+/**
+ * A settlement refused for want of a rule (docs/24 Q-29): `422 NO_ACTIVE_RULE`.
+ * Carries whose transaction and which line, for the refusal's audit record;
+ * the client sees the fixed message only.
+ */
+export class NoActiveRuleRefusal extends RastaError {
+  constructor(
+    readonly subject: {
+      transactionId: string;
+      organizationId: string;
+      payeeOrganizationId: string;
+      transactionType: string;
+      businessLine: BusinessLine;
+    },
+  ) {
+    super(ERROR_CODES.NO_ACTIVE_RULE, NO_ACTIVE_RULE_MESSAGE, {
+      internalContext: {
+        transactionId: subject.transactionId,
+        businessLine: subject.businessLine,
+        transactionType: subject.transactionType,
+      },
+    });
+  }
+}
+
+/**
  * A small closed set of failure reasons, for the metric label.
  *
  * Bounded deliberately: a label taken from an error message would have
@@ -557,6 +700,8 @@ function reasonOf(error: unknown): string {
       return 'business_rule';
     case 'LEDGER_UNBALANCED':
       return 'unbalanced';
+    case 'NO_ACTIVE_RULE':
+      return 'no_active_rule';
     case 'OPTIMISTIC_LOCK_FAILED':
       return 'concurrent_settlement';
     default:

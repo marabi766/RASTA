@@ -112,3 +112,41 @@ tests:
       - eval_time: 20m
         alertname: RastaPaymentReconcilerStalled
         exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaSettlementNoActiveRule
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # One refusal at minute 3; the other reasons never page this alert.
+      - series: 'rasta_economic_settlement_failures_total{job="economic-service",instance="host.docker.internal:3112",environment="local",service="economic-service",reason="no_active_rule"}'
+        values: '0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+      - series: 'rasta_economic_settlement_failures_total{job="economic-service",instance="host.docker.internal:3112",environment="local",service="economic-service",reason="insufficient_balance"}'
+        values: '0+1x25'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Settlements refused: no active commission rule for the line'
+              description: 'At least one settlement in the last 15 minutes was refused with 422 NO_ACTIVE_RULE: no active commission rule covers its business line, and settlement fails closed. Nothing moved and the funds stay held; the payee is not paid until a rule for the line is in force. The SETTLEMENT_REFUSED events name the transactions and lines; this alert deliberately carries none.'
+              runbook: docs/runbooks/settlement-no-active-rule.md
+      # Fifteen minutes with no new refusal: it clears.
+      - eval_time: 25m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []
+
+  # Other settlement failures raise nothing here.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_economic_settlement_failures_total{job="economic-service",instance="host.docker.internal:3112",environment="local",service="economic-service",reason="insufficient_balance"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []

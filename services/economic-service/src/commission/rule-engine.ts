@@ -12,6 +12,9 @@ import { clampCommission, commissionFor } from '../shared/money';
  * `commission_rule` row. There is no fallback rate, no default, and no
  * "reasonable" percentage anywhere in this service — **no active rule means no
  * commission**, and that is a result rather than an error (docs/10 § 10.7).
+ * What a settlement does with that result is its policy, not this engine's: in
+ * production it refuses to settle a line no rule prices (docs/24 Q-29,
+ * `SettlementService`). A 0% rule is a rule — it matches, and says so (Q-08).
  *
  * Everything here is pure. Rules go in, a decision comes out, and the decision
  * carries the rule it came from so the charge stays explicable after the rule

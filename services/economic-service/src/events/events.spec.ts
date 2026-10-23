@@ -28,7 +28,7 @@ import {
 const EVENT_NAMES = Object.values(ECONOMIC_EVENTS) as EconomicEventName[];
 
 describe('the catalogue', () => {
-  it('publishes exactly the twenty-three events docs/07 § 7.5 lists', () => {
+  it('publishes exactly the twenty-four events docs/07 § 7.5 lists', () => {
     expect(EVENT_NAMES.sort()).toEqual(
       [
         'COMMISSION_APPLIED',
@@ -52,6 +52,7 @@ describe('the catalogue', () => {
         'REWARD_LEVEL_CHANGED',
         'REWARD_RULE_CHANGED',
         'SETTLEMENT_COMPLETED',
+        'SETTLEMENT_REFUSED',
         'TRANSACTION_STATUS_CHANGED',
         'WALLET_OPENED',
       ].sort(),

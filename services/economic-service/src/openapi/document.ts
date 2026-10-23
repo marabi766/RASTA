@@ -216,6 +216,22 @@ const STATUS_TEXT: Record<number, string> = {
 };
 
 /**
+ * A status said more precisely for one route, where it has a refusal of its
+ * own that a client branches on.
+ */
+const ROUTE_STATUS_TEXT: Record<string, Partial<Record<number, string>>> = {
+  'POST /v1/settlements': {
+    422:
+      'A business rule refuses the settlement, and nothing moved: INSUFFICIENT_BALANCE, ' +
+      'LEDGER_UNBALANCED, a domain rule (BUSINESS_RULE_VIOLATION) — or NO_ACTIVE_RULE: no ' +
+      'active commission rule covers the transaction’s business line, and settlement fails ' +
+      'closed (docs/24 Q-29; on outside development and test, ' +
+      '`ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE`). The funds stay held; the same ' +
+      'settlement succeeds once a rule for the line — a 0% rule included — is in force',
+  },
+};
+
+/**
  * The same statuses on the internal routes (`/v1/internal/…`, ADR-061 § 4),
  * which answer one named service and no user at all.
  */
@@ -323,7 +339,10 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       for (const status of ERRORS[key] ?? []) {
         operation.responses[String(status)] = {
           description:
-            (internal ? INTERNAL_STATUS_TEXT[status] : undefined) ?? STATUS_TEXT[status] ?? 'Error',
+            ROUTE_STATUS_TEXT[key]?.[status] ??
+            (internal ? INTERNAL_STATUS_TEXT[status] : undefined) ??
+            STATUS_TEXT[status] ??
+            'Error',
           ...(status === 409 && IDEMPOTENT_ROUTES.has(key)
             ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } }
             : {}),
