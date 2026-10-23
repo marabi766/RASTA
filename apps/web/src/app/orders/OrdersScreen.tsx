@@ -16,6 +16,8 @@ import {
   orderStatusLabel,
   type OrderListRole,
 } from '@/lib/order-fields';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
+import type { DemoMode } from '@/lib/demo-mode';
 import type { Order, OrderListQuery, OrderPage, ReadResult } from '@/server/orders';
 
 /**
@@ -37,6 +39,8 @@ import type { Order, OrderListQuery, OrderPage, ReadResult } from '@/server/orde
 export interface OrdersScreenProps {
   readonly result: ReadResult<OrderPage>;
   readonly query: OrderListQuery;
+  /** What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or that it is unknown. */
+  readonly demoMode: DemoMode;
 }
 
 function hrefWith(query: OrderListQuery, changes: Partial<OrderListQuery>): string {
@@ -108,16 +112,17 @@ function OrderRow({ order }: { order: Order }) {
   );
 }
 
-export function OrdersScreen({ result, query }: OrdersScreenProps) {
+export function OrdersScreen({ result, query, demoMode }: OrdersScreenProps) {
   return (
     <div className="flex flex-col gap-4">
+      <DemoModeNotice mode={demoMode} />
       <SideTabs query={query} />
       <OrdersBody result={result} query={query} />
     </div>
   );
 }
 
-function OrdersBody({ result, query }: OrdersScreenProps) {
+function OrdersBody({ result, query }: Omit<OrdersScreenProps, 'demoMode'>) {
   if (result.kind === 'FORBIDDEN') {
     return <NoAccessState description="فهرست سفارش‌های این سازمان در اختیار شما نیست." />;
   }

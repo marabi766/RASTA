@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useActionState, useCallback, useEffect, useState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
+import { ProviderUnknownRefusal } from '@/app/DemoModeNotice';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { formatMoney, toPersianDigits } from '@/lib/format';
 import {
@@ -266,6 +267,10 @@ function OrderForm({
 function FormBanner({ state }: { state: PlaceOrderFormState }) {
   if (state.kind === 'INVALID' && state.message) {
     return <Alert tone="warning">{state.message}</Alert>;
+  }
+
+  if (state.kind === 'REFUSED' && state.reason === 'PROVIDER_UNKNOWN') {
+    return <ProviderUnknownRefusal />;
   }
 
   if (state.kind === 'REFUSED') {

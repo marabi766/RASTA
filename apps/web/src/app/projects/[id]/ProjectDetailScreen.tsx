@@ -2,6 +2,8 @@ import { EmptyState, ErrorState, Identifier, NoAccessState, Section, StatusBadge
 import { formatJalaliDateLong, toPersianDigits } from '@/lib/format';
 import { projectStatusLabel } from '@/lib/project-fields';
 import type { ProjectDetail, ReadResult } from '@/server/projects';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
+import type { DemoMode } from '@/lib/demo-mode';
 
 import { formatEstimate } from '../ProjectsScreen';
 
@@ -19,9 +21,11 @@ import { formatEstimate } from '../ProjectsScreen';
 
 export interface ProjectDetailScreenProps {
   readonly result: ReadResult<ProjectDetail>;
+  /** What the provider says (`fetchDemoMode`, Q-14), over the estimate. Nothing here moves money. */
+  readonly demoMode: DemoMode;
 }
 
-export function ProjectDetailScreen({ result }: ProjectDetailScreenProps) {
+export function ProjectDetailScreen({ result, demoMode }: ProjectDetailScreenProps) {
   if (result.kind === 'FORBIDDEN') {
     return <NoAccessState description="این پروژه در اختیار شما نیست." />;
   }
@@ -49,6 +53,7 @@ export function ProjectDetailScreen({ result }: ProjectDetailScreenProps) {
 
   return (
     <div className="flex flex-col gap-6">
+      <DemoModeNotice mode={demoMode} />
       <Section headingId="project-summary" title={project.title}>
         <div className="flex flex-wrap items-center gap-3">
           <StatusBadge status={project.status} label={projectStatusLabel(project.status)} />

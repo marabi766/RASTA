@@ -10,6 +10,8 @@ import {
   StatusBadge,
   TableScroll,
 } from '@/ui';
+import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
+import { MONEY_EFFECTS, mayOffer, type DemoMode } from '@/lib/demo-mode';
 import { formatShareBp } from '@/lib/contract-fields';
 import { IRR, formatJalaliDateTime, formatMoney, toPersianDigits } from '@/lib/format';
 import { roleLabel } from '@/lib/organization-fields';
@@ -235,6 +237,8 @@ export interface StatementDetailScreenProps {
   /** A command this session confirmed just now (`server/flash.ts`), if any. */
   readonly notice?: StatementCommand;
   readonly pageHref: string;
+  /** What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or that it is unknown. */
+  readonly demoMode: DemoMode;
 }
 
 export function StatementDetailScreen({
@@ -246,12 +250,20 @@ export function StatementDetailScreen({
   sessionMaxAgeSeconds,
   notice,
   pageHref,
+  demoMode,
 }: StatementDetailScreenProps) {
   if (result.kind !== 'OK') return <Failure result={result} />;
   const statement = result.data;
+  // Withheld while the provider is unknown only if it moves money (Q-14). None of these does:
+  // even the last approval only records the obligation that a separate settlement pays.
+  const shown = offered.filter(({ command }) =>
+    mayOffer(demoMode, MONEY_EFFECTS.statement[command]),
+  );
+  const withheld = shown.length < offered.length;
 
   return (
     <div className="flex flex-col gap-6">
+      <DemoModeNotice mode={demoMode} />
       {notice ? <Alert tone="success">{NOTICE_MESSAGES[notice]}</Alert> : null}
 
       <Section
@@ -330,10 +342,14 @@ export function StatementDetailScreen({
         </Alert>
       ) : null}
 
+      {withheld ? (
+        <MoneyActionWithheld title="اقدام‌های مالی این صورت‌وضعیت اکنون در دسترس نیست" />
+      ) : null}
+
       <StatementCommands
         contractId={statement.contractId}
         statementId={statement.id}
-        offered={offered}
+        offered={shown}
         csrfToken={csrfToken}
         binding={binding}
         sessionMaxAgeSeconds={sessionMaxAgeSeconds}

@@ -1,4 +1,5 @@
 import { render } from '@testing-library/react';
+import type { DemoMode } from '@/lib/demo-mode';
 import { axe } from 'jest-axe';
 
 import { OffersScreen } from './OffersScreen';
@@ -38,9 +39,16 @@ const PRODUCT: Product = {
 function render_(
   product: ReadResult<Product> = { kind: 'OK', data: PRODUCT },
   offers: ReadResult<OffersPage> = { kind: 'OK', data: { items: [OFFER] } },
+  demoMode: DemoMode = 'REAL',
 ) {
   return render(
-    <OffersScreen product={product} offers={offers} productId="PRD_1" sort="PRICE_ASC" />,
+    <OffersScreen
+      product={product}
+      offers={offers}
+      productId="PRD_1"
+      sort="PRICE_ASC"
+      demoMode={demoMode}
+    />,
   );
 }
 
@@ -109,5 +117,17 @@ describe('the offers table', () => {
   it('has no accessibility violations', async () => {
     const { container } = render_();
     expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe('the offers page: «حالت نمایشی» (Q-14)', () => {
+  it('is drawn when the provider is simulated', () => {
+    const view = render_(undefined, undefined, 'SIMULATED');
+    expect(view.getByText('حالت نمایشی')).toBeInTheDocument();
+  });
+
+  it('is absent when it is not', () => {
+    const view = render_(undefined, undefined, 'REAL');
+    expect(view.queryByText('حالت نمایشی')).toBeNull();
   });
 });

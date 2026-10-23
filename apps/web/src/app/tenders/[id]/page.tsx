@@ -6,6 +6,7 @@ import { BID_COMMANDS } from '@/lib/bid-fields';
 import { OWNER_DONE } from '@/lib/tender-owner-fields';
 import { FLASH_PARAM } from '@/lib/form-fields';
 import { currentSession } from '@/server/current-session';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { webServerEnv } from '@/server/env';
 import { readFlash } from '@/server/flash';
 import { safeReturnTo } from '@/server/login-attempt';
@@ -58,6 +59,7 @@ import {
 import type { WebSession } from '@/server/session';
 import { tenderDetailPath } from '@/lib/tender-fields';
 import { PortalSidebar } from '@/app/PortalSidebar';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
 
 import { BidCommands } from './BidCommands';
 import { bidCommandOffers } from './bid-offers';
@@ -97,6 +99,11 @@ import { OpenTenderDetailScreen, OwnBidSection, OwnTenderDetailScreen } from './
  * `assertCanBid`): the service audits every such read. The forms are the ones
  * `bidOffers` says the service would accept now; it decides again on every
  * request. No other bid is ever asked for.
+ *
+ * Every door draws `DemoModeNotice` (Q-14): the bid form takes a price, and the
+ * owner's opened bids and the award show them. None of these commands moves
+ * money — a bid is an offer, an award fixes the contract's amount — so an
+ * unknown provider is said, not used to withhold them.
  */
 export const dynamic = 'force-dynamic';
 
@@ -116,6 +123,10 @@ export default async function TenderPage({
       `/login?returnTo=${encodeURIComponent(safeReturnTo(tenderDetailPath(id, requested)))}`,
     );
   }
+
+  // Asked alongside the tender's own reads, and drawn above whichever body they make (Q-14): the
+  // opened bids' prices, the winner's amount and the bid form's price are money on this page.
+  const demoMode = fetchDemoMode(session);
 
   // From the token's own roles, the set construction-service decides on.
   const doors = tenderDoorsFor(tokenRoles(session.accessToken) ?? [], webServerEnv());
@@ -211,6 +222,9 @@ export default async function TenderPage({
         <ButtonLink href="/tenders" tone="quiet">
           بازگشت به فهرست مناقصه‌ها
         </ButtonLink>
+      </div>
+      <div className="mt-4">
+        <DemoModeNotice mode={await demoMode} />
       </div>
       <div className="mt-4">{body}</div>
     </AppShell>
