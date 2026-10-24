@@ -5,6 +5,7 @@ import {
   seedIdSchema,
   ID_PREFIXES,
   amountMinorSchema,
+  displayText,
   plainText,
   referenceId,
   withMaxKeys,
@@ -63,24 +64,6 @@ export const DOCUMENT_KINDS = [
 
 export const assetTypeSchema = z.enum(ASSET_TYPES);
 export const operationalStatusSchema = z.enum(OPERATIONAL_STATUSES);
-
-/**
- * Persian display text, allowing ZWNJ and the usual punctuation.
- *
- * The lookahead refuses every bidirectional control (`\p{Bidi_Control}`): the
- * script class alone admits U+061C ARABIC LETTER MARK, an Arabic-script one.
- * One pattern, so the published OpenAPI `pattern` states both rules.
- */
-const displayText = (min: number, max: number) =>
-  z
-    .string()
-    .trim()
-    .min(min)
-    .max(max)
-    .regex(
-      /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/:+]+$/u,
-      'Contains unsupported characters',
-    );
 
 /**
  * A value that takes part in a uniqueness check: asset tag, serial number,
