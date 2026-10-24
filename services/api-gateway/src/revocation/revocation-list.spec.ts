@@ -12,7 +12,7 @@ import {
  */
 
 const T0 = Date.parse('2026-10-24T10:00:00.000Z');
-const timing = revocationTiming(900, 5);
+const timing = revocationTiming(900, 5, 10);
 
 const list = (maxEntries = 1_000) => new RevocationList(timing, maxEntries);
 
@@ -47,10 +47,20 @@ describe('revocationTiming — from configuration, never a constant', () => {
     expect(timing).toEqual({
       maxTokenLifetimeMs: 900_000,
       clockToleranceMs: 5_000,
-      graceMs: 6_000,
-      retentionMs: 911_000,
+      propagationMs: 10_000,
+      // tolerance + propagation + the `iat` second
+      graceMs: 16_000,
+      // grace + lifetime + tolerance
+      retentionMs: 921_000,
     });
-    expect(revocationTiming(300, 0).retentionMs).toBe(301_000);
+    expect(revocationTiming(300, 0, 0).retentionMs).toBe(301_000);
+  });
+
+  it('grows grace and retention by the propagation allowance, second for second (D-064)', () => {
+    const without = revocationTiming(900, 5, 0);
+    const at60 = revocationTiming(900, 5, 60);
+    expect(at60.graceMs - without.graceMs).toBe(60_000);
+    expect(at60.retentionMs - without.retentionMs).toBe(60_000);
   });
 });
 

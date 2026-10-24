@@ -26,7 +26,7 @@ import { RevocationGate } from './revocation-gate';
 
 const T0 = Date.parse('2026-10-24T10:00:00.000Z');
 const NOW = T0 + 60_000;
-const timing = revocationTiming(900, 5);
+const timing = revocationTiming(900, 5, 10);
 
 function feedStub(state: { current: boolean; caughtUp?: boolean; failed?: boolean }) {
   return {
@@ -177,14 +177,20 @@ describe('RevocationGate — the decision', () => {
 
   it('admits a token issued after the revocation carrying the roles still held', () => {
     expect(
-      refusal(gateWith({ revokedAt: T0 }).gate, userAuth({}, { issuedAt: T0 + 10_000 })),
+      refusal(
+        gateWith({ revokedAt: T0 }).gate,
+        userAuth({}, { issuedAt: T0 + timing.graceMs + 1_000 }),
+      ),
     ).toBeUndefined();
   });
 
   it('refuses a token issued after the revocation that still carries a removed role', () => {
     const refused = refusal(
       gateWith({ revokedAt: T0 }).gate,
-      userAuth({}, { issuedAt: T0 + 10_000, tenantRoles: ['DRIVER', 'ORGANIZATION_ADMIN'] }),
+      userAuth(
+        {},
+        { issuedAt: T0 + timing.graceMs + 1_000, tenantRoles: ['DRIVER', 'ORGANIZATION_ADMIN'] },
+      ),
     );
     expect(refused?.error.code).toBe('TOKEN_REVOKED');
   });
@@ -334,7 +340,7 @@ describe('a refused request reaches nothing upstream — a retried payment inclu
       gate,
       'POST',
       '/v1/payment-intents',
-      userAuth({}, { issuedAt: T0 + 10_000 }),
+      userAuth({}, { issuedAt: T0 + timing.graceMs + 1_000 }),
     );
     expect(result.outcome).toBe('forwarded');
     expect(result.forwarded).toBe(1);
@@ -442,6 +448,53 @@ describe('a refused request reaches nothing upstream — a retried payment inclu
             userAuth({}, { issuedAt: T0 + 30_000, tenantRoles: ADMIN }),
           ),
         ).toEqual({ outcome: 'TOKEN_REVOKED', forwarded: 0, counted: 0 });
+      },
+    );
+
+    // F1, closed with identity writing Keycloak before it stamps the cutoff (D-064, PR #402):
+    // the latest administrator token Keycloak may still mint after the demotion is issued at
+    // the cutoff plus skew plus propagation — inside the grace.
+    it.each(PATHS)(
+      'F1 — %s %s: the latest token Keycloak may mint with the removed role is refused, nothing forwarded',
+      async (method, path) => {
+        const { gate } = await enforcedFrom([
+          membershipEvent('ROLE_REVOKED', 'M1', 2, T0, ['DRIVER']),
+        ]);
+        const latestStale = T0 + timing.clockToleranceMs + timing.propagationMs;
+        expect(
+          await send(
+            gate,
+            method,
+            path,
+            userAuth({ roles: ADMIN }, { issuedAt: latestStale, tenantRoles: ADMIN }),
+          ),
+        ).toEqual({ outcome: 'TOKEN_REVOKED', forwarded: 0, counted: 0 });
+        // The cutoff decides it, not the role restriction: one minted at the same instant with
+        // the demoted roles only is refused as well.
+        expect(
+          await send(
+            gate,
+            method,
+            path,
+            userAuth({}, { issuedAt: latestStale, tenantRoles: ['DRIVER'] }),
+          ),
+        ).toEqual({ outcome: 'TOKEN_REVOKED', forwarded: 0, counted: 0 });
+      },
+    );
+
+    it.each(PATHS)(
+      'F1 — %s %s: a token minted after the grace with the demoted roles is forwarded once',
+      async (method, path) => {
+        const { gate } = await enforcedFrom([
+          membershipEvent('ROLE_REVOKED', 'M1', 2, T0, ['DRIVER']),
+        ]);
+        const result = await send(
+          gate,
+          method,
+          path,
+          userAuth({}, { issuedAt: T0 + timing.graceMs + 1_000, tenantRoles: ['DRIVER'] }),
+        );
+        expect(result).toMatchObject({ outcome: 'forwarded', forwarded: 1 });
       },
     );
 

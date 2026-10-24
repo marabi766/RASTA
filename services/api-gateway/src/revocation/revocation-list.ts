@@ -12,8 +12,13 @@ export const IAT_RESOLUTION_MS = 1_000;
  *
  *   - `graceMs`: a token issued up to this long after a cutoff is still
  *     treated as issued before it — the verifier's clock tolerance (the
- *     identity-service and Keycloak clocks may differ by that much) plus the
- *     `iat` truncation. Equality refuses.
+ *     identity-service and Keycloak clocks may differ by that much), plus the
+ *     propagation allowance (Keycloak may mint from the attributes a narrowing
+ *     replaced for that long after identity-service's write returned, D-064),
+ *     plus the `iat` truncation. Equality refuses. Identity writes Keycloak
+ *     before it stamps the cutoff, so under those two bounds every token
+ *     carrying what the change took away is refused by the cutoff alone, for
+ *     its whole life; the role restriction is defence in depth.
  *   - `retentionMs`: how long a pair's state is kept after the change that set
  *     it. A token issued at the latest refused instant (`cutoff + grace`)
  *     lives the maximum lifetime and is accepted the verifier's tolerance past
@@ -22,20 +27,28 @@ export const IAT_RESOLUTION_MS = 1_000;
 export interface RevocationTiming {
   maxTokenLifetimeMs: number;
   clockToleranceMs: number;
+  propagationMs: number;
   graceMs: number;
   retentionMs: number;
 }
 
+/**
+ * Every argument is required: an allowance left out would shorten grace and
+ * retention, the unsafe direction (`KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS`).
+ */
 export function revocationTiming(
   maxTokenLifetimeSeconds: number,
   clockToleranceSeconds: number,
+  propagationSeconds: number,
 ): RevocationTiming {
   const maxTokenLifetimeMs = maxTokenLifetimeSeconds * 1000;
   const clockToleranceMs = clockToleranceSeconds * 1000;
-  const graceMs = clockToleranceMs + IAT_RESOLUTION_MS;
+  const propagationMs = propagationSeconds * 1000;
+  const graceMs = clockToleranceMs + propagationMs + IAT_RESOLUTION_MS;
   return {
     maxTokenLifetimeMs,
     clockToleranceMs,
+    propagationMs,
     graceMs,
     retentionMs: graceMs + maxTokenLifetimeMs + clockToleranceMs,
   };

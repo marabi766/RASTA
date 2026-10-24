@@ -12,7 +12,7 @@ import { RevocationList, revocationTiming } from './revocation-list';
  */
 
 const T0 = Date.parse('2026-10-24T10:00:00.000Z');
-const timing = revocationTiming(900, 5);
+const timing = revocationTiming(900, 5, 10);
 
 let nextSeq = 0;
 
@@ -433,23 +433,25 @@ describe('order: the membership stream sequence, never the producer clock (PR #3
       atMs: T0 + 20_000,
       roles: ['DRIVER'],
     });
+    // Issued past M1's end and its grace: only the roles carry the decision.
+    const afterRevokedCutoff = T0 + 19_000 + timing.graceMs + 1_000;
     const now = { now: T0 + 40_000 };
 
     it("the old membership's grant, its revocation not yet read: the narrower of the two stands", async () => {
       const { list } = await replayed([[m2Created], [m1Grant]], now);
-      expect(list.evaluate(tokenWith(T0 + 30_000, ADMIN), now.now)).toBe('stale_roles');
-      expect(list.evaluate(tokenWith(T0 + 30_000, ['DRIVER']), now.now)).toBe('allow');
+      expect(list.evaluate(tokenWith(afterRevokedCutoff, ADMIN), now.now)).toBe('stale_roles');
+      expect(list.evaluate(tokenWith(afterRevokedCutoff, ['DRIVER']), now.now)).toBe('allow');
     });
 
     it("once the old membership's revocation is read, the new membership's roles alone stand", async () => {
       const { list } = await replayed([[m2Created], [m1Grant, m1Revoked]], now);
-      expect(list.evaluate(tokenWith(T0 + 30_000, ADMIN), now.now)).toBe('stale_roles');
-      expect(list.evaluate(tokenWith(T0 + 30_000, ['DRIVER']), now.now)).toBe('allow');
+      expect(list.evaluate(tokenWith(afterRevokedCutoff, ADMIN), now.now)).toBe('stale_roles');
+      expect(list.evaluate(tokenWith(afterRevokedCutoff, ['DRIVER']), now.now)).toBe('allow');
     });
 
     it('an event of a membership already seen ended, delivered late, changes no roles', async () => {
       const { list } = await replayed([[m1Revoked, m1Grant]], now);
-      expect(list.evaluate(tokenWith(T0 + 30_000, ['DRIVER']), now.now)).toBe('stale_roles');
+      expect(list.evaluate(tokenWith(afterRevokedCutoff, ['DRIVER']), now.now)).toBe('stale_roles');
     });
   });
 
@@ -596,26 +598,81 @@ describe('stop: the feed stops vouching at once, and nothing late brings it back
   });
 });
 
-describe('PR #381 r1 F1 — open: design memo, PM decision pending; no fix in this PR yet', () => {
-  // Demoted at T while the projection lags; Keycloak still mints an administrator token at
-  // T+50 s that lives to T+950 s. The restriction expires at T+911 s on its timer and the same
-  // still-valid token is admitted. `it.failing` passes while the defect stands, and fails the
-  // day it is fixed — so the fix has to replace this with a plain test.
-  it.failing('a token minted during projection lag is still refused after the timer', async () => {
-    const clock = { now: T0 };
+describe('PR #381 r1 F1 — closed by the cutoff, with identity writing Keycloak first (D-064)', () => {
+  // Holds only with the identity change of D-064 merged (PR A): a demotion is written to
+  // Keycloak before its event is enqueued, so its `occurredAt` — the cutoff — is later than the
+  // write. Every token Keycloak mints with the removed role is then issued no later than the
+  // cutoff plus the clock skew plus the propagation allowance, which is the grace. The r1 case —
+  // an administrator token at T+50 s — can no longer be minted; the latest one possible is at
+  // T + tolerance + propagation, and the cutoff refuses it for its whole life.
+  const ADMIN = ['DRIVER', 'ORGANIZATION_ADMIN'];
+  const demoted = () => membershipEvent('ROLE_REVOKED', { seq: 2, atMs: T0, roles: ['DRIVER'] });
+  const token = (issuedAtMs: number, tenantRoles: string[]) => ({
+    userId: 'U1',
+    organizationId: 'ORG_A',
+    issuedAtMs,
+    tenantRoles,
+  });
+  /** The last whole second Keycloak may mint the old role in: skew plus propagation. */
+  const latestStale = T0 + timing.clockToleranceMs + timing.propagationMs;
+  /** When the verifier stops accepting a token issued at `issuedAtMs` on its own `exp`. */
+  const ownExpiry = (issuedAtMs: number) =>
+    issuedAtMs + timing.maxTokenLifetimeMs + timing.clockToleranceMs;
+
+  async function running(clock: { now: number }) {
     const topic = new FakeTopic(1);
-    topic.publish(0, T0, membershipEvent('ROLE_REVOKED', { seq: 2, atMs: T0, roles: ['DRIVER'] }));
-    const { list, feed } = replica(topic, clock);
-    await feed.start();
+    topic.publish(0, T0, demoted());
+    const r = replica(topic, clock);
+    await r.feed.start();
     topic.pump();
-    const lagToken = {
-      userId: 'U1',
-      organizationId: 'ORG_A',
-      issuedAtMs: T0 + 50_000,
-      tenantRoles: ['DRIVER', 'ORGANIZATION_ADMIN'],
-    };
-    expect(list.evaluate(lagToken, T0 + 60_000)).toBe('stale_roles');
-    expect(list.evaluate(lagToken, T0 + timing.retentionMs + 1)).toBe('stale_roles');
+    return { topic, ...r };
+  }
+
+  it('the latest token Keycloak may mint with the old role is refused by the cutoff, until its own exp', async () => {
+    const clock = { now: T0 + 60_000 };
+    const { list, feed } = await running(clock);
+    const lagToken = token(latestStale, ADMIN);
+    expect(list.evaluate(lagToken, clock.now)).toBe('revoked');
+    // Its last accepted instant: `exp` plus the verifier's tolerance — still refused.
+    expect(list.evaluate(lagToken, ownExpiry(latestStale))).toBe('revoked');
+    // The pair is forgotten only once that token has expired on its own: the verifier now
+    // refuses it whatever the list says.
+    const forgotten = T0 + timing.retentionMs + 1;
+    expect(list.evaluate(lagToken, forgotten)).toBe('allow');
+    expect(ownExpiry(latestStale)).toBeLessThan(forgotten);
     await feed.stop();
+  });
+
+  it('at the skew + propagation boundary: up to the grace refused, past it admitted only without the removed role', async () => {
+    const clock = { now: T0 + 60_000 };
+    const { list, feed } = await running(clock);
+    // Just inside: equality refuses, whatever the token carries.
+    expect(list.evaluate(token(T0 + timing.graceMs, ['DRIVER']), clock.now)).toBe('revoked');
+    expect(list.evaluate(token(T0 + timing.graceMs, ADMIN), clock.now)).toBe('revoked');
+    // Just outside: a legitimately new token carries the demoted roles only.
+    expect(list.evaluate(token(T0 + timing.graceMs + 1_000, ['DRIVER']), clock.now)).toBe('allow');
+    // The role restriction stays as defence in depth beyond the stated bounds.
+    expect(list.evaluate(token(T0 + timing.graceMs + 1_000, ADMIN), clock.now)).toBe('stale_roles');
+    await feed.stop();
+  });
+
+  it('a replica started after the change, late in the window, rebuilds the same refusal', async () => {
+    const lagToken = token(latestStale, ADMIN);
+    // Restarted one millisecond before the window closes: the replay from now − retention
+    // still reaches the demotion.
+    const clock = { now: T0 + timing.retentionMs - 1 };
+    const { list, feed, topic } = await running(clock);
+    expect(topic.startedFrom?.get(0)).toBe(0);
+    expect(feed.isCurrent()).toBe(true);
+    expect(list.evaluate(lagToken, clock.now)).toBe('revoked');
+    await feed.stop();
+
+    // Restarted after it: nothing is replayed, and the token has expired on its own by then.
+    const later = { now: T0 + timing.retentionMs + 1 };
+    const after = await running(later);
+    expect(after.topic.startedFrom?.get(0)).toBe(1);
+    expect(after.list.evaluate(lagToken, later.now)).toBe('allow');
+    expect(ownExpiry(latestStale)).toBeLessThan(later.now);
+    await after.feed.stop();
   });
 });

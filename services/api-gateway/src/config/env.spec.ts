@@ -207,7 +207,11 @@ describe('the revocation list settings', () => {
 
   it('takes an explicit off in production', () => {
     expect(
-      withMode({ NODE_ENV: 'production', GATEWAY_REVOCATION_LIST: 'off' }).GATEWAY_REVOCATION_LIST,
+      withMode({
+        NODE_ENV: 'production',
+        GATEWAY_REVOCATION_LIST: 'off',
+        KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS: '10',
+      }).GATEWAY_REVOCATION_LIST,
     ).toBe('off');
   });
 
@@ -235,6 +239,49 @@ describe('the revocation list settings', () => {
     expect(
       withMode({ GATEWAY_OIDC_CLOCK_TOLERANCE_SECONDS: '2' }).GATEWAY_OIDC_CLOCK_TOLERANCE_SECONDS,
     ).toBe(2);
+  });
+
+  describe('KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS (D-064)', () => {
+    it.each(['development', 'test'])('is 10 when omitted with NODE_ENV=%s', (nodeEnv) => {
+      expect(withMode({ NODE_ENV: nodeEnv }).KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS).toBe(10);
+    });
+
+    it.each(['staging', 'production', undefined])(
+      'refuses to start when omitted with NODE_ENV=%p — a stated bound, never a guess',
+      (nodeEnv) => {
+        expect(() => withMode({ NODE_ENV: nodeEnv, GATEWAY_REVOCATION_LIST: 'off' })).toThrow(
+          /KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS/,
+        );
+      },
+    );
+
+    it.each([
+      ['0', 0],
+      ['10', 10],
+      ['60', 60],
+    ])('takes %p as stated, in production too', (value, expected) => {
+      expect(
+        withMode({
+          NODE_ENV: 'production',
+          GATEWAY_REVOCATION_LIST: 'off',
+          KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS: value,
+        }).KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS,
+      ).toBe(expected);
+    });
+
+    it.each(['61', '-1', '1.5', '', ' 10', '10s', '1e1', '0x0a', '100'])(
+      'refuses %p: whole seconds from 0 to 60 only',
+      (value) => {
+        expect(() => withMode({ KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS: value })).toThrow(
+          EnvValidationError,
+        );
+      },
+    );
+
+    it('.env.example states the default the brief decided: 10', () => {
+      const example = readFileSync(join(repoRoot, '.env.example'), 'utf8');
+      expect(/^KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS=(\d+)$/m.exec(example)?.[1]).toBe('10');
+    });
   });
 
   it('.env.example states the realm’s access-token lifetime, not another number', () => {

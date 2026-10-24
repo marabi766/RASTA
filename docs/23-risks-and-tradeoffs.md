@@ -2468,8 +2468,10 @@ RETURN_DISPATCH_WITHDRAWN`)، هر قدر دیر برسد. فقط بر این «
 - **چرا این‌طور:** حالت مشترک (Redis) یا Fail-Open می‌کرد یا همه را رد، و بازسازی از Kafka را هم لازم داشت؛ پرسش هم‌زمان از
   `identity-service` همان بدیل «الف» است.
 - **هنوز روشن نیست:** `GATEWAY_REVOCATION_LIST=off` تنها حالت این نسخه است و بیرون از development و test باید صریح نوشته شود؛
-  `enforce` با PR 2 (آداپتور Kafka، Principal و ACL `api-gateway`) می‌آید. تا آن زمان **T-06** همان است که بود. نگهداری
-  پس از تاخیر Projection (PR #381 r1 F1) باز است و به تصمیم PM بسته است؛ PR 1 تا آن تصمیم و پیاده‌سازی‌اش قابل ادغام نیست.
+  `enforce` با PR 2 (آداپتور Kafka، Principal و ACL `api-gateway`) می‌آید. تا آن زمان **T-06** همان است که بود. F1 (PR #381
+  r1، نگهداری پس از تاخیر Projection) با D-064 بسته است: grace حد انتشار Keycloak را هم دارد
+  (`KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS`)، و `identity-service` تنگ‌کردن را پیش از Commit می‌نویسد (PR #402)؛ PR 1 پیش از
+  PR #402 ادغام نمی‌شود.
 - **اولویت:** متوسط
 - **ثبت‌شده:** 2026-10-24 (EXT-005)
 

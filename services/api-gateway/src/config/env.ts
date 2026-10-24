@@ -24,6 +24,9 @@ export const REVOCATION_LIST_MODES = ['off', 'enforce'] as const;
 /** Where an omitted `GATEWAY_REVOCATION_LIST` means `off`: only these, and only when stated. */
 const REVOCATION_LIST_DEFAULT_OFF_ENVIRONMENTS = ['development', 'test'];
 
+/** The propagation allowance an omission means in those environments only (D-064). */
+const DEFAULT_KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS = '10';
+
 /**
  * api-gateway configuration.
  *
@@ -118,6 +121,21 @@ export const gatewayEnvSchema = baseEnvSchema
      */
     GATEWAY_OIDC_CLOCK_TOLERANCE_SECONDS: z.coerce.number().int().min(0).max(60).default(5),
 
+    /**
+     * How long after identity-service's write returns Keycloak may still mint a
+     * token from the attributes it replaced — a node serving cached ones —
+     * in whole seconds (D-064). Added to the cutoff's grace exactly as the
+     * clock tolerance is, and so to retention, the replay window and every
+     * hold (addendum § 2). Digits only, 0 to 60. Required outside development
+     * and test, where an omission means 10 (`loadGatewayEnv`): a stated bound,
+     * never a guess.
+     */
+    KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS: z
+      .string()
+      .regex(/^\d{1,2}$/, 'must be whole seconds, 0 to 60')
+      .transform(Number)
+      .pipe(z.number().int().min(0).max(60)),
+
     /** An enforcing replica not shown caught up for longer than this refuses every pair. */
     GATEWAY_REVOCATION_MAX_STALENESS_SECONDS: z.coerce.number().int().min(5).max(300).default(30),
 
@@ -156,14 +174,21 @@ export type GatewayEnv = z.infer<typeof gatewayEnvSchema>;
 export function loadGatewayEnv(source: NodeJS.ProcessEnv = process.env): GatewayEnv {
   // The raw NODE_ENV, not the schema's default: an unset NODE_ENV is not a
   // statement that this is development.
+  const developmentOrTest = REVOCATION_LIST_DEFAULT_OFF_ENVIRONMENTS.includes(
+    source.NODE_ENV ?? '',
+  );
   const revocationListDefault =
-    source.GATEWAY_REVOCATION_LIST === undefined &&
-    REVOCATION_LIST_DEFAULT_OFF_ENVIRONMENTS.includes(source.NODE_ENV ?? '')
+    source.GATEWAY_REVOCATION_LIST === undefined && developmentOrTest
       ? { GATEWAY_REVOCATION_LIST: 'off' }
+      : {};
+  const propagationDefault =
+    source.KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS === undefined && developmentOrTest
+      ? { KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS: DEFAULT_KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS }
       : {};
   return loadEnv(gatewayEnvSchema, {
     ...source,
     ...revocationListDefault,
+    ...propagationDefault,
     SERVICE_NAME: source.SERVICE_NAME ?? 'api-gateway',
     PORT: source.PORT ?? source.PORT_API_GATEWAY ?? '3000',
   });
