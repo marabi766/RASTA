@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { MAX_AMOUNT_MINOR } from '@rasta/contracts';
+import { MAX_AMOUNT_MINOR, digitsToBigInt } from '@rasta/contracts';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
@@ -115,7 +115,12 @@ const statementFactSchema = z.object({
   statementId: z.string().min(1),
   contractId: z.string().min(1),
   status: z.string().min(1),
-  netMinor: minorAmount.refine((value) => BigInt(value) <= MAX_AMOUNT_MINOR),
+  // zod runs this even when the pattern failed: only digits are converted, so a malformed net is a
+  // body that does not parse — UPSTREAM_UNAVAILABLE — and never a SyntaxError quoting it.
+  netMinor: minorAmount.refine((value) => {
+    const amount = digitsToBigInt(value);
+    return amount === undefined || amount <= MAX_AMOUNT_MINOR;
+  }),
   currency: z.string().min(3),
   payerOrganizationId: z.string().min(1),
   beneficiaryOrganizationId: z.string().min(1),

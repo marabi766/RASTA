@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { numberInput } from '@rasta/contracts';
 import { decodeAuditCursor, InvalidCursorError, type AuditCursor } from './audit.cursor';
 
 /**
@@ -222,11 +223,7 @@ export function buildAuditEventQuerySchema(
       resourceId: filterString(FILTER_LIMITS.resourceId).optional(),
       correlationId: filterString(FILTER_LIMITS.correlationId).optional(),
       outcome: z.enum(outcomeValues).optional(),
-      limit: z.coerce
-        .number()
-        .int()
-        .min(1)
-        .max(MAX_PAGE_LIMIT)
+      limit: numberInput(z.number().int().min(1).max(MAX_PAGE_LIMIT))
         .default(DEFAULT_PAGE_LIMIT)
         .describe(`Page size. Defaults to ${DEFAULT_PAGE_LIMIT}, capped at ${MAX_PAGE_LIMIT}.`),
       cursor: z.string().min(1).max(512).optional(),
