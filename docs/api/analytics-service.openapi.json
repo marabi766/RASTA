@@ -174,11 +174,178 @@
           }
         ]
       }
+    },
+    "/v1/kpis": {
+      "get": {
+        "description": "Same configured readers as the fleet dashboard (ANALYTICS_FLEET_DASHBOARD_ROLES), plus SYSTEM_ADMIN acting for one organization. AUDITOR and service tokens are refused. Completed-maintenance count and the recorded downtime baseline itself, without a savings or avoided-downtime formula. Baseline matching requires this organization, ORGANIZATION scope, metric key, unit, no currency and the exact requested period; the latest recorded version wins. Missing or mismatched baseline: INSUFFICIENT_BASELINE with value null, never zero or an estimate. AVAILABLE values are exact decimal strings. No parameter selects organization, subtree or scope. No baseline writer or seed (Q-142 (1)).",
+        "operationId": "KpiController_list_v1",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Start of the window, inclusive (ISO 8601 with offset)."
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "End of the window, exclusive (ISO 8601 with offset)."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "organizationId": {
+                      "type": "string"
+                    },
+                    "from": {
+                      "type": "string"
+                    },
+                    "to": {
+                      "type": "string"
+                    },
+                    "earliestCompletionAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Earliest completion held here in any window; null means no facts received. A zero count describes only the events this service received, not historical coverage."
+                    },
+                    "kpis": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string",
+                                "enum": [
+                                  "MAINTENANCE_COMPLETED_COUNT",
+                                  "MAINTENANCE_DOWNTIME_BASELINE_MINUTES"
+                                ]
+                              },
+                              "unit": {
+                                "type": "string",
+                                "enum": ["COUNT", "MINUTES"]
+                              },
+                              "dependsOnBaseline": {
+                                "type": "boolean"
+                              },
+                              "status": {
+                                "const": "AVAILABLE"
+                              },
+                              "value": {
+                                "type": "string",
+                                "pattern": "^\\d+$"
+                              }
+                            },
+                            "required": ["key", "unit", "dependsOnBaseline", "status", "value"],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string",
+                                "enum": [
+                                  "MAINTENANCE_COMPLETED_COUNT",
+                                  "MAINTENANCE_DOWNTIME_BASELINE_MINUTES"
+                                ]
+                              },
+                              "unit": {
+                                "type": "string",
+                                "enum": ["COUNT", "MINUTES"]
+                              },
+                              "dependsOnBaseline": {
+                                "type": "boolean"
+                              },
+                              "status": {
+                                "const": "INSUFFICIENT_BASELINE"
+                              },
+                              "value": {
+                                "const": null
+                              }
+                            },
+                            "required": ["key", "unit", "dependsOnBaseline", "status", "value"],
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "required": ["organizationId", "from", "to", "earliestCompletionAt", "kpis"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query does not match the published schema, or the window does not start before it ends. Unknown parameters are refused rather than ignored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration (ANALYTICS_FLEET_DASHBOARD_ROLES) does not grant (INSUFFICIENT_ROLE), the oversight role (AUDITOR reads aggregate governance views only), a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "KPIs for the active organization in [from, to)",
+        "tags": ["kpis"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
     }
   },
   "info": {
     "title": "Rasta — Analytics Service",
-    "description": "Event-driven read models (RUN-001, ADR-071). Every number here is built from the domain events this service received — never from another service’s database — and only for the organization the request acts for. This release offers the maintenance part of the fleet dashboard, from MAINTENANCE_COMPLETED. Amounts are decimal strings of minor units, per currency. No route writes, and no parameter names an organization, a subtree or a scope. The governance view (aggregate-only, for AUDITOR) is not served yet; when it is, it answers only an organization that is a root of the hierarchy, as one group, for one closed period, from an immutable release — never a child subtree, never live facts (ADR-071 § 5). The KPIs with INSUFFICIENT_BASELINE and the other dashboards follow (ADR-071 implementation plan).",
+    "description": "Event-driven read models (RUN-001, ADR-071). Every number here is built from the domain events this service received — never from another service’s database — and only for the organization the request acts for. This release offers the maintenance part of the fleet dashboard, from MAINTENANCE_COMPLETED. Amounts are decimal strings of minor units, per currency. No route writes, and no parameter names an organization, a subtree or a scope. The governance view (aggregate-only, for AUDITOR) is not served yet; when it is, it answers only an organization that is a root of the hierarchy, as one group, for one closed period, from an immutable release — never a child subtree, never live facts (ADR-071 § 5). The tenant KPIs include completed-maintenance count and the recorded downtime baseline itself; a missing exact baseline is INSUFFICIENT_BASELINE with value null. No savings formula is chosen here. Other dashboards follow (ADR-071 implementation plan).",
     "version": "0.1.0",
     "contact": {}
   },
