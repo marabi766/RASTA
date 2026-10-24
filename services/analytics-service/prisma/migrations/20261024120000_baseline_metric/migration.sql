@@ -1,3 +1,5 @@
+BEGIN;
+
 -- ADR-071 § 6 / Q-142 (1): storage only, no API, application writer or seed.
 CREATE TABLE "baseline_metric" (
     "organization_id" VARCHAR(128) NOT NULL,
@@ -52,3 +54,10 @@ CREATE TRIGGER "tg_baseline_metric_no_truncate"
 CREATE TRIGGER "tg_baseline_metric_recorded_at"
   BEFORE INSERT ON "baseline_metric"
   FOR EACH ROW EXECUTE FUNCTION "fact_recorded_at_now"();
+
+-- Restrict in the creation transaction, including OLD default-mode databases.
+REVOKE ALL ON "baseline_metric" FROM rasta_analytics;
+REVOKE ALL ON SEQUENCE "baseline_metric_version_seq" FROM rasta_analytics;
+GRANT SELECT ON "baseline_metric" TO rasta_analytics;
+
+COMMIT;

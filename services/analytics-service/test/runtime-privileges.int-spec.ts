@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ulid } from 'ulid';
 import { Prisma, PrismaClient } from '../src/generated/prisma';
@@ -6,16 +7,11 @@ import { baselineFixture } from './baseline-helpers';
 import { databaseUrl, ownerClient, ownerDatabaseUrl } from './helpers';
 import { applyMigration } from './migration-helpers';
 
-const EXPECTED_GRANTS: Record<string, string[]> = {
-  _prisma_migrations: [],
-  baseline_metric: ['SELECT'],
-  fact_maintenance: ['INSERT', 'SELECT'],
-  processed_event: ['INSERT', 'SELECT'],
-};
+const SEQUENCE_OWNER_GRANTS = ['SELECT', 'UPDATE', 'USAGE'];
 const OWNER_GRANTS = ['DELETE', 'INSERT', 'REFERENCES', 'SELECT', 'TRIGGER', 'TRUNCATE', 'UPDATE'];
 // Supplier's extension-membership exclusion: CI copies PostGIS tables from
 // template1. They are DBA-owned extension objects, not analytics migrations.
-const NOT_AN_EXTENSION_TABLE = Prisma.sql`NOT EXISTS (
+const NOT_AN_EXTENSION_RELATION = Prisma.sql`NOT EXISTS (
   SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass
     AND d.objid = c.oid AND d.deptype = 'e'
 )`;
@@ -26,6 +22,37 @@ const privilegeMigration = join(
   'migration.sql',
 );
 const repositoryRoot = join(__dirname, '..', '..', '..');
+
+// Inspect raw ACLs, including defaults and columns, to prove a refused run did
+// not partially change privileges before reaching its guard.
+async function aclSnapshot(client: PrismaClient): Promise<unknown> {
+  return Promise.all([
+    client.$queryRaw`SELECT c.relname, c.relkind::text, c.relacl::text
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relkind IN ('r','p','S','v','m','f')
+      ORDER BY c.relname`,
+    client.$queryRaw`SELECT defaclrole::text, defaclnamespace::text,
+      defaclobjtype::text, defaclacl::text FROM pg_default_acl
+      ORDER BY defaclrole, defaclnamespace, defaclobjtype`,
+    client.$queryRaw`SELECT c.relname, a.attname, a.attacl::text FROM pg_attribute a
+      JOIN pg_class c ON c.oid = a.attrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND a.attacl IS NOT NULL ORDER BY c.relname, a.attname`,
+    client.$queryRaw`SELECT nspname, nspacl::text FROM pg_namespace
+      WHERE nspname = 'public'`,
+  ]);
+}
+
+it('every default-privilege revoke explicitly names the migrator and public schema', () => {
+  const sql = readFileSync(privilegeMigration, 'utf8').replace(/--[^\n]*/g, '');
+  const statements = sql.match(/ALTER\s+DEFAULT\s+PRIVILEGES\b[^;]*;/gi) ?? [];
+  expect(statements).toHaveLength(2);
+  for (const statement of statements) {
+    expect(statement).toMatch(
+      /^ALTER\s+DEFAULT\s+PRIVILEGES\s+FOR\s+ROLE\s+rasta_analytics_migrator\s+IN\s+SCHEMA\s+public\s+REVOKE\s+ALL\s+ON\s+(TABLES|SEQUENCES)\s+FROM\s+rasta_analytics\s*;$/i,
+    );
+  }
+});
 
 /** Execute the actual split script's grant step, with psql replaced by SQL capture.
  * No role/password/ownership operations are invoked by this test helper. */
@@ -64,6 +91,20 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
   const organizationId = `acl-${ulid()}`;
   const row = baselineFixture(organizationId);
 
+  const expectedRelations = [
+    { relation: '_prisma_migrations', kind: 'r', privileges: [] },
+    { relation: 'baseline_metric', kind: 'r', privileges: ['SELECT'] },
+    { relation: 'baseline_metric_version_seq', kind: 'S', privileges: [] },
+    { relation: 'fact_maintenance', kind: 'r', privileges: ['INSERT', 'SELECT'] },
+    ...(history === 'upgraded'
+      ? [{ relation: 'legacy_runtime_seq', kind: 'S', privileges: [] }]
+      : []),
+    { relation: 'processed_event', kind: 'r', privileges: ['INSERT', 'SELECT'] },
+  ];
+  let creationGrants: unknown;
+  let creationInsertError: unknown;
+  let wrongRole: { before: unknown; after: unknown; error: unknown };
+
   beforeAll(async () => {
     await admin.$executeRawUnsafe(`CREATE DATABASE "${name}"`);
     await owner.$executeRawUnsafe('REVOKE ALL ON SCHEMA public FROM PUBLIC');
@@ -87,15 +128,41 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
         'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO rasta_analytics',
       );
       await owner.$executeRawUnsafe('REVOKE ALL ON _prisma_migrations FROM rasta_analytics');
+      // Independent of L3's baseline sequence: the cleanup mutant must still
+      // leak these old rights even when baseline creation already fails closed.
+      await owner.$executeRawUnsafe('CREATE SEQUENCE legacy_runtime_seq');
+      expect(
+        await runtime.$queryRaw`SELECT
+        has_sequence_privilege('legacy_runtime_seq', 'USAGE') AS usage,
+        has_sequence_privilege('legacy_runtime_seq', 'SELECT') AS select,
+        has_sequence_privilege('legacy_runtime_seq', 'UPDATE') AS update`,
+      ).toEqual([{ usage: true, select: true, update: false }]);
     }
     for (const migration of ['20261017140000_init_analytics', '20261024120000_baseline_metric']) {
       applyMigration(ownerUrl.toString(), 'public', join(migrations, migration, 'migration.sql'));
     }
-    if (history === 'upgraded') {
-      const [legacy] = await runtime.$queryRaw<{ can_insert: boolean }[]>`
-        SELECT has_table_privilege('baseline_metric','INSERT') AS can_insert`;
-      expect(legacy?.can_insert).toBe(true);
+    // Checkpoint after ONLY 120000, before the legacy-default cleanup.
+    creationGrants = await runtime.$queryRaw`SELECT
+      has_table_privilege('baseline_metric','SELECT') AS select,
+      has_table_privilege('baseline_metric','INSERT') AS insert,
+      has_sequence_privilege('baseline_metric_version_seq','USAGE') AS sequence_usage,
+      has_sequence_privilege('baseline_metric_version_seq','SELECT') AS sequence_select,
+      has_sequence_privilege('baseline_metric_version_seq','UPDATE') AS sequence_update`;
+    try {
+      await runtime.$executeRawUnsafe(`INSERT INTO baseline_metric
+        (organization_id,id,metric_key,scope_kind,period_start,period_end,value,unit,source,recorded_by)
+        VALUES ('creation','creation','METRIC','ORGANIZATION','2026-10-01','2026-11-01',1,'COUNT','test','test')`);
+    } catch (error) {
+      creationInsertError = error;
     }
+    const before = await aclSnapshot(owner);
+    let wrongRoleError: unknown;
+    try {
+      applyMigration(runtimeUrl.toString(), 'public', privilegeMigration);
+    } catch (error) {
+      wrongRoleError = error;
+    }
+    wrongRole = { before, after: await aclSnapshot(owner), error: wrongRoleError };
     applyMigration(ownerUrl.toString(), 'public', privilegeMigration);
     await owner.baselineMetric.create({ data: row });
   });
@@ -126,7 +193,30 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
     }
   });
 
-  it('uses the runtime identity, with every analytics table owned by the migrator', async () => {
+  it('after ONLY 120000, runtime baseline INSERT is refused with 42501 and its sequence has no rights', () => {
+    expect(creationGrants).toEqual([
+      {
+        select: true,
+        insert: false,
+        sequence_usage: false,
+        sequence_select: false,
+        sequence_update: false,
+      },
+    ]);
+    expect(creationInsertError).toBeInstanceOf(Error);
+    expect((creationInsertError as Error).message).toMatch(/Code: `42501`/);
+  });
+
+  it('wrong-role migration refuses before any ACL change, including old defaults', () => {
+    expect(wrongRole.after).toEqual(wrongRole.before);
+    expect(wrongRole.error).toBeInstanceOf(Error);
+    expect((wrongRole.error as Error).message).toContain(
+      'analytics privilege migration requires the migrator role',
+    );
+    expect((wrongRole.error as Error).message).not.toContain('rasta_analytics');
+  });
+
+  it('uses the runtime identity, with every analytics relation owned by the migrator', async () => {
     expect(await runtime.$queryRaw`SELECT current_user::text AS role`).toEqual([
       { role: 'rasta_analytics' },
     ]);
@@ -134,22 +224,29 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
       await runtime.$queryRaw`
       SELECT DISTINCT pg_get_userbyid(c.relowner)::text AS owner
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND ${NOT_AN_EXTENSION_TABLE}`,
+      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'S', 'v', 'm', 'f') AND ${NOT_AN_EXTENSION_RELATION}`,
     ).toEqual([{ owner: 'rasta_analytics_migrator' }]);
   });
 
-  it('has exactly the expected relacl on EVERY analytics table, including the ledger', async () => {
-    // Supplier's exhaustive inventory, extended to inspect relacl, not just effective grants.
-    const rows = await owner.$queryRaw<{ table: string; grantee: string; privileges: string[] }[]>`
-      SELECT c.relname::text AS "table", pg_get_userbyid(a.grantee)::text AS grantee,
+  it('has exactly the kind-specific relacl on EVERY analytics relation, including sequences and the ledger', async () => {
+    const rows = await owner.$queryRaw`
+      SELECT c.relname::text AS relation, c.relkind::text AS kind,
+        pg_get_userbyid(a.grantee)::text AS grantee,
         array_agg(a.privilege_type ORDER BY a.privilege_type)::text[] AS privileges
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-      CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
-      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND ${NOT_AN_EXTENSION_TABLE}
-      GROUP BY c.relname, a.grantee ORDER BY c.relname, grantee`;
-    const expected = Object.entries(EXPECTED_GRANTS).flatMap(([table, privileges]) => [
-      ...(privileges.length ? [{ table, grantee: 'rasta_analytics', privileges }] : []),
-      { table, grantee: 'rasta_analytics_migrator', privileges: OWNER_GRANTS },
+      CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault(
+        CASE WHEN c.relkind = 'S' THEN 's'::"char" ELSE 'r'::"char" END, c.relowner))) a
+      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'S', 'v', 'm', 'f')
+        AND ${NOT_AN_EXTENSION_RELATION}
+      GROUP BY c.relname, c.relkind, a.grantee ORDER BY c.relname, grantee`;
+    const expected = expectedRelations.flatMap(({ relation, kind, privileges }) => [
+      ...(privileges.length ? [{ relation, kind, grantee: 'rasta_analytics', privileges }] : []),
+      {
+        relation,
+        kind,
+        grantee: 'rasta_analytics_migrator',
+        privileges: kind === 'S' ? SEQUENCE_OWNER_GRANTS : OWNER_GRANTS,
+      },
     ]);
     expect(rows).toEqual(expected);
     // No column-level write loopholes either.
@@ -157,6 +254,23 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
       await owner.$queryRaw`
       SELECT attname FROM pg_attribute WHERE attrelid = 'baseline_metric'::regclass AND attacl IS NOT NULL`,
     ).toEqual([]);
+  });
+
+  it('effective runtime rights match EVERY relation kind: no sequence USAGE, SELECT or UPDATE', async () => {
+    const rows = await runtime.$queryRaw`
+      SELECT c.relname::text AS relation, c.relkind::text AS kind,
+        CASE WHEN c.relkind = 'S' THEN ARRAY(
+          SELECT privilege FROM unnest(ARRAY['SELECT','UPDATE','USAGE']) privilege
+          WHERE has_sequence_privilege('rasta_analytics', c.oid, privilege)
+        ) ELSE ARRAY(
+          SELECT privilege FROM unnest(ARRAY['DELETE','INSERT','REFERENCES','SELECT','TRIGGER','TRUNCATE','UPDATE']) privilege
+          WHERE has_table_privilege('rasta_analytics', c.oid, privilege)
+        ) END AS privileges
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'S', 'v', 'm', 'f')
+        AND ${NOT_AN_EXTENSION_RELATION}
+      ORDER BY c.relname`;
+    expect(rows).toEqual(expectedRelations);
   });
 
   it('has exactly the expected pg_default_acl: no inherited table or sequence grants', async () => {

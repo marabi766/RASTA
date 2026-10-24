@@ -15,7 +15,7 @@ export const KPI_DEFINITIONS = [
     unit: 'MINUTES',
     dependsOnBaseline: true,
     formula:
-      'Identity: latest inserted baseline (database identity order) for this key, organization scope, exact period and unit; no currency.',
+      'Identity: baseline with highest database identity (version) for this key, organization scope, exact period and unit; no currency. latest = highest database identity (version), not commit order; a future writer (Q-142) must serialize writes per (org, key, scope, unit, currency, period).',
   },
 ] as const;
 
