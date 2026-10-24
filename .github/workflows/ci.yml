@@ -1466,16 +1466,18 @@ jobs:
         # the three-way collision the shared-registration step exists to avoid
         # (ADR-053 plan, Step Zero).
         #
-        # `audit` and `notification` are both registered in `Migration
-        # reversibility` too, each the moment it had a real migration to
-        # reverse and not before — a vacuous entry is worse than none (that step
-        # is in the `migration-reversibility` job since #198). `audit`
+        # `audit` and `notification` are both registered in migration
+        # reversibility too, each the moment it had a real migration to
+        # reverse and not before — a vacuous entry is worse than none (that
+        # check left this job for its own with #198, and is split across the
+        # `migration-reversibility-chain` shards since task 082). `audit`
         # arrived there with AUD-001 and `notification` with NTF-001, both
         # under the whole-chain `verify-migration-reversible.mjs <service>`.
         # `identity` is registered there as well, by the two named verifiers
         # that reach the migrations the whole-chain harness cannot — AUD-004's
-        # `security_event_outbox` and AUD-003's `audit_correction_command`. All
-        # three services' urls are therefore present in that step.
+        # `security_event_outbox` and AUD-003's `audit_correction_command`, in
+        # `migration-guards`. All three services' urls are therefore present
+        # in those steps.
         #
         # `notification` is deliberately absent from two other multi-service
         # steps, because neither would use it:
@@ -1532,7 +1534,9 @@ jobs:
         # PostgreSQL they measured shared WAL load, not the upsert (docs/14
         # § 14.3). Never `turbo run test:integration` directly — that runs
         # the workspace phase only; `check:test-phases` enforces it.
-        timeout-minutes: 12
+        # 16 is a STOPGAP (owner decision 2026-10-24): main measured 7m26s to
+        # 11m29s against the old 12. The sharding PR returns it to 12.
+        timeout-minutes: 16
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
@@ -1768,7 +1772,7 @@ jobs:
         # other workspace packages to their dist. In the single job, the
         # `Integration tests` step's turbo `^build` produced those before any
         # of these steps ran; here nothing else does. Packages only, as in
-        # `migration-reversibility`: no service is built or started here.
+        # `migration-guards`: no service is built or started here.
         run: pnpm exec turbo run build --filter='./packages/*'
 
       - name: Start the authenticated Kafka broker
@@ -2143,7 +2147,7 @@ jobs:
         # other workspace packages to their dist. In the single job, the
         # `Integration tests` step's turbo `^build` produced those before any
         # of these steps ran; here nothing else does. Packages only, as in
-        # `migration-reversibility`: no service is built or started here.
+        # `migration-guards`: no service is built or started here.
         run: pnpm exec turbo run build --filter='./packages/*'
 
       - name: Start the authenticated Kafka broker
@@ -2334,7 +2338,7 @@ jobs:
         # other workspace packages to their dist. In the single job, the
         # `Integration tests` step's turbo `^build` produced those before any
         # of these steps ran; here nothing else does. Packages only, as in
-        # `migration-reversibility`: no service is built or started here.
+        # `migration-guards`: no service is built or started here.
         run: pnpm exec turbo run build --filter='./packages/*'
 
       - name: Start the authenticated Kafka broker
@@ -2751,22 +2755,236 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Migration reversibility and the database-only guards, beside the
-  # integration job rather than after it (#198).
+  # integration jobs rather than after them (#198), and since task 082 split
+  # into parallel jobs, each against a PostgreSQL of its own: the one job had
+  # reached 1417 s of reversibility alone against a 28-minute bound on main
+  # run 40006639729, and grew with every migration.
   #
-  # Every step here needs only PostgreSQL — no Kafka, MinIO, ClamAV or Redis —
-  # and reversibility alone took 18 of the integration job's 40 minutes on
-  # main run 37083060427. Same image, same provisioning script and role split
-  # (D-045), same migrator credentials passed through the environment and
-  # never on a command line (#191); the commands are exactly the ones the
-  # integration job ran.
+  #   migration-reversibility-chain  the whole-chain check, one matrix leg per
+  #                                  shard of services (sized by that run's
+  #                                  per-service times);
+  #   migration-guards               the by-name verifiers and the database
+  #                                  guards;
+  #   migration-reversibility        the aggregate: the check branch protection
+  #                                  and the merge queue require by name.
+  #
+  # Every step needs only PostgreSQL — no Kafka, MinIO, ClamAV or Redis. Same
+  # image, same provisioning script and role split (D-045), same migrator
+  # credentials passed through the environment and never on a command line
+  # (#191); the commands are exactly the ones the single job ran, and
+  # `pnpm run test:migration` still runs all of them in one sequence locally.
+  # `scripts/ci-migration-reversibility-lib.mjs` refuses a service with
+  # migrations that no shard verifies, a step dropped, and an aggregate that
+  # could pass without every job here succeeding.
   # ---------------------------------------------------------------------------
-  migration-reversibility:
-    name: Migration reversibility and database guards
+  migration-reversibility-chain:
+    name: Migration reversibility, whole chain (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    # About 22 minutes of work (setup ~2m, reversibility ~18m, the rest ~1m on
-    # main run 37098128390); 35 leaves honest headroom without letting a hang
-    # run on. The reversibility step has its own, tighter bound.
-    timeout-minutes: 35
+    # Setup about 2 minutes; the heaviest shard's chain about 6.2 minutes on
+    # that run's per-service times. The step has its own, tighter bound.
+    timeout-minutes: 20
+    needs: quality
+    strategy:
+      # Every shard reports, so one red service does not hide another.
+      fail-fast: false
+      matrix:
+        # Balanced on main run 40006639729's times (seconds): economic 233,
+        # document 58, notification 49, procurement 29 = 369; construction 96,
+        # marketplace 81, fleet 75, audit 49, supplier 41, analytics 17 = 359;
+        # asset 90, identity 88, contract 65, maintenance 49, organization 44,
+        # inventory 32 = 368. A new service goes into the lightest shard; the
+        # guard fails until it is in one.
+        include:
+          - shard: 1/3
+            services: economic document notification procurement
+          - shard: 2/3
+            services: construction marketplace fleet audit supplier analytics
+          - shard: 3/3
+            services: asset identity contract maintenance organization inventory
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
+        env:
+          POSTGRES_USER: rasta
+          POSTGRES_PASSWORD: rasta_ci_password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rasta"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Provision databases, roles and extensions
+        env:
+          PGPASSWORD: rasta_ci_password
+          # A throwaway cluster, bootstrapped as compose bootstraps its own:
+          # unset role passwords take the published development defaults,
+          # which lib/role-passwords.bash allows only under this flag.
+          RASTA_DB_BOOTSTRAP: compose
+          POSTGRES_USER: rasta
+        run: |
+          # The same script the local stack uses, so CI and a developer
+          # laptop provision identically. Divergence here is how "works on my
+          # machine" starts.
+          export PGHOST=localhost PGPORT=5432
+          psql -U rasta -d postgres -c "SELECT 1" >/dev/null
+          bash infrastructure/docker/postgres/00-init-databases.sh
+
+      - name: Apply migrations
+        # `integration-suites`' step, unchanged. The whole-chain checks build
+        # their own scratch schema or database beside each service's real one;
+        # the runtime-privileges check below reads the real, migrated databases,
+        # as it did when it ran after every check in one job.
+        run: pnpm run db:migrate
+        env:
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_ASSET_MIGRATOR: postgresql://rasta_asset_migrator:rasta_asset_migrator_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_FLEET_MIGRATOR: postgresql://rasta_fleet_migrator:rasta_fleet_migrator_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_ECONOMIC_MIGRATOR: postgresql://rasta_economic_migrator:rasta_economic_migrator_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_DOCUMENT_MIGRATOR: postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_SUPPLIER_MIGRATOR: postgresql://rasta_supplier_migrator:rasta_supplier_migrator_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
+          DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
+          DATABASE_URL_CONTRACT: postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract?schema=public
+          DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
+          DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
+
+      - name: Migration reversibility, whole chain
+        # AGENTS.md § 7 requires every migration to be reversible, and until
+        # this check existed nothing had ever run a down script. up → down → up
+        # against a throwaway schema, asserting between each step that every
+        # object the migration owns is there, gone, and back — and that each
+        # `down.sql` removed its own `_prisma_migrations` row so the rollback
+        # can be rolled forward again. This leg runs it for its shard's
+        # services, one after another, exactly as `test:migration` does.
+        #
+        # Every service with migrations is covered by the whole-chain check.
+        # The five whose initial migration once had no down.sql (identity,
+        # organization, asset, fleet, maintenance) were beyond it until the
+        # platform-safety pass; each is now verified up → down → up like the
+        # rest, and `scripts/verify-migration-reversible-lib.test.mjs` fails if
+        # a service with migrations is in no shard above (or in two), or
+        # missing from `test:migration`.
+        #
+        # The whole-chain check proves each down.sql an *exact* inverse: after
+        # every down script the schema must match, object for object, the
+        # state recorded just before that migration (built by applying each
+        # migration.sql in turn), and the ledger must no longer list it. The
+        # one documented allowance is marketplace's NOT VALID rollback.
+        #
+        # organization and asset run in a throwaway database cloned from
+        # template1 rather than a schema, because their migrations use ltree
+        # and geography unqualified; the service roles hold CREATEDB for this.
+        #
+        # Each command exits on its own failure (`|| exit 1`), not only through
+        # the runner's `bash -e`: under a shell without errexit the loop would
+        # end with its last service's status, and a failed one before it would
+        # pass. The guard also refuses such a shell on any step here.
+        #
+        # About twice the heaviest shard's 369 s.
+        timeout-minutes: 13
+        run: |
+          test -n "${MIGRATION_SERVICES}" || exit 1
+          for service in ${MIGRATION_SERVICES}; do
+            node scripts/verify-migration-reversible.mjs "${service}" || exit 1
+          done
+        env:
+          MIGRATION_SERVICES: ${{ matrix.services }}
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_ASSET_MIGRATOR: postgresql://rasta_asset_migrator:rasta_asset_migrator_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_FLEET_MIGRATOR: postgresql://rasta_fleet_migrator:rasta_fleet_migrator_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_ECONOMIC_MIGRATOR: postgresql://rasta_economic_migrator:rasta_economic_migrator_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_DOCUMENT_MIGRATOR: postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_SUPPLIER_MIGRATOR: postgresql://rasta_supplier_migrator:rasta_supplier_migrator_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
+          DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
+          DATABASE_URL_CONTRACT: postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract?schema=public
+          DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
+          DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
+
+      - name: Runtime roles own nothing (D-045), after the reversals
+        # `integration-suites` runs this check too. It ran there after the steps
+        # above, so it also proved that no up → down → up cycle left an object
+        # owned by a runtime role; this copy keeps that proof with the cycles.
+        # A service's runtime database role must hold DML and nothing more: no
+        # ownership of its database, a schema, a table, a function or a type;
+        # no CREATE; no TRUNCATE, REFERENCES or TRIGGER; nothing on the
+        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS or SUPERUSER.
+        # Owning a table is what lets SQL running as the service ALTER TABLE
+        # … DISABLE TRIGGER and lift an integrity guard. Runs against every
+        # service database this job bootstrapped and migrated; every service
+        # must be split (audit its own way), so a new one that is not fails.
+        run: pnpm run check:db-runtime-privileges
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+
+  migration-guards:
+    name: Migration verifiers and database guards
+    runs-on: ubuntu-latest
+    # Setup about 2.5 minutes, the by-name verifiers about 5.3 minutes, the
+    # guards about 1.2 minutes on main run 40006639729.
+    timeout-minutes: 20
     needs: quality
     services:
       postgres:
@@ -2826,8 +3044,10 @@ jobs:
       - name: Apply migrations
         # `integration-suites`' step, unchanged, and why it is needed here: the
         # in-place outbox-claim verifier and the seed guard work on each
-        # service's real, migrated database; the whole-chain checks build their
-        # own scratch schema or database beside it.
+        # service's real, migrated database. So it must come first, and the
+        # in-place verifier runs before the seed guard and the privileges
+        # check, as it did in the single job: both read the database it has
+        # just reversed and rolled forward again.
         run: pnpm run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
@@ -2863,39 +3083,21 @@ jobs:
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
-      - name: Migration reversibility
-        # AGENTS.md § 7 requires every migration to be reversible, and until
-        # this step existed nothing had ever run a down script. up → down → up
-        # against a throwaway schema, asserting between each step that every
-        # object the migration owns is there, gone, and back — and, for the
-        # named verifiers, that every object it does *not* own survived, and
-        # that each `down.sql` removed its own `_prisma_migrations` row so the
-        # rollback can be rolled forward again. Its own job since #198: 18 of the
-        # integration job's 40 minutes were this step.
-        timeout-minutes: 28
-        run: pnpm run test:migration
+      - name: Migration reversibility, by-name verifiers
+        # These still run beside the whole-chain check: ADR-050's claim
+        # migration on every service database (`--in-place`, on the database
+        # migrated above), and identity's security-event and audit-correction
+        # tables, which check behaviour the catalogue comparison does not
+        # (constraints refusing rows, triggers firing). Same order as in
+        # `test:migration`. Each exits on its own failure, as the chain's loop.
+        #
+        # About twice their 320 s.
+        timeout-minutes: 11
+        run: |
+          node scripts/verify-outbox-claim-migration.mjs --in-place || exit 1
+          node scripts/verify-security-event-outbox-migration.mjs || exit 1
+          node scripts/verify-audit-correction-command-migration.mjs || exit 1
         env:
-          # Every service with migrations is now covered by the whole-chain
-          # check. The five whose initial migration once had no down.sql
-          # (identity, organization, asset, fleet, maintenance) were beyond it
-          # until the platform-safety pass; each is now verified up → down → up
-          # like the rest, and `scripts/verify-migration-reversible-lib.test.mjs`
-          # fails if a service with migrations is missing from this chain.
-          #
-          # The whole-chain check proves each down.sql an *exact* inverse: after
-          # every down script the schema must match, object for object, the
-          # state recorded just before that migration (built by applying each
-          # migration.sql in turn), and the ledger must no longer list it. The
-          # one documented allowance is marketplace's NOT VALID rollback.
-          #
-          # organization and asset run in a throwaway database cloned from
-          # template1 rather than a schema, because their migrations use ltree
-          # and geography unqualified; the service roles hold CREATEDB for this.
-          #
-          # The by-name verifiers still run: ADR-050's claim migration on every
-          # service database (`--in-place`), and identity's security-event and
-          # audit-correction tables, which check behaviour the catalogue
-          # comparison does not (constraints refusing rows, triggers firing).
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
@@ -3003,6 +3205,37 @@ jobs:
           PGPORT: '5432'
           PGUSER: rasta
           PGPASSWORD: rasta_ci_password
+
+  # The required check, by name. It runs always(), not on the default
+  # success(): a job skipped because a job it needs failed reports "skipped",
+  # which a required check counts as passing. So it runs whatever happened and
+  # fails unless every leg of the chain matrix and the guards job succeeded —
+  # a matrix job's result is "success" only when every leg's is. `containers`
+  # needs this job, and so all of them through it.
+  migration-reversibility:
+    name: Migration reversibility and database guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - migration-reversibility-chain
+      - migration-guards
+    if: ${{ always() }}
+    steps:
+      - name: Every migration job passed
+        shell: bash
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          node -e '
+            const needs = JSON.parse(process.env.NEEDS);
+            const names = Object.keys(needs);
+            for (const name of names) console.log(name + ": " + needs[name].result);
+            const failed = names.filter((name) => needs[name].result !== "success");
+            if (names.length === 0 || failed.length > 0) {
+              console.error("not passed: " + (failed.join(", ") || "no jobs at all"));
+              process.exit(1);
+            }
+          '
 
   # ---------------------------------------------------------------------------
   # Broker authorisation, on a broker of its own.
@@ -3884,6 +4117,23 @@ jobs:
           # The pull request's base must be present to diff against.
           fetch-depth: 0
 
+      # Reuse the existing root YAML parser only for PR analysis. --all on a
+      # main push still runs directly, without installing dependencies.
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        if: github.event_name == 'pull_request'
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: github.event_name == 'pull_request'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install scope parser from the frozen workspace lockfile
+        if: github.event_name == 'pull_request'
+        run: pnpm install --filter . --frozen-lockfile --ignore-scripts
+
       - name: Decide which images this change affects
         id: scope
         # L7-35: images were built and scanned only after merge, so a broken
@@ -3894,7 +4144,7 @@ jobs:
           set -euo pipefail
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             services="$(git diff --name-only "${{ github.event.pull_request.base.sha }}...HEAD" \
-              | node scripts/container-scope.mjs)"
+              | node scripts/container-scope.mjs --base "${{ github.event.pull_request.base.sha }}")"
           else
             services="$(node scripts/container-scope.mjs --all)"
           fi
