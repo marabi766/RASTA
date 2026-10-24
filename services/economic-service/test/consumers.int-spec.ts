@@ -1,3 +1,7 @@
+import { randomBytes } from 'node:crypto';
+import { InternalTokenService } from '@rasta/nest-common';
+import { withRedirectProbe } from '@rasta/testing';
+import { SourceFactsClient } from '../src/provenance/source-facts.client';
 import { ulid } from 'ulid';
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
@@ -370,6 +374,54 @@ describe('economic consumers', () => {
     expect(await findBySource(notYet.requestId)).toBeNull();
     expect(await findBySource(redirected.requestId)).toBeNull();
   });
+
+  it.each(['settlement', 'reward'] as const)(
+    'an HTTP redirect leaves %s retryable with no writes, then recovery processes the same event',
+    async (kind) => {
+      const payload = kind === 'settlement' ? approval() : usage();
+      const fact =
+        kind === 'settlement'
+          ? sources.approved(payload as ReturnType<typeof approval>)
+          : sources.recorded(payload as ReturnType<typeof usage>);
+      const event =
+        kind === 'settlement'
+          ? envelope(CONSUMED_EVENTS.MAINTENANCE_APPROVED, payload)
+          : envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor());
+      await withRedirectProbe({ body: fact }, async (probe) => {
+        const facts = new SourceFactsClient({
+          maintenanceBaseUrl: probe.baseUrl,
+          fleetBaseUrl: probe.baseUrl,
+          contractBaseUrl: probe.baseUrl,
+          timeoutMs: 2000,
+          tokens: new InternalTokenService(randomBytes(32).toString('hex'), 'rasta-internal', 300),
+          fetch: probe.fetch,
+        });
+        const consumer =
+          kind === 'settlement'
+            ? new SettlementAuthorityConsumer(noBroker, prisma, wiring.transactions, facts)
+            : new RewardTriggerConsumer(noBroker, prisma, wiring.rewards, facts);
+        const name =
+          kind === 'settlement'
+            ? SettlementAuthorityConsumer.CONSUMER_NAME
+            : RewardTriggerConsumer.CONSUMER_NAME;
+        const reference = fact.id;
+        await expect(consumer.handle(event)).rejects.toMatchObject({
+          code: 'UPSTREAM_UNAVAILABLE',
+        });
+        expect(await findBySource(reference)).toBeNull();
+        expect(await processedBy(name, event.eventId)).toBeNull();
+        expect(await rewardsFor(reference)).toHaveLength(0);
+        expect(await evaluationFor(reference)).toHaveLength(0);
+        expect(probe.sent).toHaveLength(1);
+        expect(probe.target).toEqual([]);
+        probe.recover();
+        await expect(consumer.handle(event)).resolves.toBeUndefined();
+        expect(await processedBy(name, event.eventId)).not.toBeNull();
+        if (kind === 'settlement') expect(await findBySource(reference)).not.toBeNull();
+        expect(probe.sent).toHaveLength(2);
+      });
+    },
+  );
 
   it('records nothing, and retries, while maintenance-service cannot be asked', async () => {
     // Fail closed. The error is the retryable kind, not a refusal: once the

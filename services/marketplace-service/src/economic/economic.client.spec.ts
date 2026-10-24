@@ -1,3 +1,4 @@
+import { withRedirectProbe } from '@rasta/testing';
 import { AllExceptionsFilter, RastaError, isRastaError } from '@rasta/nest-common';
 import {
   EconomicClient,
@@ -549,4 +550,64 @@ describe('what an obligation’s status says of its funds (review of #334 round 
   ])('%s → %s', (status, funds) => {
     expect(fundsOf(status)).toBe(funds);
   });
+});
+
+it('retries a committed hold whose response became a redirect with the same idempotency key and body', async () => {
+  const transaction = { id: 'TXN_COMMITTED', status: 'HELD', organizationId: 'ORG_BUYER' };
+  const committed = new Map<string, string>();
+  const receivedBodies: string[] = [];
+  let writes = 0;
+  await withRedirectProbe(
+    {
+      body: transaction,
+      onRequest: (request, body) => {
+        if (request.method !== 'POST') return;
+        // The HTTP owner commits the operation before sending the redirect response.
+        const key = String(request.headers['idempotency-key']);
+        receivedBodies.push(body);
+        if (!committed.has(key)) {
+          committed.set(key, body);
+          writes += 1;
+        }
+      },
+    },
+    async (probe) => {
+      const original = globalThis.fetch;
+      globalThis.fetch = probe.fetch;
+      try {
+        const client = new EconomicClient(
+          { ...ENV, ECONOMIC_SERVICE_URL: probe.baseUrl },
+          recordingTokens().service as never,
+        );
+        const input = {
+          orderId: 'ORD_1',
+          buyerOrganizationId: 'ORG_BUYER',
+          supplierOrganizationId: 'ORG_SUPPLIER',
+          totalAmountMinor: 10n,
+          currency: 'IRR',
+          correlationId: 'corr-1',
+        };
+        await expect(client.createObligation(input)).rejects.toMatchObject({
+          code: 'UPSTREAM_UNAVAILABLE',
+        });
+        expect(writes).toBe(1);
+        expect(probe.sent).toHaveLength(1);
+        expect(probe.target).toEqual([]);
+        probe.recover();
+        await expect(client.createObligation(input)).resolves.toEqual(transaction);
+        expect(writes).toBe(1);
+        expect([...committed.keys()]).toEqual([idempotencyKeyFor.hold('ORD_1')]);
+        expect(receivedBodies).toHaveLength(2);
+        expect(receivedBodies[1]).toBe(receivedBodies[0]);
+        expect(committed.get(idempotencyKeyFor.hold('ORD_1'))).toBe(receivedBodies[0]);
+        expect(probe.sent.map((request) => request.headers['idempotency-key'])).toEqual([
+          idempotencyKeyFor.hold('ORD_1'),
+          idempotencyKeyFor.hold('ORD_1'),
+        ]);
+        expect(probe.target).toEqual([]);
+      } finally {
+        globalThis.fetch = original;
+      }
+    },
+  );
 });
