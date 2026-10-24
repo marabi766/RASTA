@@ -36,6 +36,18 @@ export const TENANT_SCOPE_EXEMPTIONS = {
 
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 
+/**
+ * The same database URL, as a pool of at most `connections` connections with
+ * a short wait for one (seconds): what the Keycloak write fences run on
+ * (D-069), apart from the pool business transactions hold their locks on.
+ */
+export function separatePoolUrl(databaseUrl: string, connections: number, waitSeconds = 5): string {
+  const url = new URL(databaseUrl);
+  url.searchParams.set('connection_limit', String(connections));
+  url.searchParams.set('pool_timeout', String(waitSeconds));
+  return url.toString();
+}
+
 @Injectable()
 export class PrismaService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PrismaService.name);

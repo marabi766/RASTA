@@ -1,7 +1,9 @@
 import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
 import type { KeycloakProjector } from '../keycloak/keycloak.projector';
+import type { KeycloakWriteFences } from '../keycloak/keycloak-write-fence';
 import {
+  keycloakWriteFences,
   membershipLapseBacklog,
   membershipLapseFailuresTotal,
 } from '../observability/keycloak-projection.metrics';
@@ -52,50 +54,66 @@ export interface MembershipExpiryScanOptions {
  * A lapse writes Keycloak before it commits (`expireLapsedMembership`), so a
  * lapse whose write fails is not acted on at all: unclaimed, no event, and
  * `validUntil` keeps the database from granting meanwhile. It is retried, and
- * it never holds back the lapses behind it: one that fails waits out a
- * backoff that doubles per failure — two intervals, then four, eight, up to
- * {@link MAX_BACKOFF_INTERVALS} — and a pass walks past it, page by page,
- * to the next. A pass makes at most `batchSize` attempts and reads at most
- * {@link MAX_PAGES_PER_PASS} pages. Nothing is ever
- * given up: a lapse is tried until it is acted on. The backlog — lapses past
- * `validUntil` and not acted on — is published after every pass
+ * it never holds back the lapses behind it (#402 r1 F2):
+ *
+ * - **durable retry eligibility** — a lapse that fails waits out a backoff
+ *   recorded in its own row (`lapse_retry_at`), doubling per failure — two
+ *   intervals, then four, eight, up to {@link MAX_BACKOFF_INTERVALS} — and the
+ *   query skips it until then, on every replica and across restarts;
+ * - **a cursor that continues across passes** — a pass starts where the last
+ *   one stopped (oldest lapse first) and wraps round to the start once, so
+ *   lapses that became eligible behind it are reached too; at most `batchSize`
+ *   attempts and {@link MAX_PAGES_PER_PASS} pages a pass.
+ *
+ * Nothing is ever given up: a lapse is tried until it is acted on. The backlog
+ * — lapses past `validUntil` and not acted on — is published after every pass
  * (`rasta_identity_membership_lapse_backlog`), and alerted on when it stays up.
  *
- * Each pass also re-projects users whose Keycloak write was left unconfirmed,
- * once that write can no longer land (`keycloak_reassert_at`): the sweep is
- * what makes "Keycloak never stays wider than the rows" hold when nothing
- * else would project them again.
+ * ## Re-assertion (D-069)
+ *
+ * Each pass also projects again every user with a Keycloak write fence past
+ * `takeover_at` (`keycloak_write_attempt`): a write whose outcome is unknown
+ * and can no longer land. The projection writes the committed state under the
+ * user lock and, once that lands, deletes the fences it took over. The same
+ * fairness: a user whose re-assertion fails is deferred in their fence rows
+ * (`next_reassert_at`, the same capped backoff), and a cursor by user id walks
+ * on across passes. A user whose account Keycloak no longer has (404) is
+ * terminal — their fences are marked `account_missing`, never retried, and
+ * counted (`rasta_identity_keycloak_write_fences{state="account_missing"}`,
+ * alerted on).
  *
  * ## Shutdown
  *
  * `OutboxShutdown` stops it in Nest's destroy phase, beside both relays and the
- * purge, by their shared deadline (D-052): every lapse it handles writes an
- * outbox row, and a scanner that only cleared its timer went on with the pass
- * in flight while the relay drained and the pool closed.
+ * purge, by their shared deadline (D-052). A stop cancels the pass in flight
+ * (#402 r1 F4): the Keycloak call it is waiting on is aborted — its fence
+ * stays, so stopping mid-write is safe (D-069) — and every later step of the
+ * pass, down to the last gauge, checks the stop before it starts. Nothing it
+ * would have done next reaches the database once the stop has returned.
  */
-/** The longest a failing lapse waits between attempts, in scan intervals. */
+/** The longest a failing lapse or re-assertion waits between attempts, in scan intervals. */
 export const MAX_BACKOFF_INTERVALS = 16;
 
-/** How many pages of `batchSize` lapses one pass reads at most, looking past failing ones. */
+/** How many pages of `batchSize` one pass reads at most, wrap-round included. */
 export const MAX_PAGES_PER_PASS = 10;
 
-/** How many failing lapses a replica remembers the backoff of; the oldest are forgotten first. */
-const MAX_REMEMBERED_FAILURES = 10_000;
+type LapseKey = { validUntil: Date | null; id: string };
+type LapsedMembership = Awaited<ReturnType<IdentityRepository['findLapsedMemberships']>>[number];
 
 @Injectable()
 export class MembershipExpiryScanner implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(MembershipExpiryScanner.name);
   private timer?: NodeJS.Timeout;
-  /**
-   * Lapses that failed, by membership id: how many times, and not to be tried
-   * again before `retryAt`. Per replica, in memory — forgetting it (a restart)
-   * only means trying sooner.
-   */
-  private readonly failures = new Map<string, { count: number; retryAt: number }>();
+  /** Where the next pass resumes the lapses: the last one tried. Per replica; a restart starts over. */
+  private lapseCursor: LapseKey | null = null;
+  /** Where the next pass resumes the re-assertions: the last user tried. */
+  private reassertCursor: string | null = null;
   /** The pass running, for the overlap guard and for a stop to wait on. */
   private inFlight?: Promise<number>;
-  /** Set when the stop begins: no pass starts, and the one running starts no further lapse. */
+  /** Set when the stop begins: no pass starts, and the one running starts no further step. */
   private stopped = false;
+  /** Aborted when the stop begins: cancels the Keycloak call of the pass in flight. */
+  private readonly cancel = new AbortController();
   /** The one stop; later calls join it. */
   private stopping?: Promise<void>;
 
@@ -104,8 +122,10 @@ export class MembershipExpiryScanner implements OnModuleInit, OnApplicationShutd
     private readonly identity: IdentityService,
     /** From `MEMBERSHIP_EXPIRY_SCAN_*`; built by the module's factory. */
     private readonly options: MembershipExpiryScanOptions,
-    /** Re-projects users whose re-assertion mark has passed (D-064). */
+    /** Re-projects users with a write fence past takeover (D-069). */
     private readonly projector: Pick<KeycloakProjector, 'project'>,
+    /** The write fences: who is due, their deferral, the gauges (D-069). */
+    private readonly fences: Pick<KeycloakWriteFences, 'dueUsers' | 'deferReassert' | 'counts'>,
   ) {}
 
   onModuleInit(): void {
@@ -123,14 +143,15 @@ export class MembershipExpiryScanner implements OnModuleInit, OnApplicationShutd
   }
 
   /**
-   * Stops the timer at once, lets the pass in flight start no further lapse,
-   * and waits for the one being handled — at most until `deadlineAt`, the
-   * shutdown's shared deadline. Past it the pass is abandoned with a warning:
-   * each lapse is claimed, moved off and enqueued in one transaction, so an
-   * exit rolls back the one in flight and the next pass, on any replica, finds
-   * it again; one already committed has its `MEMBERSHIP_EXPIRED` row, which the
-   * Keycloak projection consumer re-projects from. Without a deadline it waits.
-   * One stop per process.
+   * Stops the timer at once, cancels the pass in flight — its Keycloak call
+   * is aborted, and it starts no further step — and waits for it to unwind, at
+   * most until `deadlineAt`, the shutdown's shared deadline. Past it the pass
+   * is abandoned with a warning; it still starts nothing new, so nothing of it
+   * reaches the database after this returns but the rollback of the
+   * transaction it was in. Each lapse is claimed, written ahead and enqueued
+   * in one transaction, so that rollback leaves it for the next pass, on any
+   * replica; a Keycloak write cut off keeps its fence. Without a deadline it
+   * waits. One stop per process.
    */
   stop(options: OutboxStopOptions = {}): Promise<void> {
     this.stopping ??= this.halt(options.deadlineAt);
@@ -144,6 +165,7 @@ export class MembershipExpiryScanner implements OnModuleInit, OnApplicationShutd
 
   private async halt(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
+    this.cancel.abort();
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
 
@@ -155,8 +177,8 @@ export class MembershipExpiryScanner implements OnModuleInit, OnApplicationShutd
     }
     if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
       this.logger.warn(
-        'Membership expiry pass still running at the shutdown deadline; abandoned. The lapse ' +
-          'in flight rolls back and the next pass finds it again',
+        'Membership expiry pass still unwinding at the shutdown deadline; abandoned. It starts ' +
+          'no further step; the lapse in flight rolls back and the next pass finds it again',
       );
     }
   }
@@ -178,92 +200,130 @@ export class MembershipExpiryScanner implements OnModuleInit, OnApplicationShutd
   private async pass(now: Date): Promise<number> {
     try {
       const handled = await this.expireLapses(now);
+      // Every stage checks the stop before it starts (#402 r1 F4).
+      if (this.stopped) return handled;
       await this.reassertDue();
+      if (this.stopped) return handled;
       membershipLapseBacklog.set(await this.repository.countLapsedMemberships(now));
+      if (this.stopped) return handled;
+      const fences = await this.fences.counts();
+      keycloakWriteFences.set({ state: 'live' }, fences.live);
+      keycloakWriteFences.set({ state: 'due' }, fences.due);
+      keycloakWriteFences.set({ state: 'account_missing' }, fences.accountMissing);
       return handled;
     } catch (error) {
       // Never takes the service down: access is already decided from the clock.
-      this.logger.error(`Membership expiry scan failed: ${describe(error)}`);
+      if (!this.stopped) this.logger.error(`Membership expiry scan failed: ${describe(error)}`);
       return 0;
     }
   }
 
   /**
-   * Up to `batchSize` attempts, oldest lapse first, walking past the ones
-   * waiting out a backoff to the ones behind them.
+   * Up to `batchSize` attempts, from where the last pass stopped, wrapping
+   * round to the oldest once; lapses waiting out a retry are not read at all.
    */
   private async expireLapses(now: Date): Promise<number> {
-    const { batchSize } = this.options;
     let attempts = 0;
     let handled = 0;
-    let after: { validUntil: Date; id: string } | null = null;
-    // Pages read, so a backlog of lapses all waiting out a backoff is not
-    // walked end to end on every pass.
-    let pages = 0;
-
-    while (attempts < batchSize && pages < MAX_PAGES_PER_PASS && !this.stopped) {
-      pages += 1;
-      const page = await this.repository.findLapsedMemberships(now, batchSize, after);
-      for (const membership of page) {
-        // Stopping: a lapse not reached stays unhandled for the next pass.
-        if (attempts >= batchSize || this.stopped) break;
-        const failed = this.failures.get(membership.id);
-        if (failed && failed.retryAt > now.getTime()) continue;
+    this.lapseCursor = await this.roundRobin<LapsedMembership, LapseKey>(
+      this.lapseCursor,
+      (after, until) =>
+        this.repository.findLapsedMemberships(now, this.options.batchSize, after, until),
+      (membership) => ({ validUntil: membership.validUntil, id: membership.id }),
+      async (membership) => {
         attempts += 1;
         try {
-          if (await this.identity.expireLapsedMembership(membership, now)) handled += 1;
-          this.failures.delete(membership.id);
+          const acted = await this.identity.expireLapsedMembership(membership, now, {
+            signal: this.cancel.signal,
+          });
+          if (acted) handled += 1;
         } catch (error) {
-          // Unclaimed, so a later pass retries it; the rest still need handling.
-          this.backOff(membership.id, now);
+          if (this.stopped) return;
+          // Unclaimed, so a later pass retries it — once its backoff, kept in
+          // its row, has passed; the rest still need handling.
           membershipLapseFailuresTotal.inc();
           this.logger.error(`Failed to expire membership ${membership.id}: ${describe(error)}`);
+          await this.repository
+            .deferLapse(membership.id, this.options.intervalSeconds, MAX_BACKOFF_INTERVALS)
+            .catch((deferError: unknown) =>
+              this.logger.error(`Could not defer lapse ${membership.id}: ${describe(deferError)}`),
+            );
         }
-      }
-      const last = page.at(-1);
-      if (page.length < batchSize || !last?.validUntil) break;
-      after = { validUntil: last.validUntil, id: last.id };
-    }
-
+      },
+    );
     if (handled > 0) this.logger.log(`Expired ${handled} of ${attempts} lapsed memberships tried`);
     return handled;
   }
 
   /**
-   * One more failure: sit out the next pass, then twice as long each time, up
-   * to the cap — so the next pass reaches the lapses behind this one.
+   * Projects again, under the user lock, every user with a write fence past
+   * takeover (D-069), from where the last pass stopped, wrapping round once;
+   * the projection deletes the fences it took over. One that fails is
+   * deferred in its fence rows; a missing account is made terminal by the
+   * projection itself (`account_missing`).
    */
-  private backOff(membershipId: string, now: Date): void {
-    const count = (this.failures.get(membershipId)?.count ?? 0) + 1;
-    const intervals = Math.min(2 ** count, MAX_BACKOFF_INTERVALS);
-    this.failures.delete(membershipId);
-    this.failures.set(membershipId, {
-      count,
-      retryAt: now.getTime() + intervals * this.options.intervalSeconds * 1000,
-    });
-    // Insertion order is age order: forget the oldest beyond the cap.
-    while (this.failures.size > MAX_REMEMBERED_FAILURES) {
-      const oldest = this.failures.keys().next().value;
-      if (oldest === undefined) break;
-      this.failures.delete(oldest);
-    }
+  private async reassertDue(): Promise<void> {
+    this.reassertCursor = await this.roundRobin<string, string>(
+      this.reassertCursor,
+      (after, until) => this.fences.dueUsers(after, this.options.batchSize, until),
+      (userId) => userId,
+      async (userId) => {
+        try {
+          await this.projector.project(userId, 'reassert', { signal: this.cancel.signal });
+        } catch (error) {
+          if (this.stopped) return;
+          this.logger.error(`Failed to re-assert user ${userId} in Keycloak: ${describe(error)}`);
+          await this.fences
+            .deferReassert(userId, this.options.intervalSeconds, MAX_BACKOFF_INTERVALS)
+            .catch((deferError: unknown) =>
+              this.logger.error(
+                `Could not defer re-assertion of ${userId}: ${describe(deferError)}`,
+              ),
+            );
+        }
+      },
+    );
   }
 
   /**
-   * Projects again, under the user lock, every user whose re-assertion mark
-   * has passed (D-064); the projection clears the mark. One that fails keeps
-   * it, or gets a later one, and is tried on a later pass.
+   * Fair progress across passes (#402 r1 F2): visits at most `batchSize`
+   * items, in the store's order, starting after `start` — where the last pass
+   * stopped — to the end, then once round from the oldest up to `start`
+   * (`until`, bounded in the query). Returns where the next pass starts: the
+   * last item visited, or null once a whole round is done. Items not eligible
+   * (waiting out a retry) are never read, so no failing prefix can take a
+   * pass's budget; the cursor makes every eligible item visited within
+   * ⌈eligible / batchSize⌉ passes.
    */
-  private async reassertDue(): Promise<void> {
-    const due = await this.repository.findUsersDueKeycloakReassert(this.options.batchSize);
-    for (const userId of due) {
-      if (this.stopped) break;
-      try {
-        await this.projector.project(userId, 'reassert');
-      } catch (error) {
-        this.logger.error(`Failed to re-assert user ${userId} in Keycloak: ${describe(error)}`);
+  private async roundRobin<T, K>(
+    start: K | null,
+    read: (after: K | null, until: K | null) => Promise<T[]>,
+    keyOf: (item: T) => K,
+    visit: (item: T) => Promise<void>,
+  ): Promise<K | null> {
+    const { batchSize } = this.options;
+    let after = start;
+    let wrapped = start === null;
+    let visited = 0;
+    let pages = 0;
+    while (visited < batchSize && pages < MAX_PAGES_PER_PASS && !this.stopped) {
+      pages += 1;
+      const page = await read(after, wrapped ? start : null);
+      for (const item of page) {
+        if (visited >= batchSize || this.stopped) return after;
+        visited += 1;
+        after = keyOf(item);
+        await visit(item);
+      }
+      if (visited >= batchSize || this.stopped) return after;
+      if (page.length < batchSize) {
+        // The end. Round once from the oldest, unless this pass began there.
+        if (wrapped) return null;
+        wrapped = true;
+        after = null;
       }
     }
+    return after;
   }
 }
 

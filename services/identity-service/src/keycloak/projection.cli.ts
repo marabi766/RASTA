@@ -3,10 +3,11 @@ import { createLogger } from '@rasta/logging';
 import { preflightRuntimeRole } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
 import { loadIdentityEnv, SERVICE_NAME } from '../config/env';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService, separatePoolUrl } from '../prisma/prisma.service';
 import { IdentityRepository } from '../identity/identity.repository';
 import { KeycloakAdminClient } from './keycloak.client';
 import { KeycloakProjector } from './keycloak.projector';
+import { FENCE_POOL_CONNECTIONS, KeycloakWriteFences } from './keycloak-write-fence';
 import { isClean, runProjectionCommand, type ProjectionCommandMode } from './projection.command';
 
 /**
@@ -43,7 +44,11 @@ async function main(): Promise<number> {
   }
 
   const prisma = new PrismaService(env.DATABASE_URL);
+  // The write fences' own pool, as in the service (D-069): the backfill's
+  // projections and orphan repairs are fenced like every other writer.
+  const fencePool = new PrismaService(separatePoolUrl(env.DATABASE_URL, FENCE_POOL_CONNECTIONS));
   await prisma.onModuleInit();
+  await fencePool.onModuleInit();
   try {
     const repository = new IdentityRepository(prisma);
     const keycloak = new KeycloakAdminClient({
@@ -53,9 +58,14 @@ async function main(): Promise<number> {
       clientSecret: env.KEYCLOAK_BACKEND_CLIENT_SECRET,
       enabled: true,
     });
-    const projector = new KeycloakProjector(repository, keycloak, {
-      writeSettleSeconds: env.KEYCLOAK_WRITE_SETTLE_SECONDS,
-    });
+    const projector = new KeycloakProjector(
+      repository,
+      keycloak,
+      new KeycloakWriteFences(fencePool),
+      {
+        writeSettleSeconds: env.KEYCLOAK_WRITE_SETTLE_SECONDS,
+      },
+    );
 
     const report = await runProjectionCommand(mode as ProjectionCommandMode, {
       repository,
@@ -66,6 +76,7 @@ async function main(): Promise<number> {
     logger.info({ report }, `Keycloak ${mode}: ${report.accounts} accounts`);
     return isClean(report) ? 0 : 1;
   } finally {
+    await fencePool.onModuleDestroy();
     await prisma.onModuleDestroy();
   }
 }

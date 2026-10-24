@@ -129,6 +129,15 @@ export function isWithin(narrower: PlatformAttributes, wider: PlatformAttributes
 }
 
 /**
+ * Whether two attribute sets hold the same values, order aside: what a write
+ * carried against what is committed (D-069 — a fence is cleared only when
+ * Keycloak holds the committed state).
+ */
+export function sameAttributes(a: PlatformAttributes, b: PlatformAttributes): boolean {
+  return isWithin(a, b) && isWithin(b, a);
+}
+
+/**
  * The attributes of an account no decision has granted anything yet: its
  * provenance alone. What a registration approval creates its account with,
  * and what the orphan repair leaves one with (#219 r2).

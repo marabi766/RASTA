@@ -35,7 +35,6 @@ import {
   grantsAnything,
   intersectAttributes,
   platformAttributesFor,
-  provenanceOnly,
   type PlatformAttributes,
 } from '../keycloak/platform-attributes';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
@@ -262,31 +261,20 @@ export class IdentityService {
     const userId = `${ID_PREFIXES.user}_${ulid()}`;
     const membershipId = `${ID_PREFIXES.membership}_${ulid()}`;
     const actor = getContext().userId ?? 'SYSTEM';
-    const grantedAt = new Date();
 
+    // Disabled, and carrying nothing but its provenance (D-069 addendum D):
+    // no user row exists yet for a lock to cover, so until the row below has
+    // committed the account must be harmless whatever happens next — a lost
+    // answer, a crash, a transaction that rolls back. Its grants and its
+    // enable are written after commit by the projector, each write fenced,
+    // like every other write of the account. Before, this created the account
+    // enabled and granting, ahead of a transaction that might not commit.
     const keycloakId = await this.keycloak.createUser({
       username: dto.username,
       email: dto.email,
       firstName: dto.firstName,
       lastName: dto.lastName,
-      // Exactly what the projector would write for the rows committed below,
-      // so the account's very first token is already right.
-      attributes: platformAttributesFor(
-        { id: userId, activeOrganizationId: dto.organizationId },
-        [
-          {
-            organizationId: dto.organizationId,
-            roles: dto.roles,
-            status: 'ACTIVE',
-            validFrom: grantedAt,
-            validUntil: null,
-          },
-        ],
-        grantedAt,
-      ),
-      // Unchanged by #219 r2: the operator path still creates the account
-      // enabled, before its transaction (a known follow-up).
-      enabled: true,
+      userId,
     });
 
     const user = await this.repository.transaction(async (tx) => {
@@ -301,6 +289,9 @@ export class IdentityService {
           phone: dto.phone ?? null,
           status: 'ACTIVE',
           activeOrganizationId: dto.organizationId,
+          // The projector writes the grants, enables the account and clears
+          // this, once (`activateOnce`; an operator's user has no request).
+          accountActivationPending: keycloakId !== null,
           createdBy: actor,
           updatedBy: actor,
         },
@@ -343,6 +334,12 @@ export class IdentityService {
 
       return created;
     });
+
+    // The grants, then the account enabled — only now that the user has
+    // committed. Never throws: USER_ACTIVATED and MEMBERSHIP_CREATED, committed
+    // above, bring the projection back round if this fails, and until it
+    // lands the account stays disabled.
+    await this.projector.projectAfterCommit(userId);
 
     return toUserView(user);
   }
@@ -525,7 +522,8 @@ export class IdentityService {
         const nextRoles: readonly string[] = dto.roles;
         const added = nextRoles.filter((role) => !previousRoles.includes(role));
         const removed = previousRoles.filter((role) => !nextRoles.includes(role));
-        const now = new Date();
+        // The database's clock, read after the lock (#402 r1 F3).
+        const now = await this.repository.databaseNow(tx);
         const before = removed.length > 0 ? await this.rowsGrant(tx, userId, now) : null;
 
         const result = await tx.membership.update({
@@ -535,10 +533,8 @@ export class IdentityService {
 
         // Narrowing: Keycloak first, before any event exists.
         if (before) {
-          await writeAhead.write(
-            tx,
-            intersectAttributes(before, await this.rowsGrant(tx, userId, now)),
-          );
+          const after = await this.rowsGrant(tx, userId, now);
+          await writeAhead.write(tx, intersectAttributes(before, after), after);
         }
 
         // Two events, because a consumer usually cares about one direction. The
@@ -585,7 +581,7 @@ export class IdentityService {
     // token, because roles were written to Keycloak only when the account was
     // created. A demoted administrator kept administering. After a demotion
     // this only adds what the write-ahead held back.
-    await this.projector.projectAfterCommit(userId);
+    await writeAhead.afterCommit();
 
     return toMembershipView(updated);
   }
@@ -627,7 +623,8 @@ export class IdentityService {
         // Already ended — by this same request, sent again: nothing to do.
         if (membership.deletedAt) return;
 
-        const now = new Date();
+        // The database's clock, read after the lock (#402 r1 F3).
+        const now = await this.repository.databaseNow(tx);
         const before = await this.rowsGrant(tx, userId, now);
 
         // `deletedAt` is the end of the membership in every history read: the database's clock,
@@ -637,10 +634,8 @@ export class IdentityService {
         await this.moveActiveOrganizationOff(tx, userId, membership.organizationId, actor, now);
 
         // Keycloak first, before the event that is the gateway's cutoff.
-        await writeAhead.write(
-          tx,
-          intersectAttributes(before, await this.rowsGrant(tx, userId, now)),
-        );
+        const after = await this.rowsGrant(tx, userId, now);
+        await writeAhead.write(tx, intersectAttributes(before, after), after);
 
         await this.repository.enqueueEvent(tx, {
           aggregateType: 'Membership',
@@ -660,7 +655,7 @@ export class IdentityService {
         throw await writeAhead.settle(error);
       });
 
-    await this.projector.projectAfterCommit(userId);
+    await writeAhead.afterCommit();
   }
 
   /**
@@ -696,6 +691,9 @@ export class IdentityService {
       // membership checked below is still the membership when this commits
       // (Codex #114 R1-1).
       const current = await this.repository.lockUserMemberships(tx, userId);
+      // The database's clock, in a statement after the lock: `now()` would be
+      // this transaction's start, older than any wait for the lock (#402 r1 F3).
+      const now = current ? await this.repository.databaseNow(tx) : null;
 
       // Read and judged inside the lock, against the database's clock: a
       // revocation or an expiry that committed first is seen here. A caller
@@ -706,7 +704,7 @@ export class IdentityService {
         : null;
       // Live, not merely ACTIVE: a membership past its validUntil is not one the
       // caller may act for, and this is where acting for it would begin.
-      if (!current || !membership || !isMembershipLive(membership, current.now)) {
+      if (!current || !now || !membership || !isMembershipLive(membership, now)) {
         // Marked as the one refusal this service records as audit evidence
         // (ADR-053 § 4). The mark changes nothing about the error or its `403`;
         // it only tells the exception filter that *this* decision is the one the
@@ -888,119 +886,133 @@ export class IdentityService {
     // An account that already exists, or a create Keycloak did not confirm,
     // is resolved below, under the request lock (#219 r3).
     const created = await this.createApprovalAccount(request);
+    // Whether an adoption wrote to the account (D-069): its fenced writes
+    // that landed are due at once, and the projection after this approval —
+    // whichever way it ends — takes them over.
+    let adopted = false;
 
-    const updated = await this.repository.transaction(async (tx) => {
-      // Decided under the request's row lock, on the status read under it:
-      // a rejection or a second approval of this request waits here, and
-      // whichever comes second sees the first one's decision and is refused
-      // — never an overwrite, never a second event. The update stays
-      // conditional on PENDING as well, so it can never be the one that
-      // decides; Prisma answers a `where` that matches nothing with P2025.
-      const locked = await this.repository.lockRegistrationRequest(tx, registrationId);
-      if (locked?.status !== 'PENDING') {
-        throw registrationAlreadyDecided('APPROVED', locked?.status);
-      }
-      // The one lock of every Keycloak writer of the user (`KeycloakProjector`,
-      // D-064), after the request lock: adopting an account may write to it.
-      await this.repository.lockUserMemberships(tx, request.userId);
-      const keycloakId =
-        created.outcome === 'created'
-          ? created.keycloakId
-          : await this.adoptApprovalAccount(registrationId, request, created.outcome);
-      const result = await tx.registrationRequest
-        .update({
-          where: { id: registrationId, status: 'PENDING' },
-          data: { status: 'APPROVED', reviewedBy: reviewer, reviewedAt: new Date() },
-          include: { user: true },
-        })
-        .catch((error: unknown) => {
-          if (isRecordNotFound(error)) throw registrationAlreadyDecided('APPROVED', 'DECIDED');
-          throw error;
-        });
-
-      await runUnscoped('activating a user is a platform-level operation', () =>
-        tx.user.update({
-          where: { id: request.userId },
-          data: {
-            status: 'ACTIVE',
-            keycloakId,
-            // The projector enables the account and clears this, once.
-            accountActivationPending: keycloakId !== null,
-            activeOrganizationId: request.requestedOrganizationId,
-            updatedBy: reviewer,
-            version: { increment: 1 },
-          },
-        }),
-      );
-
-      try {
-        await this.createMembershipRow(tx, {
-          membershipId,
-          userId: request.userId,
-          organizationId: request.requestedOrganizationId,
-          roles: grantedRoles,
-          actor: reviewer,
-        });
-      } catch (error) {
-        // Somebody gave this person a membership in the organization while
-        // the request waited. Which of the two grants should stand is the
-        // reviewer's call, so the request stays pending and says why.
-        if (error instanceof RastaError && error.code === ERROR_CODES.ALREADY_EXISTS) {
-          throw registrationMembershipConflict(registrationId);
+    const updated = await this.repository
+      .transaction(async (tx) => {
+        // Decided under the request's row lock, on the status read under it:
+        // a rejection or a second approval of this request waits here, and
+        // whichever comes second sees the first one's decision and is refused
+        // — never an overwrite, never a second event. The update stays
+        // conditional on PENDING as well, so it can never be the one that
+        // decides; Prisma answers a `where` that matches nothing with P2025.
+        const locked = await this.repository.lockRegistrationRequest(tx, registrationId);
+        if (locked?.status !== 'PENDING') {
+          throw registrationAlreadyDecided('APPROVED', locked?.status);
         }
-        throw error;
-      }
+        // The one lock of every Keycloak writer of the user (`KeycloakProjector`,
+        // D-064), after the request lock: adopting an account may write to it.
+        await this.repository.lockUserMemberships(tx, request.userId);
+        const keycloakId =
+          created.outcome === 'created'
+            ? created.keycloakId
+            : await this.adoptApprovalAccount(tx, registrationId, request, created.outcome, () => {
+                adopted = true;
+              });
+        const result = await tx.registrationRequest
+          .update({
+            where: { id: registrationId, status: 'PENDING' },
+            data: { status: 'APPROVED', reviewedBy: reviewer, reviewedAt: new Date() },
+            include: { user: true },
+          })
+          .catch((error: unknown) => {
+            if (isRecordNotFound(error)) throw registrationAlreadyDecided('APPROVED', 'DECIDED');
+            throw error;
+          });
 
-      for (const event of [
-        {
-          name: IDENTITY_EVENTS.REGISTRATION_APPROVED,
-          aggregateType: 'RegistrationRequest',
-          aggregateId: registrationId,
-          payload: {
-            registrationId,
-            userId: request.userId,
-            requestedOrganizationId: request.requestedOrganizationId,
-            outcome: 'APPROVED' as const,
-            reviewedBy: reviewer,
-            grantedRoles,
-          },
-        },
-        {
-          name: IDENTITY_EVENTS.USER_ACTIVATED,
-          aggregateType: 'User',
-          aggregateId: request.userId,
-          payload: {
-            userId: request.userId,
-            organizationId: request.requestedOrganizationId,
-            roles: grantedRoles,
-          },
-        },
-        {
-          name: IDENTITY_EVENTS.MEMBERSHIP_CREATED,
-          aggregateType: 'Membership',
-          aggregateId: membershipId,
-          payload: {
+        await runUnscoped('activating a user is a platform-level operation', () =>
+          tx.user.update({
+            where: { id: request.userId },
+            data: {
+              status: 'ACTIVE',
+              keycloakId,
+              // The projector enables the account and clears this, once.
+              accountActivationPending: keycloakId !== null,
+              activeOrganizationId: request.requestedOrganizationId,
+              updatedBy: reviewer,
+              version: { increment: 1 },
+            },
+          }),
+        );
+
+        try {
+          await this.createMembershipRow(tx, {
             membershipId,
             userId: request.userId,
             organizationId: request.requestedOrganizationId,
             roles: grantedRoles,
-          },
-        },
-      ]) {
-        await this.repository.enqueueEvent(tx, {
-          aggregateType: event.aggregateType,
-          aggregateId: event.aggregateId,
-          eventName: event.name,
-          topic: IDENTITY_TOPIC,
-          organizationId: request.requestedOrganizationId,
-          payload: validateIdentityPayload(event.name, event.payload),
-        });
-      }
+            actor: reviewer,
+          });
+        } catch (error) {
+          // Somebody gave this person a membership in the organization while
+          // the request waited. Which of the two grants should stand is the
+          // reviewer's call, so the request stays pending and says why.
+          if (error instanceof RastaError && error.code === ERROR_CODES.ALREADY_EXISTS) {
+            throw registrationMembershipConflict(registrationId);
+          }
+          throw error;
+        }
 
-      return result;
-      // Above the default: resolving an existing account holds the lock across
-      // up to five Keycloak calls, each bounded at 10 s by the client.
-    }, APPROVAL_TRANSACTION_OPTIONS);
+        for (const event of [
+          {
+            name: IDENTITY_EVENTS.REGISTRATION_APPROVED,
+            aggregateType: 'RegistrationRequest',
+            aggregateId: registrationId,
+            payload: {
+              registrationId,
+              userId: request.userId,
+              requestedOrganizationId: request.requestedOrganizationId,
+              outcome: 'APPROVED' as const,
+              reviewedBy: reviewer,
+              grantedRoles,
+            },
+          },
+          {
+            name: IDENTITY_EVENTS.USER_ACTIVATED,
+            aggregateType: 'User',
+            aggregateId: request.userId,
+            payload: {
+              userId: request.userId,
+              organizationId: request.requestedOrganizationId,
+              roles: grantedRoles,
+            },
+          },
+          {
+            name: IDENTITY_EVENTS.MEMBERSHIP_CREATED,
+            aggregateType: 'Membership',
+            aggregateId: membershipId,
+            payload: {
+              membershipId,
+              userId: request.userId,
+              organizationId: request.requestedOrganizationId,
+              roles: grantedRoles,
+            },
+          },
+        ]) {
+          await this.repository.enqueueEvent(tx, {
+            aggregateType: event.aggregateType,
+            aggregateId: event.aggregateId,
+            eventName: event.name,
+            topic: IDENTITY_TOPIC,
+            organizationId: request.requestedOrganizationId,
+            payload: validateIdentityPayload(event.name, event.payload),
+          });
+        }
+
+        return result;
+        // Above the default: resolving an existing account holds the lock across
+        // up to five Keycloak calls, each bounded at 10 s by the client.
+      }, APPROVAL_TRANSACTION_OPTIONS)
+      .catch(async (error: unknown) => {
+        // Not approved: the account an adoption wrote stays harmless, which is
+        // what an account no user row names should be — confirmed, and its
+        // fences deleted, by this projection (`reassertUnlinked`).
+        if (adopted) await this.projector.projectAfterCommit(request.userId);
+        throw error;
+      });
 
     // The grants, then the account enabled — only now that the approval has
     // committed. Never throws: a failure is logged and counted, and the
@@ -1036,8 +1048,7 @@ export class IdentityService {
         email: request.user.email,
         firstName: request.user.firstName,
         lastName: request.user.lastName,
-        attributes: provenanceOnly(request.userId),
-        enabled: false,
+        userId: request.userId,
       });
       return { outcome: 'created', keycloakId };
     } catch (error) {
@@ -1071,9 +1082,11 @@ export class IdentityService {
    * attempt creates or finds it.
    */
   private async adoptApprovalAccount(
+    tx: ExtendedPrismaClient,
     registrationId: string,
     request: { userId: string; user: { username: string } },
     outcome: 'exists' | 'unconfirmed',
+    wrote: () => void,
   ): Promise<string> {
     const existing = await this.keycloak.findAccountByUsername(request.user.username);
     if (!existing) throw registrationAccountUnconfirmed(registrationId);
@@ -1082,8 +1095,10 @@ export class IdentityService {
       throw registrationAccountTaken(registrationId);
     }
     if (existing.enabled || grantsAnything(existing.attributes)) {
-      await this.keycloak.setEnabled(existing.id, false);
-      await this.keycloak.replacePlatformAttributes(existing.id, provenanceOnly(request.userId));
+      // Fenced, under the user lock this transaction holds (D-069): a late
+      // disable or clear can then never land after the enable unseen.
+      wrote();
+      await this.projector.adoptHarmless(tx, request.userId, existing);
       this.logger.warn(
         { registrationId, userId: request.userId, keycloakId: existing.id },
         "Approval disabled and cleared an earlier attempt's account before adopting it",
@@ -1234,16 +1249,29 @@ export class IdentityService {
    * the membership's own organization, like a request would: a background job
    * is not trusted more than a person is.
    *
+   * `selectedAt` is when the sweep picked the lapse, and only that: every
+   * decision is made on the database's clock read after the user lock
+   * (#402 r1 F3), so a pass that was delayed — on the lock, on Keycloak, on a
+   * slow page — still judges every membership of the user as of the moment it
+   * writes. Judged on the old clock, a membership that lapsed meanwhile would
+   * be granted again in the write-ahead, after its own cutoff.
+   *
+   * `signal` is the sweep's shutdown (#402 r1 F4): it cancels the Keycloak
+   * call in flight and refuses every further step.
+   *
    * Returns whether this call acted, which is `false` when another replica
    * claimed the lapse first.
    */
   async expireLapsedMembership(
     membership: { id: string; userId: string; organizationId: string; validUntil: Date | null },
-    now: Date,
+    selectedAt: Date,
+    options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
-    if (!membership.validUntil || membership.validUntil > now) return false;
+    if (!membership.validUntil || membership.validUntil > selectedAt) return false;
     const validUntil = membership.validUntil;
-    const writeAhead = this.projector.narrowing(membership.userId);
+    const { signal } = options;
+    signal?.throwIfAborted();
+    const writeAhead = this.projector.narrowing(membership.userId, { signal });
 
     const acted = await runWithContext(
       createSystemContext({
@@ -1255,9 +1283,17 @@ export class IdentityService {
         this.repository.transaction(async (tx) => {
           // The same per-user serialisation as revocation and the switch.
           await this.repository.lockUserMemberships(tx, membership.userId);
+          signal?.throwIfAborted();
+          // Fresh, after the lock: the clock of every decision below.
+          const now = await this.repository.databaseNow(tx);
 
           const claim = await tx.membership.updateMany({
-            where: { id: membership.id, lapseHandledAt: null, deletedAt: null },
+            where: {
+              id: membership.id,
+              lapseHandledAt: null,
+              deletedAt: null,
+              validUntil: { lte: now },
+            },
             data: { lapseHandledAt: now },
           });
           if (claim.count === 0) return false;
@@ -1270,10 +1306,9 @@ export class IdentityService {
             'SYSTEM',
             now,
           );
-          await writeAhead.write(
-            tx,
-            intersectAttributes(before, await this.rowsGrant(tx, membership.userId, now)),
-          );
+          const after = await this.rowsGrant(tx, membership.userId, now);
+          await writeAhead.write(tx, intersectAttributes(before, after), after);
+          signal?.throwIfAborted();
 
           await this.repository.enqueueEvent(tx, {
             aggregateType: 'Membership',
@@ -1294,7 +1329,7 @@ export class IdentityService {
       throw await writeAhead.settle(error);
     });
 
-    if (acted) await this.projector.projectAfterCommit(membership.userId);
+    if (acted) await writeAhead.afterCommit();
     return acted;
   }
 
@@ -1314,7 +1349,8 @@ export class IdentityService {
     userId: string,
     leftOrganizationId: string,
     actor: string,
-    now: Date = new Date(),
+    /** The database's clock, read after the user lock (#402 r1 F3). */
+    now: Date,
   ): Promise<void> {
     const user = await this.repository.findUserById(userId, tx);
     if (!user || user.activeOrganizationId !== leftOrganizationId) return;

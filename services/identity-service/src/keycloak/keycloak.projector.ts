@@ -3,12 +3,23 @@ import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError, runUnscoped } from '@rasta/nest-common';
 import { IdentityRepository } from '../identity/identity.repository';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
-import { KeycloakAdminClient, KeycloakWriteUnconfirmedError } from './keycloak.client';
+import {
+  KeycloakAdminClient,
+  KeycloakWriteUnconfirmedError,
+  type KeycloakAccount,
+  type KeycloakWriteContext,
+} from './keycloak.client';
+import {
+  KeycloakWriteFences,
+  type KeycloakWriteAttempt,
+  type KeycloakWriteFence,
+} from './keycloak-write-fence';
 import {
   divergentAttributes,
   grantsAnything,
   platformAttributesFor,
   provenanceOnly,
+  sameAttributes,
   type PlatformAttributeName,
   type PlatformAttributes,
 } from './platform-attributes';
@@ -16,8 +27,8 @@ import {
   KEYCLOAK_PROJECTION_OUTCOMES,
   KEYCLOAK_WRITE_AHEAD_OUTCOMES,
   keycloakProjectionsTotal,
-  keycloakReassertMarksTotal,
   keycloakWriteAheadTotal,
+  keycloakWriteFenceEventsTotal,
   type KeycloakProjectionOutcome,
   type KeycloakProjectionTrigger,
   type KeycloakWriteAheadOutcome,
@@ -49,9 +60,9 @@ export const USER_LOCK_TRANSACTION_OPTIONS = PROJECTION_TRANSACTION_OPTIONS;
 
 export interface KeycloakProjectorOptions {
   /**
-   * `KEYCLOAK_WRITE_SETTLE_SECONDS`: how long a write whose answer was lost may
-   * still be applied, so how long a narrowing change of that user is refused
-   * and when the user is re-projected (D-064).
+   * `KEYCLOAK_WRITE_SETTLE_SECONDS`: how long after its deadline a write whose
+   * answer was lost may still be applied — so how long its fence stays live
+   * and a narrowing change of that user is refused (D-064, D-069).
    */
   writeSettleSeconds: number;
 }
@@ -62,6 +73,15 @@ export const KEYCLOAK_PROJECTOR_OPTIONS = Symbol('KEYCLOAK_PROJECTOR_OPTIONS');
 export const DEFAULT_KEYCLOAK_PROJECTOR_OPTIONS: KeycloakProjectorOptions = {
   writeSettleSeconds: 120,
 };
+
+/** How a projection may be asked for. */
+export interface ProjectOptions {
+  /**
+   * Cancels the Keycloak calls in flight and refuses every further step: the
+   * sweep's shutdown (#402 r1 F4). A write cut off mid-flight keeps its fence.
+   */
+  signal?: AbortSignal;
+}
 
 /**
  * A narrowing change's write to Keycloak, made inside its transaction before
@@ -74,21 +94,35 @@ export interface NarrowingWriteAhead {
    * account. Called in the change's transaction, under the user lock, after
    * the rows changed and **before** any event is enqueued: the event's
    * `occurredAt` is stamped after this returns, and is the gateway's cutoff.
+   * `committed` is what the rows grant after the change: when the two are the
+   * same, the write's fence is deleted in this transaction, so with its commit.
    *
-   * Proceeds without writing when there is nothing to narrow: no account
-   * (`keycloakId` null — no token can exist), or Keycloak answers 404 for it,
-   * or Keycloak sync is off (development and test only; refused at boot
-   * elsewhere, `assertNarrowingEnforced`). Throws `KEYCLOAK_UNAVAILABLE` when
-   * the write did not land, or when an earlier write of the user may still.
+   * Refused, before anything is sent, while a fence of the user is live — an
+   * earlier write that may still land could overtake this one (503
+   * `KEYCLOAK_WRITE_SETTLING`, D-069). Proceeds without writing when there is
+   * nothing to narrow: no account (`keycloakId` null — no token can exist), or
+   * Keycloak answers 404 for it, or Keycloak sync is off (development and test
+   * only; refused at boot elsewhere, `assertNarrowingEnforced`). Throws when
+   * the write did not land; `settle` turns that into `KEYCLOAK_UNAVAILABLE`.
    */
   write(
     tx: ExtendedPrismaClient,
     attributes: PlatformAttributes,
+    committed: PlatformAttributes,
   ): Promise<KeycloakWriteAheadOutcome>;
   /**
-   * After the transaction failed: records what Keycloak may now hold, and
-   * returns what to throw — `KEYCLOAK_UNAVAILABLE` when Keycloak was the
-   * reason, the error itself otherwise.
+   * After the transaction committed: projects the full new state, which
+   * takes over the write-ahead's fence when that write carried less than the
+   * rows now grant (a mixed change: made due when it landed). Never throws.
+   */
+  afterCommit(): Promise<void>;
+  /**
+   * After the transaction failed: when the write landed, makes its fence due
+   * and puts the rows back (Keycloak now holds less than they grant), and
+   * returns what to throw —
+   * `KEYCLOAK_UNAVAILABLE` when Keycloak was the reason, the error itself
+   * otherwise. A write whose outcome is unknown keeps its fence, and the
+   * sweep takes it over (D-069): nothing here is best-effort.
    */
   settle(error: unknown): Promise<unknown>;
 }
@@ -110,9 +144,94 @@ export function keycloakUnavailable(cause: unknown, retryAfterSeconds?: number):
   );
 }
 
+/**
+ * 503 `KEYCLOAK_WRITE_SETTLING` (D-069): a narrowing change of this user was
+ * refused before anything was sent, because an earlier Keycloak write of the
+ * same user may still land and could overtake it. Keycloak itself may be
+ * healthy; the refusal concerns this one user, for at most `retryAfterSeconds`
+ * (`Retry-After`). Nothing committed, no event; the same request may be sent
+ * again then. Only ever after the caller was authorized for the change.
+ */
+export function keycloakWriteSettling(retryAfterSeconds: number): RastaError {
+  return new RastaError(
+    ERROR_CODES.KEYCLOAK_WRITE_SETTLING,
+    'An earlier identity-provider write of this user may still land; nothing was changed',
+    {
+      internalContext: { service: 'keycloak', operation: 'writeAhead', reason: 'settling' },
+      retryAfterSeconds: Math.max(1, retryAfterSeconds),
+    },
+  );
+}
+
 /** Keycloak has no account under the id: there is nothing to write, and nothing can mint a token. */
 function isAccountMissing(error: unknown): boolean {
   return error instanceof RastaError && error.code === ERROR_CODES.NOT_FOUND;
+}
+
+/**
+ * The fenced Keycloak writes of one transaction that holds the user lock
+ * (D-069). Each write opens its own attempt right before its PUT; an attempt
+ * provably not applied is released at once, one whose outcome is unknown is
+ * left in place, and one that landed is listed for the caller to settle.
+ */
+class FencedWrites {
+  readonly landed: string[] = [];
+
+  /**
+   * Makes every attempt that landed due at once (`confirmLanded`): for a
+   * transaction that will not delete them — it failed, or committed something
+   * they do not carry. Not before the transaction's own `settle`.
+   */
+  async confirmLanded(): Promise<void> {
+    if (this.landed.length === 0) return;
+    const confirmed = await this.fences.confirmLanded(this.landed);
+    keycloakWriteFenceEventsTotal.inc(
+      { event: confirmed ? 'confirmed' : 'confirm_failed' },
+      this.landed.length,
+    );
+  }
+
+  constructor(
+    private readonly fences: KeycloakWriteFences,
+    private readonly tx: ExtendedPrismaClient,
+    private readonly userId: string,
+    private readonly timing: { timeoutMs: number; settleSeconds: number },
+    readonly cancel: AbortSignal | undefined,
+  ) {}
+
+  async write(
+    keycloakId: string,
+    call: (context: KeycloakWriteContext) => Promise<void>,
+  ): Promise<void> {
+    let attempt: KeycloakWriteAttempt | null = null;
+    const fence: KeycloakWriteFence = async (operation) => {
+      if (attempt) throw new Error('one PUT per fenced write');
+      attempt = await this.fences.open(this.tx, {
+        userId: this.userId,
+        keycloakId,
+        operation,
+        ...this.timing,
+        cancel: this.cancel,
+      });
+      keycloakWriteFenceEventsTotal.inc({ event: 'opened' });
+      return attempt;
+    };
+    try {
+      await call({ fence, cancel: this.cancel });
+    } catch (error) {
+      const opened = attempt as KeycloakWriteAttempt | null;
+      // Provably not applied — never sent, refused, 404, its deadline passed
+      // before dispatch: nothing can land, so its fence goes now. Unknown: it
+      // stays, and holds narrowing back until the sweep takes it over.
+      if (opened && !(error instanceof KeycloakWriteUnconfirmedError)) {
+        const released = await this.fences.release(opened.id);
+        keycloakWriteFenceEventsTotal.inc({ event: released ? 'released' : 'release_failed' });
+      }
+      throw error;
+    }
+    const opened = attempt as KeycloakWriteAttempt | null;
+    if (opened) this.landed.push(opened.id);
+  }
 }
 
 export interface ReconcileFinding {
@@ -170,29 +289,40 @@ export type OrphanRepairOutcome =
  *
  * ## One lock, every writer
  *
- * Every write of a user's attributes — a narrowing change's write-ahead, a
+ * Every write of a user's account — a narrowing change's write-ahead, a
  * projection after a request, the consumer's backstop, the backfill, the
- * re-assertion sweep, a first activation, the orphan repair — happens in a
- * transaction that took that user's row lock (`lockUserMemberships`) **before
- * it read** what it writes, and holds it until after the write. Membership
- * changes take the same lock first, so a write always carries rows that were
- * current while it was made: no write can carry state older than one made
- * before it, and none can carry state another transaction is about to
- * change. Locks are always taken in one order — a registration request (an
- * approval, the orphan repair), then the user, then their memberships, then
- * the outbox stream counter — so this lock adds no cycle.
+ * re-assertion sweep, a first activation, an approval's adoption, the orphan
+ * repair — happens in a transaction that took that user's row lock
+ * (`lockUserMemberships`) **before it read** what it writes, and holds it
+ * until after the write. Membership changes take the same lock first, so a
+ * write always carries rows that were current while it was made. Locks are
+ * always taken in one order — a registration request (an approval, the orphan
+ * repair), then the user, then their memberships, then the outbox stream
+ * counter — so this lock adds no cycle.
  *
- * ## A write whose answer was lost
+ * ## The in-flight fence (D-069)
  *
  * Aborting a request does not cancel it: a write past its deadline, cut off
  * mid-answer or answered 5xx may be applied by Keycloak later, after a newer
- * write, and leave Keycloak wider than the rows. Every writer here records
- * such a write against the user (`keycloak_reassert_at`, now +
- * `KEYCLOAK_WRITE_SETTLE_SECONDS`): until then a narrowing change of that user
- * is refused, because it could not be the last write; once it passes, the
- * expiry sweep projects the user again, under the lock, from the rows. A
- * write that did land in a transaction that then did not commit is recorded
- * as due at once, and projected again straight away.
+ * write. So before **every** PUT, the writer commits a fence row for that one
+ * attempt on its own connection pool (`KeycloakWriteFences`), and only a
+ * confirmed outcome removes it — never a rollback, a timeout or an exit. Every
+ * writer reads the user's fences under the user lock, on the database's clock
+ * read after it:
+ *
+ * - a narrowing change refuses while one is **live** (503
+ *   `KEYCLOAK_WRITE_SETTLING`): it could not be the last write;
+ * - a first activation waits while one is live: a late disable or clear could
+ *   land after the enable and leave an approved account unusable;
+ * - a projection whose writes all landed deletes, with its commit, its own
+ *   fences and every one that was already **due** — past `takeover_at`, or
+ *   landed and confirmed by its owner — when it read them: its write of the
+ *   committed state is the re-assertion that takes them over. The sweep runs
+ *   one for every user with a due fence.
+ *
+ * What remains is stated in ADR-060's D-069 addendum: a sender paused between
+ * its final deadline check and the socket write for longer than the settle
+ * window, or a request delivered later than that.
  */
 @Injectable()
 export class KeycloakProjector {
@@ -201,6 +331,7 @@ export class KeycloakProjector {
   constructor(
     private readonly repository: IdentityRepository,
     private readonly keycloak: KeycloakAdminClient,
+    private readonly fences: KeycloakWriteFences,
     @Optional()
     @Inject(KEYCLOAK_PROJECTOR_OPTIONS)
     private readonly options: KeycloakProjectorOptions = DEFAULT_KEYCLOAK_PROJECTOR_OPTIONS,
@@ -218,21 +349,26 @@ export class KeycloakProjector {
     const memberships = await this.repository.listMembershipsForUser(userId);
     return {
       keycloakId: user.keycloakId,
-      attributes: platformAttributesFor(user, memberships, new Date()),
+      attributes: platformAttributesFor(
+        user,
+        memberships,
+        await this.repository.databaseNow(this.repository.client),
+      ),
       activationPending: user.accountActivationPending,
       status: user.status,
     };
   }
 
   /**
-   * Rebuilds and writes one user's platform attributes. Throws if the write
+   * Rebuilds and writes one user's platform attributes. Throws if a write
    * does not land.
    */
   async project(
     userId: string,
     trigger: KeycloakProjectionTrigger,
+    options: ProjectOptions = {},
   ): Promise<KeycloakProjectionOutcome> {
-    const outcome = await this.write(userId).catch((error: unknown) => {
+    const outcome = await this.write(userId, options).catch((error: unknown) => {
       keycloakProjectionsTotal.inc({ trigger, outcome: KEYCLOAK_PROJECTION_OUTCOMES.FAILED });
       throw error;
     });
@@ -250,9 +386,9 @@ export class KeycloakProjector {
    * a narrowing change Keycloak already holds no more than the rows grant: what
    * is late is only what it added.
    */
-  async projectAfterCommit(userId: string): Promise<void> {
+  async projectAfterCommit(userId: string, options: ProjectOptions = {}): Promise<void> {
     try {
-      await this.project(userId, 'request');
+      await this.project(userId, 'request', options);
     } catch (error) {
       this.logger.error(
         `Keycloak projection failed for user ${userId}; the identity event will retry it. ` +
@@ -262,12 +398,13 @@ export class KeycloakProjector {
   }
 
   /**
-   * Starts one narrowing change's write-ahead (D-064). The caller holds the
-   * user lock in its transaction, computes the attributes from rows read
-   * under it, calls `write` before it enqueues its event, and passes any
-   * failure of the transaction through `settle`.
+   * Starts one narrowing change's write-ahead (D-064, D-069). The caller holds
+   * the user lock in its transaction, computes the attributes from rows read
+   * under it on the database's clock, calls `write` before it enqueues its
+   * event, `afterCommit` once it committed, and passes any failure of the
+   * transaction through `settle`.
    */
-  narrowing(userId: string): NarrowingWriteAhead {
+  narrowing(userId: string, options: { signal?: AbortSignal } = {}): NarrowingWriteAhead {
     /**
      * idle → writing → landed | unconfirmed | refused | absent, or settling
      * when refused before writing. `writing` that outlives the transaction —
@@ -275,28 +412,41 @@ export class KeycloakProjector {
      */
     let phase: 'idle' | 'writing' | 'landed' | 'unconfirmed' | 'refused' | 'absent' | 'settling' =
       'idle';
+    /** The write's attempts once it landed; empty when there was none to fence. */
+    let writes: FencedWrites | null = null;
     const outcome = (value: KeycloakWriteAheadOutcome) => {
       keycloakWriteAheadTotal.inc({ outcome: value });
       return value;
     };
 
     return {
-      write: async (tx, attributes) => {
+      write: async (tx, attributes, committed) => {
         if (phase !== 'idle') throw new Error('one write-ahead per narrowing change');
         if (!this.keycloak.enabled) return outcome(KEYCLOAK_WRITE_AHEAD_OUTCOMES.DISABLED);
-        const state = await this.repository.keycloakWriteState(tx, userId);
+        options.signal?.throwIfAborted();
+        const now = await this.repository.databaseNow(tx);
+        const user = await this.repository.findUserById(userId, tx);
         // No account: nothing was ever enabled to sign in with, so no token of
         // this user exists to narrow (an approval links the account in the
         // transaction that activates it).
-        if (!state?.keycloakId) return outcome(KEYCLOAK_WRITE_AHEAD_OUTCOMES.NO_ACCOUNT);
-        if (state.settlingForSeconds !== null) {
+        if (!user?.keycloakId) return outcome(KEYCLOAK_WRITE_AHEAD_OUTCOMES.NO_ACCOUNT);
+        const keycloakId = user.keycloakId;
+        // Read under the user lock: every fence of every write that can be in
+        // flight for this user is here (`KeycloakWriteFences.open`). Decided
+        // only now, after the caller authorized the change under that lock.
+        const live = (await this.fences.ofUser(tx, userId, now)).filter((fence) => fence.live);
+        if (live.length > 0) {
           phase = 'settling';
           outcome(KEYCLOAK_WRITE_AHEAD_OUTCOMES.SETTLING);
-          throw keycloakUnavailable(null, state.settlingForSeconds);
+          throw keycloakWriteSettling(Math.max(...live.map((fence) => fence.settlesInSeconds)));
         }
         phase = 'writing';
+        const fenced = this.fencedWrites(tx, userId, options.signal);
+        writes = fenced;
         try {
-          await this.keycloak.replacePlatformAttributes(state.keycloakId, attributes);
+          await fenced.write(keycloakId, (context) =>
+            this.keycloak.replacePlatformAttributes(keycloakId, attributes, context),
+          );
         } catch (error) {
           if (isAccountMissing(error)) {
             // Deleted in Keycloak: it can mint nothing more, and every token
@@ -313,18 +463,30 @@ export class KeycloakProjector {
           throw error;
         }
         phase = 'landed';
+        if (sameAttributes(attributes, committed)) {
+          // Landed, and carrying exactly what this transaction commits: the
+          // fence goes with the commit, and stays if it rolls back.
+          await this.fences.settle(tx, userId, fenced.landed);
+        } else {
+          // A mixed change: less than the rows grant after it. Landed, so it
+          // can no longer land: due now, taken over by the projection after
+          // commit (or the sweep's). Before this transaction's last statement.
+          await fenced.confirmLanded();
+        }
         return outcome(KEYCLOAK_WRITE_AHEAD_OUTCOMES.WRITTEN);
       },
 
+      afterCommit: async () => {
+        await this.projectAfterCommit(userId, { signal: options.signal });
+      },
+
       settle: async (error) => {
-        if (phase === 'writing' || phase === 'unconfirmed') {
-          // May land at any time: hold narrowing back until it no longer can.
-          await this.markReassert(userId, 'unconfirmed');
-        } else if (phase === 'landed') {
-          // Keycloak holds less than the rows that did not commit: put the
-          // rows back now, and leave the mark for the sweep if that fails.
-          await this.markReassert(userId, 'rolled_back');
-          await this.projectAfterCommit(userId);
+        if (phase === 'landed' && writes) {
+          // Keycloak holds less than the rows that did not commit. The write
+          // landed, so it cannot land again: due now (its delete rolled back
+          // with the rest), and the rows are put back at once.
+          await writes.confirmLanded();
+          await this.projectAfterCommit(userId, { signal: options.signal });
         }
         if (phase === 'settling') return error;
         if (phase === 'writing' || phase === 'unconfirmed' || phase === 'refused') {
@@ -371,9 +533,10 @@ export class KeycloakProjector {
    * Decided under the row lock of every registration request of the user —
    * the lock approval takes — and only while none of them is APPROVED and the
    * user row still names no account; the Keycloak writes happen while the lock
-   * is held. So an approval that adopts the account either committed first
-   * (and this finds it owned) or waits for this to finish, and its projection
-   * then enables the account. Throws when Keycloak cannot be reached.
+   * is held, each fenced (D-069). So an approval that adopts the account
+   * either committed first (and this finds it owned) or waits for this to
+   * finish, and its projection then enables the account. Throws when Keycloak
+   * cannot be reached.
    */
   async repairOrphan(userId: string, username: string): Promise<OrphanRepairOutcome> {
     return this.repository.transaction(async (tx) => {
@@ -389,14 +552,68 @@ export class KeycloakProjector {
       if (!account || provenance.length !== 1 || provenance[0] !== userId) return 'not_ours';
       if (!account.enabled && !grantsAnything(account.attributes)) return 'harmless';
 
-      await this.keycloak.setEnabled(account.id, false);
-      await this.keycloak.replacePlatformAttributes(account.id, provenanceOnly(userId));
+      const writes = this.fencedWrites(tx, userId);
+      await this.makeHarmless(writes, userId, account);
+      // Harmless is what an account no user row names should be: the writes
+      // carried the committed state, and their fences go with this commit.
+      await this.fences.settle(tx, userId, writes.landed);
       this.logger.warn(
         { userId, keycloakId: account.id },
         'Orphan Keycloak account disabled and its grants cleared',
       );
       return 'repaired';
     }, PROJECTION_TRANSACTION_OPTIONS);
+  }
+
+  /**
+   * An approval adopting its request's own earlier account (#219 r3), in the
+   * approval's transaction, under the request lock and the user lock: disabled
+   * and its grants cleared when it carries any, each write fenced (D-069).
+   * Every attempt that landed is made due at once, even when a later one
+   * fails: the approval commits ACTIVE, which those writes do not carry, so
+   * whichever way it ends its projection after commit — or the sweep's —
+   * takes them over. Returns whether anything was written.
+   */
+  async adoptHarmless(
+    tx: ExtendedPrismaClient,
+    userId: string,
+    account: KeycloakAccount,
+  ): Promise<boolean> {
+    if (!account.enabled && !grantsAnything(account.attributes)) return false;
+    const writes = this.fencedWrites(tx, userId);
+    try {
+      await this.makeHarmless(writes, userId, account);
+    } finally {
+      await writes.confirmLanded();
+    }
+    return true;
+  }
+
+  /** Disabled, then cleared to its provenance: two fenced writes, the disable first. */
+  private async makeHarmless(
+    writes: FencedWrites,
+    userId: string,
+    account: KeycloakAccount,
+  ): Promise<void> {
+    if (account.enabled) {
+      await writes.write(account.id, (context) => this.keycloak.disable(account.id, context));
+    }
+    await writes.write(account.id, (context) =>
+      this.keycloak.replacePlatformAttributes(account.id, provenanceOnly(userId), context),
+    );
+  }
+
+  private fencedWrites(tx: ExtendedPrismaClient, userId: string, cancel?: AbortSignal) {
+    return new FencedWrites(
+      this.fences,
+      tx,
+      userId,
+      {
+        timeoutMs: this.keycloak.requestTimeoutMs,
+        settleSeconds: this.options.writeSettleSeconds,
+      },
+      cancel,
+    );
   }
 
   /**
@@ -415,128 +632,214 @@ export class KeycloakProjector {
    * lock a first activation needs as well (#219 r3), so it is taken before
    * the user is read, activation or not.
    *
+   * Every validity decision is made on the database's clock read after the
+   * lock (#402 r1 F3). Every PUT is fenced (D-069); the fences this projection
+   * may delete are listed in the header, and are deleted as its last
+   * statements, so with its commit. An account Keycloak no longer has (404) is
+   * `account_missing`: the due fences of it become terminal, and are alerted
+   * on.
+   *
    * The transaction outlives the Keycloak calls (three, or six on a first
    * activation, each bounded at 10 s by the client), so its timeout is set
-   * above that. A projection that cannot get the lock in time fails and is retried
-   * by its event, as any other failed projection is. A write whose answer was
-   * lost marks the user for re-assertion (`markReassert`); one that lands
-   * clears a mark that has passed.
+   * above that. A projection that cannot get the lock in time fails and is
+   * retried by its event, as any other failed projection is.
    */
-  private async write(userId: string): Promise<KeycloakProjectionOutcome> {
+  private async write(userId: string, options: ProjectOptions): Promise<KeycloakProjectionOutcome> {
     if (!this.keycloak.enabled) return KEYCLOAK_PROJECTION_OUTCOMES.DISABLED;
-    // Set when a write may have been sent and its answer never came.
-    const writes = { unconfirmed: false, inFlight: 0 };
-    const tracked = async (call: () => Promise<void>): Promise<void> => {
-      writes.inFlight += 1;
-      try {
-        await call();
-      } catch (error) {
-        if (error instanceof KeycloakWriteUnconfirmedError) writes.unconfirmed = true;
-        throw error;
-      } finally {
-        writes.inFlight -= 1;
-      }
-    };
-    try {
-      return await this.repository.transaction(async (tx) => {
+    const { signal } = options;
+    signal?.throwIfAborted();
+    let missing: string[] = [];
+    let writes: FencedWrites | null = null;
+    const outcome = await this.repository
+      .transaction(async (tx) => {
         // First, before anything is read: the one lock of every writer.
         if (!(await this.repository.lockUserMemberships(tx, userId))) {
           return KEYCLOAK_PROJECTION_OUTCOMES.NO_USER;
         }
+        // The clock every decision below is made on — a later statement than
+        // the lock, so it cannot be older than the wait for it.
+        const now = await this.repository.databaseNow(tx);
         const user = await this.repository.findUserById(userId, tx);
         if (!user) return KEYCLOAK_PROJECTION_OUTCOMES.NO_USER;
+        const fences = await this.fences.ofUser(tx, userId, now);
+        // Due now, so due before any write below is sent: no write of theirs
+        // can land after ours, and ours carries the committed state. Terminal
+        // ones (`account_missing`) too: past takeover like any due fence, they
+        // only wait for an account to write to — the sweep no longer retries
+        // them, but a projection that lands (the account restored, or the
+        // user linked to another) takes them over like the rest.
+        const due = fences.filter((fence) => !fence.live);
+        // Live: may still land.
+        const uncertain = fences.filter((fence) => fence.live);
+        const fenced = this.fencedWrites(tx, userId, signal);
+        writes = fenced;
+        const linked = user.keycloakId;
+
+        // Fences of an account the user does not (or no longer) link: an
+        // approval's adoption that did not commit, or an orphan repair. What it
+        // should hold is harmless.
+        const others = due.filter((fence) => fence.keycloakId !== linked);
+        for (const keycloakId of new Set(others.map((fence) => fence.keycloakId))) {
+          await this.reassertUnlinked(fenced, userId, keycloakId, signal);
+        }
+        const takenOver = due.map((fence) => fence.attemptId);
+
         // A registration not yet approved has no account: nothing to project into.
-        if (!user.keycloakId) return KEYCLOAK_PROJECTION_OUTCOMES.NO_ACCOUNT;
-        const keycloakId = user.keycloakId;
+        if (!linked) {
+          signal?.throwIfAborted();
+          await this.fences.settle(tx, userId, [...fenced.landed, ...takenOver]);
+          return KEYCLOAK_PROJECTION_OUTCOMES.NO_ACCOUNT;
+        }
         // A first activation is decided on memberships no revocation can end
         // while it runs: the lock above is the one every membership change
         // takes first, so a revocation either committed before this read —
         // and there is no live membership to enable for — or waits until this
         // commits, and its own write-ahead then clears the grants (#219 r3).
         const memberships = await this.repository.listMembershipsForUser(userId, tx);
-        const attributes = platformAttributesFor(user, memberships, new Date());
-        await tracked(() => this.keycloak.replacePlatformAttributes(keycloakId, attributes));
+        const attributes = platformAttributesFor(user, memberships, now);
+        try {
+          await fenced.write(linked, (context) =>
+            this.keycloak.replacePlatformAttributes(linked, attributes, context),
+          );
+        } catch (error) {
+          if (!isAccountMissing(error)) throw error;
+          missing = due
+            .filter((fence) => fence.keycloakId === linked && !fence.accountMissing)
+            .map((fence) => fence.attemptId);
+          // An unlinked account's repair that landed above: due, for the sweep.
+          await fenced.confirmLanded();
+          return KEYCLOAK_PROJECTION_OUTCOMES.ACCOUNT_MISSING;
+        }
+        signal?.throwIfAborted();
         if (user.accountActivationPending) {
-          await this.activateOnce(tx, user, keycloakId, attributes, tracked);
+          await this.activateOnce(tx, user, linked, attributes, fenced, uncertain.length, signal);
         }
         if (user.status !== 'ACTIVE') {
-          await this.disableIfEnabled(user.id, keycloakId, tracked);
+          await this.disableIfEnabled(user.id, linked, fenced, signal);
         }
-        await this.repository.clearDueKeycloakReassert(tx, userId);
+        signal?.throwIfAborted();
+        // Every write landed and carried the committed state: its own fences
+        // and the due ones go with this commit — and stay if it does not
+        // commit. The last fence statement of this transaction.
+        await this.fences.settle(tx, userId, [...fenced.landed, ...takenOver]);
         return KEYCLOAK_PROJECTION_OUTCOMES.PROJECTED;
-      }, PROJECTION_TRANSACTION_OPTIONS);
+      }, PROJECTION_TRANSACTION_OPTIONS)
+      .catch(async (error: unknown) => {
+        // Did not commit: what landed can no longer land, so it is due now and
+        // holds nothing back; the sweep re-asserts it. Not when cancelled — a
+        // stop starts nothing more (#402 r1 F4); those stay live until takeover.
+        const current = writes as FencedWrites | null;
+        if (current && !signal?.aborted) await current.confirmLanded();
+        throw error;
+      });
+
+    if (missing.length > 0) {
+      // Terminal: there is nothing to re-assert into, and nothing can mint a
+      // token for it. Recorded on the fence pool, counted and alerted on.
+      await this.fences.markAccountMissing(missing);
+      keycloakWriteFenceEventsTotal.inc({ event: 'account_missing' }, missing.length);
+      this.logger.error(
+        { userId, fences: missing.length },
+        'Keycloak has no account for this user any more; its write fences are terminal ' +
+          '(account_missing) and need an operator',
+      );
+    } else if (outcome === KEYCLOAK_PROJECTION_OUTCOMES.ACCOUNT_MISSING) {
+      this.logger.warn({ userId }, 'Keycloak has no account for this user; nothing projected');
+    }
+    return outcome;
+  }
+
+  /**
+   * Re-asserts an account the user does not link (D-069 takeover): harmless —
+   * disabled, granting nothing — when its provenance names them and it is not.
+   * Gone (404) or not theirs: nothing to write.
+   */
+  private async reassertUnlinked(
+    writes: FencedWrites,
+    userId: string,
+    keycloakId: string,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    let account: KeycloakAccount;
+    try {
+      account = await this.keycloak.getAccount(keycloakId, signal);
     } catch (error) {
-      if (writes.unconfirmed || writes.inFlight > 0) await this.markReassert(userId, 'unconfirmed');
+      if (isAccountMissing(error)) return;
       throw error;
     }
+    signal?.throwIfAborted();
+    const provenance = account.attributes.rasta_user_id;
+    if (provenance.length !== 1 || provenance[0] !== userId) return;
+    if (!account.enabled && !grantsAnything(account.attributes)) return;
+    await this.makeHarmless(writes, userId, account);
   }
 
   /**
-   * Marks the user for re-assertion (`keycloak_reassert_at`): after
-   * `KEYCLOAK_WRITE_SETTLE_SECONDS` for a write whose answer was lost, at once
-   * for one that landed in a transaction that did not commit. Never throws —
-   * the caller is already failing for its own reason — but a mark that cannot
-   * be stored is logged and counted (`outcome="failed"`), and alerted on.
-   */
-  private async markReassert(userId: string, reason: 'unconfirmed' | 'rolled_back'): Promise<void> {
-    const afterSeconds = reason === 'unconfirmed' ? this.options.writeSettleSeconds : 0;
-    try {
-      await this.repository.markKeycloakReassert(userId, afterSeconds);
-      keycloakReassertMarksTotal.inc({ reason, outcome: 'recorded' });
-    } catch (error) {
-      keycloakReassertMarksTotal.inc({ reason, outcome: 'failed' });
-      this.logger.error(
-        `Could not mark user ${userId} for Keycloak re-assertion (${reason}); ` +
-          `run keycloak:backfill once the database is back. ${describe(error)}`,
-      );
-    }
-  }
-
-  /**
-   * Enables a registration approval's account — once, provably (#219 r3).
+   * Enables a provisioned account — once, provably (#219 r3).
    *
    * Runs in the projection's transaction, after the grants are written, so the
-   * account's first token is already right. Three outcomes:
+   * account's first token is already right. Three outcomes, and a fourth while
+   * an earlier write of the user may still land (`inFlight`, D-069):
    *
    * - **Already activated.** The account carries `rasta_activation`: an
    *   earlier attempt's enable landed, whatever became of its answer or of the
    *   transaction that would have cleared the flag. It is never enabled again
    *   — an account an administrator has disabled since stays disabled — and
    *   only the flag is cleared.
-   * - **Activated now.** The request is APPROVED, the user ACTIVE and holding
-   *   a live membership (read under the user row lock): `enabled: true` and
-   *   the marker are written in one representation update, then the flag is
-   *   cleared. A lost answer leaves the flag set, and the next attempt finds
-   *   the marker.
+   * - **Activated now.** The user's provisioning is decided — the registration
+   *   request APPROVED, or the user created by an operator, who has no request
+   *   (`findActivationSource`) — the user ACTIVE and holding a live membership
+   *   (read under the user row lock): `enabled: true` and the marker are
+   *   written in one representation update, then the flag is cleared. A lost
+   *   answer leaves the flag set, and the next attempt finds the marker.
    * - **Withheld.** Any of those conditions does not hold: nothing is enabled
    *   and nothing cleared, so reconcile keeps reporting the user
    *   (`activationPending`) for an operator to decide. Logged by ids only.
+   * - **Deferred.** It would enable now, but a fence of the user is live: a
+   *   late disable or clear could land after the enable and leave the account
+   *   unusable with its flag cleared. Nothing is sent or cleared; the sweep
+   *   projects the user again once those fences are due, and activates then.
+   *   Only the enable waits: an account that already carries the marker sends
+   *   nothing, and has its flag cleared at once.
    */
   private async activateOnce(
     tx: ExtendedPrismaClient,
     user: { id: string; status: string },
     keycloakId: string,
     attributes: PlatformAttributes,
-    tracked: (call: () => Promise<void>) => Promise<void>,
+    writes: FencedWrites,
+    inFlight: number,
+    signal: AbortSignal | undefined,
   ): Promise<void> {
-    const account = await this.keycloak.getAccount(keycloakId);
+    const account = await this.keycloak.getAccount(keycloakId, signal);
+    signal?.throwIfAborted();
     if (account.activation === null) {
-      const registrationId = await this.repository.findApprovedRegistrationId(tx, user.id);
-      const withheld = !registrationId
-        ? 'no_approved_registration'
+      const activationId = await this.repository.findActivationSource(tx, user.id);
+      const withheld = !activationId
+        ? 'no_activation_source'
         : user.status !== 'ACTIVE'
           ? 'user_not_active'
           : attributes.organization_ids.length === 0
             ? 'no_live_membership'
             : null;
-      if (!registrationId || withheld !== null) {
+      if (!activationId || withheld !== null) {
         this.logger.warn(
           { userId: user.id, keycloakId, reason: withheld },
           'Account activation withheld; the account stays disabled and reconcile reports it',
         );
         return;
       }
-      await tracked(() => this.keycloak.activateAccount(keycloakId, registrationId));
+      if (inFlight > 0) {
+        this.logger.warn(
+          { userId: user.id, keycloakId, inFlight },
+          'Account activation deferred until earlier Keycloak writes of it can no longer land',
+        );
+        return;
+      }
+      await writes.write(keycloakId, (context) =>
+        this.keycloak.activateAccount(keycloakId, activationId, context),
+      );
+      signal?.throwIfAborted();
     }
     await runUnscoped('the activation flag is the user row, not tenant data', () =>
       tx.user.update({
@@ -558,11 +861,13 @@ export class KeycloakProjector {
   private async disableIfEnabled(
     userId: string,
     keycloakId: string,
-    tracked: (call: () => Promise<void>) => Promise<void>,
+    writes: FencedWrites,
+    signal: AbortSignal | undefined,
   ): Promise<void> {
-    const account = await this.keycloak.getAccount(keycloakId);
+    const account = await this.keycloak.getAccount(keycloakId, signal);
+    signal?.throwIfAborted();
     if (!account.enabled) return;
-    await tracked(() => this.keycloak.setEnabled(keycloakId, false));
+    await writes.write(keycloakId, (context) => this.keycloak.disable(keycloakId, context));
     this.logger.warn(
       { userId, keycloakId },
       'Account disabled: the platform user is not ACTIVE, and its status is the authority',

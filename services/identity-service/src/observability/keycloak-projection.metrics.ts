@@ -14,6 +14,8 @@ export const KEYCLOAK_PROJECTION_OUTCOMES = {
   NO_ACCOUNT: 'no_account',
   NO_USER: 'no_user',
   DISABLED: 'disabled',
+  /** Keycloak answered 404 for the linked account: nothing to project into (D-069). */
+  ACCOUNT_MISSING: 'account_missing',
 } as const;
 export type KeycloakProjectionOutcome =
   (typeof KEYCLOAK_PROJECTION_OUTCOMES)[keyof typeof KEYCLOAK_PROJECTION_OUTCOMES];
@@ -26,7 +28,7 @@ export const KEYCLOAK_PROJECTION_TRIGGERS = {
   EVENT: 'event',
   /** The backfill or reconcile command. */
   COMMAND: 'command',
-  /** The sweep re-projecting a user whose re-assertion mark has passed (D-064). */
+  /** The sweep re-projecting a user with a Keycloak write fence past takeover (D-069). */
   REASSERT: 'reassert',
 } as const;
 export type KeycloakProjectionTrigger =
@@ -44,7 +46,8 @@ export const keycloakProjectionsTotal = new Counter({
  * D-064). `refused` and `unconfirmed` answered the caller 503, nothing
  * committed; `settling` refused it before writing, because an earlier write
  * of the user whose answer was lost may still land. A sustained non-zero rate
- * of those three is demotions an administrator could not make.
+ * of those three is demotions an administrator could not make. `settling` is
+ * per user (KEYCLOAK_WRITE_SETTLING); `refused`/`unconfirmed` are Keycloak's.
  */
 export const KEYCLOAK_WRITE_AHEAD_OUTCOMES = {
   WRITTEN: 'written',
@@ -65,16 +68,30 @@ export const keycloakWriteAheadTotal = new Counter({
 });
 
 /**
- * Re-assertion marks (D-064): `unconfirmed` — a write whose answer was lost,
- * re-projected once it can no longer land; `rolled_back` — a write that landed
- * in a transaction that did not commit, re-projected at once. `failed` means
- * the mark itself could not be stored: that user is not re-asserted by the
- * sweep, and is the one outcome alerted on at any rate.
+ * The in-flight fences of Keycloak writes (D-069), by what happened to one:
+ * `opened` before a PUT; `released` when it provably was not applied;
+ * `release_failed` when that delete did not reach the database (the fence
+ * stays until the sweep takes it over — slower, never unsafe);
+ * `account_missing` when a due fence became terminal (Keycloak 404).
  */
-export const keycloakReassertMarksTotal = new Counter({
-  name: 'rasta_identity_keycloak_reassert_marks_total',
-  help: 'Users marked for Keycloak re-assertion, by reason and whether the mark was stored',
-  labelNames: ['reason', 'outcome'] as const,
+export const keycloakWriteFenceEventsTotal = new Counter({
+  name: 'rasta_identity_keycloak_write_fence_events_total',
+  help: 'Keycloak write fences opened, released, failed to release, or made terminal (account missing)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
+/**
+ * Keycloak write fences as of the sweep's last pass (D-069): `live` — writes
+ * that may still land; `due` — past takeover, not re-asserted yet;
+ * `account_missing` — terminal, Keycloak has no account for them. A `due`
+ * count that stays up is users whose re-assertion keeps failing; any
+ * `account_missing` is an account an operator must look at.
+ */
+export const keycloakWriteFences = new Gauge({
+  name: 'rasta_identity_keycloak_write_fences',
+  help: 'Keycloak write fences by state (live, due, account_missing), as of the last sweep',
+  labelNames: ['state'] as const,
   registers: [registry],
 });
 

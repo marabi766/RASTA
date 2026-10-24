@@ -32,7 +32,7 @@ import {
   outboxPendingAgeSeconds,
   outboxPendingTotal,
 } from '@rasta/observability';
-import { PrismaService } from './prisma/prisma.service';
+import { PrismaService, separatePoolUrl } from './prisma/prisma.service';
 import { PrismaOutboxStore } from './outbox/outbox.store';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { KeycloakAdminClient } from './keycloak/keycloak.client';
@@ -42,6 +42,7 @@ import {
   type KeycloakProjectorOptions,
 } from './keycloak/keycloak.projector';
 import { KeycloakProjectionConsumer } from './keycloak/keycloak-projection.consumer';
+import { FENCE_POOL_CONNECTIONS, KeycloakWriteFences } from './keycloak/keycloak-write-fence';
 import { IdentityRepository } from './identity/identity.repository';
 import { IdentityService } from './identity/identity.service';
 import { MembershipExpiryScanner } from './identity/membership-expiry.scanner';
@@ -84,6 +85,8 @@ import {
 } from './observability/security-event.metrics';
 
 export const ENV = Symbol('IDENTITY_ENV');
+/** The Keycloak write fences' own pool (D-069): never the one business transactions hold. */
+export const FENCE_PRISMA = Symbol('IDENTITY_FENCE_PRISMA');
 export const LOGGER = Symbol('IDENTITY_LOGGER');
 
 /** How often both outbox gauges are sampled from the database. */
@@ -124,6 +127,21 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
       provide: PrismaService,
       inject: [ENV],
       useFactory: (env: IdentityEnv) => new PrismaService(env.DATABASE_URL),
+    },
+    {
+      // A second, small pool: a fence is inserted while the business
+      // transaction holds the user lock, so it must never wait for a
+      // connection of a pool that transactions queued on that lock can
+      // exhaust (D-069, KeycloakWriteFences).
+      provide: FENCE_PRISMA,
+      inject: [ENV],
+      useFactory: (env: IdentityEnv) =>
+        new PrismaService(separatePoolUrl(env.DATABASE_URL, FENCE_POOL_CONNECTIONS)),
+    },
+    {
+      provide: KeycloakWriteFences,
+      inject: [FENCE_PRISMA],
+      useFactory: (pool: PrismaService) => new KeycloakWriteFences(pool),
     },
 
     {
@@ -171,12 +189,13 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
     IdentityService,
     {
       provide: MembershipExpiryScanner,
-      inject: [ENV, IdentityRepository, IdentityService, KeycloakProjector],
+      inject: [ENV, IdentityRepository, IdentityService, KeycloakProjector, KeycloakWriteFences],
       useFactory: (
         env: IdentityEnv,
         repository: IdentityRepository,
         identity: IdentityService,
         projector: KeycloakProjector,
+        fences: KeycloakWriteFences,
       ) =>
         new MembershipExpiryScanner(
           repository,
@@ -187,6 +206,7 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
             batchSize: env.MEMBERSHIP_EXPIRY_SCAN_BATCH_SIZE,
           },
           projector,
+          fences,
         ),
     },
 

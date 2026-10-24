@@ -143,8 +143,9 @@ export class MembershipController {
     description:
       'A change that removes a role is written to the identity provider before it commits ' +
       '(ADR-060, D-064). Refused with 503 KEYCLOAK_UNAVAILABLE, nothing changed and no event, ' +
-      'when the provider cannot be written; with `Retry-After` while an earlier unanswered write ' +
-      'of the same user may still land. Sending the same roles again answers the same and emits nothing.',
+      'when the provider cannot be written; with 503 KEYCLOAK_WRITE_SETTLING and `Retry-After` ' +
+      'while an earlier write of the same user may still land (D-069) — only after the caller was ' +
+      'authorized for this membership. Sending the same roles again answers the same and emits nothing.',
   })
   updateRoles(
     @Param('id') id: string,
@@ -161,8 +162,9 @@ export class MembershipController {
     description:
       'Written to the identity provider before it commits (ADR-060, D-064). Refused with ' +
       '503 KEYCLOAK_UNAVAILABLE, the membership still live and no event, when the provider cannot ' +
-      'be written; with `Retry-After` while an earlier unanswered write of the same user may still ' +
-      'land. Revoking an ended membership again answers 204 and emits nothing.',
+      'be written; with 503 KEYCLOAK_WRITE_SETTLING and `Retry-After` while an earlier write of ' +
+      'the same user may still land (D-069) — only after the caller was authorized for this ' +
+      'membership. Revoking an ended membership again answers 204 and emits nothing.',
   })
   async revoke(
     @Param('id') id: string,

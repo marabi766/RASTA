@@ -96,18 +96,20 @@ export const identityEnvSchema = baseEnvSchema
     KEYCLOAK_SYNC_ENABLED: booleanEnv(true),
 
     /**
-     * ADR-060, write-ahead addendum (D-064) — how long after a Keycloak write
-     * whose answer never came (its deadline passed, the connection broke, a
-     * 5xx) that write may still be applied. An aborted request is not a
-     * cancelled one, so for this long an older write could land after a newer
-     * one. Until it passes, a narrowing change of that user is refused (503
-     * `KEYCLOAK_UNAVAILABLE`), and then the user is re-projected
-     * (`keycloak_reassert_at`).
+     * ADR-060, write-ahead addendum (D-064, D-069) — how long after its
+     * deadline a Keycloak write whose answer never came (the deadline passed,
+     * the connection broke, a 5xx) may still be applied. An aborted request is
+     * not a cancelled one, so for this long an older write could land after a
+     * newer one. Every write's fence (`keycloak_write_attempt`) stays live
+     * until `deadline + this`: meanwhile a narrowing change of that user is
+     * refused (503 `KEYCLOAK_WRITE_SETTLING`); after it, the sweep re-asserts
+     * the user and clears the fence.
      *
-     * An assumption about the deployment, stated in the ADR: Keycloak applies
-     * an admin write within this long of receiving it, or never. The floor is
-     * above the client's own 10 s deadline; the ceiling bounds how long one
-     * lost answer can hold demotions of that user back.
+     * An assumption about the deployment, stated in the ADR's D-069 residual:
+     * Keycloak applies an admin write within this long of the sender's
+     * deadline, or never. The floor is above the client's own 10 s deadline;
+     * the ceiling bounds how long one lost answer can hold demotions of that
+     * user back.
      */
     KEYCLOAK_WRITE_SETTLE_SECONDS: z.coerce.number().int().min(15).max(900).default(120),
 
