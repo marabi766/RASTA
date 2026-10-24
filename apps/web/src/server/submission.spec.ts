@@ -91,6 +91,37 @@ describe('submission ids', () => {
     ).toBe(true);
   });
 
+  describe('bound to the organization the access token acts for (task 095)', () => {
+    /** A token as the portal reads it: only the payload is decoded, never verified. */
+    const token = (claims: Record<string, unknown>) =>
+      `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`;
+    const forOrg = (org: string | undefined, extra: Record<string, unknown> = {}): WebSession => ({
+      ...SESSION,
+      accessToken: token({ ...(org === undefined ? {} : { org_id: org }), ...extra }),
+    });
+
+    it('survives a refresh that keeps the organization', () => {
+      const id = mintSubmissionId(forOrg('ORG-DEH-0001', { exp: 1 }));
+      expect(isBoundSubmissionId(id, forOrg('ORG-DEH-0001', { exp: 2, jti: 'next' }))).toBe(true);
+    });
+
+    it('refuses a form drawn for one organization once the token acts for another', () => {
+      // The session's own organizationId does not move on a refresh; the token's does.
+      const id = mintSubmissionId(forOrg('ORG-DEH-0001'));
+      expect(isBoundSubmissionId(id, forOrg('ORG-DEH-0002'))).toBe(false);
+      expect(isBoundSubmissionId(id, forOrg(undefined))).toBe(false);
+      // And the reverse: drawn while acting for none, sent while acting for one.
+      expect(isBoundSubmissionId(mintSubmissionId(forOrg(undefined)), forOrg('ORG-DEH-0001'))).toBe(
+        false,
+      );
+    });
+
+    it('reads the claim strictly: an organization id the guard would not accept binds nothing', () => {
+      const id = mintSubmissionId(forOrg('ORG-DEH-0001'));
+      expect(isBoundSubmissionId(id, forOrg('ORG-DEH-0001:FLEET_MANAGER'))).toBe(false);
+    });
+  });
+
   it('refuses an id whose nonce or MAC was altered, one character at a time', () => {
     const id = mintSubmissionId(SESSION);
     for (let i = 'sub_'.length; i < id.length; i += 1) {

@@ -4,7 +4,9 @@ import { axe } from 'jest-axe';
 import { DriversScreen } from './DriversScreen';
 import { NewDriverForm } from './NewDriverForm';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
-import type { DriverPage, ReadResult } from '@/server/drivers';
+import type { DriverPicker } from '@/lib/driver-fields';
+import { NOT_A_MEMBER_TEXT, type DriverPage, type ReadResult } from '@/server/drivers';
+import type { RosterPerson } from '@/server/driver-roster';
 import type { CreateDriverFormState } from './form-state';
 
 /**
@@ -106,6 +108,48 @@ describe('the driver list', () => {
     const { container } = render(<DriversScreen result={page()} query={{}} />);
     expect(await axe(container)).toHaveNoViolations();
   });
+
+  describe('names, when the whole member list was read (task 095)', () => {
+    const names = new Map<string, RosterPerson>([
+      ['USR_9', { userId: 'USR_9', name: 'مریم کاظمی', username: 'maryam.k' }],
+    ]);
+    const formerMember = { ...DRIVER, id: 'DRV_2', userId: 'USR_GONE', employeeNo: 'EMP-2' };
+
+    it('shows each driver’s name and username, and says so for one not in the member list', () => {
+      const { getByRole } = render(
+        <DriversScreen result={page({ items: [DRIVER, formerMember] })} query={{}} names={names} />,
+      );
+      expect(getByRole('columnheader', { name: 'نام' })).toBeInTheDocument();
+      const row = getByRole('row', { name: /EMP-1/ });
+      expect(row).toHaveTextContent('مریم کاظمی');
+      expect(row).toHaveTextContent('maryam.k');
+      expect(getByRole('row', { name: /EMP-2/ })).toHaveTextContent(
+        'در فهرست اعضای این سازمان نیست',
+      );
+    });
+
+    it('has no name column without the member list (a fleet manager’s view)', () => {
+      const { queryByRole } = render(<DriversScreen result={page()} query={{}} names={null} />);
+      expect(queryByRole('columnheader', { name: 'نام' })).toBeNull();
+    });
+
+    it('drops bidi controls from a stored name', () => {
+      const spoofed = new Map<string, RosterPerson>([
+        ['USR_9', { userId: 'USR_9', name: 'علی\u202eرضا', username: 'ali\u2066x' }],
+      ]);
+      const { getByRole } = render(<DriversScreen result={page()} query={{}} names={spoofed} />);
+      const row = getByRole('row', { name: /EMP-1/ });
+      expect(row.textContent).not.toMatch(/\p{Bidi_Control}/u);
+      expect(row).toHaveTextContent('علیرضا');
+    });
+
+    it('has no accessibility violations with the name column', async () => {
+      const { container } = render(
+        <DriversScreen result={page({ items: [DRIVER, formerMember] })} query={{}} names={names} />,
+      );
+      expect(await axe(container)).toHaveNoViolations();
+    });
+  });
 });
 
 let currentState: CreateDriverFormState = { kind: 'IDLE' };
@@ -122,10 +166,16 @@ jest.mock('react', () => {
 const CSRF = 'csrf-token-for-this-session';
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 
-function renderForm(state: CreateDriverFormState = { kind: 'IDLE' }, isPending = false) {
+const ID_FIELD: DriverPicker = { kind: 'ID', reason: 'NOT_ALLOWED' };
+
+function renderForm(
+  state: CreateDriverFormState = { kind: 'IDLE' },
+  isPending = false,
+  picker: DriverPicker = ID_FIELD,
+) {
   currentState = state;
   pending = isPending;
-  return render(<NewDriverForm csrfToken={CSRF} submissionId={SUBMISSION} />);
+  return render(<NewDriverForm csrfToken={CSRF} submissionId={SUBMISSION} picker={picker} />);
 }
 
 afterEach(() => {
@@ -235,6 +285,83 @@ describe('the registration form', () => {
 
   it('has no accessibility violations', async () => {
     const { container } = renderForm();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe('who to register: the member picker (task 095)', () => {
+  const PICK: DriverPicker = {
+    kind: 'PICK',
+    candidates: [
+      { userId: 'USR_01J00000000000000000000000', name: 'مریم کاظمی', username: 'maryam.k' },
+      { userId: 'USR_01J00000000000000000000001', name: 'رضا نادری', username: 'reza.n' },
+    ],
+  };
+
+  it('offers the members by name and username, and sends the user id', () => {
+    const { container, getByRole } = renderForm({ kind: 'IDLE' }, false, PICK);
+    const select = getByRole('combobox', { name: /عضو سازمان/ });
+    expect(select).toHaveAttribute('name', 'userId');
+    expect(select).toBeRequired();
+    expect(getByRole('option', { name: 'مریم کاظمی — maryam.k' })).toHaveValue(
+      'USR_01J00000000000000000000000',
+    );
+    expect(getByRole('option', { name: 'رضا نادری — reza.n' })).toHaveValue(
+      'USR_01J00000000000000000000001',
+    );
+    // Nothing to type: no free-text id field beside the picker.
+    expect(container.querySelector('input[name="userId"]')).toBeNull();
+  });
+
+  it('starts on no one, so a person is chosen rather than defaulted', () => {
+    const { getByRole } = renderForm({ kind: 'IDLE' }, false, PICK);
+    expect(getByRole('combobox', { name: /عضو سازمان/ })).toHaveValue('');
+  });
+
+  it('keeps the chosen member and shows the refusal in Persian under the picker', () => {
+    const { getByRole, getByText } = renderForm(
+      {
+        kind: 'INVALID',
+        submissionId: SUBMISSION,
+        values: { ...VALUES, userId: 'USR_01J00000000000000000000001' },
+        fieldErrors: { userId: NOT_A_MEMBER_TEXT },
+        message: null,
+      },
+      false,
+      PICK,
+    );
+    const select = getByRole('combobox', { name: /عضو سازمان/ });
+    expect(select).toHaveValue('USR_01J00000000000000000000001');
+    expect(select).toHaveAttribute('aria-invalid', 'true');
+    expect(getByText(NOT_A_MEMBER_TEXT)).toHaveAttribute('role', 'alert');
+  });
+
+  it('drops bidi controls from a stored name in an option', () => {
+    const { getAllByRole } = renderForm({ kind: 'IDLE' }, false, {
+      kind: 'PICK',
+      candidates: [{ userId: 'USR_X', name: 'علی\u202eرضا', username: 'ali' }],
+    });
+    for (const option of getAllByRole('option')) {
+      expect(option.textContent).not.toMatch(/\p{Bidi_Control}/u);
+    }
+  });
+
+  it.each([
+    ['NOT_ALLOWED', /از مدیر سازمان بگیرید/],
+    ['INCOMPLETE', /کامل نشان داده شود/],
+    ['UNAVAILABLE', /اکنون خوانده نشد/],
+  ] as const)('keeps the id field, saying why, when the picker is %s', (reason, hint) => {
+    const { container, getByText, queryByRole } = renderForm({ kind: 'IDLE' }, false, {
+      kind: 'ID',
+      reason,
+    });
+    expect(container.querySelector('input[name="userId"]')).not.toBeNull();
+    expect(queryByRole('combobox', { name: /عضو سازمان/ })).toBeNull();
+    expect(getByText(hint)).toBeInTheDocument();
+  });
+
+  it('has no accessibility violations with the picker', async () => {
+    const { container } = renderForm({ kind: 'IDLE' }, false, PICK);
     expect(await axe(container)).toHaveNoViolations();
   });
 });

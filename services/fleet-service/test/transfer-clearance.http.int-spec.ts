@@ -59,6 +59,7 @@ describe('transfer clearance over HTTP: the bound runs from arrival', () => {
       INTERNAL_TOKEN_ISSUER: 'rasta-internal',
       ASSET_SERVICE_URL: 'http://127.0.0.1:9',
       MAINTENANCE_SERVICE_URL: 'http://127.0.0.1:9',
+      IDENTITY_SERVICE_URL: 'http://127.0.0.1:9',
     });
     const inert = { start: () => undefined, stop: async () => undefined };
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })

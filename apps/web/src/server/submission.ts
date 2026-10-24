@@ -3,6 +3,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { SUBMISSION_FIELD } from '@/lib/form-fields';
 
 import { webServerEnv } from './env';
+import { tokenOrganization } from './realm-roles';
 import type { WebSession } from './session';
 
 /**
@@ -38,9 +39,20 @@ import type { WebSession } from './session';
  * ## Bound to the session
  *
  * The id carries a MAC, keyed from the server's session secret, over the
- * session's subject, its CSRF token and the id's own nonce. A well-formed id
- * this server never issued, another person's id, and an id minted under an
- * earlier login are all refused before anything reaches the gateway.
+ * session's subject, its CSRF token, **the organization the access token acts
+ * for** and the id's own nonce. A well-formed id this server never issued,
+ * another person's id, an id minted under an earlier login, and an id minted
+ * while the token acted for another organization are all refused before
+ * anything reaches the gateway.
+ *
+ * The organization is the access token's `org_id`, not the session's: a
+ * refresh keeps the session's `organizationId` from the login but takes the
+ * token Keycloak issues now, so after the person switches their active
+ * organization elsewhere the next refresh sends every write for the new one
+ * (task 095). A form drawn for the old organization — a member picked from its
+ * list, a record of its own — is then refused as stale (`REFUSED`,
+ * `SUBMISSION`: refresh the page), never sent for the new one. A refresh that
+ * keeps the organization keeps every form valid.
  *
  * Every form uses this pair. There used to be a second, shape-only pair (a
  * random id and a regular-expression check) that proved an id was the right
@@ -67,12 +79,13 @@ const MAC_CHARS = 22;
 const BOUND_SUBMISSION_ID = new RegExp(`^sub_[A-Za-z0-9_-]{${NONCE_CHARS + MAC_CHARS}}$`);
 
 /** A purpose for the key, so this MAC cannot be confused with any other use of the secret. */
-const KEY_PURPOSE = 'rasta-web/submission-id/v1';
+const KEY_PURPOSE = 'rasta-web/submission-id/v2';
 
 function macFor(session: WebSession, nonce: string): Buffer {
   const key = createHmac('sha256', webServerEnv().WEB_SESSION_SECRET).update(KEY_PURPOSE).digest();
+  const organization = tokenOrganization(session.accessToken) ?? '';
   return createHmac('sha256', key)
-    .update(`${session.subject}\n${session.csrfToken}\n${nonce}`)
+    .update(`${session.subject}\n${session.csrfToken}\n${organization}\n${nonce}`)
     .digest()
     .subarray(0, MAC_BYTES);
 }

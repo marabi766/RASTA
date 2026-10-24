@@ -180,6 +180,8 @@ describe('GET /v1/users/:id/organizations service access (CON-002 PR 8, ADR-070 
 
   it('refuses every other service, tenant-less or not: 403, and reads nothing', async () => {
     for (const caller of [
+      // fleet-service asks only the one-bit question (task 095), never this one.
+      'fleet-service',
       'notification-service',
       'marketplace-service',
       'supplier-service',
@@ -244,9 +246,11 @@ describe('GET /v1/users/:id/organizations service access (CON-002 PR 8, ADR-070 
     const operation = document.paths['/v1/users/{id}/organizations']?.get;
     expect(operation?.security).toEqual([{ [INTERNAL_TOKEN_SCHEME]: [] }]);
     expect(operation?.description).toContain('procurement-service');
-    // No other route of the controller is put under it.
+    // No other route of the controller is put under it, but fleet-service's
+    // one-bit question (`live-membership.service-access.spec.ts`).
     for (const [route, item] of Object.entries(document.paths)) {
       if (route === '/v1/users/{id}/organizations') continue;
+      if (route === '/v1/users/{id}/live-membership') continue;
       for (const [method, op] of Object.entries(item)) {
         const schemes = ((op as { security?: Record<string, unknown>[] }).security ?? []).flatMap(
           Object.keys,
