@@ -98,6 +98,10 @@ Projection به Keycloak روی آن عمل نمی‌کند — تغییر سا�
 | `ORGANIZATION_POLICY_CHANGED`  | audit                                              | `organizationId`, `policyKey`, `value`                                                                            |
 | `ORGANIZATION_CONTACT_CHANGED` | audit                                              | `organizationId`, `contactId`, `change`, `kind`, `isPrimary`, `demotedContactIds[]` — **بدون** تلفن، ایمیل یا نام |
 
+**برنامه‌ریزی‌شده (ADR-072، هنوز تولید نمی‌شود):** `ORGANIZATION_UNION_MEMBERSHIP_STARTED` و `ORGANIZATION_UNION_MEMBERSHIP_ENDED`
+روی همین Topic — کلید Partition سازمان عضو، مستأجر لفافه اتحادیه؛ مصرف: audit (مسیر A، خودکار) · construction و contract (فقط
+`..._ENDED`، محرک بازپرسی سیاست، Q-83). Payload در ADR-072 § ۳؛ ردیف‌ها در PR ـِ `organization-service` به این جدول می‌آیند.
+
 ## Asset — `rasta.asset.v1`
 
 | رویداد                    | مصرف‌کنندگان                       | Payload کلیدی                                                                                             |
