@@ -35,8 +35,12 @@ overrides:
   # denial of service. @nestjs/platform-express pins multer 2.2.0 exactly, so
   # the patched release has to come from here.
   # GHSA-3pph-fpjx-jg34 (moderate, 2026-10-05) — 2.4.0 closes it as well.
-  # GHSA-q7qp-rjg7-q26m (high) — late async fileFilter callbacks after teardown
-  # can emit an unhandled busboy error. 2.5.0 retains the teardown error listener.
+  # GHSA-q7qp-rjg7-q26m (high, published 2026-10-23) — multer <2.5.0: a pending
+  # asynchronous fileFilter after request teardown leaves busboy with no error
+  # listener, and its late error crashes the process. No service registers a
+  # multipart route today, but the audit gate is version-based and the fix is
+  # small. 2.5.0 (2026-10-22) is younger than the minimum release age, so it is
+  # named in minimumReleaseAgeExclude below.
   'multer@<2.5.0': '2.5.0'
   # GHSA-6g55-p6wh-862q and GHSA-r28c-9q8g-f849 — arbitrary file read and path
   # traversal through an attacker-controlled `sourceMappingURL` in a CSS
@@ -150,12 +154,13 @@ minimumReleaseAgeExclude:
   # than the window. Remove this entry once 2.4.0 is older than seven days
   # (2026-10-29).
   - body-parser@2.4.0
-  # GHSA-q7qp-rjg7-q26m: published 2026-10-22T11:58:46Z by the expressjs
-  # trusted publisher, approved by listed maintainer ulisesgascon. The full
-  # 2.4.0 -> 2.5.0 tarball diff was reviewed: late-error/abort cleanup and
-  # fieldSize boundary fixes, no new dependency or install script. Changed
-  # runtime/manifest bytes match signed upstream release commit 2c380d06.
-  # Remove after 2026-10-29T11:58:47Z (seven days after publication).
+  # GHSA-q7qp-rjg7-q26m (see the multer override above). 2.5.0 was published by
+  # the expressjs GitHub Actions trusted publisher with SLSA provenance; its diff
+  # from 2.4.0 was read on 2026-10-24: lib/make-middleware.js only (a no-op error
+  # listener kept after teardown, no cleanup entry for a file the engine never
+  # stored, and the fieldSize "max allowed" adjustment applied to busboy's 1MB
+  # default), no new dependency. Remove this entry once 2.5.0 is older than seven
+  # days (2026-10-29).
   - multer@2.5.0
 
 # Refuse a version whose publish carried weaker trust evidence (no provenance
