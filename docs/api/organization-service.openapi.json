@@ -1,0 +1,172 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Rasta Organization Service — procurement thresholds",
+    "version": "0.1.0",
+    "description": "Scoped contract for the procurement-thresholds service read. Other organization routes are documented by the runtime Swagger surface."
+  },
+  "paths": {
+    "/v1/organizations/{id}/procurement-thresholds": {
+      "get": {
+        "operationId": "OrganizationController_procurementThresholds",
+        "summary": "Effective procurement thresholds for construction-service",
+        "description": "Service callers only (construction-service). Person/session callers and other services receive 403. The signed token organization must equal the requested id exactly, including when it is an ancestor: otherwise generic 404 without existence details. Returns only the effective inherited-resolved construction.tender.procurement_thresholds key, or null when absent. Bounds are inclusive integer rial strings; minimum must not exceed maximum. Governance values are stored as configured; malformed values fail closed at the construction consumer.",
+        "security": [
+          {
+            "internalToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One effective policy or explicit null",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["organizationId", "policy"],
+                  "properties": {
+                    "organizationId": {
+                      "type": "string"
+                    },
+                    "policy": {
+                      "type": "object",
+                      "nullable": true,
+                      "additionalProperties": false,
+                      "required": ["id", "value"],
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "value": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": ["FORMAL_TENDER", "INQUIRY", "RFP", "MARKETPLACE_DEAL"],
+                          "properties": {
+                            "FORMAL_TENDER": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": ["minAmountMinor", "maxAmountMinor", "mode"],
+                              "properties": {
+                                "minAmountMinor": {
+                                  "type": "string",
+                                  "pattern": "^[0-9]+$",
+                                  "nullable": true
+                                },
+                                "maxAmountMinor": {
+                                  "type": "string",
+                                  "pattern": "^[0-9]+$",
+                                  "nullable": true
+                                },
+                                "mode": {
+                                  "type": "string",
+                                  "enum": ["WARN", "REJECT"]
+                                }
+                              }
+                            },
+                            "INQUIRY": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": ["minAmountMinor", "maxAmountMinor", "mode"],
+                              "properties": {
+                                "minAmountMinor": {
+                                  "type": "string",
+                                  "pattern": "^[0-9]+$",
+                                  "nullable": true
+                                },
+                                "maxAmountMinor": {
+                                  "type": "string",
+                                  "pattern": "^[0-9]+$",
+                                  "nullable": true
+                                },
+                                "mode": {
+                                  "type": "string",
+                                  "enum": ["WARN", "REJECT"]
+                                }
+                              }
+                            },
+                            "RFP": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": ["minAmountMinor", "maxAmountMinor", "mode"],
+                              "properties": {
+                                "minAmountMinor": {
+                                  "type": "string",
+                                  "pattern": "^[0-9]+$",
+                                  "nullable": true
+                                },
+                                "maxAmountMinor": {
+                                  "type": "string",
+                                  "pattern": "^[0-9]+$",
+                                  "nullable": true
+                                },
+                                "mode": {
+                                  "type": "string",
+                                  "enum": ["WARN", "REJECT"]
+                                }
+                              }
+                            },
+                            "MARKETPLACE_DEAL": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": ["minAmountMinor", "maxAmountMinor", "mode"],
+                              "properties": {
+                                "minAmountMinor": {
+                                  "type": "string",
+                                  "pattern": "^[0-9]+$",
+                                  "nullable": true
+                                },
+                                "maxAmountMinor": {
+                                  "type": "string",
+                                  "pattern": "^[0-9]+$",
+                                  "nullable": true
+                                },
+                                "mode": {
+                                  "type": "string",
+                                  "enum": ["WARN", "REJECT"]
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid authentication"
+          },
+          "403": {
+            "description": "Person/session caller or another service refused"
+          },
+          "404": {
+            "description": "Token organization mismatch or organization absent; no existence details"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "internalToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Internal-Token"
+      }
+    }
+  }
+}

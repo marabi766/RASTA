@@ -196,6 +196,8 @@ export const approvalBindingSchema = z
     requestId: z.string(),
     tenderVersion: z.number().int(),
     status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'STALE', 'CONSUMED']),
+    procurementThresholdWarning: z.literal('PROCUREMENT_AMOUNT_OUTSIDE_RANGE').optional(),
+    procurementThresholdPolicyId: z.string().optional(),
     requestedBy: z.string(),
     requestedAt: z.string(),
     bid: z

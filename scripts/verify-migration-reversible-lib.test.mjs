@@ -1,10 +1,19 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { parse as parseYaml } from 'yaml';
 
 import {
   EXPECTED,
@@ -30,6 +39,14 @@ import {
   verifierConnection,
   verifierRoleProblem,
 } from './verify-migration-reversible-lib.mjs';
+import {
+  AGGREGATE_JOB,
+  BY_NAME_COMMANDS,
+  CHAIN_JOB,
+  GUARDS_JOB,
+  chainShards,
+  checkMigrationReversibility,
+} from './ci-migration-reversibility-lib.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -709,16 +726,235 @@ test('a kept extension is excused by exact name, and only as its exact post-depl
   );
 });
 
-test('every service with migrations is in EXPECTED and in test:migration', () => {
+// CI runs the whole-chain check as a matrix of shards (task 082), so a service
+// is verified there only if a shard lists it; `test:migration` is the same set
+// in one sequence, for a developer. Both are read here, from the files CI and a
+// developer run.
+function migrationGate() {
+  const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8'));
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
-  const verified = [
-    ...pkg.scripts['test:migration'].matchAll(/verify-migration-reversible\.mjs (\S+)/g),
-  ].map((m) => m[1]);
+  return { workflow, testMigration: pkg.scripts['test:migration'] };
+}
 
+const gateProblems = ({ workflow, testMigration }) =>
+  checkMigrationReversibility(workflow, { services: servicesWithMigrations(), testMigration });
+
+test('every service with migrations is in EXPECTED, in one CI shard and in test:migration', () => {
   for (const service of servicesWithMigrations()) {
     assert.ok(EXPECTED[service], `${service} has no EXPECTED entry`);
-    assert.ok(verified.includes(service), `${service} is not in the root test:migration chain`);
   }
+  assert.deepEqual(gateProblems(migrationGate()), []);
+  assert.deepEqual(
+    chainShards(migrationGate().workflow)
+      .flatMap((shard) => shard.services)
+      .sort(),
+    servicesWithMigrations(),
+  );
+});
+
+test('the migration gate refuses a shard list, job or aggregate that would verify less', () => {
+  const refuses = (mutate, pattern) => {
+    const gate = structuredClone(migrationGate());
+    mutate(gate, gate.workflow.jobs);
+    const problems = gateProblems(gate);
+    assert.ok(
+      problems.some((problem) => pattern.test(problem)),
+      `expected ${pattern}, got:\n${problems.join('\n')}`,
+    );
+  };
+  const include = (jobs) => jobs[CHAIN_JOB].strategy.matrix.include;
+  const step = (job, name) => job.steps.find((candidate) => candidate.name === name);
+  const dropped = (services, name) =>
+    services
+      .split(/\s+/)
+      .filter((service) => service !== name)
+      .join(' ');
+
+  // A service dropped from its shard, moved into a second one, or a shard emptied.
+  refuses((_, jobs) => {
+    const entry = include(jobs).find((candidate) => candidate.services.includes('economic'));
+    entry.services = dropped(entry.services, 'economic');
+  }, /^economic has migrations and is in no shard/);
+  refuses((_, jobs) => {
+    include(jobs)[1].services += ' ' + include(jobs)[0].services.split(' ')[0];
+  }, /is in shards/);
+  refuses((_, jobs) => {
+    include(jobs)[0].services = '';
+  }, /lists no services/);
+  refuses((_, jobs) => {
+    include(jobs)[0].services += ' payments';
+  }, /lists payments, which is not a service with migrations/);
+  refuses((_, jobs) => {
+    jobs[CHAIN_JOB].strategy.matrix.extra = ['a', 'b'];
+  }, /beside include/);
+  // The whole chain no longer run, or run so that a failure passes.
+  refuses((_, jobs) => {
+    step(jobs[CHAIN_JOB], 'Migration reversibility, whole chain').run += ' || true';
+  }, /whole chain" must run exactly/);
+  refuses((_, jobs) => {
+    step(jobs[CHAIN_JOB], 'Migration reversibility, whole chain')['continue-on-error'] = true;
+  }, /sets continue-on-error/);
+  refuses((_, jobs) => {
+    delete step(jobs[CHAIN_JOB], 'Migration reversibility, whole chain').env.MIGRATION_SERVICES;
+  }, /must set MIGRATION_SERVICES/);
+  // A shell that does not stop at a failed command (round 2 on #376): on the
+  // step, as the job's default, or as the workflow's.
+  const noErrexit = 'bash {0}';
+  refuses((_, jobs) => {
+    step(jobs[CHAIN_JOB], 'Migration reversibility, whole chain').shell = noErrexit;
+  }, /whole chain" runs under "bash \{0\}" \(its shell\)/);
+  refuses((_, jobs) => {
+    step(jobs[GUARDS_JOB], 'Migration reversibility, by-name verifiers').shell = noErrexit;
+  }, /by-name verifiers" runs under "bash \{0\}" \(its shell\)/);
+  refuses((_, jobs) => {
+    jobs[CHAIN_JOB].defaults = { run: { shell: noErrexit } };
+  }, /whole chain" runs under "bash \{0\}" \(the job's defaults\.run\.shell\)/);
+  refuses((_, jobs) => {
+    jobs[GUARDS_JOB].defaults = { run: { shell: 'sh {0}' } };
+  }, /by-name verifiers" runs under "sh \{0\}" \(the job's defaults\.run\.shell\)/);
+  refuses((gate) => {
+    gate.workflow.defaults = { run: { shell: noErrexit } };
+  }, /whole chain" runs under "bash \{0\}" \(the workflow's defaults\.run\.shell\)/);
+  refuses((gate) => {
+    gate.workflow.defaults = { run: { shell: noErrexit } };
+  }, /by-name verifiers" runs under "bash \{0\}" \(the workflow's/);
+  // A step's own errexit shell is not overridden by an unsafe default above it.
+  refuses((gate, jobs) => {
+    jobs[CHAIN_JOB].defaults = { run: { shell: noErrexit } };
+    step(jobs[CHAIN_JOB], 'Migration reversibility, whole chain').shell = 'bash -e {0}';
+  }, /"Apply migrations" runs under "bash \{0\}"/);
+  // A by-name verifier or a database guard dropped, or run before what it reads.
+  refuses((_, jobs) => {
+    const verifiers = step(jobs[GUARDS_JOB], 'Migration reversibility, by-name verifiers');
+    verifiers.run = verifiers.run.replace(/.*--in-place.*\n/, '');
+  }, /by-name verifiers" must run exactly/);
+  refuses((_, jobs) => {
+    const steps = jobs[GUARDS_JOB].steps;
+    steps.splice(
+      steps.findIndex(
+        (candidate) => candidate.name === 'Demo seeds refuse outside development and test',
+      ),
+      1,
+    );
+  }, /does not run "Demo seeds refuse/);
+  refuses((_, jobs) => {
+    const steps = jobs[GUARDS_JOB].steps;
+    const at = steps.findIndex((candidate) => candidate.name === 'Apply migrations');
+    steps.push(...steps.splice(at, 1));
+  }, /out of order|must be its last step/);
+  refuses((_, jobs) => {
+    delete step(jobs[GUARDS_JOB], 'Migration verifier library, against PostgreSQL').env
+      .MIGRATION_LIB_TEST_DATABASE_REQUIRED;
+  }, /must set MIGRATION_LIB_TEST_DATABASE_REQUIRED/);
+  // The required check passing without every job here.
+  refuses((_, jobs) => {
+    jobs[AGGREGATE_JOB].needs = [CHAIN_JOB];
+  }, /must need exactly/);
+  refuses((_, jobs) => {
+    delete jobs[AGGREGATE_JOB].if;
+  }, /must run if/);
+  refuses((_, jobs) => {
+    jobs[AGGREGATE_JOB].name = 'Migration reversibility';
+  }, /must be named "Migration reversibility and database guards"/);
+  refuses((_, jobs) => {
+    jobs[AGGREGATE_JOB].steps[0].run = jobs[AGGREGATE_JOB].steps[0].run.replace(
+      'needs[name].result !== "success"',
+      'needs[name].result === "failure"',
+    );
+  }, /passes when migration-reversibility-chain skipped/);
+  // The developer's full run losing a service or a by-name verifier.
+  refuses((gate) => {
+    gate.testMigration = gate.testMigration.replace(
+      'node scripts/verify-migration-reversible.mjs analytics && ',
+      '',
+    );
+  }, /^analytics is not in the root test:migration chain/);
+  refuses((gate) => {
+    gate.testMigration = gate.testMigration.replace(
+      ' && node scripts/verify-audit-correction-command-migration.mjs',
+      '',
+    );
+  }, /test:migration must end with/);
+});
+
+test('the gate accepts every shell that stops at a failed command, wherever it is set', () => {
+  for (const shell of ['bash', 'bash -e {0}', 'bash --noprofile --norc -eo pipefail {0}']) {
+    const gate = structuredClone(migrationGate());
+    gate.workflow.defaults = { run: { shell } };
+    gate.workflow.jobs[GUARDS_JOB].defaults = { run: { shell } };
+    for (const candidate of gate.workflow.jobs[CHAIN_JOB].steps) {
+      if ('run' in candidate) candidate.shell = shell;
+    }
+    assert.deepEqual(gateProblems(gate), [], shell);
+  }
+});
+
+// The guard pins the commands and refuses a shell without errexit; this runs
+// the pinned scripts themselves, as CI's run steps hold them, under such a
+// shell anyway, with a verifier failing in the middle: each must still fail,
+// and run nothing after it.
+function runWithFailingVerifier(run, failing, env = {}) {
+  const directory = mkdtempSync(join(tmpdir(), 'migration-loop-'));
+  try {
+    const bin = join(directory, 'bin');
+    mkdirSync(bin);
+    const log = join(directory, 'ran');
+    writeFileSync(log, '');
+    // `node` that records its arguments and fails for the one named.
+    writeFileSync(
+      join(bin, 'node'),
+      '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$RAN_LOG"\n' +
+        'case "$*" in *"$FAILING"*) exit 3 ;; esac\nexit 0\n',
+    );
+    chmodSync(join(bin, 'node'), 0o755);
+    const script = join(directory, 'step.sh');
+    writeFileSync(script, run);
+    // `bash {0}`: what GitHub runs for that shell, no -e, no pipefail.
+    const outcome = spawnSync('bash', [script], {
+      env: { PATH: `${bin}:/usr/bin:/bin`, RAN_LOG: log, FAILING: failing, ...env },
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    assert.ifError(outcome.error);
+    return { status: outcome.status, ran: readFileSync(log, 'utf8').split('\n').filter(Boolean) };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test('a failed verifier mid-run fails the step even under a shell without errexit', () => {
+  const { workflow } = migrationGate();
+  const runOf = (job, name) => workflow.jobs[job].steps.find((step) => step.name === name).run;
+  const chain = runOf(CHAIN_JOB, 'Migration reversibility, whole chain');
+  const byName = runOf(GUARDS_JOB, 'Migration reversibility, by-name verifiers');
+  const services = { MIGRATION_SERVICES: 'document economic notification procurement' };
+
+  const passing = runWithFailingVerifier(chain, 'nothing-fails', services);
+  assert.equal(passing.status, 0);
+  assert.equal(passing.ran.length, 4);
+
+  const chainFailed = runWithFailingVerifier(chain, 'economic', services);
+  assert.notEqual(chainFailed.status, 0, 'economic failed, the shard passed');
+  assert.deepEqual(chainFailed.ran, [
+    'scripts/verify-migration-reversible.mjs document',
+    'scripts/verify-migration-reversible.mjs economic',
+  ]);
+  assert.notEqual(
+    runWithFailingVerifier(chain, 'nothing-fails', { MIGRATION_SERVICES: '' }).status,
+    0,
+  );
+
+  const byNameFailed = runWithFailingVerifier(byName, 'verify-security-event-outbox-migration');
+  assert.notEqual(byNameFailed.status, 0, 'the security-event verifier failed, the step passed');
+  assert.deepEqual(
+    byNameFailed.ran,
+    BY_NAME_COMMANDS.slice(0, 2).map((c) => c.slice('node '.length)),
+  );
+  assert.equal(runWithFailingVerifier(byName, 'nothing-fails').status, 0);
+
+  // The harness tells: round 1's loop, without `|| exit 1`, passes here.
+  const round1 = chain.replaceAll(' || exit 1', '');
+  assert.equal(runWithFailingVerifier(round1, 'economic', services).status, 0);
 });
 
 // ---------------------------------------------------------------------------
