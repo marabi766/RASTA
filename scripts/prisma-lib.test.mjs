@@ -117,7 +117,7 @@ test('refuses what the services’ copy refuses: repeated options, a raw control
       assert.throws(
         call,
         (error) =>
-          /options parameters|raw control character/.test(error.message) &&
+          /options parameter|raw control character/.test(error.message) &&
           !error.message.includes('db.internal') &&
           !error.message.includes(CREDENTIALS),
         JSON.stringify(url),

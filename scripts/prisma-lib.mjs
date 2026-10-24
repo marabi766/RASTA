@@ -119,9 +119,11 @@ function splitOptions(url) {
   const isOptions = (pair) => decode(pair.split('=')[0] ?? '') === 'options';
   const written = pairs.filter(isOptions);
   if (written.length > 1) {
+    // The services' text, word for word (`packages/config` DATABASE_URL_REPEATED_OPTIONS): fixed,
+    // without the count (#385 r3), and pinned equal by scripts/db-session-utc.pg.test.mjs (4).
     throw new Error(
-      `DATABASE_URL has ${written.length} options parameters, and the driver keeps only the ` +
-        'last one; write every startup option in a single options parameter',
+      'DATABASE_URL has more than one options parameter, and the driver keeps only the last ' +
+        'one; write every startup option in a single options parameter',
     );
   }
   const [pair] = written;
