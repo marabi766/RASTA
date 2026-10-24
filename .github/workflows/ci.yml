@@ -289,11 +289,9 @@ jobs:
           pnpm run test:grafana-live-isolation-lib
 
       - name: Image scan coverage gate
-        # Runs here, in a job that fires on pull requests, rather than beside
-        # the `containers` job it protects — that one only runs on a push to
-        # main, so it cannot catch a service being added without an image
-        # build until the omission has already merged. Three services have
-        # landed unscanned this way (PROJECT_MEMORY § 22).
+        # Checks every service's image coverage on PRs and main, independently
+        # of the affected-image selection below. Three services once landed
+        # unscanned without this coverage gate (PROJECT_MEMORY § 22).
         run: |
           pnpm run ci:image-matrix
           pnpm run test:image-matrix
@@ -4107,8 +4105,7 @@ jobs:
           grep -Eq 'is up-to-date|updated \(version' /tmp/freshclam.log
 
   # ---------------------------------------------------------------------------
-  # Container build and image scan. Only on main, because it is the slowest
-  # stage and a PR has already been gated by everything above.
+  # Container build and image scan: affected images on PRs, every image on main.
   # ---------------------------------------------------------------------------
   container-scope:
     name: Images to build and scan
@@ -4139,6 +4136,10 @@ jobs:
         if: github.event_name == 'pull_request'
         run: pnpm install --filter . --frozen-lockfile --ignore-scripts
 
+      - name: Prove workflow narrowing with the filtered parser install
+        if: github.event_name == 'pull_request'
+        run: node --test --test-name-pattern='filtered parser narrows' scripts/container-scope.test.mjs
+
       - name: Decide which images this change affects
         id: scope
         # L7-35: images were built and scanned only after merge, so a broken
@@ -4148,8 +4149,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            services="$(git diff --name-only "${{ github.event.pull_request.base.sha }}...HEAD" \
-              | node scripts/container-scope.mjs --base "${{ github.event.pull_request.base.sha }}")"
+            services="$(node scripts/container-scope.mjs --base "${{ github.event.pull_request.base.sha }}")"
           else
             services="$(node scripts/container-scope.mjs --all)"
           fi

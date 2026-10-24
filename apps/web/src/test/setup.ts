@@ -29,3 +29,16 @@ expect.extend(toHaveNoViolations);
 // (see `turbo-inputs-guard.ts`); a forgotten input is a failure here, not a
 // stale cached green later.
 installTurboInputsGuard();
+
+// An unmapped service sentence is reported with a one-line structured
+// diagnostic on stderr (`server/write.ts`, `reportUnmappedMessage`). Specs
+// exercise that path on purpose, so the line is swallowed here; a spec that
+// cares asserts on `console.error` (it stays a jest spy). Any other
+// `console.error` still reaches the terminal.
+const realConsoleError = console.error.bind(console);
+beforeEach(() => {
+  jest.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+    if (typeof args[0] === 'string' && args[0].includes('web.unmapped_service_message')) return;
+    realConsoleError(...args);
+  });
+});

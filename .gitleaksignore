@@ -6,3 +6,6 @@
 c0fbaeffb79669ddb501daac6e4015a306527fb3:apps/web/src/app/transactions/dispute-retry.spec.tsx:generic-api-key:41
 # #319 squash on main: the same test sessionStorage key name, not a secret (PM-verified).
 be0f5fa7e000d30e7fad8df39b530d743355ab01:apps/web/src/app/transactions/dispute-retry.spec.tsx:generic-api-key:51
+# #397: an Idempotency-Key literal in a supertest call (test fixture string, not a secret); the later commit renames it to the repo's usual form.
+73dc0a437c429f7487cd048e8615a248c001f030:services/asset-service/src/asset/persian-punctuation-http.spec.ts:generic-api-key:67
+73dc0a437c429f7487cd048e8615a248c001f030:services/asset-service/src/asset/persian-punctuation-http.spec.ts:generic-api-key:80
