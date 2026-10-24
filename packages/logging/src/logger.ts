@@ -1,7 +1,13 @@
 import pino, { type DestinationStream, type Logger, type LoggerOptions } from 'pino';
 import { scrubbedErrorSerializer } from './error-serializer';
-import { buildRedactionPaths, REDACTED } from './redaction';
-import { scrubbingDestination, writeFallback } from './scrubbing-destination';
+import { buildRedactionPaths, REDACTED, scrubMessage } from './redaction';
+import {
+  type DropEnvelope,
+  MAX_LOG_STRING_LENGTH,
+  MAX_LOG_LINE_LENGTH,
+  scrubbingDestination,
+  writeFallback,
+} from './scrubbing-destination';
 
 /**
  * Fields that identify *where* a log line came from and *which* request
@@ -17,6 +23,7 @@ export interface LogContext {
   traceId?: string;
   spanId?: string;
   tenantId?: string;
+  organizationId?: string;
   userId?: string;
   requestId?: string;
 }
@@ -113,6 +120,74 @@ function rejectComposite(destination: DestinationStream | undefined): void {
   }
 }
 
+/**
+ * Bound strings before pino interpolates or serialises them. Matching the final
+ * destination's 16 Ki string budget leaves room in its 64 Ki line budget for
+ * the envelope and other fields. Many fields / escaping can still drop a line.
+ * Only direct string values of argument objects are visited; Errors retain
+ * the existing serializer. No caller-owned object is mutated.
+ */
+export const MAX_LOG_ARGUMENT_LENGTH = MAX_LOG_STRING_LENGTH;
+
+function boundArguments(args: unknown[], envelope: DropEnvelope): unknown[] {
+  const bound = (text: string): string => {
+    // Preserve the existing whole-record drop for inputs already beyond the
+    // line budget (also consumed by OTel), without ever formatting that input.
+    if (text.length > MAX_LOG_LINE_LENGTH) {
+      envelope.originalLength = Math.max(envelope.originalLength ?? 0, text.length);
+    }
+    return text.length > MAX_LOG_ARGUMENT_LENGTH
+      ? scrubMessage(text, MAX_LOG_ARGUMENT_LENGTH)
+      : text;
+  };
+  return args.map((arg: unknown) => {
+    if (typeof arg === 'string') return bound(arg);
+    if (typeof arg !== 'object' || arg === null || arg instanceof Error) return arg;
+    const prototype = Object.getPrototypeOf(arg) as object | null;
+    // Retain descriptors (including getters and toJSON) and the prototype.
+    // Wrap accessors lazily; pino still owns when they are evaluated.
+    const descriptors = Object.getOwnPropertyDescriptors(arg);
+    let changed = false;
+    for (const descriptor of Object.values(descriptors)) {
+      if (descriptor.get) {
+        const get = descriptor.get;
+        descriptor.get = () => {
+          const value: unknown = get.call(arg);
+          return typeof value === 'string' ? bound(value) : value;
+        };
+        changed = true;
+      }
+      if (typeof descriptor.value !== 'string') continue;
+      const value = bound(descriptor.value);
+      if (value !== descriptor.value) {
+        descriptor.value = value;
+        changed = true;
+      }
+    }
+    return changed
+      ? Object.defineProperties(Array.isArray(arg) ? [] : Object.create(prototype), descriptors)
+      : arg;
+  });
+}
+
+const CONTEXT_IDS = ['correlationId', 'tenantId', 'organizationId'] as const;
+
+/** Copy only identifiers, never payload, into the separately captured envelope. */
+function captureIds(envelope: DropEnvelope, source: unknown): void {
+  if (typeof source !== 'object' || source === null) return;
+  for (const key of CONTEXT_IDS) {
+    try {
+      if (key in source) {
+        const value: unknown = (source as Record<string, unknown>)[key];
+        // The destination validates these before writing; don't coerce values.
+        envelope[key] = typeof value === 'string' ? value : undefined;
+      }
+    } catch {
+      envelope[key] = undefined;
+    }
+  }
+}
+
 export function createLogger(config: LoggerConfig): Logger {
   const {
     serviceName,
@@ -126,15 +201,23 @@ export function createLogger(config: LoggerConfig): Logger {
   rejectComposite(destination);
   const raw = openDestination(destination, pretty);
   let output: DestinationStream = raw;
+  let envelope: DropEnvelope | undefined;
+  let context: LogContext | undefined;
 
   const options: LoggerOptions = {
     level,
     base: { service: serviceName, version: serviceVersion, env: environment },
 
     // Attached to every line, evaluated per call so late-bound context is seen.
-    mixin() {
+    mixin(mergeObject) {
       try {
-        return contextProvider?.() ?? {};
+        const fields = context ?? {};
+        if (envelope) {
+          captureIds(envelope, fields);
+          // Same precedence as pino: call fields override the mixin and bindings.
+          captureIds(envelope, mergeObject);
+        }
+        return fields;
       } catch {
         // A failing context provider costs the context, never the line.
         return {};
@@ -160,11 +243,30 @@ export function createLogger(config: LoggerConfig): Logger {
       // Interpolation, serializers, redaction and mixins all run inside this
       // call. One that throws (a hostile toString or getter) must not reach
       // the caller: a fixed line is written instead.
-      logMethod(args, method) {
+      logMethod(args, method, level) {
+        const previous = envelope;
+        const previousContext = context;
+        envelope = {
+          time: new Date().toISOString(),
+          level: pino.levels.labels[level] ?? 'error',
+          service: serviceName,
+        };
         try {
-          method.apply(this, args);
+          captureIds(envelope, this.bindings());
+          try {
+            context = contextProvider?.();
+          } catch {
+            context = undefined;
+          }
+          captureIds(envelope, context);
+          captureIds(envelope, args[0]);
+          method.apply(this, boundArguments(args, envelope) as Parameters<typeof method>);
         } catch {
-          writeFallback(output);
+          writeFallback(output, envelope);
+        } finally {
+          // A getter / provider / destination can log recursively.
+          envelope = previous;
+          context = previousContext;
         }
       },
     },
@@ -185,7 +287,7 @@ export function createLogger(config: LoggerConfig): Logger {
   // the whole of it puts every consumer behind the scrub.
   const symbols = pino.symbols as unknown as { streamSym: symbol };
   const loggerState = logger as unknown as Record<symbol, DestinationStream>;
-  output = scrubbingDestination(loggerState[symbols.streamSym] ?? raw);
+  output = scrubbingDestination(loggerState[symbols.streamSym] ?? raw, () => envelope);
   loggerState[symbols.streamSym] = output;
   return logger;
 }
