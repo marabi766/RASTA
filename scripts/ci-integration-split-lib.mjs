@@ -145,7 +145,12 @@ export const STEP_INVENTORY = Object.freeze({
   'Notification coverage gate': coverageGate('notification', MAILPIT),
   'Organization coverage gate': coverageGate('organization'),
   'Procurement coverage gate': coverageGate('procurement'),
-  'Analytics coverage gate': coverageGate('analytics'),
+  'Analytics coverage gate': coverageGate('analytics', { TEST_ANALYTICS_ADMIN_URL: ANY }),
+  'Analytics database privilege integration tests': {
+    run: ['pnpm --filter @rasta/analytics-service run test:db-privileges'],
+    env: { NODE_ENV: 'test', ...databases('ANALYTICS'), TEST_ANALYTICS_ADMIN_URL: ANY },
+    timeout: 5,
+  },
   'Test independence (F-25)': {
     run: withKafka('tests', 'pnpm run test:independence'),
     env: { ...KAFKA_TESTS, ...databases('MAINTENANCE') },
