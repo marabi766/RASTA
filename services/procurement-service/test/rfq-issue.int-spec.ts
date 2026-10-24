@@ -441,20 +441,28 @@ describe('issuing an RFQ', () => {
     });
 
     it('an issue that read the aggregation, then waited on supplier-service while another committed: 409 under the lock, nothing written by it', async () => {
-      const { organizationId, aggregation } = await h.readyAggregation();
-      const admin = h.admin(organizationId);
-      const slowBody = h.issueBody(aggregation);
-      const parked = h.supplier.park(slowBody.invitedSupplierOrganizationIds[0]!);
+      // The harness's 1 s supplier timeout is for the tests that want a 504. Here the first issue is
+      // held at the stub for as long as the second one takes to run to its commit, which on a loaded
+      // runner can pass 1 s and turn the first into a 504 before the release; so no timeout may fire.
+      const patient = await startRfqApi({ PROCUREMENT_SUPPLIER_REQUEST_TIMEOUT_MS: '30000' });
+      try {
+        const { organizationId, aggregation } = await patient.readyAggregation();
+        const admin = patient.admin(organizationId);
+        const slowBody = patient.issueBody(aggregation);
+        const parked = patient.supplier.park(slowBody.invitedSupplierOrganizationIds[0]!);
 
-      const first = started(admin.issueRfq(aggregation.id, slowBody));
-      await parked.reached;
-      const second = await admin.issueRfq(aggregation.id, h.issueBody(aggregation));
-      parked.release();
+        const first = started(admin.issueRfq(aggregation.id, slowBody));
+        await parked.reached;
+        const second = await admin.issueRfq(aggregation.id, patient.issueBody(aggregation));
+        parked.release();
 
-      const a = await first;
-      expect([second.status, a.status]).toEqual([201, 409]);
-      expect(a.body.code).toBe('OPTIMISTIC_LOCK_FAILED');
-      expect(await rfqRows(aggregation.id)).toEqual([{ id: second.body.id }]);
+        const a = await first;
+        expect([second.status, a.status]).toEqual([201, 409]);
+        expect(a.body.code).toBe('OPTIMISTIC_LOCK_FAILED');
+        expect(await rfqRows(aggregation.id)).toEqual([{ id: second.body.id }]);
+      } finally {
+        await patient.close();
+      }
     });
 
     it('an issue and an aggregation cancel, the cancel first: the issue waits on the lock, then 409', async () => {
