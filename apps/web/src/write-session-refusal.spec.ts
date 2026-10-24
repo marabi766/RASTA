@@ -35,42 +35,47 @@ const { REFRESH_UNAVAILABLE, SESSION_STATE_HEADER } =
 
 type Action = (...args: never[]) => Promise<unknown>;
 
-/** Every `'use server'` module under `src/app`, by its path. */
-const MODULES = [
-  'app/transactions/[id]/actions',
-  'app/marketplace/[productId]/place-order-actions',
-  'app/orders/[id]/actions',
-  'app/assets/actions',
-  'app/assets/[id]/actions',
-  'app/assets/[id]/document-actions',
-  'app/assets/[id]/record-actions',
-  'app/assets/[id]/availability-actions',
-  'app/assets/[id]/lifecycle-actions',
-  'app/usage/actions',
-  'app/wallet/actions',
-  'app/drivers/actions',
-  'app/drivers/[id]/actions',
-  'app/maintenance/actions',
-  'app/maintenance/[id]/actions',
-  'app/maintenance/[id]/repair-actions',
-  'app/organizations/actions',
-  'app/contracts/[id]/statement-actions',
-  'app/returns/return-actions',
-  'app/contracts/[id]/contract-actions',
-  'app/tenders/[id]/bid-actions',
-  'app/tenders/[id]/owner-actions',
-] as const;
+/**
+ * Every `'use server'` module under `src/app`, by its path: found by walking
+ * the tree, so a new action module is covered without being listed anywhere.
+ */
+function discoverModules(): string[] {
+  const found: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.ts$/.test(entry.name) && !/\.spec\.ts$/.test(entry.name)) {
+        if (/^'use server';/.test(readFileSync(full, 'utf8'))) {
+          found.push(relative(__dirname, full).replace(/\.ts$/, ''));
+        }
+      }
+    }
+  };
+  walk(join(__dirname, 'app'));
+  return found.sort();
+}
 
-const ACTIONS: Record<string, Record<string, Action>> = Object.fromEntries(
-  MODULES.map((path) => [path, require(`./${path}`) as Record<string, Action>]),
+const MODULES = discoverModules();
+
+const ACTIONS: Record<string, Record<string, unknown>> = Object.fromEntries(
+  MODULES.map((path) => [path, require(`./${path}`) as Record<string, unknown>]),
 );
 /* eslint-enable @typescript-eslint/no-require-imports */
 
-const CASES = Object.entries(ACTIONS).flatMap(([route, module]) =>
-  Object.entries(module)
-    .filter(([name, value]) => name.startsWith('submit') && typeof value === 'function')
-    .map(([name, action]) => ({ name: `${route} ${name}`, action })),
+/** Every runtime export of every discovered module, as `<module> <export>`. */
+const EXPORTS = Object.entries(ACTIONS).flatMap(([route, module]) =>
+  Object.entries(module).map(([name, value]) => ({
+    name: `${route} ${name}`,
+    exported: name,
+    value,
+  })),
 );
+
+/** One case per exported action; nothing here is listed by hand. */
+const CASES = EXPORTS.filter(
+  ({ exported, value }) => exported.startsWith('submit') && typeof value === 'function',
+).map(({ name, value }) => ({ name, action: value as Action }));
 
 /** The action's own leading arguments (ids), then the previous state, then the form. */
 function call(action: Action): Promise<unknown> {
@@ -86,26 +91,16 @@ beforeEach(() => {
   forwarded = new Headers();
 });
 
-it('covers every server-action module in the portal', () => {
-  const found: string[] = [];
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (/\.ts$/.test(entry.name) && !/\.spec\.ts$/.test(entry.name)) {
-        if (/^'use server';/.test(readFileSync(full, 'utf8'))) {
-          found.push(relative(__dirname, full).replace(/\.ts$/, ''));
-        }
-      }
-    }
-  };
-  walk(join(__dirname, 'app'));
-  expect([...MODULES].sort()).toEqual(found.sort());
+it('finds the server-action modules', () => {
+  expect(MODULES.length).toBeGreaterThan(0);
 });
 
-it('covers every write action in those modules', () => {
-  // 40 exported actions today; a new one is added to `ACTIONS` above.
-  expect(CASES.length).toBe(40);
+it('covers every exported action of every module: each is a `submit*` function', () => {
+  // A `'use server'` export that is not exercised below would be an
+  // unguarded write, so the exports and the cases must be the same set.
+  const covered = new Set(CASES.map(({ name }) => name));
+  const uncovered = EXPORTS.map(({ name }) => name).filter((name) => !covered.has(name));
+  expect(uncovered).toEqual([]);
 });
 
 describe.each(CASES)('$name', ({ action }) => {
