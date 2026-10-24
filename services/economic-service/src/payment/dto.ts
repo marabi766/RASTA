@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { amountMinorSchema, digitsToBigInt } from '@rasta/contracts';
+import { amountMinorSchema, digitsToBigInt, numberInput } from '@rasta/contracts';
 import { EVIDENCE_REFERENCE_PATTERN } from '../events/events';
 import { cursorQueryParameter } from '../shared/cursor';
 
@@ -81,7 +81,7 @@ export type OperatorDecisionDto = z.infer<typeof operatorDecisionSchema>;
 export const listPaymentsQuerySchema = z
   .object({
     cursor: cursorQueryParameter,
-    limit: z.coerce.number().int().min(1).max(100).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).default(25),
   })
   .strict();
 

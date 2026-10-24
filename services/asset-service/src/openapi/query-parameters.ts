@@ -85,7 +85,7 @@ function numeric(def: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
- * Peels `.default()` and `.optional()` off a field.
+ * Peels `.default()`, `.optional()` and a preprocess off a field.
  *
  * Both decide whether a client must send the parameter, and both hide the
  * primitive underneath — so the answer to "is it required" and the answer to
@@ -113,6 +113,16 @@ function unwrap(field: z.ZodTypeAny): {
     if (def.typeName === z.ZodFirstPartyTypeKind.ZodOptional) {
       inner = def.innerType as z.ZodTypeAny;
       required = false;
+      continue;
+    }
+
+    // `numberInput` (@rasta/contracts): text is converted before the schema
+    // underneath runs, and that schema is what the parameter is.
+    if (
+      def.typeName === z.ZodFirstPartyTypeKind.ZodEffects &&
+      (def.effect as { type: string }).type === 'preprocess'
+    ) {
+      inner = def.schema as z.ZodTypeAny;
       continue;
     }
 

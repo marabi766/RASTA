@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { numberInput } from './number-input';
 
 /**
  * Uniform list semantics for every collection endpoint on the platform.
@@ -16,14 +17,14 @@ export const MAX_PAGE_SIZE = 200;
 export const cursorPaginationSchema = z.object({
   /** Opaque, server-issued. Clients must not construct or parse it. */
   cursor: z.string().max(512).optional(),
-  limit: z.coerce.number().int().min(1).max(MAX_PAGE_SIZE).default(DEFAULT_PAGE_SIZE),
+  limit: numberInput(z.number().int().min(1).max(MAX_PAGE_SIZE)).default(DEFAULT_PAGE_SIZE),
 });
 
 export type CursorPagination = z.infer<typeof cursorPaginationSchema>;
 
 export const offsetPaginationSchema = z.object({
-  page: z.coerce.number().int().min(1).default(1),
-  pageSize: z.coerce.number().int().min(1).max(MAX_PAGE_SIZE).default(DEFAULT_PAGE_SIZE),
+  page: numberInput(z.number().int().min(1)).default(1),
+  pageSize: numberInput(z.number().int().min(1).max(MAX_PAGE_SIZE)).default(DEFAULT_PAGE_SIZE),
 });
 
 export type OffsetPagination = z.infer<typeof offsetPaginationSchema>;

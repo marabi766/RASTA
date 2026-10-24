@@ -7,6 +7,7 @@ import {
   seedIdSchema,
   ID_PREFIXES,
   referenceId,
+  numberInput,
 } from '@rasta/contracts';
 
 /**
@@ -145,14 +146,14 @@ const partQuantity = z
 
 const scheduleIntervals = {
   /** Elapsed days since the last service. */
-  intervalDays: z.coerce.number().int().min(1).max(3650).optional(),
+  intervalDays: numberInput(z.number().int().min(1).max(3650)).optional(),
   /** Engine hours since the last service. */
   intervalHours: quantity(8).optional(),
   /** Kilometres since the last service. */
   intervalKilometres: quantity(10).optional(),
 
   /** How far ahead of each trigger the schedule announces itself. */
-  leadDays: z.coerce.number().int().min(0).max(365).optional(),
+  leadDays: numberInput(z.number().int().min(0).max(365)).optional(),
   leadHours: quantity(8).optional(),
   leadKilometres: quantity(10).optional(),
 };
@@ -220,10 +221,10 @@ export type CreateScheduleDto = z.infer<typeof createScheduleSchema>;
 export const updateScheduleSchema = z
   .object({
     title: displayText(2, 200).optional(),
-    intervalDays: z.coerce.number().int().min(1).max(3650).nullable().optional(),
+    intervalDays: numberInput(z.number().int().min(1).max(3650)).nullable().optional(),
     intervalHours: quantity(8).nullable().optional(),
     intervalKilometres: quantity(10).nullable().optional(),
-    leadDays: z.coerce.number().int().min(0).max(365).nullable().optional(),
+    leadDays: numberInput(z.number().int().min(0).max(365)).nullable().optional(),
     leadHours: quantity(8).nullable().optional(),
     leadKilometres: quantity(10).nullable().optional(),
     /**

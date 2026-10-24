@@ -2,6 +2,7 @@ import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query } from '@nes
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AllowService, Roles, getContext, zodPipe } from '@rasta/nest-common';
 import { z } from 'zod';
+import { numberInput } from '@rasta/contracts';
 import { OrganizationService } from './organization.service';
 import {
   addLocationSchema,
@@ -44,7 +45,7 @@ export const ECONOMIC_SERVICE = 'economic-service';
 export const MARKETPLACE_SERVICE = 'marketplace-service';
 
 const subtreeQuerySchema = z
-  .object({ maxDepth: z.coerce.number().int().min(1).max(10).optional() })
+  .object({ maxDepth: numberInput(z.number().int().min(1).max(10)).optional() })
   .strict();
 
 /**

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { amountMinorSchema, organizationIdSchema } from '@rasta/contracts';
+import { amountMinorSchema, organizationIdSchema, numberInput } from '@rasta/contracts';
 import { RULE_STATUSES } from '../commission/dto';
 import {
   PARTICIPATION_FACTS,
@@ -133,7 +133,7 @@ export type ListRewardRulesQuery = z.infer<typeof listRewardRulesQuerySchema>;
 
 export const myRewardsQuerySchema = z
   .object({
-    limit: z.coerce.number().int().min(1).max(100).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).default(25),
   })
   .strict();
 
@@ -192,7 +192,7 @@ export type CreateParticipationRuleDto = z.infer<typeof createParticipationRuleS
  */
 export const myParticipationQuerySchema = z
   .object({
-    limit: z.coerce.number().int().min(1).max(100).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).default(25),
   })
   .strict();
 

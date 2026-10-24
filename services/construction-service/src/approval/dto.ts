@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { cursorPaginationSchema, digitsToBigInt } from '@rasta/contracts';
+import { cursorPaginationSchema, digitsToBigInt, numberInput } from '@rasta/contracts';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
 import { amountMinorInput } from '../project/dto';
 import { APPROVAL_STATES, POLICY_STATES, WORKFLOW_KEYS } from './approval.state-machine';
@@ -135,7 +135,7 @@ export type InboxQuery = z.infer<typeof inboxQuerySchema>;
 export const projectApprovalsQuerySchema = z
   .object({
     workflowKey: z.enum(WORKFLOW_KEYS).optional(),
-    round: z.coerce.number().int().min(1).optional(),
+    round: numberInput(z.number().int().min(1)).optional(),
   })
   .strict();
 export type ProjectApprovalsQuery = z.infer<typeof projectApprovalsQuerySchema>;
