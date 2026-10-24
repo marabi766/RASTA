@@ -7,6 +7,7 @@ import {
   amountMinorSchema,
   plainText,
   referenceId,
+  withMaxKeys,
   withoutBidiControlDeep,
   numberInput,
 } from '@rasta/contracts';
@@ -90,10 +91,20 @@ const identifierText = (min: number, max: number) =>
   plainText().transform(canonicalIdentifier).pipe(z.string().min(min).max(max));
 
 /**
+ * How many top-level attributes `specifications` may carry. A spec sheet names
+ * tens of fields (engine, capacity, axles…), and no screen writes it today
+ * (apps/web `asset-form-fields.ts`); a hundred is room, not a target. Counted
+ * before any entry is parsed (GHSA-mrhx-c7xc-m3w5, see `withMaxKeys`).
+ */
+export const MAX_SPECIFICATION_KEYS = 100;
+
+/**
  * Type-specific attributes: any shape, but no bidi control in any key or string
  * value at any depth (#209) — they are stored and shown like any other text.
  */
-const freeFormSpecifications = withoutBidiControlDeep(z.record(z.unknown()));
+const freeFormSpecifications = withoutBidiControlDeep(
+  withMaxKeys(z.record(z.unknown()), MAX_SPECIFICATION_KEYS),
+);
 
 /**
  * A document-service id, stored as given and never resolved here. No control

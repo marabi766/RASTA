@@ -28,6 +28,8 @@ export {
   withoutBidiControlDeep,
 } from './common/text';
 
+export { withMaxKeys } from './common/bounds';
+
 export {
   CURRENCIES,
   MAX_AMOUNT_MINOR,
@@ -126,8 +128,17 @@ export {
   brokerAcls,
   brokerAclDocument,
   brokerTopics,
+  brokerTopicLine,
+  deadLetterSources,
   BROKER_PROFILES,
 } from './events/broker-acls';
+export {
+  TOPIC_MESSAGE_MAX_BYTES,
+  DLQ_HEADER_VALUE_MAX_BYTES,
+  DLQ_ADDED_HEADERS_MAX_BYTES,
+  gzipGrowthMaxBytes,
+  deadLetterMessageMaxBytes,
+} from './events/dead-letter-size';
 export type {
   AclBinding,
   AclOperation,

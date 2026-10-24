@@ -134,7 +134,7 @@ export type MembershipWindowQuery = z.infer<typeof membershipWindowQuerySchema>;
 export const createMembershipSchema = z
   .object({
     organizationId,
-    roles: z.array(roleSchema).min(1),
+    roles: z.array(roleSchema).min(1).max(PLATFORM_ROLES.length),
     validUntil: z.string().datetime().optional(),
   })
   .strict();
@@ -143,7 +143,7 @@ export type CreateMembershipDto = z.infer<typeof createMembershipSchema>;
 
 export const updateMembershipRolesSchema = z
   .object({
-    roles: z.array(roleSchema).min(1),
+    roles: z.array(roleSchema).min(1).max(PLATFORM_ROLES.length),
     /** Recorded on the audit event. Role changes need a stated why. */
     reason: plainText().min(3).max(500),
   })
@@ -179,7 +179,7 @@ export const submitRegistrationSchema = z
       .regex(/^(?:\+98|0)9\d{9}$/)
       .optional(),
     requestedOrganizationId: organizationId,
-    requestedRoles: z.array(roleSchema).min(1),
+    requestedRoles: z.array(roleSchema).min(1).max(PLATFORM_ROLES.length),
     justification: plainText().max(1000).optional(),
     /**
      * Document ids from document-service. Never file contents. Stored as
@@ -194,7 +194,7 @@ export type SubmitRegistrationDto = z.infer<typeof submitRegistrationSchema>;
 export const approveRegistrationSchema = z
   .object({
     /** Lets the reviewer grant something narrower than what was asked for. */
-    roles: z.array(roleSchema).min(1).optional(),
+    roles: z.array(roleSchema).min(1).max(PLATFORM_ROLES.length).optional(),
   })
   .strict();
 
