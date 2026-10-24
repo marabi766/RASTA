@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -34,6 +35,14 @@ const harmless = new Map([
   ],
 ]);
 
+function isZero(node) {
+  if (!node) return false;
+  if (ts.isParenthesizedExpression(node) || ts.isPrefixUnaryExpression(node)) {
+    return isZero(node.operand ?? node.expression);
+  }
+  return ts.isNumericLiteral(node) && Number(node.text) === 0;
+}
+
 function hazards(source, file = '') {
   const errors = [];
   const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
@@ -42,23 +51,40 @@ function hazards(source, file = '') {
     errors.push(`${file}:${line + 1}: ${reason}`);
   };
   const visit = (node) => {
-    // Stronger than a reclaim heuristic: forbid zero leases/backoffs in specs.
+    // Stronger than a reclaim heuristic: forbid zero leases/backoffs in all test code.
     // To avoid parking rows, expireClaim after claiming with a positive lease.
     if (
       ts.isPropertyAssignment(node) &&
       /^(leaseSeconds|baseSeconds)$/.test(
         ts.isStringLiteral(node.name) ? node.name.text : node.name.getText(ast),
       ) &&
-      node.initializer.getText(ast) === '0'
+      isZero(node.initializer)
     ) {
       report(node, 'zero lease/backoff: use expireClaim/makeDue');
     }
     if (
       ts.isCallExpression(node) &&
-      node.expression.getText(ast) === 'claim' &&
-      node.arguments[2]?.getText(ast) === '0'
+      /^claim/i.test(
+        ts.isPropertyAccessExpression(node.expression)
+          ? node.expression.name.text
+          : ts.isElementAccessExpression(node.expression) &&
+              ts.isStringLiteral(node.expression.argumentExpression)
+            ? node.expression.argumentExpression.text
+            : node.expression.getText(ast),
+      ) &&
+      isZero(node.arguments[2])
     ) {
       report(node, 'zero positional lease: use expireClaim');
+    }
+    if (
+      ts.isPropertyAssignment(node) &&
+      /^(?:claimExpiresAt|nextAttemptAt|leaseUntil)$|(?:ClaimExpiresAt|NextAttemptAt|LeaseUntil)$/.test(
+        ts.isStringLiteral(node.name) ? node.name.text : node.name.getText(ast),
+      ) &&
+      ts.isNewExpression(node.initializer) &&
+      node.initializer.expression.getText(ast) === 'Date'
+    ) {
+      report(node, 'JS-clock eligibility write: use expireClaim/makeDue');
     }
     if (
       ts.isStringLiteral(node) ||
@@ -66,16 +92,32 @@ function hazards(source, file = '') {
       ts.isTemplateExpression(node)
     ) {
       const sql = node.getText(ast);
-      const bareNow =
-        /\b(?:claim_expires_at|next_attempt_at|(?:sweep_)?lease_until)"?\s*=\s*now\(\)(?!\s*[+-])/;
+      const bareNow = /([a-z_][a-z_0-9]*|"[a-z_][a-z_0-9]*")\s*=\s*now\(\)(?!\s*[+-])/gi;
+      const eligibilityColumn = /(^|[_"])(claim_expires_at|next_attempt_at|lease_until)"?$/;
+
       // SELECT equality assertions and in-transaction EQ boundary INSERTs are
       // intentional. Include assignment fragments passed to SQL setters too.
       const unreviewed = (harmless.get(file) ?? []).reduce(
         (text, reviewed) => text.replaceAll(reviewed, ''),
         sql,
       );
-      if (bareNow.test(unreviewed) && !/^\s*[`'"]\s*SELECT\b/i.test(sql)) {
+      if (
+        [...unreviewed.matchAll(bareNow)].some((match) => eligibilityColumn.test(match[1])) &&
+        !/^\s*[`'"]\s*SELECT\b/i.test(sql)
+      ) {
         report(node, 'bare now() eligibility write: use expireClaim/makeDue');
+      }
+      for (const [, interval] of sql.matchAll(/\binterval\s*'([^']+)'/gi)) {
+        // PostgreSQL also accepts abbreviated units, decimal zeros and HH:MM:SS.
+        if (
+          /0/.test(interval) &&
+          /^[+\-0.:\s]*(?:(?:microseconds?|milliseconds?|seconds?|minutes?|mins?|secs?|hours?|hrs?|days?|weeks?|months?|years?|us|ms|s|m|h|d)\s*[+\-0.:\s]*)*$/i.test(
+            interval,
+          )
+        ) {
+          report(node, 'zero SQL interval: use expireClaim/makeDue');
+          break;
+        }
       }
     }
     ts.forEachChild(node, visit);
@@ -84,18 +126,25 @@ function hazards(source, file = '') {
   return errors;
 }
 
-function specs(dir) {
+function typescriptFiles(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = join(dir, entry.name);
-    return entry.isDirectory() ? specs(path) : /\.(?:int-)?spec\.ts$/.test(path) ? [path] : [];
+    return entry.isDirectory() ? typescriptFiles(path) : /\.ts$/.test(path) ? [path] : [];
   });
 }
 
-test('service specs use explicit past timestamps for cross-statement eligibility', () => {
-  const errors = specs(join(root, 'services')).flatMap((path) =>
-    hazards(readFileSync(path, 'utf8'), relative(root, path)),
-  );
-  assert.deepEqual(errors, []);
+function serviceHazards(repository) {
+  return readdirSync(join(repository, 'services'), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .flatMap((entry) => {
+      const service = join(repository, 'services', entry.name);
+      return readdirSync(service).includes('test') ? typescriptFiles(join(service, 'test')) : [];
+    })
+    .flatMap((path) => hazards(readFileSync(path, 'utf8'), relative(repository, path)));
+}
+
+test('all service test TypeScript uses DB-clock helpers for eligibility', () => {
+  assert.deepEqual(serviceHazards(root), []);
 });
 
 test('guard rejects zero leases/backoffs and bare eligibility writes', () => {
@@ -111,6 +160,80 @@ test('guard rejects zero leases/backoffs and bare eligibility writes', () => {
     'store.claimPending({ "leaseSeconds": 0 }); reclaim();',
   ]) {
     assert.equal(hazards(source).length, 1, source);
+  }
+});
+
+test('guard rejects prefixed SQL eligibility columns', () => {
+  for (const column of ['close_next_attempt_at', 'close_lease_until', 'scan_next_attempt_at']) {
+    for (const name of [column, `"${column}"`]) {
+      assert.equal(hazards(`sql(\`UPDATE task SET ${name} = now()\`);`).length, 1, name);
+    }
+  }
+});
+
+test('guard scans helpers and nested non-spec TypeScript under every service test directory', () => {
+  const fixture = mkdtempSync(join(tmpdir(), 'eligibility-guard-'));
+  try {
+    const dir = join(fixture, 'services', 'sample-service', 'test', 'nested');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'helpers.ts'), 'w.repository.claimPending("worker", 10, 0);');
+    assert.match(serviceHazards(fixture)[0], /test\/nested\/helpers.ts:1: zero positional lease/);
+    assert.equal(serviceHazards(fixture).length, 1);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('guard rejects ORM eligibility fields assigned from the JS clock', () => {
+  for (const field of [
+    'claimExpiresAt',
+    'nextAttemptAt',
+    'leaseUntil',
+    'closeNextAttemptAt',
+    'closeLeaseUntil',
+    'scanNextAttemptAt',
+    'sweepLeaseUntil',
+    'outboxClaimExpiresAt',
+  ]) {
+    for (const name of [field, `"${field}"`]) {
+      assert.equal(
+        hazards(`update({ data: { ${name}: new Date(Date.now() - 1000) } });`).length,
+        1,
+        name,
+      );
+    }
+  }
+});
+
+test('guard rejects zero positional leases on every claim method', () => {
+  for (const call of [
+    'claim',
+    'store.claimPending',
+    'w.repository.claimReady',
+    'claimBatch',
+    'store["claimPending"]',
+  ]) {
+    for (const zero of ['0', '0.0', '-0', '(0)', '0x0']) {
+      assert.equal(hazards(`${call}('worker', 10, ${zero});`).length, 1, `${call}: ${zero}`);
+    }
+  }
+});
+
+test('guard rejects zero SQL intervals', () => {
+  for (const interval of [
+    '0 s',
+    '0 seconds',
+    '0 milliseconds',
+    '0.0 min',
+    '00:00:00',
+    '0',
+    '0 days 0 s',
+  ]) {
+    assert.equal(
+      hazards(`sql(\`UPDATE task SET next_attempt_at = now() + interval '${interval}'\`);`).length,
+      1,
+      interval,
+    );
   }
 });
 
