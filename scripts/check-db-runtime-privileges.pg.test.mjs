@@ -38,7 +38,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { FINDINGS_SQL } from './check-db-runtime-privileges-lib.mjs';
+import { classifyServices, FINDINGS_SQL } from './check-db-runtime-privileges-lib.mjs';
 import { ledgerRevoke } from './prisma-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -701,3 +701,204 @@ test('a legacy cluster — public owned by the superuser, the runtime role ownin
     assert.match(asAuditRuntime(sql).stderr, /must be owner|permission denied/, sql);
   }
 });
+
+// Every configured service, including audit's separate path, in both bootstrap
+// orders. Synthetic roles/databases keep this safe beside the real CI services.
+const extensionModes = spawnSync(
+  'bash',
+  [
+    '-c',
+    `source "${ROLE_PASSWORDS}"; for svc in "\${PRIVILEGE_SPLIT_SERVICES[@]}"; do printf '%s:%s\n' "$svc" "$(privilege_split_grants_mode "$svc")"; done`,
+  ],
+  { encoding: 'utf8' },
+);
+assert.equal(extensionModes.status, 0, extensionModes.stderr);
+const modeByService = new Map(
+  extensionModes.stdout
+    .trim()
+    .split('\n')
+    .map((line) => line.split(':')),
+);
+
+for (const [index, { service, kind }] of classifyServices().entries()) {
+  const mode = kind === 'audit' ? 'audit' : modeByService.get(service);
+  assert.ok(['audit', 'migration', 'default'].includes(mode), `${service}: unknown mode`);
+  for (const history of ['fresh', 'upgraded']) {
+    test(`${service} (${mode}), ${history}: extension writes removed on first split and rerun; application grants preserved`, () => {
+      const svc = `d820_${process.pid}_${index}_${history}`;
+      const runtime = `rasta_${svc}`;
+      const migrator = `${runtime}_migrator`;
+      const db = runtime;
+      const reader = `${runtime}_reader`;
+      PASSWORD[runtime] = `rt_${randomBytes(12).toString('hex')}`;
+      PASSWORD[migrator] = `mg_${randomBytes(12).toString('hex')}`;
+      const run = (sql, role) => ok(sql, { database: db, role });
+      const inspect = () => run(FINDINGS_SQL.replaceAll(":'runtime'", `'${runtime}'`));
+      const doSplit = () => {
+        const result = spawnSync(
+          'bash',
+          [
+            '-eu',
+            '-c',
+            `
+          source "${SPLIT}"
+          declare -gA ROLE_PASSWORDS=([${migrator}]=${PASSWORD[migrator]})
+          ${mode === 'audit' ? `split_audit_database_privileges ${db} ${svc}` : `split_service_privileges ${svc} ${db} ${mode}`}
+        `,
+          ],
+          { env: { ...process.env, POSTGRES_USER: process.env.PGUSER }, encoding: 'utf8' },
+        );
+        assert.equal(result.status, 0, result.stderr);
+      };
+      const extensions = () => run('CREATE EXTENSION IF NOT EXISTS postgis');
+      const assertExtension = () => {
+        assert.ok(
+          Number(
+            run(`SELECT count(*) FROM pg_class c JOIN pg_depend d ON d.objid = c.oid
+          WHERE d.classid = 'pg_class'::regclass AND d.deptype = 'e'
+            AND c.oid = 'public.spatial_ref_sys'::regclass`),
+          ) > 0,
+          'extension relation must exist',
+        );
+        assert.equal(
+          run(`SELECT has_table_privilege('${runtime}', 'spatial_ref_sys',
+          'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+          OR has_any_column_privilege('${runtime}', 'spatial_ref_sys', 'INSERT,UPDATE,REFERENCES')`),
+          'f',
+        );
+        assert.equal(inspect(), '');
+      };
+      const spatialRead = () => {
+        // Exercise both repository shapes as runtime: asset geography distance
+        // and construction GeoJSON -> geography. Keep existing extension SELECT.
+        assert.equal(
+          run(
+            `SELECT ST_DWithin(
+          ST_SetSRID(ST_MakePoint(51.4,35.7),4326)::geography,
+          ST_SetSRID(ST_MakePoint(51.4,35.7),4326)::geography, 100)
+          AND ST_Distance(ST_SetSRID(ST_MakePoint(51.4,35.7),4326)::geography,
+                          ST_SetSRID(ST_MakePoint(51.4,35.7),4326)::geography) = 0
+          AND ST_SRID(ST_SetSRID(ST_GeomFromGeoJSON(
+            '{"type":"Polygon","coordinates":[[[51,35],[52,35],[52,36],[51,35]]]}'),4326)::geography) = 4326`,
+            runtime,
+          ),
+          't',
+        );
+        if (mode === 'default' || history === 'upgraded') {
+          assert.equal(run('SELECT count(*) > 0 FROM public.spatial_ref_sys', runtime), 't');
+        }
+      };
+      try {
+        ok(
+          `CREATE ROLE ${runtime} LOGIN PASSWORD '${PASSWORD[runtime]}';
+            CREATE ROLE ${reader};`,
+          { database: 'postgres' },
+        );
+        ok(`CREATE DATABASE ${db} TEMPLATE template0 OWNER ${runtime}`, { database: 'postgres' });
+        if (history === 'fresh') {
+          doSplit(); // Real bootstrap splits BEFORE the superuser installs extensions.
+          extensions();
+        } else {
+          extensions();
+          run(`GRANT USAGE ON SCHEMA public TO ${runtime};
+               GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${runtime}`);
+          assert.equal(
+            run(`SELECT has_table_privilege('${runtime}', 'spatial_ref_sys', 'INSERT')
+              AND has_table_privilege('${runtime}', 'spatial_ref_sys', 'UPDATE')
+              AND has_table_privilege('${runtime}', 'spatial_ref_sys', 'DELETE')`),
+            't',
+          );
+          assert.match(inspect(), /INSERT on extension relation public.spatial_ref_sys/);
+          // Prove each effective pathway independently, including column-only grants.
+          run(`REVOKE INSERT, UPDATE, DELETE ON spatial_ref_sys FROM ${runtime};
+               GRANT INSERT ON spatial_ref_sys TO PUBLIC`);
+          assert.match(inspect(), /INSERT on extension relation public\.spatial_ref_sys/);
+          run(`REVOKE INSERT ON spatial_ref_sys FROM PUBLIC;
+               GRANT UPDATE ON spatial_ref_sys TO ${reader}; GRANT ${reader} TO ${runtime}`);
+          assert.match(inspect(), /UPDATE on extension relation public\.spatial_ref_sys/);
+          run(`REVOKE UPDATE ON spatial_ref_sys FROM ${reader};
+               GRANT INSERT (srid), UPDATE (srtext) ON spatial_ref_sys TO ${runtime}`);
+          assert.equal(
+            run(`SELECT has_table_privilege('${runtime}', 'spatial_ref_sys', 'INSERT,UPDATE')`),
+            'f',
+          );
+          assert.match(inspect(), /INSERT on extension relation public\.spatial_ref_sys/);
+          assert.match(inspect(), /UPDATE on extension relation public\.spatial_ref_sys/);
+          // Leave all legacy sources present for the actual repair.
+          run(`GRANT SELECT, INSERT, UPDATE, DELETE ON spatial_ref_sys TO ${runtime};
+               GRANT DELETE ON spatial_ref_sys TO PUBLIC;
+               GRANT UPDATE (srtext) ON spatial_ref_sys TO ${reader};
+               GRANT INSERT (srid) ON spatial_ref_sys TO PUBLIC`);
+          spatialRead();
+          doSplit();
+        }
+        const schema = mode === 'audit' ? 'audit' : 'public';
+        run(
+          `CREATE TABLE ${schema}.app_probe (id int PRIMARY KEY, value text);
+             INSERT INTO ${schema}.app_probe VALUES (1, 'preserved');`,
+          migrator,
+        );
+        if (mode !== 'default')
+          run(`GRANT SELECT, INSERT ON ${schema}.app_probe TO ${runtime}`, migrator);
+        // Explicit invoker grants are application permissions too (economic's
+        // commission locks and procurement's digest). A rerun must keep them,
+        // while PUBLIC, ungranted invokers, definers and trigger functions stay closed.
+        run(
+          `CREATE FUNCTION ${schema}.app_invoker_probe() RETURNS int LANGUAGE sql AS 'SELECT 42';
+             CREATE FUNCTION ${schema}.app_ungranted_probe() RETURNS int LANGUAGE sql AS 'SELECT 42';
+             CREATE FUNCTION ${schema}.app_definer_probe() RETURNS int LANGUAGE sql SECURITY DEFINER AS 'SELECT 42';
+             CREATE FUNCTION ${schema}.app_trigger_probe() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
+             REVOKE EXECUTE ON FUNCTION ${schema}.app_ungranted_probe() FROM PUBLIC;
+             GRANT EXECUTE ON FUNCTION ${schema}.app_invoker_probe(), ${schema}.app_definer_probe(), ${schema}.app_trigger_probe() TO ${runtime};`,
+          migrator,
+        );
+        // Audit intentionally has no USAGE in public, so its spatial API isn't a service grant.
+        if (mode === 'audit') {
+          assert.equal(run(`SELECT has_schema_privilege('${runtime}', 'public', 'USAGE')`), 'f');
+        } else {
+          spatialRead();
+        }
+        assertExtension();
+        for (let rerun = 0; rerun < 2; rerun += 1) {
+          if (rerun) doSplit();
+          assertExtension();
+          assert.equal(
+            run(`SELECT value FROM ${schema}.app_probe WHERE id=1`, runtime),
+            'preserved',
+          );
+          run(`INSERT INTO ${schema}.app_probe VALUES (${rerun + 2}, 'append')`, runtime);
+          if (mode === 'default') {
+            run(
+              `UPDATE ${schema}.app_probe SET value='writable' WHERE id=${rerun + 2};
+                 DELETE FROM ${schema}.app_probe WHERE id=${rerun + 2}`,
+              runtime,
+            );
+          } else {
+            assert.equal(
+              run(
+                `SELECT has_table_privilege('${runtime}', '${schema}.app_probe', 'UPDATE,DELETE')`,
+              ),
+              'f',
+            );
+          }
+          assert.equal(run(`SELECT ${schema}.app_invoker_probe()`, runtime), '42');
+          if (rerun && mode !== 'audit') {
+            for (const fn of ['app_ungranted_probe', 'app_definer_probe', 'app_trigger_probe']) {
+              assert.equal(
+                run(`SELECT has_function_privilege('${runtime}', '${schema}.${fn}()', 'EXECUTE')`),
+                'f',
+              );
+            }
+          }
+          if (mode !== 'audit') spatialRead();
+        }
+      } finally {
+        psql(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`, { database: 'postgres' });
+        for (const role of [runtime, migrator, reader]) {
+          const result = psql(`DROP ROLE IF EXISTS ${role}`, { database: 'postgres' });
+          assert.equal(result.status, 0, result.stderr);
+        }
+      }
+    });
+  }
+}

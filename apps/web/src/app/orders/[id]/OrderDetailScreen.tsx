@@ -250,7 +250,14 @@ export function OrderDetailScreen({
           <p className="mt-2 text-sm">دلیل لغو: {order.cancellationReason}</p>
         ) : null}
         {order.failureReason ? (
-          <p className="mt-2 text-sm">دلیل ناکامی: {order.failureReason}</p>
+          // The reason is economic-service's English refusal text (the saga
+          // stores it as sent): never rendered. The cause that matters to a
+          // buyer is the wallet, and the correlation of the failure is the
+          // order id.
+          <p className="mt-2 text-sm">
+            دلیل ناکامی: نگه‌داشت وجه برای این سفارش انجام نشد؛ معمولاً به‌دلیل ناکافی بودن موجودی
+            کیف پول.
+          </p>
         ) : null}
 
         <div className="mt-4">

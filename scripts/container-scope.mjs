@@ -3,15 +3,19 @@
  * Prints, as a JSON array, the service images to build and scan.
  *
  *   node scripts/container-scope.mjs --all              # a push to main
- *   git diff --name-only BASE...HEAD | node scripts/container-scope.mjs --base BASE
+ *   node scripts/container-scope.mjs --base BASE        # a pull request
  *
  * The reasoning is in `container-scope-lib.mjs`.
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { imageWorkflowUnchanged, servicesToBuild } from './container-scope-lib.mjs';
+import {
+  imageWorkflowUnchanged,
+  servicesToBuild,
+  warnScopeFallback,
+} from './container-scope-lib.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const services = readdirSync(join(root, 'services'), { withFileTypes: true })
@@ -21,6 +25,7 @@ const services = readdirSync(join(root, 'services'), { withFileTypes: true })
   .sort();
 
 let selected = [...services];
+let failureReason = 'missing or malformed base SHA';
 try {
   if (process.argv.includes('--all')) {
     selected = servicesToBuild(services, 'all');
@@ -34,19 +39,31 @@ try {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
       });
-    // A missing/unreadable base must never turn a PR into an empty matrix.
+    // Errors and oversized/truncated output retain ALL. Never use stderr's
+    // contents as an annotation: Git errors can contain paths or source text.
+    failureReason = 'base commit unavailable';
     git('cat-file', '-e', `${args[1]}^{commit}`);
-    const changed = readFileSync(0, 'utf8').split('\n');
+    failureReason = 'Git merge base unavailable';
+    const mergeBase = git('merge-base', args[1], 'HEAD').trim();
+    if (!/^[a-f0-9]{40}$/i.test(mergeBase)) throw new Error('Invalid merge base');
+    failureReason = 'Git diff failed or returned truncated output';
+    const output = git('diff', '--no-renames', '-z', '--name-only', `${args[1]}...HEAD`);
+    if (output && !output.endsWith('\0')) throw new Error('Truncated diff');
+    // NUL alone separates filenames: spaces, newlines and Unicode are literal.
+    // --no-renames retains both sides of moves, even into an exempt directory.
+    const changed = output ? output.slice(0, -1).split('\0') : [];
+    if (changed.some((path) => !path)) throw new Error('Empty diff path');
     let workflowUnchanged = false;
-    if (changed.some((path) => path.trim() === '.github/workflows/ci.yml')) {
+    if (changed.includes('.github/workflows/ci.yml')) {
+      failureReason = 'committed workflow unavailable';
       workflowUnchanged = await imageWorkflowUnchanged(
-        git('show', `${args[1]}:.github/workflows/ci.yml`),
+        git('show', `${mergeBase}:.github/workflows/ci.yml`),
         git('show', 'HEAD:.github/workflows/ci.yml'),
       );
     }
     selected = servicesToBuild(services, changed, workflowUnchanged);
   }
 } catch {
-  process.stderr.write('Container scope analysis failed; building and scanning every image.\n');
+  warnScopeFallback(failureReason);
 }
 process.stdout.write(`${JSON.stringify(selected)}\n`);

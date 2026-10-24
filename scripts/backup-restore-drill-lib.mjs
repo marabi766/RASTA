@@ -1,0 +1,669 @@
+import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+
+// No broad comment/whitespace filtering: only these two generated version lines,
+// at the fixed dump-header position, are removed. SQL comments and bodies retain every byte.
+export const SCHEMA_DUMP_FLAGS = [
+  '--schema-only',
+  '--format=plain',
+  '--encoding=UTF8',
+  '--quote-all-identifiers',
+];
+export const DUMP_RESTRICT_KEY = 'RastaRestoreDrill';
+export function normalizeSchemaDump(raw) {
+  if (!Buffer.isBuffer(raw) || !raw.length) throw new Error('Missing schema dump');
+  const header = raw
+    .subarray(0, 1024)
+    .toString('utf8')
+    .match(
+      /^((?:--\n-- PostgreSQL database dump\n--\n\n)(?:\\restrict RastaRestoreDrill\n\n)?)(-- Dumped from database version [^\r\n]+\n-- Dumped by pg_dump version [^\r\n]+\n)/,
+    );
+  const footer = Buffer.from('--\n-- PostgreSQL database dump complete\n--\n\n');
+  const end = raw.subarray(-256).toString('utf8');
+  if (
+    !header ||
+    !(
+      raw.subarray(-footer.length).equals(footer) ||
+      end.endsWith(footer.toString() + `\\unrestrict ${DUMP_RESTRICT_KEY}\n\n`)
+    )
+  ) {
+    throw new Error('Incomplete schema dump');
+  }
+  const start = Buffer.byteLength(header[1]);
+  const normalized = Buffer.concat([
+    raw.subarray(0, start),
+    raw.subarray(start + Buffer.byteLength(header[2])),
+  ]);
+  if (!normalized.includes(Buffer.from('SET ')) || !normalized.includes(Buffer.from('CREATE '))) {
+    throw new Error('Empty schema dump');
+  }
+  return normalized;
+}
+
+// Bytes remain private and non-enumerable: JSON evidence never contains function bodies.
+export function schemaDumpEvidence(raw, version, milliseconds = 0) {
+  if (typeof version !== 'string' || !version.startsWith('pg_dump (PostgreSQL) '))
+    throw new Error('Missing schema dump version');
+  const bytes = normalizeSchemaDump(raw);
+  const evidence = {
+    version,
+    bytes: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    milliseconds,
+  };
+  Object.defineProperty(evidence, 'content', { value: bytes });
+  return evidence;
+}
+
+// Shared SQL-aware scanner: quoted identifiers/strings, dollar bodies and nested comments
+// are indivisible. Consumers never interpret CHECK-looking payload text as SQL syntax.
+function* scanSql(text) {
+  for (let i = 0; i < text.length;) {
+    const start = i;
+    const ch = text[i];
+    if (/\s/.test(ch)) {
+      i++;
+      continue;
+    }
+    if (text.startsWith('--', i)) {
+      const end = text.indexOf('\n', i);
+      i = end < 0 ? text.length : end;
+      yield { kind: 'comment', value: text.slice(start, i), start, end: i };
+      continue;
+    }
+    if (text.startsWith('/*', i)) {
+      let depth = 1;
+      i += 2;
+      while (i < text.length && depth) {
+        if (text.startsWith('/*', i)) {
+          depth++;
+          i += 2;
+        } else if (text.startsWith('*/', i)) {
+          depth--;
+          i += 2;
+        } else i++;
+      }
+      if (depth) throw new Error('Unclosed schema SQL comment');
+      yield { kind: 'comment', value: text.slice(start, i), start, end: i };
+      continue;
+    }
+    const dollar = ch === '$' && text.slice(i).match(/^\$(?:[a-zA-Z_][a-zA-Z0-9_]*)?\$/);
+    if (dollar) {
+      const end = text.indexOf(dollar[0], i + dollar[0].length);
+      if (end < 0) throw new Error('Unclosed schema SQL body');
+      i = end + dollar[0].length;
+      yield { kind: 'string', value: '', start, end: i };
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      const escape = ch === "'" && /[eE]/.test(text[i - 1] ?? '');
+      i++;
+      let closed = false;
+      while (i < text.length) {
+        if (escape && text[i] === '\\') {
+          i += 2;
+          continue;
+        }
+        if (text[i++] === ch) {
+          if (text[i] === ch) i++;
+          else {
+            closed = true;
+            break;
+          }
+        }
+      }
+      if (!closed) throw new Error('Unclosed schema SQL quote');
+      yield {
+        kind: ch === '"' ? 'identifier' : 'string',
+        value: ch === '"' ? text.slice(start + 1, i - 1).replaceAll('""', '"') : '',
+        start,
+        end: i,
+      };
+      continue;
+    }
+    const word = text.slice(i).match(/^[a-zA-Z_][a-zA-Z0-9_$]*/);
+    if (word) {
+      i += word[0].length;
+      yield { kind: 'word', value: word[0], start, end: i };
+    } else {
+      i++;
+      yield { kind: 'symbol', value: ch, start, end: i };
+    }
+  }
+}
+
+// SQL-standard routine bodies are unquoted BEGIN ATOMIC blocks. Their inner
+// semicolons/comments must not become top-level statements or dump identities.
+function atomicDepthAfter(token, next, depth) {
+  if (token.kind !== 'word') return depth;
+  const word = token.value.toUpperCase();
+  if (
+    (word === 'BEGIN' && next?.kind === 'word' && next.value.toUpperCase() === 'ATOMIC') ||
+    (depth && word === 'CASE')
+  )
+    return depth + 1;
+  return depth && word === 'END' ? depth - 1 : depth;
+}
+
+// Only generated object identities, never differing SQL or function bodies, enter diagnostics.
+export function schemaDiffSummary(source, restored) {
+  const a = source.content,
+    b = restored.content;
+  let offset = 0;
+  while (offset < Math.min(a.length, b.length) && a[offset] === b[offset]) offset++;
+  const text = a.toString('utf8');
+  const limit = a.subarray(0, offset).toString('utf8').length;
+  let identity = 'database schema',
+    atomicDepth = 0;
+  const tokens = [...scanSql(text)].filter((t) => t.kind !== 'comment' || t.value.startsWith('--'));
+  for (const [index, token] of tokens.entries()) {
+    if (token.start > limit) break;
+    atomicDepth = atomicDepthAfter(
+      token,
+      token.kind === 'word' && token.value.toUpperCase() === 'BEGIN'
+        ? tokens.slice(index + 1).find((t) => t.kind !== 'comment')
+        : undefined,
+      atomicDepth,
+    );
+    const match =
+      !atomicDepth &&
+      token.kind === 'comment' &&
+      (token.start === 0 || text[token.start - 1] === '\n') &&
+      token.value.match(
+        /^-- Name: ([a-zA-Z0-9_ .(),"-]+); Type: ([A-Z ]+); Schema: ([a-zA-Z0-9_"-]+); Owner: [^\n]*$/,
+      );
+    if (match) identity = `${match[3]}.${match[1]} (${match[2]})`.slice(0, 180);
+  }
+  return { identity, firstDifferentByte: offset, sourceBytes: a.length, restoredBytes: b.length };
+}
+
+function checkLines(evidence, database) {
+  const text = evidence.content.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(evidence.content)) throw new Error('Invalid schema UTF-8');
+  const lines = text.split('\n');
+  const starts = [0];
+  for (let i = 0; i < text.length; i++) if (text[i] === '\n') starts.push(i + 1);
+  const lineAt = new Map(starts.map((start, line) => [start, line]));
+  const checks = new Map(),
+    identities = [];
+  const tokens = [...scanSql(text)].filter((t) => t.kind !== 'comment');
+  let statement = [];
+  const inspect = () => {
+    let i = 0;
+    const keyword = (index, value) =>
+      statement[index]?.kind === 'word' && statement[index].value.toUpperCase() === value;
+    if (!keyword(i++, 'CREATE')) return;
+    if (keyword(i, 'UNLOGGED')) i++;
+    if (!keyword(i++, 'TABLE')) return;
+    const schema = statement[i++],
+      dot = statement[i++],
+      table = statement[i++];
+    if (
+      schema?.kind !== 'identifier' ||
+      dot?.value !== '.' ||
+      table?.kind !== 'identifier' ||
+      statement[i++]?.value !== '('
+    )
+      return;
+    let depth = 1;
+    for (; i < statement.length; i++) {
+      const token = statement[i];
+      if (
+        depth === 1 &&
+        keyword(i, 'CONSTRAINT') &&
+        statement[i + 1]?.kind === 'identifier' &&
+        keyword(i + 2, 'CHECK') &&
+        statement[i + 3]?.value === '('
+      ) {
+        let j = i + 4,
+          expressionDepth = 1;
+        for (; j < statement.length && expressionDepth; j++) {
+          if (statement[j].value === '(' && statement[j].kind === 'symbol') expressionDepth++;
+          if (statement[j].value === ')' && statement[j].kind === 'symbol') expressionDepth--;
+        }
+        if (expressionDepth) throw new Error('Malformed CHECK evidence');
+        if (keyword(j, 'NO') && keyword(j + 1, 'INHERIT')) j += 2;
+        const lineStart = text.lastIndexOf('\n', token.start - 1) + 1;
+        const line = lineAt.get(lineStart);
+        const end = statement[j - 1].end;
+        const prefix = text.slice(lineStart, token.start);
+        const suffix = text.slice(
+          end,
+          text.indexOf('\n', end) < 0 ? text.length : text.indexOf('\n', end),
+        );
+        // A whole physical line, not an arbitrary fragment of a statement, is permitted.
+        if (
+          /^[ \t]*$/.test(prefix) &&
+          /^[ \t]*,?[ \t]*$/.test(suffix) &&
+          !text.slice(token.start, end).includes('\n')
+        ) {
+          const identity = JSON.stringify([
+            database,
+            schema.value,
+            table.value,
+            statement[i + 1].value,
+          ]);
+          checks.set(line, identity);
+          identities.push(identity);
+        }
+      }
+      if (token.kind === 'symbol' && token.value === '(') depth++;
+      if (token.kind === 'symbol' && token.value === ')') depth--;
+    }
+  };
+  let atomicDepth = 0;
+  for (const [index, token] of tokens.entries()) {
+    atomicDepth = atomicDepthAfter(token, tokens[index + 1], atomicDepth);
+    if (!atomicDepth && token.kind === 'symbol' && token.value === ';') {
+      inspect();
+      statement = [];
+    } else statement.push(token);
+  }
+  return { lines, checks, identities: identities.sort() };
+}
+
+const allowances = new WeakMap();
+const references = new WeakMap();
+export function checkSourceReference(source, reference, database) {
+  if (
+    !database ||
+    !Buffer.isBuffer(source?.content) ||
+    !Buffer.isBuffer(reference?.content) ||
+    source.version !== reference.version
+  )
+    throw new Error('Missing SOURCE/REF evidence');
+  const a = checkLines(source, database),
+    b = checkLines(reference, database);
+  if (a.lines.length !== b.lines.length || !isDeepStrictEqual(a.identities, b.identities))
+    throw new Error('SOURCE/REF CHECK identity or line count differs');
+  let checkLinesDifferent = 0;
+  for (let i = 0; i < a.lines.length; i++) {
+    if (a.lines[i] === b.lines[i]) continue;
+    if (!a.checks.has(i) || a.checks.get(i) !== b.checks.get(i))
+      throw new Error('SOURCE/REF non-CHECK difference');
+    checkLinesDifferent++;
+  }
+  // This structural allowance trusts PostgreSQL; it does NOT prove CHECK semantics.
+  const proof = { database, checkLinesDifferent };
+  allowances.set(proof, { source, reference });
+  return proof;
+}
+export function schemaReferenceEvidence(
+  source,
+  reference,
+  fixedPoint,
+  allowance,
+  milliseconds = 0,
+) {
+  const allowed = allowances.get(allowance);
+  if (!allowed || allowed.source !== source || allowed.reference !== reference)
+    throw new Error('Missing SOURCE/REF allowance guard');
+  if (
+    !Buffer.isBuffer(fixedPoint?.content) ||
+    fixedPoint.version !== reference.version ||
+    !reference.content.equals(fixedPoint.content)
+  )
+    throw new Error('Missing or unstable REF fixed-point evidence');
+  const evidence = { ...allowance, milliseconds, reference, fixedPoint };
+  references.set(evidence, { source, reference });
+  return evidence;
+}
+
+export function discoverEnvServices(text) {
+  const keys = [...text.matchAll(/^[ \t]*(?:export[ \t]+)?DATABASE_URL_([A-Z][A-Z0-9_]*)[ \t]*=/gm)]
+    .map((m) => m[1])
+    .filter((name) => !name.endsWith('_MIGRATOR'));
+  const services = keys.map((key) => key.toLowerCase()).sort();
+  if (!services.length || new Set(services).size !== services.length)
+    throw new Error('Invalid .env.example database coverage');
+  return services;
+}
+export function checkEnvServiceCoverage(discovered, configured) {
+  if (!isDeepStrictEqual([...discovered].sort(), configured))
+    throw new Error('Service coverage mismatch: .env.example and Prisma schemas differ');
+}
+
+// Row counts and money stay decimal strings: PostgreSQL count/SUM can exceed JS's safe integer.
+function count(value) {
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) throw new Error('Invalid count');
+  return BigInt(value);
+}
+
+function validateSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot.tables !== 'object' || Array.isArray(snapshot.tables)) {
+    throw new Error('Missing table inventory');
+  }
+  if (
+    !Buffer.isBuffer(snapshot.schemaDump?.content) ||
+    !snapshot.schemaDump.content.length ||
+    !snapshot.schemaDump.version
+  )
+    throw new Error('Missing schema dump evidence');
+  const tables = Object.entries(snapshot.tables);
+  if (!tables.length) throw new Error('Empty table inventory');
+  for (const [, table] of tables) {
+    count(table.rows);
+    if (
+      !['application', 'migration', 'extension'].includes(table.kind) ||
+      !/^[a-f0-9]{32}$/.test(table.digest)
+    )
+      throw new Error('Invalid table evidence');
+  }
+  const state = snapshot.databaseState;
+  if (!state?.owner || !Object.hasOwn(state, 'acl') || !Array.isArray(state.settings)) {
+    throw new Error('Missing database state');
+  }
+  const objects = snapshot.objectState;
+  if (
+    !objects ||
+    !Array.isArray(objects.schemas) ||
+    !objects.schemas.length ||
+    !Array.isArray(objects.relations) ||
+    !objects.relations.length ||
+    !Array.isArray(objects.defaultPrivileges) ||
+    !Array.isArray(objects.sequences)
+  ) {
+    throw new Error('Missing object state');
+  }
+  if (!Array.isArray(snapshot.migrations) || !snapshot.migrations.length) {
+    throw new Error('Missing migration ledger');
+  }
+  for (const row of snapshot.migrations) {
+    if (!row.migration_name || !row.checksum || !row.finished_at || row.rolled_back_at !== null) {
+      throw new Error('Incomplete migration');
+    }
+  }
+}
+
+/** A missing table or ledger, changed row count, or any changed migration field is a failure. */
+export function compareSnapshots(source, restored) {
+  validateSnapshot(source);
+  validateSnapshot(restored);
+  const proof = references.get(source.reference);
+  if (
+    !proof ||
+    !proof.source.content.equals(source.schemaDump.content) ||
+    proof.source.version !== source.schemaDump.version
+  )
+    throw new Error('Missing schema reference evidence');
+  return {
+    referenceChecked: true,
+    fixedPointEqual: true,
+    allowanceChecked: true,
+    schemaDumpEqual:
+      proof.reference.version === restored.schemaDump.version &&
+      proof.reference.content.equals(restored.schemaDump.content),
+    tablesEqual: isDeepStrictEqual(source.tables, restored.tables),
+    migrationsEqual: isDeepStrictEqual(source.migrations, restored.migrations),
+    databaseStateEqual: isDeepStrictEqual(source.databaseState, restored.databaseState),
+    objectStateEqual: isDeepStrictEqual(source.objectState, restored.objectState),
+  };
+}
+
+/** Missing coverage is a failure: the drill always installs its synthetic postings fixture. */
+export function ledgerPassed(ledger) {
+  if (
+    !ledger ||
+    !Array.isArray(ledger.amountsByCurrency) ||
+    !ledger.amountsByCurrency.length ||
+    ledger.fixtureAmount !== '9007199254740993'
+  )
+    throw new Error('Missing ledger amounts');
+  for (const row of ledger.amountsByCurrency) {
+    if (!row.currency) throw new Error('Missing currency');
+    count(row.total);
+  }
+  return (
+    count(ledger.journalsChecked) > 0n &&
+    count(ledger.walletsChecked) > 0n &&
+    count(ledger.entriesChecked) > 0n &&
+    count(ledger.journalMismatches) === 0n &&
+    count(ledger.walletMismatches) === 0n
+  );
+}
+
+export function compareLedgers(source, restored) {
+  return ledgerPassed(source) && ledgerPassed(restored) && isDeepStrictEqual(source, restored);
+}
+
+/** The same acceptance gate is exercised by the SQL drift tests and the operator command. */
+export function drillPassed(databases, expectedCount, sourceLedger, restoredLedger) {
+  return (
+    expectedCount > 0 &&
+    databases.length === expectedCount &&
+    databases.every(
+      (db) =>
+        db.schemaDumpEqual === true &&
+        db.referenceChecked === true &&
+        db.fixedPointEqual === true &&
+        db.allowanceChecked === true &&
+        db.tablesEqual &&
+        db.migrationsEqual &&
+        db.databaseStateEqual &&
+        db.objectStateEqual,
+    ) &&
+    compareLedgers(sourceLedger, restoredLedger)
+  );
+}
+
+// Explicit exclusions are bootstrap infrastructure, never service databases.
+export const EXCLUDED_DATABASES = {
+  keycloak: 'identity-provider storage; outside logical service drill',
+  temporal: 'workflow engine storage; outside logical service drill',
+  temporal_visibility: 'workflow visibility storage; outside logical service drill',
+};
+export const DATABASES_SQL = `SELECT coalesce(json_agg(datname ORDER BY datname), '[]'::json)
+FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres';`;
+
+export function checkDatabaseCoverage(actual, expected) {
+  if (
+    !Array.isArray(actual) ||
+    !actual.length ||
+    !expected.length ||
+    new Set(actual).size !== actual.length ||
+    !isDeepStrictEqual(
+      actual.filter((db) => !Object.hasOwn(EXCLUDED_DATABASES, db)).sort(),
+      [...expected].sort(),
+    )
+  )
+    throw new Error('Database coverage mismatch');
+}
+
+/** Schema files are independent of bootstrap's RASTA_SERVICES; discovery fails closed. */
+export function discoverSchemaServices(root) {
+  const services = readdirSync(join(root, 'services'), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.endsWith('-service'))
+    .filter((entry) => readdirSync(join(root, 'services', entry.name)).includes('prisma'))
+    .map((entry) => {
+      const schema = readFileSync(
+        join(root, 'services', entry.name, 'prisma/schema.prisma'),
+        'utf8',
+      );
+      if (!schema.trim()) throw new Error(`Empty schema: ${entry.name}`);
+      return entry.name.slice(0, -'-service'.length).replaceAll('-', '_');
+    })
+    .sort();
+  if (!services.length) throw new Error('Empty schema discovery');
+  return services;
+}
+
+export function checkServiceCoverage(discovered, configured) {
+  const missing = discovered.filter((name) => !configured.includes(name));
+  const extra = configured.filter((name) => !discovered.includes(name));
+  if (
+    !discovered.length ||
+    !configured.length ||
+    missing.length ||
+    extra.length ||
+    new Set(configured).size !== configured.length
+  ) {
+    throw new Error(
+      `Service coverage mismatch: missing from RASTA_SERVICES [${missing}]; absent schemas [${extra}]`,
+    );
+  }
+}
+
+// Use role names, never cluster-local OIDs. ACL text and all arrays use C ordering.
+// pg_dump omits redundant explicit owner-only ACLs: NULL means acldefault, not no grants.
+// acldefault uses lower-case 's' for SEQUENCE; upper-case 'S' is FOREIGN SERVER.
+export const OBJECT_STATE_SQL = `
+WITH namespaces AS (
+  SELECT * FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+  AND nspname NOT LIKE 'pg_toast%' AND nspname NOT LIKE 'pg_temp_%'
+), relations AS (
+  SELECT c.*, n.nspname FROM pg_class c JOIN namespaces n ON n.oid = c.relnamespace
+  WHERE c.relkind IN ('r', 'p', 'S', 'v', 'm', 'f')
+)
+SELECT json_build_object(
+  'schemas', (SELECT coalesce(json_agg(json_build_object('name', nspname,
+    'owner', pg_get_userbyid(nspowner)) ORDER BY nspname COLLATE "C"), '[]'::json) FROM namespaces),
+  'relations', (SELECT coalesce(json_agg(json_build_object('name', nspname || '.' || relname,
+    'kind', relkind, 'owner', pg_get_userbyid(relowner),
+    'acl', (SELECT json_agg(a::text ORDER BY a::text COLLATE "C") FROM unnest(coalesce(relacl, acldefault(
+      CASE WHEN relkind = 'S' THEN 's'::"char" ELSE 'r'::"char" END, relowner))) a))
+    ORDER BY nspname COLLATE "C", relname COLLATE "C"), '[]'::json) FROM relations),
+  'defaultPrivileges', (SELECT coalesce(json_agg(json_build_object(
+    'role', pg_get_userbyid(d.defaclrole), 'schema', coalesce(n.nspname, '*'),
+    'kind', d.defaclobjtype,
+    'acl', (SELECT json_agg(a::text ORDER BY a::text COLLATE "C") FROM unnest(d.defaclacl) a))
+    ORDER BY pg_get_userbyid(d.defaclrole) COLLATE "C", coalesce(n.nspname, '*') COLLATE "C", d.defaclobjtype),
+    '[]'::json) FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace));
+`;
+
+// Read every sequence directly; pg_sequences alone does not expose is_called.
+export const SEQUENCES_SQL = `
+SELECT format('SELECT json_build_object(''name'', %L, ''last_value'', last_value::text,
+  ''is_called'', is_called) FROM %I.%I', n.nspname || '.' || c.relname, n.nspname, c.relname)
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind = 'S' AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+ORDER BY n.nspname COLLATE "C", c.relname COLLATE "C"
+\\gexec
+`;
+
+export const DATABASE_STATE_SQL = `
+SELECT json_build_object('owner', pg_get_userbyid(d.datdba),
+  'acl', (SELECT json_agg(a::text ORDER BY a::text COLLATE "C") FROM unnest(coalesce(d.datacl, acldefault('d'::"char", d.datdba))) a),
+  'settings', coalesce((SELECT json_agg(json_build_object(
+    'role', CASE WHEN s.setrole = 0 THEN '*' ELSE pg_get_userbyid(s.setrole) END,
+    'config', (SELECT json_agg(v ORDER BY v COLLATE "C") FROM unnest(s.setconfig) v))
+    ORDER BY s.setrole = 0 DESC, pg_get_userbyid(s.setrole) COLLATE "C")
+    FROM pg_db_role_setting s WHERE s.setdatabase = d.oid), '[]'::json))
+FROM pg_database d WHERE d.datname = current_database();
+`;
+
+export function summarizeTables(tables) {
+  const summary = {};
+  for (const kind of ['application', 'migration', 'extension']) {
+    const selected = Object.values(tables).filter((table) => table.kind === kind);
+    summary[kind] = {
+      tables: selected.length,
+      nonEmptyTables: selected.filter((table) => count(table.rows) > 0n).length,
+      rows: selected.reduce((total, table) => total + count(table.rows), 0n).toString(),
+    };
+  }
+  return summary;
+}
+
+// All non-system tables, across schemas (including extension tables, audit and _prisma_migrations).
+// format(%I) quotes catalog identifiers; no operator-supplied SQL is interpolated.
+export const INVENTORY_SQL = `
+SELECT format('SELECT json_build_object(''name'', %L, ''rows'', count(*)::text,
+  ''kind'', %L, ''digest'', md5(coalesce(string_agg(row_to_json(t)::text, E''\\n''
+  ORDER BY row_to_json(t)::text COLLATE "C"), ''''))) FROM %I.%I t',
+  n.nspname || '.' || c.relname,
+  CASE WHEN EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass
+    AND d.objid = c.oid AND d.deptype = 'e') THEN 'extension'
+    WHEN c.relname = '_prisma_migrations' THEN 'migration' ELSE 'application' END,
+  n.nspname, c.relname)
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+ORDER BY n.nspname, c.relname
+\\gexec
+`;
+
+export const MIGRATIONS_SQL = (schema) => `
+SELECT coalesce(json_agg(row_to_json(m) ORDER BY migration_name, id), '[]'::json)
+FROM "${schema}"._prisma_migrations m;
+`;
+
+// Reuses the invariant, without importing service code:
+// services/economic-service/src/wallet/wallet.repository.ts:115-139 (credits minus debits,
+// WALLET = available, ESCROW = pending, sum = ledger), and balance-audit.ts:235-273.
+// Journal sums follow services/economic-service/prisma/migrations/
+// 20260828202043_init_economic/migration.sql:596-627 (per journal AND currency).
+// numeric SUM avoids bigint overflow; counts and amounts leave PostgreSQL as text.
+export const LEDGER_SQL = `
+WITH bad_journals AS (
+  SELECT j.id FROM public.journal j LEFT JOIN public.ledger_entry e ON e.journal_id = j.id
+  GROUP BY j.id
+  HAVING count(e.id) < 2 OR EXISTS (
+    SELECT 1 FROM public.ledger_entry entry WHERE entry.journal_id = j.id
+    GROUP BY entry.currency
+    HAVING sum(CASE WHEN entry.direction = 'DEBIT' THEN entry.amount_minor::numeric
+                    ELSE -entry.amount_minor::numeric END) <> 0
+  )
+), balances AS (
+  SELECT a.id, a.organization_id, a.currency, a.purpose, a.account_type,
+    coalesce(sum(CASE WHEN e.direction = 'CREDIT' THEN e.amount_minor::numeric
+                      ELSE -e.amount_minor::numeric END), 0) AS balance
+  FROM public.ledger_account a LEFT JOIN public.ledger_entry e ON e.account_id = a.id
+  GROUP BY a.id
+), bad_wallets AS (
+  SELECT w.id FROM public.wallet w
+  LEFT JOIN balances a ON a.id = w.ledger_account_id
+  LEFT JOIN balances escrow ON escrow.organization_id = w.organization_id
+    AND escrow.currency = w.currency AND escrow.purpose = 'ESCROW'
+  WHERE a.id IS NULL OR a.purpose <> 'WALLET' OR a.account_type <> 'LIABILITY'
+    OR a.organization_id <> w.organization_id OR a.currency <> w.currency
+    OR w.available_balance_minor <> a.balance
+    OR w.pending_balance_minor <> coalesce(escrow.balance, 0)
+    OR w.ledger_balance_minor::numeric <> a.balance + coalesce(escrow.balance, 0)
+    OR w.available_balance_minor < 0 OR w.pending_balance_minor < 0 OR w.ledger_balance_minor < 0
+    OR w.pending_balance_minor <> (SELECT coalesce(sum(h.amount_minor::numeric), 0)
+        FROM public.wallet_hold h WHERE h.wallet_id = w.id AND h.status = 'ACTIVE')
+)
+SELECT json_build_object(
+  'journalsChecked', (SELECT count(*)::text FROM public.journal),
+  'entriesChecked', (SELECT count(*)::text FROM public.ledger_entry),
+  'walletsChecked', (SELECT count(*)::text FROM public.wallet),
+  'journalMismatches', (SELECT count(*)::text FROM bad_journals),
+  'walletMismatches', (SELECT count(*)::text FROM bad_wallets),
+  'amountsByCurrency', (SELECT json_agg(t ORDER BY currency) FROM
+    (SELECT currency, sum(amount_minor::numeric)::text AS total FROM public.ledger_entry
+     GROUP BY currency) t),
+  'fixtureAmount', (SELECT amount_minor::text FROM public.ledger_entry WHERE id = 'LGE_DRILL_CREDIT'));
+`;
+
+// The dev seed intentionally has no wallets/postings (economic prisma/seed.ts:30).
+// Synthetic backup-test data ONLY, in a fresh owned cluster: no provider, rate, event or API.
+// Like test/helpers.ts:324-350, a wallet balance must be justified by postings.
+// The fixture amount is compared as text, alongside table digests and per-currency sums.
+export const FIXTURE_SQL = `
+BEGIN;
+INSERT INTO public.ledger_account
+ (id, organization_id, account_type, account_code, purpose, currency, created_by)
+VALUES ('ACC_DRILL_WALLET', 'ORG-RESTORE-DRILL', 'LIABILITY', 'DRILL-WALLET', 'WALLET', 'IRR', 'restore-drill'),
+ ('ACC_DRILL_ESCROW', 'ORG-RESTORE-DRILL', 'LIABILITY', 'DRILL-ESCROW', 'ESCROW', 'IRR', 'restore-drill');
+INSERT INTO public.journal
+ (id, organization_id, journal_type, description, posted_at, posted_by, correlation_id)
+VALUES ('JRN_DRILL_TOPUP', 'ORG-RESTORE-DRILL', 'WALLET_TOP_UP', 'Synthetic restore fixture', now(), 'restore-drill', 'restore-drill'),
+ ('JRN_DRILL_HOLD', 'ORG-RESTORE-DRILL', 'FUNDS_HELD', 'Synthetic restore hold', now(), 'restore-drill', 'restore-drill');
+INSERT INTO public.ledger_entry
+ (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
+VALUES
+ ('LGE_DRILL_DEBIT', 'JRN_DRILL_TOPUP', 'ACC_SEED_PAYMENT_CLEARING', 'ORG-PLATFORM', 'DEBIT', 9007199254740993, 'IRR', now()),
+ ('LGE_DRILL_CREDIT', 'JRN_DRILL_TOPUP', 'ACC_DRILL_WALLET', 'ORG-RESTORE-DRILL', 'CREDIT', 9007199254740993, 'IRR', now()),
+ ('LGE_DRILL_HOLD_DEBIT', 'JRN_DRILL_HOLD', 'ACC_DRILL_WALLET', 'ORG-RESTORE-DRILL', 'DEBIT', 2500, 'IRR', now()),
+ ('LGE_DRILL_HOLD_CREDIT', 'JRN_DRILL_HOLD', 'ACC_DRILL_ESCROW', 'ORG-RESTORE-DRILL', 'CREDIT', 2500, 'IRR', now());
+INSERT INTO public.wallet
+ (id, organization_id, currency, ledger_account_id, ledger_balance_minor, available_balance_minor, pending_balance_minor, updated_at)
+VALUES ('WLT_DRILL', 'ORG-RESTORE-DRILL', 'IRR', 'ACC_DRILL_WALLET', 9007199254740993, 9007199254738493, 2500, now());
+INSERT INTO public.wallet_hold
+ (id, organization_id, wallet_id, amount_minor, currency, reference, reference_type, placed_journal_id, placed_at, placed_by)
+VALUES ('HLD_DRILL', 'ORG-RESTORE-DRILL', 'WLT_DRILL', 2500, 'IRR', 'DRILL', 'RESTORE_TEST', 'JRN_DRILL_HOLD', now(), 'restore-drill');
+COMMIT;
+`;

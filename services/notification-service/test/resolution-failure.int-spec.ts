@@ -1,3 +1,4 @@
+import { expireClaim } from '@rasta/testing';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { RecipientResolutionError } from '../src/recipients/recipient.port';
@@ -190,12 +191,7 @@ describe('recipient resolution failure and recovery', () => {
     expect(await w.repository.claimPending('worker-d', 10, 60)).toHaveLength(0);
 
     // Expire one lease as a crashed worker would leave it; it is claimable again.
-    await runUnscoped('the test expires one lease to simulate a crashed worker', () =>
-      w.prisma.client.notificationIntent.update({
-        where: { id: a[0]!.id },
-        data: { claimExpiresAt: new Date(Date.now() - 1_000) },
-      }),
-    );
+    await expireClaim(w.prisma, [a[0]!.id], 'notification_intent');
     const reclaimed = await w.repository.claimPending('worker-d', 10, 60);
     expect(reclaimed.map((intent) => intent.id)).toEqual([a[0]!.id]);
     expect(reclaimed[0]!.claimToken).not.toBe(a[0]!.claimToken);
@@ -210,12 +206,7 @@ describe('recipient resolution failure and recovery', () => {
 
     const [stale] = await w.repository.claimPending('worker-slow', 1, 60);
     // The slow worker's lease expires and a fast one takes it over.
-    await runUnscoped('the test expires a lease to stage a takeover', () =>
-      w.prisma.client.notificationIntent.update({
-        where: { id: stale!.id },
-        data: { claimExpiresAt: new Date(Date.now() - 1_000) },
-      }),
-    );
+    await expireClaim(w.prisma, [stale!.id], 'notification_intent');
     const [fresh] = await w.repository.claimPending('worker-fast', 1, 60);
     expect(fresh!.id).toBe(stale!.id);
     expect(fresh!.claimToken).not.toBe(stale!.claimToken);

@@ -69,6 +69,12 @@ describe('PlaceOrderForm', () => {
     expect(container.querySelector('[name*="amount" i]')).toBeNull();
   });
 
+  it('offers no note field: the service refuses any order note (Q-110)', () => {
+    const { container } = renderForm();
+    expect(container.querySelector('[name="note"]')).toBeNull();
+    expect(container.querySelector('textarea')).toBeNull();
+  });
+
   it('offers each offer with its supplier, price, minimum and availability', () => {
     const { getAllByRole } = renderForm();
     const options = getAllByRole('option').map((option) => option.textContent);
