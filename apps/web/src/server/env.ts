@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { replayMarginCoversClockBudget } from './unresolved-request-policy';
+
 /**
  * Server-only configuration for the portal (ADR-059).
  *
@@ -389,7 +391,9 @@ const schema = z.object({
   /**
    * How much earlier than that retention the portal stops re-sending a bid
    * command, in seconds: room for the request to reach construction-service.
-   * Same bounds as the dispute margin.
+   * Same bounds as the dispute margin, and at least `2 × MAX_CLOCK_SKEW_MS +
+   * MAX_REQUEST_TIMEOUT_MS` (75 s: `unresolved-request-policy.ts`) — below that
+   * the portal refuses to start (`loadWebServerEnv`).
    */
   WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: z.coerce
     .number()
@@ -425,6 +429,16 @@ export function loadWebServerEnv(
   // replicas, and two replicas without shared coordination race for every
   // refresh token (ADR-059 addendum).
   if (source.NODE_ENV === 'production' && !source.WEB_REDIS_URL) missing.push('WEB_REDIS_URL');
+
+  // The clock budget of the replay deadlines (`unresolved-request-policy.ts`):
+  // the margin must cover two clock skews and one request, or a key could be
+  // resent after the service forgot it. Refuse to start rather than run without.
+  if (
+    parsed.success &&
+    !replayMarginCoversClockBudget(parsed.data.WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS)
+  ) {
+    missing.push('WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS');
+  }
 
   if (!parsed.success || missing.length > 0) {
     // Names only, never values: this object holds the session key.

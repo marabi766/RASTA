@@ -22,11 +22,7 @@ import {
   type SupplierBaseline,
   type WrittenSupplier,
 } from '@/server/supplier-commands';
-import {
-  supplierWriteScope,
-  SUPPLIER_WRITE_PURPOSE,
-  SUPPLIER_WRITE_RETRY,
-} from '@/server/supplier-unresolved';
+import { supplierWriteScope, SUPPLIER_WRITE_PURPOSE } from '@/server/supplier-unresolved';
 import {
   readUnresolved,
   requestDigest,
@@ -180,7 +176,6 @@ async function sendReserved<F extends string>(
     issuedAt: Date.now(),
     deadline: null,
     windowMs: null,
-    retry: SUPPLIER_WRITE_RETRY,
   });
   switch (reserved.kind) {
     case 'UNAVAILABLE':
@@ -196,7 +191,7 @@ async function sendReserved<F extends string>(
             ? { kind: 'BUSY' }
             : {
                 kind: 'UNCONFIRMED',
-                correlationId: reserved.request.ref ?? reserved.request.key,
+                correlationId: reserved.request?.ref ?? reserved.request?.key ?? submissionId,
               },
       };
     case 'RESERVED':

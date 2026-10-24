@@ -6,6 +6,7 @@ import { join } from 'node:path';
 
 import {
   MAX_EVIDENCE_ITEMS,
+  REVIEWER_NOTE_HINT,
   SUPPLIER_COMMANDS,
   SUPPLIER_COMMAND_CONSEQUENCES,
   SUPPLIER_COMMAND_LABELS,
@@ -216,4 +217,26 @@ describe('the words', () => {
       expect(offending).toEqual([]);
     },
   );
+});
+
+describe('the decision note has one audience, in every sentence that mentions it', () => {
+  // supplier-service omits `decisionNote` for the supplier's audience (views.ts), so no text may
+  // promise it to the supplier: the hint and both decision consequences say "platform reviewers only".
+  const PRIVATE = ['بازبین', 'منتشر نمی‌شود'] as const;
+
+  it.each([
+    ['the hint', REVIEWER_NOTE_HINT],
+    ['the approval consequence', SUPPLIER_COMMAND_CONSEQUENCES.APPROVE_QUALIFICATION],
+    ['the rejection consequence', SUPPLIER_COMMAND_CONSEQUENCES.REJECT_QUALIFICATION],
+  ])('%s says the note is private to platform reviewers', (_name, text) => {
+    for (const part of PRIVATE) expect(text).toContain(part);
+    expect(text).not.toMatch(/یادداشت[^.؛]*(برای|و) تامین‌کننده است/);
+  });
+
+  it('the approval consequence and the hint agree: reviewers only, never the supplier', () => {
+    const approval = SUPPLIER_COMMAND_CONSEQUENCES.APPROVE_QUALIFICATION;
+    expect(approval).toContain('نه تامین‌کننده');
+    expect(REVIEWER_NOTE_HINT).toContain('نه تامین‌کننده');
+    expect(approval).not.toContain('برای سابقه و تامین‌کننده');
+  });
 });

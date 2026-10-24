@@ -18,15 +18,6 @@ export function supplierWriteScope(supplierId: string | null): UnresolvedScope {
   };
 }
 
-/**
- * Whether an unresolved supplier write may be sent again with its own key and
- * body: **never**. supplier-service takes no Idempotency-Key and has no ledger
- * that answers a repeat with the first result, so the only way out of a held
- * write is the person's reconciliation (`reconcileSupplierWrite`). The write has
- * no signed deadline either (nothing expires on the service's side).
- */
-export const SUPPLIER_WRITE_RETRY = false;
-
 /** The checkbox that releases a slot: the person re-read the record and checked. */
 export const RECONCILED_FIELD = 'reconciled';
 export const RECONCILED_VALUE = 'yes';

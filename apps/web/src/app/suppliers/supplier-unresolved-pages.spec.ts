@@ -61,6 +61,7 @@ type Page = (props: {
 }) => Promise<ReactElement>;
 const DetailPage = (require('./[id]/page') as { default: Page }).default;
 const ListPage = (require('./page') as { default: Page }).default;
+const { PortalSidebar } = require('../PortalSidebar') as typeof import('../PortalSidebar');
 const { UnresolvedSupplierNotice } =
   require('./UnresolvedSupplierNotice') as typeof import('./UnresolvedSupplierNotice');
 const { SubmitQualificationForm, RegisterSupplierForm } =
@@ -142,7 +143,6 @@ async function lose(scope: ReturnType<typeof supplierWriteScope>, key: string, s
     issuedAt: Date.now(),
     deadline: null,
     windowMs: null,
-    retry: false,
   });
   if (reserved.kind !== 'RESERVED') throw new Error(reserved.kind);
   await settleUnresolved(reserved.attempt, 'UNRESOLVED');
@@ -153,6 +153,16 @@ beforeEach(() => {
   mockSession.current = SESSION;
 });
 afterEach(() => useUnresolvedStore(undefined));
+
+describe('the shared navigation', () => {
+  it('is the sidebar of both screens, on /suppliers (spelling checked in supplier-persian.spec.tsx)', async () => {
+    for (const tree of [await listTree(), await detailTree()]) {
+      expect(props(tree, PortalSidebar)).toEqual([
+        expect.objectContaining({ currentHref: '/suppliers' }),
+      ]);
+    }
+  });
+});
 
 describe('a supplier page with nothing unresolved', () => {
   it('draws no notice and enabled forms', async () => {

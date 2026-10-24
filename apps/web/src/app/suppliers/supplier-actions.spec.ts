@@ -694,7 +694,10 @@ describe.each(CASES)('$command — an unresolved write', (testCase) => {
 
   it('the reservation itself refuses the same key and body again, whatever the page check said', async () => {
     // The earlier check answers "nothing held"; the atomic reservation decides.
-    useUnresolvedStore({ ...memoryUnresolvedStore(), read: async () => null });
+    useUnresolvedStore({
+      ...memoryUnresolvedStore(),
+      read: async () => ({ record: null, now: Date.now() }),
+    });
     const first = mintSubmissionId(SESSION);
     testCase.send.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-lost' });
     await run(formData(testCase, undefined, { submission: first }));
@@ -712,7 +715,7 @@ describe.each(CASES)('$command — an unresolved write', (testCase) => {
     expect(sent()).toHaveLength(0);
 
     // The check passes, the atomic reservation does not: still nothing goes out.
-    useUnresolvedStore(unreachable({ read: async () => null }));
+    useUnresolvedStore(unreachable({ read: async () => ({ record: null, now: Date.now() }) }));
     expect(await run()).toEqual({ kind: 'NOT_CHECKED' });
     expect(sent()).toHaveLength(0);
   });

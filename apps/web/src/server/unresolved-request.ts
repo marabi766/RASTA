@@ -7,15 +7,17 @@ import { webServerEnv } from './env';
 import type { RedisLike } from './refresh-coordinator';
 import type { WebSession } from './session';
 import { signPayload, verifyPayload } from './signed-payload';
+import { MAX_CLOCK_SKEW_MS, policyOf } from './unresolved-request-policy';
 import {
+  deadlineOf,
   INFLIGHT_LEASE_MS,
   MAX_PENDING_PER_LOGIN,
   memoryUnresolvedStore,
   PENDING_KEY_PREFIX,
-  RECORD_RETENTION_AFTER_MS,
   redisUnresolvedStore,
   UnresolvedStoreUnavailable,
   type HeldReason,
+  type RecordBinding,
   type SettleMode,
   type StoredRecord,
   type UnresolvedStore,
@@ -63,12 +65,18 @@ import {
  *
  * ## The deadline
  *
- * A record's `deadline` is fixed when it is created as the earlier of the
+ * What a purpose may do — retry or not, and whether it has a deadline — is one
+ * table (`unresolved-request-policy.ts`). A record's `deadline` is **required**
+ * for a purpose that resends: fixed when it is created as the earlier of the
  * signed stamp's deadline and `issuedAt + window(configuration then)`, and on
- * every retry it is the earlier of the stored one and `issuedAt +
- * window(configuration now)`: it only ever shrinks. Past it nothing is sent and
- * the record is kept. The record expires 30 days after the deadline (after its
- * creation when there is none).
+ * every retry the earlier of the **stored** one and `issuedAt +
+ * window(configuration now)`: it only ever shrinks, and a record without a valid
+ * stored deadline is corrupt (unavailable), never rebuilt from the current
+ * window. It is checked inside the store's script against the store's own
+ * clock, less a skew budget, on the first send as well as every retry. Past it
+ * nothing is sent and the record is kept. The record expires 30 days after the
+ * deadline (after its creation for a purpose that has none, stored as
+ * `"NONE"`). Time: see `unresolved-request-store.ts` and the policy file.
  *
  * It holds **no body**, only a keyed digest, no token and no personal data.
  */
@@ -97,7 +105,7 @@ export interface UnresolvedRequest {
   readonly deadline: number | null;
   /** Opaque, short: whatever the caller must hand back to its form (a signed stamp). */
   readonly ref: string | null;
-  /** True while an attempt is being dispatched right now. */
+  /** True while an attempt is being dispatched right now (by the store's clock, not this replica's). */
   readonly inFlight: boolean;
 }
 
@@ -108,20 +116,19 @@ function scopeLabel(scope: UnresolvedScope): string {
 
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
-interface Keys {
-  readonly recordKey: string;
-  readonly setKey: string;
-  readonly bind: string;
-}
-
-/** Every key names the organization (ADR-007) and is bound to this person's login. */
-function keysFor(session: WebSession, scope: UnresolvedScope): Keys {
+/** Every key names the organization (ADR-007) and is bound to this person's login; the record carries the same binding. */
+function keysFor(session: WebSession, scope: UnresolvedScope): RecordBinding {
   const org = encodeURIComponent(session.organizationId ?? 'none');
   const login = `${session.subject}\n${session.csrfToken}`;
   const bind = sha256(`${login}\n${scopeLabel(scope)}`);
+  const loginDigest = sha256(login);
   return {
     recordKey: `${PENDING_KEY_PREFIX}:org:${org}:pw:${bind}`,
-    setKey: `${PENDING_KEY_PREFIX}:org:${org}:pwl:${sha256(login)}`,
+    setKey: `${PENDING_KEY_PREFIX}:org:${org}:pwl:${loginDigest}`,
+    org,
+    login: loginDigest,
+    purpose: scope.purpose,
+    target: scope.target ?? '',
     bind,
   };
 }
@@ -205,19 +212,20 @@ export function useUnresolvedStore(replacement?: UnresolvedStore): void {
   lastWarned.clear();
 }
 
+/** `now` is the store's time (Redis `TIME`), never this replica's. */
 function viewOf(record: StoredRecord, now: number): UnresolvedRequest {
   return {
     id: record.id,
     key: record.key,
     digest: record.digest,
-    deadline: record.deadline ?? null,
+    deadline: deadlineOf(record),
     ref: record.ref,
     inFlight: record.state === 'RESERVED' && now - record.reservedAt <= INFLIGHT_LEASE_MS,
   };
 }
 
-/** A record found under a key it does not belong to is not trusted. */
-function trusted(record: StoredRecord, keys: Keys): boolean {
+/** A record found under a key it does not belong to is not trusted (the store checked it too). */
+function trusted(record: StoredRecord, keys: RecordBinding): boolean {
   return record.bind === keys.bind;
 }
 
@@ -227,7 +235,8 @@ function trusted(record: StoredRecord, keys: Keys): boolean {
 
 export type UnresolvedRead =
   | { readonly kind: 'NONE' }
-  | { readonly kind: 'PENDING'; readonly request: UnresolvedRequest }
+  /** `now` is the store's time at the read: what `inFlight` and `mayResend` are judged by. */
+  | { readonly kind: 'PENDING'; readonly request: UnresolvedRequest; readonly now: number }
   /** The store could not say (error, timeout, malformed or unverifiable record): never "no hold". */
   | { readonly kind: 'UNAVAILABLE' };
 
@@ -240,14 +249,13 @@ export type UnresolvedRead =
 export async function readUnresolved(
   session: WebSession,
   scope: UnresolvedScope,
-  now: number = Date.now(),
 ): Promise<UnresolvedRead> {
   try {
     const keys = keysFor(session, scope);
-    const record = await defaultStore().read(keys.recordKey, now);
+    const { record, now } = await defaultStore().read(keys);
     if (record === null) return { kind: 'NONE' };
     if (!trusted(record, keys)) return { kind: 'UNAVAILABLE' };
-    return { kind: 'PENDING', request: viewOf(record, now) };
+    return { kind: 'PENDING', request: viewOf(record, now), now };
   } catch (error) {
     if (!(error instanceof UnresolvedStoreUnavailable)) throw error;
     warnOperator(
@@ -264,8 +272,7 @@ export async function readUnresolved(
 
 /** What the caller must hand back to `settleUnresolved`. */
 export interface UnresolvedAttempt {
-  readonly recordKey: string;
-  readonly setKey: string;
+  readonly binding: RecordBinding;
   readonly id: string;
   readonly attemptId: string;
 }
@@ -280,81 +287,88 @@ export interface ReserveInput {
   readonly issuedAt: number;
   /**
    * The deadline for a record created now: the earlier of the stamp's and
-   * `issuedAt + window(now)`. Null for a purpose without one.
+   * `issuedAt + window(now)`. A finite number for a purpose whose policy says
+   * `REQUIRED`; null exactly for one that says `NONE`.
    */
   readonly deadline: number | null;
-  /** `window(configuration now)` in ms, bounding a retry; null for a purpose without one. */
+  /** `window(configuration now)` in ms, bounding a retry; null exactly when `deadline` is. */
   readonly windowMs: number | null;
-  /**
-   * Whether an unresolved record with this very key and body may be sent again:
-   * true only when the service answers a repeated key with the first result.
-   * False: the person reconciles, and the record is only ever released.
-   */
-  readonly retry: boolean;
 }
 
 export type ReserveOutcome =
   | { readonly kind: 'RESERVED'; readonly attempt: UnresolvedAttempt; readonly retry: boolean }
   | { readonly kind: 'HELD'; readonly reason: HeldReason; readonly request: UnresolvedRequest }
-  | { readonly kind: 'EXPIRED'; readonly request: UnresolvedRequest }
+  /** Past its deadline (less the skew budget). `request` is null for a first send: nothing was kept. */
+  | { readonly kind: 'EXPIRED'; readonly request: UnresolvedRequest | null }
   | { readonly kind: 'CAPACITY' }
   /** The store could not be reached or read: nothing may be sent. */
   | { readonly kind: 'UNAVAILABLE' };
 
 const newId = () => randomBytes(16).toString('hex');
 
+/**
+ * Whether a retry may be sent again, and whether a deadline is kept, come from
+ * the purpose's row in the policy table — not from the caller. The caller's
+ * numbers must agree with the row, or nothing is reserved.
+ */
 export async function reserveUnresolved(
   session: WebSession,
   scope: UnresolvedScope,
   input: ReserveInput,
-  now: number = Date.now(),
 ): Promise<ReserveOutcome> {
   try {
     const keys = keysFor(session, scope);
+    const policy = policyOf(scope.purpose);
+    const numeric = policy?.deadline === 'REQUIRED';
+    if (
+      !policy ||
+      (numeric
+        ? !Number.isSafeInteger(input.deadline) ||
+          !Number.isSafeInteger(input.windowMs) ||
+          (input.deadline as number) < 0 ||
+          (input.windowMs as number) < 0
+        : input.deadline !== null || input.windowMs !== null)
+    ) {
+      throw new UnresolvedStoreUnavailable(new Error('input does not fit the purpose policy'));
+    }
     const id = newId();
     const attemptId = newId();
     const reply = await defaultStore().reserve({
-      recordKey: keys.recordKey,
-      setKey: keys.setKey,
-      now,
+      binding: keys,
       cap: MAX_PENDING_PER_LOGIN,
       leaseMs: INFLIGHT_LEASE_MS,
-      retry: input.retry,
       windowMs: input.windowMs,
       key: input.key,
       digest: input.digest,
       attemptId,
-      expireAt: (input.deadline ?? now) + RECORD_RETENTION_AFTER_MS,
       fresh: {
-        v: 1,
+        v: 2,
+        purpose: keys.purpose,
+        target: keys.target,
+        org: keys.org,
+        login: keys.login,
         id,
         attemptId,
         key: input.key,
         digest: input.digest,
         issuedAt: input.issuedAt,
         ref: input.ref,
-        deadline: input.deadline,
+        deadline: input.deadline ?? 'NONE',
         state: 'RESERVED',
         wasUnresolved: false,
-        createdAt: now,
-        reservedAt: now,
         bind: keys.bind,
       },
     });
     if (reply.kind === 'CAPACITY') return { kind: 'CAPACITY' };
+    if (reply.record === null) return { kind: 'EXPIRED', request: null };
     if (!trusted(reply.record, keys)) return { kind: 'UNAVAILABLE' };
-    const request = viewOf(reply.record, now);
+    const request = viewOf(reply.record, reply.now);
     if (reply.kind === 'HELD') return { kind: 'HELD', reason: reply.reason, request };
     if (reply.kind === 'EXPIRED') return { kind: 'EXPIRED', request };
     return {
       kind: 'RESERVED',
       retry: reply.retry,
-      attempt: {
-        recordKey: keys.recordKey,
-        setKey: keys.setKey,
-        id: reply.record.id,
-        attemptId: reply.record.attemptId,
-      },
+      attempt: { binding: keys, id: reply.record.id, attemptId: reply.record.attemptId },
     };
   } catch (error) {
     if (!(error instanceof UnresolvedStoreUnavailable)) throw error;
@@ -386,8 +400,7 @@ export async function settleUnresolved(
 ): Promise<boolean> {
   try {
     const reply = await defaultStore().settle(
-      attempt.recordKey,
-      attempt.setKey,
+      attempt.binding,
       attempt.id,
       attempt.attemptId,
       MODE[outcome],
@@ -440,37 +453,40 @@ export async function releaseUnresolved(
   session: WebSession,
   scope: UnresolvedScope,
   token: unknown,
-  now: number = Date.now(),
+  /** Only the signed token's own expiry uses this replica's clock; the lease is judged by the store's. */
+  tokenNow: number = Date.now(),
 ): Promise<ReleaseOutcome> {
-  const named = verifyPayload(session, RELEASE_PURPOSE, token, releaseSchema, now);
+  const named = verifyPayload(session, RELEASE_PURPOSE, token, releaseSchema, tokenNow);
   if (named === null || named.scope !== scopeLabel(scope)) return 'STALE';
   try {
-    const keys = keysFor(session, scope);
-    return await defaultStore().release(
-      keys.recordKey,
-      keys.setKey,
-      named.id,
-      now,
-      INFLIGHT_LEASE_MS,
-    );
+    return await defaultStore().release(keysFor(session, scope), named.id, INFLIGHT_LEASE_MS);
   } catch (error) {
     if (!(error instanceof UnresolvedStoreUnavailable)) throw error;
     return 'UNAVAILABLE';
   }
 }
 
-/** Logout: deletes every record this login holds and its capacity set. True when the store took it. */
+/**
+ * Logout: deletes every record this login holds and its capacity set. True when
+ * the store did; false when it could not be reached **or** found a member that
+ * is not valid (then it deleted nothing — see the store header).
+ */
 export async function purgeUnresolved(session: WebSession): Promise<boolean> {
   try {
-    await defaultStore().purge(keysFor(session, { purpose: 'purge' }).setKey);
-    return true;
+    const keys = keysFor(session, { purpose: 'purge' });
+    return await defaultStore().purge({ setKey: keys.setKey, org: keys.org, login: keys.login });
   } catch (error) {
     if (!(error instanceof UnresolvedStoreUnavailable)) throw error;
     return false;
   }
 }
 
-/** True while `request` may still be sent: no deadline, or not yet reached. */
-export function mayResend(request: UnresolvedRequest, now: number = Date.now()): boolean {
-  return request.deadline === null || now <= request.deadline;
+/**
+ * True while `request` may still be sent: no deadline, or not yet reached by
+ * `now` (the store's time, as the read returned it) plus the skew budget — the
+ * same comparison the store's script makes, so the page never offers a send the
+ * script would refuse.
+ */
+export function mayResend(request: UnresolvedRequest, now: number): boolean {
+  return request.deadline === null || now + MAX_CLOCK_SKEW_MS <= request.deadline;
 }
