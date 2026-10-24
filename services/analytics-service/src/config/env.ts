@@ -86,8 +86,8 @@ function roleList(name: string) {
  *                                       {@link assertConsumerMayStart}. Enabling it is a
  *                                       deployment decision, as for supplier-service's consumer.
  *
- * No threshold, baseline or KPI formula is configured here: none exists before PR 2 and
- * PR 3, and Q-141 / Q-142 decide them (ADR-071 §§ 5–6).
+ * KPI readers use the same configured roles (ADR-071 § 4). KPI definitions live in code;
+ * baseline writing remains absent pending Q-142 (1). Governance thresholds belong to later PRs.
  */
 export const analyticsEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)

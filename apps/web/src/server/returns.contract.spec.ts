@@ -205,7 +205,7 @@ describe('the bodies', () => {
     const list = squash(topLevelConst(dto, 'listReturnsQuerySchema').getText()) ?? '';
     expect(list).toContain("role:z.enum(['BUYER','SUPPLIER']).default('BUYER')");
     expect(list).toContain('status:z.enum(RETURN_STATUSES).optional()');
-    expect(list).toContain('limit:z.coerce.number().int().min(1).max(100)');
+    expect(list).toContain('limit:numberInput(z.number().int().min(1).max(100))');
     expect([...RETURN_LIST_SIDES]).toEqual(['BUYER', 'SUPPLIER']);
   });
 

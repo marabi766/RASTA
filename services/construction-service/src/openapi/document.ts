@@ -10,6 +10,7 @@ import {
 } from '../tender/tender-approval.dto';
 import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS, toJsonSchema } from '@rasta/nest-common';
 import type { RefusalArea } from '../shared/refusal';
+import { thresholdPreviewSchema } from '../tender/procurement-thresholds';
 import { PUBLICATION_REFUSALS, type PublicationRefusal } from '../tender/publication';
 import type { BidRefusal } from '../tender/bid.service';
 import type { OpeningRefusal } from '../tender/tender-open.service';
@@ -240,6 +241,10 @@ export const RESPONSE_BODIES: Record<
   'GET /v1/criteria-templates/{id}': { status: '200', schema: criteriaTemplateViewSchema },
   'PUT /v1/tenders/{id}/criteria': { status: '200', schema: criteriaViewSchema },
   'GET /v1/tenders/{id}/criteria': { status: '200', schema: criteriaViewSchema },
+  'GET /v1/tenders/{id}/procurement-threshold-preview': {
+    status: '200',
+    schema: thresholdPreviewSchema,
+  },
   'POST /v1/tenders/{id}/publish': {
     status: '200',
     schema: tenderViewSchema,

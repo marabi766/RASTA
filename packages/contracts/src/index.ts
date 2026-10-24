@@ -42,8 +42,11 @@ export {
   addMoney,
   subtractMoney,
   applyBasisPoints,
+  digitsToBigInt,
 } from './common/money';
 export type { Currency, Money, SignedMoney } from './common/money';
+
+export { numberInput } from './common/number-input';
 
 export { BUSINESS_LINES, businessLineSchema } from './common/business-line';
 export type { BusinessLine } from './common/business-line';
@@ -262,6 +265,11 @@ export type {
   ShipmentDispatchedPayload,
   ShipmentDeliveredPayload,
 } from './events/inventory-shipments';
+export {
+  PROCUREMENT_THRESHOLDS_KEY,
+  procurementThresholdsSchema,
+} from './common/procurement-thresholds';
+export type { ProcurementThresholds } from './common/procurement-thresholds';
 export type {
   AuditOutcome,
   AuditTrailActor,

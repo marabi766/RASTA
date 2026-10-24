@@ -4,6 +4,7 @@ import {
   businessLineSchema,
   currencySchema,
   organizationIdSchema,
+  numberInput,
 } from '@rasta/contracts';
 import { queryBoolean } from '@rasta/config';
 import { cursorQueryParameter } from '../shared/cursor';
@@ -146,7 +147,7 @@ export const listTransactionsQuerySchema = z
      */
     includeIncoming: queryBoolean(false),
     cursor: cursorQueryParameter,
-    limit: z.coerce.number().int().min(1).max(100).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).default(25),
   })
   .strict();
 

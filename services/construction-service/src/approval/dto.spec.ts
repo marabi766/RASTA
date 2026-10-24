@@ -1,4 +1,5 @@
 import { ulid } from 'ulid';
+import { hashRequestBody } from '../shared/idempotency';
 import { createPolicySchema, decisionSchema, inboxQuerySchema } from './dto';
 import { createProgressSchema } from '../progress/dto';
 
@@ -152,5 +153,108 @@ describe('progress', () => {
     expect(
       createProgressSchema.safeParse({ progressBasisPoints: 1, assetsUsed: many }).success,
     ).toBe(false);
+  });
+});
+
+/**
+ * Task 011 (#385 r2 F1): with both bounds present, the range refinement ran after a bound had
+ * failed its pattern — zod runs an object's refinement on a dirty value — and `BigInt('1.5')`
+ * threw out of the validation pipe: a 500, with the client's text in the log. The bounds keep
+ * their own rule (no leading zeros, nineteen digits, at most a BIGINT); a bound that is not a
+ * string of digits is reported by its pattern alone, and the range is compared only between
+ * strings of digits, as before.
+ */
+describe('createPolicy: a malformed amount bound', () => {
+  const PATTERN = 'An amount is a non-negative integer string in rial minor units';
+  const ORDER = 'minAmountMinor must be less than maxAmountMinor';
+  const MAX = '9223372036854775807';
+
+  const issues = (bounds: Record<string, string>) => {
+    const parsed = createPolicySchema.safeParse({ ...POLICY, steps: [{ ...STEP, ...bounds }] });
+    return parsed.success
+      ? []
+      : parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`);
+  };
+
+  it.each([
+    ['a fraction', '1.5'],
+    ['letters', 'abc'],
+    ['an exponent', '1e3'],
+    ['free text', 'private-invoice-reference-123'],
+    ['nothing', ''],
+    ['a leading space', ' 1'],
+    ['a plus sign', '+1'],
+    ['a hexadecimal literal', '0x10'],
+    ['a minus sign', '-1'],
+  ])('refuses %s as either bound beside a good one, by its pattern alone', (_l, value) => {
+    expect(issues({ minAmountMinor: value, maxAmountMinor: '100' })).toEqual([
+      `steps.0.minAmountMinor: ${PATTERN}`,
+    ]);
+    expect(issues({ minAmountMinor: '5', maxAmountMinor: value })).toEqual([
+      `steps.0.maxAmountMinor: ${PATTERN}`,
+    ]);
+    expect(issues({ minAmountMinor: value, maxAmountMinor: value })).toEqual([
+      `steps.0.minAmountMinor: ${PATTERN}`,
+      `steps.0.maxAmountMinor: ${PATTERN}`,
+    ]);
+  });
+
+  it.each([
+    ['zero with a leading zero', '00'],
+    ['one with a leading zero', '01'],
+  ])('refuses %s, and still compares it as the digits it is', (_l, value) => {
+    expect(issues({ minAmountMinor: value, maxAmountMinor: '100' })).toEqual([
+      `steps.0.minAmountMinor: ${PATTERN}`,
+    ]);
+    expect(issues({ minAmountMinor: '5', maxAmountMinor: value })).toEqual([
+      `steps.0.maxAmountMinor: ${PATTERN}`,
+      `steps.0.maxAmountMinor: ${ORDER}`,
+    ]);
+  });
+
+  it('refuses one past a BIGINT and twenty digits as it did, the range compared as digits', () => {
+    expect(issues({ minAmountMinor: '9223372036854775808', maxAmountMinor: '100' })).toEqual([
+      'steps.0.minAmountMinor: The amount exceeds the largest storable value',
+      `steps.0.maxAmountMinor: ${ORDER}`,
+    ]);
+    expect(issues({ minAmountMinor: '5', maxAmountMinor: '9'.repeat(20) })).toEqual([
+      `steps.0.maxAmountMinor: ${PATTERN}`,
+      'steps.0.maxAmountMinor: The amount exceeds the largest storable value',
+    ]);
+  });
+
+  /** The body `zz-pin-recorder` hashed on origin/main before the fix. */
+  const HASHED_POLICY = {
+    organizationId: 'ORG_A',
+    workflowKey: 'project.execution',
+    label: 'Council',
+    rationale: 'Resolution recorded',
+    steps: [
+      {
+        approvalType: 'Council',
+        authorityOrganizationId: 'ORG_A',
+        authorityRole: 'ORGANIZATION_ADMIN',
+        authorityLabel: 'Council',
+      },
+    ],
+  };
+
+  it.each([
+    [{ minAmountMinor: '0' }, '4f27dd180f60c14587b4b166051484ab885dcff5613e601df36e6b1885a3cf2c'],
+    [{ maxAmountMinor: '0' }, '98117f88eb70d4e2638425efd1f56b6be9e51a130473215a79d9b98c8d755c47'],
+    [{ maxAmountMinor: MAX }, '28b4feee97495763bfc9f813e0cdfc89d0895fdc71630dcf13cdfddbdbbeff14'],
+    [
+      { minAmountMinor: '0', maxAmountMinor: '100' },
+      '04d1f6bbd340fd91030cea6d648674c9cbd63402cb34c37c5ffc79024f793d4c',
+    ],
+    [
+      { minAmountMinor: '5', maxAmountMinor: MAX },
+      '52ac88bd1e1da8a6af6255e7c2f08904d28c5920ad560e4ffd64f847dd43f7d5',
+    ],
+  ])('accepts %j byte-for-byte, with the idempotency hash it had', (bounds, hash) => {
+    const body = { ...HASHED_POLICY, steps: [{ ...HASHED_POLICY.steps[0], ...bounds }] };
+    const parsed = createPolicySchema.parse(body);
+    expect(parsed.steps[0]).toEqual(body.steps[0]);
+    expect(hashRequestBody(parsed)).toBe(hash);
   });
 });
