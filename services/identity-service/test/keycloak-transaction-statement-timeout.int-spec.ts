@@ -200,21 +200,21 @@ describe('Keycloak projection and approval transactions outlast the connection s
     await approve(registrationId);
     expect(await showStatementTimeout()).toBe('1s');
 
-    const { taken, released } = hold((tx) => holderRepository.lockUserProjection(tx, userId));
+    const { taken, released } = hold((tx) => holderRepository.lockUserMemberships(tx, userId));
     await taken;
     await expect(
-      repository.transaction((tx) => repository.lockUserProjection(tx, userId), {
+      repository.transaction((tx) => repository.lockUserMemberships(tx, userId), {
         timeout: HOLD_MS + 10_000,
       }),
     ).rejects.toThrow(/statement timeout/);
     await released;
   });
 
-  it('a projection waits on the projection lock longer than the connection allows, and projects', async () => {
+  it('a projection waits on the user lock longer than the connection allows, and projects', async () => {
     const { registrationId, userId, username } = await submit();
     await approve(registrationId);
 
-    const { taken, released } = hold((tx) => holderRepository.lockUserProjection(tx, userId));
+    const { taken, released } = hold((tx) => holderRepository.lockUserMemberships(tx, userId));
     await taken;
     const { result, ms } = await timed(() => projector.project(userId, 'event'));
     await released;

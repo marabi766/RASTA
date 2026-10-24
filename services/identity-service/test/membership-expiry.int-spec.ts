@@ -81,11 +81,12 @@ describe('membership validUntil (ADR-060 § 5)', () => {
     } as unknown as KeycloakAdminClient;
     const projector = new KeycloakProjector(repository, keycloak);
     service = new IdentityService(repository, keycloak, projector);
-    scanner = new MembershipExpiryScanner(repository, service, {
-      enabled: false,
-      intervalSeconds: 60,
-      batchSize: 500,
-    });
+    scanner = new MembershipExpiryScanner(
+      repository,
+      service,
+      { enabled: false, intervalSeconds: 60, batchSize: 500 },
+      projector,
+    );
 
     await runUnscoped('test fixture spans two organizations', async () => {
       await prisma.client.user.create({

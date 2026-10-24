@@ -5,6 +5,7 @@ import {
   ACTIVATION_ATTRIBUTE,
   KeycloakAdminClient,
   KeycloakCreateUnconfirmedError,
+  KeycloakWriteUnconfirmedError,
 } from './keycloak.client';
 import { provenanceOnly } from './platform-attributes';
 
@@ -425,6 +426,153 @@ describe('KeycloakAdminClient: a deadline on every call, the token request inclu
     const error = await client()
       .getAccount('kc-1')
       .catch((caught: unknown) => caught);
+    expect(JSON.stringify(error, Object.getOwnPropertyNames(error))).not.toContain(
+      'client-secret-for-tests',
+    );
+  });
+});
+
+/**
+ * D-064: a write that may have reached Keycloak is told apart from one that
+ * provably did not. An aborted request is not a cancelled one, so a write past
+ * its deadline, cut off mid-answer, or answered 5xx "may land"
+ * (`KeycloakWriteUnconfirmedError`); a refused connection, a failure before
+ * the write was sent, or a 4xx did not. A real socket, so what is classified
+ * is what `fetch` itself reports.
+ */
+describe('KeycloakAdminClient: whether a write may have landed (D-064)', () => {
+  let server: Server;
+  let baseUrl = '';
+  /** What the server does with the next PUT. */
+  let onPut: 'hang' | 'reset' | 'reset-after-body' | number = 204;
+  /** What it does with the GET before it. */
+  let onGet: 'ok' | 404 | 503 = 'ok';
+  const puts: string[] = [];
+  const held: ServerResponse[] = [];
+
+  beforeAll(async () => {
+    server = createServer((request, response) => {
+      if (request.url?.endsWith('/token')) {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ access_token: 'admin-token', expires_in: 300 }));
+        return;
+      }
+      if (request.method === 'GET') {
+        if (onGet !== 'ok') {
+          response.writeHead(onGet).end();
+          return;
+        }
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ id: 'kc-1', email: 'a@example.test', attributes: {} }));
+        return;
+      }
+      let body = '';
+      request.on('data', (chunk: Buffer) => (body += chunk.toString()));
+      request.on('end', () => {
+        puts.push(body);
+        if (onPut === 'hang') held.push(response);
+        else if (onPut === 'reset' || onPut === 'reset-after-body') response.socket?.destroy();
+        else response.writeHead(onPut).end();
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    for (const response of held) response.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  beforeEach(() => {
+    puts.length = 0;
+    onPut = 204;
+    onGet = 'ok';
+  });
+
+  const client = (url = baseUrl) =>
+    new KeycloakAdminClient({
+      baseUrl: url,
+      realm: 'rasta',
+      clientId: 'rasta-backend',
+      clientSecret: 'client-secret-for-tests',
+      enabled: true,
+      requestTimeoutMs: 300,
+    });
+  const write = (url?: string) =>
+    client(url).replacePlatformAttributes('kc-1', provenanceOnly('USR_1'));
+
+  it.each([
+    ['its deadline passes', 'hang' as const, 'deadline'],
+    ['the connection breaks after it was sent', 'reset' as const, 'connection'],
+    ['Keycloak, or a proxy before it, answers 500', 500, 'server_error'],
+    ['a proxy answers 502', 502, 'server_error'],
+    ['a proxy answers 504', 504, 'server_error'],
+  ])('unconfirmed when %s: it reached Keycloak and may land', async (_label, mode, reason) => {
+    onPut = mode;
+    const error = await write().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(KeycloakWriteUnconfirmedError);
+    expect(error).toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+      internalContext: { service: 'keycloak', reason, unconfirmed: true },
+    });
+    expect(puts).toHaveLength(1);
+  });
+
+  it.each([400, 403, 409])('a %s refuses the write: confirmed, not applied', async (status) => {
+    onPut = status;
+    const error = await write().catch((caught: unknown) => caught);
+    expect(error).not.toBeInstanceOf(KeycloakWriteUnconfirmedError);
+    expect(error).toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+  });
+
+  it('a refused connection is confirmed: nothing was sent', async () => {
+    const closed = createServer();
+    await new Promise<void>((resolve) => closed.listen(0, '127.0.0.1', resolve));
+    const url = `http://127.0.0.1:${(closed.address() as AddressInfo).port}`;
+    await new Promise<void>((resolve) => closed.close(() => resolve()));
+
+    const error = await write(url).catch((caught: unknown) => caught);
+    expect(error).not.toBeInstanceOf(KeycloakWriteUnconfirmedError);
+    expect(error).toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+  });
+
+  it('a read that fails before the write is confirmed: nothing was sent', async () => {
+    onGet = 503;
+    const error = await write().catch((caught: unknown) => caught);
+    expect(error).not.toBeInstanceOf(KeycloakWriteUnconfirmedError);
+    expect(puts).toHaveLength(0);
+  });
+
+  it('a 404 is "no such account", read or write', async () => {
+    onGet = 404;
+    await expect(write()).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    onGet = 'ok';
+    onPut = 404;
+    await expect(write()).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('setEnabled keeps answering a 404 as upstream unavailable, as it always did', async () => {
+    onPut = 404;
+    await expect(client().setEnabled('kc-1', false)).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+    });
+  });
+
+  it.each([
+    ['setEnabled', (c: KeycloakAdminClient) => c.setEnabled('kc-1', false)],
+    ['activateAccount', (c: KeycloakAdminClient) => c.activateAccount('kc-1', 'REG_1')],
+  ])('%s is classified the same way', async (_name, call) => {
+    onPut = 'hang';
+    await expect(call(client())).rejects.toBeInstanceOf(KeycloakWriteUnconfirmedError);
+    onPut = 400;
+    const refused = await call(client()).catch((caught: unknown) => caught);
+    expect(refused).not.toBeInstanceOf(KeycloakWriteUnconfirmedError);
+  });
+
+  it('the secret never reaches an unconfirmed error', async () => {
+    onPut = 'hang';
+    const error = await write().catch((caught: unknown) => caught);
     expect(JSON.stringify(error, Object.getOwnPropertyNames(error))).not.toContain(
       'client-secret-for-tests',
     );
