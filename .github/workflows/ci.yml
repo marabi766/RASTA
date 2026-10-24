@@ -1034,9 +1034,13 @@ jobs:
 
       - name: Refresh coordination against a real Redis
         # The coordinator's lease, fencing (the Lua itself), lost-lease and TTL
-        # tests, against this job's Redis service. REQUIRED makes a missing
-        # URL fail the step instead of quietly skipping the real run.
-        run: pnpm --filter @rasta/web exec jest src/server/refresh-coordinator
+        # tests, and the pending-write store's reserve/settle/release/capacity
+        # scripts (src/server/unresolved-request.spec.ts) and the supplier writes
+        # on top of them (lost response, two tabs, stale confirmation, Redis
+        # down; src/app/suppliers/supplier-actions.redis.spec.ts), against this
+        # job's Redis service. REQUIRED makes a missing URL fail the step instead of
+        # quietly skipping the real run.
+        run: pnpm --filter @rasta/web exec jest src/server/refresh-coordinator src/server/unresolved-request src/app/suppliers/supplier-actions.redis src/app/suppliers/supplier-store-integrity
         env:
           WEB_TEST_REDIS_URL: redis://localhost:6379
           WEB_TEST_REDIS_REQUIRED: 'true'

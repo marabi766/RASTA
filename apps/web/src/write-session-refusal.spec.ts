@@ -59,6 +59,7 @@ const MODULES = [
   'app/contracts/[id]/contract-actions',
   'app/tenders/[id]/bid-actions',
   'app/tenders/[id]/owner-actions',
+  'app/suppliers/supplier-actions',
 ] as const;
 
 const ACTIONS: Record<string, Record<string, Action>> = Object.fromEntries(
@@ -104,8 +105,8 @@ it('covers every server-action module in the portal', () => {
 });
 
 it('covers every write action in those modules', () => {
-  // 40 exported actions today; a new one is added to `ACTIONS` above.
-  expect(CASES.length).toBe(40);
+  // 46 exported actions today; a new one is added to `ACTIONS` above.
+  expect(CASES.length).toBe(46);
 });
 
 describe.each(CASES)('$name', ({ action }) => {
