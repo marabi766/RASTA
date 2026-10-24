@@ -12,6 +12,7 @@ import {
   GatewayRequestError,
   callGateway,
   gatewayUrl,
+  GatewayNeverSentError,
   neverSent,
   parseRetryAfter,
 } from './gateway';
@@ -100,6 +101,63 @@ describe('what goes on the wire', () => {
       // is the worst bug this file could have.
       expect(calls[0]!.init.cache).toBe('no-store');
     });
+  });
+
+  it('sends the replay deadline beside the key, as one canonical integer (D-065)', async () => {
+    const { impl, calls } = fakeFetch(new Response('{}', { status: 201 }));
+    await callGateway({
+      baseUrl: GATEWAY,
+      path: '/v1/projects',
+      method: 'POST',
+      body: {},
+      accessToken: 't',
+      idempotencyKey: 'key-0001',
+      replayDeadline: 1_900_000_000_123,
+      fetchImpl: impl,
+    });
+    const headers = calls[0]!.init.headers as Record<string, string>;
+    expect(headers['idempotency-key']).toBe('key-0001');
+    expect(headers['idempotency-replay-deadline']).toBe('1900000000123');
+  });
+
+  it('sends no deadline header unless one is given', async () => {
+    const { impl, calls } = fakeFetch(new Response('{}', { status: 201 }));
+    await callGateway({
+      baseUrl: GATEWAY,
+      path: '/v1/projects',
+      method: 'POST',
+      body: {},
+      accessToken: 't',
+      idempotencyKey: 'key-0001',
+      fetchImpl: impl,
+    });
+    expect(calls[0]!.init.headers as Record<string, string>).not.toHaveProperty(
+      'idempotency-replay-deadline',
+    );
+  });
+
+  it.each([
+    ['without a key', undefined, 1_900_000_000_123],
+    ['zero', 'k', 0],
+    ['negative', 'k', -5],
+    ['fractional', 'k', 1.5],
+    ['unsafe', 'k', 2 ** 53],
+    ['not a number', 'k', Number.NaN],
+  ])('refuses before fetching a deadline that is %s', async (_n, key, deadline) => {
+    const { impl, calls } = fakeFetch(new Response('{}', { status: 201 }));
+    await expect(
+      callGateway({
+        baseUrl: GATEWAY,
+        path: '/v1/projects',
+        method: 'POST',
+        body: {},
+        accessToken: 't',
+        idempotencyKey: key,
+        replayDeadline: deadline,
+        fetchImpl: impl,
+      }),
+    ).rejects.toThrow(/replay deadline/);
+    expect(calls).toHaveLength(0);
   });
 
   it('mints a correlation id when the caller has none', async () => {
@@ -246,6 +304,7 @@ describe('a read keeps today’s outcome; a write learns the outcome is unknown 
 
     expect(error).toBeInstanceOf(GatewayRequestError);
     expect(error).not.toBeInstanceOf(GatewayOutcomeUnknownError);
+    expect(error).toBeInstanceOf(GatewayNeverSentError);
     expect(error).toMatchObject({ status: 503 });
   });
 
