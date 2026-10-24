@@ -3860,6 +3860,23 @@ jobs:
           # The pull request's base must be present to diff against.
           fetch-depth: 0
 
+      # Reuse the existing root YAML parser only for PR analysis. --all on a
+      # main push still runs directly, without installing dependencies.
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        if: github.event_name == 'pull_request'
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: github.event_name == 'pull_request'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install scope parser from the frozen workspace lockfile
+        if: github.event_name == 'pull_request'
+        run: pnpm install --filter . --frozen-lockfile --ignore-scripts
+
       - name: Decide which images this change affects
         id: scope
         # L7-35: images were built and scanned only after merge, so a broken
@@ -3870,7 +3887,7 @@ jobs:
           set -euo pipefail
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             services="$(git diff --name-only "${{ github.event.pull_request.base.sha }}...HEAD" \
-              | node scripts/container-scope.mjs)"
+              | node scripts/container-scope.mjs --base "${{ github.event.pull_request.base.sha }}")"
           else
             services="$(node scripts/container-scope.mjs --all)"
           fi
