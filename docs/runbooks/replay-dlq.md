@@ -38,7 +38,7 @@
 
 **DLQ صندوق فراموشی نیست.** هر پیام باید بررسی و تعیین تکلیف شود.
 
-### اندازه‌ی پیام: سقف‌ها، آنچه ثابت شده و آنچه نه (PR #378 r2، r4)
+### اندازه‌ی پیام: سقف‌ها، آنچه ثابت شده و آنچه نه (PR #378 r2، r4، r5)
 
 هر Topic سقف `max.message.bytes` **صریح** دارد، ستون سوم
 [`topics.txt`](../../infrastructure/docker/kafka/topics.txt) که `pnpm kafka:acl:generate` از `TOPIC_CONSUMERS` می‌سازد.
@@ -93,7 +93,7 @@ check:kafka-topic-limits` برنامه را در `verify` و CI می‌سنجد.
 - **چه کسی روی مبدا می‌نویسد:** ACL هر سرویس فقط به Producer اعلام‌شده اجازه می‌دهد؛ Admin بوت‌استرپ Superuser است، و
   ACL سطح فشرده‌سازی را محدود نمی‌کند.
 
-**Broker موجود:** `create-topics.sh` هیچ سقفی را **پایین نمی‌آورد**. پیش از هر تغییر، سقف **واقعی** (Effective) همه‌ی Topicها را
+**Broker موجود:** یک اجرای تنهای `create-topics.sh` هیچ سقفی را **پایین نمی‌آورد**. پیش از هر تغییر، سقف **واقعی** (Effective) همه‌ی Topicها را
 می‌خواند (`kafka-configs --describe --all`، پس پیش‌فرض به‌ارث‌رسیده از Broker هم دیده می‌شود) و اگر خروجی را با اطمینان
 نخواند، بی‌هیچ تغییری شکست می‌خورد. سپس اول همه‌ی DLQها را می‌سازد یا بالا می‌برد، تا بالای بزرگ‌ترین سقفی که مبداهایشان
 خواهند داشت (برنامه یا سقف بزرگ‌تر موجود)، و بازمی‌خواند؛ فقط بعد Topicهای دیگر را می‌سازد یا تا سقف برنامه بالا
@@ -101,16 +101,36 @@ check:kafka-topic-limits` برنامه را در `verify` و CI می‌سنجد.
 هدفش یا زیر سقف قبلی‌اش نیست و هر DLQ بالای مبداهایش جا دارد. اجرای دوباره چیزی را تغییر نمی‌دهد؛ اجرای نیمه‌کاره هیچ
 مبدایی را بالاتر از جای DLQهایش نمی‌گذارد. Retention و Partition یک Topic موجود دست نمی‌خورد. سقفی که از پیش‌فرض Broker
 به ارث رسیده به ارث می‌ماند و با آن پیش‌فرض تغییر می‌کند. Topicی که باید کوچک شود کار اپراتور است، پس از تخلیه‌ی آن؛ این
-اسکریپت چنین گزینه‌ای ندارد. Broker محیط واقعی که پیش از این تغییر ساخته شده: اسکریپت را یک بار با Admin اجرا کن، یا
-دستی، فقط برای بالا بردن، پس از خواندن سقف واقعی:
+اسکریپت چنین گزینه‌ای ندارد.
+
+**هم‌زمانی (PR #378 r5، تصمیم PM D-066):** اسکریپت Topicها را یکی‌یکی و بی هیچ کار پس‌زمینه تغییر می‌دهد. پیش از
+بالا بردن هر Topic سقف واقعی **همان** Topic را دوباره می‌خواند و اگر با آنچه برنامه بر آن ساخته شده یکی نباشد، بی‌آنکه
+چیز دیگری را تغییر دهد می‌ایستد و می‌گوید دوباره اجرا کن؛ پس از بالا بردن، آن را بازمی‌خواند و اگر کمتر از بزرگ‌ترِ سقف
+قبلی و هدف باشد می‌ایستد. ساختن Topic شرطی است: اگر کسی در این فاصله آن را ساخته باشد Broker ساختن را رد می‌کند و اجرا
+می‌ایستد. اما تغییر Config در Kafka شرط «فقط اگر هنوز» ندارد — `IncrementalAlterConfigs` فقط نام، عمل و مقدار می‌گیرد
+([Schema نسخه‌ی 3.9.0](https://github.com/apache/kafka/blob/3.9.0/clients/src/main/resources/common/message/IncrementalAlterConfigsRequest.json)) —
+پس تغییری که میان آن خواندن دوباره و نوشتن این اجرا برسد **دیده نمی‌شود** و بازنویسی می‌شود: Provisioner دیگری روی
+Host دیگر فقط وقتی دیده می‌شود که تغییرش پیش از خواندن دوباره‌ی ما رسیده باشد. **پیش‌شرط:** در طول اجرا هیچ Provisioner
+دیگر، هیچ `kafka-configs --alter` دستی روی Topicها و هیچ تغییری در پیش‌فرض `message.max.bytes` خود Broker نباشد — دو
+Provisioner را هم‌زمان اجرا نکن. Compose برای هر Stack یک `kafka-init` دارد، هر Job در CI که Kafka لازم دارد Broker خودش
+را با `ci-up.sh` می‌سازد و یک بار Provision می‌کند، و تست‌های Broker اجراها را پشت سر هم می‌زنند. اگر اجرا با پیام
+«another writer» ایستاد، صبر کن تا نویسنده‌ی دیگر تمام کند و دوباره اجرا کن؛ اجرای دوباره DLQها را بالای سقف واقعی
+مبداها می‌برد.
+
+Broker محیط واقعی که پیش از این تغییر ساخته شده: اسکریپت را یک بار با Admin اجرا کن، یا دستی، فقط برای بالا بردن، با
+**همان پیش‌شرط** (هیچ Provisioner یا Operator دیگری هم‌زمان Config Topicها یا پیش‌فرض Broker را تغییر ندهد): درست پیش
+از `--alter` سقف واقعی را بخوان و پس از آن بازخوان:
 
 ```bash
 kafka-configs.sh --bootstrap-server <broker> --command-config <admin.properties> \
   --describe --all --entity-type topics --entity-name rasta.audit.v1.dlq | grep max.message.bytes
-# فقط اگر کمتر از سقف لازم است:
+# فقط اگر کمتر از سقف لازم است، و بلافاصله پس از خواندن بالا:
 kafka-configs.sh --bootstrap-server <broker> --command-config <admin.properties> \
   --alter --entity-type topics --entity-name rasta.audit.v1.dlq \
   --add-config max.message.bytes=1050565
+# بازخوانی: دست‌کم 1050565، وگرنه کس دیگری هم‌زمان نوشته است
+kafka-configs.sh --bootstrap-server <broker> --command-config <admin.properties> \
+  --describe --all --entity-type topics --entity-name rasta.audit.v1.dlq | grep max.message.bytes
 ```
 
 اول DLQها، بعد مبداها؛ سقف لازم یک DLQ روی مبدای بزرگ‌تر از ۱٬۰۴۸٬۵۸۸ همان فرمول است (`deadLetterMessageMaxBytes`).
