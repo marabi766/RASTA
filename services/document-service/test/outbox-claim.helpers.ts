@@ -58,6 +58,9 @@ export async function createProtocolSchema(): Promise<void> {
          AS 'SELECT pg_catalog.date_trunc(''milliseconds'', pg_catalog.now())'`,
     );
     await admin.client.$executeRawUnsafe(
+      `GRANT EXECUTE ON FUNCTION "${PROTOCOL_SCHEMA}".now() TO "${runtime}"`,
+    );
+    await admin.client.$executeRawUnsafe(
       `GRANT USAGE ON SCHEMA "${PROTOCOL_SCHEMA}" TO "${runtime}"`,
     );
     await admin.client.$executeRawUnsafe(
