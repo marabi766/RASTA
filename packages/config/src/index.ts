@@ -35,6 +35,8 @@ export {
   outboxPurgeOperationBudget,
   idempotencyClaimOperationBudget,
   urlWithProtocol,
+  urlWithProtocolMessages,
+  CONFIG_ENV_MESSAGES,
   httpUrlSchema,
   postgresUrlSchema,
   redisUrlSchema,
@@ -51,7 +53,19 @@ export type {
   OperationBudget,
 } from './env';
 
-export { UTC_SESSION_OPTION, withStatementTimeout, withUtcSession } from './database-session';
+export { ENV_PATH_PLACEHOLDER, envIssues, fixedEnvMessages } from './env-issues';
+export { envEnumFields } from './env-schema';
+export type { EnvEnumField } from './env-schema';
+export { envEnumProbes, envRefusalOf } from './env-probe';
+export type { EnvEnumProbe, EnvRefusal } from './env-probe';
+
+export {
+  DATABASE_URL_CONTROL_CHARACTER,
+  DATABASE_URL_REPEATED_OPTIONS,
+  UTC_SESSION_OPTION,
+  withStatementTimeout,
+  withUtcSession,
+} from './database-session';
 
 export {
   DATABASE_POOL_PARAMETERS,

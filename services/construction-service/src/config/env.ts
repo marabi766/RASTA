@@ -5,6 +5,7 @@ import {
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
@@ -17,6 +18,35 @@ import {
   PROJECT_STATES,
   type ProjectStateName,
 } from '../project/project.state-machine';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+
+const EVALUATORS_MIN_OVER_MAX = fixed(
+  'CONSTRUCTION_EVALUATION_MIN_EVALUATORS may not exceed CONSTRUCTION_EVALUATION_MAX_EVALUATORS: no bid could ever be complete',
+);
+const FOUR_EYES_OPT_OUT_REFUSED = fixed(
+  'CONSTRUCTION_TENDER_OPEN_FOUR_EYES=false is accepted only when NODE_ENV is development or test (Q-91)',
+);
+const KEK_CURRENT_NOT_IN_KEKS = fixed(
+  'CONSTRUCTION_TENDER_KEK_CURRENT must name one of the ids in CONSTRUCTION_TENDER_KEKS, ' +
+    'and be set exactly when CONSTRUCTION_TENDER_KEKS is',
+);
+
+const KEKS_MALFORMED = fixed(
+  'CONSTRUCTION_TENDER_KEKS must be id:base64 pairs (id a-z0-9-, 32 random bytes each)',
+);
+const KEK_CURRENT_MALFORMED = fixed('CONSTRUCTION_TENDER_KEK_CURRENT must be a KEK id (a-z0-9-)');
+
+const TENDER_OPEN_ROLES_REFUSED = fixed(
+  'CONSTRUCTION_TENDER_OPEN_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither opens or reads bids (ADR-066 § 4)',
+);
+const TENDER_EVALUATE_ROLES_REFUSED = fixed(
+  'CONSTRUCTION_TENDER_EVALUATE_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither evaluates bids (ADR-066 § 4, ADR-067 § 4)',
+);
+const TENDER_AWARD_ROLES_REFUSED = fixed(
+  'CONSTRUCTION_TENDER_AWARD_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither awards a tender (ADR-066 § 4, ADR-067 § 3)',
+);
 
 export const SERVICE_NAME = 'construction-service';
 
@@ -59,6 +89,11 @@ const REFUSED_ROLE = 'AUDITOR';
 export const COI_RULES = ['AWARDER_NOT_EVALUATOR', 'EVALUATOR_NOT_TENDER_AUTHOR'] as const;
 export type CoiRule = (typeof COI_RULES)[number];
 
+const UNKNOWN_COI_RULE = fixed(
+  `Unknown rule in CONSTRUCTION_COI_RULES; the closed set is ${COI_RULES.join(', ')}`,
+);
+const UNKNOWN_CANCELLABLE_STATE = fixed('Unknown state in CONSTRUCTION_CANCELLABLE_STATES');
+
 /** A comma-separated list, trimmed, with empty elements dropped. */
 function commaList() {
   return z.string().transform((raw) =>
@@ -71,12 +106,15 @@ function commaList() {
 
 /** A list of platform roles that may never include the oversight role. */
 function roleList(name: string, options: { min: number }) {
+  const unknownRole = fixed(`Unknown role in ${name}`);
   return commaList().pipe(
     z
-      .array(z.enum(PLATFORM_ROLES, { errorMap: () => ({ message: `Unknown role in ${name}` }) }))
-      .min(options.min, `${name} must name at least ${options.min} role`)
+      .array(z.enum(PLATFORM_ROLES, { errorMap: () => ({ message: unknownRole }) }))
+      .min(options.min, fixed(`${name} must name at least ${options.min} role`))
       .refine((roles) => !roles.includes(REFUSED_ROLE), {
-        message: `${name} may not name ${REFUSED_ROLE}: the oversight role has aggregate access only`,
+        message: fixed(
+          `${name} may not name ${REFUSED_ROLE}: the oversight role has aggregate access only`,
+        ),
       }),
   );
 }
@@ -210,8 +248,7 @@ export const constructionEnvSchema = baseEnvSchema
       .default('')
       .pipe(roleList('CONSTRUCTION_TENDER_OPEN_ROLES', { min: 0 }))
       .refine((roles) => !roles.includes('SYSTEM_ADMIN') && !roles.includes('CONTRACTOR'), {
-        message:
-          'CONSTRUCTION_TENDER_OPEN_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither opens or reads bids (ADR-066 § 4)',
+        message: TENDER_OPEN_ROLES_REFUSED,
       }),
 
     /**
@@ -233,8 +270,7 @@ export const constructionEnvSchema = baseEnvSchema
       .default('')
       .pipe(roleList('CONSTRUCTION_TENDER_EVALUATE_ROLES', { min: 0 }))
       .refine((roles) => !roles.includes('SYSTEM_ADMIN') && !roles.includes('CONTRACTOR'), {
-        message:
-          'CONSTRUCTION_TENDER_EVALUATE_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither evaluates bids (ADR-066 § 4, ADR-067 § 4)',
+        message: TENDER_EVALUATE_ROLES_REFUSED,
       }),
 
     /**
@@ -247,8 +283,7 @@ export const constructionEnvSchema = baseEnvSchema
       .default('')
       .pipe(roleList('CONSTRUCTION_TENDER_AWARD_ROLES', { min: 0 }))
       .refine((roles) => !roles.includes('SYSTEM_ADMIN') && !roles.includes('CONTRACTOR'), {
-        message:
-          'CONSTRUCTION_TENDER_AWARD_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither awards a tender (ADR-066 § 4, ADR-067 § 3)',
+        message: TENDER_AWARD_ROLES_REFUSED,
       }),
 
     /**
@@ -277,9 +312,7 @@ export const constructionEnvSchema = baseEnvSchema
         commaList().pipe(
           z.array(
             z.enum(COI_RULES, {
-              errorMap: () => ({
-                message: `Unknown rule in CONSTRUCTION_COI_RULES; the closed set is ${COI_RULES.join(', ')}`,
-              }),
+              errorMap: () => ({ message: UNKNOWN_COI_RULE }),
             }),
           ),
         ),
@@ -293,13 +326,14 @@ export const constructionEnvSchema = baseEnvSchema
           z
             .array(
               z.enum(PROJECT_STATES, {
-                errorMap: () => ({ message: 'Unknown state in CONSTRUCTION_CANCELLABLE_STATES' }),
+                errorMap: () => ({ message: UNKNOWN_CANCELLABLE_STATE }),
               }),
             )
             .refine((states) => states.every((state) => CANCELLABLE_BY_LIFECYCLE.includes(state)), {
-              message:
+              message: fixed(
                 'CONSTRUCTION_CANCELLABLE_STATES may only name states the lifecycle can cancel from: ' +
-                CANCELLABLE_BY_LIFECYCLE.join(', '),
+                  CANCELLABLE_BY_LIFECYCLE.join(', '),
+              ),
             }),
         ),
       ),
@@ -312,8 +346,11 @@ export const constructionEnvSchema = baseEnvSchema
           z.array(
             z
               .string()
-              .min(2, 'Each CONSTRUCTION_OPERATION_TYPES entry must be 2 to 100 characters')
-              .max(100, 'Each CONSTRUCTION_OPERATION_TYPES entry must be 2 to 100 characters'),
+              .min(2, fixed('Each CONSTRUCTION_OPERATION_TYPES entry must be 2 to 100 characters'))
+              .max(
+                100,
+                fixed('Each CONSTRUCTION_OPERATION_TYPES entry must be 2 to 100 characters'),
+              ),
           ),
         ),
       ),
@@ -503,8 +540,7 @@ export const constructionEnvSchema = baseEnvSchema
           }
         },
         {
-          message:
-            'CONSTRUCTION_TENDER_KEKS must be id:base64 pairs (id a-z0-9-, 32 random bytes each)',
+          message: KEKS_MALFORMED,
         },
       ),
     /** The id in `CONSTRUCTION_TENDER_KEKS` that wraps new tender keys; older ones only unwrap. */
@@ -512,7 +548,7 @@ export const constructionEnvSchema = baseEnvSchema
       .string()
       .optional()
       .refine((value) => value === undefined || value === '' || isKekId(value), {
-        message: 'CONSTRUCTION_TENDER_KEK_CURRENT must be a KEK id (a-z0-9-)',
+        message: KEK_CURRENT_MALFORMED,
       }),
 
     /**
@@ -613,8 +649,7 @@ export const constructionEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['CONSTRUCTION_EVALUATION_MIN_EVALUATORS'],
-        message:
-          'CONSTRUCTION_EVALUATION_MIN_EVALUATORS may not exceed CONSTRUCTION_EVALUATION_MAX_EVALUATORS: no bid could ever be complete',
+        message: EVALUATORS_MIN_OVER_MAX,
       });
     }
     if (
@@ -625,8 +660,7 @@ export const constructionEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['CONSTRUCTION_TENDER_OPEN_FOUR_EYES'],
-        message:
-          'CONSTRUCTION_TENDER_OPEN_FOUR_EYES=false is accepted only when NODE_ENV is development or test (Q-91)',
+        message: FOUR_EYES_OPT_OUT_REFUSED,
       });
     }
     try {
@@ -640,12 +674,12 @@ export const constructionEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['CONSTRUCTION_TENDER_KEK_CURRENT'],
-        message:
-          'CONSTRUCTION_TENDER_KEK_CURRENT must name one of the ids in CONSTRUCTION_TENDER_KEKS, ' +
-          'and be set exactly when CONSTRUCTION_TENDER_KEKS is',
+        message: KEK_CURRENT_NOT_IN_KEKS,
       });
     }
   });
+
+export const CONSTRUCTION_ENV_MESSAGES = seal();
 
 export type ConstructionEnv = z.infer<typeof constructionEnvSchema>;
 
@@ -672,7 +706,7 @@ export function loadConstructionEnv(source: NodeJS.ProcessEnv = process.env): Co
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: constructionOperationBudgets },
+    { operationBudgets: constructionOperationBudgets, fixedMessages: CONSTRUCTION_ENV_MESSAGES },
   );
 }
 

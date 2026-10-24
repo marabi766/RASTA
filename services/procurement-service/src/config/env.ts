@@ -9,12 +9,30 @@ import {
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
 } from '@rasta/config';
 import { procurementOperationBudgets } from './operation-budgets';
 import { isKekId, parseKekConfiguration, parseKekEntries } from '../rfq/key-provider';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+
+const KEK_CURRENT_NOT_IN_KEKS = fixed(
+  'PROCUREMENT_RFQ_KEK_CURRENT must name one of the ids in PROCUREMENT_RFQ_KEKS, ' +
+    'and be set exactly when PROCUREMENT_RFQ_KEKS is',
+);
+
+const RESERVED_CANCELLATION_CODE = fixed(
+  'PROCUREMENT_RFQ_CANCELLATION_CODES may not name NO_QUALIFIED_QUOTATION: it ' +
+    'arrives with evaluation (plan PR 10), which checks it',
+);
+const KEKS_MALFORMED = fixed(
+  'PROCUREMENT_RFQ_KEKS must be id:base64 pairs (id a-z0-9-, 32 random bytes each)',
+);
+const KEK_CURRENT_MALFORMED = fixed('PROCUREMENT_RFQ_KEK_CURRENT must be a KEK id (a-z0-9-)');
 
 export const SERVICE_NAME = 'procurement-service';
 
@@ -86,15 +104,20 @@ function commaList() {
 
 /** A list of platform roles of the buyer's own organization: never the oversight role or the operator. */
 function roleList(name: string, options: { min: number }) {
+  const unknownRole = fixed(`Unknown role in ${name}`);
   return commaList().pipe(
     z
-      .array(z.enum(PLATFORM_ROLES, { errorMap: () => ({ message: `Unknown role in ${name}` }) }))
-      .min(options.min, `${name} must name at least ${options.min} role`)
+      .array(z.enum(PLATFORM_ROLES, { errorMap: () => ({ message: unknownRole }) }))
+      .min(options.min, fixed(`${name} must name at least ${options.min} role`))
       .refine((roles) => !roles.includes(REFUSED_ROLE), {
-        message: `${name} may not name ${REFUSED_ROLE}: the oversight role has aggregate access only`,
+        message: fixed(
+          `${name} may not name ${REFUSED_ROLE}: the oversight role has aggregate access only`,
+        ),
       })
       .refine((roles) => !roles.includes(PLATFORM_ROLE), {
-        message: `${name} may not name ${PLATFORM_ROLE}: the platform operator never acts for a buyer`,
+        message: fixed(
+          `${name} may not name ${PLATFORM_ROLE}: the platform operator never acts for a buyer`,
+        ),
       }),
   );
 }
@@ -245,12 +268,12 @@ export const procurementEnvSchema = baseEnvSchema
                 .string()
                 .regex(
                   RFQ_CANCELLATION_CODE_PATTERN,
-                  'A cancellation code is upper-case words, 2 to 64 characters',
+                  fixed('A cancellation code is upper-case words, 2 to 64 characters'),
                 ),
             )
-            .min(1, 'PROCUREMENT_RFQ_CANCELLATION_CODES must name at least one code')
+            .min(1, fixed('PROCUREMENT_RFQ_CANCELLATION_CODES must name at least one code'))
             .refine((codes) => new Set(codes).size === codes.length, {
-              message: 'PROCUREMENT_RFQ_CANCELLATION_CODES names a code twice',
+              message: fixed('PROCUREMENT_RFQ_CANCELLATION_CODES names a code twice'),
             })
             .refine(
               (codes) =>
@@ -258,9 +281,7 @@ export const procurementEnvSchema = baseEnvSchema
                   (RESERVED_RFQ_CANCELLATION_CODES as readonly string[]).includes(code),
                 ),
               {
-                message:
-                  'PROCUREMENT_RFQ_CANCELLATION_CODES may not name NO_QUALIFIED_QUOTATION: it ' +
-                  'arrives with evaluation (plan PR 10), which checks it',
+                message: RESERVED_CANCELLATION_CODE,
               },
             ),
         ),
@@ -294,8 +315,7 @@ export const procurementEnvSchema = baseEnvSchema
           }
         },
         {
-          message:
-            'PROCUREMENT_RFQ_KEKS must be id:base64 pairs (id a-z0-9-, 32 random bytes each)',
+          message: KEKS_MALFORMED,
         },
       ),
     /** The id in `PROCUREMENT_RFQ_KEKS` that wraps new RFQ keys; older ones only unwrap. */
@@ -303,7 +323,7 @@ export const procurementEnvSchema = baseEnvSchema
       .string()
       .optional()
       .refine((value) => value === undefined || value === '' || isKekId(value), {
-        message: 'PROCUREMENT_RFQ_KEK_CURRENT must be a KEK id (a-z0-9-)',
+        message: KEK_CURRENT_MALFORMED,
       }),
 
     /**
@@ -438,12 +458,12 @@ export const procurementEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['PROCUREMENT_RFQ_KEK_CURRENT'],
-        message:
-          'PROCUREMENT_RFQ_KEK_CURRENT must name one of the ids in PROCUREMENT_RFQ_KEKS, ' +
-          'and be set exactly when PROCUREMENT_RFQ_KEKS is',
+        message: KEK_CURRENT_NOT_IN_KEKS,
       });
     }
   });
+
+export const PROCUREMENT_ENV_MESSAGES = seal();
 
 export type ProcurementEnv = z.infer<typeof procurementEnvSchema>;
 
@@ -467,7 +487,7 @@ export function loadProcurementEnv(source: NodeJS.ProcessEnv = process.env): Pro
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: procurementOperationBudgets },
+    { operationBudgets: procurementOperationBudgets, fixedMessages: PROCUREMENT_ENV_MESSAGES },
   );
 }
 

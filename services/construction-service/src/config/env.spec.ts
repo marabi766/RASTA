@@ -1,8 +1,10 @@
+import { envEnumProbes } from '@rasta/config';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EVIDENCE_MAX_CHAIN_LINKS } from '../tender/evidence-limits';
 import {
   brokersOf,
+  constructionEnvSchema,
   corsOrigins,
   DEFAULT_PORT,
   loadConstructionEnv,
@@ -683,5 +685,36 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)'
     expect(() =>
       load({ ...slowTransactions, DATABASE_STATEMENT_TIMEOUT_MS: '60001' }),
     ).not.toThrow();
+  });
+});
+
+/**
+ * Refusals never carry the value written (S-09, #385 r2 F2): every enum setting, found by
+ * walking the schema rather than listed, set to each of two sentinels, is refused alike, with
+ * neither in the issues, the error's message or its stack (what the startup log prints).
+ */
+describe('enum settings are refused without the value written (#385 r2 F2)', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+  const probes = envEnumProbes(
+    constructionEnvSchema,
+    (source) => loadConstructionEnv(source),
+    BASE,
+    SENTINELS,
+  );
+
+  it('are found by walking the schema, the ones the r2 review named among them', () => {
+    expect(probes.map((probe) => probe.name)).toEqual(
+      expect.arrayContaining(['NODE_ENV', 'LOG_LEVEL', 'KAFKA_SASL_MECHANISM']),
+    );
+  });
+
+  it.each(probes.map((probe) => [probe.name, probe] as const))('%s', (name, probe) => {
+    expect(probe.codes).toContain('invalid_enum_value');
+    const [a, b] = probe.refusals;
+    expect(a).toEqual(b);
+    for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
+    expect(a.issues.some((issue) => issue.path === name || issue.path.startsWith(`${name}.`))).toBe(
+      true,
+    );
   });
 });

@@ -4,6 +4,7 @@ import {
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   kafkaSaslConfigured,
   loadEnv,
@@ -11,6 +12,9 @@ import {
   PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
 } from '@rasta/config';
 import { marketplaceOperationBudgets } from './operation-budgets';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
 
 /**
  * marketplace-service configuration.
@@ -195,10 +199,13 @@ export const marketplaceEnvSchema = baseEnvSchema
       env.MARKETPLACE_IDEMPOTENCY_TTL_HOURS * 60 * 60,
     {
       path: ['MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS'],
-      message:
+      message: fixed(
         'MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS must be shorter than MARKETPLACE_IDEMPOTENCY_TTL_HOURS',
+      ),
     },
   );
+
+export const MARKETPLACE_ENV_MESSAGES = seal();
 
 export type MarketplaceEnv = z.infer<typeof marketplaceEnvSchema>;
 
@@ -214,7 +221,7 @@ export function loadMarketplaceEnv(source: NodeJS.ProcessEnv = process.env): Mar
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'marketplace-service.main',
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: marketplaceOperationBudgets },
+    { operationBudgets: marketplaceOperationBudgets, fixedMessages: MARKETPLACE_ENV_MESSAGES },
   );
   assertReturnMirrorMayStart(env);
   return env;
