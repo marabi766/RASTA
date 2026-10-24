@@ -14,8 +14,7 @@
  * session is the first gate, so nothing after it runs either way.
  */
 
-import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { discoverServerActions, scanServerActions } from './test/server-action-discovery';
 
 let forwarded = new Headers();
 
@@ -36,27 +35,12 @@ const { REFRESH_UNAVAILABLE, SESSION_STATE_HEADER } =
 type Action = (...args: never[]) => Promise<unknown>;
 
 /**
- * Every `'use server'` module under `src/app`, by its path: found by walking
- * the tree, so a new action module is covered without being listed anywhere.
+ * Every `'use server'` module under `src`, found by parsing the sources
+ * (`test/server-action-discovery.ts`): a new action module is covered without
+ * being listed anywhere, and an inline directive cannot hide from the cases.
  */
-function discoverModules(): string[] {
-  const found: string[] = [];
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (/\.ts$/.test(entry.name) && !/\.spec\.ts$/.test(entry.name)) {
-        if (/^'use server';/.test(readFileSync(full, 'utf8'))) {
-          found.push(relative(__dirname, full).replace(/\.ts$/, ''));
-        }
-      }
-    }
-  };
-  walk(join(__dirname, 'app'));
-  return found.sort();
-}
-
-const MODULES = discoverModules();
+const DISCOVERED = discoverServerActions(__dirname);
+const MODULES = DISCOVERED.modules;
 
 const ACTIONS: Record<string, Record<string, unknown>> = Object.fromEntries(
   MODULES.map((path) => [path, require(`./${path}`) as Record<string, unknown>]),
@@ -93,6 +77,31 @@ beforeEach(() => {
 
 it('finds the server-action modules', () => {
   expect(MODULES.length).toBeGreaterThan(0);
+});
+
+it('has no inline server action: a function-scoped directive is outside the cases', () => {
+  // Message: move it to a 'use server' module.
+  expect(DISCOVERED.inline).toEqual([]);
+});
+
+describe('discovery (negative control)', () => {
+  const body = 'export async function submitDummy() { return { kind: "OK" }; }\n';
+  it.each([
+    ['a leading comment', `// wallet actions\n'use server';\n${body}`],
+    ['a blank line first', `\n\n'use server';\n${body}`],
+    ['double quotes', `"use server";\n${body}`],
+    ['no semicolon', `'use server'\n${body}`],
+    ['a block comment and tsx', `/* x */\n"use server"\n${body}`],
+  ])('finds a module with %s', (_, source) => {
+    expect(scanServerActions(source, 'x.tsx')).toEqual({ fileLevel: true, inline: [] });
+  });
+  it('finds an inline directive, with its line', () => {
+    const source = `export async function a() {\n  "use server";\n  return 1;\n}\n`;
+    expect(scanServerActions(source, 'x.ts')).toEqual({ fileLevel: false, inline: [2] });
+  });
+  it('does not take a string in the middle of a file for a directive', () => {
+    expect(scanServerActions(`const a = 1;\n'use server';\n`, 'x.ts').fileLevel).toBe(false);
+  });
 });
 
 it('covers every exported action of every module: each is a `submit*` function', () => {
