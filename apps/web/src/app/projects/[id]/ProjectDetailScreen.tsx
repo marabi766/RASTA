@@ -1,5 +1,16 @@
-import { EmptyState, ErrorState, Identifier, NoAccessState, Section, StatusBadge } from '@/ui';
+import type { ReactNode } from 'react';
+
+import {
+  Alert,
+  EmptyState,
+  ErrorState,
+  Identifier,
+  NoAccessState,
+  Section,
+  StatusBadge,
+} from '@/ui';
 import { formatJalaliDateLong, toPersianDigits } from '@/lib/format';
+import { PROJECT_NOTICE_TEXT, type ProjectNotice } from '@/lib/project-commands';
 import { projectStatusLabel } from '@/lib/project-fields';
 import type { ProjectDetail, ReadResult } from '@/server/projects';
 import { DemoModeNotice } from '@/app/DemoModeNotice';
@@ -8,24 +19,42 @@ import type { DemoMode } from '@/lib/demo-mode';
 import { formatEstimate } from '../ProjectsScreen';
 
 /**
- * The project detail (docs/16 § ۱۶٫۶, `/projects/[id]`), read-only.
+ * The project detail (docs/16 § ۱۶٫۶, `/projects/[id]`): the record, and the
+ * write slots the page fills in — the commands the status offers, the approval
+ * rounds with their policy.
  *
  * Every outcome the server can hand back is rendered. A project of another
  * organization answers 404 from the service, and is shown with the same words
  * as an id that does not exist: a distinct "exists but not yours" would
  * confirm the id to somebody who should not learn it.
  *
- * The approval flow, needs, tenders and progress are separate slices; this
- * screen shows the record itself.
+ * Needs, tenders and progress reports are separate slices; this screen shows
+ * the record, its approvals and the commands on the project itself.
  */
 
 export interface ProjectDetailScreenProps {
   readonly result: ReadResult<ProjectDetail>;
+  /**
+   * What the write that sent the person here did — decided by the page, which
+   * accepts it only from a flash the server signed for this session and this
+   * project (`readFlash`).
+   */
+  readonly notice?: ProjectNotice;
   /** What the provider says (`fetchDemoMode`, Q-14), over the estimate. Nothing here moves money. */
   readonly demoMode: DemoMode;
+  /** The approval policy's state and the rounds, built by the page. */
+  readonly approvals?: ReactNode;
+  /** The commands the status offers, built by the page from the same read. */
+  readonly commands?: ReactNode;
 }
 
-export function ProjectDetailScreen({ result, demoMode }: ProjectDetailScreenProps) {
+export function ProjectDetailScreen({
+  result,
+  demoMode,
+  notice,
+  approvals,
+  commands,
+}: ProjectDetailScreenProps) {
   if (result.kind === 'FORBIDDEN') {
     return <NoAccessState description="این پروژه در اختیار شما نیست." />;
   }
@@ -54,6 +83,9 @@ export function ProjectDetailScreen({ result, demoMode }: ProjectDetailScreenPro
   return (
     <div className="flex flex-col gap-6">
       <DemoModeNotice mode={demoMode} />
+      {notice ? (
+        <Alert tone={PROJECT_NOTICE_TEXT[notice].tone}>{PROJECT_NOTICE_TEXT[notice].text}</Alert>
+      ) : null}
       <Section headingId="project-summary" title={project.title}>
         <div className="flex flex-wrap items-center gap-3">
           <StatusBadge status={project.status} label={projectStatusLabel(project.status)} />
@@ -112,6 +144,9 @@ export function ProjectDetailScreen({ result, demoMode }: ProjectDetailScreenPro
           </ul>
         </Section>
       ) : null}
+
+      {approvals}
+      {commands}
     </div>
   );
 }

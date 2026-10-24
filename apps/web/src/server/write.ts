@@ -5,6 +5,7 @@ import type { z } from 'zod';
 import { toPersianDigits } from '@/lib/format';
 import {
   callGateway,
+  GatewayNeverSentError,
   GatewayOutcomeUnknownError,
   GatewayRequestError,
   type GatewayProblem,
@@ -51,8 +52,25 @@ export type WriteResult<T, F extends string> =
   /** The thing written *about* is not visible to this person — the platform's
    *  non-disclosure 404. */
   | { readonly kind: 'NOT_FOUND'; readonly correlationId: string }
-  /** Refused before it could act: nothing was written. */
-  | { readonly kind: 'UNAVAILABLE'; readonly status: number; readonly correlationId: string }
+  /**
+   * Refused before it could act: nothing was written. `neverSent` is set when
+   * the request provably never left this portal (connection refused, DNS …):
+   * unlike a 503 the platform answered, which may follow a commit, that one is
+   * known not to have reached anything — a write need not remember it as
+   * unresolved.
+   */
+  | {
+      readonly kind: 'UNAVAILABLE';
+      readonly status: number;
+      readonly correlationId: string;
+      readonly neverSent?: true;
+      /**
+       * The owning service refused because the replay deadline this write carried is behind its own
+       * clock (`409 REPLAY_WINDOW_CLOSED`, PM decision D-065). A proven refusal of THIS attempt: nothing
+       * was written by it. It says nothing about an earlier attempt under the same key.
+       */
+      readonly replayWindowClosed?: true;
+    }
   /**
    * Sent, and possibly committed, but not confirmed (Codex post-merge review
    * of #106): the connection failed after dispatch, this portal's deadline
@@ -246,8 +264,14 @@ export function mapProblemToFields<F extends string>(
 export interface WriteCall<S extends z.ZodTypeAny, F extends string> {
   readonly path: string;
   readonly body: unknown;
-  /** The submission id — sent as `Idempotency-Key`; see `submission.ts`. */
-  readonly submissionId: string;
+  /**
+   * The submission id — sent as `Idempotency-Key`; see `submission.ts`. Left out
+   * for a service that takes no key (supplier-service's six writes): sending one
+   * would suggest a retry is safe, and it is not.
+   */
+  readonly submissionId?: string;
+  /** The last instant this write may be executed under its key (needs `submissionId`); see `GatewayCall.replayDeadline`. */
+  readonly replayDeadline?: number;
   /** What the created resource must look like; everything else is dropped. */
   readonly schema: S;
   readonly mapping: FieldMapping<F>;
@@ -274,6 +298,7 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
       body: call.body,
       accessToken: session.accessToken,
       idempotencyKey: call.submissionId,
+      replayDeadline: call.replayDeadline,
       fetchImpl: call.fetchImpl,
     });
 
@@ -301,6 +326,10 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
         correlationId,
       };
     }
+    // Before the generic 409 below, which would turn it into a message on a field.
+    if (status === 409 && problem?.code === 'REPLAY_WINDOW_CLOSED') {
+      return { kind: 'UNAVAILABLE', status, correlationId, replayWindowClosed: true };
+    }
     if (status === 403) {
       const reasons = (problem?.details ?? []).flatMap((detail) =>
         detail.code !== undefined ? [detail.code] : [],
@@ -314,6 +343,9 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
         correlationId,
         ...mapProblemToFields(problem, call.mapping, status),
       };
+    }
+    if (error instanceof GatewayNeverSentError) {
+      return { kind: 'UNAVAILABLE', status, correlationId, neverSent: true };
     }
     return { kind: 'UNAVAILABLE', status, correlationId };
   }
