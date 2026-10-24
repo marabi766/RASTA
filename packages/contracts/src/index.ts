@@ -58,6 +58,8 @@ export type { BusinessLine } from './common/business-line';
 export { ERROR_CODES, ERROR_STATUS, errorDetailSchema, apiErrorSchema } from './common/errors';
 export type { ErrorCode, ErrorDetail, ApiError } from './common/errors';
 
+export { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from './common/replay-window';
+
 export {
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,

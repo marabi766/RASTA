@@ -21,6 +21,21 @@ export const CLAIM_WAIT_MS = 5_000;
 /** Slack for a claim-side transaction beyond its lock wait, so the wait ends first. */
 export const WAIT_TRANSACTION_SLACK_MS = 2_000;
 
+/**
+ * The replay fence's slack (PM decision D-065): a claim reads its clock once, and the insert it
+ * decides can run up to a claim's whole wait (`CLAIM_WAIT_MS` plus its transaction slack) later.
+ */
+export const REPLAY_FENCE_MARGIN_MS = CLAIM_WAIT_MS + WAIT_TRANSACTION_SLACK_MS;
+
+/**
+ * B, the fence budget in ms: how much earlier than the record's own expiry a replay deadline ends,
+ * and how much later than that expiry the purge may delete. `B = 2·skew + margin` — two replicas'
+ * clocks may each be off by `skew` in opposite directions (the one that claimed, the one that asks).
+ */
+export function replayFenceBudgetMs(clockSkewSeconds: number): number {
+  return 2 * clockSkewSeconds * 1000 + REPLAY_FENCE_MARGIN_MS;
+}
+
 export function constructionOperationBudgets(env: ConstructionEnv): readonly OperationBudget[] {
   return [
     // Every other domain transaction and the three sweepers' per-item work: the
