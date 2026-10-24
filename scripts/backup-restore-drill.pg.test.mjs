@@ -513,3 +513,50 @@ test('SOURCE default drift and unstable simulated REF refuse, then original refe
     true,
   );
 });
+
+test('sequence NULL ACL equals explicit owner defaults, but a real SELECT revocation refuses', () => {
+  const db = `${database}_sequence_acl`;
+  sql(`CREATE DATABASE ${db} TEMPLATE template0`, 'postgres');
+  try {
+    sql(
+      `GRANT CREATE ON SCHEMA public TO drill_metadata_owner;
+      SET ROLE drill_metadata_owner;
+      CREATE SEQUENCE public.default_acl_counter;
+      RESET ROLE;`,
+      db,
+    );
+    const state = () => JSON.parse(sql(OBJECT_STATE_SQL, db));
+    const allowed = () =>
+      sql(
+        "SELECT has_sequence_privilege('drill_metadata_owner', 'public.default_acl_counter', 'SELECT')",
+        db,
+      );
+    assert.equal(
+      sql(
+        "SELECT relacl IS NULL FROM pg_class WHERE oid='public.default_acl_counter'::regclass",
+        db,
+      ),
+      't',
+    );
+    assert.equal(allowed(), 't');
+    const baseline = state();
+    sql('REVOKE ALL ON SEQUENCE public.default_acl_counter FROM drill_metadata_reader', db);
+    assert.equal(
+      sql(
+        "SELECT relacl IS NULL FROM pg_class WHERE oid='public.default_acl_counter'::regclass",
+        db,
+      ),
+      'f',
+    );
+    assert.equal(allowed(), 't');
+    assert.deepEqual(state(), baseline);
+    sql('REVOKE SELECT ON SEQUENCE public.default_acl_counter FROM drill_metadata_owner', db);
+    assert.equal(allowed(), 'f');
+    assert.notDeepEqual(state(), baseline);
+    sql('GRANT SELECT ON SEQUENCE public.default_acl_counter TO drill_metadata_owner', db);
+    assert.equal(allowed(), 't');
+    assert.deepEqual(state(), baseline);
+  } finally {
+    sql(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`, 'postgres');
+  }
+});
