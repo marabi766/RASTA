@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
 // Row counts and money stay decimal strings: PostgreSQL count/SUM can exceed JS's safe integer.
@@ -24,6 +26,18 @@ function validateSnapshot(snapshot) {
   if (!state?.owner || !Object.hasOwn(state, 'acl') || !Array.isArray(state.settings)) {
     throw new Error('Missing database state');
   }
+  const objects = snapshot.objectState;
+  if (
+    !objects ||
+    !Array.isArray(objects.schemas) ||
+    !objects.schemas.length ||
+    !Array.isArray(objects.relations) ||
+    !objects.relations.length ||
+    !Array.isArray(objects.defaultPrivileges) ||
+    !Array.isArray(objects.sequences)
+  ) {
+    throw new Error('Missing object state');
+  }
   if (!Array.isArray(snapshot.migrations) || !snapshot.migrations.length) {
     throw new Error('Missing migration ledger');
   }
@@ -42,6 +56,7 @@ export function compareSnapshots(source, restored) {
     tablesEqual: isDeepStrictEqual(source.tables, restored.tables),
     migrationsEqual: isDeepStrictEqual(source.migrations, restored.migrations),
     databaseStateEqual: isDeepStrictEqual(source.databaseState, restored.databaseState),
+    objectStateEqual: isDeepStrictEqual(source.objectState, restored.objectState),
   };
 }
 
@@ -76,7 +91,9 @@ export function drillPassed(databases, expectedCount, sourceLedger, restoredLedg
   return (
     expectedCount > 0 &&
     databases.length === expectedCount &&
-    databases.every((db) => db.tablesEqual && db.migrationsEqual && db.databaseStateEqual) &&
+    databases.every(
+      (db) => db.tablesEqual && db.migrationsEqual && db.databaseStateEqual && db.objectStateEqual,
+    ) &&
     compareLedgers(sourceLedger, restoredLedger)
   );
 }
@@ -103,6 +120,74 @@ export function checkDatabaseCoverage(actual, expected) {
   )
     throw new Error('Database coverage mismatch');
 }
+
+/** Schema files are independent of bootstrap's RASTA_SERVICES; discovery fails closed. */
+export function discoverSchemaServices(root) {
+  const services = readdirSync(join(root, 'services'), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.endsWith('-service'))
+    .filter((entry) => readdirSync(join(root, 'services', entry.name)).includes('prisma'))
+    .map((entry) => {
+      const schema = readFileSync(
+        join(root, 'services', entry.name, 'prisma/schema.prisma'),
+        'utf8',
+      );
+      if (!schema.trim()) throw new Error(`Empty schema: ${entry.name}`);
+      return entry.name.slice(0, -'-service'.length).replaceAll('-', '_');
+    })
+    .sort();
+  if (!services.length) throw new Error('Empty schema discovery');
+  return services;
+}
+
+export function checkServiceCoverage(discovered, configured) {
+  const missing = discovered.filter((name) => !configured.includes(name));
+  const extra = configured.filter((name) => !discovered.includes(name));
+  if (
+    !discovered.length ||
+    !configured.length ||
+    missing.length ||
+    extra.length ||
+    new Set(configured).size !== configured.length
+  ) {
+    throw new Error(
+      `Service coverage mismatch: missing from RASTA_SERVICES [${missing}]; absent schemas [${extra}]`,
+    );
+  }
+}
+
+// Use role names, never cluster-local OIDs. ACL text and all arrays use C ordering.
+export const OBJECT_STATE_SQL = `
+WITH namespaces AS (
+  SELECT * FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+  AND nspname NOT LIKE 'pg_toast%' AND nspname NOT LIKE 'pg_temp_%'
+), relations AS (
+  SELECT c.*, n.nspname FROM pg_class c JOIN namespaces n ON n.oid = c.relnamespace
+  WHERE c.relkind IN ('r', 'p', 'S', 'v', 'm', 'f')
+)
+SELECT json_build_object(
+  'schemas', (SELECT coalesce(json_agg(json_build_object('name', nspname,
+    'owner', pg_get_userbyid(nspowner)) ORDER BY nspname COLLATE "C"), '[]'::json) FROM namespaces),
+  'relations', (SELECT coalesce(json_agg(json_build_object('name', nspname || '.' || relname,
+    'kind', relkind, 'owner', pg_get_userbyid(relowner),
+    'acl', (SELECT json_agg(a::text ORDER BY a::text COLLATE "C") FROM unnest(relacl) a))
+    ORDER BY nspname COLLATE "C", relname COLLATE "C"), '[]'::json) FROM relations),
+  'defaultPrivileges', (SELECT coalesce(json_agg(json_build_object(
+    'role', pg_get_userbyid(d.defaclrole), 'schema', coalesce(n.nspname, '*'),
+    'kind', d.defaclobjtype,
+    'acl', (SELECT json_agg(a::text ORDER BY a::text COLLATE "C") FROM unnest(d.defaclacl) a))
+    ORDER BY pg_get_userbyid(d.defaclrole) COLLATE "C", coalesce(n.nspname, '*') COLLATE "C", d.defaclobjtype),
+    '[]'::json) FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace));
+`;
+
+// Read every sequence directly; pg_sequences alone does not expose is_called.
+export const SEQUENCES_SQL = `
+SELECT format('SELECT json_build_object(''name'', %L, ''last_value'', last_value::text,
+  ''is_called'', is_called) FROM %I.%I', n.nspname || '.' || c.relname, n.nspname, c.relname)
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind = 'S' AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+ORDER BY n.nspname COLLATE "C", c.relname COLLATE "C"
+\\gexec
+`;
 
 export const DATABASE_STATE_SQL = `
 SELECT json_build_object('owner', pg_get_userbyid(d.datdba),

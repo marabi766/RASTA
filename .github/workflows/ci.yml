@@ -1210,7 +1210,7 @@ jobs:
     name: Integration tests and database guards
     runs-on: ubuntu-latest
     # About 11.5 minutes on main run 38600385830 (setup ~4m, the suites 428 s,
-    # the guards 28 s). Keep the job bounded at 25 minutes.
+    # the guards 28 s). 25 is twice that, and the suites carry their own 12.
     # History of the single job's limit: 60 (#197), 35 once reversibility
     # moved out (#198), 50 as #273's stopgap until this split.
     timeout-minutes: 25
@@ -1525,10 +1525,7 @@ jobs:
         # PostgreSQL they measured shared WAL load, not the upsert (docs/14
         # § 14.3). Never `turbo run test:integration` directly — that runs
         # the workspace phase only; `check:test-phases` enforces it.
-        # Run 40048560391 spent 11m18s in the successful workspace phase,
-        # leaving too little of the old 12m for the mandatory exclusive phase.
-        # Keep both phases and every assertion; the enclosing job stays at 25m.
-        timeout-minutes: 16
+        timeout-minutes: 12
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
@@ -1666,15 +1663,6 @@ jobs:
         # clean, its rows intact and its trigger out of the runtime role's reach.
         timeout-minutes: 5
         run: pnpm run test:db-runtime-privileges
-        env:
-          PGHOST: localhost
-          PGPORT: '5432'
-          PGUSER: rasta
-          PGPASSWORD: rasta_ci_password
-
-      - name: Backup restore SQL on a disposable database
-        timeout-minutes: 5
-        run: pnpm run test:backup-restore-drill-pg
         env:
           PGHOST: localhost
           PGPORT: '5432'
@@ -2718,13 +2706,60 @@ jobs:
           DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
           DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
 
+  # Independent database-only gate: creates its own migrated fixture databases.
+  integration-backup-drill:
+    name: Backup restore PostgreSQL drill
+    runs-on: ubuntu-latest
+    needs: quality
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
+        env:
+          POSTGRES_USER: rasta
+          POSTGRES_PASSWORD: rasta_ci_password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rasta"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Provision databases, roles and extensions
+        env:
+          PGPASSWORD: rasta_ci_password
+          RASTA_DB_BOOTSTRAP: compose
+          POSTGRES_USER: rasta
+        run: |
+          export PGHOST=localhost PGPORT=5432
+          bash infrastructure/docker/postgres/00-init-databases.sh
+      - name: Backup restore SQL on a disposable database
+        timeout-minutes: 5
+        run: pnpm run test:backup-restore-drill-pg
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+
   # The check branch protection and the merge queue require by name. It runs
   # always(), not on the default success(): a job skipped because a job it
   # needs failed reports "skipped", which a required check counts as passing.
   # So this runs whatever happened and fails unless every split job succeeded,
   # whether one failed, was cancelled, timed out or was skipped (when
-  # `quality` fails, all four are skipped and so this fails too). `containers`
-  # still needs `integration`, and so all four through it.
+  # `quality` fails, all five are skipped and so this fails too). `containers`
+  # still needs `integration`, and so all five through it.
   integration:
     name: Integration and security tests
     runs-on: ubuntu-latest
@@ -2734,6 +2769,7 @@ jobs:
       - integration-security
       - integration-coverage-critical
       - integration-coverage
+      - integration-backup-drill
     if: ${{ always() }}
     steps:
       - name: Every integration job passed

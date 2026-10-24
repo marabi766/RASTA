@@ -224,15 +224,12 @@ test('a test step without its time limit, or above it, is refused', () => {
   const raised = real();
   stepNamed(raised, 'Construction coverage gate')['timeout-minutes'] = 9;
   fails(raised, /"Construction coverage gate" has timeout-minutes 9, above its 8/);
-  const raisedIntegration = real();
-  stepNamed(raisedIntegration, 'Integration tests')['timeout-minutes'] = 17;
-  fails(raisedIntegration, /"Integration tests" has timeout-minutes 17, above its 16/);
   const expression = real();
   stepNamed(expression, 'Construction coverage gate')['timeout-minutes'] = '${{ 600 }}';
   fails(expression, /"Construction coverage gate" has no timeout-minutes/);
   const aboveJob = real();
   aboveJob.jobs['integration-suites']['timeout-minutes'] = 10;
-  fails(aboveJob, /"Integration tests" has timeout-minutes 16, above its job's 10/);
+  fails(aboveJob, /"Integration tests" has timeout-minutes 12, above its job's 10/);
   const tightened = real();
   stepNamed(tightened, 'Construction coverage gate')['timeout-minutes'] = 7;
   assert.deepEqual(checkIntegrationSplit(tightened), []);
@@ -459,4 +456,31 @@ test('the notification SMTP suites cannot skip: Mailpit is provisioned and requi
 
 test('invalid YAML is a problem, not a pass', () => {
   assert.equal(checkIntegrationSplitText('jobs: [unclosed').length, 1);
+});
+
+test('backup drill is required and its self-migration exemption cannot spread', () => {
+  const missing = real();
+  missing.jobs.integration.needs = missing.jobs.integration.needs.filter(
+    (id) => id !== 'integration-backup-drill',
+  );
+  fails(missing, /does not need integration-backup-drill/);
+  const renamed = real();
+  renamed.jobs['integration-pretend-drill'] = renamed.jobs['integration-backup-drill'];
+  delete renamed.jobs['integration-backup-drill'];
+  renamed.jobs.integration.needs = renamed.jobs.integration.needs.map((id) =>
+    id === 'integration-backup-drill' ? 'integration-pretend-drill' : id,
+  );
+  fails(renamed, /integration-pretend-drill: .*runs without "Apply migrations"/);
+});
+
+test('aggregate rejects backup drill failure, skip and cancellation independently', () => {
+  for (const result of ['failure', 'skipped', 'cancelled']) {
+    const workflow = real();
+    // This weakening accepts only this result for this job; the executable validator must catch it.
+    verdict(workflow).run = verdict(workflow).run.replace(
+      'needs[name].result !== "success"',
+      `needs[name].result !== "success" && !(name === "integration-backup-drill" && needs[name].result === "${result}")`,
+    );
+    fails(workflow, /must fail unless every needed job's result is "success"/);
+  }
 });

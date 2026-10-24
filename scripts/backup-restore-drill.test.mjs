@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import {
+  discoverSchemaServices,
+  checkServiceCoverage,
   compareSnapshots,
   ledgerPassed,
   compareLedgers,
@@ -13,6 +18,12 @@ function snapshot() {
     tables: {
       'public.wallet': { rows: '9007199254740993', kind: 'application', digest: 'a'.repeat(32) },
       'public.empty': { rows: '0', kind: 'application', digest: 'b'.repeat(32) },
+    },
+    objectState: {
+      schemas: [{ name: 'public', owner: 'migrator' }],
+      relations: [{ name: 'public.wallet', owner: 'migrator', acl: null }],
+      defaultPrivileges: [],
+      sequences: [],
     },
     databaseState: { owner: 'migrator', acl: ['migrator=CTc/migrator'], settings: [] },
     migrations: [
@@ -37,6 +48,7 @@ test('identical snapshots pass, independent of table key order', () => {
     tablesEqual: true,
     migrationsEqual: true,
     databaseStateEqual: true,
+    objectStateEqual: true,
   });
 });
 
@@ -186,4 +198,38 @@ test('the comparator tests remain wired into verify and the existing CI jobs', a
   assert.match(pkg.scripts.verify, /pnpm run test:backup-restore-drill-lib/);
   assert.match(ci, /run: pnpm run test:backup-restore-drill-lib/);
   assert.match(ci, /run: pnpm run test:backup-restore-drill-pg/);
+});
+
+test('schema discovery independently rejects a schema missing from RASTA_SERVICES, and reverse drift', () => {
+  const root = mkdtempSync(join(tmpdir(), 'drill-coverage-'));
+  try {
+    assert.throws(() => discoverSchemaServices(root));
+    mkdirSync(join(root, 'services'));
+    assert.throws(() => discoverSchemaServices(root), /Empty/);
+    mkdirSync(join(root, 'services/new-service/prisma'), { recursive: true });
+    assert.throws(() => discoverSchemaServices(root));
+    writeFileSync(join(root, 'services/new-service/prisma/schema.prisma'), '');
+    assert.throws(() => discoverSchemaServices(root), /Empty schema/);
+    writeFileSync(join(root, 'services/new-service/prisma/schema.prisma'), 'datasource db {}');
+    const discovered = discoverSchemaServices(root);
+    assert.deepEqual(discovered, ['new']);
+    assert.throws(
+      () => checkServiceCoverage(discovered, ['economic']),
+      /missing from RASTA_SERVICES \[new\]; absent schemas \[economic\]/,
+    );
+    checkServiceCoverage(discovered, ['new']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('object evidence is required and each category affects the comparator', () => {
+  const missing = snapshot();
+  delete missing.objectState;
+  assert.throws(() => compareSnapshots(snapshot(), missing), /Missing object state/);
+  for (const field of ['schemas', 'relations', 'defaultPrivileges', 'sequences']) {
+    const restored = snapshot();
+    restored.objectState[field] = [{ drift: field }];
+    assert.equal(compareSnapshots(snapshot(), restored).objectStateEqual, false);
+  }
 });

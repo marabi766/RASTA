@@ -17,6 +17,10 @@ import { parseEnv } from 'node:util';
 import YAML from 'yaml';
 import { servicesFromLibrary } from './infra-preflight-lib.mjs';
 import {
+  discoverSchemaServices,
+  checkServiceCoverage,
+  OBJECT_STATE_SQL,
+  SEQUENCES_SQL,
   compareSnapshots,
   drillPassed,
   checkDatabaseCoverage,
@@ -31,7 +35,9 @@ import {
   FIXTURE_SQL,
 } from './backup-restore-drill-lib.mjs';
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const ROOT = process.env.RASTA_DRILL_ROOT
+  ? resolve(process.env.RASTA_DRILL_ROOT)
+  : resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 if (args.length !== 2 || args[0] !== '--report') {
   console.error('Usage: scripts/backup-restore-drill --report /path/to/new-report.json');
@@ -56,10 +62,13 @@ const env = {
 };
 let stage = 'preflight';
 let interrupted = false;
+let cleaning = false;
+process.stderr.on('error', () => {});
 let active;
 let composeReady = false;
 const report = {
-  version: 2,
+  version: 3,
+  signals: [],
   startedAt: new Date().toISOString(),
   passed: false,
   fixture: 'existing demo seeds plus synthetic 9007199254740993 IRR journal and wallet',
@@ -79,11 +88,14 @@ function stopActive() {
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
     interrupted = true;
-    stopActive();
+    report.signals.push({ signal, duringCleanup: cleaning });
+    if (!cleaning) stopActive();
+    else process.stderr.write(`[backup-restore-drill] cleanup continues after ${signal}\n`);
   });
 }
 
-/** One bounded child process group at a time; output never prints credentials or seeded payloads. */
+/** Bounded children; failure diagnostics retain the last 4 KB per stream.
+ * Database URLs are redacted; synthetic seed payloads can appear in diagnostics. */
 async function run(command, argv, options = {}) {
   if (interrupted && !options.cleanup) throw new Error('Interrupted');
   return new Promise((accept, reject) => {
@@ -173,14 +185,19 @@ async function snapshot(container, service) {
     }),
   );
   const databaseState = JSON.parse(await psql(container, database, DATABASE_STATE_SQL));
+  const objectState = JSON.parse(await psql(container, database, OBJECT_STATE_SQL));
+  const sequenceRows = await psql(container, database, SEQUENCES_SQL);
+  objectState.sequences = sequenceRows
+    ? sequenceRows.split('\n').map((line) => JSON.parse(line))
+    : [];
   const schema = service === 'audit' ? 'audit' : 'public';
   const migrations = JSON.parse(await psql(container, database, MIGRATIONS_SQL(schema)));
-  return { tables, migrations, databaseState, summary: summarizeTables(tables) };
+  return { tables, migrations, databaseState, objectState, summary: summarizeTables(tables) };
 }
 
 function progress(value) {
   stage = value;
-  console.error(`[backup-restore-drill] ${stage}`);
+  process.stderr.write(`[backup-restore-drill] ${stage}\n`);
 }
 
 try {
@@ -188,7 +205,11 @@ try {
   project = `restore-drill-${randomBytes(8).toString('hex')}`;
   report.project = project;
   composeFile = join(temporary, 'compose.json');
-  services = servicesFromLibrary();
+  services = servicesFromLibrary(
+    readFileSync(join(ROOT, 'infrastructure/docker/postgres/lib/role-passwords.bash'), 'utf8'),
+  );
+  report.schemaServices = discoverSchemaServices(ROOT);
+  checkServiceCoverage(report.schemaServices, services);
   for (const path of [
     join(ROOT, '.env'),
     join(ROOT, '.env.migrator'),
@@ -360,17 +381,25 @@ try {
   report.error = { stage, message: error.message };
   report.passed = false;
 } finally {
+  cleaning = true;
   progress('cleanup owned containers, networks and volumes');
   try {
     if (composeReady)
       await compose(['down', '--volumes', '--timeout', '15'], { cleanup: true, timeout: 60_000 });
     // Confirm no owned resources survived (never enumerate/remove another project's resources).
-    const resources = project
+    const resources = composeReady
       ? await Promise.all(
           ['container', 'volume', 'network'].map((kind) =>
             run(
               'docker',
-              [kind, 'ls', '--quiet', '--filter', `label=com.docker.compose.project=${project}`],
+              [
+                kind,
+                'ls',
+                ...(kind === 'container' ? ['-a'] : []),
+                '--quiet',
+                '--filter',
+                `label=com.docker.compose.project=${project}`,
+              ],
               { cleanup: true, timeout: 15_000 },
             ),
           ),
