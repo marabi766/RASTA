@@ -1,3 +1,4 @@
+import { makeDue } from '@rasta/testing';
 import request from 'supertest';
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -320,10 +321,7 @@ describe('a signing policy follows an organization move', () => {
       expect(waiting.lastErrorCode).toBe('UPSTREAM_UNAVAILABLE');
 
       api.hierarchy.unavailable = false;
-      await w.prisma.client.$executeRawUnsafe(
-        `UPDATE policy_reconciliation_task SET next_attempt_at = now() WHERE policy_id = $1`,
-        policyId,
-      );
+      await makeDue(w.prisma, [waiting.id], 'policy_reconciliation_task');
       const confirmed = await sweeper.runOnce();
       expect(confirmed.confirmed).toBeGreaterThanOrEqual(1);
       expect((await policyRow(policyId)).status).toBe('ACTIVE');
