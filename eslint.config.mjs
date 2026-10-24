@@ -93,7 +93,9 @@ const base = tseslint.config(
     },
   },
   {
-    files: ['**/env.ts'],
+    // `env-issues.spec.ts` builds environment schemas as `env.ts` does, from
+    // the same string-only `process.env` input, to test their refusal texts.
+    files: ['**/env.ts', '**/env-issues.spec.ts'],
     rules: { 'no-restricted-syntax': 'off' },
   },
   {

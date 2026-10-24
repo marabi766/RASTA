@@ -39,11 +39,9 @@ import { listSettlementsQuerySchema } from '../settlement/dto';
  * behaviour change, fixed in the code. Two things are deliberately not pinned:
  * an over-cap array of invalid elements (zod 3 reports every element after
  * `too_big` — the advisory itself, which B changes), and a non-digit top-up
- * amount. The top-up refinement's `BigInt` throws on it: a 500 whose exception
- * text — the client's input — goes into the error log today, as the same
- * conversion does into `x-dlq-error` on analytics' consumer. That is not an
- * oracle to keep: it is owned by task 011 (W#7), which fixes every such
- * conversion site, and recording it here would make B preserve the leak.
+ * amount. Its refusal is task 011's (#393: a malformed amount is a refusal,
+ * never a `BigInt` SyntaxError), pinned by that change's own tests
+ * (`wallet/amount-format.spec.ts`), not by this oracle.
  *
  * These fixtures pin parsing and hashing only. Tenancy, the scoped cursor
  * lookup and what `includeIncoming` widens are the services' own tests.

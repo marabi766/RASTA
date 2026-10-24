@@ -150,6 +150,48 @@ describe('FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS', () => {
 });
 
 /** #240 r8: the parked-insurance sweep. */
+/**
+ * #385 r4, the rule for numbers: the budget refusal prints the three timeouts,
+ * which the schema has read as numbers first. Written as text, each is refused
+ * by the schema with a fixed message, never repeated.
+ */
+describe('the asset-sync budget settings, written as text', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'];
+  const MINIMAL: NodeJS.ProcessEnv = {
+    NODE_ENV: 'test',
+    DATABASE_URL: 'postgresql://rasta_fleet:pw@127.0.0.1:5433/rasta_fleet?schema=public',
+    KAFKA_BROKERS: 'localhost:9092',
+    REDIS_URL: 'redis://127.0.0.1:6379',
+    OIDC_ISSUER_URL: 'http://localhost:8080/realms/rasta',
+    OIDC_JWKS_URI: 'http://localhost:8080/realms/rasta/protocol/openid-connect/certs',
+    OIDC_AUDIENCE: 'rasta-api',
+    INTERNAL_TOKEN_SECRET: 'x'.repeat(48),
+    ASSET_SERVICE_URL: 'http://localhost:3102',
+    MAINTENANCE_SERVICE_URL: 'http://localhost:3106',
+  };
+  const refusal = (source: NodeJS.ProcessEnv): Error => {
+    try {
+      loadFleetEnv(source);
+    } catch (error) {
+      return error as Error;
+    }
+    throw new Error('expected a refusal');
+  };
+
+  it.each([
+    'FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS',
+    'FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS',
+    'ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS',
+  ])('%s is refused before the budget check can print it', (name) => {
+    const [a, b] = SENTINELS.map((value) => refusal({ ...MINIMAL, [name]: value }));
+    expect(a?.message).toBe(b?.message);
+    expect(a?.message).toContain(name);
+    for (const error of [a, b]) {
+      expect(`${error?.message}\n${error?.stack}`).not.toMatch(/sentinel|jz97|another[-_]secret/i);
+    }
+  });
+});
+
 describe('FLEET_INSURANCE_PARKED_*', () => {
   const shape = fleetEnvSchema.shape;
 

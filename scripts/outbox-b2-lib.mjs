@@ -305,8 +305,10 @@ export function assertEnvironment(env = {}) {
     );
   }
   if (!ALLOWED_ENVIRONMENTS.includes(nodeEnv)) {
+    // A fixed text: what NODE_ENV holds is not repeated (#385 r4). Both CLIs
+    // emit this message as their `refused` event's reason.
     refuse(
-      `Refusing to run with an unrecognised NODE_ENV="${nodeEnv}". ` +
+      'Refusing to run with an unrecognised NODE_ENV. ' +
         `Known: ${ALLOWED_ENVIRONMENTS.join(', ')}.`,
     );
   }

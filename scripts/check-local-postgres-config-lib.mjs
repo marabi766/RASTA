@@ -24,8 +24,14 @@
  *
  * A URL carries credentials, so no message contains a value. A failure names
  * the variable, its line and a fixed category for the host (`localhost`,
- * `IPv6 literal`, `other host`) or the port number.
+ * `IPv6 literal`, `other host`) or the port number — a number the URL parser
+ * has already read as one. The variable is named only when it is a registered
+ * setting (`database-services.mjs`); a `DATABASE_URL_*` no service owns came
+ * from the text checked, and is shown as {@link UNREGISTERED_DATABASE_URL}
+ * (#385 r4). It is still checked: detection stays by prefix.
  */
+
+import { UNREGISTERED_DATABASE_URL, registeredDatabaseSettings } from './database-services.mjs';
 
 /** The only host the committed local PostgreSQL defaults may name. */
 export const REQUIRED_HOST = '127.0.0.1';
@@ -104,13 +110,17 @@ function schemeOf(value) {
  * Returns `{ errors, postgresUrls, ignoredUrls }`: `errors` are safe to print,
  * `postgresUrls` and `ignoredUrls` are variable names only.
  */
-export function validateLocalPostgresConfig(text) {
+export function validateLocalPostgresConfig(text, registered = registeredDatabaseSettings()) {
   const errors = [];
   const { assignments, malformed } = parseEnvAssignments(text);
+  const shown = (name) =>
+    name === HOST_VARIABLE || name === PORT_VARIABLE || registered.has(name)
+      ? name
+      : UNREGISTERED_DATABASE_URL;
 
   for (const entry of malformed) {
     if (entry.name !== null && isRelevantName(entry.name)) {
-      errors.push(`${entry.name} (line ${entry.line}): malformed assignment`);
+      errors.push(`${shown(entry.name)} (line ${entry.line}): malformed assignment`);
     }
   }
 
@@ -120,7 +130,7 @@ export function validateLocalPostgresConfig(text) {
     const seen = byName.get(assignment.name);
     if (seen) {
       errors.push(
-        `${assignment.name} (line ${assignment.line}): duplicate assignment (first on line ${seen.line})`,
+        `${shown(assignment.name)} (line ${assignment.line}): duplicate assignment (first on line ${seen.line})`,
       );
       continue;
     }
@@ -154,7 +164,7 @@ export function validateLocalPostgresConfig(text) {
   const ignoredUrls = [];
   for (const assignment of byName.values()) {
     if (!assignment.name.startsWith(URL_PREFIX)) continue;
-    const where = `${assignment.name} (line ${assignment.line})`;
+    const where = `${shown(assignment.name)} (line ${assignment.line})`;
     const scheme = schemeOf(assignment.value);
 
     if (scheme === null) {

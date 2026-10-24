@@ -317,6 +317,14 @@ jobs:
         # (@rasta/config assertNoMigratorCredentials; Codex review of #176).
         run: pnpm run test:boot-guard
 
+      - name: Outbox B2 refusals, run as the CLIs (ADR-051, #385 r4)
+        # The B2 backfill's and vacuum's option and environment refusals: the
+        # production interlock refuses an unrecognised NODE_ENV with a fixed
+        # text, and an owner credential named for no service is counted, never
+        # named — the library and both CLIs as processes, before any database
+        # is opened. After Build: the CLIs load the built packages.
+        run: pnpm run test:outbox-b2
+
       - name: Service dev scripts load TypeScript as CommonJS, telemetry first
         # `pnpm dev` ran the services through swc-node's ES-module loader,
         # under which main.ts could not import AppModule from its CommonJS

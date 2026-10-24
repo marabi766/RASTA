@@ -87,8 +87,10 @@ export {
 export type { DemoSeedDatabaseProbe } from './seed-guard';
 
 export {
+  DATABASE_SERVICES,
   MIGRATOR_CREDENTIAL_PATTERN,
   MigratorCredentialInServiceError,
+  REGISTERED_MIGRATOR_CREDENTIALS,
   assertNoMigratorCredentials,
   migratorCredentialsIn,
 } from './owner-credentials';

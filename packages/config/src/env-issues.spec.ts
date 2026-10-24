@@ -140,6 +140,52 @@ describe('the shared schemas', () => {
   });
 });
 
+/**
+ * #385 r4, the rule for numbers: a post-parse check may print a setting's value
+ * only once the schema has read it as a number — digits cannot carry text. Each
+ * such setting, written as text, is refused by the schema with a fixed message
+ * before any check that prints it runs; written as a number that fails the
+ * cross-check, it is printed.
+ */
+describe('numeric settings a post-parse check prints', () => {
+  const shared = baseEnvSchema
+    .merge(databaseEnvSchema)
+    .merge(kafkaEnvSchema)
+    .merge(outboxPurgeEnvSchema);
+  const valid = {
+    SERVICE_NAME: 'asset-service',
+    PORT: '3103',
+    DATABASE_URL: 'postgresql://db.internal/rasta',
+    KAFKA_BROKERS: 'kafka:9092',
+    KAFKA_CLIENT_ID: 'asset-service',
+  };
+  const PRINTED = [
+    'SHUTDOWN_TIMEOUT_MS',
+    'DATABASE_STATEMENT_TIMEOUT_MS',
+    'OUTBOX_SHUTDOWN_GRACE_SECONDS',
+    'OUTBOX_PURGE_STATEMENT_TIMEOUT_MS',
+    'OUTBOX_PURGE_MAX_WAIT_MS',
+  ];
+
+  it.each(PRINTED)('%s written as text is refused before it can be printed', (name) => {
+    const refusal = refusedAlike(
+      shared,
+      (value) => ({ ...valid, [name]: value }) as NodeJS.ProcessEnv,
+      SENTINELS,
+      { operationBudgets: () => [] },
+    );
+    expect(refusal.issues).toHaveLength(1);
+    expect(refusal.issues[0]?.path).toBe(name);
+  });
+
+  it('written as a number that fails the cross-check, the number is printed', () => {
+    const issues = (timeout: string) =>
+      refusalOf(() => loadEnv(shared, { ...valid, SHUTDOWN_TIMEOUT_MS: timeout })).issues;
+    expect(issues('1234')[0]?.message).toContain('(1234 ms) leaves no outbox shutdown budget');
+    expect(issues('1567')[0]?.message).toContain('(1567 ms) leaves no outbox shutdown budget');
+  });
+});
+
 describe('every issue code, from the schema and the code alone', () => {
   it('invalid_type: Required, or the expected type without what was received', () => {
     expect(refusedAlike(z.object({ A: z.string(), B: z.number() }), only('B'))).toMatchObject({
@@ -353,6 +399,30 @@ describe('every issue code, from the schema and the code alone', () => {
       issues: [
         { path: 'K.kind', message: 'Invalid discriminator value' },
         { path: 'I', message: 'Intersection results could not be merged' },
+      ],
+    });
+  });
+
+  it('invalid_arguments and invalid_return_type: fixed, whatever the nested error holds', () => {
+    // A schema raises these only through z.function(); a refinement raises them
+    // here with a nested ZodError that repeats the value, which must stay unprinted.
+    const nested = (value: string) =>
+      new z.ZodError([{ code: z.ZodIssueCode.custom, path: [value], message: `got ${value}` }]);
+    const schema = z.object({
+      F: z.string().superRefine((value, ctx) => {
+        ctx.addIssue({ code: z.ZodIssueCode.invalid_arguments, argumentsError: nested(value) });
+      }),
+      R: z.string().superRefine((value, ctx) => {
+        ctx.addIssue({ code: z.ZodIssueCode.invalid_return_type, returnTypeError: nested(value) });
+      }),
+    });
+    expect(
+      refusedAlike(schema, (value) => ({ F: value, R: value }) as NodeJS.ProcessEnv),
+    ).toMatchObject({
+      codes: ['invalid_arguments', 'invalid_return_type'],
+      issues: [
+        { path: 'F', message: 'Invalid function arguments' },
+        { path: 'R', message: 'Invalid function return type' },
       ],
     });
   });

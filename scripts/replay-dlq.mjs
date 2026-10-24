@@ -114,7 +114,13 @@ const env = {
       ? configuredCa
       : resolve(root, 'infrastructure/docker/kafka/.tls/ca.pem'),
 };
-const connection = connectionFor(PRINCIPAL, env, (path) => readFileSync(path, 'utf8'));
+let connection;
+try {
+  connection = connectionFor(PRINCIPAL, env, (path) => readFileSync(path, 'utf8'));
+} catch (error) {
+  // A fixed text (UNREADABLE_CA_FILE), printed alone: never the path (#385 r4).
+  fail(error.message);
+}
 if (!connection.sasl || !connection.ssl) {
   fail(
     'KAFKA_SASL_PASSWORD_OPS_REPLAY and the broker CA are required: the tool connects as ops-replay ' +

@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
+  MIGRATION_REFUSALS,
   MIGRATION_STATEMENT_TIMEOUT_SETTING,
   UTC_SESSION_OPTION,
   ledgerRevoke,
@@ -8,6 +14,7 @@ import {
   withUtcSession,
 } from './prisma-lib.mjs';
 import { CREDENTIALS, UTC_SESSION_CORPUS, UTC_SESSION_REFUSED } from './utc-session-corpus.mjs';
+import { SENTINELS, assertNoSentinel, thrownBy } from './refusal-probes.mjs';
 
 const pg = (user, db, schema) =>
   `postgresql://${user}:secret_value_here@127.0.0.1:5433/${db}${schema ? `?schema=${schema}` : ''}`;
@@ -54,7 +61,7 @@ test('refuses an identifier it would have to interpolate unquoted-unsafe', () =>
         migratorUrl: pg('m', 'db', 'public'),
         runtimeUrl: pg('evil%22%3B%20DROP', 'db', 'public'),
       }),
-    /not a plain identifier/,
+    { message: MIGRATION_REFUSALS.runtimeRole },
   );
   assert.throws(
     () =>
@@ -62,8 +69,38 @@ test('refuses an identifier it would have to interpolate unquoted-unsafe', () =>
         migratorUrl: pg('m', 'db', 'Pub"lic'),
         runtimeUrl: pg('rasta_x', 'db'),
       }),
-    /not a plain identifier/,
+    { message: MIGRATION_REFUSALS.schema },
   );
+});
+
+// #385 r4: a refusal names the component, never what it holds — nor does any
+// part of the thrown object (`new URL` keeps its whole input on `.input`).
+test('the ledger refusals repeat nothing of the URLs, in any part of the thrown error', () => {
+  for (const sentinel of SENTINELS) {
+    const cases = [
+      [{ migratorUrl: pg('m', 'db'), runtimeUrl: pg(sentinel, 'db') }, 'runtimeRole'],
+      [{ migratorUrl: pg('m', 'db', sentinel), runtimeUrl: pg('rasta_x', 'db') }, 'schema'],
+      [
+        { migratorUrl: `postgresql://m:${sentinel}@[bad/db`, runtimeUrl: pg('r', 'db') },
+        'unreadableUrl',
+      ],
+      [
+        { migratorUrl: pg('m', 'db'), runtimeUrl: `postgresql://${sentinel}@[bad/db` },
+        'unreadableUrl',
+      ],
+      [
+        { migratorUrl: pg('m', 'db'), runtimeUrl: `postgresql://%E0%A4%A@h/${sentinel}` },
+        'unreadableUrl',
+      ],
+    ];
+    for (const [urls, refusal] of cases) {
+      const error = thrownBy(() => ledgerRevoke(urls));
+      assert.equal(error.message, MIGRATION_REFUSALS[refusal], `${refusal}: ${sentinel}`);
+      assert.equal(error.cause, undefined);
+      assert.deepEqual(Object.keys(error), [], 'no property but the message');
+      assertNoSentinel(error, `${refusal} (${sentinel})`);
+    }
+  }
 });
 
 // --- withUtcSession (L7-37) ---------------------------------------------------
@@ -164,8 +201,109 @@ test('no override leaves the URL alone; anything but a positive duration is refu
   for (const value of ['0s', '15', '15 min', '1d', '-5s', '5s -c role=postgres', "5s'"]) {
     assert.throws(
       () => withMigrationStatementTimeout(UTC_SESSION_CORPUS[0], value),
-      /is not a positive duration/,
+      { message: MIGRATION_REFUSALS.statementTimeout },
       value,
     );
+  }
+});
+
+// Before its check the value is text, not yet a duration: never repeated (#385 r4).
+test('a refused statement timeout is not repeated, nor any piece of it', () => {
+  for (const sentinel of SENTINELS) {
+    for (const value of [sentinel, `15min${sentinel}`, `${sentinel.length}s ${sentinel}`]) {
+      const error = thrownBy(() => withMigrationStatementTimeout(UTC_SESSION_CORPUS[0], value));
+      assert.equal(error.message, MIGRATION_REFUSALS.statementTimeout);
+      assertNoSentinel(error, value);
+    }
+  }
+});
+
+// --- scripts/prisma.mjs, the real entry point (#385 r4) ------------------------
+// Run as `db:migrate` runs it, from a service directory, with a stub `prisma`
+// first on PATH that records each call: no database is reached, and the record
+// shows whether the refusal came before Prisma ran (the statement timeout) or
+// after it (the ledger revoke, which follows every run, failed or not).
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const SERVICE_DIR = join(ROOT, 'services/document-service');
+
+function runPrismaScript(settings) {
+  const bin = mkdtempSync(join(tmpdir(), 'prisma-stub-'));
+  const log = join(bin, 'calls.log');
+  writeFileSync(
+    join(bin, 'prisma'),
+    '#!/bin/sh\necho "$*" >> "$STUB_LOG"\ncat > /dev/null\nexit 0\n',
+  );
+  chmodSync(join(bin, 'prisma'), 0o755);
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([name]) => !name.startsWith('DATABASE_URL') && name !== 'RASTA_MIGRATION_STATEMENT_TIMEOUT',
+    ),
+  );
+  try {
+    const run = spawnSync(
+      process.execPath,
+      [join(ROOT, 'scripts/prisma.mjs'), 'migrate', 'deploy'],
+      {
+        cwd: SERVICE_DIR,
+        env: { ...env, ...settings, PATH: `${bin}:${process.env.PATH}`, STUB_LOG: log },
+        encoding: 'utf8',
+      },
+    );
+    const calls = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [];
+    return { status: run.status, stdout: run.stdout, stderr: run.stderr, calls };
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
+  }
+}
+
+const RUNTIME = 'postgresql://rasta_document:runtime_pw@127.0.0.1:1/rasta_document';
+const MIGRATOR = 'postgresql://rasta_document_migrator:owner_pw@127.0.0.1:1/rasta_document';
+
+test('prisma.mjs: a valid configuration migrates, then revokes the ledger (positive control)', () => {
+  const run = runPrismaScript({
+    DATABASE_URL_DOCUMENT: RUNTIME,
+    DATABASE_URL_DOCUMENT_MIGRATOR: MIGRATOR,
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(run.calls, [
+    'migrate deploy',
+    'db execute --schema prisma/schema.prisma --stdin',
+  ]);
+});
+
+test('prisma.mjs: each refusal is its fixed text alone on stderr, at the same point', () => {
+  for (const sentinel of SENTINELS) {
+    const cases = [
+      // Before Prisma runs: nothing is migrated.
+      [{ RASTA_MIGRATION_STATEMENT_TIMEOUT: sentinel }, 'statementTimeout', []],
+      // After the run, before the revoke is sent.
+      [
+        { DATABASE_URL_DOCUMENT: `postgresql://${sentinel}:pw@127.0.0.1:1/rasta_document` },
+        'runtimeRole',
+        ['migrate deploy'],
+      ],
+      [
+        { DATABASE_URL_DOCUMENT_MIGRATOR: `${MIGRATOR}?schema=${sentinel}` },
+        'schema',
+        ['migrate deploy'],
+      ],
+      [
+        { DATABASE_URL_DOCUMENT_MIGRATOR: `postgresql://m:${sentinel}@[bad/rasta_document` },
+        'unreadableUrl',
+        ['migrate deploy'],
+      ],
+    ];
+    for (const [settings, refusal, calls] of cases) {
+      const run = runPrismaScript({
+        DATABASE_URL_DOCUMENT: RUNTIME,
+        DATABASE_URL_DOCUMENT_MIGRATOR: MIGRATOR,
+        ...settings,
+      });
+      assert.equal(run.status, 1, `${refusal}: ${run.stderr}`);
+      assert.equal(run.stderr, `${MIGRATION_REFUSALS[refusal]}\n`, refusal);
+      assert.deepEqual(run.calls, calls, `${refusal}: where it refused`);
+      assertNoSentinel(`${run.stdout}\n${run.stderr}`, `${refusal} (${sentinel})`);
+    }
   }
 });

@@ -138,6 +138,9 @@ describe('zod-3 golden: the pipe’s issue details', () => {
         nonnegative: z.number().int().nonnegative().optional(),
         ranged: z.number().int().min(1).max(10).optional(),
         finite: z.number().finite().optional(),
+        // A recorded zod 3 case B is measured against, not a request schema: #393 bars
+        // z.coerce from those, and this keeps the snapshot it was recorded with.
+        // eslint-disable-next-line no-restricted-syntax
         coerced: z.coerce.number().int().min(1).optional(),
         list: z.array(z.string()).min(1).max(2).optional(),
         nonempty: z.array(z.string()).nonempty().optional(),
