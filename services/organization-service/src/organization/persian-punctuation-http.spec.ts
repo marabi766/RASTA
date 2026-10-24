@@ -49,12 +49,15 @@ describe('an organization name with Persian punctuation (HTTP)', () => {
     );
   });
 
+  it('keeps the whitespace rule it always had: a line break still validates', async () => {
+    expect((await post('شرکت\nنمونه')).status).toBe(201);
+  });
+
   it.each([
     ['«؛»', 'شرکت نمونه؛ دو'],
     ['«؟»', 'شرکت نمونه؟'],
     ['a colon', 'شرکت: نمونه'],
     ['a plus', 'شرکت + نمونه'],
-    ['a line break', 'شرکت\nنمونه'],
     ['a bidi control', 'شرکت نمونه‮'],
     ['a tatweel', 'شرکـت نمونه'],
   ])('still refuses %s in a name (the class did not loosen)', async (_label, name) => {

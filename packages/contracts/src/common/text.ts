@@ -46,9 +46,12 @@ export function plainText(): z.ZodString {
  *    (`\p{Nd}`: ۱۲۳, ١٢٣, 123), combining marks (`\p{Mark}`: the vowel signs
  *    and hamza above/below of Arabic script);
  *  - ZWNJ (U+200C), which Persian needs («می‌شود»);
- *  - whitespace: the space separators (`\p{Zs}`: space, no-break space, the
- *    en/em spaces …), tab, line feed and carriage return — so a multi-line
- *    note works;
+ *  - whitespace: everything `\s` matches (space, tab, line feed, carriage
+ *    return, VT, FF, no-break space, the en/em spaces, U+2028/U+2029, the
+ *    byte-order mark) — exactly what the per-service patterns this replaced
+ *    accepted, so a value stored before this rule still validates on an
+ *    unchanged resubmit (a stricter whitespace rule is a separate,
+ *    canonicalising change: it must migrate the stored values first);
  *  - punctuation: `( ) « » ' ’ - . , / : + ; ? ! % "`, the Persian comma «،»
  *    (U+060C), semicolon «؛» (U+061B) and question mark «؟» (U+061F), the
  *    ellipsis «…» and the en dash «–». The Arabic decimal and thousands
@@ -58,13 +61,9 @@ export function plainText(): z.ZodString {
  * Refused, by omission or by the lookahead:
  *  - every bidirectional control (`\p{Bidi_Control}`, U+061C included — it is
  *    Arabic script, so the script class alone would admit it);
- *  - every C0/C1 control other than tab, LF and CR (NUL, ESC, VT, FF, NEL …);
- *  - the byte-order mark U+FEFF anywhere inside (`\s` would have admitted
- *    it, which this pattern deliberately does not: it is an invisible
- *    character; at the very edge `trim()` removes it first), the line and
- *    paragraph separators U+2028/U+2029, and the zero-width characters
- *    U+200B (space) and U+200D (ZWJ — Persian does not use it; it joins emoji
- *    and Indic letters) and U+2060 word joiner;
+ *  - every C0/C1 control that `\s` does not match (NUL, ESC, NEL …);
+ *  - the zero-width characters U+200B (space), U+200D (ZWJ — Persian does not
+ *    use it; it joins emoji and Indic letters) and U+2060 word joiner;
  *  - TATWEEL (U+0640, kashida): decoration, not text — it makes two strings
  *    that read alike compare unequal and defeats search. A pasted headline
  *    with kashida is refused with the closed message;
@@ -78,7 +77,7 @@ export function plainText(): z.ZodString {
  * rule, lookahead included.
  */
 export const DISPLAY_TEXT_PATTERN =
-  /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\p{Zs}\t\n\r\u200c()«»'’\-.,/:+\u060c\u061b\u061f;?!%"\u2026\u2013]+$/u;
+  /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s\u200c()«»'’\-.,/:+\u060c\u061b\u061f;?!%"\u2026\u2013]+$/u;
 
 /**
  * A trimmed display-text string within `min`..`max` characters

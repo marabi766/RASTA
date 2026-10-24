@@ -24,9 +24,10 @@ const organizationId = seedIdSchema(ID_PREFIXES.organization);
  * to police what a person may be called.
  *
  * Deliberately NOT the shared display-text rule: no digits, no comma-like
- * punctuation. Whitespace is `\p{Zs}` (space separators) — a name is one line,
- * so tab, line feed, the byte-order mark and the line/paragraph separators,
- * which `\s` admitted, are refused (tightened with the display-text work).
+ * punctuation. Whitespace stays `\s`, exactly as before the display-text work:
+ * a stored name may hold a tab or a line break, and the unchanged PATCH of it
+ * must keep validating. Tightening it (one line, no BOM) is a separate change
+ * that canonicalises the stored names first.
  *
  * The lookahead refuses every bidirectional control (`\p{Bidi_Control}`): the
  * script class alone admits U+061C ARABIC LETTER MARK, an Arabic-script one.
@@ -38,7 +39,7 @@ const personName = z
   .min(1)
   .max(100)
   .regex(
-    /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Mark}\p{Zs}‌'’\-.]+$/u,
+    /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Mark}\s‌'’\-.]+$/u,
     'Name contains unsupported characters',
   );
 

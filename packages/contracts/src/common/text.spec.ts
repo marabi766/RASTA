@@ -161,6 +161,13 @@ describe('displayText (the one display-text rule: descriptions, notes, titles)',
     ['line feed (a multi-line note)', 'خط اول\nخط دوم'],
     ['carriage return + line feed', 'a\r\nb'],
     ['no-break space U+00A0', `a${cp(0x00a0)}b`],
+    // `\s` always accepted these, so a value stored before the display-text
+    // rule must keep validating (the compatibility table below proves all of it).
+    ['byte-order mark U+FEFF inside', `a${cp(0xfeff)}b`],
+    ['line separator U+2028', `a${cp(0x2028)}b`],
+    ['paragraph separator U+2029', `a${cp(0x2029)}b`],
+    ['vertical tab', `a${cp(0x0b)}b`],
+    ['form feed', `a${cp(0x0c)}b`],
     ['a full Persian sentence', 'موتور روشن نشد، استارت خراب است؛ لطفاً بررسی شود؟'],
   ];
 
@@ -173,14 +180,9 @@ describe('displayText (the one display-text rule: descriptions, notes, titles)',
     ['ZWJ U+200D (decision: refused)', `a${cp(0x200d)}b`],
     ['zero-width space U+200B', `a${cp(0x200b)}b`],
     ['word joiner U+2060', `a${cp(0x2060)}b`],
-    ['byte-order mark U+FEFF inside', `a${cp(0xfeff)}b`],
-    ['line separator U+2028', `a${cp(0x2028)}b`],
-    ['paragraph separator U+2029', `a${cp(0x2029)}b`],
     ['soft hyphen U+00AD', `a${cp(0x00ad)}b`],
     ['NUL', `a${cp(0)}b`],
     ['ESC', `a${cp(0x1b)}b`],
-    ['vertical tab', `a${cp(0x0b)}b`],
-    ['form feed', `a${cp(0x0c)}b`],
     ['next line U+0085', `a${cp(0x85)}b`],
     ['DEL', `a${cp(0x7f)}b`],
     ['angle brackets', 'a<b>'],
@@ -231,5 +233,99 @@ describe('displayText (the one display-text rule: descriptions, notes, titles)',
     expect(plainText().safeParse(`a${cp(0x200d)}b`).success).toBe(true);
     expect(referenceId().safeParse(`a${cp(0x200c)}b`).success).toBe(false);
     expect(referenceId().safeParse('AST-SEED-0001').success).toBe(true);
+  });
+});
+
+/**
+ * Compatibility: the PR must ACCEPT more (Persian punctuation), never refuse a
+ * value the per-service patterns it replaced accepted, or a stored value
+ * cannot be sent back unchanged. The pattern is quoted from `origin/main`
+ * (9ecfa4a9): asset, fleet and maintenance `dto.ts` each carried this exact
+ * literal inside `z.string().trim().min().max().regex(…)`.
+ */
+describe('displayText accepts everything the pattern it replaced accepted', () => {
+  const OLD_DISPLAY_TEXT =
+    /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/:+]+$/u;
+  const oldField = z.string().trim().min(1).max(500).regex(OLD_DISPLAY_TEXT);
+  const newField = displayText(1, 500);
+
+  function* everyCodePoint(): Generator<number> {
+    for (let code = 0; code <= 0x10ffff; code += 1) {
+      if (code >= 0xd800 && code <= 0xdfff) continue;
+      yield code;
+    }
+  }
+
+  it('pins that the quoted pattern is the one on main (what the table is measured against)', () => {
+    expect(OLD_DISPLAY_TEXT.source).toBe(
+      "^(?![\\s\\S]*\\p{Bidi_Control})[\\p{Script=Arabic}\\p{Script=Latin}\\p{Nd}\\p{Mark}\\s‌()«»'’\\-.,/:+]+$",
+    );
+  });
+
+  it('accepts every generated value the old pattern accepted: all code points, alone, inside, at both edges', () => {
+    const lost: string[] = [];
+    let oldAccepted = 0;
+    for (const code of everyCodePoint()) {
+      const c = String.fromCodePoint(code);
+      for (const value of [c, `ا${c}ب`, `${c}ا`, `ا${c}`, `a${c}${c}b`]) {
+        if (!OLD_DISPLAY_TEXT.test(value)) continue;
+        oldAccepted += 1;
+        if (!DISPLAY_TEXT_PATTERN.test(value))
+          lost.push(`U+${code.toString(16)} in ${value.length}`);
+      }
+    }
+    expect(oldAccepted).toBeGreaterThan(20_000);
+    expect(lost).toEqual([]);
+  });
+
+  it('accepts, through the schema (trim, bounds), every whitespace code point the old schema accepted', () => {
+    const whitespace = [...everyCodePoint()].filter((code) =>
+      /\s/u.test(String.fromCodePoint(code)),
+    );
+    // 25 members today (TAB LF VT FF CR, space, NBSP, U+1680, U+2000–200A, U+2028/9, U+202F, U+205F, U+3000, BOM).
+    expect(whitespace.length).toBeGreaterThanOrEqual(25);
+    for (const code of whitespace) {
+      const c = String.fromCodePoint(code);
+      for (const value of [`ا${c}ب`, `  ا${c}ب  `, `ا${c}${c}ب`, `${c}ا${c}`, `a${c}b`]) {
+        expect([code, value, newField.safeParse(value).success]).toEqual([
+          code,
+          value,
+          oldField.safeParse(value).success,
+        ]);
+      }
+    }
+  });
+
+  it('covers every class the first draft of this PR newly refused', () => {
+    const FIRST_DRAFT_REFUSED = [0xfeff, 0x0b, 0x0c, 0x2028, 0x2029];
+    for (const code of FIRST_DRAFT_REFUSED) {
+      const value = `ا${String.fromCodePoint(code)}ب`;
+      expect([code, oldField.safeParse(value).success, newField.safeParse(value).success]).toEqual([
+        code,
+        true,
+        true,
+      ]);
+    }
+  });
+
+  it('still refuses what the old pattern refused apart from what it newly accepts', () => {
+    const NEWLY_ACCEPTED = new Set(
+      [0x060c, 0x061b, 0x061f, 0x3b, 0x3f, 0x21, 0x25, 0x22, 0x2026, 0x2013].map((code) =>
+        String.fromCodePoint(code),
+      ),
+    );
+    const widened: string[] = [];
+    for (const code of everyCodePoint()) {
+      const c = String.fromCodePoint(code);
+      const value = `ا${c}ب`;
+      if (
+        DISPLAY_TEXT_PATTERN.test(value) &&
+        !OLD_DISPLAY_TEXT.test(value) &&
+        !NEWLY_ACCEPTED.has(c)
+      ) {
+        widened.push(`U+${code.toString(16)}`);
+      }
+    }
+    expect(widened).toEqual([]);
   });
 });
