@@ -1,3 +1,4 @@
+import { expireClaim } from '@rasta/testing';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl, ownerDatabaseUrl } from './helpers';
 
@@ -50,6 +51,15 @@ export async function createProtocolSchema(): Promise<void> {
     await admin.client.$executeRawUnsafe(
       `CREATE TABLE "${PROTOCOL_SCHEMA}".outbox_message
          (LIKE public.outbox_message INCLUDING ALL)`,
+    );
+    // Explicit search_path opt-in only: ordinary sessions still resolve pg_catalog.now.
+    await admin.client.$executeRawUnsafe(
+      `CREATE FUNCTION "${PROTOCOL_SCHEMA}".now() RETURNS timestamptz
+         LANGUAGE sql STABLE
+         AS 'SELECT pg_catalog.date_trunc(''milliseconds'', pg_catalog.now())'`,
+    );
+    await admin.client.$executeRawUnsafe(
+      `GRANT EXECUTE ON FUNCTION "${PROTOCOL_SCHEMA}".now() TO "${runtime}"`,
     );
     await admin.client.$executeRawUnsafe(
       `GRANT USAGE ON SCHEMA "${PROTOCOL_SCHEMA}" TO "${runtime}"`,
@@ -170,10 +180,7 @@ export class GatedPublisher {
 
 /** Advances a row's lease into the past without waiting for wall-clock time. */
 export async function expireLease(prisma: PrismaService, id: string): Promise<void> {
-  await prisma.client.$executeRawUnsafe(
-    `UPDATE outbox_message SET claim_expires_at = now() - interval '1 second' WHERE id = $1`,
-    id,
-  );
+  await expireClaim(prisma, [id]);
 }
 
 /** A lock held open on one connection until the test lets it go. */
