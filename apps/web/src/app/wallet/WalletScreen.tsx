@@ -31,6 +31,7 @@ import type {
 } from '@/server/wallet';
 import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
 import { demoModeOf } from '@/lib/demo-mode';
+import { providerNotice } from '@/lib/wallet-fields';
 import { TopUpForm } from './TopUpForm';
 
 /**
@@ -300,8 +301,9 @@ export function WalletScreen({
           <Section headingId="top-up" title="افزایش موجودی">
             {provider.kind === 'OK' ? (
               <>
-                {/* The service's own sentence; the label itself is drawn once, above. */}
-                <Alert tone="info">{provider.data.notice}</Alert>
+                {/* Worded here from the provider's `simulated` flag, never the service's
+                    English sentence; the «حالت نمایشی» label itself is drawn once, above. */}
+                <Alert tone="info">{providerNotice(provider.data.simulated)}</Alert>
                 <TopUpForm
                   walletId={wallet.data.id}
                   csrfToken={csrfToken}

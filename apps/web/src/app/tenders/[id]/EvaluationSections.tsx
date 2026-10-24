@@ -11,6 +11,7 @@ import {
   StatusBadge,
 } from '@/ui';
 import { bidStatusLabel } from '@/lib/bid-fields';
+import { standingVerdictLabel } from '@/lib/labels';
 import {
   formatJalaliDateTime,
   formatMoney,
@@ -360,12 +361,7 @@ export function StepBid({
       <div>
         <dt className="text-sm text-content-muted">صلاحیت به گفتهٔ سرویس تأمین‌کنندگان</dt>
         <dd>
-          {bid.standingVerdict === 'ELIGIBLE' ? (
-            'واجد صلاحیت'
-          ) : (
-            <Identifier>{bid.standingVerdict}</Identifier>
-          )}{' '}
-          · {formatJalaliDateTime(bid.standingAsOf)}
+          {standingVerdictLabel(bid.standingVerdict)} · {formatJalaliDateTime(bid.standingAsOf)}
         </dd>
       </div>
       <div>

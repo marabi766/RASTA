@@ -137,6 +137,16 @@ const STATUS_LABELS: Readonly<Record<string, string>> = {
   SIGNED: 'امضاشده',
   PROPOSED: 'پیشنهادشده',
   EFFECTIVE: 'اجراشده',
+  // Orders: the same words `orderStatusLabel` (lib/order-fields.ts) uses, so a
+  // badge drawn without an explicit label still reads Persian.
+  PENDING: 'در انتظار نگه‌داشت وجه',
+  FUNDS_HELD: 'وجه نگه‌داشته شد',
+  CONFIRMED: 'پذیرفته‌شده توسط فروشنده',
+  AWAITING_RECEIPT_CONFIRMATION: 'تحویل‌شده، منتظر تایید خریدار',
+  RECEIPT_CONFIRMED: 'دریافت تایید شد',
+  SETTLING: 'در حال تسویه',
+  DISPUTED: 'در اختلاف',
+  CANCELLING: 'در حال لغو',
 };
 
 export function StatusBadge({

@@ -1,3 +1,4 @@
+import { expireClaim, makeDue } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import {
@@ -472,19 +473,31 @@ describe('idempotency and outbox (real database)', () => {
 
       // Each mutation is fenced on the claim token, and each failure releases
       // the claim — so the row is re-claimed for the second failure, exactly as
-      // the relay does on its next tick (ADR-050). A zero lease keeps this
-      // suite from parking rows for any other.
-      const claimOwned = () =>
-        store.claimPending({ limit: 500, owner: 'mkt-int-spec', leaseSeconds: 0 });
-      const noBackoff = { baseSeconds: 0, maxSeconds: 0 };
+      // the relay does on its next tick (ADR-050). Explicit expiry keeps
+      // this suite from parking rows for any other.
+      const claimOwned = async () => {
+        const claimed = await store.claimPending({
+          limit: 500,
+          owner: 'mkt-int-spec',
+          leaseSeconds: 60,
+        });
+        await expireClaim(
+          prisma,
+          claimed.rows.map((row) => row.id),
+        );
+        return claimed;
+      };
+      const backoff = { baseSeconds: 5, maxSeconds: 60 };
 
       const first = await claimOwned();
-      expect(await store.markFailed(id, first.token!, 'broker unreachable', noBackoff)).toBe(1);
+      expect(await store.markFailed(id, first.token!, 'broker unreachable', backoff)).toBe(1);
+      await makeDue(prisma, [id]);
       const second = await claimOwned();
-      expect(await store.markFailed(id, second.token!, 'broker unreachable again', noBackoff)).toBe(
+      expect(await store.markFailed(id, second.token!, 'broker unreachable again', backoff)).toBe(
         1,
       );
 
+      await makeDue(prisma, [id]);
       const claimed = (await claimOwned()).rows.find((row) => row.id === id);
 
       expect(claimed).toBeDefined();

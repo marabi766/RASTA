@@ -1,4 +1,4 @@
-import { WITHOUT_CONTROL_CHARACTER } from '@rasta/contracts';
+import { DISPLAY_TEXT_PATTERN, WITHOUT_CONTROL_CHARACTER } from '@rasta/contracts';
 import { z } from 'zod';
 import { toJsonSchema } from './zod-schema';
 import {
@@ -149,5 +149,21 @@ describe('zod to JSON Schema', () => {
       // does not hold.
       expect(toJsonSchema(z.map(z.string(), z.number()))).toEqual({});
     });
+  });
+});
+
+describe('the published display-text pattern', () => {
+  it('is the shared rule in full: the Bidi_Control lookahead and the Persian punctuation', () => {
+    const properties = toJsonSchema(createRequestSchema).properties as Record<
+      string,
+      { pattern?: string }
+    >;
+    for (const field of ['title', 'description']) {
+      expect(properties[field]?.pattern).toBe(DISPLAY_TEXT_PATTERN.source);
+    }
+    expect(properties.title?.pattern).toContain('\\p{Bidi_Control}');
+    expect(properties.title?.pattern).toContain('\\u060c');
+    // A client validating against the published pattern agrees with the service.
+    expect(new RegExp(properties.title!.pattern!, 'u').test('خرابی، استارت؟')).toBe(true);
   });
 });
