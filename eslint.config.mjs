@@ -2,6 +2,7 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 import globals from 'globals';
+import internalTokenTransport from './scripts/internal-token-transport-rule.mjs';
 
 /** Restated in `apps/web/eslint.config.mjs`, which does not extend this file. */
 const NO_ZOD_COERCE = [
@@ -91,6 +92,12 @@ const base = tseslint.config(
     rules: {
       'no-console': ['error', { allow: ['log', 'info', 'warn', 'error'] }],
     },
+  },
+  {
+    files: ['services/*/src/**/*.ts', 'packages/*/src/**/*.ts', 'scripts/**/*.{js,mjs,cjs}'],
+    ignores: ['**/*.spec.ts', '**/*.test.mjs', '**/test/**'],
+    plugins: { internal: { rules: { transport: internalTokenTransport } } },
+    rules: { 'internal/transport': 'error' },
   },
   {
     files: ['**/env.ts'],
