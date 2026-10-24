@@ -31,6 +31,7 @@ import {
   sealUploadedDocument,
   uploadDocument,
 } from './asset-documents';
+import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
 
 /**
@@ -448,13 +449,13 @@ describe('the chain a file travels', () => {
     },
   );
 
-  it('says a sentence it does not know as it arrived — visibly foreign, not hidden', async () => {
+  it('says a sentence it does not know by the generic Persian sentence, never the English', async () => {
     const g = gateway([
       json(422, { code: 'BUSINESS_RULE_VIOLATION', message: 'A brand new rule' }),
     ]);
     expect(await upload(g, storage(new Response(null, { status: 200 })))).toEqual({
       kind: 'REFUSED',
-      message: 'A brand new rule',
+      message: GENERIC_REFUSAL_MESSAGE,
     });
   });
 

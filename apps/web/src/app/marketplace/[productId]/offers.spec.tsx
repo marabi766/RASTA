@@ -52,6 +52,22 @@ function render_(
   );
 }
 
+describe('the supplier qualification column', () => {
+  it.each([
+    ['SUBMITTED', 'ارسال‌شده'],
+    ['APPROVED', 'تأییدشده'],
+    ['REJECTED', 'ردشده'],
+    ['UNAVAILABLE', 'هنوز فعال نیست'],
+  ])('says %s in Persian', (state, label) => {
+    const { getByText, container } = render_(undefined, {
+      kind: 'OK',
+      data: { items: [{ ...OFFER, supplierQualification: state }] },
+    });
+    expect(getByText(label)).toBeInTheDocument();
+    expect(container.textContent).not.toContain(state);
+  });
+});
+
 describe('the product header', () => {
   it('shows the product’s own name and unit', () => {
     const { getByText } = render_();

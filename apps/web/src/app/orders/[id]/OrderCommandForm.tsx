@@ -150,7 +150,16 @@ function CommandFields({
       );
 
     case 'CONFIRM_RECEIPT':
-      return <NoteField values={values} errors={errors} />;
+      // No note field (Q-110): marketplace-service refuses a non-empty receipt
+      // note and has nowhere to store one, so offering the field made the
+      // buyer's most important step fail. FULFILL keeps its note — that one is
+      // stored. A post that still carries a note (stale page, crafted request)
+      // is refused by `parseOrderCommand` and its Persian sentence shows here.
+      return errors.note ? (
+        <p role="alert" className="text-sm text-danger">
+          {errors.note}
+        </p>
+      ) : null;
 
     case 'RAISE_DISPUTE':
       return (

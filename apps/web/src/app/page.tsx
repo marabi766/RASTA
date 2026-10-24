@@ -12,6 +12,7 @@ import {
   TopBar,
 } from '@/ui';
 import { currentSession } from '@/server/current-session';
+import { roleLabel, userStatusLabel } from '@/lib/organization-fields';
 import { activeMembership, displayName, fetchCurrentUser } from '@/server/identity';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
@@ -46,10 +47,16 @@ export default async function HomePage() {
 
   const result = await fetchCurrentUser(session);
 
+  // The organisation's name when the page already has it (the membership the
+  // user is acting under); the code stays as secondary text, and is all the
+  // header has before — or without — that read.
+  const membership = result.kind === 'USER' ? activeMembership(result.user) : undefined;
+  const organizationName = membership?.organizationName ?? null;
+
   return (
     <AppShell
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={organizationName ?? session.organizationId ?? 'بدون سازمان فعال'}>
           <form method="post" action="/auth/logout">
             {/* ADR-059 § 5: SameSite=Strict plus a token, because "almost
                 always" is not a guarantee for a state change. */}
@@ -92,14 +99,26 @@ export default async function HomePage() {
                 <div className="flex flex-col gap-1">
                   <dt className="text-sm text-content-subtle">وضعیت حساب</dt>
                   <dd>
-                    <StatusBadge status={result.user.status} />
+                    <StatusBadge
+                      status={result.user.status}
+                      label={userStatusLabel(result.user.status)}
+                    />
                   </dd>
                 </div>
                 <div className="flex flex-col gap-1">
                   <dt className="text-sm text-content-subtle">سازمان فعال</dt>
                   <dd className="text-content">
                     {result.user.activeOrganizationId ? (
-                      <Identifier>{result.user.activeOrganizationId}</Identifier>
+                      organizationName ? (
+                        <>
+                          <span className="text-xl">{organizationName}</span>
+                          <span className="ms-2 text-sm text-content-muted">
+                            کد <Identifier>{result.user.activeOrganizationId}</Identifier>
+                          </span>
+                        </>
+                      ) : (
+                        <Identifier>{result.user.activeOrganizationId}</Identifier>
+                      )
                     ) : (
                       'انتخاب نشده'
                     )}
@@ -114,7 +133,12 @@ export default async function HomePage() {
               <ul className="flex flex-wrap gap-2">
                 {result.user.effectiveRoles.map((role) => (
                   <li key={role}>
-                    <Identifier>{role}</Identifier>
+                    {/* The Persian name; the code (a closed Latin vocabulary) is
+                        what the service authorises on and is not for the reader.
+                        A role this portal has no name for yet shows as sent. */}
+                    <span className="inline-block rounded-md bg-muted-surface px-2 py-1 text-sm text-content">
+                      {roleLabel(role)}
+                    </span>
                   </li>
                 ))}
               </ul>
@@ -131,12 +155,6 @@ export default async function HomePage() {
           </Section>
         </>
       ) : null}
-
-      <Alert tone="info" title="بقیهٔ صفحه‌های عملیاتی در راه‌اند">
-        فهرست ماشین‌آلات و پروندهٔ الکترونیکی دارایی آماده‌اند. راننده و تخصیص، ثبت کارکرد و نگهداری
-        در داستان‌های بعدی می‌آیند — و تا آن روز در ناوبری نمی‌نشینند، چون پیوند به صفحه‌ای که پاسخ
-        نمی‌دهد یک قول است که محصول به آن عمل نمی‌کند.
-      </Alert>
     </AppShell>
   );
 }

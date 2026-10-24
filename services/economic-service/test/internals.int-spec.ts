@@ -1,3 +1,4 @@
+import { expireClaim } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
@@ -78,11 +79,21 @@ describe('economic internals', () => {
     }
 
     // Every mutation is fenced on a claim token (ADR-050), so the suite claims
-    // before it mutates — the same order the relay uses. A zero lease keeps
+    // before it mutates — the same order the relay uses. Explicit expiry keeps
     // these rows from being parked for any other suite.
-    const claimOwned = () =>
-      store.claimPending({ limit: 500, owner: 'econ-internals', leaseSeconds: 0 });
-    const noBackoff = { baseSeconds: 0, maxSeconds: 0 };
+    const claimOwned = async () => {
+      const claimed = await store.claimPending({
+        limit: 500,
+        owner: 'econ-internals',
+        leaseSeconds: 60,
+      });
+      await expireClaim(
+        prisma,
+        claimed.rows.map((row) => row.id),
+      );
+      return claimed;
+    };
+    const backoff = { baseSeconds: 5, maxSeconds: 60 };
 
     it('does nothing when asked to publish an empty batch', async () => {
       // The relay calls this with whatever it read, and an empty read is the
@@ -96,7 +107,7 @@ describe('economic internals', () => {
 
       const claimed = await claimOwned();
       expect(
-        await store.markFailed(rowId, claimed.token!, 'the broker refused the batch', noBackoff),
+        await store.markFailed(rowId, claimed.token!, 'the broker refused the batch', backoff),
       ).toBe(1);
 
       const row = await runUnscoped('the suite reads back the row it wrote', () =>
