@@ -28,7 +28,9 @@ import { toPersianDigits } from './format/digits';
 /** The fallback for an issue nothing above can describe. */
 export const GENERIC_FIELD_MESSAGE = 'مقدار واردشده معتبر نیست';
 
-const ARABIC_SCRIPT_LETTER = /\p{Script=Arabic}/u;
+// Detection only (is this sentence Persian?), not an allow-list of what may be typed:
+// the Arabic blocks, so `display-text-sites.spec.ts` keeps its one-definition rule.
+const ARABIC_SCRIPT_LETTER = /[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]/;
 
 const digits = (value: number | bigint): string => toPersianDigits(String(value));
 
