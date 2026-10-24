@@ -77,12 +77,12 @@ describe('formIssueMessage', () => {
     );
     const echo = formIssueMessage(
       issueOf(
-        z.string().refine(() => false, 'Not allowed: secret-input'),
-        'secret-input',
+        z.string().refine(() => false, 'Not allowed: typed-input-marker'),
+        'typed-input-marker',
       ),
     );
     expect(echo).toBe(GENERIC_FIELD_MESSAGE);
-    expect(echo).not.toContain('secret-input');
+    expect(echo).not.toContain('typed-input-marker');
   });
 
   it('answers one generic Persian sentence for an issue it cannot describe', () => {
