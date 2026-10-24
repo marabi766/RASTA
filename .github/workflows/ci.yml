@@ -4193,7 +4193,7 @@ jobs:
 
       - name: Prove workflow narrowing with the filtered parser install
         if: github.event_name == 'pull_request'
-        run: node --test --test-name-pattern='filtered parser narrows' scripts/container-scope.test.mjs
+        run: node scripts/container-scope-proof.mjs
 
       - name: Decide which images this change affects
         id: scope
