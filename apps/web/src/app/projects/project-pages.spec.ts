@@ -1,0 +1,990 @@
+/**
+ * @jest-environment node
+ */
+
+/**
+ * `/projects` and `/projects/[id]` run as the server components they are, with
+ * the reads stubbed: which reads each page makes, which commands each person is
+ * drawn for a project in each status, what the closed system does to the request
+ * for approval, who is drawn an authority's decision, and that a reader — or a
+ * person with no organization — is drawn no write form at all.
+ */
+
+import { isValidElement, type ReactElement, type ReactNode } from 'react';
+
+Object.assign(process.env, {
+  API_GATEWAY_URL: 'http://gateway.test:3000',
+  OIDC_ISSUER_URL: 'http://keycloak.test/realms/rasta',
+  OIDC_CLIENT_ID: 'rasta-web',
+  WEB_PUBLIC_ORIGIN: 'http://localhost:3200',
+  WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
+  WEB_PROJECT_ROLES: 'ORGANIZATION_ADMIN',
+  WEB_PROJECT_READER_ROLES: 'FLEET_MANAGER',
+});
+
+const ORG = 'ORG-OWNER';
+const mockSession = { current: null as unknown };
+const mockFetched: string[] = [];
+const mockAnswers: Record<string, unknown> = {};
+
+jest.mock('@/server/current-session', () => ({
+  currentSession: async () => mockSession.current,
+  missingSessionReason: async () => 'NO_SESSION',
+}));
+jest.mock('next/navigation', () => ({
+  redirect: (url: string) => {
+    throw new Error(`NEXT_REDIRECT:${url}`);
+  },
+}));
+jest.mock('@/server/projects', () => {
+  const actual = jest.requireActual('@/server/projects') as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.entries(actual).map(([name, value]) => [
+      name,
+      name.startsWith('fetch') && typeof value === 'function'
+        ? async () => {
+            mockFetched.push(name);
+            return mockAnswers[name] ?? { kind: 'NOT_FOUND' };
+          }
+        : value,
+    ]),
+  );
+});
+
+/* eslint-disable @typescript-eslint/no-require-imports */
+type Page = (props: {
+  params?: Promise<Record<string, string>>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) => Promise<ReactElement>;
+const DetailPage = (require('./[id]/page') as { default: Page }).default;
+const ListPage = (require('./page') as { default: Page }).default;
+const { ProjectCommands, PolicyState } =
+  require('./[id]/ProjectCommands') as typeof import('./[id]/ProjectCommands');
+const { ProjectApprovals } =
+  require('./[id]/ProjectApprovals') as typeof import('./[id]/ProjectApprovals');
+const { ProjectDetailScreen } =
+  require('./[id]/ProjectDetailScreen') as typeof import('./[id]/ProjectDetailScreen');
+const { ApprovalInbox } = require('./ApprovalInbox') as typeof import('./ApprovalInbox');
+const { CreateProjectForm } =
+  require('./CreateProjectForm') as typeof import('./CreateProjectForm');
+const { openProjectBaseline } =
+  require('@/server/project-commands') as typeof import('@/server/project-commands');
+const { mintFlash } = require('@/server/flash') as typeof import('@/server/flash');
+const { reserveUnresolved, settleUnresolved, useUnresolvedStore } =
+  require('@/server/unresolved-request') as typeof import('@/server/unresolved-request');
+const { memoryUnresolvedStore, UnresolvedStoreUnavailable } =
+  require('@/server/unresolved-request-store') as typeof import('@/server/unresolved-request-store');
+const { PROJECT_CREATE_UNRESOLVED, mintCreateSubmission } =
+  require('@/server/project-create-replay') as typeof import('@/server/project-create-replay');
+const { NeedsSection } = require('./[id]/NeedsSection') as typeof import('./[id]/NeedsSection');
+const { openNeedBaseline } =
+  require('@/server/project-need-commands') as typeof import('@/server/project-need-commands');
+const { mintNeedSubmission, needCreateScope } =
+  require('@/server/project-need-commands') as typeof import('@/server/project-need-commands');
+const { releaseUnresolved } =
+  require('@/server/unresolved-request') as typeof import('@/server/unresolved-request');
+const { UnresolvedCreateNotice } =
+  require('./UnresolvedCreateNotice') as typeof import('./UnresolvedCreateNotice');
+/* eslint-enable @typescript-eslint/no-require-imports */
+
+const jwt = (claims: unknown): string =>
+  `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`;
+
+function signedInWith(roles: string[], organization: string | null = ORG) {
+  return {
+    subject: 'user-1',
+    username: 'u',
+    organizationId: organization,
+    accessToken: jwt(
+      organization === null
+        ? { org_ids: [] }
+        : {
+            org_id: organization,
+            org_ids: [organization],
+            org_roles: roles.map((role) => `${organization}:${role}`),
+          },
+    ),
+    accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    refreshToken: 'refresh-token-value',
+    csrfToken: 'csrf-token-for-this-session',
+    issuedAt: Math.floor(Date.now() / 1000) - 60,
+  };
+}
+
+function elements(node: unknown, out: ReactElement[] = []): ReactElement[] {
+  if (Array.isArray(node)) {
+    for (const item of node) elements(item, out);
+  } else if (isValidElement(node)) {
+    out.push(node);
+    for (const value of Object.values(node.props as Record<string, unknown>)) elements(value, out);
+  }
+  return out;
+}
+
+const ofType = (tree: ReactNode, type: unknown) => elements(tree).filter((e) => e.type === type);
+const propsOf = <T>(element: ReactElement | undefined): T => (element?.props ?? {}) as T;
+
+const PROJECT = (status: string, over: Record<string, unknown> = {}) => ({
+  id: 'PRJ_1',
+  title: 'بازسازی پل',
+  operationType: 'خاکبرداری',
+  locationDescription: 'کیلومتر ۱۲',
+  estimatedCostMinor: '1500000',
+  status,
+  statusChangedAt: '2026-10-20T08:00:00.000Z',
+  hasArea: false,
+  statusReason: null,
+  createdAt: '2026-10-19T08:00:00.000Z',
+  scopeOfWork: 'شرح کار',
+  needsSummary: null,
+  version: 5,
+  ...over,
+});
+
+const STEP = (over: Record<string, unknown> = {}) => ({
+  id: 'APR_1',
+  projectId: 'PRJ_1',
+  workflowKey: 'project.execution',
+  round: 1,
+  stepOrder: 1,
+  approvalType: 'تایید فنی',
+  authorityOrganizationId: ORG,
+  authorityRole: 'ORGANIZATION_ADMIN',
+  authorityLabel: 'شورا',
+  status: 'PENDING',
+  requestedAt: null,
+  decidedAt: null,
+  decisionNumber: null,
+  conditions: null,
+  reason: null,
+  version: 2,
+  ...over,
+});
+
+const OPEN = { kind: 'OK', data: { kind: 'OPEN', label: 'سیاست', isSample: false, steps: [] } };
+const CLOSED = { kind: 'OK', data: { kind: 'CLOSED' } };
+
+beforeEach(() => {
+  mockFetched.length = 0;
+  for (const key of Object.keys(mockAnswers)) delete mockAnswers[key];
+  mockSession.current = signedInWith(['ORGANIZATION_ADMIN']);
+});
+
+async function detail(
+  status: string,
+  options: { approvals?: unknown; policy?: unknown; project?: unknown; flash?: string } = {},
+) {
+  mockAnswers['fetchProject'] = options.project ?? { kind: 'OK', data: PROJECT(status) };
+  mockAnswers['fetchProjectApprovals'] = options.approvals ?? { kind: 'OK', data: [] };
+  mockAnswers['fetchExecutionPolicy'] = options.policy ?? OPEN;
+  return DetailPage({
+    params: Promise.resolve({ id: 'PRJ_1' }),
+    searchParams: Promise.resolve(options.flash ? { flash: options.flash } : {}),
+  });
+}
+
+const offeredIn = (tree: ReactNode): string[] =>
+  Object.keys(
+    propsOf<{ tokens: Record<string, unknown> }>(ofType(tree, ProjectCommands)[0]).tokens ?? {},
+  ).sort();
+
+describe('/projects/[id]', () => {
+  it('sends a person with no session to sign in, and back', async () => {
+    mockSession.current = null;
+    await expect(detail('DRAFT')).rejects.toThrow(
+      'NEXT_REDIRECT:/login?returnTo=%2Fprojects%2FPRJ_1',
+    );
+  });
+
+  it.each([
+    ['DRAFT', ['cancel', 'edit', 'requestApproval']],
+    ['CHANGES_REQUESTED', ['cancel', 'edit', 'requestApproval']],
+    ['PENDING_APPROVAL', ['cancel']],
+    ['APPROVED', ['cancel', 'start']],
+    ['IN_PROGRESS', ['complete']],
+    ['COMPLETED', []],
+    ['CANCELLED', []],
+  ])('draws a %s project for its writer with %j', async (status, offered) => {
+    const tree = await detail(status);
+    expect(offeredIn(tree)).toEqual(offered);
+  });
+
+  it('signs each command for itself: the project, the command, the version and the status shown', async () => {
+    const tree = await detail('DRAFT');
+    const tokens = propsOf<{ tokens: Record<string, { baseline: string; submissionId: string }> }>(
+      ofType(tree, ProjectCommands)[0],
+    ).tokens;
+    const session = mockSession.current as Parameters<typeof openProjectBaseline>[0];
+    for (const command of ['edit', 'requestApproval', 'cancel'] as const) {
+      expect(openProjectBaseline(session, tokens[command]!.baseline, command)).toMatchObject({
+        targetId: 'PRJ_1',
+        projectId: 'PRJ_1',
+        command,
+        version: 5,
+        status: 'DRAFT',
+      });
+      // …and for no other command.
+      expect(
+        openProjectBaseline(
+          session,
+          tokens[command]!.baseline,
+          command === 'edit' ? 'cancel' : 'edit',
+        ),
+      ).toBeNull();
+      expect(tokens[command]!.submissionId).toMatch(/^sub_/);
+    }
+    expect(openProjectBaseline(session, tokens['edit']!.baseline, 'edit')?.digests).toMatchObject({
+      title: expect.any(String),
+      estimatedCost: expect.any(String),
+    });
+    expect(openProjectBaseline(session, tokens['cancel']!.baseline, 'cancel')?.digests).toBeNull();
+  });
+
+  it('draws the edit form from the record as the form’s own text', async () => {
+    const tree = await detail('DRAFT');
+    expect(
+      propsOf<{ initialValues: unknown }>(ofType(tree, ProjectCommands)[0]).initialValues,
+    ).toEqual({
+      title: 'بازسازی پل',
+      operationType: 'خاکبرداری',
+      locationDescription: 'کیلومتر ۱۲',
+      scopeOfWork: 'شرح کار',
+      estimatedCost: '1500000',
+    });
+  });
+
+  it('says the system is closed, and withholds only the request for approval', async () => {
+    const tree = await detail('DRAFT', { policy: CLOSED });
+    expect(offeredIn(tree)).toEqual(['cancel', 'edit']);
+    const policy = propsOf<{ policy: unknown }>(ofType(tree, PolicyState)[0]).policy;
+    expect(policy).toEqual(CLOSED);
+  });
+
+  it('keeps the request when the policy could not be read, and does not call that closed', async () => {
+    for (const policy of [
+      { kind: 'FORBIDDEN' },
+      { kind: 'UNAVAILABLE', status: 503, correlationId: 'c' },
+      { kind: 'MALFORMED', correlationId: 'c' },
+      { kind: 'OK', data: { kind: 'UNKNOWN' } },
+    ]) {
+      const tree = await detail('DRAFT', { policy });
+      expect(offeredIn(tree)).toEqual(['cancel', 'edit', 'requestApproval']);
+      expect(propsOf<{ policy: unknown }>(ofType(tree, PolicyState)[0]).policy).toEqual(policy);
+    }
+  });
+
+  it('reads the policy only where it decides the next step', async () => {
+    for (const status of ['DRAFT', 'CHANGES_REQUESTED', 'PENDING_APPROVAL']) {
+      mockFetched.length = 0;
+      await detail(status);
+      expect(mockFetched).toContain('fetchExecutionPolicy');
+    }
+    for (const status of ['APPROVED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED']) {
+      mockFetched.length = 0;
+      const tree = await detail(status);
+      expect(mockFetched).not.toContain('fetchExecutionPolicy');
+      expect(ofType(tree, PolicyState)).toHaveLength(0);
+    }
+  });
+
+  it('draws no write form for a reader, for the oversight role or for a token with no organization', async () => {
+    for (const session of [
+      signedInWith(['FLEET_MANAGER']),
+      signedInWith(['ORGANIZATION_ADMIN', 'AUDITOR']),
+      signedInWith([], null),
+    ]) {
+      mockSession.current = session;
+      const tree = await detail('DRAFT');
+      expect(ofType(tree, ProjectCommands)).toHaveLength(0);
+    }
+  });
+
+  it('draws the record, the approvals and the empty commands section for a reader', async () => {
+    mockSession.current = signedInWith(['FLEET_MANAGER']);
+    const tree = await detail('DRAFT');
+    expect(ofType(tree, ProjectDetailScreen)).toHaveLength(1);
+    expect(ofType(tree, ProjectApprovals)).toHaveLength(1);
+  });
+
+  it('draws the commands for the platform administrator acting for an organization', async () => {
+    const session = signedInWith(['ORGANIZATION_ADMIN']);
+    session.accessToken = jwt({
+      org_id: ORG,
+      org_ids: [ORG],
+      org_roles: [`${ORG}:FLEET_MANAGER`],
+      realm_access: { roles: ['SYSTEM_ADMIN'] },
+    });
+    mockSession.current = session;
+    expect(offeredIn(await detail('APPROVED'))).toEqual(['cancel', 'start']);
+  });
+
+  it('draws the decision forms only on a pending step this person is the authority of', async () => {
+    const approvals = {
+      kind: 'OK',
+      data: [
+        STEP({ id: 'APR_1' }),
+        STEP({ id: 'APR_2', stepOrder: 2, authorityRole: 'UNION_ADMIN' }),
+        STEP({ id: 'APR_3', stepOrder: 3, authorityOrganizationId: 'ORG-COUNCIL' }),
+        STEP({ id: 'APR_4', stepOrder: 4, status: 'QUEUED' }),
+        STEP({ id: 'APR_5', stepOrder: 5, workflowKey: 'tender.award' }),
+      ],
+    };
+    const tree = await detail('PENDING_APPROVAL', { approvals });
+    const decisions = propsOf<{
+      decisions: Record<string, { grant: { baseline: string }; reject: { baseline: string } }>;
+    }>(ofType(tree, ProjectApprovals)[0]).decisions;
+    expect(Object.keys(decisions)).toEqual(['APR_1']);
+    const session = mockSession.current as Parameters<typeof openProjectBaseline>[0];
+    expect(openProjectBaseline(session, decisions['APR_1']!.grant.baseline, 'grant')).toMatchObject(
+      {
+        targetId: 'APR_1',
+        projectId: 'PRJ_1',
+        version: 2,
+        status: 'PENDING',
+      },
+    );
+    expect(openProjectBaseline(session, decisions['APR_1']!.grant.baseline, 'reject')).toBeNull();
+    expect(
+      openProjectBaseline(session, decisions['APR_1']!.reject.baseline, 'reject'),
+    ).not.toBeNull();
+  });
+
+  it('draws a decision for an authority even when it is not allowed to write projects', async () => {
+    mockSession.current = signedInWith(['FLEET_MANAGER']);
+    const approvals = {
+      kind: 'OK',
+      data: [STEP({ authorityRole: 'FLEET_MANAGER' })],
+    };
+    const tree = await detail('PENDING_APPROVAL', { approvals });
+    expect(
+      Object.keys(propsOf<{ decisions: object }>(ofType(tree, ProjectApprovals)[0]).decisions),
+    ).toEqual(['APR_1']);
+    expect(ofType(tree, ProjectCommands)).toHaveLength(0);
+  });
+
+  it.each([
+    [{ kind: 'NOT_FOUND' }],
+    [{ kind: 'FORBIDDEN' }],
+    [{ kind: 'UNAVAILABLE', status: 503, correlationId: 'c' }],
+    [{ kind: 'MALFORMED', correlationId: 'c' }],
+  ])(
+    'draws no commands, approvals or policy for a project read that answered %j',
+    async (project) => {
+      const tree = await detail('DRAFT', { project });
+      expect(ofType(tree, ProjectCommands)).toHaveLength(0);
+      expect(ofType(tree, ProjectApprovals)).toHaveLength(0);
+      expect(ofType(tree, PolicyState)).toHaveLength(0);
+      expect(mockFetched).not.toContain('fetchExecutionPolicy');
+    },
+  );
+
+  it('offers no command for a project the service sent without a version', async () => {
+    const tree = await detail('DRAFT', {
+      project: { kind: 'OK', data: PROJECT('DRAFT', { version: undefined }) },
+    });
+    expect(offeredIn(tree)).toEqual([]);
+  });
+
+  it('shows the confirmation only for the project it was signed for', async () => {
+    const session = mockSession.current as Parameters<typeof mintFlash>[0];
+    const mine = await detail('DRAFT', { flash: mintFlash(session, 'PRJ_1', 'updated') });
+    expect(propsOf<{ notice?: string }>(ofType(mine, ProjectDetailScreen)[0]).notice).toBe(
+      'updated',
+    );
+    const other = await detail('DRAFT', { flash: mintFlash(session, 'PRJ_2', 'updated') });
+    expect(
+      propsOf<{ notice?: string }>(ofType(other, ProjectDetailScreen)[0]).notice,
+    ).toBeUndefined();
+    const forged = await detail('DRAFT', { flash: 'updated' });
+    expect(
+      propsOf<{ notice?: string }>(ofType(forged, ProjectDetailScreen)[0]).notice,
+    ).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The needs on /projects/[id]
+// ---------------------------------------------------------------------------
+
+describe('/projects/[id] — the needs', () => {
+  let memoryStore = memoryUnresolvedStore();
+  beforeEach(() => {
+    memoryStore = memoryUnresolvedStore();
+    useUnresolvedStore(memoryStore);
+  });
+
+  const NEED = (id: string, status: string, over: Record<string, unknown> = {}) => ({
+    id,
+    projectId: 'PRJ_1',
+    title: `نیاز ${id}`,
+    description: 'شرح',
+    quantity: '25.5',
+    unit: 'متر مکعب',
+    estimatedCostMinor: '1500000',
+    status,
+    createdAt: '2026-10-20T08:00:00.000Z',
+    submittedAt: null,
+    withdrawnAt: null,
+    withdrawalReason: null,
+    version: 4,
+    ...over,
+  });
+  const NEEDS = [NEED('NED_1', 'DRAFT'), NEED('NED_2', 'SUBMITTED'), NEED('NED_3', 'WITHDRAWN')];
+  const PAGE_OF = (items: unknown[], over: Record<string, unknown> = {}) => ({
+    kind: 'OK',
+    data: { items, nextCursor: null, hasMore: false, ...over },
+  });
+
+  async function withNeeds(
+    status: string,
+    options: {
+      needs?: unknown;
+      project?: unknown;
+      flash?: string;
+      query?: Record<string, string>;
+    } = {},
+  ) {
+    mockAnswers['fetchProjectNeeds'] = options.needs ?? PAGE_OF(NEEDS);
+    mockAnswers['fetchProject'] = options.project ?? { kind: 'OK', data: PROJECT(status) };
+    mockAnswers['fetchProjectApprovals'] = { kind: 'OK', data: [] };
+    mockAnswers['fetchExecutionPolicy'] = OPEN;
+    return DetailPage({
+      params: Promise.resolve({ id: 'PRJ_1' }),
+      searchParams: Promise.resolve({
+        ...options.query,
+        ...(options.flash ? { flash: options.flash } : {}),
+      }),
+    });
+  }
+
+  type SectionProps = React.ComponentProps<typeof NeedsSection>;
+  const sectionOf = (tree: ReactNode): SectionProps =>
+    propsOf<SectionProps>(ofType(tree, NeedsSection)[0]);
+  const offeredFor = (tree: ReactNode) =>
+    Object.fromEntries(
+      Object.entries(sectionOf(tree).tokens).map(([id, tokens]) => [
+        id,
+        Object.keys(tokens).sort(),
+      ]),
+    );
+
+  it('reads the needs with the page and draws them in a section of their own', async () => {
+    const tree = await withNeeds('DRAFT');
+    expect(mockFetched).toContain('fetchProjectNeeds');
+    expect(ofType(tree, NeedsSection)).toHaveLength(1);
+    expect(sectionOf(tree).result).toEqual(PAGE_OF(NEEDS));
+    expect(sectionOf(tree).cursor).toBeNull();
+    expect(sectionOf(tree).projectId).toBe('PRJ_1');
+  });
+
+  it('passes the page cursor on, and ignores a cursor that is not text', async () => {
+    expect(sectionOf(await withNeeds('DRAFT', { query: { needs: 'CUR_2' } })).cursor).toBe('CUR_2');
+    expect(sectionOf(await withNeeds('DRAFT', { query: { needs: '' } })).cursor).toBeNull();
+  });
+
+  it.each([['DRAFT'], ['CHANGES_REQUESTED']])(
+    'draws, in a %s project, what each need’s status offers',
+    async (status) => {
+      const tree = await withNeeds(status);
+      expect(offeredFor(tree)).toEqual({
+        NED_1: ['edit', 'submit', 'withdraw'],
+        NED_2: ['withdraw'],
+        NED_3: [],
+      });
+      expect(sectionOf(tree).add).toMatchObject({ kind: 'FORM' });
+    },
+  );
+
+  it.each([['PENDING_APPROVAL'], ['APPROVED'], ['IN_PROGRESS'], ['COMPLETED'], ['CANCELLED']])(
+    'draws no need command and no add form in a %s project, and says why',
+    async (status) => {
+      const tree = await withNeeds(status);
+      expect(offeredFor(tree)).toEqual({ NED_1: [], NED_2: [], NED_3: [] });
+      expect(sectionOf(tree).add).toEqual({ kind: 'NOT_OFFERED', reason: 'STATUS' });
+      // The list itself is still drawn.
+      expect(sectionOf(tree).result).toEqual(PAGE_OF(NEEDS));
+    },
+  );
+
+  it('signs each command for itself: the need, the project, the command, the version and the status shown', async () => {
+    const tree = await withNeeds('DRAFT');
+    const tokens = sectionOf(tree).tokens;
+    const session = mockSession.current as Parameters<typeof openNeedBaseline>[0];
+    for (const command of ['edit', 'submit', 'withdraw'] as const) {
+      const token = tokens['NED_1']![command]!;
+      expect(openNeedBaseline(session, token.baseline, command)).toMatchObject({
+        needId: 'NED_1',
+        projectId: 'PRJ_1',
+        command,
+        version: 4,
+        status: 'DRAFT',
+      });
+      // …and for no other command.
+      expect(
+        openNeedBaseline(session, token.baseline, command === 'edit' ? 'submit' : 'edit'),
+      ).toBeNull();
+      expect(token.submissionId).toMatch(/^sub_/);
+    }
+    expect(
+      openNeedBaseline(session, tokens['NED_1']!.edit!.baseline, 'edit')?.digests,
+    ).toMatchObject({ title: expect.any(String), quantity: expect.any(String) });
+    expect(
+      openNeedBaseline(session, tokens['NED_1']!.submit!.baseline, 'submit')?.digests,
+    ).toBeNull();
+    // A submitted need is signed at its own status and version.
+    expect(
+      openNeedBaseline(session, tokens['NED_2']!.withdraw!.baseline, 'withdraw'),
+    ).toMatchObject({ needId: 'NED_2', status: 'SUBMITTED', version: 4 });
+  });
+
+  it('draws every need’s edit form from its own record, with the quantity in canonical form', async () => {
+    const tree = await withNeeds('DRAFT', {
+      needs: PAGE_OF([
+        NEED('NED_1', 'DRAFT', { quantity: '7.5', unit: null, estimatedCostMinor: null }),
+      ]),
+    });
+    expect(sectionOf(tree).editValues['NED_1']).toEqual({
+      title: 'نیاز NED_1',
+      description: 'شرح',
+      quantity: '7.5',
+      unit: '',
+      estimatedCost: '',
+    });
+  });
+
+  it('draws no command for a reader, for the oversight role or for a token with no organization — and reads no hold for them', async () => {
+    const hold = async (session: ReturnType<typeof signedInWith>) => {
+      const sent = mintNeedSubmission(session, 'PRJ_1');
+      const reserved = await reserveUnresolved(session, needCreateScope('PRJ_1'), {
+        key: sent.id,
+        digest: 'digest',
+        ref: sent.replay,
+        issuedAt: Date.now(),
+        deadline: null,
+        windowMs: null,
+      });
+      if (reserved.kind !== 'RESERVED') throw new Error(reserved.kind);
+      await settleUnresolved(reserved.attempt, 'UNRESOLVED');
+    };
+    for (const [index, base] of [
+      signedInWith(['FLEET_MANAGER']),
+      signedInWith(['ORGANIZATION_ADMIN', 'AUDITOR']),
+    ].entries()) {
+      // A login of its own each, so each has a hold of its own.
+      const session = { ...base, csrfToken: `reader-login-${index}` };
+      mockSession.current = session;
+      await hold(session);
+      const tree = await withNeeds('DRAFT');
+      expect(offeredFor(tree)).toEqual({ NED_1: [], NED_2: [], NED_3: [] });
+      expect(sectionOf(tree).add).toEqual({ kind: 'NOT_OFFERED', reason: 'ROLE' });
+    }
+    mockSession.current = signedInWith([], null);
+    const tree = await withNeeds('DRAFT');
+    expect(sectionOf(tree).add).toEqual({ kind: 'NOT_OFFERED', reason: 'ROLE' });
+  });
+
+  it('a stamp minted for the add form is this project’s own', async () => {
+    const tree = await withNeeds('DRAFT');
+    const add = sectionOf(tree).add;
+    if (add.kind !== 'FORM') throw new Error(add.kind);
+    expect(add.submission.id).toMatch(/^sub_/);
+    expect(add.submission.replay).toEqual(expect.any(String));
+  });
+
+  describe('an unresolved add', () => {
+    const remember = async () => {
+      const session = mockSession.current as ReturnType<typeof signedInWith>;
+      const sent = mintNeedSubmission(session, 'PRJ_1');
+      const reserved = await reserveUnresolved(session, needCreateScope('PRJ_1'), {
+        key: sent.id,
+        digest: 'digest',
+        ref: sent.replay,
+        issuedAt: Date.now(),
+        deadline: null,
+        windowMs: null,
+      });
+      if (reserved.kind !== 'RESERVED') throw new Error(reserved.kind);
+      // The response that would have carried the news is lost: only the server's record remains.
+      await settleUnresolved(reserved.attempt, 'UNRESOLVED');
+      return sent;
+    };
+
+    it('is said on every reload and replaces the add form — with no way to send it again, only to release it', async () => {
+      const sent = await remember();
+      for (const query of [{}, { needs: 'CUR_2' }] as Record<string, string>[]) {
+        const add = sectionOf(await withNeeds('DRAFT', { query })).add;
+        if (add.kind !== 'PENDING') throw new Error(add.kind);
+        expect(add.request.key).toBe(sent.id);
+      }
+    });
+
+    it('stays said when the project is no longer editable, and when the needs could not be read', async () => {
+      await remember();
+      for (const tree of [
+        await withNeeds('PENDING_APPROVAL'),
+        await withNeeds('DRAFT', {
+          needs: { kind: 'UNAVAILABLE', status: 503, correlationId: 'c' },
+        }),
+      ]) {
+        expect(sectionOf(tree).add.kind).toBe('PENDING');
+      }
+    });
+
+    it('is another project’s own: the hold of one project does not show on another', async () => {
+      await remember();
+      mockAnswers['fetchProject'] = { kind: 'OK', data: PROJECT('DRAFT', { id: 'PRJ_2' }) };
+      mockAnswers['fetchProjectNeeds'] = PAGE_OF([]);
+      mockAnswers['fetchProjectApprovals'] = { kind: 'OK', data: [] };
+      mockAnswers['fetchExecutionPolicy'] = OPEN;
+      const tree = await DetailPage({
+        params: Promise.resolve({ id: 'PRJ_2' }),
+        searchParams: Promise.resolve({}),
+      });
+      expect(sectionOf(tree).add.kind).toBe('FORM');
+    });
+
+    it('is not another person’s: the same project, another login, sees no hold', async () => {
+      await remember();
+      mockSession.current = { ...signedInWith(['ORGANIZATION_ADMIN']), csrfToken: 'another-login' };
+      expect(sectionOf(await withNeeds('DRAFT')).add.kind).toBe('FORM');
+    });
+
+    it('offers a release that names this record, and the release lets go of it', async () => {
+      const sent = await remember();
+      const add = sectionOf(await withNeeds('DRAFT')).add;
+      if (add.kind !== 'PENDING') throw new Error(add.kind);
+      const session = mockSession.current as Parameters<typeof releaseUnresolved>[0];
+      expect(await releaseUnresolved(session, needCreateScope('PRJ_2'), add.releaseToken)).toBe(
+        'STALE',
+      );
+      expect(await releaseUnresolved(session, needCreateScope('PRJ_1'), add.releaseToken)).toBe(
+        'RELEASED',
+      );
+      expect(sectionOf(await withNeeds('DRAFT')).add.kind).toBe('FORM');
+      expect(sent.id).toMatch(/^sub_/);
+    });
+
+    it('passes a refused release on, and nothing else the query says', async () => {
+      for (const [release, expected] of [
+        ['STALE', 'STALE'],
+        ['IN_PROGRESS', 'IN_PROGRESS'],
+        ['RELEASED', null],
+        ['anything', null],
+      ] as const) {
+        expect(sectionOf(await withNeeds('DRAFT', { query: { release } })).releaseRefused).toBe(
+          expected,
+        );
+      }
+    });
+  });
+
+  it('FAILS CLOSED when the store cannot say: a notice, NO add form, no fresh key', async () => {
+    const fail = async () => {
+      throw new UnresolvedStoreUnavailable(new Error('ECONNREFUSED'));
+    };
+    useUnresolvedStore({ reserve: fail, read: fail, settle: fail, release: fail, purge: fail });
+    const tree = await withNeeds('DRAFT');
+    expect(sectionOf(tree).add).toEqual({ kind: 'UNCHECKED' });
+    // The commands that carry their own version are not held back by the store.
+    expect(offeredFor(tree)['NED_1']).toEqual(['edit', 'submit', 'withdraw']);
+    // A project that is not editable has no add form to hold back.
+    expect((await withNeeds('APPROVED').then(sectionOf)).add).toEqual({
+      kind: 'NOT_OFFERED',
+      reason: 'STATUS',
+    });
+  });
+
+  it.each([
+    [{ kind: 'FORBIDDEN' }],
+    [{ kind: 'NOT_FOUND' }],
+    [{ kind: 'UNAVAILABLE', status: 503, correlationId: 'c' }],
+    [{ kind: 'MALFORMED', correlationId: 'c' }],
+  ])('a needs read that answered %j draws no command and no add form', async (needs) => {
+    const tree = await withNeeds('DRAFT', { needs });
+    expect(sectionOf(tree).result).toEqual(needs);
+    expect(sectionOf(tree).tokens).toEqual({});
+    expect(sectionOf(tree).add).toEqual({ kind: 'LIST_UNREAD' });
+  });
+
+  it('draws no needs section for a project that could not be read', async () => {
+    for (const project of [
+      { kind: 'NOT_FOUND' },
+      { kind: 'FORBIDDEN' },
+      { kind: 'UNAVAILABLE', status: 503, correlationId: 'c' },
+    ]) {
+      const tree = await withNeeds('DRAFT', { project });
+      expect(ofType(tree, NeedsSection)).toHaveLength(0);
+    }
+  });
+
+  it('shows a need’s confirmation only for the project it was signed for', async () => {
+    const session = mockSession.current as Parameters<typeof mintFlash>[0];
+    for (const notice of ['needAdded', 'needUpdated', 'needSubmitted', 'needWithdrawn'] as const) {
+      const mine = await withNeeds('DRAFT', { flash: mintFlash(session, 'PRJ_1', notice) });
+      expect(propsOf<{ notice?: string }>(ofType(mine, ProjectDetailScreen)[0]).notice).toBe(
+        notice,
+      );
+      const other = await withNeeds('DRAFT', { flash: mintFlash(session, 'PRJ_2', notice) });
+      expect(
+        propsOf<{ notice?: string }>(ofType(other, ProjectDetailScreen)[0]).notice,
+      ).toBeUndefined();
+    }
+    // The stale notice of the project's own commands is the need commands' too.
+    const stale = await withNeeds('DRAFT', { flash: mintFlash(session, 'PRJ_1', 'stale') });
+    expect(propsOf<{ notice?: string }>(ofType(stale, ProjectDetailScreen)[0]).notice).toBe(
+      'stale',
+    );
+  });
+});
+
+describe('/projects', () => {
+  let memoryStore = memoryUnresolvedStore();
+  beforeEach(() => {
+    memoryStore = memoryUnresolvedStore();
+    useUnresolvedStore(memoryStore);
+  });
+
+  async function list(
+    options: { inbox?: unknown; flash?: string; search?: Record<string, string | undefined> } = {},
+  ) {
+    mockAnswers['fetchProjects'] = {
+      kind: 'OK',
+      data: { items: [], nextCursor: null, hasMore: false },
+    };
+    mockAnswers['fetchApprovalInbox'] = options.inbox ?? {
+      kind: 'OK',
+      data: { items: [], nextCursor: null, hasMore: false },
+    };
+    return ListPage({
+      searchParams: Promise.resolve(
+        options.flash ? { ...options.search, flash: options.flash } : (options.search ?? {}),
+      ),
+    });
+  }
+
+  it('draws the create form for a writer, with a submission id of its own', async () => {
+    const tree = await list();
+    const form = propsOf<{ submission: { id: string; replay: string }; csrfToken: string }>(
+      ofType(tree, CreateProjectForm)[0],
+    );
+    expect(form.submission.id).toMatch(/^sub_/);
+    expect(form.submission.replay).toMatch(/\./);
+    expect(form.csrfToken).toBe('csrf-token-for-this-session');
+  });
+
+  it('draws a fresh submission id on every render', async () => {
+    const first = propsOf<{ submission: { id: string } }>(
+      ofType(await list(), CreateProjectForm)[0],
+    );
+    const second = propsOf<{ submission: { id: string } }>(
+      ofType(await list(), CreateProjectForm)[0],
+    );
+    expect(first.submission.id).not.toBe(second.submission.id);
+  });
+
+  it.each([
+    [['FLEET_MANAGER'], 'ORG-OWNER'],
+    [['ORGANIZATION_ADMIN', 'AUDITOR'], 'ORG-OWNER'],
+    [[], null],
+  ])('draws no create form for %j acting for %j', async (roles, organization) => {
+    mockSession.current = signedInWith(roles, organization);
+    const tree = await list();
+    expect(ofType(tree, CreateProjectForm)).toHaveLength(0);
+  });
+
+  describe('an unresolved create', () => {
+    const remember = async (session = signedInWith(['ORGANIZATION_ADMIN'])) => {
+      const sent = mintCreateSubmission(session);
+      const reserved = await reserveUnresolved(session, PROJECT_CREATE_UNRESOLVED, {
+        key: sent.id,
+        digest: 'digest',
+        ref: sent.replay,
+        issuedAt: Date.now(),
+        deadline: Date.now() + 60_000,
+        windowMs: 60_000,
+      });
+      if (reserved.kind !== 'RESERVED') throw new Error(reserved.kind);
+      // The response that would have carried the news is lost: only the server's record remains.
+      await settleUnresolved(reserved.attempt, 'UNRESOLVED');
+      return sent;
+    };
+
+    it('keeps the warning and the OLD key on a reload with a filter that hides the new draft', async () => {
+      const sent = await remember();
+      for (const search of [{}, { status: 'APPROVED' }] as Record<string, string>[]) {
+        const tree = await list({ search });
+        expect(ofType(tree, UnresolvedCreateNotice)).toHaveLength(1);
+        const form = propsOf<{ submission: { id: string; replay: string } }>(
+          ofType(tree, CreateProjectForm)[0],
+        );
+        expect(form.submission).toEqual(sent);
+      }
+    });
+
+    it('is not shown to another person, another organization, or a later login', async () => {
+      await remember();
+      const base = signedInWith(['ORGANIZATION_ADMIN']);
+      for (const other of [
+        { ...base, subject: 'user-2' },
+        { ...signedInWith(['ORGANIZATION_ADMIN'], 'ORG-2') },
+        { ...base, csrfToken: 'a-later-login' },
+      ]) {
+        mockSession.current = other;
+        const tree = await list();
+        expect(ofType(tree, UnresolvedCreateNotice)).toHaveLength(0);
+        expect(
+          propsOf<{ submission: { id: string } }>(ofType(tree, CreateProjectForm)[0]).submission.id,
+        ).toMatch(/^sub_/);
+      }
+    });
+
+    it('draws a release form that names the held record', async () => {
+      await remember();
+      const notice = propsOf<{ releaseToken: string }>(
+        ofType(await list(), UnresolvedCreateNotice)[0],
+      );
+      expect(notice.releaseToken).toMatch(/\./);
+    });
+
+    it('while a dispatch is in flight shows the notice as in flight, with the pinned form', async () => {
+      const session = signedInWith(['ORGANIZATION_ADMIN']);
+      const sent = mintCreateSubmission(session);
+      await reserveUnresolved(session, PROJECT_CREATE_UNRESOLVED, {
+        key: sent.id,
+        digest: 'd',
+        ref: sent.replay,
+        issuedAt: Date.now(),
+        deadline: Date.now() + 60_000,
+        windowMs: 60_000,
+      });
+      const tree = await list();
+      expect(
+        propsOf<{ request: { inFlight: boolean } }>(ofType(tree, UnresolvedCreateNotice)[0]).request
+          .inFlight,
+      ).toBe(true);
+      expect(
+        propsOf<{ submission: { id: string } }>(ofType(tree, CreateProjectForm)[0]).submission.id,
+      ).toBe(sent.id);
+    });
+
+    it('FAILS CLOSED when the store cannot say: a notice, NO create form, no fresh key', async () => {
+      const fail = async () => {
+        throw new UnresolvedStoreUnavailable(new Error('ECONNREFUSED'));
+      };
+      useUnresolvedStore({
+        reserve: fail,
+        read: fail,
+        settle: fail,
+        release: fail,
+        purge: fail,
+      });
+      const tree = await list();
+      expect(ofType(tree, CreateProjectForm)).toHaveLength(0);
+      expect(ofType(tree, UnresolvedCreateNotice)).toHaveLength(0);
+      expect(JSON.stringify(elements(tree).map((e) => e.props))).toContain('بررسی کرد');
+    });
+
+    it('FAILS CLOSED on a record that is not this person’s (unverifiable), too', async () => {
+      const session = signedInWith(['ORGANIZATION_ADMIN']);
+      await remember(session);
+      useUnresolvedStore({
+        ...memoryStore,
+        read: async (binding) => {
+          const out = await memoryStore.read(binding);
+          return { ...out, record: out.record && { ...out.record, bind: 'f'.repeat(64) } };
+        },
+      });
+      const tree = await list();
+      expect(ofType(tree, CreateProjectForm)).toHaveLength(0);
+    });
+
+    it.each([
+      ['a missing deadline', (r: Record<string, unknown>) => delete r.deadline],
+      ['a null deadline', (r: Record<string, unknown>) => (r.deadline = null)],
+      ['an unknown state', (r: Record<string, unknown>) => (r.state = 'BOGUS')],
+      ['an extra field', (r: Record<string, unknown>) => (r.extra = 1)],
+    ])(
+      'FAILS CLOSED on a malformed stored record (%s): "cannot be checked now", no form, no fresh key, the record untouched',
+      async (_name, corrupt) => {
+        const session = signedInWith(['ORGANIZATION_ADMIN']);
+        await remember(session);
+        const [key] = [...memoryStore.records.keys()];
+        const rec = JSON.parse(memoryStore.records.get(key!)!);
+        corrupt(rec);
+        const bytes = JSON.stringify(rec);
+        memoryStore.records.set(key!, bytes);
+        const tree = await list();
+        expect(ofType(tree, CreateProjectForm)).toHaveLength(0);
+        expect(ofType(tree, UnresolvedCreateNotice)).toHaveLength(0);
+        expect(JSON.stringify(elements(tree).map((e) => e.props))).toContain('بررسی کرد');
+        expect(memoryStore.records.get(key!)).toBe(bytes);
+      },
+    );
+
+    it.each([61_000, -61_000])(
+      'judges "in flight" and the resend window by the STORE’s clock when this replica is %i ms off',
+      async (offset) => {
+        const session = signedInWith(['ORGANIZATION_ADMIN']);
+        const sent = mintCreateSubmission(session);
+        const reserved = await reserveUnresolved(session, PROJECT_CREATE_UNRESOLVED, {
+          key: sent.id,
+          digest: 'd',
+          ref: sent.replay,
+          issuedAt: Date.now(),
+          deadline: Date.now() + 10 * 60_000,
+          windowMs: 10 * 60_000,
+        });
+        if (reserved.kind !== 'RESERVED') throw new Error(reserved.kind);
+        const real = Date.now;
+        jest.spyOn(Date, 'now').mockImplementation(() => real() + offset);
+        try {
+          const notice = propsOf<{ request: { inFlight: boolean }; now: number }>(
+            ofType(await list(), UnresolvedCreateNotice)[0],
+          );
+          // The dispatch is 0 s old by the store's clock, however far this replica is off.
+          expect(notice.request.inFlight).toBe(true);
+          // And the notice is given the store's time, not this replica's.
+          expect(Math.abs(notice.now - real())).toBeLessThan(5_000);
+        } finally {
+          jest.restoreAllMocks();
+        }
+      },
+    );
+
+    it('says a release form was refused as stale, and draws the current state', async () => {
+      await remember();
+      const tree = await list({ search: { release: 'STALE' } });
+      expect(JSON.stringify(elements(tree).map((e) => e.props))).toContain('تغییر کرده');
+      expect(ofType(tree, UnresolvedCreateNotice)).toHaveLength(1);
+    });
+
+    it('draws no notice when nothing is unresolved', async () => {
+      expect(ofType(await list(), UnresolvedCreateNotice)).toHaveLength(0);
+    });
+  });
+
+  it('gives the inbox a decision for each step the person is the authority of, and the list its own read', async () => {
+    const inbox = {
+      kind: 'OK',
+      data: {
+        items: [STEP({ id: 'APR_1' }), STEP({ id: 'APR_2', authorityOrganizationId: 'ORG-OTHER' })],
+        nextCursor: null,
+        hasMore: false,
+      },
+    };
+    const tree = await list({ inbox });
+    const props = propsOf<{ decisions: Record<string, unknown> }>(ofType(tree, ApprovalInbox)[0]);
+    expect(Object.keys(props.decisions)).toEqual(['APR_1']);
+    expect(mockFetched).toEqual(expect.arrayContaining(['fetchProjects', 'fetchApprovalInbox']));
+  });
+
+  it('draws no decisions for an inbox that could not be read', async () => {
+    for (const inbox of [
+      { kind: 'FORBIDDEN' },
+      { kind: 'UNAVAILABLE', status: 503, correlationId: 'c' },
+    ]) {
+      const tree = await list({ inbox });
+      expect(propsOf<{ decisions: object }>(ofType(tree, ApprovalInbox)[0]).decisions).toEqual({});
+    }
+  });
+});
