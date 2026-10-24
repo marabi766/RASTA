@@ -296,7 +296,10 @@ export function timelineTitleLabel(title: string): string {
  * anything else is machine wording and is replaced by `machineWording`.
  */
 export function reasonText(reason: string, machineWording: string): string {
-  const personal = /\p{Script=Arabic}/u.test(reason) || !/[A-Za-z]/.test(reason);
+  // Detection, not an allow-list: any letter of the Arabic script blocks.
+  const personal =
+    /[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]/.test(reason) ||
+    !/[A-Za-z]/.test(reason);
   return personal ? reason : machineWording;
 }
 

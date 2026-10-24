@@ -64,7 +64,7 @@ describe('an asset with Persian punctuation (HTTP)', () => {
   it('POST /v1/assets accepts «،» «؛» «؟» in name, manufacturer and site', async () => {
     const response = await request(app.getHttpServer())
       .post('/v1/assets')
-      .set('Idempotency-Key', 'persian-punct-0001')
+      .set('Idempotency-Key', 'create-asset-0001')
       .send(BODY);
 
     expect(response.status).toBe(201);
@@ -77,7 +77,7 @@ describe('an asset with Persian punctuation (HTTP)', () => {
   it('still refuses a bidi control in the name', async () => {
     const response = await request(app.getHttpServer())
       .post('/v1/assets')
-      .set('Idempotency-Key', 'persian-punct-0002')
+      .set('Idempotency-Key', 'create-asset-0002')
       .send({ ...BODY, name: `${BODY.name}‮` });
 
     expect(response.status).toBe(400);
