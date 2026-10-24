@@ -10,6 +10,7 @@ import {
 import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
 import { MONEY_EFFECTS, mayOffer, type DemoMode } from '@/lib/demo-mode';
 import { productKindLabel } from '@/lib/labels';
+import { qualificationStateLabel } from '@/lib/supplier-fields';
 import { formatMoney, toPersianDigits } from '@/lib/format';
 import type { OffersPage, Product, ReadResult } from '@/server/marketplace';
 
@@ -135,7 +136,7 @@ function OfferRows({ offers }: { offers: OffersPage }) {
             <td className="p-3 text-content-muted">
               {offer.supplierQualification === 'UNAVAILABLE'
                 ? 'هنوز فعال نیست'
-                : offer.supplierQualification}
+                : qualificationStateLabel(offer.supplierQualification)}
             </td>
           </tr>
         ))}

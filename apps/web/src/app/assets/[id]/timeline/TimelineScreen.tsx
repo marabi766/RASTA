@@ -8,7 +8,7 @@ import {
   PageHeader,
   Section,
 } from '@/ui';
-import { timelineCategoryLabel, timelineCategoryOptions } from '@/lib/labels';
+import { timelineCategoryLabel, timelineCategoryOptions, timelineTitleLabel } from '@/lib/labels';
 import { formatJalaliDateLong, formatMoney } from '@/lib/format';
 import type { AssetTimelinePage, AssetTimelineQuery, ReadResult } from '@/server/assets';
 import { DemoModeNotice } from '@/app/DemoModeNotice';
@@ -105,7 +105,7 @@ function EntryRows({
       <ol className="flex flex-col gap-4">
         {page.items.map((entry) => (
           <li key={entry.id} className="border-s-2 border-border ps-4">
-            <p className="text-content">{entry.title}</p>
+            <p className="text-content">{timelineTitleLabel(entry.title)}</p>
             <p className="text-sm text-content-muted">
               {timelineCategoryLabel(entry.category)} · {formatJalaliDateLong(entry.occurredAt)}
               {entry.amountMinor ? ` · ${formatMoney(entry.amountMinor)}` : ''}

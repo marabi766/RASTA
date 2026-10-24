@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   cursorPaginationSchema,
+  displayText,
   seedIdSchema,
   ID_PREFIXES,
   plainText,
@@ -32,24 +33,6 @@ export const ASSIGNMENT_END_REASONS = [
 export const driverStatusSchema = z.enum(DRIVER_STATUSES);
 export const usageSourceSchema = z.enum(USAGE_SOURCES);
 export const assignmentEndReasonSchema = z.enum(ASSIGNMENT_END_REASONS);
-
-/**
- * Persian display text, allowing ZWNJ and the usual punctuation.
- *
- * The lookahead refuses every bidirectional control (`\p{Bidi_Control}`): the
- * script class alone admits U+061C ARABIC LETTER MARK, an Arabic-script one.
- * One pattern, so the published OpenAPI `pattern` states both rules.
- */
-const displayText = (min: number, max: number) =>
-  z
-    .string()
-    .trim()
-    .min(min)
-    .max(max)
-    .regex(
-      /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/:+]+$/u,
-      'Contains unsupported characters',
-    );
 
 /**
  * A non-negative quantity with at most two decimals, accepted as a string.

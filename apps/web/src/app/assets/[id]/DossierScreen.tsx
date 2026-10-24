@@ -18,6 +18,7 @@ import {
   blockerLabel,
   inspectionResultLabel,
   timelineCategoryLabel,
+  timelineTitleLabel,
 } from '@/lib/labels';
 import { formatJalaliDateLong, formatMoney, toPersianDigits } from '@/lib/format';
 import type { AssetDossier, ReadResult } from '@/server/assets';
@@ -378,7 +379,7 @@ export function DossierScreen({
           <ol className="flex flex-col gap-4">
             {recentActivity.map((entry) => (
               <li key={entry.id} className="border-s-2 border-border ps-4">
-                <p className="text-content">{entry.title}</p>
+                <p className="text-content">{timelineTitleLabel(entry.title)}</p>
                 <p className="text-sm text-content-muted">
                   {timelineCategoryLabel(entry.category)} · {formatJalaliDateLong(entry.occurredAt)}
                   {entry.amountMinor ? ` · ${formatMoney(entry.amountMinor)}` : ''}

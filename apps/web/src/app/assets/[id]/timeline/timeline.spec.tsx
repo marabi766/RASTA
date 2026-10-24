@@ -39,6 +39,19 @@ describe('the asset timeline', () => {
     expect(getByText(new RegExp(formatMoney(ENTRY.amountMinor)))).toBeInTheDocument();
   });
 
+  it('words a status change in Persian: the status code inside the title becomes its label', () => {
+    const { container, getByText } = render(
+      <TimelineScreen
+        demoMode="REAL"
+        result={page({ items: [{ ...ENTRY, title: 'تغییر وضعیت به IN_MAINTENANCE' }] })}
+        assetId="AST_1"
+        query={{}}
+      />,
+    );
+    expect(getByText('تغییر وضعیت به در تعمیر')).toBeInTheDocument();
+    expect(container.textContent).not.toContain('IN_MAINTENANCE');
+  });
+
   it('shows a stored reason that carries a bidi override isolated, and without the override', () => {
     // A status reason written before #220, copied into the line by asset-service.
     const RLO = String.fromCodePoint(0x202e);

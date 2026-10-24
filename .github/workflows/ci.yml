@@ -134,6 +134,9 @@ jobs:
         # psql that records every call.
         run: pnpm run test:infra-preflight
 
+      - name: Backup restore drill comparisons and cleanup
+        run: pnpm run test:backup-restore-drill-lib
+
       - name: Database runtime-role rules (D-045)
         # Every service is placed exactly once — split or audit — and one in
         # neither fails; the migration ledger revoke
@@ -289,11 +292,9 @@ jobs:
           pnpm run test:grafana-live-isolation-lib
 
       - name: Image scan coverage gate
-        # Runs here, in a job that fires on pull requests, rather than beside
-        # the `containers` job it protects — that one only runs on a push to
-        # main, so it cannot catch a service being added without an image
-        # build until the omission has already merged. Three services have
-        # landed unscanned this way (PROJECT_MEMORY § 22).
+        # Checks every service's image coverage on PRs and main, independently
+        # of the affected-image selection below. Three services once landed
+        # unscanned without this coverage gate (PROJECT_MEMORY § 22).
         run: |
           pnpm run ci:image-matrix
           pnpm run test:image-matrix
@@ -1578,6 +1579,8 @@ jobs:
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
           DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          # Disposable test admin: wrong-role guard must prevent an otherwise authorized ACL change.
+          DATABASE_URL_ANALYTICS_TEST_ADMIN: postgresql://rasta:rasta_ci_password@localhost:5432/postgres?schema=public
           DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
@@ -2719,14 +2722,63 @@ jobs:
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
           DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          # Disposable test admin: wrong-role guard must prevent an otherwise authorized ACL change.
+          DATABASE_URL_ANALYTICS_TEST_ADMIN: postgresql://rasta:rasta_ci_password@localhost:5432/postgres?schema=public
+
+  # Independent database-only gate: creates its own migrated fixture databases.
+  integration-backup-drill:
+    name: Backup restore PostgreSQL drill
+    runs-on: ubuntu-latest
+    needs: quality
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
+        env:
+          POSTGRES_USER: rasta
+          POSTGRES_PASSWORD: rasta_ci_password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rasta"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Provision databases, roles and extensions
+        env:
+          PGPASSWORD: rasta_ci_password
+          RASTA_DB_BOOTSTRAP: compose
+          POSTGRES_USER: rasta
+        run: |
+          export PGHOST=localhost PGPORT=5432
+          bash infrastructure/docker/postgres/00-init-databases.sh
+      - name: Backup restore SQL on a disposable database
+        timeout-minutes: 5
+        run: pnpm run test:backup-restore-drill-pg
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
 
   # The check branch protection and the merge queue require by name. It runs
   # always(), not on the default success(): a job skipped because a job it
   # needs failed reports "skipped", which a required check counts as passing.
   # So this runs whatever happened and fails unless every split job succeeded,
   # whether one failed, was cancelled, timed out or was skipped (when
-  # `quality` fails, all four are skipped and so this fails too). `containers`
-  # still needs `integration`, and so all four through it.
+  # `quality` fails, all five are skipped and so this fails too). `containers`
+  # still needs `integration`, and so all five through it.
   integration:
     name: Integration and security tests
     runs-on: ubuntu-latest
@@ -2736,6 +2788,7 @@ jobs:
       - integration-security
       - integration-coverage-critical
       - integration-coverage
+      - integration-backup-drill
     if: ${{ always() }}
     steps:
       - name: Every integration job passed
@@ -4105,8 +4158,7 @@ jobs:
           grep -Eq 'is up-to-date|updated \(version' /tmp/freshclam.log
 
   # ---------------------------------------------------------------------------
-  # Container build and image scan. Only on main, because it is the slowest
-  # stage and a PR has already been gated by everything above.
+  # Container build and image scan: affected images on PRs, every image on main.
   # ---------------------------------------------------------------------------
   container-scope:
     name: Images to build and scan
@@ -4137,6 +4189,10 @@ jobs:
         if: github.event_name == 'pull_request'
         run: pnpm install --filter . --frozen-lockfile --ignore-scripts
 
+      - name: Prove workflow narrowing with the filtered parser install
+        if: github.event_name == 'pull_request'
+        run: node --test --test-name-pattern='filtered parser narrows' scripts/container-scope.test.mjs
+
       - name: Decide which images this change affects
         id: scope
         # L7-35: images were built and scanned only after merge, so a broken
@@ -4146,8 +4202,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            services="$(git diff --name-only "${{ github.event.pull_request.base.sha }}...HEAD" \
-              | node scripts/container-scope.mjs --base "${{ github.event.pull_request.base.sha }}")"
+            services="$(node scripts/container-scope.mjs --base "${{ github.event.pull_request.base.sha }}")"
           else
             services="$(node scripts/container-scope.mjs --all)"
           fi

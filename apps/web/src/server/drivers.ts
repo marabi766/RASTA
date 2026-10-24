@@ -2,6 +2,7 @@ import { TZDate } from '@date-fns/tz';
 import { ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { BIDI_CONTROL, DISPLAY_TIME_ZONE, normalizePersianText, toLatinDigits } from '@/lib/format';
 import {
   CHANGE_STATUS_FIELDS,
@@ -338,18 +339,7 @@ export function parseCreateDriverForm(values: CreateDriverFormValues): ParsedCre
   const parsed = createDriverFormSchema.safeParse(values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<CreateDriverField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (
-      typeof field === 'string' &&
-      isCreateDriverField(field) &&
-      fieldErrors[field] === undefined
-    ) {
-      fieldErrors[field] = issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isCreateDriverField) };
 }
 
 function isCreateDriverField(value: string): value is CreateDriverField {
@@ -447,18 +437,7 @@ export function parseUpdateDriverForm(values: UpdateDriverFormValues): ParsedUpd
   const parsed = updateDriverFormSchema.safeParse(values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<UpdateDriverField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (
-      typeof field === 'string' &&
-      isUpdateDriverField(field) &&
-      fieldErrors[field] === undefined
-    ) {
-      fieldErrors[field] = issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isUpdateDriverField) };
 }
 
 function isUpdateDriverField(value: string): value is UpdateDriverField {
@@ -537,18 +516,7 @@ export function parseChangeStatusForm(values: ChangeStatusFormValues): ParsedCha
   const parsed = changeStatusFormSchema.safeParse(values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<ChangeStatusField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (
-      typeof field === 'string' &&
-      isChangeStatusField(field) &&
-      fieldErrors[field] === undefined
-    ) {
-      fieldErrors[field] = issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isChangeStatusField) };
 }
 
 function isChangeStatusField(value: string): value is ChangeStatusField {
