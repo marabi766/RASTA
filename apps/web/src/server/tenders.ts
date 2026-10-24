@@ -65,6 +65,7 @@ export type TenderSummary = z.infer<typeof tenderSummarySchema>;
 const tenderDetailSchema = tenderSummarySchema.extend({
   projectId: z.string(),
   scopeOfWork: z.string().default(''),
+  procurementThresholdWarning: z.literal('PROCUREMENT_AMOUNT_OUTSIDE_RANGE').optional(),
   statusReason: z.string().nullable().default(null),
   statusReasonCode: z.string().nullable().default(null),
   publishedAt: utcInstant.nullable().default(null),

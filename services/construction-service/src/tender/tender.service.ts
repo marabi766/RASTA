@@ -111,6 +111,8 @@ export class TenderService {
               projectId,
               title: dto.title,
               scopeOfWork: dto.scopeOfWork,
+              estimatedCostMinor:
+                dto.estimatedCostMinor === undefined ? null : BigInt(dto.estimatedCostMinor),
               procurementNature: dto.procurementNature ?? null,
               visibility: dto.visibility ?? null,
               bidOpeningAt: dto.bidOpeningAt ? new Date(dto.bidOpeningAt) : null,
@@ -225,6 +227,11 @@ export class TenderService {
           if (dto.title !== undefined) set('title', dto.title, dto.title !== current.title);
           if (dto.scopeOfWork !== undefined) {
             set('scopeOfWork', dto.scopeOfWork, dto.scopeOfWork !== current.scopeOfWork);
+          }
+          if (dto.estimatedCostMinor !== undefined) {
+            const estimate =
+              dto.estimatedCostMinor === null ? null : BigInt(dto.estimatedCostMinor);
+            set('estimatedCostMinor', estimate, estimate !== current.estimatedCostMinor);
           }
           if (dto.procurementNature !== undefined) {
             set(
