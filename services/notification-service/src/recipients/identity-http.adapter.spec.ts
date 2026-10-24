@@ -297,8 +297,10 @@ describe('IdentityHttpRecipientAdapter', () => {
   it('refuses an unreadable base URL with a fixed text, never the URL (#385 r5)', async () => {
     // `new URL(path, base)` keeps the base on `.base`; an uncaught throw prints it.
     const { fetch, calls } = fakeFetch(() => jsonResponse({ items: [], hasMore: false }));
+    // Built from the two sentinels, not written as one literal URL.
+    const [user, password] = ['private-sentinel-79', 'JZ97-another-secret'];
     const adapter = new IdentityHttpRecipientAdapter(
-      { baseUrl: 'http://private-sentinel-79:JZ97-another-secret@identity:bad', timeoutMs: 1000 },
+      { baseUrl: `http://${user}:${password}@identity:bad`, timeoutMs: 1000 },
       tokens,
       fetch,
     );

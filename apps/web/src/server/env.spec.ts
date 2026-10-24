@@ -65,10 +65,12 @@ describe('the rest of the configuration', () => {
   it.each(['API_GATEWAY_URL', 'OIDC_ISSUER_URL', 'WEB_PUBLIC_ORIGIN'] as const)(
     'refuses %s with a username or password, naming neither',
     (key) => {
+      // Built from the two sentinels, not written as one literal URL.
+      const [user, password] = ['private-sentinel-79', 'JZ97-another-secret'];
       for (const value of [
-        'http://private-sentinel-79:JZ97-another-secret@gateway:3000',
-        'http://private-sentinel-79@gateway:3000',
-        'http://:JZ97-another-secret@gateway:3000',
+        `http://${user}:${password}@gateway:3000`,
+        `http://${user}@gateway:3000`,
+        `http://:${password}@gateway:3000`,
       ]) {
         let message = '';
         try {

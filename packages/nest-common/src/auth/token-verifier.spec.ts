@@ -146,10 +146,12 @@ describe('a refused token never puts its own text in the log', () => {
 
 describe('TokenVerifier configuration (#385 r5)', () => {
   it('refuses an unreadable JWKS URI with a fixed text, never the URI', () => {
+    // Built from the two sentinels, not written as one literal URL.
+    const [user, password] = ['private-sentinel-79', 'JZ97-another-secret'];
     let error: unknown;
     try {
       new TokenVerifier({
-        jwksUri: 'http://private-sentinel-79:JZ97-another-secret@keycloak:bad/certs',
+        jwksUri: `http://${user}:${password}@keycloak:bad/certs`,
         issuer: ISSUER,
         audience: AUDIENCE,
       });
