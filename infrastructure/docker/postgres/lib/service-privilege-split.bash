@@ -51,6 +51,8 @@
 #       migration  — nothing here: each table's grant is in the service's own
 #                    migrations (supplier-service grants less than DML on its
 #                    append-only and insert-only tables).
+#   * Extension relations keep at most SELECT in every mode (including audit);
+#     the superuser removes legacy writes after the application grants above.
 #   * The migration ledger `_prisma_migrations` is created **here**, with
 #     Prisma's own DDL, owned by the migrator and granted to no one — before any
 #     migration runs (Codex review of #176). Left to Prisma, a fresh database's
@@ -219,6 +221,44 @@ grant_service_tables() {
   fi
 }
 
+# Extension relations belong to the DBA, not application migrations. Old
+# superuser blanket grants also reached spatial_ref_sys. Preserve existing
+# SELECT (PostGIS geography reads), but remove writes including column grants
+# and grants reachable through PUBLIC or inherited roles, in every mode.
+restrict_extension_relations() {
+  local db="$1" runtime="$2"
+  _svc_split_psql "${db}" "DO \$\$
+    DECLARE rel record; holder record;
+    BEGIN
+      FOR rel IN
+        SELECT c.oid, c.relkind, n.nspname, c.relname
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+           AND EXISTS (SELECT 1 FROM pg_depend d
+                        WHERE d.classid = 'pg_class'::regclass
+                          AND d.objid = c.oid AND d.deptype = 'e')
+      LOOP
+        FOR holder IN
+          SELECT 'PUBLIC' AS sql_name
+          UNION ALL
+          SELECT quote_ident(r.rolname) FROM pg_roles r
+           WHERE r.rolname = '${runtime}'
+              OR pg_has_role('${runtime}', r.oid, 'USAGE')
+        LOOP
+          IF rel.relkind = 'S' THEN
+            EXECUTE format('REVOKE USAGE, UPDATE ON SEQUENCE %I.%I FROM %s CASCADE',
+                           rel.nspname, rel.relname, holder.sql_name);
+          ELSE
+            EXECUTE format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE %I.%I FROM %s CASCADE',
+                           rel.nspname, rel.relname, holder.sql_name);
+            -- PostgreSQL also revokes these grantees' column privileges when
+            -- the corresponding table privileges are revoked (even column-only grants).
+          END IF;
+        END LOOP;
+      END LOOP;
+    END \$\$;"
+}
+
 # split_service_privileges <service> [database] [default|migration]
 split_service_privileges() {
   local svc="${1:?a service name is required}"
@@ -275,10 +315,11 @@ split_service_privileges() {
   # never revoke them (measured on PostgreSQL 16 for supplier-service).
   _svc_split_psql "${db}" "ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"
   _svc_split_psql "${db}" "DO \$\$
-    DECLARE fn regprocedure;
+    DECLARE fn record;
     BEGIN
       FOR fn IN
-        SELECT p.oid::regprocedure
+        SELECT p.oid::regprocedure AS signature,
+               p.prosecdef OR p.prorettype IN ('trigger'::regtype, 'event_trigger'::regtype) AS privileged
           FROM pg_proc p
          WHERE p.proowner = '${migrator}'::regrole
            AND NOT EXISTS (
@@ -286,11 +327,18 @@ split_service_privileges() {
               WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e'
            )
       LOOP
-        EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC, ${runtime}', fn);
+        EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC', fn.signature);
+        -- Keep explicit migration grants on invoker functions (economic's
+        -- commission locks; procurement's digest). They confer no owner rights.
+        -- Definers and trigger entry points remain closed to direct runtime calls.
+        IF fn.privileged THEN
+          EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM ${runtime}', fn.signature);
+        END IF;
       END LOOP;
     END \$\$;"
 
   grant_service_tables "${svc}" "${db}" "${mode}"
+  restrict_extension_relations "${db}" "${runtime}"
 
   # The migration ledger is the migrator's alone, from before the first
   # migration: a runtime role that could write it could mark a guard-creating
@@ -300,7 +348,7 @@ split_service_privileges() {
   ensure_utc_session_defaults "${db}" "${runtime}" "${migrator}"
   ensure_runtime_statement_timeout "${svc}" "${db}" "${runtime}" || return 1
 
-  echo "    - ${db}: owned by ${migrator}; ${runtime} has CONNECT, USAGE on public, no CREATEDB, no EXECUTE, grants: ${mode}; ledger pre-created, no runtime rights; sessions default to UTC"
+  echo "    - ${db}: owned by ${migrator}; ${runtime} has CONNECT, USAGE on public, no CREATEDB, no direct definer/trigger EXECUTE, grants: ${mode}; ledger pre-created, no runtime rights; sessions default to UTC"
 }
 
 # split_audit_database_privileges [database] [service]
@@ -347,6 +395,7 @@ split_audit_database_privileges() {
   _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA audit FROM PUBLIC"
   _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA audit FROM ${runtime}"
   _svc_split_psql "${db}" "GRANT USAGE ON SCHEMA audit TO ${runtime}"
+  restrict_extension_relations "${db}" "${runtime}"
   # Its migrations run with `?schema=audit`, so that is where Prisma keeps the
   # ledger; the same pre-creation, so it never holds a runtime grant either.
   own_migration_ledger "${db}" audit "${migrator}" "${runtime}"
