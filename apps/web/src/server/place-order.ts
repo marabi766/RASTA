@@ -131,6 +131,11 @@ export const PLACE_ORDER_FIELD_MAPPING: FieldMapping<PlaceOrderField> = {
   messages: {
     'An organization cannot order from itself': 'سازمان شما نمی‌تواند از پیشنهاد خودش سفارش بدهد.',
     'An order must have a positive total': 'مجموع سفارش باید بیشتر از صفر باشد.',
+    // Q-110: the service refuses an order note. The form never sends one (see
+    // `parsePlaceOrderForm`: the body is `{ lines }` and nothing else); this is
+    // only the Persian for a post that got past it.
+    'An order note is not stored yet (open question Q-110); leave it out':
+      'یادداشت سفارش هنوز ذخیره نمی‌شود؛ بدون یادداشت ثبت کنید.',
     'Missing Idempotency-Key': 'درخواست دوباره ارسال شد؛ صفحه را تازه کنید.',
   },
   byCode: {

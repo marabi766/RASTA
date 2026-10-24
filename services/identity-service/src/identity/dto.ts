@@ -23,6 +23,11 @@ const organizationId = seedIdSchema(ID_PREFIXES.organization);
  * an identifier — the rule exists to reject control characters and markup, not
  * to police what a person may be called.
  *
+ * Deliberately NOT the shared display-text rule: no digits, no comma-like
+ * punctuation. Whitespace is `\p{Zs}` (space separators) — a name is one line,
+ * so tab, line feed, the byte-order mark and the line/paragraph separators,
+ * which `\s` admitted, are refused (tightened with the display-text work).
+ *
  * The lookahead refuses every bidirectional control (`\p{Bidi_Control}`): the
  * script class alone admits U+061C ARABIC LETTER MARK, an Arabic-script one.
  * One pattern, so the published OpenAPI `pattern` states both rules.
@@ -33,7 +38,7 @@ const personName = z
   .min(1)
   .max(100)
   .regex(
-    /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Mark}\s‌'’\-.]+$/u,
+    /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Mark}\p{Zs}‌'’\-.]+$/u,
     'Name contains unsupported characters',
   );
 

@@ -183,6 +183,13 @@ export function orderCommandFormValues(form: FormData): OrderCommandFormValues {
   };
 }
 
+/**
+ * What the buyer reads when a receipt confirmation arrives with a note. Plain
+ * words: the note is not kept, nothing was confirmed, and what to do next.
+ */
+export const RECEIPT_NOTE_REFUSAL =
+  'یادداشت هنگام تایید دریافت ذخیره نمی‌شود، پس چیزی ارسال نشد. صفحه را تازه کنید و بدون یادداشت تایید کنید.';
+
 /** An optional free-text field: blank means "not given", so it is left out. */
 const optionalText = (max: number, message: string) =>
   z
@@ -214,11 +221,19 @@ const COMMAND_SCHEMAS = {
     ),
   }),
 
+  // Q-110 (docs/06 § order commands, temporary decision): marketplace-service
+  // refuses a non-empty receipt note, because confirming receipt records who
+  // and when and has no place to keep a note. The form therefore has no note
+  // field; a post that still carries one (a stale page, a crafted request) is
+  // refused HERE, in Persian, before anything is sent — never dropped silently
+  // and never settled with the text lost. Blank (after normalising) is no note.
+  // The sentence names no ticket number.
   CONFIRM_RECEIPT: z.object({
-    note: optionalText(
-      LIMITS.note.max,
-      `یادداشت نباید بیش از ${digits(LIMITS.note.max)} نویسه باشد`,
-    ),
+    note: z
+      .string()
+      .trim()
+      .max(0, RECEIPT_NOTE_REFUSAL)
+      .transform(() => undefined),
   }),
 
   RAISE_DISPUTE: z.object({
@@ -347,6 +362,9 @@ export function parseOrderCommand(values: OrderCommandFormValues): ParsedOrderCo
   return { ok: false, command, fieldErrors };
 }
 
+const ORDER_STATE_REFUSAL =
+  'وضعیت سفارش اجازه‌ی این اقدام را نمی‌دهد؛ ممکن است طرف مقابل همین حالا اقدام کرده باشد. صفحه را تازه کنید.';
+
 export const ORDER_COMMAND_FIELD_MAPPING: FieldMapping<OrderCommandField> = {
   paths: {
     reason: 'reason',
@@ -358,7 +376,28 @@ export const ORDER_COMMAND_FIELD_MAPPING: FieldMapping<OrderCommandField> = {
     rating: 'rating',
     comment: 'comment',
   },
-  messages: {},
+  messages: {
+    // Q-110: the service's refusal of a receipt note, if a post ever got past
+    // the portal's own check above. The ticket number is the service's, not
+    // the reader's.
+    'A receipt confirmation note is not stored yet (open question Q-110); leave it out':
+      RECEIPT_NOTE_REFUSAL,
+    'Only a completed order may be reviewed': 'فقط برای سفارش تکمیل‌شده می‌توان نظر ثبت کرد.',
+  },
+  // An order's state moves under both parties' hands; the service says which
+  // transition it refused ("Order ORD_… cannot move from …", "… is already …")
+  // with ids and statuses in the sentence, which are not for the reader.
+  patterns: [
+    [
+      /^Order \S+ (?:cannot move from \S+ to \S+|is already \S+ and cannot change further)$/,
+      ORDER_STATE_REFUSAL,
+    ],
+  ],
+  byCode: {
+    BUSINESS_RULE_VIOLATION: ORDER_STATE_REFUSAL,
+    INVALID_STATE_TRANSITION: ORDER_STATE_REFUSAL,
+    VALIDATION_FAILED: 'اطلاعات فرم پذیرفته نشد؛ فیلدها را بررسی کنید.',
+  },
 };
 
 export function issueOrderCommand(

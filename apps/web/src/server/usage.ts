@@ -225,7 +225,8 @@ export type UsageRecord = z.infer<typeof usageRecordSchema>;
  *
  * The keys on the left are fleet-service's request-body paths; the messages
  * are the ones its schema and service emit today. A sentence not listed here
- * is shown as it arrived rather than replaced by a guess.
+ * is never shown as it arrived: `mapProblemToFields` says the generic Persian
+ * refusal and logs a sanitised diagnostic.
  */
 export const USAGE_FIELD_MAPPING: FieldMapping<UsageField> = {
   paths: {
@@ -245,6 +246,8 @@ export const USAGE_FIELD_MAPPING: FieldMapping<UsageField> = {
     'Expected a non-negative number with at most two decimals':
       'عددی نامنفی با حداکثر دو رقم اعشار وارد کنید',
     'Usage cannot be recorded for a period in the future.': 'بازهٔ کارکرد نمی‌تواند در آینده باشد',
+    'This usage period overlaps an existing record for the same machine.':
+      'این بازه‌ی کارکرد با ثبت دیگری برای همین ماشین هم‌پوشانی دارد؛ بازه‌ی دیگری را وارد کنید.',
     'Only a registered driver may record usage for a machine':
       'برای ثبت کارکرد باید به‌عنوان راننده ثبت شده باشید',
   },

@@ -18,6 +18,7 @@ import {
   sealAssetLifecycleBaseline,
 } from './asset-lifecycle-commands';
 import { signPayload } from './signed-payload';
+import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
 import {
   canActivateFrom,
@@ -408,7 +409,7 @@ describe('writing', () => {
       },
     );
 
-    it('says a transition it does not know by its platform code, and an unknown code as it arrived', async () => {
+    it('says a transition it does not know by its platform code, and an unknown code by the generic Persian sentence', async () => {
       const call = (impl: typeof fetch) => activateAsset(SESSION, ASSET, 1, 's', impl);
       expect(
         await call(
@@ -423,7 +424,7 @@ describe('writing', () => {
         await call(
           recording(409, { code: 'SOME_NEW_CODE', message: 'An asset cannot be frobbed' }).impl,
         ),
-      ).toMatchObject({ kind: 'INVALID', message: 'An asset cannot be frobbed' });
+      ).toMatchObject({ kind: 'INVALID', message: GENERIC_REFUSAL_MESSAGE });
     });
 
     it('puts a field problem from the service on the field it names', async () => {
@@ -441,7 +442,7 @@ describe('writing', () => {
       );
       expect(result).toMatchObject({
         kind: 'INVALID',
-        fieldErrors: { reason: 'String must contain at least 3 character(s)' },
+        fieldErrors: { reason: 'این متن دست‌کم ۳ نویسه باشد' },
       });
     });
   });

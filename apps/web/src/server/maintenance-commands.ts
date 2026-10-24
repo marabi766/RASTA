@@ -1,4 +1,4 @@
-import { ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
+import { DISPLAY_TEXT_PATTERN, ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
 import { normalizePersianText } from '@/lib/format';
@@ -234,14 +234,12 @@ export function canManageMaintenance(roles: readonly string[]): boolean {
 }
 
 /**
- * The service's own `displayText` character class, which it applies to every
- * free-text field of these three commands. A copy, because the portal may not
- * import a service (A-02); `maintenance-commands.contract.spec.ts` fails the
- * moment the two disagree. Letters of the Arabic and Latin scripts, digits of
- * any script, combining marks, spaces, ZWNJ and a short list of punctuation.
+ * The service's own `displayText` rule, which it applies to every free-text
+ * field of these commands — the pattern itself, imported from
+ * `@rasta/contracts` (`DISPLAY_TEXT_PATTERN`), not copied. The policy (what
+ * whitespace, zero-width and control characters pass) is documented there.
  */
-export const MAINTENANCE_DISPLAY_TEXT =
-  /^[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s\u200c()«»'’\-.,/:+]+$/u;
+export const MAINTENANCE_DISPLAY_TEXT = DISPLAY_TEXT_PATTERN;
 
 export const DISPLAY_TEXT_MESSAGE = 'فقط حروف فارسی و لاتین، عدد و نشانه‌های ساده مجاز است';
 

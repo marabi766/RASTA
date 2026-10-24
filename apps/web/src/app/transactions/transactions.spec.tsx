@@ -461,6 +461,37 @@ describe('the dispute state, as the record says it', () => {
   });
 });
 
+describe('raw codes and English wording in the detail', () => {
+  it.each([
+    ['ORDER', 'سفارش'],
+    ['MAINTENANCE_REQUEST', 'درخواست تعمیر و نگهداری'],
+    ['PAYMENT_INTENT', 'افزایش موجودی کیف پول'],
+    ['STATEMENT', 'صورت‌وضعیت قرارداد'],
+  ])(
+    'names the source type %s in Persian and keeps the reference as an identifier',
+    (type, label) => {
+      const { container } = renderScreen(
+        ok({ ...HELD, sourceType: type, sourceReference: 'REF_9' }),
+      );
+      const row = [...container.querySelectorAll('dd')].find((dd) =>
+        dd.textContent?.includes('REF_9'),
+      )!;
+      expect(row.textContent).toContain(label);
+      expect(row.textContent).not.toContain(type);
+    },
+  );
+
+  it('does not show a machine-worded reason, and shows a person’s', () => {
+    const machine = renderScreen(ok({ ...HELD, failureReason: 'REFUND_REQUESTED' }));
+    expect(machine.container.textContent).not.toContain('REFUND_REQUESTED');
+    expect(machine.container.textContent).toContain('علت را سامانه ثبت کرده است');
+    machine.unmount();
+
+    const personal = renderScreen(ok({ ...HELD, failureReason: 'مشتری منصرف شد، مبلغ برگشت.' }));
+    expect(personal.container.textContent).toContain('مشتری منصرف شد، مبلغ برگشت.');
+  });
+});
+
 describe('a marketplace order’s transaction (Q-138)', () => {
   const ORDER_TX: Transaction = {
     ...HELD,

@@ -40,7 +40,18 @@ export const CONTACT_KINDS = ['ADMINISTRATIVE', 'FINANCIAL', 'TECHNICAL', 'EMERG
 export const organizationTypeSchema = z.enum(ORGANIZATION_TYPES);
 export type OrganizationTypeValue = z.infer<typeof organizationTypeSchema>;
 
-/** Persian display names, allowing ZWNJ (نیم‌فاصله) and the usual punctuation. *
+/**
+ * Persian display names, allowing ZWNJ (نیم‌فاصله) and the usual punctuation.
+ *
+ * Deliberately narrower than the shared `displayText` (no `:`, `+`, `;`, `?`,
+ * `!`, `%`, quotes): a name is a one-line label, shown in lists and selects, so
+ * whitespace is `\p{Zs}` (space separators) — tab, line feed, the byte-order
+ * mark and the line/paragraph separators, which `\s` admitted, are refused
+ * (tightened with the display-text work). The one addition is the Persian comma «،» (U+060C): a legal
+ * name a person types can hold one — «شرکت راه‌سازان، عمران و توسعه» — and the
+ * old class refused it with the same English message as free text. Not shared
+ * with `displayText`: this class is the organisation-name policy, nothing else.
+ *
  * The lookahead refuses every bidirectional control (`\p{Bidi_Control}`): the
  * script class alone admits U+061C ARABIC LETTER MARK, an Arabic-script one.
  * One pattern, so the published OpenAPI `pattern` states both rules.
@@ -51,7 +62,7 @@ const displayName = z
   .min(2)
   .max(200)
   .regex(
-    /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/]+$/u,
+    /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\p{Zs}‌()«»'’\-.,/\u060c]+$/u,
     'Name contains unsupported characters',
   );
 

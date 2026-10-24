@@ -35,6 +35,61 @@ export function plainText(): z.ZodString {
 }
 
 /**
+ * Display text: the free text a person types in Persian or English and other
+ * people read — a description, a note, a title, a reason, a machine's name.
+ * ONE definition for every service and for the portal (a second copy is how
+ * «،» ended up refused in five services at once); the person-name and
+ * organisation-name rules are deliberately narrower and keep their own policy.
+ *
+ * Accepted, whole string, at least one character:
+ *  - letters of the Arabic and Latin scripts, decimal digits of any script
+ *    (`\p{Nd}`: ۱۲۳, ١٢٣, 123), combining marks (`\p{Mark}`: the vowel signs
+ *    and hamza above/below of Arabic script);
+ *  - ZWNJ (U+200C), which Persian needs («می‌شود»);
+ *  - whitespace: the space separators (`\p{Zs}`: space, no-break space, the
+ *    en/em spaces …), tab, line feed and carriage return — so a multi-line
+ *    note works;
+ *  - punctuation: `( ) « » ' ’ - . , / : + ; ? ! % "`, the Persian comma «،»
+ *    (U+060C), semicolon «؛» (U+061B) and question mark «؟» (U+061F), the
+ *    ellipsis «…» and the en dash «–». The Arabic decimal and thousands
+ *    separators U+066B/U+066C and the percent sign «٪» (U+066A) are Arabic
+ *    script and always passed.
+ *
+ * Refused, by omission or by the lookahead:
+ *  - every bidirectional control (`\p{Bidi_Control}`, U+061C included — it is
+ *    Arabic script, so the script class alone would admit it);
+ *  - every C0/C1 control other than tab, LF and CR (NUL, ESC, VT, FF, NEL …);
+ *  - the byte-order mark U+FEFF anywhere inside (`\s` would have admitted
+ *    it, which this pattern deliberately does not: it is an invisible
+ *    character; at the very edge `trim()` removes it first), the line and
+ *    paragraph separators U+2028/U+2029, and the zero-width characters
+ *    U+200B (space) and U+200D (ZWJ — Persian does not use it; it joins emoji
+ *    and Indic letters) and U+2060 word joiner;
+ *  - TATWEEL (U+0640, kashida): decoration, not text — it makes two strings
+ *    that read alike compare unequal and defeats search. A pasted headline
+ *    with kashida is refused with the closed message;
+ *  - every other symbol (`< > { } [ ] \ | ^ ~ * @ # $ & = _`, emoji).
+ *
+ * The portal normalises before it validates (`normalizePersianText`: Arabic
+ * ك/ي become ک/ی, zero-width spaces and every run of whitespace become one
+ * space), so a form never sends a newline or U+200B; the service sees raw
+ * input and applies the policy above to it. One regex literal so the
+ * published OpenAPI `pattern` (generated from `.source`) states the whole
+ * rule, lookahead included.
+ */
+export const DISPLAY_TEXT_PATTERN =
+  /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\p{Zs}\t\n\r\u200c()«»'’\-.,/:+\u060c\u061b\u061f;?!%"\u2026\u2013]+$/u;
+
+/**
+ * A trimmed display-text string within `min`..`max` characters
+ * ({@link DISPLAY_TEXT_PATTERN}). The message is the closed
+ * {@link UNSUPPORTED_CHARACTERS}.
+ */
+export function displayText(min: number, max: number): z.ZodString {
+  return z.string().trim().min(min).max(max).regex(DISPLAY_TEXT_PATTERN, UNSUPPORTED_CHARACTERS);
+}
+
+/**
  * Matches a string holding no control or format character: no C0/C1 control
  * (`\p{Cc}`), no format character (`\p{Cf}` — every bidi control but one, the
  * zero-width characters, the byte-order mark), no line or paragraph separator

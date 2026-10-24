@@ -1,9 +1,11 @@
 import { z } from 'zod';
 import {
+  DISPLAY_TEXT_PATTERN,
   UNSUPPORTED_CHARACTERS,
   WITHOUT_BIDI_CONTROL,
   WITHOUT_CONTROL_CHARACTER,
   containsBidiControl,
+  displayText,
   plainText,
   referenceId,
   withoutBidiControlDeep,
@@ -126,5 +128,108 @@ describe('containsBidiControl / withoutBidiControlDeep (free-form JSON)', () => 
     expect(containsBidiControl(cyclic)).toBe(false);
     expect(containsBidiControl(42)).toBe(false);
     expect(containsBidiControl(undefined)).toBe(false);
+  });
+});
+
+describe('displayText (the one display-text rule: descriptions, notes, titles)', () => {
+  const cp = (code: number) => String.fromCodePoint(code);
+  const hex = (code: number) => `U+${code.toString(16).toUpperCase().padStart(4, '0')}`;
+  const field = displayText(1, 200);
+
+  // Every character is written from its number: a reviewer must not have to
+  // tell an invisible one from a space by eye.
+  const ACCEPTED: ReadonlyArray<readonly [string, string]> = [
+    ['Persian comma «،»', `الف${cp(0x060c)} ب`],
+    ['Persian semicolon «؛»', `الف${cp(0x061b)} ب`],
+    ['Persian question mark «؟»', `چرا${cp(0x061f)}`],
+    ['Arabic decimal separator U+066B', `۱${cp(0x066b)}۵`],
+    ['Arabic thousands separator U+066C', `۱${cp(0x066c)}۵۰۰`],
+    ['Arabic percent sign U+066A', `۵۰${cp(0x066a)}`],
+    ['ASCII question mark', 'why?'],
+    ['exclamation mark', 'توجه!'],
+    ['ASCII semicolon', 'a; b'],
+    ['percent sign', '50%'],
+    ['double quote', 'گفت "بله"'],
+    ['ellipsis U+2026', `ادامه${cp(0x2026)}`],
+    ['en dash U+2013', `۱۰${cp(0x2013)}۲۰`],
+    ['ZWNJ U+200C', `می${cp(0x200c)}شود`],
+    ['Persian, Latin and digits of every script', 'گریدر Komatsu ۱۴۰۲ ١٤٠٢ 1402'],
+    ['guillemets, brackets, slash, colon, plus', '«کلید» (اصلی) a/b c:d +1'],
+    ['apostrophes and hyphen', "O'Brien’s a-b."],
+    ['combining mark (vowel sign)', `کتاب${cp(0x064e)}`],
+    ['tab', 'a\tb'],
+    ['line feed (a multi-line note)', 'خط اول\nخط دوم'],
+    ['carriage return + line feed', 'a\r\nb'],
+    ['no-break space U+00A0', `a${cp(0x00a0)}b`],
+    ['a full Persian sentence', 'موتور روشن نشد، استارت خراب است؛ لطفاً بررسی شود؟'],
+  ];
+
+  const REFUSED: ReadonlyArray<readonly [string, string]> = [
+    ...[
+      0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068,
+      0x2069,
+    ].map((code) => [`bidi control ${hex(code)}`, `ab${cp(code)}cd`] as const),
+    ['TATWEEL U+0640 (decision: refused)', `ســلام`.replace('س', `س${cp(0x0640)}`)],
+    ['ZWJ U+200D (decision: refused)', `a${cp(0x200d)}b`],
+    ['zero-width space U+200B', `a${cp(0x200b)}b`],
+    ['word joiner U+2060', `a${cp(0x2060)}b`],
+    ['byte-order mark U+FEFF inside', `a${cp(0xfeff)}b`],
+    ['line separator U+2028', `a${cp(0x2028)}b`],
+    ['paragraph separator U+2029', `a${cp(0x2029)}b`],
+    ['soft hyphen U+00AD', `a${cp(0x00ad)}b`],
+    ['NUL', `a${cp(0)}b`],
+    ['ESC', `a${cp(0x1b)}b`],
+    ['vertical tab', `a${cp(0x0b)}b`],
+    ['form feed', `a${cp(0x0c)}b`],
+    ['next line U+0085', `a${cp(0x85)}b`],
+    ['DEL', `a${cp(0x7f)}b`],
+    ['angle brackets', 'a<b>'],
+    ['backslash', 'a\\b'],
+    ['curly braces', 'a{b}'],
+    ['at sign', 'a@b'],
+    ['equals', 'a=b'],
+    ['underscore', 'a_b'],
+    ['emoji', `a ${cp(0x1f69c)}`],
+    ['CJK', '日本語'],
+    ['Cyrillic', 'Москва'],
+    ['only whitespace (empty after trim)', '   '],
+  ];
+
+  it.each(ACCEPTED)('accepts %s', (_label, value) => {
+    expect(field.safeParse(value).success).toBe(true);
+  });
+
+  it.each(REFUSED)('refuses %s, with the closed message that repeats nothing', (_label, value) => {
+    const result = field.safeParse(value);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    const messages = result.error.issues.map((issue) => issue.message);
+    expect(messages.every((m) => m === UNSUPPORTED_CHARACTERS || m.startsWith('String must'))).toBe(
+      true,
+    );
+    expect(JSON.stringify(result.error.issues)).not.toContain('cd');
+  });
+
+  it('trims at the edges, a leading or trailing byte-order mark included', () => {
+    expect(field.parse(`${cp(0xfeff)}  الف،  ${cp(0xfeff)}`)).toBe('الف،');
+  });
+
+  it('keeps the field bounds', () => {
+    expect(displayText(2, 4).safeParse('ا').success).toBe(false);
+    expect(displayText(2, 4).safeParse('ابتثج').success).toBe(false);
+    expect(displayText(2, 4).safeParse('ابت').success).toBe(true);
+  });
+
+  it('is one pattern whose source states the whole rule, lookahead included', () => {
+    expect(DISPLAY_TEXT_PATTERN.source).toContain('(?![\\s\\S]*\\p{Bidi_Control})');
+    expect(DISPLAY_TEXT_PATTERN.source).toContain('\\u060c');
+    expect(DISPLAY_TEXT_PATTERN.flags).toBe('u');
+  });
+
+  it('leaves plainText() and referenceId() exactly as they were', () => {
+    expect(plainText().safeParse('a<b>_@').success).toBe(true);
+    expect(plainText().safeParse(`a${cp(0x200d)}b`).success).toBe(true);
+    expect(referenceId().safeParse(`a${cp(0x200c)}b`).success).toBe(false);
+    expect(referenceId().safeParse('AST-SEED-0001').success).toBe(true);
   });
 });

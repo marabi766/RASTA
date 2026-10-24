@@ -353,6 +353,8 @@ describe('the sentences the portal translates', () => {
     'dto.ts',
   ]
     .map((file) => read(file))
+    // The shared text rule's closed message lives in @rasta/contracts now.
+    .concat(readFileSync(join(ROOT, 'packages', 'contracts', 'src', 'common', 'text.ts'), 'utf8'))
     .join('\n');
 
   const normalise = (text: string) => text.replace(/'\s*\+\s*\n?\s*'/g, '').replace(/\s+/g, ' ');

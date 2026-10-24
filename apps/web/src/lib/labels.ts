@@ -250,6 +250,56 @@ export const documentKindLabel = (value: string): string => lookup(DOCUMENT_KIND
 export const timelineCategoryLabel = (value: string): string =>
   lookup(TIMELINE_CATEGORY_LABELS, value);
 
+/**
+ * Where a transaction came from (`sourceType`): the closed set economic-service
+ * records itself (`recorded-sources.ts`) and `ORDER`, which marketplace-service
+ * records. Any other value is shown as sent.
+ */
+const TRANSACTION_SOURCE_LABELS: Readonly<Record<string, string>> = {
+  ORDER: 'سفارش',
+  MAINTENANCE_REQUEST: 'درخواست تعمیر و نگهداری',
+  PAYMENT_INTENT: 'افزایش موجودی کیف پول',
+  STATEMENT: 'صورت‌وضعیت قرارداد',
+};
+export const transactionSourceLabel = (value: string): string =>
+  lookup(TRANSACTION_SOURCE_LABELS, value);
+
+/**
+ * What supplier-service said about a bidder's standing when the bid was
+ * evaluated. `ELIGIBLE` is the only verdict that lets an award through; the
+ * refusal is `NOT_ELIGIBLE`. Any other value is shown as sent.
+ */
+const STANDING_VERDICT_LABELS: Readonly<Record<string, string>> = {
+  ELIGIBLE: 'واجد صلاحیت',
+  NOT_ELIGIBLE: 'فاقد صلاحیت',
+};
+export const standingVerdictLabel = (value: string): string =>
+  lookup(STANDING_VERDICT_LABELS, value);
+
+/**
+ * A timeline title the asset service wrote with the new status spelled as its
+ * code («تغییر وضعیت به IN_MAINTENANCE»): every asset-status code in it is
+ * replaced by its Persian label, so no code shows inside a Persian sentence.
+ * Text with no code is returned unchanged.
+ */
+export function timelineTitleLabel(title: string): string {
+  return title.replace(/\b[A-Z][A-Z_]{2,}\b/g, (code) =>
+    (ASSET_STATUSES as readonly string[]).includes(code) ? assetStatusLabel(code) : code,
+  );
+}
+
+/**
+ * A free-text reason a transaction or order carries. People type these in
+ * Persian; the platform's own sagas and providers write English markers and
+ * sentences (`REFUND_REQUESTED`, «wallet empty»). Text with an Arabic-script
+ * letter, or with no Latin letter at all, is a person's and is shown;
+ * anything else is machine wording and is replaced by `machineWording`.
+ */
+export function reasonText(reason: string, machineWording: string): string {
+  const personal = /\p{Script=Arabic}/u.test(reason) || !/[A-Za-z]/.test(reason);
+  return personal ? reason : machineWording;
+}
+
 export function blockerLabel(value: string): string {
   const status = STATUS_BLOCKER.exec(value)?.[1];
   if (status !== undefined) return `وضعیت دارایی «${assetStatusLabel(status)}» است`;
