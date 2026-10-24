@@ -8,6 +8,11 @@ import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  SCHEMA_DUMP_FLAGS,
+  DUMP_RESTRICT_KEY,
+  schemaDumpEvidence,
+  checkSourceReference,
+  schemaReferenceEvidence,
   INVENTORY_SQL,
   LEDGER_SQL,
   FIXTURE_SQL,
@@ -28,17 +33,70 @@ import {
 const database = `drill_test_${randomBytes(8).toString('hex')}`;
 const directory = mkdtempSync(join(tmpdir(), 'drill-sql-test-'));
 const dump = join(directory, 'database.dump');
+const scratch = [`${database}_ref`, `${database}_fixed`];
+let reference;
+let referenceMilliseconds = 0;
 let created = false;
-function command(name, args, input) {
+let initialSnapshot;
+let initialLedger;
+function command(name, args, input, privateOutput = false) {
   const result = spawnSync(name, args, { input, encoding: 'utf8', timeout: 60_000 });
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 0, privateOutput ? 'private schema command failed' : result.stderr);
   return result.stdout.trim();
 }
 function sql(input, db = database) {
   return command('psql', ['-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-d', db], input);
 }
+const dumpVersion = command('pg_dump', ['--version']);
+const dumpFlags = [
+  ...SCHEMA_DUMP_FLAGS,
+  ...(command('pg_dump', ['--help']).includes('--restrict-key')
+    ? [`--restrict-key=${DUMP_RESTRICT_KEY}`]
+    : []),
+];
+let dumpMilliseconds = 0;
+function schemaDump(db = database) {
+  const result = spawnSync('pg_dump', [...dumpFlags, '-d', db], { timeout: 60_000 });
+  assert.equal(result.status, 0, 'schema dump command failed');
+  return schemaDumpEvidence(result.stdout, dumpVersion);
+}
+function makeReference(source) {
+  const started = performance.now();
+  const separate = schemaDump();
+  assert.ok(source.content.equals(separate.content));
+  let ref, fixed;
+  try {
+    for (const [index, name] of scratch.entries()) {
+      sql(`CREATE DATABASE "${name}" TEMPLATE template0`, 'postgres');
+      command(
+        'psql',
+        ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-d', name],
+        index === 0 ? separate.content : ref.content,
+        true,
+      );
+      const dumped = schemaDump(name);
+      if (index === 0) ref = dumped;
+      else fixed = dumped;
+    }
+    const proof = schemaReferenceEvidence(
+      source,
+      ref,
+      fixed,
+      checkSourceReference(source, ref, database),
+    );
+    referenceMilliseconds += performance.now() - started;
+    return proof;
+  } finally {
+    for (const name of scratch) sql(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`, 'postgres');
+  }
+}
 function snapshot() {
+  const started = performance.now();
+  const schema = schemaDump();
+  dumpMilliseconds += performance.now() - started;
   return {
+    schemaDump: schema,
+    reference,
     tables: Object.fromEntries(
       sql(INVENTORY_SQL)
         .split('\n')
@@ -93,6 +151,13 @@ before(() => {
   sql(`CREATE ROLE drill_metadata_owner;
     CREATE ROLE drill_metadata_reader;
     CREATE SCHEMA drill_metadata;
+    REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+    REVOKE EXECUTE ON FUNCTION public.reject_ledger_mutation() FROM PUBLIC;
+    CREATE POLICY drill_ledger_policy ON public.ledger_entry USING (organization_id = current_setting('rasta.organization_id', true));
+    ALTER TABLE public.ledger_entry ENABLE ROW LEVEL SECURITY;
+    COMMENT ON FUNCTION public.reject_ledger_mutation() IS 'drill comment must survive';
+    CREATE TABLE drill_metadata.deparse_sample (a integer, b integer,
+      CONSTRAINT drill_deparse_check CHECK (a BETWEEN 0 AND 10 AND b >= 0));
     CREATE TABLE drill_metadata.sample (id integer);
     CREATE TABLE drill_metadata.owned_sample (id integer);
     REVOKE ALL ON drill_metadata.owned_sample FROM PUBLIC;
@@ -101,20 +166,45 @@ before(() => {
     GRANT SELECT ON drill_metadata.sample TO drill_metadata_reader;
     GRANT USAGE ON SEQUENCE drill_metadata.counter TO drill_metadata_reader;
     ALTER DEFAULT PRIVILEGES IN SCHEMA drill_metadata GRANT SELECT ON TABLES TO drill_metadata_reader;`);
+  const sourceSchema = schemaDump();
+  reference = makeReference(sourceSchema);
+  initialSnapshot = snapshot();
+  initialLedger = ledger();
   command('pg_dump', ['-Fc', '-d', database, '-f', dump]);
   sql(`DROP DATABASE ${database}`, 'postgres');
   command('pg_restore', ['--create', '--exit-on-error', '-d', 'postgres', dump]);
+  // Subsequent mutant SOURCE snapshots are taken from the now-restored fixture.
+  // Keep the first SOURCE proof on initialSnapshot for the first-restore assertion.
+  reference = schemaReferenceEvidence(
+    reference.reference,
+    reference.reference,
+    reference.fixedPoint,
+    checkSourceReference(reference.reference, reference.reference, database),
+  );
 });
 after(() => {
   try {
+    for (const name of scratch) sql(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`, 'postgres');
     if (created) sql(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`, 'postgres');
     sql(
       'DROP ROLE IF EXISTS drill_metadata_reader; DROP ROLE IF EXISTS drill_metadata_owner;',
       'postgres',
     );
   } finally {
+    console.error(
+      `Reference restore + fixed point: ${Math.round(referenceMilliseconds)} ms; schema-only dump collection total: ${Math.round(dumpMilliseconds)} ms`,
+    );
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('unchanged migrated fixture passes its first restore against REF, with real CHECK deparse drift', () => {
+  assert.equal(initialSnapshot.reference.checkLinesDifferent, 1);
+  assert.equal(initialSnapshot.schemaDump.content.equals(reference.reference.content), false);
+  assert.equal(
+    drillPassed([compareSnapshots(initialSnapshot, snapshot())], 1, initialLedger, ledger()),
+    true,
+  );
 });
 
 test('real inventory separates extension rows and detects equal-count value changes', () => {
@@ -159,13 +249,25 @@ test('--create restores database ACL, owner, per-role settings, digests and exac
   sql(`DROP DATABASE ${database}`, 'postgres');
   command('pg_restore', ['--create', '--exit-on-error', '-d', 'postgres', dump]);
   assert.deepEqual(compareSnapshots(before, snapshot()), {
+    referenceChecked: true,
+    fixedPointEqual: true,
+    allowanceChecked: true,
+    schemaDumpEqual: true,
     tablesEqual: true,
     migrationsEqual: true,
     databaseStateEqual: true,
     objectStateEqual: true,
   });
   assert.equal(compareLedgers(beforeLedger, ledger()), true);
+  assert.equal(
+    sql(`SELECT has_database_privilege('public', '${database}', 'CONNECT')`, 'postgres'),
+    'f',
+  );
   sql(`GRANT CONNECT ON DATABASE ${database} TO PUBLIC`, 'postgres');
+  assert.equal(
+    sql(`SELECT has_database_privilege('public', '${database}', 'CONNECT')`, 'postgres'),
+    't',
+  );
   try {
     const comparison = compareSnapshots(before, snapshot());
     assert.equal(comparison.databaseStateEqual, false);
@@ -263,3 +365,151 @@ for (const [category, mutation, undo] of [
     assert.deepEqual(snapshot(), source);
   });
 }
+
+// Fixtures supplement the real initial migration: the real append-only function gets an
+// explicit restricted ACL, and an RLS policy is added because this migration has none.
+for (const [category, mutation, verify, baseline] of [
+  [
+    'schema CREATE grant',
+    'GRANT CREATE ON SCHEMA public TO PUBLIC',
+    "SELECT has_schema_privilege('public', 'public', 'CREATE')",
+    'f',
+  ],
+  [
+    'function EXECUTE grant',
+    'GRANT EXECUTE ON FUNCTION public.reject_ledger_mutation() TO PUBLIC',
+    "SELECT has_function_privilege('public', 'public.reject_ledger_mutation()', 'EXECUTE')",
+    'f',
+  ],
+  [
+    'append-only trigger enabled state',
+    'ALTER TABLE public.ledger_entry DISABLE TRIGGER trg_ledger_entry_immutable',
+    "SELECT tgenabled FROM pg_trigger WHERE tgrelid = 'public.ledger_entry'::regclass AND tgname = 'trg_ledger_entry_immutable'",
+    'O',
+  ],
+  [
+    'RLS policy',
+    'DROP POLICY drill_ledger_policy ON public.ledger_entry',
+    "SELECT count(*) FROM pg_policy WHERE polrelid = 'public.ledger_entry'::regclass AND polname = 'drill_ledger_policy'",
+    '1',
+  ],
+  [
+    'ledger constraint',
+    'ALTER TABLE public.ledger_entry DROP CONSTRAINT ck_ledger_entry_amount_positive',
+    "SELECT count(*) FROM pg_constraint WHERE conrelid = 'public.ledger_entry'::regclass AND conname = 'ck_ledger_entry_amount_positive'",
+    '1',
+  ],
+]) {
+  test(`restored ${category} changes existing state and schema bytes; independent mutant fails drill`, () => {
+    const source = snapshot();
+    const sourceLedger = ledger();
+    assert.equal(sql(verify), baseline);
+    assert.equal(
+      drillPassed([compareSnapshots(source, snapshot())], 1, sourceLedger, ledger()),
+      true,
+    );
+    command('pg_dump', ['-Fc', '-d', database, '-f', dump]);
+    try {
+      sql(mutation);
+      assert.notEqual(sql(verify), baseline, 'mutation must change real state before drill');
+      const comparison = compareSnapshots(source, snapshot());
+      assert.equal(comparison.schemaDumpEqual, false);
+      assert.equal(drillPassed([comparison], 1, sourceLedger, ledger()), false);
+    } finally {
+      sql(`DROP DATABASE ${database}`, 'postgres');
+      command('pg_restore', ['--create', '--exit-on-error', '-d', 'postgres', dump]);
+    }
+    assert.equal(sql(verify), baseline);
+    assert.equal(
+      drillPassed([compareSnapshots(source, snapshot())], 1, sourceLedger, ledger()),
+      true,
+    );
+  });
+}
+
+test('database NULL ACL and explicit acldefault compare equally, PUBLIC grant still fails', () => {
+  sql(`CREATE DATABASE drill_acl_normalization TEMPLATE template0`, 'postgres');
+  try {
+    const baseline = JSON.parse(sql(DATABASE_STATE_SQL, 'drill_acl_normalization'));
+    assert.equal(
+      sql(
+        "SELECT datacl IS NULL FROM pg_database WHERE datname = 'drill_acl_normalization'",
+        'postgres',
+      ),
+      't',
+    );
+    sql('REVOKE ALL ON DATABASE drill_acl_normalization FROM drill_metadata_reader', 'postgres');
+    assert.equal(
+      sql(
+        "SELECT datacl IS NULL FROM pg_database WHERE datname = 'drill_acl_normalization'",
+        'postgres',
+      ),
+      'f',
+    );
+    assert.deepEqual(JSON.parse(sql(DATABASE_STATE_SQL, 'drill_acl_normalization')), baseline);
+    sql('GRANT CREATE ON DATABASE drill_acl_normalization TO PUBLIC', 'postgres');
+    assert.notDeepEqual(JSON.parse(sql(DATABASE_STATE_SQL, 'drill_acl_normalization')), baseline);
+  } finally {
+    sql('DROP DATABASE drill_acl_normalization', 'postgres');
+  }
+});
+
+for (const [category, mutation] of [
+  [
+    'CHECK bound',
+    'ALTER TABLE public.ledger_entry DROP CONSTRAINT ck_ledger_entry_amount_positive; ALTER TABLE public.ledger_entry ADD CONSTRAINT ck_ledger_entry_amount_positive CHECK (amount_minor >= 1)',
+  ],
+  [
+    'renamed CHECK',
+    'ALTER TABLE public.ledger_entry RENAME CONSTRAINT ck_ledger_entry_amount_positive TO drill_renamed_check',
+  ],
+]) {
+  test(`restored ${category} refuses REF equality then restored baseline passes`, () => {
+    const source = snapshot(),
+      sourceLedger = ledger();
+    command('pg_dump', ['-Fc', '-d', database, '-f', dump]);
+    assert.equal(
+      drillPassed([compareSnapshots(source, snapshot())], 1, sourceLedger, ledger()),
+      true,
+    );
+    try {
+      sql(mutation);
+      const comparison = compareSnapshots(source, snapshot());
+      assert.equal(comparison.schemaDumpEqual, false);
+      assert.equal(drillPassed([comparison], 1, sourceLedger, ledger()), false);
+    } finally {
+      sql(`DROP DATABASE ${database}`, 'postgres');
+      command('pg_restore', ['--create', '--exit-on-error', '-d', 'postgres', dump]);
+    }
+    assert.equal(
+      drillPassed([compareSnapshots(source, snapshot())], 1, sourceLedger, ledger()),
+      true,
+    );
+  });
+}
+
+test('SOURCE default drift and unstable simulated REF refuse, then original reference passes', () => {
+  const source = snapshot(),
+    sourceLedger = ledger();
+  command('pg_dump', ['-Fc', '-d', database, '-f', dump]);
+  try {
+    sql('ALTER TABLE public.ledger_entry ALTER COLUMN amount_minor SET DEFAULT 1');
+    const changed = schemaDump();
+    assert.throws(() => checkSourceReference(changed, reference.reference, database));
+    assert.throws(() =>
+      schemaReferenceEvidence(
+        source.schemaDump,
+        reference.reference,
+        changed,
+        checkSourceReference(source.schemaDump, reference.reference, database),
+      ),
+    );
+  } finally {
+    sql(`DROP DATABASE ${database}`, 'postgres');
+    command('pg_restore', ['--create', '--exit-on-error', '-d', 'postgres', dump]);
+  }
+  assert.equal(
+    drillPassed([compareSnapshots(source, snapshot())], 1, sourceLedger, ledger()),
+    true,
+  );
+});

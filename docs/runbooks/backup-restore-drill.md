@@ -4,7 +4,7 @@
 زنده وصل نمی‌شود. فهرست پایگاه‌ها از `RASTA_SERVICES` در
 `infrastructure/docker/postgres/lib/role-passwords.bash` خوانده می‌شود؛ اکنون ۱۶ پایگاه
 سرویس داریم. پیش از هر راه‌اندازی یا نوشتن داده، فهرست مستقل فایل‌های
-`services/*-service/prisma/schema.prisma` با آن در هر دو جهت مقایسه می‌شود؛
+`services/*-service/prisma/schema.prisma` با آن و کلیدهای `DATABASE_URL_<X>` در `.env.example` در هر دو جهت مقایسه می‌شود (کلیدهای `_MIGRATOR` کنار گذاشته می‌شوند)؛
 فهرست خالی یا ناخوانا تمرین را رد می‌کند. فهرست واقعی `pg_database` نیز بررسی می‌شود؛ فقط `keycloak`، `temporal` و
 `temporal_visibility` با دلیل مشخص خارج از دامنه هستند و هر پایگاه ناشناخته تمرین را رد می‌کند. فقط بخش PostgreSQL از Compose موجود اجرا می‌شود.
 
@@ -43,16 +43,79 @@ dump متوقف می‌شود و PostgreSQL تازه با volume جدا شروع
 گرفته نمی‌شود. در هر لحظه فقط یک سرور PostgreSQL با سقف حافظه ۵۱۲ MiB فعال است؛
 فرایندهای ساخت و seed نیز یکی‌یکی اجرا می‌شوند.
 
+### Reference restore — PM decision D-068
+
+For every discovered database (currently all 16), collect a separate schema-only
+SOURCE dump with the same pinned `pg_dump` and flags. Restore it into a fresh
+scratch database, then dump that database to obtain REF. Do not modify SOURCE.
+Compare the real archive's restored schema with REF using strict byte equality;
+strip only the two generated version header lines at their exact header position.
+No SQL, whitespace or expression normalization is allowed.
+
+Between SOURCE and REF only, equal line counts and an identical multiset of CHECK
+identities (database, schema, table, constraint name) are required. Every differing
+line must be a whole `CONSTRAINT "name" CHECK (...)` line in actual CREATE TABLE
+SQL context. Function bodies, comments and COMMENT strings never qualify. A
+non-CHECK difference, dropped/extra object or renamed constraint refuses. Report
+only the observed number of differing CHECK lines per database; do not hard-code
+exceptions or print expressions. Rows/MD5 digests, migration records, sequences,
+ACLs, ledger and wallet remain compared against SOURCE; REF contains schema only.
+
+PostgreSQL CHECK deparse is not idempotent on the first round trip. For example,
+`= ANY ((ARRAY['USER'::character varying, ...])::"text"[])` can return as
+`= ANY (ARRAY[('USER'::character varying)::"text", ...])`.
+
+REF equality proves the backup under test restores to exactly what PostgreSQL itself produces from the source schema. The SOURCE-vs-REF allowance TRUSTS PostgreSQL's own schema dump/restore for CHECK text: it does not prove semantic equivalence of those lines (a same-name CHECK with a different bound would also pass that structural guard — e.g. economic init migration :648-649). The fixed point proves stability for one more round trip only.
+
+Restore REF into a second fresh scratch database and dump it: these bytes must
+also equal REF. Missing REF, missing fixed-point evidence, a skipped allowance
+guard, or any failed reference restore/dump refuses operator acceptance. The drill
+creates both databases with its random suffix inside its existing single active
+PostgreSQL server (512 MiB, one CPU). It drops them after collection, and removes
+the owned cluster/volume on success, failure and signals. Ownership comes from
+names created by this invocation, never from a restored disposable marker.
+All new SQL files are private 0600 inside the 0700 directory. Plain-SQL restore
+stdout/stderr are captured and never printed, including on failure. Writers,
+services, consumers and publishers stay stopped throughout SOURCE, REF and archive
+collection; restored outboxes never publish.
+
+Version 5 JSON includes mandatory `referenceChecked`, `allowanceChecked` and
+`fixedPointEqual` gates plus per-database `before.reference.checkLinesDifferent`
+and `before.reference.milliseconds` (extra reference collection/restore/dump and
+fixed-point time). The PG suite prints that extra time separately in local and CI
+logs. CI budgets remain **10 minutes per job / 5 minutes for the PG test step**;
+main integration job/step budgets are unchanged. Runtime tenant isolation is not
+proved. This drill does not prove PITR, WAL archiving, operational RPO/RTO,
+large-data recovery time, direct equality of every column value (rows use MD5
+rather than collision-free proof), production-role recovery (bootstrap supplies
+development roles), runtime role access or runtime tenant isolation, API or real
+payment flows, Keycloak/Temporal storage, object-storage file contents, backup
+encryption/off-host transfer and retention, Kafka offsets, distributed snapshot
+consistency with active writers, or full-system recovery.
+
 ## گزارش و معیار قبولی
 
-گزارش JSON با مجوز `0600` و نسخه قالب `3` نوشته می‌شود. `passed: true` و کد خروج
+گزارش JSON با مجوز `0600` و نسخه قالب `5` نوشته می‌شود. `passed: true` و کد خروج
 صفر فقط وقتی رخ می‌دهد که همه مقایسه‌ها و پاکسازی موفق باشند. `databases` برای هر
-پایگاه `before`، `after`، `tablesEqual`، `migrationsEqual`، `databaseStateEqual` و `objectStateEqual` دارد. تعداد سطرها و مبالغ
+پایگاه `before`، `after`، `tablesEqual`، `migrationsEqual`، `databaseStateEqual`، `objectStateEqual` و `schemaDumpEqual` دارد. تعداد سطرها و مبالغ
 به صورت رشته دهدهی هستند؛ تبدیل به Number انجام نمی‌شود.
 
 - فهرست همه جدول‌های غیرسیستمی در همه schemaها و تعداد دقیق سطرها برابر است؛
   جدول خالی، جدول‌های افزونه و schema حسابرسی نیز در مقایسه هستند. برای هر جدول digest از
   متن JSON همه سطرها با ترتیب ثابت محاسبه و مقایسه می‌شود (MD5، نه اثبات بدون احتمال برخورد).
+- برای هر پایگاه، خروجی `pg_dump --schema-only --format=plain --encoding=UTF8 --quote-all-identifiers`
+  با همان باینری در تصویر ثابت، بدون trim و به صورت بایت به بایت با REF برابر است (قاعده D-068 پایین).
+  در نسخه دارای `--restrict-key`، کلید ثابت `RastaRestoreDrill` داده می‌شود.
+  فقط دو خط تولیدشده `-- Dumped from database version ...` و `-- Dumped by pg_dump version ...`
+  در جای دقیق ابتدای header حذف می‌شوند؛ هیچ خط دیگر، فاصله، `COMMENT ON` یا بدنه تابع حذف نمی‌شود.
+  header و نشان پایان باید کامل باشند؛ خروجی گمشده، خالی، بریده یا فرمان ناموفق رد می‌شود.
+  برابری شامل اشیایی است که dump منطقی schema صادر می‌کند: مالکیت، مجوزهای schema، تابع، type و ستون،
+  `SECURITY DEFINER`، trigger و وضعیت فعال بودن، RLS policy، constraint و index.
+  اشیای داخلی افزونه‌ها را خود افزونه می‌سازد؛ dump منطقی همه کاتالوگ‌های داخلی سرور یا نقش‌های خوشه نیست.
+  ACL پایگاه جداگانه با `acldefault` نرمال و مقایسه می‌شود.
+  گزارش فقط نسخه باینری، تعداد بایت، SHA-256 و زمان جمع‌آوری `milliseconds` را نگه می‌دارد؛
+  تصمیم برابری از خود بایت‌هاست. اختلاف فقط نام پایگاه، شناسه شی و خلاصه تعداد بایت و محل اختلاف را چاپ می‌کند.
+  dump کامل فقط در فایل محلی خصوصی `0600` در پوشه موقت `0700` است؛ در log یا artifact عمومی CI نیست.
 - مالک schemaها (`nspowner`) و اشیا (`relowner`)، ACL جدول‌ها و sequenceها
   (`relacl`) و مجوزهای پیش‌فرض (`pg_default_acl`) با نام نقش و ترتیب ثابت برابرند.
   ACL ضمنی `NULL` با `acldefault` به مجوزهای واقعی پیش‌فرض تبدیل می‌شود؛
@@ -87,7 +150,7 @@ dump متوقف می‌شود و PostgreSQL تازه با volume جدا شروع
 رفتن Docker daemon می‌تواند منابع را باقی بگذارد. فقط با نام پروژه ثبت‌شده در گزارش
 و فایل Compose همان پوشه موقت پاکسازی کنید؛ هرگز stack مشترک را reset نکنید.
 
-فایل‌های dump موقت پس از موفقیت پاکسازی حذف می‌شوند؛ گزارش JSON باقی می‌ماند.
+فایل‌های dump موقت، شامل schema و بدنه تابع، پس از موفقیت پاکسازی حذف می‌شوند؛ گزارش JSON باقی می‌ماند.
 این فرمان سرویس‌های دیگر یا containerهای موجود را متوقف نمی‌کند. فایل گزارش را
 بدون بررسی در مخزن commit نکنید؛ گزارش نام جدول و فراداده migration دارد.
 
@@ -101,7 +164,7 @@ dump متوقف می‌شود و PostgreSQL تازه با volume جدا شروع
 مقایسه مستقیم همه مقدارهای ستون‌ها (فقط digest و مبلغ‌های مشخص مقایسه می‌شوند)،
 بازیابی نقش‌ها از backup، دسترسی سرویس با نقش runtime،
 اجرای API یا جریان واقعی پرداخت را اثبات نمی‌کند. برابری مالکیت schema و اشیا، مجوزهای
-جدول و sequence، مجوزهای پیش‌فرض و هر دو میدان وضعیت sequence به صورت مستقیم گیت می‌شود.
+جدول و sequence، مجوزهای پیش‌فرض، خروجی کامل schema-only و هر دو میدان وضعیت sequence به صورت مستقیم گیت می‌شود.
 خوشه مقصد نقش‌های توسعه را از bootstrap می‌گیرد؛ این backup نقش‌های production نیست.
 برابری با دسترسی superuser اثبات جداسازی مستاجران با نقش runtime نیست.
 
@@ -113,7 +176,7 @@ backup، انتقال و نگهداری خارج از میزبان، Kafka و of
 برای خودکارسازی ماهانه باید مالک زیرساخت یک job زمان‌بندی‌شده جدا با نگهداری گزارش
 تصویب کند. تست‌های مقایسه و SQL منفی در CI اجرا می‌شوند؛ job مستقل
 `integration-backup-drill` با سقف ۱۰ دقیقه عضو گیت `Integration and security tests` است؛ اجرای کامل تمرین
-زمان‌بندی نشده است.
+زمان‌بندی نشده است. سقف گام آزمون PostgreSQL پنج دقیقه است و افزایش نیافته؛ زمان این job در CI و زمان کامل فرمان ۱۶ پایگاه باید جدا گزارش شوند. جمع `before.schemaDump.milliseconds` و `after.schemaDump.milliseconds` هزینه جمع‌آوری schema را نشان می‌دهد.
 
 ## آزمون منطق مقایسه
 

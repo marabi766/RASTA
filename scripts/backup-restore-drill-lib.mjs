@@ -1,6 +1,316 @@
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+
+// No broad comment/whitespace filtering: only these two generated version lines,
+// at the fixed dump-header position, are removed. SQL comments and bodies retain every byte.
+export const SCHEMA_DUMP_FLAGS = [
+  '--schema-only',
+  '--format=plain',
+  '--encoding=UTF8',
+  '--quote-all-identifiers',
+];
+export const DUMP_RESTRICT_KEY = 'RastaRestoreDrill';
+export function normalizeSchemaDump(raw) {
+  if (!Buffer.isBuffer(raw) || !raw.length) throw new Error('Missing schema dump');
+  const header = raw
+    .subarray(0, 1024)
+    .toString('utf8')
+    .match(
+      /^((?:--\n-- PostgreSQL database dump\n--\n\n)(?:\\restrict RastaRestoreDrill\n\n)?)(-- Dumped from database version [^\r\n]+\n-- Dumped by pg_dump version [^\r\n]+\n)/,
+    );
+  const footer = Buffer.from('--\n-- PostgreSQL database dump complete\n--\n\n');
+  const end = raw.subarray(-256).toString('utf8');
+  if (
+    !header ||
+    !(
+      raw.subarray(-footer.length).equals(footer) ||
+      end.endsWith(footer.toString() + `\\unrestrict ${DUMP_RESTRICT_KEY}\n\n`)
+    )
+  ) {
+    throw new Error('Incomplete schema dump');
+  }
+  const start = Buffer.byteLength(header[1]);
+  const normalized = Buffer.concat([
+    raw.subarray(0, start),
+    raw.subarray(start + Buffer.byteLength(header[2])),
+  ]);
+  if (!normalized.includes(Buffer.from('SET ')) || !normalized.includes(Buffer.from('CREATE '))) {
+    throw new Error('Empty schema dump');
+  }
+  return normalized;
+}
+
+// Bytes remain private and non-enumerable: JSON evidence never contains function bodies.
+export function schemaDumpEvidence(raw, version, milliseconds = 0) {
+  if (typeof version !== 'string' || !version.startsWith('pg_dump (PostgreSQL) '))
+    throw new Error('Missing schema dump version');
+  const bytes = normalizeSchemaDump(raw);
+  const evidence = {
+    version,
+    bytes: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    milliseconds,
+  };
+  Object.defineProperty(evidence, 'content', { value: bytes });
+  return evidence;
+}
+
+// Shared SQL-aware scanner: quoted identifiers/strings, dollar bodies and nested comments
+// are indivisible. Consumers never interpret CHECK-looking payload text as SQL syntax.
+function* scanSql(text) {
+  for (let i = 0; i < text.length;) {
+    const start = i;
+    const ch = text[i];
+    if (/\s/.test(ch)) {
+      i++;
+      continue;
+    }
+    if (text.startsWith('--', i)) {
+      const end = text.indexOf('\n', i);
+      i = end < 0 ? text.length : end;
+      yield { kind: 'comment', value: text.slice(start, i), start, end: i };
+      continue;
+    }
+    if (text.startsWith('/*', i)) {
+      let depth = 1;
+      i += 2;
+      while (i < text.length && depth) {
+        if (text.startsWith('/*', i)) {
+          depth++;
+          i += 2;
+        } else if (text.startsWith('*/', i)) {
+          depth--;
+          i += 2;
+        } else i++;
+      }
+      if (depth) throw new Error('Unclosed schema SQL comment');
+      yield { kind: 'comment', value: text.slice(start, i), start, end: i };
+      continue;
+    }
+    const dollar = ch === '$' && text.slice(i).match(/^\$(?:[a-zA-Z_][a-zA-Z0-9_]*)?\$/);
+    if (dollar) {
+      const end = text.indexOf(dollar[0], i + dollar[0].length);
+      if (end < 0) throw new Error('Unclosed schema SQL body');
+      i = end + dollar[0].length;
+      yield { kind: 'string', value: '', start, end: i };
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      const escape = ch === "'" && /[eE]/.test(text[i - 1] ?? '');
+      i++;
+      let closed = false;
+      while (i < text.length) {
+        if (escape && text[i] === '\\') {
+          i += 2;
+          continue;
+        }
+        if (text[i++] === ch) {
+          if (text[i] === ch) i++;
+          else {
+            closed = true;
+            break;
+          }
+        }
+      }
+      if (!closed) throw new Error('Unclosed schema SQL quote');
+      yield {
+        kind: ch === '"' ? 'identifier' : 'string',
+        value: ch === '"' ? text.slice(start + 1, i - 1).replaceAll('""', '"') : '',
+        start,
+        end: i,
+      };
+      continue;
+    }
+    const word = text.slice(i).match(/^[a-zA-Z_][a-zA-Z0-9_$]*/);
+    if (word) {
+      i += word[0].length;
+      yield { kind: 'word', value: word[0], start, end: i };
+    } else {
+      i++;
+      yield { kind: 'symbol', value: ch, start, end: i };
+    }
+  }
+}
+
+// Only generated object identities, never differing SQL or function bodies, enter diagnostics.
+export function schemaDiffSummary(source, restored) {
+  const a = source.content,
+    b = restored.content;
+  let offset = 0;
+  while (offset < Math.min(a.length, b.length) && a[offset] === b[offset]) offset++;
+  const text = a.toString('utf8');
+  const limit = a.subarray(0, offset).toString('utf8').length;
+  let identity = 'database schema';
+  for (const token of scanSql(text)) {
+    if (token.start > limit) break;
+    const match =
+      token.kind === 'comment' &&
+      (token.start === 0 || text[token.start - 1] === '\n') &&
+      token.value.match(
+        /^-- Name: ([a-zA-Z0-9_ .(),"-]+); Type: ([A-Z ]+); Schema: ([a-zA-Z0-9_"-]+); Owner: [^\n]*$/,
+      );
+    if (match) identity = `${match[3]}.${match[1]} (${match[2]})`.slice(0, 180);
+  }
+  return { identity, firstDifferentByte: offset, sourceBytes: a.length, restoredBytes: b.length };
+}
+
+function checkLines(evidence, database) {
+  const text = evidence.content.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(evidence.content)) throw new Error('Invalid schema UTF-8');
+  const lines = text.split('\n');
+  const starts = [0];
+  for (let i = 0; i < text.length; i++) if (text[i] === '\n') starts.push(i + 1);
+  const lineAt = new Map(starts.map((start, line) => [start, line]));
+  const checks = new Map(),
+    identities = [];
+  const tokens = [...scanSql(text)].filter((t) => t.kind !== 'comment');
+  let statement = [];
+  const inspect = () => {
+    let i = 0;
+    const keyword = (index, value) =>
+      statement[index]?.kind === 'word' && statement[index].value.toUpperCase() === value;
+    if (!keyword(i++, 'CREATE')) return;
+    if (keyword(i, 'UNLOGGED')) i++;
+    if (!keyword(i++, 'TABLE')) return;
+    const schema = statement[i++],
+      dot = statement[i++],
+      table = statement[i++];
+    if (
+      schema?.kind !== 'identifier' ||
+      dot?.value !== '.' ||
+      table?.kind !== 'identifier' ||
+      statement[i++]?.value !== '('
+    )
+      return;
+    let depth = 1;
+    for (; i < statement.length; i++) {
+      const token = statement[i];
+      if (
+        depth === 1 &&
+        keyword(i, 'CONSTRAINT') &&
+        statement[i + 1]?.kind === 'identifier' &&
+        keyword(i + 2, 'CHECK') &&
+        statement[i + 3]?.value === '('
+      ) {
+        let j = i + 4,
+          expressionDepth = 1;
+        for (; j < statement.length && expressionDepth; j++) {
+          if (statement[j].value === '(' && statement[j].kind === 'symbol') expressionDepth++;
+          if (statement[j].value === ')' && statement[j].kind === 'symbol') expressionDepth--;
+        }
+        if (expressionDepth) throw new Error('Malformed CHECK evidence');
+        if (keyword(j, 'NO') && keyword(j + 1, 'INHERIT')) j += 2;
+        const lineStart = text.lastIndexOf('\n', token.start - 1) + 1;
+        const line = lineAt.get(lineStart);
+        const end = statement[j - 1].end;
+        const prefix = text.slice(lineStart, token.start);
+        const suffix = text.slice(
+          end,
+          text.indexOf('\n', end) < 0 ? text.length : text.indexOf('\n', end),
+        );
+        // A whole physical line, not an arbitrary fragment of a statement, is permitted.
+        if (
+          /^[ \t]*$/.test(prefix) &&
+          /^[ \t]*,?[ \t]*$/.test(suffix) &&
+          !text.slice(token.start, end).includes('\n')
+        ) {
+          const identity = JSON.stringify([
+            database,
+            schema.value,
+            table.value,
+            statement[i + 1].value,
+          ]);
+          checks.set(line, identity);
+          identities.push(identity);
+        }
+      }
+      if (token.kind === 'symbol' && token.value === '(') depth++;
+      if (token.kind === 'symbol' && token.value === ')') depth--;
+    }
+  };
+  let atomicDepth = 0;
+  for (const [index, token] of tokens.entries()) {
+    if (token.kind === 'word') {
+      const word = token.value.toUpperCase();
+      if (
+        (word === 'BEGIN' &&
+          tokens[index + 1]?.kind === 'word' &&
+          tokens[index + 1].value.toUpperCase() === 'ATOMIC') ||
+        (atomicDepth && word === 'CASE')
+      )
+        atomicDepth++;
+      if (atomicDepth && word === 'END') atomicDepth--;
+    }
+    if (!atomicDepth && token.kind === 'symbol' && token.value === ';') {
+      inspect();
+      statement = [];
+    } else statement.push(token);
+  }
+  return { lines, checks, identities: identities.sort() };
+}
+
+const allowances = new WeakMap();
+const references = new WeakMap();
+export function checkSourceReference(source, reference, database) {
+  if (
+    !database ||
+    !Buffer.isBuffer(source?.content) ||
+    !Buffer.isBuffer(reference?.content) ||
+    source.version !== reference.version
+  )
+    throw new Error('Missing SOURCE/REF evidence');
+  const a = checkLines(source, database),
+    b = checkLines(reference, database);
+  if (a.lines.length !== b.lines.length || !isDeepStrictEqual(a.identities, b.identities))
+    throw new Error('SOURCE/REF CHECK identity or line count differs');
+  let checkLinesDifferent = 0;
+  for (let i = 0; i < a.lines.length; i++) {
+    if (a.lines[i] === b.lines[i]) continue;
+    if (!a.checks.has(i) || a.checks.get(i) !== b.checks.get(i))
+      throw new Error('SOURCE/REF non-CHECK difference');
+    checkLinesDifferent++;
+  }
+  // This structural allowance trusts PostgreSQL; it does NOT prove CHECK semantics.
+  const proof = { database, checkLinesDifferent };
+  allowances.set(proof, { source, reference });
+  return proof;
+}
+export function schemaReferenceEvidence(
+  source,
+  reference,
+  fixedPoint,
+  allowance,
+  milliseconds = 0,
+) {
+  const allowed = allowances.get(allowance);
+  if (!allowed || allowed.source !== source || allowed.reference !== reference)
+    throw new Error('Missing SOURCE/REF allowance guard');
+  if (
+    !Buffer.isBuffer(fixedPoint?.content) ||
+    fixedPoint.version !== reference.version ||
+    !reference.content.equals(fixedPoint.content)
+  )
+    throw new Error('Missing or unstable REF fixed-point evidence');
+  const evidence = { ...allowance, milliseconds, reference, fixedPoint };
+  references.set(evidence, { source, reference });
+  return evidence;
+}
+
+export function discoverEnvServices(text) {
+  const keys = [...text.matchAll(/^[ \t]*(?:export[ \t]+)?DATABASE_URL_([A-Z][A-Z0-9_]*)[ \t]*=/gm)]
+    .map((m) => m[1])
+    .filter((name) => !name.endsWith('_MIGRATOR'));
+  const services = keys.map((key) => key.toLowerCase()).sort();
+  if (!services.length || new Set(services).size !== services.length)
+    throw new Error('Invalid .env.example database coverage');
+  return services;
+}
+export function checkEnvServiceCoverage(discovered, configured) {
+  if (!isDeepStrictEqual([...discovered].sort(), configured))
+    throw new Error('Service coverage mismatch: .env.example and Prisma schemas differ');
+}
 
 // Row counts and money stay decimal strings: PostgreSQL count/SUM can exceed JS's safe integer.
 function count(value) {
@@ -12,6 +322,12 @@ function validateSnapshot(snapshot) {
   if (!snapshot || typeof snapshot.tables !== 'object' || Array.isArray(snapshot.tables)) {
     throw new Error('Missing table inventory');
   }
+  if (
+    !Buffer.isBuffer(snapshot.schemaDump?.content) ||
+    !snapshot.schemaDump.content.length ||
+    !snapshot.schemaDump.version
+  )
+    throw new Error('Missing schema dump evidence');
   const tables = Object.entries(snapshot.tables);
   if (!tables.length) throw new Error('Empty table inventory');
   for (const [, table] of tables) {
@@ -52,7 +368,20 @@ function validateSnapshot(snapshot) {
 export function compareSnapshots(source, restored) {
   validateSnapshot(source);
   validateSnapshot(restored);
+  const proof = references.get(source.reference);
+  if (
+    !proof ||
+    !proof.source.content.equals(source.schemaDump.content) ||
+    proof.source.version !== source.schemaDump.version
+  )
+    throw new Error('Missing schema reference evidence');
   return {
+    referenceChecked: true,
+    fixedPointEqual: true,
+    allowanceChecked: true,
+    schemaDumpEqual:
+      proof.reference.version === restored.schemaDump.version &&
+      proof.reference.content.equals(restored.schemaDump.content),
     tablesEqual: isDeepStrictEqual(source.tables, restored.tables),
     migrationsEqual: isDeepStrictEqual(source.migrations, restored.migrations),
     databaseStateEqual: isDeepStrictEqual(source.databaseState, restored.databaseState),
@@ -92,7 +421,15 @@ export function drillPassed(databases, expectedCount, sourceLedger, restoredLedg
     expectedCount > 0 &&
     databases.length === expectedCount &&
     databases.every(
-      (db) => db.tablesEqual && db.migrationsEqual && db.databaseStateEqual && db.objectStateEqual,
+      (db) =>
+        db.schemaDumpEqual === true &&
+        db.referenceChecked === true &&
+        db.fixedPointEqual === true &&
+        db.allowanceChecked === true &&
+        db.tablesEqual &&
+        db.migrationsEqual &&
+        db.databaseStateEqual &&
+        db.objectStateEqual,
     ) &&
     compareLedgers(sourceLedger, restoredLedger)
   );
@@ -193,7 +530,7 @@ ORDER BY n.nspname COLLATE "C", c.relname COLLATE "C"
 
 export const DATABASE_STATE_SQL = `
 SELECT json_build_object('owner', pg_get_userbyid(d.datdba),
-  'acl', (SELECT json_agg(a::text ORDER BY a::text COLLATE "C") FROM unnest(d.datacl) a),
+  'acl', (SELECT json_agg(a::text ORDER BY a::text COLLATE "C") FROM unnest(coalesce(d.datacl, acldefault('d'::"char", d.datdba))) a),
   'settings', coalesce((SELECT json_agg(json_build_object(
     'role', CASE WHEN s.setrole = 0 THEN '*' ELSE pg_get_userbyid(s.setrole) END,
     'config', (SELECT json_agg(v ORDER BY v COLLATE "C") FROM unnest(s.setconfig) v))

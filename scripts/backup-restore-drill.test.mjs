@@ -5,6 +5,14 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   discoverSchemaServices,
+  discoverEnvServices,
+  checkEnvServiceCoverage,
+  normalizeSchemaDump,
+  schemaDumpEvidence,
+  checkSourceReference,
+  schemaReferenceEvidence,
+  schemaDiffSummary,
+  drillPassed,
   checkServiceCoverage,
   compareSnapshots,
   ledgerPassed,
@@ -14,7 +22,16 @@ import {
 } from './backup-restore-drill-lib.mjs';
 
 function snapshot() {
+  const schemaDump = schemaDumpEvidence(dumpFixture(), 'pg_dump (PostgreSQL) 16.4');
+  const reference = schemaReferenceEvidence(
+    schemaDump,
+    schemaDump,
+    schemaDump,
+    checkSourceReference(schemaDump, schemaDump, 'fixture'),
+  );
   return {
+    reference,
+    schemaDump,
     tables: {
       'public.wallet': { rows: '9007199254740993', kind: 'application', digest: 'a'.repeat(32) },
       'public.empty': { rows: '0', kind: 'application', digest: 'b'.repeat(32) },
@@ -45,6 +62,10 @@ test('identical snapshots pass, independent of table key order', () => {
   const restored = snapshot();
   restored.tables = Object.fromEntries(Object.entries(restored.tables).reverse());
   assert.deepEqual(compareSnapshots(snapshot(), restored), {
+    referenceChecked: true,
+    fixedPointEqual: true,
+    allowanceChecked: true,
+    schemaDumpEqual: true,
     tablesEqual: true,
     migrationsEqual: true,
     databaseStateEqual: true,
@@ -232,4 +253,218 @@ test('object evidence is required and each category affects the comparator', () 
     restored.objectState[field] = [{ drift: field }];
     assert.equal(compareSnapshots(snapshot(), restored).objectStateEqual, false);
   }
+});
+
+function dumpFixture(body = 'CREATE TABLE public.example (id integer);\n') {
+  return Buffer.from(
+    '--\n-- PostgreSQL database dump\n--\n\n-- Dumped from database version 16.4\n-- Dumped by pg_dump version 16.4\n\nSET statement_timeout = 0;\n' +
+      body +
+      '--\n-- PostgreSQL database dump complete\n--\n\n',
+  );
+}
+
+test('dump normalization removes exactly the two fixed header version lines; all SQL/body/comment bytes survive', () => {
+  const body = `CREATE FUNCTION public.fixture() RETURNS text AS $body$
+-- Dumped by pg_dump version do not strip me
+-- PostgreSQL database dump
+RETURN 'PRIVATE_FUNCTION_BODY';
+$body$ LANGUAGE sql;
+COMMENT ON FUNCTION public.fixture() IS 'PRIVATE_COMMENT';
+-- arbitrary SQL comment
+`;
+  const raw = dumpFixture(body);
+  const expected = raw
+    .toString()
+    .replace('-- Dumped from database version 16.4\n-- Dumped by pg_dump version 16.4\n', '');
+  assert.deepEqual(normalizeSchemaDump(raw), Buffer.from(expected));
+  assert.ok(normalizeSchemaDump(raw).includes(Buffer.from(body)));
+  // Different whitespace, trailing bytes, COMMENT ON text and function bodies must differ.
+  for (const change of [
+    body + '\n',
+    body.replace('PRIVATE_COMMENT', 'CHANGED'),
+    body.replace('RETURN', ' RETURN'),
+  ]) {
+    assert.equal(normalizeSchemaDump(raw).equals(normalizeSchemaDump(dumpFixture(change))), false);
+  }
+});
+
+test('missing, empty, failed-shaped and truncated dump evidence fails closed', () => {
+  for (const raw of [
+    undefined,
+    Buffer.alloc(0),
+    Buffer.from('pg_dump: failed'),
+    dumpFixture().subarray(0, -1),
+    dumpFixture().subarray(0, -40),
+    dumpFixture().subarray(5),
+    dumpFixture(''),
+  ]) {
+    assert.throws(() => schemaDumpEvidence(raw, 'pg_dump (PostgreSQL) 16.4'));
+  }
+  for (const evidence of [undefined, {}, { bytes: 100, sha256: 'a' }]) {
+    assert.throws(
+      () => compareSnapshots(snapshot(), { ...snapshot(), schemaDump: evidence }),
+      /Missing schema dump/,
+    );
+  }
+});
+
+test('schema gate cannot be omitted and byte mismatch or client version mismatch rejects acceptance', () => {
+  const source = snapshot();
+  for (const restored of [
+    {
+      ...snapshot(),
+      schemaDump: schemaDumpEvidence(
+        dumpFixture('CREATE TABLE changed (id integer);\n'),
+        'pg_dump (PostgreSQL) 16.4',
+      ),
+    },
+    { ...snapshot(), schemaDump: schemaDumpEvidence(dumpFixture(), 'pg_dump (PostgreSQL) 16.5') },
+  ]) {
+    const comparison = compareSnapshots(source, restored);
+    assert.equal(comparison.schemaDumpEqual, false);
+    assert.equal(drillPassed([comparison], 1, ledger(), ledger()), false);
+  }
+  const comparison = compareSnapshots(source, snapshot());
+  assert.equal(drillPassed([comparison], 1, ledger(), ledger()), true);
+  delete comparison.schemaDumpEqual;
+  assert.equal(drillPassed([comparison], 1, ledger(), ledger()), false);
+});
+
+test('schema diagnostics and JSON disclose only identity and short byte summary', () => {
+  const body =
+    "-- Name: fixture(); Type: FUNCTION; Schema: public; Owner: owner\nCREATE FUNCTION fixture() AS $$PRIVATE_FUNCTION_BODY$$;\nCOMMENT ON FUNCTION fixture() IS 'PRIVATE_COMMENT';\n";
+  const a = schemaDumpEvidence(dumpFixture(body), 'pg_dump (PostgreSQL) 16.4');
+  const b = schemaDumpEvidence(
+    dumpFixture(body.replace('PRIVATE_FUNCTION_BODY', 'OTHER_BODY')),
+    a.version,
+  );
+  const diff = schemaDiffSummary(a, b);
+  assert.equal(diff.identity, 'public.fixture() (FUNCTION)');
+  assert.doesNotMatch(
+    JSON.stringify({ a, b, diff }),
+    /PRIVATE|OTHER_BODY|COMMENT ON|CREATE FUNCTION/,
+  );
+});
+
+test('third-source discovery ignores migrators and refuses extra, missing, duplicate or empty runtime keys', () => {
+  const discovered = discoverEnvServices(
+    'DATABASE_URL_ECONOMIC=x\nDATABASE_URL_ECONOMIC_MIGRATOR=y\n',
+  );
+  assert.deepEqual(discovered, ['economic']);
+  assert.deepEqual(discoverEnvServices(' export DATABASE_URL_NEW = x\n'), ['new']);
+  checkEnvServiceCoverage(['economic'], discovered);
+  for (const configured of [[], ['economic', 'unknown'], ['unknown']])
+    assert.throws(() => checkEnvServiceCoverage(['economic'], configured));
+  for (const text of ['', 'DATABASE_URL_ECONOMIC=x\nDATABASE_URL_ECONOMIC=y\n'])
+    assert.throws(() => discoverEnvServices(text));
+});
+
+test('fixed restrict/unrestrict markers are retained byte for byte on modern clients', () => {
+  const raw = Buffer.from(
+    dumpFixture()
+      .toString()
+      .replace('-- Dumped from', '\\restrict RastaRestoreDrill\n\n-- Dumped from') +
+      '\\unrestrict RastaRestoreDrill\n\n',
+  );
+  assert.deepEqual(
+    normalizeSchemaDump(raw),
+    Buffer.from(
+      raw
+        .toString()
+        .replace('-- Dumped from database version 16.4\n-- Dumped by pg_dump version 16.4\n', ''),
+    ),
+  );
+});
+
+test('forged dump identities inside function bodies and COMMENT strings never enter diagnostics', () => {
+  for (const sql of [
+    "CREATE FUNCTION f() RETURNS text AS $body$\n-- Name: PRIVATE_BODY; Type: FUNCTION; Schema: private; Owner: owner\nRETURN 'secret';\n$body$ LANGUAGE sql;\n",
+    "COMMENT ON FUNCTION f() IS 'line\n-- Name: PRIVATE_COMMENT; Type: FUNCTION; Schema: private; Owner: owner\nsecret';\n",
+  ]) {
+    const body =
+      'CREATE TABLE fixture (id integer);\n-- Name: safe(); Type: FUNCTION; Schema: public; Owner: owner\n' +
+      sql;
+    const a = schemaDumpEvidence(dumpFixture(body), 'pg_dump (PostgreSQL) 16.4');
+    const b = schemaDumpEvidence(dumpFixture(body.replace('secret', 'changed')), a.version);
+    assert.equal(schemaDiffSummary(a, b).identity, 'public.safe() (FUNCTION)');
+  }
+});
+
+const referenceVersion = 'pg_dump (PostgreSQL) 16.4';
+const checkBody = `CREATE TABLE "public"."sample" (
+    "amount" integer DEFAULT 0,
+    CONSTRAINT "same_name" CHECK ((amount >= 0))
+);
+CREATE TABLE "audit"."sample" (
+    "amount" integer,
+    CONSTRAINT "same_name" CHECK ((amount >= 0))
+);
+`;
+const evidence = (body) => schemaDumpEvidence(dumpFixture(body), referenceVersion);
+
+test('SOURCE/REF allowance scopes identities by database/schema/table/name and preserves multiplicity', () => {
+  const source = evidence(checkBody);
+  const ref = evidence(checkBody.replaceAll('((amount >= 0))', '(amount >= 0)'));
+  assert.deepEqual(checkSourceReference(source, ref, 'rasta_test'), {
+    database: 'rasta_test',
+    checkLinesDifferent: 2,
+  });
+  // Honest trust boundary: even a different bound passes this structural guard.
+  assert.equal(
+    checkSourceReference(source, evidence(checkBody.replaceAll('>= 0', '>= 1')), 'rasta_test')
+      .checkLinesDifferent,
+    2,
+  );
+  for (const body of [
+    checkBody.replace('DEFAULT 0', 'DEFAULT 1'),
+    checkBody.replace('"same_name"', '"renamed"'),
+    checkBody.replace('"audit"."sample"', '"other"."sample"'),
+    checkBody.replace('"public"."sample"', '"public"."other"'),
+    checkBody.replace('    CONSTRAINT "same_name" CHECK ((amount >= 0))\n', ''),
+    checkBody + '\n',
+    checkBody.replace(
+      '    "amount" integer DEFAULT 0,',
+      '    CONSTRAINT "same_name" CHECK ((amount >= 0)),',
+    ),
+  ])
+    assert.throws(() => checkSourceReference(source, evidence(body), 'rasta_test'));
+});
+
+test('CHECK-looking lines in functions, comments, COMMENT strings and nested SQL never qualify', () => {
+  const forged = '    CONSTRAINT "same_name" CHECK ((amount >= 0))';
+  for (const body of [
+    `CREATE FUNCTION "public"."f"() RETURNS void AS $body$\nCREATE TABLE "public"."sample" (\n${forged}\n);\n$body$ LANGUAGE sql;\n`,
+    `COMMENT ON TABLE "public"."sample" IS 'CREATE TABLE "public"."sample" (\n${forged}\n);';\n`,
+    `/* outer /* nested */ CREATE TABLE "public"."sample" (\n${forged}\n); */\n`,
+    `-- CREATE TABLE "public"."sample" (\n-- ${forged}\n-- );\n`,
+    `CREATE FUNCTION "public"."f"() RETURNS void LANGUAGE sql BEGIN ATOMIC\nSELECT CASE WHEN true THEN 1 ELSE 0 END;\nCREATE TABLE "public"."sample" (\n${forged}\n);\nEND;\n`,
+    `CREATE FUNCTION "public"."f"() RETURNS text AS E'escaped \\' quote\n${forged}\n' LANGUAGE sql;\n`,
+  ]) {
+    assert.throws(() =>
+      checkSourceReference(
+        evidence(checkBody + body),
+        evidence(checkBody + body.replace('>= 0', '>= 1')),
+        'rasta_test',
+      ),
+    );
+  }
+});
+
+test('missing REF, fixed point or allowance and unstable REF cannot pass operator acceptance', () => {
+  const source = snapshot();
+  const ref = source.schemaDump;
+  const allowed = checkSourceReference(ref, ref, 'rasta_test');
+  for (const value of [undefined, {}, { database: 'rasta_test', checkLinesDifferent: 0 }])
+    assert.throws(() => schemaReferenceEvidence(ref, ref, ref, value));
+  for (const fixed of [undefined, {}, evidence(checkBody)])
+    assert.throws(() => schemaReferenceEvidence(ref, ref, fixed, allowed));
+  for (const reference of [undefined, {}, JSON.parse(JSON.stringify(source.reference))])
+    assert.throws(() => compareSnapshots({ ...source, reference }, snapshot()));
+  const result = compareSnapshots(source, snapshot());
+  for (const key of ['referenceChecked', 'fixedPointEqual', 'allowanceChecked']) {
+    const bypass = { ...result };
+    delete bypass[key];
+    assert.equal(drillPassed([bypass], 1, ledger(), ledger()), false);
+  }
+  assert.equal(drillPassed([result], 1, ledger(), ledger()), true);
 });
