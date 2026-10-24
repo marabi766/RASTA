@@ -1,7 +1,7 @@
 import { withUtcSession } from '@rasta/config';
 import { runWithContext, type RequestContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
-import { PrismaService, separatePoolUrl } from '../src/prisma/prisma.service';
+import { PrismaService } from '../src/prisma/prisma.service';
 import { FENCE_POOL_CONNECTIONS, KeycloakWriteFences } from '../src/keycloak/keycloak-write-fence';
 
 /**
@@ -34,7 +34,7 @@ export function newPrisma(): PrismaService {
  * (D-069, `app.module.ts`). Connected; the suite closes `pool` in `afterAll`.
  */
 export async function newFences(): Promise<{ fences: KeycloakWriteFences; pool: PrismaService }> {
-  const pool = new PrismaService(separatePoolUrl(databaseUrl(), FENCE_POOL_CONNECTIONS));
+  const pool = new PrismaService(databaseUrl(), { connections: FENCE_POOL_CONNECTIONS });
   await pool.onModuleInit();
   return { fences: new KeycloakWriteFences(pool), pool };
 }

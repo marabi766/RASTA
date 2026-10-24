@@ -32,7 +32,7 @@ import {
   outboxPendingAgeSeconds,
   outboxPendingTotal,
 } from '@rasta/observability';
-import { PrismaService, separatePoolUrl } from './prisma/prisma.service';
+import { PrismaService } from './prisma/prisma.service';
 import { PrismaOutboxStore } from './outbox/outbox.store';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { KeycloakAdminClient } from './keycloak/keycloak.client';
@@ -136,7 +136,7 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
       provide: FENCE_PRISMA,
       inject: [ENV],
       useFactory: (env: IdentityEnv) =>
-        new PrismaService(separatePoolUrl(env.DATABASE_URL, FENCE_POOL_CONNECTIONS)),
+        new PrismaService(env.DATABASE_URL, { connections: FENCE_POOL_CONNECTIONS }),
     },
     {
       provide: KeycloakWriteFences,

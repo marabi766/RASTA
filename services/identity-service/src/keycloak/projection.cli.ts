@@ -3,7 +3,7 @@ import { createLogger } from '@rasta/logging';
 import { preflightRuntimeRole } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
 import { loadIdentityEnv, SERVICE_NAME } from '../config/env';
-import { PrismaService, separatePoolUrl } from '../prisma/prisma.service';
+import { PrismaService } from '../prisma/prisma.service';
 import { IdentityRepository } from '../identity/identity.repository';
 import { KeycloakAdminClient } from './keycloak.client';
 import { KeycloakProjector } from './keycloak.projector';
@@ -46,7 +46,7 @@ async function main(): Promise<number> {
   const prisma = new PrismaService(env.DATABASE_URL);
   // The write fences' own pool, as in the service (D-069): the backfill's
   // projections and orphan repairs are fenced like every other writer.
-  const fencePool = new PrismaService(separatePoolUrl(env.DATABASE_URL, FENCE_POOL_CONNECTIONS));
+  const fencePool = new PrismaService(env.DATABASE_URL, { connections: FENCE_POOL_CONNECTIONS });
   await prisma.onModuleInit();
   await fencePool.onModuleInit();
   try {

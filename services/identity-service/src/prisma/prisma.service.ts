@@ -56,7 +56,16 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   /** The client every repository uses. Tenant scoping is already applied. */
   readonly client: ExtendedPrismaClient;
 
-  constructor(databaseUrl: string) {
+  /**
+   * @param loadedUrl always the loaded `DATABASE_URL` (the repository guard
+   *   `scripts/db-pool-config.pg.test.mjs` holds every service to it).
+   * @param pool a separate, bounded pool on that same URL — the Keycloak write
+   *   fences' (D-069), never the one business transactions hold locks on.
+   */
+  constructor(loadedUrl: string, pool?: { connections: number; waitSeconds?: number }) {
+    const databaseUrl = pool
+      ? separatePoolUrl(loadedUrl, pool.connections, pool.waitSeconds)
+      : loadedUrl;
     this.base = new PrismaClient({
       datasources: { db: { url: databaseUrl } },
       log: [
