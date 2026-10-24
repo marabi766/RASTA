@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { amountMinorSchema } from '@rasta/contracts';
+import { amountMinorSchema, digitsToBigInt } from '@rasta/contracts';
 import { EVIDENCE_REFERENCE_PATTERN } from '../events/events';
 import { cursorQueryParameter } from '../shared/cursor';
 
@@ -14,9 +14,14 @@ import { cursorQueryParameter } from '../shared/cursor';
 
 export const topUpSchema = z
   .object({
-    amountMinor: amountMinorSchema.refine((value) => BigInt(value) > 0n, {
-      message: 'A top-up must be positive',
-    }),
+    // zod runs this even when the pattern failed, with the raw text: only digits are converted.
+    amountMinor: amountMinorSchema.refine(
+      (value) => {
+        const amount = digitsToBigInt(value);
+        return amount === undefined || amount > 0n;
+      },
+      { message: 'A top-up must be positive' },
+    ),
     /**
      * Mirrors the required `Idempotency-Key` header.
      *

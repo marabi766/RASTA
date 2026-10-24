@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { amountMinorSchema, currencySchema } from '@rasta/contracts';
+import { amountMinorSchema, currencySchema, digitsToBigInt } from '@rasta/contracts';
 
 /** Wallet request and response shapes. */
 
@@ -21,9 +21,14 @@ export type ListHoldsQuery = z.infer<typeof listHoldsQuerySchema>;
 
 export const placeHoldSchema = z
   .object({
-    amountMinor: amountMinorSchema.refine((value) => BigInt(value) > 0n, {
-      message: 'A hold must be positive',
-    }),
+    // zod runs this even when the pattern failed, with the raw text: only digits are converted.
+    amountMinor: amountMinorSchema.refine(
+      (value) => {
+        const amount = digitsToBigInt(value);
+        return amount === undefined || amount > 0n;
+      },
+      { message: 'A hold must be positive' },
+    ),
     /**
      * The transaction the hold secures.
      *

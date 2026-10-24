@@ -42,6 +42,7 @@ export {
   addMoney,
   subtractMoney,
   applyBasisPoints,
+  digitsToBigInt,
 } from './common/money';
 export type { Currency, Money, SignedMoney } from './common/money';
 

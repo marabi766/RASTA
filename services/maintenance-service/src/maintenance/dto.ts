@@ -3,6 +3,7 @@ import {
   amountMinorSchema,
   cursorPaginationSchema,
   currencySchema,
+  digitsToBigInt,
   seedIdSchema,
   ID_PREFIXES,
   referenceId,
@@ -73,9 +74,14 @@ export const MAX_AMOUNT_MINOR = 9_223_372_036_854_775_807n;
  * (`amountMinorSchema`) and no larger than {@link MAX_AMOUNT_MINOR}.
  */
 export const boundedAmountMinorSchema = amountMinorSchema
-  .refine((value) => BigInt(value) <= MAX_AMOUNT_MINOR, {
-    message: 'Amount is larger than the maximum this system can hold (9223372036854775807)',
-  })
+  // zod runs this even when the pattern failed, with the raw text: only digits are converted.
+  .refine(
+    (value) => {
+      const amount = digitsToBigInt(value);
+      return amount === undefined || amount <= MAX_AMOUNT_MINOR;
+    },
+    { message: 'Amount is larger than the maximum this system can hold (9223372036854775807)' },
+  )
   .describe('Minor units, as a string of digits, at most 9223372036854775807.');
 
 export const maintenanceTypeSchema = z.enum(MAINTENANCE_TYPES);
