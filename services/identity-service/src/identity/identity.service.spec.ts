@@ -4,6 +4,7 @@ import { IdentityService } from './identity.service';
 import type { IdentityRepository } from './identity.repository';
 import type { KeycloakAdminClient } from '../keycloak/keycloak.client';
 import { KeycloakProjector } from '../keycloak/keycloak.projector';
+import type { KeycloakWriteFences } from '../keycloak/keycloak-write-fence';
 import { IDENTITY_EVENTS } from './events';
 import { REFUSAL_SITES, refusalSiteOf } from '../security-events/refusal-sites';
 import { DEFAULT_ROLE_GRANT_POLICY, assertMayGrantRoles } from './role-grants';
@@ -67,6 +68,7 @@ interface Harness {
   service: IdentityService;
   repository: jest.Mocked<IdentityRepository>;
   keycloak: jest.Mocked<KeycloakAdminClient>;
+  fences: jest.Mocked<KeycloakWriteFences>;
   enqueued: Array<{ eventName: string; payload: unknown }>;
 }
 
@@ -97,18 +99,13 @@ function harness(overrides: Partial<jest.Mocked<IdentityRepository>> = {}): Harn
     findMembership: jest.fn(),
     findMembershipById: jest.fn(),
     listMembershipsForUser: jest.fn(async () => []),
-    // What a write-ahead reads under the user lock (D-064): the account, and no
-    // earlier write still settling.
-    keycloakWriteState: jest.fn(async () => ({ keycloakId: 'kc-1', settlingForSeconds: null })),
-    clearDueKeycloakReassert: jest.fn(async () => undefined),
-    markKeycloakReassert: jest.fn(async () => undefined),
+    // The database's clock, read after the user lock (#402 r1 F3).
+    databaseNow: jest.fn(async () => new Date()),
+    findActivationSource: jest.fn(async () => null),
     // The request row lock a registration decision takes (#219 r2): PENDING here.
     lockRegistrationRequest: jest.fn(async () => ({ status: 'PENDING', userId: 'USR_ANY' })),
     revokeMembership: jest.fn(async () => undefined),
-    lockUserMemberships: jest.fn(async () => ({
-      activeOrganizationId: TEST_ORG_A,
-      now: new Date(),
-    })),
+    lockUserMemberships: jest.fn(async () => ({ activeOrganizationId: TEST_ORG_A })),
     findOrganizationRefs: jest.fn(async () => []),
     listUsersInOrganization: jest.fn(),
     ...overrides,
@@ -130,12 +127,22 @@ function harness(overrides: Partial<jest.Mocked<IdentityRepository>> = {}): Harn
 
   // The real projector over the mocked repository and client, so these tests
   // see exactly the attribute set a membership change writes.
-  const projector = new KeycloakProjector(repository, keycloak);
+  // No fence is live (D-069); the mocked client opens none, so there is
+  // nothing to release or settle.
+  const fences = {
+    ofUser: jest.fn(async () => []),
+    open: jest.fn(),
+    release: jest.fn(async () => true),
+    settle: jest.fn(async () => undefined),
+    markAccountMissing: jest.fn(async () => undefined),
+  } as unknown as jest.Mocked<KeycloakWriteFences>;
+  const projector = new KeycloakProjector(repository, keycloak, fences);
 
   return {
     service: new IdentityService(repository, keycloak, projector),
     repository,
     keycloak,
+    fences,
     enqueued,
   };
 }
@@ -200,10 +207,7 @@ describe('switchActiveOrganization', () => {
 
   it('records null as the previous organization when none was active', async () => {
     const h = harness();
-    h.repository.lockUserMemberships.mockResolvedValue({
-      activeOrganizationId: null,
-      now: new Date(),
-    });
+    h.repository.lockUserMemberships.mockResolvedValue({ activeOrganizationId: null });
     h.repository.findMembership.mockResolvedValue(
       membershipRow({ organizationId: TEST_ORG_B }) as never,
     );
@@ -249,10 +253,7 @@ describe('switchActiveOrganization', () => {
       }) as never,
     );
     // The application clock says the membership is live; the database says not.
-    h.repository.lockUserMemberships.mockResolvedValue({
-      activeOrganizationId: TEST_ORG_A,
-      now: new Date('2026-06-01T00:00:00.000Z'),
-    });
+    h.repository.databaseNow.mockResolvedValue(new Date('2026-06-01T00:00:00.000Z'));
     const tx = h.repository.client as unknown as { user: { update: jest.Mock } };
 
     await expect(
@@ -404,8 +405,11 @@ describe('createUser', () => {
       IDENTITY_EVENTS.MEMBERSHIP_CREATED,
     ]);
     // The events go through the same transaction callback as the writes, which
-    // is what the outbox guarantee rests on.
-    expect(h.repository.transaction).toHaveBeenCalledTimes(1);
+    // is what the outbox guarantee rests on. The second transaction is the
+    // projection after commit, which writes the grants and enables the
+    // account (D-069 addendum D).
+    expect(h.repository.transaction).toHaveBeenCalledTimes(2);
+    expect(h.enqueued).toHaveLength(2);
   });
 });
 
@@ -623,10 +627,12 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
       membership: { update: jest.Mock; findFirst: jest.Mock };
     };
 
-  it('creates the account with all four attributes, rasta_user_id included', async () => {
-    // Before, only the two organization attributes were written — and on
+  it('creates the account disabled with its provenance, then projects all four attributes after commit (D-069 addendum D)', async () => {
+    // Before #219, only the two organization attributes were written — and on
     // Keycloak 26 not even those survived — so every API-provisioned token fell
-    // back to `sub` for its user id and carried no organization at all.
+    // back to `sub` for its user id. Before D-069 the account was created
+    // enabled and granting, ahead of a transaction that might not commit; now
+    // it is created harmless, and the grants follow the committed rows.
     const h = harness();
     h.repository.findUserByUsernameOrEmail.mockResolvedValue(null as never);
     const client = h.repository.client as unknown as {
@@ -647,16 +653,30 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
       }),
     );
 
-    const input = (h.keycloak.createUser as unknown as jest.Mock).mock.calls[0]![0] as {
-      attributes: Record<string, string[]>;
-    };
-    const created = (client.user.create.mock.calls[0]![0] as { data: { id: string } }).data;
-    expect(input.attributes).toEqual({
-      rasta_user_id: [created.id],
-      organization_ids: [TEST_ORG_A],
-      organization_roles: [`${TEST_ORG_A}:DRIVER`, `${TEST_ORG_A}:OPERATOR`],
-      active_organization_id: [TEST_ORG_A],
+    const input = (h.keycloak.createUser as unknown as jest.Mock).mock.calls[0]![0] as Record<
+      string,
+      unknown
+    >;
+    const created = (
+      client.user.create.mock.calls[0]![0] as {
+        data: { id: string; keycloakId: string; accountActivationPending: boolean };
+      }
+    ).data;
+    // Nothing to ask for but the provenance: the client creates it disabled.
+    expect(input).toEqual({
+      username: 'new.user',
+      email: 'new.user@rasta.local',
+      firstName: 'نو',
+      lastName: 'کاربر',
+      userId: created.id,
     });
+    expect(created).toMatchObject({ keycloakId: 'kc-new', accountActivationPending: true });
+    // The account's grants, written by the projection after commit, from the
+    // committed rows.
+    expect(h.keycloak.createUser).toHaveBeenCalledTimes(1);
+    expect(
+      (h.repository.transaction as unknown as jest.Mock).mock.invocationCallOrder[1],
+    ).toBeGreaterThan((h.keycloak.createUser as unknown as jest.Mock).mock.invocationCallOrder[0]!);
   });
 
   it('writes a demotion to Keycloak before its event, then the whole set after commit', async () => {
@@ -687,8 +707,8 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
       active_organization_id: [TEST_ORG_A],
     };
     expect(put(h).mock.calls).toEqual([
-      ['kc-1', demoted],
-      ['kc-1', demoted],
+      ['kc-1', demoted, expect.objectContaining({ fence: expect.any(Function) })],
+      ['kc-1', demoted, expect.objectContaining({ fence: expect.any(Function) })],
     ]);
     expect(put(h).mock.invocationCallOrder[0]).toBeLessThan(
       (h.repository.enqueueEvent as unknown as jest.Mock).mock.invocationCallOrder[0]!,
@@ -719,6 +739,7 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
         organization_ids: [TEST_ORG_A, TEST_ORG_B].sort(),
         organization_roles: [`${TEST_ORG_A}:FLEET_MANAGER`, `${TEST_ORG_B}:DRIVER`].sort(),
       }),
+      expect.anything(),
     );
   });
 
@@ -786,12 +807,16 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
         h.service.revokeMembership('MBR_1', { reason: 'left' }),
       );
 
-      expect(put(h)).toHaveBeenCalledWith('kc-1', {
-        rasta_user_id: [TEST_USER_A],
-        organization_ids: [],
-        organization_roles: [],
-        active_organization_id: [],
-      });
+      expect(put(h)).toHaveBeenCalledWith(
+        'kc-1',
+        {
+          rasta_user_id: [TEST_USER_A],
+          organization_ids: [],
+          organization_roles: [],
+          active_organization_id: [],
+        },
+        expect.anything(),
+      );
     });
   });
 
@@ -829,8 +854,9 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
       ),
     ).rejects.toMatchObject({ status: 503, code: 'KEYCLOAK_UNAVAILABLE' });
     expect(h.enqueued).toEqual([]);
-    // A confirmed refusal: nothing can land later, so nothing is held back.
-    expect(h.repository.markKeycloakReassert).not.toHaveBeenCalled();
+    // A confirmed refusal: nothing can land later, so nothing is held back —
+    // and with this mocked client no fence was opened at all.
+    expect(h.fences.open).not.toHaveBeenCalled();
   });
 
   it('reports a failed switch: its audit event is not a re-projection trigger', async () => {
@@ -899,12 +925,16 @@ describe('membership validity window (ADR-060 § 5)', () => {
       ),
     );
 
-    expect(put(h)).toHaveBeenCalledWith('kc-1', {
-      rasta_user_id: [TEST_USER_A],
-      organization_ids: [TEST_ORG_A, TEST_ORG_B].sort(),
-      organization_roles: [`${TEST_ORG_A}:FLEET_MANAGER`, `${TEST_ORG_B}:FLEET_MANAGER`].sort(),
-      active_organization_id: [TEST_ORG_B],
-    });
+    expect(put(h)).toHaveBeenCalledWith(
+      'kc-1',
+      {
+        rasta_user_id: [TEST_USER_A],
+        organization_ids: [TEST_ORG_A, TEST_ORG_B].sort(),
+        organization_roles: [`${TEST_ORG_A}:FLEET_MANAGER`, `${TEST_ORG_B}:FLEET_MANAGER`].sort(),
+        active_organization_id: [TEST_ORG_B],
+      },
+      expect.anything(),
+    );
   });
 
   it.each([
@@ -961,7 +991,13 @@ describe('membership validity window (ADR-060 § 5)', () => {
       expect(acted).toBe(true);
       // Claimed with the guard, so a second replica cannot act on it too.
       expect(tx(h).membership.updateMany).toHaveBeenCalledWith({
-        where: { id: 'MBR_B', lapseHandledAt: null, deletedAt: null },
+        where: {
+          id: 'MBR_B',
+          lapseHandledAt: null,
+          deletedAt: null,
+          // Lapsed on the database's clock read after the lock (#402 r1 F3).
+          validUntil: { lte: after },
+        },
         data: { lapseHandledAt: after },
       });
       expect(tx(h).user.update).toHaveBeenCalledWith(
@@ -980,12 +1016,16 @@ describe('membership validity window (ADR-060 § 5)', () => {
           },
         },
       ]);
-      expect(put(h)).toHaveBeenCalledWith('kc-1', {
-        rasta_user_id: [TEST_USER_A],
-        organization_ids: [TEST_ORG_A],
-        organization_roles: [`${TEST_ORG_A}:FLEET_MANAGER`],
-        active_organization_id: [TEST_ORG_A],
-      });
+      expect(put(h)).toHaveBeenCalledWith(
+        'kc-1',
+        {
+          rasta_user_id: [TEST_USER_A],
+          organization_ids: [TEST_ORG_A],
+          organization_roles: [`${TEST_ORG_A}:FLEET_MANAGER`],
+          active_organization_id: [TEST_ORG_A],
+        },
+        expect.anything(),
+      );
     });
 
     it('does nothing when another replica claimed the lapse first', async () => {

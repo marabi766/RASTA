@@ -4,7 +4,7 @@ import type { KeycloakAdminClient } from '../src/keycloak/keycloak.client';
 import { KeycloakProjector } from '../src/keycloak/keycloak.projector';
 import type { PlatformAttributes } from '../src/keycloak/platform-attributes';
 import type { PrismaService } from '../src/prisma/prisma.service';
-import { id, newPrisma, tenants, waitFor } from './helpers';
+import { id, newPrisma, tenants, waitFor, newFences } from './helpers';
 
 /**
  * ADR-060 § 5 — two projections of one user never leave Keycloak on the older
@@ -28,6 +28,7 @@ describe('Keycloak projection ordering (ADR-060 § 5)', () => {
   let prisma: PrismaService;
   let projector: KeycloakProjector;
   const written: string[][] = [];
+  let fencing: Awaited<ReturnType<typeof newFences>> | undefined;
   let openGate!: () => void;
   const gate = new Promise<void>((resolve) => (openGate = resolve));
 
@@ -47,7 +48,8 @@ describe('Keycloak projection ordering (ADR-060 § 5)', () => {
         written.push(attributes.organization_roles);
       }),
     } as unknown as KeycloakAdminClient;
-    projector = new KeycloakProjector(repository, keycloak);
+    fencing = await newFences();
+    projector = new KeycloakProjector(repository, keycloak, fencing.fences);
 
     await runUnscoped('test fixture', async () => {
       await prisma.client.user.create({
@@ -79,6 +81,7 @@ describe('Keycloak projection ordering (ADR-060 § 5)', () => {
 
   afterAll(async () => {
     openGate();
+    await fencing?.pool.onModuleDestroy();
     await prisma.onModuleDestroy();
   });
 

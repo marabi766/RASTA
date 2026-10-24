@@ -7,7 +7,29 @@ import {
   KeycloakCreateUnconfirmedError,
   KeycloakWriteUnconfirmedError,
 } from './keycloak.client';
+import { writeNotSent, type KeycloakWriteFence } from './keycloak-write-fence';
 import { provenanceOnly } from './platform-attributes';
+
+/**
+ * A fence that commits nothing, for the client alone: records each attempt
+ * the client opens before a PUT (D-069), with the attempt's deadline as the
+ * request's signal. `expired` makes the deadline pass before dispatch.
+ */
+function testFence(timeoutMs = 10_000, options: { expired?: boolean } = {}) {
+  const opened: string[] = [];
+  const fence: KeycloakWriteFence = async (operation) => {
+    opened.push(operation);
+    const signal = AbortSignal.timeout(timeoutMs);
+    return {
+      id: `KWA_TEST_${opened.length}`,
+      signal,
+      assertDispatchable() {
+        if (options.expired) throw writeNotSent(operation, 'deadline');
+      },
+    };
+  };
+  return { fence, opened };
+}
 
 /**
  * The one Keycloak write the platform attributes go through.
@@ -75,12 +97,16 @@ describe('KeycloakAdminClient.replacePlatformAttributes', () => {
     });
 
   it('writes the profile fields, the attributes it does not own, and every platform attribute', async () => {
-    await client().replacePlatformAttributes('kc-1', {
-      rasta_user_id: ['USR_1'],
-      organization_ids: ['ORG-A'],
-      organization_roles: ['ORG-A:DRIVER'],
-      active_organization_id: [],
-    });
+    await client().replacePlatformAttributes(
+      'kc-1',
+      {
+        rasta_user_id: ['USR_1'],
+        organization_ids: ['ORG-A'],
+        organization_roles: ['ORG-A:DRIVER'],
+        active_organization_id: [],
+      },
+      { fence: testFence().fence },
+    );
 
     const put = calls.find((call) => call.method === 'PUT');
     expect(put?.url).toBe('http://keycloak.test/admin/realms/rasta/users/kc-1');
@@ -102,12 +128,16 @@ describe('KeycloakAdminClient.replacePlatformAttributes', () => {
   });
 
   it('never sends a field it does not own, whatever the read returned', async () => {
-    await client().replacePlatformAttributes('kc-1', {
-      rasta_user_id: ['USR_1'],
-      organization_ids: [],
-      organization_roles: [],
-      active_organization_id: [],
-    });
+    await client().replacePlatformAttributes(
+      'kc-1',
+      {
+        rasta_user_id: ['USR_1'],
+        organization_ids: [],
+        organization_roles: [],
+        active_organization_id: [],
+      },
+      { fence: testFence().fence },
+    );
 
     const body = calls.find((call) => call.method === 'PUT')?.body as Record<string, unknown>;
     expect(Object.keys(body).sort()).toEqual(['attributes', 'email', 'firstName', 'lastName']);
@@ -121,24 +151,32 @@ describe('KeycloakAdminClient.replacePlatformAttributes', () => {
         ? new Response(JSON.stringify(withoutEmail))
         : originalGet(input, init)) as typeof fetch;
 
-    await client().replacePlatformAttributes('kc-1', {
-      rasta_user_id: ['USR_1'],
-      organization_ids: [],
-      organization_roles: [],
-      active_organization_id: [],
-    });
+    await client().replacePlatformAttributes(
+      'kc-1',
+      {
+        rasta_user_id: ['USR_1'],
+        organization_ids: [],
+        organization_roles: [],
+        active_organization_id: [],
+      },
+      { fence: testFence().fence },
+    );
 
     const body = calls.find((call) => call.method === 'PUT')?.body as Record<string, unknown>;
     expect(body).not.toHaveProperty('email');
   });
 
   it('makes exactly one write', async () => {
-    await client().replacePlatformAttributes('kc-1', {
-      rasta_user_id: ['USR_1'],
-      organization_ids: [],
-      organization_roles: [],
-      active_organization_id: [],
-    });
+    await client().replacePlatformAttributes(
+      'kc-1',
+      {
+        rasta_user_id: ['USR_1'],
+        organization_ids: [],
+        organization_roles: [],
+        active_organization_id: [],
+      },
+      { fence: testFence().fence },
+    );
     expect(calls.filter((call) => call.method === 'PUT')).toHaveLength(1);
   });
 });
@@ -267,9 +305,23 @@ describe('KeycloakAdminClient: unconfirmed create and one-shot activation (#219 
     email: 'applicant@example.test',
     firstName: 'A',
     lastName: 'B',
-    attributes: provenanceOnly('USR_1'),
-    enabled: false,
+    userId: 'USR_1',
   };
+
+  it('creates every account disabled and granting nothing but its provenance (D-069 addendum D)', async () => {
+    answers = [
+      new Response(null, {
+        status: 201,
+        headers: { location: 'http://keycloak.test/admin/realms/rasta/users/0b5c-11ef' },
+      }),
+    ];
+    await client().createUser(input);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      method: 'POST',
+      body: { enabled: false, attributes: provenanceOnly('USR_1') },
+    });
+  });
 
   it("returns the id a create's Location names", async () => {
     answers = [
@@ -305,7 +357,7 @@ describe('KeycloakAdminClient: unconfirmed create and one-shot activation (#219 
       ),
       new Response(null, { status: 204 }),
     ];
-    await client().activateAccount('kc-1', 'REG_1');
+    await client().activateAccount('kc-1', 'REG_1', { fence: testFence().fence });
     expect(calls.map((call) => call.method)).toEqual(['GET', 'PUT']);
     expect(calls[1]?.body).toEqual({
       email: 'applicant@example.test',
@@ -326,7 +378,9 @@ describe('KeycloakAdminClient: unconfirmed create and one-shot activation (#219 
       new Response(JSON.stringify({ id: 'kc-1', attributes: {} })),
       new Response(null, { status: 500 }),
     ];
-    await expect(client().activateAccount('kc-1', 'REG_1')).rejects.toMatchObject({
+    await expect(
+      client().activateAccount('kc-1', 'REG_1', { fence: testFence().fence }),
+    ).rejects.toMatchObject({
       code: 'UPSTREAM_UNAVAILABLE',
     });
   });
@@ -500,7 +554,9 @@ describe('KeycloakAdminClient: whether a write may have landed (D-064)', () => {
       requestTimeoutMs: 300,
     });
   const write = (url?: string) =>
-    client(url).replacePlatformAttributes('kc-1', provenanceOnly('USR_1'));
+    client(url).replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), {
+      fence: testFence(300).fence,
+    });
 
   it.each([
     ['its deadline passes', 'hang' as const, 'deadline'],
@@ -552,22 +608,86 @@ describe('KeycloakAdminClient: whether a write may have landed (D-064)', () => {
     await expect(write()).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
-  it('setEnabled keeps answering a 404 as upstream unavailable, as it always did', async () => {
+  it('disable keeps answering a 404 as upstream unavailable, as it always did', async () => {
     onPut = 404;
-    await expect(client().setEnabled('kc-1', false)).rejects.toMatchObject({
+    await expect(client().disable('kc-1', { fence: testFence(300).fence })).rejects.toMatchObject({
       code: 'UPSTREAM_UNAVAILABLE',
     });
   });
 
   it.each([
-    ['setEnabled', (c: KeycloakAdminClient) => c.setEnabled('kc-1', false)],
-    ['activateAccount', (c: KeycloakAdminClient) => c.activateAccount('kc-1', 'REG_1')],
+    ['disable', (c: KeycloakAdminClient) => c.disable('kc-1', { fence: testFence(300).fence })],
+    [
+      'activateAccount',
+      (c: KeycloakAdminClient) =>
+        c.activateAccount('kc-1', 'REG_1', { fence: testFence(300).fence }),
+    ],
   ])('%s is classified the same way', async (_name, call) => {
     onPut = 'hang';
     await expect(call(client())).rejects.toBeInstanceOf(KeycloakWriteUnconfirmedError);
     onPut = 400;
     const refused = await call(client()).catch((caught: unknown) => caught);
     expect(refused).not.toBeInstanceOf(KeycloakWriteUnconfirmedError);
+  });
+
+  it('opens the fence after the read and before the PUT; a read that fails opens none (D-069)', async () => {
+    const order: string[] = [];
+    const recorded = testFence(300);
+    const fence: KeycloakWriteFence = async (operation) => {
+      order.push(`fence:${operation}:puts=${puts.length}`);
+      return recorded.fence(operation);
+    };
+    await client().replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), { fence });
+    expect(order).toEqual(['fence:replace_attributes:puts=0']);
+    expect(puts).toHaveLength(1);
+
+    onGet = 503;
+    order.length = 0;
+    await expect(
+      client().replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), { fence }),
+    ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+    expect(order).toEqual([]);
+  });
+
+  it('a deadline that passed before dispatch sends nothing, and is confirmed not applied (D-069)', async () => {
+    const error = await client()
+      .replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), {
+        fence: testFence(300, { expired: true }).fence,
+      })
+      .catch((caught: unknown) => caught);
+    expect(error).not.toBeInstanceOf(KeycloakWriteUnconfirmedError);
+    expect(error).toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+      internalContext: { reason: 'deadline_before_dispatch' },
+    });
+    expect(puts).toHaveLength(0);
+  });
+
+  it('a fence that cannot be committed sends nothing (D-069)', async () => {
+    const fence: KeycloakWriteFence = async () => {
+      throw new Error('fence pool unavailable');
+    };
+    await expect(
+      client().replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), { fence }),
+    ).rejects.toThrow('fence pool unavailable');
+    expect(puts).toHaveLength(0);
+  });
+
+  it('the caller cancelling mid-flight leaves the write unconfirmed (D-069: its fence stays)', async () => {
+    onPut = 'hang';
+    const cancel = new AbortController();
+    const recorded = testFence(5_000);
+    const fence: KeycloakWriteFence = async (operation) => {
+      const attempt = await recorded.fence(operation);
+      return { ...attempt, signal: AbortSignal.any([attempt.signal, cancel.signal]) };
+    };
+    const pending = client()
+      .replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), { fence, cancel: cancel.signal })
+      .catch((caught: unknown) => caught);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    cancel.abort();
+    expect(await pending).toBeInstanceOf(KeycloakWriteUnconfirmedError);
+    expect(puts).toHaveLength(1);
   });
 
   it('the secret never reaches an unconfirmed error', async () => {
@@ -599,8 +719,7 @@ describe('KeycloakAdminClient with sync disabled', () => {
           email: 'applicant@example.test',
           firstName: 'A',
           lastName: 'B',
-          attributes: provenanceOnly('USR_1'),
-          enabled: false,
+          userId: 'USR_1',
         }),
       ).resolves.toBeNull();
     } finally {

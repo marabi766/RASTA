@@ -6,16 +6,20 @@ import { IdentityService, REGISTRATION_APPROVAL_CODES } from '../src/identity/id
 import { IDENTITY_EVENTS } from '../src/identity/events';
 import {
   KeycloakCreateUnconfirmedError,
+  KeycloakWriteUnconfirmedError,
   type KeycloakAdminClient,
+  type KeycloakWriteContext,
 } from '../src/keycloak/keycloak.client';
 import { KeycloakProjector } from '../src/keycloak/keycloak.projector';
 import {
+  provenanceOnly,
   readPlatformAttributes,
   type PlatformAttributes,
 } from '../src/keycloak/platform-attributes';
 import { runProjectionCommand } from '../src/keycloak/projection.command';
 import type { PrismaService } from '../src/prisma/prisma.service';
-import { asActor, id, newPrisma, tenants } from './helpers';
+import { asActor, id, newFences, newPrisma, tenants } from './helpers';
+import type { KeycloakWriteOperation } from '../src/keycloak/keycloak-write-fence';
 
 /**
  * Registration decisions against a real database, and the Keycloak account an
@@ -67,11 +71,8 @@ class FakeKeycloak {
   /** Every write after a create, in order: what the service asked of Keycloak. */
   readonly writes: string[] = [];
 
-  async createUser(input: {
-    username: string;
-    attributes: PlatformAttributes;
-    enabled: boolean;
-  }): Promise<string> {
+  /** As the real client: always disabled, its provenance alone (D-069 addendum D). */
+  async createUser(input: { username: string; userId: string }): Promise<string> {
     this.fail('create');
     await new Promise((resolve) => setImmediate(resolve));
     if (this.createWithoutId === 'not_made') {
@@ -85,8 +86,8 @@ class FakeKeycloak {
     this.accounts.set(accountId, {
       id: accountId,
       username: input.username,
-      enabled: input.enabled,
-      attributes: input.attributes,
+      enabled: false,
+      attributes: provenanceOnly(input.userId),
       activation: null,
     });
     if (this.createWithoutId === 'made') {
@@ -116,18 +117,30 @@ class FakeKeycloak {
   }
 
   /** `enabled: true` and the marker, applied together as one representation update. */
-  async activateAccount(accountId: string, registrationId: string) {
+  async activateAccount(accountId: string, registrationId: string, context: KeycloakWriteContext) {
     this.fail('activate');
     const found = this.accounts.get(accountId);
     if (!found) throw RastaError.notFound('KeycloakUser', accountId);
+    await this.dispatch(context, 'activate');
     found.enabled = true;
     found.activation = registrationId;
     this.writes.push(`activate:${accountId}`);
     if (this.dropActivateResponse) {
       this.dropActivateResponse = false;
-      throw RastaError.upstreamUnavailable('keycloak', { operation: 'activateAccount' });
+      // Applied, and the answer lost: what the real client reports as unknown.
+      throw new KeycloakWriteUnconfirmedError('activateAccount', 'connection');
     }
   }
+
+  /** What the real client does before every PUT: the fence first, then the deadline (D-069). */
+  private async dispatch(context: KeycloakWriteContext, operation: KeycloakWriteOperation) {
+    const attempt = await context.fence(operation);
+    attempt.assertDispatchable();
+    this.fenced.push(`${operation}:${attempt.id}`);
+  }
+
+  /** Every attempt a fence was opened for, in order. */
+  readonly fenced: string[] = [];
 
   private view(found: FakeAccount) {
     return {
@@ -145,20 +158,30 @@ class FakeKeycloak {
     return readPlatformAttributes(found.attributes);
   }
 
-  async replacePlatformAttributes(accountId: string, attributes: PlatformAttributes) {
+  async replacePlatformAttributes(
+    accountId: string,
+    attributes: PlatformAttributes,
+    context: KeycloakWriteContext,
+  ) {
     this.fail('write');
     const found = this.accounts.get(accountId);
     if (!found) throw RastaError.notFound('KeycloakUser', accountId);
+    await this.dispatch(context, 'replace_attributes');
     found.attributes = attributes;
     this.writes.push(`attributes:${accountId}`);
   }
 
-  async setEnabled(accountId: string | null, enabled: boolean) {
+  async disable(accountId: string, context: KeycloakWriteContext) {
     this.fail('write');
-    const found = this.accounts.get(accountId!);
-    if (!found) throw RastaError.notFound('KeycloakUser', accountId ?? '');
-    found.enabled = enabled;
-    this.writes.push(`${enabled ? 'enable' : 'disable'}:${accountId}`);
+    const found = this.accounts.get(accountId);
+    if (!found) throw RastaError.notFound('KeycloakUser', accountId);
+    await this.dispatch(context, 'disable');
+    found.enabled = false;
+    this.writes.push(`disable:${accountId}`);
+  }
+
+  get requestTimeoutMs(): number {
+    return 10_000;
   }
 
   private fail(step: Step): void {
@@ -178,17 +201,19 @@ describe('registration decisions and the Keycloak account an approval creates', 
   let projector: KeycloakProjector;
   let service: IdentityService;
   const users: string[] = [];
+  let fencing: Awaited<ReturnType<typeof newFences>>;
 
   beforeAll(async () => {
     prisma = newPrisma();
     await prisma.onModuleInit();
     repository = new IdentityRepository(prisma);
+    fencing = await newFences();
   });
 
   beforeEach(() => {
     keycloak = new FakeKeycloak();
     const client = keycloak as unknown as KeycloakAdminClient;
-    projector = new KeycloakProjector(repository, client);
+    projector = new KeycloakProjector(repository, client, fencing.fences);
     service = new IdentityService(repository, client, projector);
   });
 
@@ -205,6 +230,7 @@ describe('registration decisions and the Keycloak account an approval creates', 
       await prisma.client.registrationRequest.deleteMany({ where: { userId: { in: users } } });
       await prisma.client.user.deleteMany({ where: { id: { in: users } } });
     });
+    await fencing.pool.onModuleDestroy();
     await prisma.onModuleDestroy();
   });
 

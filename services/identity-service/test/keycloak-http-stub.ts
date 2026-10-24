@@ -61,6 +61,7 @@ type PutMode =
   | { kind: 'delay'; ms: number };
 
 const USER_PATH = /^\/admin\/realms\/[^/]+\/users\/([^/?#]+)$/;
+const USERS_PATH = /^\/admin\/realms\/[^/]+\/users$/;
 
 export class KeycloakHttpStub {
   readonly accounts = new Map<string, StubAccount>();
@@ -177,6 +178,45 @@ export class KeycloakHttpStub {
     });
   }
 
+  /**
+   * `POST /users` (a create: 201 with the new id in `Location`, 409 for a
+   * username taken) and `GET /users?username=&exact=true` (a search) — what
+   * provisioning and an approval's adoption ask of Keycloak.
+   */
+  private async handleUsers(
+    request: IncomingMessage,
+    response: ServerResponse,
+    raw: string,
+  ): Promise<void> {
+    const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : null;
+    this.requests.push({ at: Date.now(), method: request.method ?? 'GET', userId: null, body });
+    if (request.method === 'POST') {
+      const username = String(body?.username ?? '').toLowerCase();
+      if ([...this.accounts.values()].some((account) => account.username === username)) {
+        response.writeHead(409).end();
+        return;
+      }
+      const id = `kc-${Math.random().toString(36).slice(2, 12)}`;
+      this.accounts.set(id, {
+        id,
+        username,
+        email: String(body?.email ?? ''),
+        firstName: String(body?.firstName ?? ''),
+        lastName: String(body?.lastName ?? ''),
+        enabled: body?.enabled === true,
+        requiredActions: (body?.requiredActions as string[] | undefined) ?? [],
+        attributes: structuredClone((body?.attributes as Record<string, string[]>) ?? {}),
+      });
+      response.writeHead(201, { location: `${this.url}/admin/realms/rasta/users/${id}` }).end();
+      return;
+    }
+    const query = new URL(request.url ?? '', this.url).searchParams;
+    const username = (query.get('username') ?? '').toLowerCase();
+    const found = [...this.accounts.values()].filter((account) => account.username === username);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(found));
+  }
+
   private newServer(): Server {
     return createServer((request, response) => {
       void this.handle(request, response).catch(() => response.destroy());
@@ -189,6 +229,10 @@ export class KeycloakHttpStub {
     if (path.endsWith('/protocol/openid-connect/token')) {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ access_token: 'stub-admin-token', expires_in: 300 }));
+      return;
+    }
+    if (USERS_PATH.test(path)) {
+      await this.handleUsers(request, response, raw);
       return;
     }
     const userId = USER_PATH.exec(path)?.[1] ?? null;

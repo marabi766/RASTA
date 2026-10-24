@@ -3,15 +3,17 @@ import { RastaError, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { IdentityRepository } from '../src/identity/identity.repository';
 import { IdentityService } from '../src/identity/identity.service';
-import type { KeycloakAdminClient } from '../src/keycloak/keycloak.client';
+import type { KeycloakAdminClient, KeycloakWriteContext } from '../src/keycloak/keycloak.client';
+import type { KeycloakWriteOperation } from '../src/keycloak/keycloak-write-fence';
 import { KeycloakProjector } from '../src/keycloak/keycloak.projector';
 import { KEYCLOAK_PROJECTION_OUTCOMES } from '../src/observability/keycloak-projection.metrics';
 import {
+  provenanceOnly,
   readPlatformAttributes,
   type PlatformAttributes,
 } from '../src/keycloak/platform-attributes';
 import { PrismaService, type ExtendedPrismaClient } from '../src/prisma/prisma.service';
-import { asActor, databaseUrl, newPrisma, tenants } from './helpers';
+import { asActor, databaseUrl, newFences, newPrisma, tenants } from './helpers';
 
 /**
  * The Keycloak projection and registration approval keep waiting on each
@@ -46,13 +48,29 @@ class FakeKeycloak {
   readonly enabled = true;
   readonly accounts = new Map<string, FakeAccount>();
 
-  async createUser(input: { username: string; attributes: PlatformAttributes; enabled: boolean }) {
+  /** As the real client: always disabled, its provenance alone (D-069 addendum D). */
+  async createUser(input: { username: string; userId: string }) {
     if ([...this.accounts.values()].some((account) => account.username === input.username)) {
       throw RastaError.alreadyExists('User');
     }
     const id = `kc-${ulid()}`;
-    this.accounts.set(id, { id, ...input, activation: null });
+    this.accounts.set(id, {
+      id,
+      username: input.username,
+      enabled: false,
+      attributes: provenanceOnly(input.userId),
+      activation: null,
+    });
     return id;
+  }
+
+  get requestTimeoutMs(): number {
+    return 10_000;
+  }
+
+  /** The fence before every PUT, as the real client opens it (D-069): on its own pool. */
+  private async dispatch(context: KeycloakWriteContext, operation: KeycloakWriteOperation) {
+    (await context.fence(operation)).assertDispatchable();
   }
 
   async findAccountByUsername(username: string) {
@@ -64,18 +82,27 @@ class FakeKeycloak {
     return this.view(this.account(accountId));
   }
 
-  async activateAccount(accountId: string, registrationId: string) {
+  async activateAccount(accountId: string, registrationId: string, context: KeycloakWriteContext) {
     const found = this.account(accountId);
+    await this.dispatch(context, 'activate');
     found.enabled = true;
     found.activation = registrationId;
   }
 
-  async replacePlatformAttributes(accountId: string, attributes: PlatformAttributes) {
-    this.account(accountId).attributes = attributes;
+  async replacePlatformAttributes(
+    accountId: string,
+    attributes: PlatformAttributes,
+    context: KeycloakWriteContext,
+  ) {
+    const found = this.account(accountId);
+    await this.dispatch(context, 'replace_attributes');
+    found.attributes = attributes;
   }
 
-  async setEnabled(accountId: string, enabled: boolean) {
-    this.account(accountId).enabled = enabled;
+  async disable(accountId: string, context: KeycloakWriteContext) {
+    const found = this.account(accountId);
+    await this.dispatch(context, 'disable');
+    found.enabled = false;
   }
 
   private account(accountId: string): FakeAccount {
@@ -106,6 +133,7 @@ describe('Keycloak projection and approval transactions outlast the connection s
   let projector: KeycloakProjector;
   let service: IdentityService;
   const users: string[] = [];
+  let fencing: Awaited<ReturnType<typeof newFences>>;
 
   beforeAll(async () => {
     prisma = new PrismaService(
@@ -119,12 +147,15 @@ describe('Keycloak projection and approval transactions outlast the connection s
     await holder.onModuleInit();
     repository = new IdentityRepository(prisma);
     holderRepository = new IdentityRepository(holder);
+    // The business pool here is ONE connection: a fence on that same pool
+    // would wait for the connection its own transaction holds (D-069 B).
+    fencing = await newFences();
   });
 
   beforeEach(() => {
     keycloak = new FakeKeycloak();
     const client = keycloak as unknown as KeycloakAdminClient;
-    projector = new KeycloakProjector(repository, client);
+    projector = new KeycloakProjector(repository, client, fencing.fences);
     service = new IdentityService(repository, client, projector);
   });
 
@@ -137,6 +168,7 @@ describe('Keycloak projection and approval transactions outlast the connection s
       await holder.client.registrationRequest.deleteMany({ where: { userId: { in: users } } });
       await holder.client.user.deleteMany({ where: { id: { in: users } } });
     });
+    await fencing.pool.onModuleDestroy();
     await prisma.onModuleDestroy();
     await holder.onModuleDestroy();
   });

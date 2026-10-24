@@ -165,6 +165,52 @@ describe('narrowing over HTTP (D-064)', () => {
     expect((await membership(s.membershipId))?.roles).toEqual(['OPERATOR', 'DRIVER']);
   });
 
+  it('an earlier write of the user still in flight (D-069): another tenant gets 404 first; the user’s own administrator gets 503 KEYCLOAK_WRITE_SETTLING with Retry-After and the fixed envelope; nothing is sent', async () => {
+    const s = await seed(['ORGANIZATION_ADMIN', 'OPERATOR']);
+    // A write of this user another replica sent, whose answer never came:
+    // its fence is live for the next two minutes.
+    await harness.prisma.client.$executeRaw`
+      INSERT INTO keycloak_write_attempt
+             (attempt_id, user_id, keycloak_id, operation,
+              started_at, deadline_at, takeover_at, next_reassert_at)
+      VALUES (${id('KWA')}, ${s.userId}, ${s.keycloakId}, 'replace_attributes',
+              now(), now() + interval '10 seconds', now() + interval '130 seconds',
+              now() + interval '130 seconds')`;
+    const before = stub.requests.length;
+
+    // Tenant and object checks come first: the fence's existence is not
+    // disclosed to anybody who may not manage this membership.
+    expect((await roles(s.membershipId, s.org.b, ['OPERATOR'])).status).toBe(404);
+    expect((await revoke(s.membershipId, s.org.b)).status).toBe(404);
+
+    for (const response of [
+      await roles(s.membershipId, s.org.a, ['OPERATOR']),
+      await revoke(s.membershipId, s.org.a),
+    ]) {
+      expect(response.status).toBe(503);
+      expect(Object.keys(response.body).sort()).toEqual(
+        ['code', 'correlationId', 'message', 'path', 'timestamp']
+          .concat('traceId' in response.body ? ['traceId'] : [])
+          .sort(),
+      );
+      expect(response.body).toMatchObject({
+        code: 'KEYCLOAK_WRITE_SETTLING',
+        message: 'An unexpected error occurred',
+      });
+      const retryAfter = Number(response.headers['retry-after']);
+      expect(retryAfter).toBeGreaterThan(100);
+      expect(retryAfter).toBeLessThanOrEqual(130);
+      expect(JSON.stringify(response.body)).not.toMatch(
+        /keycloak(?!_write_settling)|attempt|KWA_/i,
+      );
+    }
+    expect(stub.requests).toHaveLength(before);
+    expect((await membership(s.membershipId))?.roles).toEqual(['ORGANIZATION_ADMIN', 'OPERATOR']);
+    expect(await eventNames(s.membershipId)).toEqual([]);
+    await harness.prisma.client.$executeRaw`
+      DELETE FROM keycloak_write_attempt WHERE user_id = ${s.userId}`;
+  });
+
   it('a demotion and a revocation that Keycloak takes: 200 and 204, written ahead, one event each', async () => {
     const s = await seed(['ORGANIZATION_ADMIN', 'OPERATOR']);
 

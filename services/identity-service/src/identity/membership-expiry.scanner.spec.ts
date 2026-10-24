@@ -6,103 +6,205 @@ import {
 import type { IdentityRepository } from './identity.repository';
 import type { IdentityService } from './identity.service';
 import type { KeycloakProjector } from '../keycloak/keycloak.projector';
+import type { KeycloakWriteFences } from '../keycloak/keycloak-write-fence';
 import {
+  keycloakWriteFences,
   membershipLapseBacklog,
   membershipLapseFailuresTotal,
 } from '../observability/keycloak-projection.metrics';
 
 /**
- * The sweep that notices a validUntil passing (ADR-060 § 5). What it decides
- * lives in `IdentityService.expireLapsedMembership`; what is asserted here is
- * that one pass visits the lapses it finds, oldest first, with one clock;
- * survives any one of them failing; never lets failing ones starve the rest
- * (D-064); and re-asserts users whose Keycloak write was left unconfirmed.
+ * The sweep that notices a validUntil passing (ADR-060 § 5), and re-asserts
+ * users with a Keycloak write fence past takeover (D-069). What it decides
+ * lives in `IdentityService.expireLapsedMembership` and the projector; what is
+ * asserted here is that a pass visits what it finds with one selection clock;
+ * survives any one item failing; makes **fair progress across passes** — a
+ * failing prefix of any length never hides the items behind it (#402 r1 F2):
+ * durable retry eligibility plus a cursor that continues across passes and
+ * wraps round — and that a stop cancels the pass and nothing it would have
+ * done next reaches the store once the stop returned (#402 r1 F4).
+ *
+ * The store is a model of the two queries' contracts — eligibility by retry
+ * time on a database clock the test moves, keyset bounds `after`/`until` —
+ * with the retry state kept in the rows, as the database keeps it.
  */
 describe('MembershipExpiryScanner', () => {
   const now = new Date('2026-10-01T00:01:00.000Z');
-  const lapse = (n: number, userId = `USR_${n}`) => ({
-    id: `MBR_${n}`,
+  const INTERVAL_SECONDS = 60;
+
+  interface Row {
+    id: string;
+    userId: string;
+    organizationId: string;
+    validUntil: Date;
+  }
+  const lapse = (n: number, userId = `USR_${n}`): Row => ({
+    id: `MBR_${String(n).padStart(3, '0')}`,
     userId,
     organizationId: n % 2 ? 'ORG-A' : 'ORG-B',
     validUntil: new Date(n),
   });
-  const lapsed = [lapse(1), lapse(2), lapse(3)];
 
-  /** The repository's lapse query, keyset and all, over `rows` minus what was handled. */
-  function scannerWith(
-    expire: jest.Mock,
-    rows: ReturnType<typeof lapse>[] = lapsed,
-    options: { batchSize?: number; due?: string[] } = {},
-  ) {
-    const handled = new Set<string>();
-    const open = () => rows.filter((row) => !handled.has(row.id));
+  /** The two tables the sweep reads, as the database answers them. */
+  function model(rows: Row[], dueUsers: string[] = []) {
+    const db = {
+      /** The database's clock, in ms. */
+      clock: now.getTime(),
+      handled: new Set<string>(),
+      claimed: new Set<string>(),
+      lapseRetry: new Map<string, { failures: number; retryAt: number }>(),
+      fence: new Map<string, { failures: number; nextAt: number }>(
+        dueUsers.map((userId) => [userId, { failures: 0, nextAt: 0 }]),
+      ),
+    };
+    const key = (row: Row) => [row.validUntil.getTime(), row.id] as const;
+    const after = (row: Row, bound: { validUntil: Date | null; id: string } | null) =>
+      !bound?.validUntil ||
+      key(row)[0] > bound.validUntil.getTime() ||
+      (key(row)[0] === bound.validUntil.getTime() && row.id > bound.id);
+    const upTo = (row: Row, bound: { validUntil: Date | null; id: string } | null) =>
+      !bound?.validUntil ||
+      key(row)[0] < bound.validUntil.getTime() ||
+      (key(row)[0] === bound.validUntil.getTime() && row.id <= bound.id);
+    const eligible = () =>
+      rows
+        .filter((row) => !db.handled.has(row.id))
+        .filter((row) => (db.lapseRetry.get(row.id)?.retryAt ?? 0) <= db.clock);
+
     const repository = {
       findLapsedMemberships: jest.fn(
-        async (_now: Date, take: number, after: { validUntil: Date; id: string } | null) =>
-          open()
-            .filter(
-              (row) =>
-                !after ||
-                row.validUntil > after.validUntil ||
-                (row.validUntil.getTime() === after.validUntil.getTime() && row.id > after.id),
+        async (
+          at: Date,
+          take: number,
+          from: { validUntil: Date | null; id: string } | null = null,
+          until: { validUntil: Date | null; id: string } | null = null,
+        ) =>
+          eligible()
+            .filter((row) => row.validUntil <= at && after(row, from) && upTo(row, until))
+            .sort(
+              (a, b) => a.validUntil.getTime() - b.validUntil.getTime() || (a.id < b.id ? -1 : 1),
             )
             .slice(0, take),
       ),
-      countLapsedMemberships: jest.fn(async () => open().length),
-      findUsersDueKeycloakReassert: jest.fn(async () => options.due ?? []),
-    };
-    const identity = {
-      expireLapsedMembership: jest.fn(async (membership: { id: string }, at: Date) => {
-        const acted = (await expire(membership, at)) as boolean;
-        if (acted) handled.add(membership.id);
-        return acted;
+      deferLapse: jest.fn(async (id: string, interval: number, max: number) => {
+        const failures = (db.lapseRetry.get(id)?.failures ?? 0) + 1;
+        db.lapseRetry.set(id, {
+          failures,
+          retryAt: db.clock + interval * 1000 * Math.min(2 ** failures, max),
+        });
       }),
+      countLapsedMemberships: jest.fn(async () => rows.filter((r) => !db.handled.has(r.id)).length),
     };
-    const projector = { project: jest.fn(async () => 'projected') };
-    const scanner = new MembershipExpiryScanner(
-      repository as unknown as IdentityRepository,
-      identity as unknown as IdentityService,
-      { enabled: true, intervalSeconds: 60, batchSize: options.batchSize ?? 50 },
-      projector as unknown as Pick<KeycloakProjector, 'project'>,
-    );
-    return { scanner, repository, projector, identity };
+    const fences = {
+      dueUsers: jest.fn(async (from: string | null, take: number, until: string | null = null) =>
+        [...db.fence.entries()]
+          .filter(([, state]) => state.nextAt <= db.clock)
+          .map(([userId]) => userId)
+          .filter(
+            (userId) => (from === null || userId > from) && (until === null || userId <= until),
+          )
+          .sort()
+          .slice(0, take),
+      ),
+      deferReassert: jest.fn(async (userId: string, interval: number, max: number) => {
+        const state = db.fence.get(userId);
+        if (!state) return;
+        state.failures += 1;
+        state.nextAt = db.clock + interval * 1000 * Math.min(2 ** state.failures, max);
+      }),
+      counts: jest.fn(async () => ({ live: 1, due: db.fence.size, accountMissing: 2 })),
+    };
+    return { db, repository, fences };
   }
 
-  it('asks for lapses as of one clock and hands each the same clock', async () => {
-    const expire = jest.fn(async (_membership: { id: string }, _at: Date) => true);
+  function scannerWith(
+    expire: (membership: Row, at: Date, options: { signal?: AbortSignal }) => Promise<boolean>,
+    rows: Row[] = [lapse(1), lapse(2), lapse(3)],
+    options: {
+      batchSize?: number;
+      due?: string[];
+      project?: (userId: string, options: { signal?: AbortSignal }) => Promise<string>;
+      store?: ReturnType<typeof model>;
+    } = {},
+  ) {
+    const store = options.store ?? model(rows, options.due);
+    const identity = {
+      expireLapsedMembership: jest.fn(
+        async (membership: Row, at: Date, opts: { signal?: AbortSignal } = {}) => {
+          // The claim: one replica acts on a lapse, whoever comes first; a
+          // failure rolls the claim back with the rest of its transaction.
+          if (store.db.handled.has(membership.id) || store.db.claimed.has(membership.id)) {
+            return false;
+          }
+          store.db.claimed.add(membership.id);
+          try {
+            const acted = await expire(membership, at, opts);
+            if (acted) store.db.handled.add(membership.id);
+            return acted;
+          } finally {
+            store.db.claimed.delete(membership.id);
+          }
+        },
+      ),
+    };
+    const projector = {
+      project: jest.fn(
+        async (userId: string, _trigger: string, opts: { signal?: AbortSignal } = {}) => {
+          const outcome = await (options.project ?? (async () => 'projected'))(userId, opts);
+          store.db.fence.delete(userId);
+          return outcome;
+        },
+      ),
+    };
+    const scanner = new MembershipExpiryScanner(
+      store.repository as unknown as IdentityRepository,
+      identity as unknown as IdentityService,
+      { enabled: true, intervalSeconds: INTERVAL_SECONDS, batchSize: options.batchSize ?? 50 },
+      projector as unknown as Pick<KeycloakProjector, 'project'>,
+      store.fences as unknown as Pick<KeycloakWriteFences, 'dueUsers' | 'deferReassert' | 'counts'>,
+    );
+    return { scanner, identity, projector, ...store };
+  }
+
+  const failing = (ids: Set<string>) => async (membership: Row) => {
+    if (ids.has(membership.id)) throw new Error('KEYCLOAK_UNAVAILABLE');
+    return true;
+  };
+
+  it('selects lapses as of one clock and hands each that clock and the stop signal', async () => {
+    const expire = jest.fn(async (_m: Row, _at: Date, _opts: { signal?: AbortSignal }) => true);
     const { scanner, repository } = scannerWith(expire);
 
     await expect(scanner.scan(now)).resolves.toBe(3);
-    expect(repository.findLapsedMemberships).toHaveBeenCalledWith(now, 50, null);
-    expect(expire.mock.calls.map(([membership, at]) => [membership.id, at])).toEqual([
-      ['MBR_1', now],
-      ['MBR_2', now],
-      ['MBR_3', now],
+    expect(repository.findLapsedMemberships).toHaveBeenCalledWith(now, 50, null, null);
+    expect(expire.mock.calls.map(([m, at, opts]) => [m.id, at, opts.signal])).toEqual([
+      ['MBR_001', now, expect.any(AbortSignal)],
+      ['MBR_002', now, expect.any(AbortSignal)],
+      ['MBR_003', now, expect.any(AbortSignal)],
     ]);
   });
 
   it('counts only the lapses it claimed', async () => {
-    const expire = jest.fn(async (membership: { id: string }) => membership.id !== 'MBR_2');
-    const { scanner } = scannerWith(expire);
-
+    const { scanner } = scannerWith(async (membership) => membership.id !== 'MBR_002');
     await expect(scanner.scan(now)).resolves.toBe(2);
   });
 
-  it('keeps going past a lapse it could not handle', async () => {
-    const expire = jest.fn(async (membership: { id: string }) => {
-      if (membership.id === 'MBR_1') throw new Error('database unavailable');
-      return true;
-    });
-    const { scanner } = scannerWith(expire);
+  it('keeps going past a lapse it could not handle, and defers that one in its row', async () => {
+    const expire = jest.fn(failing(new Set(['MBR_002'])));
+    const { scanner, repository } = scannerWith(expire);
 
     await expect(scanner.scan(now)).resolves.toBe(2);
     expect(expire).toHaveBeenCalledTimes(3);
+    expect(repository.deferLapse).toHaveBeenCalledWith(
+      'MBR_002',
+      INTERVAL_SECONDS,
+      MAX_BACKOFF_INTERVALS,
+    );
   });
 
   it('never throws, even when the lapse query fails', async () => {
     const { scanner, repository } = scannerWith(jest.fn());
-    repository.findLapsedMemberships.mockRejectedValue(new Error('down'));
-
+    repository.findLapsedMemberships.mockRejectedValueOnce(new Error('connection reset'));
     await expect(scanner.scan(now)).resolves.toBe(0);
   });
 
@@ -113,180 +215,260 @@ describe('MembershipExpiryScanner', () => {
       await gate;
       return true;
     });
-    const { scanner, repository } = scannerWith(expire);
-
+    const { scanner } = scannerWith(expire);
     const first = scanner.scan(now);
     await expect(scanner.scan(now)).resolves.toBe(0);
     release();
     await expect(first).resolves.toBe(3);
-    expect(repository.findLapsedMemberships).toHaveBeenCalledTimes(1);
   });
 
-  /**
-   * D-064: a lapse whose Keycloak write fails is not acted on, and is retried;
-   * it must never hold back the lapses behind it, and nothing is given up.
-   */
-  describe('failing lapses never starve the rest (D-064)', () => {
-    const minutes = (n: number) => new Date(now.getTime() + n * 60_000);
-    const rows = [lapse(1), lapse(2), lapse(3), lapse(4)];
-    // MBR_1 and MBR_2 cannot be written (their users' Keycloak refuses).
-    const failing = new Set(['MBR_1', 'MBR_2']);
-    const expire = () =>
-      jest.fn(async (membership: { id: string }) => {
-        if (failing.has(membership.id)) throw new Error('KEYCLOAK_UNAVAILABLE');
-        return true;
-      });
+  describe('fair progress across passes (#402 r1 F2)', () => {
+    it('a failing prefix longer than the page cap never hides the healthy lapse behind it', async () => {
+      // batchSize 1, MAX_PAGES_PER_PASS pages: one pass could reach at most
+      // that many lapses. A prefix of failing lapses three times as long.
+      const prefix = MAX_PAGES_PER_PASS * 3;
+      const rows = Array.from({ length: prefix + 1 }, (_, i) => lapse(i + 1));
+      const healthy = rows.at(-1)!.id;
+      const expire = jest.fn(failing(new Set(rows.slice(0, prefix).map((row) => row.id))));
+      const { scanner, db } = scannerWith(expire, rows, { batchSize: 1 });
 
-    it('sits a failed lapse out for the next pass, which reaches the ones behind it', async () => {
-      const fn = expire();
-      const { scanner } = scannerWith(fn, rows, { batchSize: 2 });
-
-      // Pass 1: the two oldest, both failing, use up the pass.
-      await expect(scanner.scan(now)).resolves.toBe(0);
-      // Pass 2, one interval later: they wait, and the next two are acted on.
-      await expect(scanner.scan(minutes(1))).resolves.toBe(2);
-      expect(fn.mock.calls.map(([membership]) => membership.id)).toEqual([
-        'MBR_1',
-        'MBR_2',
-        'MBR_3',
-        'MBR_4',
-      ]);
-    });
-
-    it('retries a failing lapse with a doubling backoff, capped, and never gives it up', async () => {
-      const fn = jest.fn(async (): Promise<boolean> => {
-        throw new Error('KEYCLOAK_UNAVAILABLE');
-      });
-      const { scanner } = scannerWith(fn, [lapse(1)]);
-
-      const attemptsBy = async (passes: number) => {
-        for (let pass = 0; pass < passes; pass += 1) await scanner.scan(minutes(pass));
-        return fn.mock.calls.length;
-      };
-      // Tried at minute 0, 2, 6, 14, 30, then every 16 minutes: never dropped.
-      expect(await attemptsBy(31)).toBe(5);
-      fn.mockClear();
-      for (let pass = 31; pass <= 31 + 3 * MAX_BACKOFF_INTERVALS; pass += 1) {
-        await scanner.scan(minutes(pass));
+      // The database clock never moves: no failed lapse becomes eligible again.
+      for (let pass = 0; pass < prefix + 1 && !db.handled.has(healthy); pass += 1) {
+        await scanner.scan(now);
       }
-      expect(fn.mock.calls.length).toBe(3);
+      expect(db.handled.has(healthy)).toBe(true);
+      // Each failing lapse was tried exactly once, then sat out its backoff.
+      expect(expire.mock.calls.filter(([m]) => m.id !== healthy)).toHaveLength(prefix);
     });
 
-    it('acts on a lapse once its write succeeds, and forgets its backoff', async () => {
-      let refuse = true;
-      const fn = jest.fn(async () => {
-        if (refuse) throw new Error('KEYCLOAK_UNAVAILABLE');
+    it('even when every failing lapse is eligible again each pass, the cursor reaches the healthy one', async () => {
+      const prefix = MAX_PAGES_PER_PASS * 3;
+      const rows = Array.from({ length: prefix + 1 }, (_, i) => lapse(i + 1));
+      const healthy = rows.at(-1)!.id;
+      const expire = jest.fn(failing(new Set(rows.slice(0, prefix).map((row) => row.id))));
+      const { scanner, db } = scannerWith(expire, rows, { batchSize: 1 });
+
+      let passes = 0;
+      while (!db.handled.has(healthy) && passes < prefix + 2) {
+        await scanner.scan(now);
+        passes += 1;
+        // Past the longest backoff: every failed lapse may be tried again.
+        db.clock += INTERVAL_SECONDS * 1000 * MAX_BACKOFF_INTERVALS + 1;
+      }
+      expect(db.handled.has(healthy)).toBe(true);
+      // Visited in turn, never the oldest again and again: ⌈31 / 1⌉ passes.
+      expect(passes).toBe(prefix + 1);
+    });
+
+    it('backs a failing lapse off in its row, doubling, capped, and never gives it up', async () => {
+      const rows = [lapse(1)];
+      const { scanner, db, repository } = scannerWith(failing(new Set(['MBR_001'])), rows);
+      const waits: number[] = [];
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        await scanner.scan(now);
+        const retryAt = db.lapseRetry.get('MBR_001')!.retryAt;
+        waits.push((retryAt - db.clock) / (INTERVAL_SECONDS * 1000));
+        db.clock = retryAt;
+      }
+      expect(waits).toEqual([2, 4, 8, 16, 16, 16]);
+      expect(repository.deferLapse).toHaveBeenCalledTimes(6);
+    });
+
+    it('survives a restart: the backoff is in the row, so a fresh scanner does not retry sooner', async () => {
+      const rows = [lapse(1), lapse(2)];
+      const store = model(rows);
+      const expire = jest.fn(failing(new Set(['MBR_001'])));
+      const first = scannerWith(expire, rows, { batchSize: 1, store });
+      await first.scanner.scan(now);
+      expect(expire.mock.calls.map(([m]) => m.id)).toEqual(['MBR_001']);
+
+      // A new process: cursor gone, retry state not.
+      const second = scannerWith(expire, rows, { batchSize: 1, store });
+      await second.scanner.scan(now);
+      expect(expire.mock.calls.map(([m]) => m.id)).toEqual(['MBR_001', 'MBR_002']);
+      expect(store.db.handled.has('MBR_002')).toBe(true);
+    });
+
+    it('two replicas sweeping together: every healthy lapse acted on once, none starved', async () => {
+      const rows = Array.from({ length: 12 }, (_, i) => lapse(i + 1));
+      const bad = new Set(rows.slice(0, 6).map((row) => row.id));
+      const store = model(rows);
+      const acted: string[] = [];
+      const expire = async (membership: Row) => {
+        await new Promise((resolve) => setImmediate(resolve));
+        if (bad.has(membership.id)) throw new Error('KEYCLOAK_UNAVAILABLE');
+        acted.push(membership.id);
         return true;
-      });
-      const { scanner } = scannerWith(fn, [lapse(1)]);
-
-      await expect(scanner.scan(now)).resolves.toBe(0);
-      refuse = false;
-      await expect(scanner.scan(minutes(1))).resolves.toBe(0);
-      await expect(scanner.scan(minutes(2))).resolves.toBe(1);
-      expect(fn).toHaveBeenCalledTimes(2);
+      };
+      const a = scannerWith(expire, rows, { batchSize: 2, store });
+      const b = scannerWith(expire, rows, { batchSize: 2, store });
+      for (let pass = 0; pass < 6; pass += 1) {
+        await Promise.all([a.scanner.scan(now), b.scanner.scan(now)]);
+      }
+      expect([...acted].sort()).toEqual(rows.slice(6).map((row) => row.id));
+      expect(new Set(acted).size).toBe(acted.length);
     });
 
-    it('makes at most batchSize attempts, and reads at most MAX_PAGES_PER_PASS pages', async () => {
-      const many = Array.from({ length: 200 }, (_, n) => lapse(n + 1));
-      const fn = jest.fn(async (): Promise<boolean> => {
-        throw new Error('KEYCLOAK_UNAVAILABLE');
+    it('wraps round: a lapse that becomes eligible behind the cursor is reached', async () => {
+      const rows = [lapse(1), lapse(2), lapse(3), lapse(4)];
+      const store = model(rows);
+      // MBR_001 fails once, then succeeds.
+      let failedOnce = false;
+      const expire = jest.fn(async (membership: Row) => {
+        if (membership.id === 'MBR_001' && !failedOnce) {
+          failedOnce = true;
+          throw new Error('KEYCLOAK_UNAVAILABLE');
+        }
+        // MBR_003 and MBR_004 are not acted on (another replica's claim pending).
+        return membership.id === 'MBR_001' || membership.id === 'MBR_002';
       });
-      const { scanner, repository } = scannerWith(fn, many, { batchSize: 5 });
+      const { scanner, db } = scannerWith(expire, rows, { batchSize: 2, store });
 
+      await scanner.scan(now); // 001 (fails), 002 — cursor after 002
+      await scanner.scan(now); // 003, 004 — cursor after 004
+      db.clock = db.lapseRetry.get('MBR_001')!.retryAt; // 001 eligible again, behind the cursor
+      await scanner.scan(now); // the end, so round from the oldest: 001, 003
+      expect(expire.mock.calls.map(([m]) => m.id)).toEqual([
+        'MBR_001',
+        'MBR_002',
+        'MBR_003',
+        'MBR_004',
+        'MBR_001',
+        'MBR_003',
+      ]);
+      expect(db.handled.has('MBR_001')).toBe(true);
+    });
+
+    it('a pass visits each eligible lapse at most once, wrap-round included', async () => {
+      const rows = [lapse(1), lapse(2), lapse(3)];
+      const expire = jest.fn(async (_m: Row) => false);
+      const { scanner } = scannerWith(expire, rows, { batchSize: 2 });
+      await scanner.scan(now); // 1, 2
+      await scanner.scan(now); // 3, then wrap: 1
+      await scanner.scan(now); // 2, 3
+      expect(expire.mock.calls.map(([m]) => m.id)).toEqual([
+        'MBR_001',
+        'MBR_002',
+        'MBR_003',
+        'MBR_001',
+        'MBR_002',
+        'MBR_003',
+      ]);
+      expect(expire.mock.calls.length).toBeLessThanOrEqual(6);
+    });
+
+    it('publishes the backlog and the fence gauges after every pass, and counts each failed attempt', async () => {
+      const before = (await membershipLapseFailuresTotal.get()).values[0]?.value ?? 0;
+      const { scanner } = scannerWith(failing(new Set(['MBR_002'])), undefined, { due: ['USR_X'] });
       await scanner.scan(now);
-      expect(fn).toHaveBeenCalledTimes(5);
-      // The next pass: every row it reads is waiting out a backoff or new.
-      fn.mockClear();
-      repository.findLapsedMemberships.mockClear();
-      await scanner.scan(minutes(1));
-      expect(fn).toHaveBeenCalledTimes(5);
-      expect(repository.findLapsedMemberships.mock.calls.length).toBeLessThanOrEqual(
-        MAX_PAGES_PER_PASS,
+      expect((await membershipLapseBacklog.get()).values[0]?.value).toBe(1);
+      expect((await membershipLapseFailuresTotal.get()).values[0]?.value).toBe(before + 1);
+      const states = Object.fromEntries(
+        (await keycloakWriteFences.get()).values.map((v) => [v.labels.state, v.value]),
       );
-    });
-
-    it('publishes the backlog after every pass, and counts each failed attempt', async () => {
-      const failuresBefore = (await membershipLapseFailuresTotal.get()).values[0]?.value ?? 0;
-      const { scanner } = scannerWith(expire(), rows, { batchSize: 2 });
-
-      await scanner.scan(now);
-      expect((await membershipLapseBacklog.get()).values[0]?.value).toBe(4);
-      await scanner.scan(minutes(1));
-      expect((await membershipLapseBacklog.get()).values[0]?.value).toBe(2);
-      expect((await membershipLapseFailuresTotal.get()).values[0]?.value).toBe(failuresBefore + 2);
+      expect(states).toEqual({ live: 1, due: 0, account_missing: 2 });
     });
   });
 
-  /** D-064: users whose Keycloak write was left unconfirmed are projected again, once it can no longer land. */
-  describe('re-assertion', () => {
-    it('projects every user whose mark has passed, as the reassert trigger', async () => {
-      const { scanner, projector } = scannerWith(
-        jest.fn(async () => true),
-        [],
-        {
-          due: ['USR_7', 'USR_8'],
-        },
-      );
-
+  describe('re-assertion (D-069)', () => {
+    it('projects every user with a fence past takeover, as the reassert trigger, with the stop signal', async () => {
+      const { scanner, projector } = scannerWith(async () => true, [], {
+        due: ['USR_A', 'USR_B'],
+      });
       await scanner.scan(now);
       expect(projector.project.mock.calls).toEqual([
-        ['USR_7', 'reassert'],
-        ['USR_8', 'reassert'],
+        ['USR_A', 'reassert', { signal: expect.any(AbortSignal) }],
+        ['USR_B', 'reassert', { signal: expect.any(AbortSignal) }],
       ]);
     });
 
-    it('goes on past a user it cannot project, and never throws', async () => {
-      const { scanner, projector } = scannerWith(
-        jest.fn(async () => true),
-        [],
-        {
-          due: ['USR_7', 'USR_8'],
-        },
+    it('a permanently failing user ahead of a healthy one: the healthy one is re-asserted, the failing one deferred', async () => {
+      const project = jest.fn(async (userId: string) => {
+        if (userId === 'USR_A') throw new Error('KEYCLOAK_UNAVAILABLE');
+        return 'projected';
+      });
+      const { scanner, db, fences } = scannerWith(async () => true, [], {
+        batchSize: 1,
+        due: ['USR_A', 'USR_B'],
+        project,
+      });
+      await scanner.scan(now);
+      await scanner.scan(now);
+      expect(project.mock.calls.map(([userId]) => userId)).toEqual(['USR_A', 'USR_B']);
+      expect(db.fence.has('USR_B')).toBe(false);
+      expect(fences.deferReassert).toHaveBeenCalledWith(
+        'USR_A',
+        INTERVAL_SECONDS,
+        MAX_BACKOFF_INTERVALS,
       );
-      projector.project.mockRejectedValueOnce(new Error('KEYCLOAK_UNAVAILABLE'));
+      // Still there, and tried again once its backoff passes: never dropped.
+      db.clock = db.fence.get('USR_A')!.nextAt;
+      await scanner.scan(now);
+      expect(project.mock.calls.map(([userId]) => userId)).toEqual(['USR_A', 'USR_B', 'USR_A']);
+    });
 
-      await expect(scanner.scan(now)).resolves.toBe(0);
-      expect(projector.project).toHaveBeenCalledTimes(2);
+    it('even when the failing user is due again every pass, the cursor reaches the healthy one', async () => {
+      const project = jest.fn(async (userId: string) => {
+        if (userId === 'USR_A') throw new Error('KEYCLOAK_UNAVAILABLE');
+        return 'projected';
+      });
+      const { scanner, db } = scannerWith(async () => true, [], {
+        batchSize: 1,
+        due: ['USR_A', 'USR_B'],
+        project,
+      });
+      await scanner.scan(now);
+      db.clock += INTERVAL_SECONDS * 1000 * MAX_BACKOFF_INTERVALS + 1;
+      await scanner.scan(now);
+      expect(project.mock.calls.map(([userId]) => userId)).toEqual(['USR_A', 'USR_B']);
+    });
+
+    it('an outcome — account_missing included — is not a failure: nothing deferred (the projector made it terminal)', async () => {
+      const { scanner, fences } = scannerWith(async () => true, [], {
+        due: ['USR_A'],
+        project: async () => 'account_missing',
+      });
+      await scanner.scan(now);
+      expect(fences.deferReassert).not.toHaveBeenCalled();
     });
   });
 
   /**
-   * D-052: an `OutboxShutdown` worker. Every lapse writes an outbox row, so
-   * the stop ends the pass by the shutdown's shared deadline rather than only
-   * clearing the timer.
+   * D-052: an `OutboxShutdown` worker. #402 r1 F4: the stop cancels the pass,
+   * and nothing the pass would do next reaches the store once it returned —
+   * also when the work in flight **resumes** after the stop gave up on it.
    */
   describe('the stop', () => {
-    it('waits for the lapse in flight, and starts no further one', async () => {
-      let release!: () => void;
-      const gate = new Promise<void>((resolve) => (release = resolve));
-      const expire = jest.fn(async () => {
-        await gate;
-        return true;
-      });
-      const { scanner } = scannerWith(expire);
-
+    it('cancels the pass: the signal handed to the lapse in flight aborts, and no further lapse starts', async () => {
+      let seen: AbortSignal | undefined;
+      const expire = jest.fn(
+        (_m: Row, _at: Date, opts: { signal?: AbortSignal }) =>
+          new Promise<boolean>((_resolve, reject) => {
+            seen = opts.signal;
+            opts.signal?.addEventListener('abort', () => reject(opts.signal?.reason));
+          }),
+      );
+      const { scanner, repository } = scannerWith(expire);
       const pass = scanner.scan(now);
       await new Promise((resolve) => setImmediate(resolve));
-      expect(expire).toHaveBeenCalledTimes(1);
 
-      let stopped = false;
-      const stopping = scanner.stop({ deadlineAt: Date.now() + 5000 }).then(() => {
-        stopped = true;
-      });
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(stopped).toBe(false);
-
-      release();
-      await stopping;
-      // MBR_2 and MBR_3 are left for the next pass.
-      await expect(pass).resolves.toBe(1);
+      await scanner.stop({ deadlineAt: Date.now() + 5000 });
+      expect(seen?.aborted).toBe(true);
+      await expect(pass).resolves.toBe(0);
       expect(expire).toHaveBeenCalledTimes(1);
+      // A cancelled lapse is not a failed one: no retry bookkeeping after the stop.
+      expect(repository.deferLapse).not.toHaveBeenCalled();
     });
 
-    it('returns by the deadline, with a warning, when the lapse in flight does not end', async () => {
-      const expire = jest.fn(() => new Promise<boolean>(() => undefined));
-      const { scanner } = scannerWith(expire);
+    it('work that resumes after the stop gave up on it starts nothing further — no query, no gauge, no defer', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      // Ignores the signal, as a statement waiting on a lock would.
+      const expire = jest.fn(async () => {
+        await gate;
+        throw new Error('KEYCLOAK_UNAVAILABLE');
+      });
+      const { scanner, repository, fences } = scannerWith(expire, undefined, { due: ['USR_A'] });
       const warn = jest
         .spyOn(
           (scanner as unknown as { logger: { warn: (message: string) => void } }).logger,
@@ -294,20 +476,51 @@ describe('MembershipExpiryScanner', () => {
         )
         .mockImplementation(() => undefined);
 
-      void scanner.scan(now);
+      const pass = scanner.scan(now);
       await new Promise((resolve) => setImmediate(resolve));
-
-      const startedAt = Date.now();
-      await scanner.stop({ deadlineAt: Date.now() + 200 });
-      expect(Date.now() - startedAt).toBeLessThan(1000);
+      await scanner.stop({ deadlineAt: Date.now() + 100 });
       expect(warn).toHaveBeenCalledWith(expect.stringMatching(/abandoned/));
+      const callsAtStop = {
+        lapses: repository.findLapsedMemberships.mock.calls.length,
+        due: fences.dueUsers.mock.calls.length,
+      };
+
+      // The work resumes, after shutdown returned.
+      release();
+      await pass;
       expect(expire).toHaveBeenCalledTimes(1);
+      expect(repository.findLapsedMemberships).toHaveBeenCalledTimes(callsAtStop.lapses);
+      expect(repository.deferLapse).not.toHaveBeenCalled();
+      expect(fences.dueUsers).toHaveBeenCalledTimes(callsAtStop.due);
+      expect(fences.dueUsers).not.toHaveBeenCalled();
+      expect(repository.countLapsedMemberships).not.toHaveBeenCalled();
+      expect(fences.counts).not.toHaveBeenCalled();
+    });
+
+    it('a stop during re-assertion: the projection is cancelled, and neither gauge is read', async () => {
+      const project = jest.fn(
+        (_userId: string, opts: { signal?: AbortSignal }) =>
+          new Promise<string>((_resolve, reject) =>
+            opts.signal?.addEventListener('abort', () => reject(opts.signal?.reason)),
+          ),
+      );
+      const { scanner, repository, fences } = scannerWith(async () => true, [], {
+        due: ['USR_A', 'USR_B'],
+        project,
+      });
+      const pass = scanner.scan(now);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(project).toHaveBeenCalledTimes(1);
+      await scanner.stop({ deadlineAt: Date.now() + 5000 });
+      await pass;
+      expect(project).toHaveBeenCalledTimes(1);
+      expect(fences.deferReassert).not.toHaveBeenCalled();
+      expect(repository.countLapsedMemberships).not.toHaveBeenCalled();
+      expect(fences.counts).not.toHaveBeenCalled();
     });
 
     it('starts no pass once stopping, and a later stop joins the first', async () => {
-      const expire = jest.fn(async () => true);
-      const { scanner, repository } = scannerWith(expire);
-
+      const { scanner, repository } = scannerWith(jest.fn(async () => true));
       const first = scanner.stop({ deadlineAt: Date.now() + 1000 });
       expect(scanner.stop()).toBe(first);
       expect(scanner.onApplicationShutdown()).toBe(first);
