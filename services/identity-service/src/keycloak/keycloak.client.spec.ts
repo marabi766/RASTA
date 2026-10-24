@@ -684,7 +684,13 @@ describe('KeycloakAdminClient: whether a write may have landed (D-064)', () => {
     const pending = client()
       .replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), { fence, cancel: cancel.signal })
       .catch((caught: unknown) => caught);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Mid-flight: once the PUT has reached the server, not after a guessed
+    // delay — under load a fixed sleep could cancel before dispatch, which is
+    // the other (confirmed not-sent) case.
+    for (let waited = 0; puts.length === 0 && waited < 4_000; waited += 5) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(puts).toHaveLength(1);
     cancel.abort();
     expect(await pending).toBeInstanceOf(KeycloakWriteUnconfirmedError);
     expect(puts).toHaveLength(1);

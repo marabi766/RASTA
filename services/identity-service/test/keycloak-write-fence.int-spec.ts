@@ -493,6 +493,69 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       expect(stub.platform(s.keycloakId).organization_roles).toEqual([`${s.org.a}:OPERATOR`]);
     });
 
+    it('opens only under a user row it can lock: for a user that does not exist it refuses and inserts nothing', async () => {
+      const ghost = id('USR-FN-GHOST');
+      await expect(
+        repository.transaction((tx) =>
+          fencing.fences.open(tx, {
+            userId: ghost,
+            keycloakId: 'kc-ghost',
+            operation: 'replace_attributes',
+            timeoutMs: REQUEST_TIMEOUT_MS,
+            settleSeconds: SETTLE_SECONDS,
+          }),
+        ),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      expect(await fencesOf(ghost)).toEqual([]);
+    });
+
+    it('a projection whose PUT landed but whose transaction failed: its fence is due at once, so it holds no narrowing back', async () => {
+      const s = await seed({
+        memberships: [{ in: 'a', roles: ['ORGANIZATION_ADMIN', 'OPERATOR'] }],
+      });
+      jest
+        .spyOn(fencing.fences, 'settle')
+        .mockRejectedValueOnce(new Error('the commit-time statement failed'));
+      await expect(projector.project(s.userId, 'command')).rejects.toThrow(
+        'the commit-time statement failed',
+      );
+      // Landed (confirmed), so it can no longer land: due, not live.
+      expect(await fencesOf(s.userId)).toEqual([expect.objectContaining({ live: false })]);
+
+      // Nothing held back: the demotion commits now, and its projection takes the fence over.
+      await demote(s, ['OPERATOR']);
+      expect((await events(s.memberships[0]!)).map((e) => e.eventName)).toEqual(['ROLE_REVOKED']);
+      expect(await fencesOf(s.userId)).toEqual([]);
+    });
+
+    it('a mixed change: its write-ahead carried less than it commits, so its fence outlives the commit until a projection of the full state lands', async () => {
+      const s = await seed({
+        memberships: [{ in: 'a', roles: ['ORGANIZATION_ADMIN', 'OPERATOR'] }],
+      });
+      // The write-ahead (the intersection) lands; the projection after commit is refused.
+      let puts = 0;
+      stub.onPut = async () => {
+        puts += 1;
+        if (puts === 2) stub.refuseFor(s.keycloakId, 403);
+      };
+      try {
+        await demote(s, ['OPERATOR', 'DRIVER']);
+        expect(stub.platform(s.keycloakId).organization_roles).toEqual([`${s.org.a}:OPERATOR`]);
+        expect(await fencesOf(s.userId)).toEqual([expect.objectContaining({ live: false })]);
+      } finally {
+        stub.stopRefusing(s.keycloakId);
+        stub.onPut = null;
+      }
+
+      // The sweep re-asserts the committed state and takes the fence over.
+      await ownScanner(50, undefined, new Set([s.userId])).scan();
+      expect(stub.platform(s.keycloakId)).toEqual(await rowsGrant(s.userId));
+      expect(stub.platform(s.keycloakId).organization_roles).toEqual(
+        expect.arrayContaining([`${s.org.a}:OPERATOR`, `${s.org.a}:DRIVER`]),
+      );
+      expect(await fencesOf(s.userId)).toEqual([]);
+    });
+
     it('measures how long the final deadline check precedes the PUT reaching Keycloak (D-069 addendum C)', async () => {
       const s = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
       const checkedAt: number[] = [];

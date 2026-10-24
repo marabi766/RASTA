@@ -78,7 +78,9 @@ describe('membership validUntil (ADR-060 § 5)', () => {
       enabled: true,
       replacePlatformAttributes: jest.fn(
         async (keycloakId: string, attributes: PlatformAttributes) => {
-          written.push({ keycloakId, attributes });
+          // This suite's user only: the sweep also re-asserts due write fences
+          // (D-069), and another suite sharing the database may have left one.
+          if (keycloakId === `kc-${userId}`) written.push({ keycloakId, attributes });
         },
       ),
     } as unknown as KeycloakAdminClient;
