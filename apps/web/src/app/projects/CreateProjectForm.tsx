@@ -14,7 +14,10 @@ import {
   MAX_TITLE_LENGTH,
   CREATE_EXPIRED_MESSAGE,
   HELD_CHANGED_MESSAGE,
+  HELD_IN_PROGRESS_MESSAGE,
   HELD_OTHER_MESSAGE,
+  PENDING_CAPACITY_MESSAGE,
+  PENDING_UNCHECKED_MESSAGE,
   PROJECT_FORBIDDEN_MESSAGE,
   projectFailureText,
   type ProjectField,
@@ -48,6 +51,8 @@ function valuesOf(state: CreateProjectFormState): ProjectFormValues {
     state.kind === 'INVALID' ||
     state.kind === 'IN_PROGRESS' ||
     state.kind === 'HELD' ||
+    state.kind === 'NOT_CHECKED' ||
+    state.kind === 'CAPACITY' ||
     state.kind === 'EXPIRED'
   ) {
     return state.values;
@@ -222,9 +227,21 @@ function FormBanner({ state }: { state: CreateProjectFormState }) {
   if (state.kind === 'HELD') {
     return (
       <Alert tone="warning">
-        {state.reason === 'CHANGED_BODY' ? HELD_CHANGED_MESSAGE : HELD_OTHER_MESSAGE}
+        {state.reason === 'CHANGED_BODY'
+          ? HELD_CHANGED_MESSAGE
+          : state.reason === 'IN_PROGRESS'
+            ? HELD_IN_PROGRESS_MESSAGE
+            : HELD_OTHER_MESSAGE}
       </Alert>
     );
+  }
+
+  if (state.kind === 'NOT_CHECKED') {
+    return <Alert tone="warning">{PENDING_UNCHECKED_MESSAGE}</Alert>;
+  }
+
+  if (state.kind === 'CAPACITY') {
+    return <Alert tone="warning">{PENDING_CAPACITY_MESSAGE}</Alert>;
   }
 
   if (state.kind === 'INVALID' && state.message) {

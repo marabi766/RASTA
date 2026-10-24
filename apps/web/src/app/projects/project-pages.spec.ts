@@ -31,15 +31,6 @@ jest.mock('@/server/current-session', () => ({
   currentSession: async () => mockSession.current,
   missingSessionReason: async () => 'NO_SESSION',
 }));
-const jar = new Map<string, string>();
-jest.mock('next/headers', () => ({
-  cookies: async () => ({
-    get: (name: string) => (jar.has(name) ? { name, value: jar.get(name)! } : undefined),
-    getAll: () => [...jar].map(([name, value]) => ({ name, value })),
-    set: (name: string, value: string) => void jar.set(name, value),
-    delete: (name: string) => void jar.delete(name),
-  }),
-}));
 jest.mock('next/navigation', () => ({
   redirect: (url: string) => {
     throw new Error(`NEXT_REDIRECT:${url}`);
@@ -79,8 +70,10 @@ const { CreateProjectForm } =
 const { openProjectBaseline } =
   require('@/server/project-commands') as typeof import('@/server/project-commands');
 const { mintFlash } = require('@/server/flash') as typeof import('@/server/flash');
-const { rememberUnresolved } =
+const { reserveUnresolved, settleUnresolved, useUnresolvedStore } =
   require('@/server/unresolved-request') as typeof import('@/server/unresolved-request');
+const { memoryUnresolvedStore, UnresolvedStoreUnavailable } =
+  require('@/server/unresolved-request-store') as typeof import('@/server/unresolved-request-store');
 const { PROJECT_CREATE_UNRESOLVED, mintCreateSubmission } =
   require('@/server/project-create-replay') as typeof import('@/server/project-create-replay');
 const { UnresolvedCreateNotice } =
@@ -403,7 +396,11 @@ describe('/projects/[id]', () => {
 });
 
 describe('/projects', () => {
-  beforeEach(() => jar.clear());
+  let memoryStore = memoryUnresolvedStore();
+  beforeEach(() => {
+    memoryStore = memoryUnresolvedStore();
+    useUnresolvedStore(memoryStore);
+  });
 
   async function list(
     options: { inbox?: unknown; flash?: string; search?: Record<string, string | undefined> } = {},
@@ -456,12 +453,18 @@ describe('/projects', () => {
   describe('an unresolved create', () => {
     const remember = async (session = signedInWith(['ORGANIZATION_ADMIN'])) => {
       const sent = mintCreateSubmission(session);
-      await rememberUnresolved(session, PROJECT_CREATE_UNRESOLVED, {
+      const reserved = await reserveUnresolved(session, PROJECT_CREATE_UNRESOLVED, {
         key: sent.id,
         digest: 'digest',
-        deadline: Date.now() + 60_000,
         ref: sent.replay,
+        issuedAt: Date.now(),
+        deadline: Date.now() + 60_000,
+        windowMs: 60_000,
+        retry: true,
       });
+      if (reserved.kind !== 'RESERVED') throw new Error(reserved.kind);
+      // The response that would have carried the news is lost: only the server's record remains.
+      await settleUnresolved(reserved.attempt, 'UNRESOLVED');
       return sent;
     };
 
@@ -492,6 +495,74 @@ describe('/projects', () => {
           propsOf<{ submission: { id: string } }>(ofType(tree, CreateProjectForm)[0]).submission.id,
         ).toMatch(/^sub_/);
       }
+    });
+
+    it('draws a release form that names the held record', async () => {
+      await remember();
+      const notice = propsOf<{ releaseToken: string }>(
+        ofType(await list(), UnresolvedCreateNotice)[0],
+      );
+      expect(notice.releaseToken).toMatch(/\./);
+    });
+
+    it('while a dispatch is in flight shows the notice as in flight, with the pinned form', async () => {
+      const session = signedInWith(['ORGANIZATION_ADMIN']);
+      const sent = mintCreateSubmission(session);
+      await reserveUnresolved(session, PROJECT_CREATE_UNRESOLVED, {
+        key: sent.id,
+        digest: 'd',
+        ref: sent.replay,
+        issuedAt: Date.now(),
+        deadline: Date.now() + 60_000,
+        windowMs: 60_000,
+        retry: true,
+      });
+      const tree = await list();
+      expect(
+        propsOf<{ request: { inFlight: boolean } }>(ofType(tree, UnresolvedCreateNotice)[0]).request
+          .inFlight,
+      ).toBe(true);
+      expect(
+        propsOf<{ submission: { id: string } }>(ofType(tree, CreateProjectForm)[0]).submission.id,
+      ).toBe(sent.id);
+    });
+
+    it('FAILS CLOSED when the store cannot say: a notice, NO create form, no fresh key', async () => {
+      const fail = async () => {
+        throw new UnresolvedStoreUnavailable(new Error('ECONNREFUSED'));
+      };
+      useUnresolvedStore({
+        reserve: fail,
+        read: fail,
+        settle: fail,
+        release: fail,
+        purge: fail,
+      });
+      const tree = await list();
+      expect(ofType(tree, CreateProjectForm)).toHaveLength(0);
+      expect(ofType(tree, UnresolvedCreateNotice)).toHaveLength(0);
+      expect(JSON.stringify(elements(tree).map((e) => e.props))).toContain('بررسی کرد');
+    });
+
+    it('FAILS CLOSED on a record that is not this person’s (unverifiable), too', async () => {
+      const session = signedInWith(['ORGANIZATION_ADMIN']);
+      await remember(session);
+      useUnresolvedStore({
+        ...memoryStore,
+        read: async (key, now) => {
+          const record = await memoryStore.read(key, now);
+          return record && { ...record, bind: 'f'.repeat(64) };
+        },
+      });
+      const tree = await list();
+      expect(ofType(tree, CreateProjectForm)).toHaveLength(0);
+    });
+
+    it('says a release form was refused as stale, and draws the current state', async () => {
+      await remember();
+      const tree = await list({ search: { release: 'STALE' } });
+      expect(JSON.stringify(elements(tree).map((e) => e.props))).toContain('تغییر کرده');
+      expect(ofType(tree, UnresolvedCreateNotice)).toHaveLength(1);
     });
 
     it('draws no notice when nothing is unresolved', async () => {

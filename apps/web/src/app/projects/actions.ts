@@ -11,15 +11,21 @@ import { createProject } from '@/server/project-commands';
 import {
   checkCreateStamp,
   createBodyDigest,
-  createStampDeadline,
+  createStampTerms,
+  PROJECT_CREATE_RETRY,
   PROJECT_CREATE_UNRESOLVED,
 } from '@/server/project-create-replay';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
-import { clearUnresolved, readUnresolved, rememberUnresolved } from '@/server/unresolved-request';
+import {
+  releaseUnresolved,
+  reserveUnresolved,
+  settleUnresolved,
+} from '@/server/unresolved-request';
 
 import {
   CONFIRM_DUPLICATE_FIELD,
   CONFIRM_DUPLICATE_VALUE,
+  RELEASE_FIELD,
   type CreateProjectFormState,
 } from './form-state';
 
@@ -62,15 +68,6 @@ export async function submitCreateProject(
   }
   if (sendable === 'EXPIRED') return { kind: 'EXPIRED', values };
 
-  // An earlier request of this person's is unresolved: it may have committed, a
-  // filtered list cannot show it, and a reload drew a form with a fresh key. The
-  // only request that may go out is that very one — its key, its body — until a
-  // confirmed outcome or an informed release (`releaseUnresolvedCreate`).
-  const unresolved = await readUnresolved(session, PROJECT_CREATE_UNRESOLVED);
-  if (unresolved && unresolved.key !== submissionId) {
-    return { kind: 'HELD', reason: 'OTHER_REQUEST', values };
-  }
-
   const parsed = parseCreateForm(values);
   if (!parsed.ok) {
     return {
@@ -83,25 +80,51 @@ export async function submitCreateProject(
     };
   }
 
-  const digest = createBodyDigest(session, parsed.body);
-  if (unresolved && unresolved.digest !== digest) {
-    return { kind: 'HELD', reason: 'CHANGED_BODY', values };
+  // Reserved BEFORE the dispatch, in one atomic step on the server
+  // (`server/unresolved-request.ts`): an earlier request of this scope that is
+  // unresolved, or in flight in another tab, holds this one back — the only
+  // request that may go out is that very one, its key and its body, and only
+  // one at a time. The store unreachable is not "no hold": nothing is sent.
+  const terms = createStampTerms(session, replay, submissionId);
+  if (terms === null) return { kind: 'REFUSED', reason: 'SUBMISSION' };
+  const reserved = await reserveUnresolved(session, PROJECT_CREATE_UNRESOLVED, {
+    key: submissionId,
+    digest: createBodyDigest(session, parsed.body),
+    ref: replay,
+    issuedAt: terms.issuedAt,
+    deadline: terms.deadline,
+    windowMs: terms.windowMs,
+    retry: PROJECT_CREATE_RETRY,
+  });
+  switch (reserved.kind) {
+    case 'UNAVAILABLE':
+      return { kind: 'NOT_CHECKED', values };
+    case 'CAPACITY':
+      return { kind: 'CAPACITY', values };
+    case 'EXPIRED':
+      return { kind: 'EXPIRED', values };
+    case 'HELD':
+      return {
+        kind: 'HELD',
+        reason: reserved.reason === 'RECONCILE_ONLY' ? 'OTHER_REQUEST' : reserved.reason,
+        values,
+      };
+    case 'RESERVED':
+      break;
+  }
+  const { attempt } = reserved;
+
+  let result;
+  try {
+    result = await createProject(session, parsed.body, submissionId);
+  } catch (error) {
+    // Anything unexpected after the request may have gone out: unresolved.
+    await settleUnresolved(attempt, 'UNRESOLVED');
+    throw error;
   }
 
-  // Remembered for the outcomes that leave it open; the same key and body again
-  // keep the deadline the first send was given.
-  const remember = () =>
-    rememberUnresolved(session, PROJECT_CREATE_UNRESOLVED, {
-      key: submissionId,
-      digest,
-      deadline: unresolved?.deadline ?? createStampDeadline(session, replay, submissionId),
-      ref: replay,
-    });
-
-  const result = await createProject(session, parsed.body, submissionId);
-
   if (result.kind === 'CREATED') {
-    await clearUnresolved(PROJECT_CREATE_UNRESOLVED);
+    await settleUnresolved(attempt, 'CONFIRMED');
     // Redirect, not state: a refreshed page must not resubmit, and a fresh
     // form must carry a fresh submission id.
     redirect(
@@ -111,6 +134,7 @@ export async function submitCreateProject(
 
   switch (result.kind) {
     case 'INVALID':
+      await settleUnresolved(attempt, 'REFUSED');
       return {
         kind: 'INVALID',
         submissionId,
@@ -120,29 +144,38 @@ export async function submitCreateProject(
         message: result.message,
       };
     case 'FORBIDDEN':
+      await settleUnresolved(attempt, 'REFUSED');
       return { kind: 'FORBIDDEN', correlationId: result.correlationId };
     case 'NOT_FOUND':
       // construction-service never answers 404 for this endpoint — there is no
       // referenced resource to be absent — but the type is shared across every
       // write, so it is handled rather than assumed away.
+      await settleUnresolved(attempt, 'REFUSED');
       return { kind: 'FAILED', status: 404, correlationId: result.correlationId };
     case 'UNAVAILABLE':
+      // The request provably never left this portal: nothing was created, and
+      // the hold this attempt made goes (or, for a retry, goes back).
+      if (result.neverSent) {
+        await settleUnresolved(attempt, 'NEVER_SENT');
+        return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+      }
       // Only a 4xx proves nothing was created; a 5xx may follow the commit.
       if (!isProvenRefusalStatus(result.status)) {
-        await remember();
+        await settleUnresolved(attempt, 'UNRESOLVED');
         return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
       }
+      await settleUnresolved(attempt, 'REFUSED');
       return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
     case 'UNKNOWN_OUTCOME':
       // Sent, maybe committed, not confirmed: never "nothing was saved".
-      await remember();
+      await settleUnresolved(attempt, 'UNRESOLVED');
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
     case 'IN_PROGRESS':
       // The first submission of this form is still being processed — a double
       // press, or a create slower than the service waits for. Same values, same
       // submission id: sent again after the wait, it is answered with that first
       // request's result, never a second project.
-      await remember();
+      await settleUnresolved(attempt, 'UNRESOLVED');
       return {
         kind: 'IN_PROGRESS',
         submissionId,
@@ -157,15 +190,23 @@ export async function submitCreateProject(
 /**
  * "Send as new": lets go of the unresolved create so the next form carries a
  * fresh key. Only with the confirmation that names the risk — the person checked
- * the **full** project list (a filtered one proves nothing) and accepts that a
- * second project may result. Without it nothing changes.
+ * the **full** project list (a filtered one proves nothing: and not even the
+ * full one, which is capped and permission-filtered, proves the first request
+ * did not happen) and accepts that a second project may result. The form names
+ * the record it was drawn for; if that is no longer the current one nothing
+ * changes. Without the confirmation nothing changes either.
  */
 export async function releaseUnresolvedCreate(form: FormData): Promise<void> {
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/projects');
   if (!verifyCsrf(session, form).ok) redirect('/projects');
-  if (form.get(CONFIRM_DUPLICATE_FIELD) === CONFIRM_DUPLICATE_VALUE) {
-    await clearUnresolved(PROJECT_CREATE_UNRESOLVED);
-  }
-  redirect('/projects');
+  if (form.get(CONFIRM_DUPLICATE_FIELD) !== CONFIRM_DUPLICATE_VALUE) redirect('/projects');
+  const outcome = await releaseUnresolved(
+    session,
+    PROJECT_CREATE_UNRESOLVED,
+    form.get(RELEASE_FIELD),
+  );
+  redirect(
+    outcome === 'RELEASED' || outcome === 'GONE' ? '/projects' : `/projects?release=${outcome}`,
+  );
 }

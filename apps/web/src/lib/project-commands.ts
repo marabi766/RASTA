@@ -604,6 +604,25 @@ export const HELD_CHANGED_MESSAGE =
   'درخواست پیشین این فرم هنوز روشن نشده است و با مقدارهای دیگری فرستاده می‌شد. نمی‌توان آن را با مقدارهای تازه فرستاد: ' +
   'همان مقدارها را دوباره بفرستید، یا پس از بررسی فهرست کامل پروژه‌ها، با پذیرفتن خطر تکرار، درخواست تازه بفرستید.';
 
+/** Another dispatch of this scope is in flight (another tab, a double press): nothing was sent. */
+export const HELD_IN_PROGRESS_MESSAGE =
+  'درخواست دیگری از این فرم هم‌اکنون در حال فرستاده شدن است (برای نمونه در زبانه دیگر)، پس چیزی فرستاده نشد. ' +
+  'چند لحظه صبر کنید، صفحه را تازه کنید و وضعیت را ببینید.';
+
+/** The store of unresolved requests could not be checked: nothing was sent. */
+export const PENDING_UNCHECKED_MESSAGE =
+  'اکنون نمی‌توان بررسی کرد که درخواست روشن‌نشده‌ای وجود دارد یا نه، پس چیزی فرستاده نشد و فرم ثبت نشان داده نمی‌شود. ' +
+  'چند لحظه بعد صفحه را تازه کنید.';
+
+/** This login holds the most unresolved requests allowed. */
+export const PENDING_CAPACITY_MESSAGE =
+  'شمار درخواست‌های روشن‌نشده این نشست به سقف رسیده است و چیزی فرستاده نشد. ' +
+  'نخست درخواست‌های روشن‌نشده را بررسی و رها کنید.';
+
+/** The release form was drawn for a request that has since changed. */
+export const RELEASE_STALE_MESSAGE =
+  'درخواست روشن‌نشده از زمان باز شدن این صفحه تغییر کرده است و چیزی تغییر نکرد. صفحه را تازه کنید و دوباره بررسی کنید.';
+
 /** An unresolved create exists and this post is a different request. */
 export const HELD_OTHER_MESSAGE =
   'درخواست پیشینی هنوز روشن نشده است و درخواست دیگری فرستاده نشد. صفحه را تازه کنید؛ ' +

@@ -2,7 +2,14 @@ import { redirect } from 'next/navigation';
 
 import { Alert, AppShell, Button, EmptyState, PageHeader, Section, TopBar } from '@/ui';
 import { FLASH_PARAM } from '@/lib/form-fields';
-import { INBOX_FLASH_SUBJECT, PROJECT_NOTICE_TEXT, PROJECT_NOTICES } from '@/lib/project-commands';
+import {
+  HELD_IN_PROGRESS_MESSAGE,
+  INBOX_FLASH_SUBJECT,
+  PENDING_UNCHECKED_MESSAGE,
+  PROJECT_NOTICE_TEXT,
+  PROJECT_NOTICES,
+  RELEASE_STALE_MESSAGE,
+} from '@/lib/project-commands';
 import { isProjectStatus } from '@/lib/project-fields';
 import { currentSession } from '@/server/current-session';
 import { readFlash } from '@/server/flash';
@@ -17,7 +24,7 @@ import {
 } from '@/server/projects';
 import type { WebSession } from '@/server/session';
 import { mintCreateSubmission, PROJECT_CREATE_UNRESOLVED } from '@/server/project-create-replay';
-import { readUnresolved } from '@/server/unresolved-request';
+import { readUnresolved, releaseToken } from '@/server/unresolved-request';
 import { mintSubmissionId } from '@/server/submission';
 import { fetchDemoMode } from '@/server/demo-mode';
 import { PortalSidebar } from '@/app/PortalSidebar';
@@ -80,13 +87,15 @@ export default async function ProjectsPage({
     cursor: one(params.cursor),
   };
 
-  const [result, inbox, unresolved, demoMode] = await Promise.all([
+  const [result, inbox, pending, demoMode] = await Promise.all([
     fetchProjects(session, query),
     fetchApprovalInbox(session),
     readUnresolved(session, PROJECT_CREATE_UNRESOLVED),
     fetchDemoMode(session),
   ]);
   const now = Date.now();
+  const release = one(params.release);
+  const releaseRefused = release === 'STALE' || release === 'IN_PROGRESS' ? release : null;
   const notice = readFlash(session, one(params[FLASH_PARAM]), INBOX_FLASH_SUBJECT, PROJECT_NOTICES);
 
   return (
@@ -123,23 +132,41 @@ export default async function ProjectsPage({
         >
           {canWriteProjects(tokenWriteRoles(session.accessToken), webServerEnv()) ? (
             <>
-              {unresolved ? (
-                <UnresolvedCreateNotice
-                  request={unresolved}
-                  csrfToken={session.csrfToken}
-                  now={now}
-                />
+              {releaseRefused ? (
+                <Alert tone="warning">
+                  {releaseRefused === 'IN_PROGRESS'
+                    ? HELD_IN_PROGRESS_MESSAGE
+                    : RELEASE_STALE_MESSAGE}
+                </Alert>
               ) : null}
-              <CreateProjectForm
-                csrfToken={session.csrfToken}
-                // An unresolved create keeps its key and its signed deadline: the
-                // form is that request, never a fresh one.
-                submission={
-                  unresolved?.ref
-                    ? { id: unresolved.key, replay: unresolved.ref }
-                    : mintCreateSubmission(session)
-                }
-              />
+              {pending.kind === 'UNAVAILABLE' ? (
+                // Not "no hold": the store could not say, so no create form is
+                // drawn (and none mints a fresh key); the action refuses too.
+                <Alert tone="warning">{PENDING_UNCHECKED_MESSAGE}</Alert>
+              ) : pending.kind === 'PENDING' ? (
+                <>
+                  <UnresolvedCreateNotice
+                    request={pending.request}
+                    csrfToken={session.csrfToken}
+                    releaseToken={releaseToken(session, PROJECT_CREATE_UNRESOLVED, pending.request)}
+                    now={now}
+                  />
+                  {pending.request.ref ? (
+                    // The held request keeps its key and its signed stamp: the
+                    // form is rebuilt from the server's record, not from the
+                    // response of the action that made it.
+                    <CreateProjectForm
+                      csrfToken={session.csrfToken}
+                      submission={{ id: pending.request.key, replay: pending.request.ref }}
+                    />
+                  ) : null}
+                </>
+              ) : (
+                <CreateProjectForm
+                  csrfToken={session.csrfToken}
+                  submission={mintCreateSubmission(session)}
+                />
+              )}
             </>
           ) : (
             <EmptyState

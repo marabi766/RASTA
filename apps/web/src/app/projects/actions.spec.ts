@@ -4,7 +4,18 @@
 import { REPLAY_FIELD } from '@/lib/form-fields';
 import { CSRF_FIELD } from '@/server/csrf';
 import { mintCreateStamp, PROJECT_CREATE_UNRESOLVED } from '@/server/project-create-replay';
-import { readUnresolved } from '@/server/unresolved-request';
+import {
+  readUnresolved,
+  releaseToken,
+  reserveUnresolved,
+  useUnresolvedStore,
+  type UnresolvedRead,
+} from '@/server/unresolved-request';
+import {
+  memoryUnresolvedStore,
+  UnresolvedStoreUnavailable,
+  type UnresolvedStore,
+} from '@/server/unresolved-request-store';
 import { readFlash } from '@/server/flash';
 import { SUBMISSION_FIELD, isBoundSubmissionId, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
@@ -13,6 +24,7 @@ import {
   CONFIRM_DUPLICATE_FIELD,
   CONFIRM_DUPLICATE_VALUE,
   IDLE_CREATE_PROJECT_FORM,
+  RELEASE_FIELD,
 } from './form-state';
 
 /**
@@ -30,16 +42,6 @@ const redirect = jest.fn((url: string) => {
 jest.mock('@/server/current-session', () => ({
   currentSession: () => currentSession(),
   missingSessionReason: async () => 'NO_SESSION',
-}));
-// A cookie jar the action writes and the next request reads, as a browser would.
-const jar = new Map<string, string>();
-jest.mock('next/headers', () => ({
-  cookies: async () => ({
-    get: (name: string) => (jar.has(name) ? { name, value: jar.get(name)! } : undefined),
-    getAll: () => [...jar].map(([name, value]) => ({ name, value })),
-    set: (name: string, value: string) => void jar.set(name, value),
-    delete: (name: string) => void jar.delete(name),
-  }),
 }));
 jest.mock('next/navigation', () => ({ redirect: (url: string) => redirect(url) }));
 jest.mock('@/server/project-commands', () => {
@@ -114,7 +116,7 @@ beforeEach(() => {
     correlationId: 'corr-sample',
   });
   redirect.mockClear();
-  jar.clear();
+  useUnresolvedStore(memoryUnresolvedStore());
 });
 
 describe('what is refused before anything is sent', () => {
@@ -369,6 +371,16 @@ describe('what comes back', () => {
 describe('an unresolved create outlives the form that sent it', () => {
   const unconfirmed = { kind: 'UNKNOWN_OUTCOME', correlationId: 'lost' };
   const scope = PROJECT_CREATE_UNRESOLVED;
+  const created = { kind: 'CREATED', data: { id: PROJECT_ID }, correlationId: 'c' };
+
+  async function held(): Promise<UnresolvedRead> {
+    return readUnresolved(SESSION, scope);
+  }
+  const heldRequest = async () => {
+    const read = await held();
+    if (read.kind !== 'PENDING') throw new Error(`expected a held request, got ${read.kind}`);
+    return read.request;
+  };
 
   async function sendAndLose(fields = VALID) {
     createProject.mockResolvedValue(unconfirmed);
@@ -377,51 +389,110 @@ describe('an unresolved create outlives the form that sent it', () => {
     return form;
   }
 
+  /** A store that records what it was asked to keep, to prove no body reaches it. */
+  function spyStore(): { store: UnresolvedStore; reserved: unknown[] } {
+    const inner = memoryUnresolvedStore();
+    const reserved: unknown[] = [];
+    return {
+      reserved,
+      store: {
+        ...inner,
+        reserve: async (input) => {
+          reserved.push(input.fresh);
+          return inner.reserve(input);
+        },
+      },
+    };
+  }
+
   it.each([
     ['UNKNOWN_OUTCOME', { kind: 'UNKNOWN_OUTCOME', correlationId: 'c' }],
     ['a 5xx', { kind: 'UNAVAILABLE', status: 502, correlationId: 'c' }],
     ['IN_PROGRESS', { kind: 'IN_PROGRESS', retryAfterSeconds: 1, correlationId: 'c' }],
-  ])('is remembered after %s: key, body digest and the signed deadline', async (_name, result) => {
+  ])('is kept after %s: key, signed stamp, deadline — and no body', async (_name, result) => {
+    const spy = spyStore();
+    useUnresolvedStore(spy.store);
     createProject.mockResolvedValue(result);
     const form = formData();
     await submit(form);
-    const kept = await readUnresolved(SESSION, scope);
-    expect(kept).toMatchObject({ key: form.get(SUBMISSION_FIELD), ref: form.get(REPLAY_FIELD) });
-    expect(kept!.deadline).toBeGreaterThan(Date.now());
-    // The body itself is not in the cookie, only a digest of it.
-    expect(JSON.stringify([...jar.values()])).not.toContain('بازسازی');
+    const kept = await heldRequest();
+    expect(kept).toMatchObject({
+      key: form.get(SUBMISSION_FIELD),
+      ref: form.get(REPLAY_FIELD),
+      inFlight: false,
+    });
+    expect(kept.deadline).toBeGreaterThan(Date.now());
+    expect(JSON.stringify(spy.reserved)).not.toContain('بازسازی');
   });
 
   it.each([
     ['a proven refusal', { kind: 'UNAVAILABLE', status: 429, correlationId: 'c' }],
     ['a forbidden', { kind: 'FORBIDDEN', correlationId: 'c' }],
+    ['a service refusal', { kind: 'INVALID', fieldErrors: {}, message: 'm', correlationId: 'c' }],
   ])('is not made by %s', async (_name, result) => {
     createProject.mockResolvedValue(result);
     await submit(formData());
-    expect(await readUnresolved(SESSION, scope)).toBeNull();
+    expect(await held()).toEqual({ kind: 'NONE' });
   });
 
-  it('keeps the old key after a reload: a form with a fresh key is held, nothing is sent', async () => {
+  it('is not made by a request that never left the portal: the next valid submit, even with other values, goes through', async () => {
+    createProject.mockResolvedValue({
+      kind: 'UNAVAILABLE',
+      status: 503,
+      correlationId: 'refused',
+      neverSent: true,
+    });
+    expect(await submit(formData())).toMatchObject({ kind: 'FAILED', status: 503 });
+    expect(await held()).toEqual({ kind: 'NONE' });
+
+    createProject.mockResolvedValue(created);
+    await submit(formData({ ...VALID, title: 'عنوان دیگر' })).catch(() => undefined);
+    expect(createProject).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps an earlier unresolved request when the retry then never leaves the portal', async () => {
     const first = await sendAndLose();
+    createProject.mockResolvedValue({
+      kind: 'UNAVAILABLE',
+      status: 503,
+      correlationId: 'refused',
+      neverSent: true,
+    });
+    await submit(first);
+    expect((await heldRequest()).key).toBe(first.get(SUBMISSION_FIELD));
+  });
+
+  it('keeps an earlier unresolved request when the retry is refused (e.g. by authorization before replay)', async () => {
+    const first = await sendAndLose();
+    createProject.mockResolvedValue({ kind: 'FORBIDDEN', correlationId: 'denied' });
+    expect(await submit(first)).toMatchObject({ kind: 'FORBIDDEN' });
+    expect((await heldRequest()).key).toBe(first.get(SUBMISSION_FIELD));
+    // And the held request is still the only one that may go out.
+    createProject.mockClear();
+    expect(await submit(formData())).toMatchObject({ kind: 'HELD', reason: 'OTHER_REQUEST' });
+    expect(createProject).not.toHaveBeenCalled();
+  });
+
+  it('survives a LOST RESPONSE: no cookie, no client state — a reload still finds it and rebuilds the pinned form', async () => {
+    const first = await sendAndLose();
+    // The next page request carries nothing from the action's response; the
+    // page reads the server's record.
+    const request = await heldRequest();
+    expect(request.key).toBe(first.get(SUBMISSION_FIELD));
+    expect(request.ref).toBe(first.get(REPLAY_FIELD));
     createProject.mockClear();
     // The reload drew a fresh form (new key) over the same values.
-    const again = await submit(formData());
-    expect(again).toMatchObject({ kind: 'HELD', reason: 'OTHER_REQUEST' });
+    expect(await submit(formData())).toMatchObject({ kind: 'HELD', reason: 'OTHER_REQUEST' });
     expect(createProject).not.toHaveBeenCalled();
-    expect((await readUnresolved(SESSION, scope))!.key).toBe(first.get(SUBMISSION_FIELD));
   });
 
   it('resends the SAME request: same key, same body, and a created answer clears it', async () => {
     const first = await sendAndLose();
-    createProject.mockResolvedValue({
-      kind: 'CREATED',
-      data: { id: PROJECT_ID },
-      correlationId: 'c',
-    });
+    createProject.mockResolvedValue(created);
     await submit(first).catch(() => undefined);
     expect(createProject.mock.calls[1]![2]).toBe(first.get(SUBMISSION_FIELD));
     expect(createProject.mock.calls[1]![1]).toEqual(createProject.mock.calls[0]![1]);
-    expect(await readUnresolved(SESSION, scope)).toBeNull();
+    expect(await held()).toEqual({ kind: 'NONE' });
   });
 
   it('refuses other values under the remembered key', async () => {
@@ -446,44 +517,173 @@ describe('an unresolved create outlives the form that sent it', () => {
       jest.restoreAllMocks();
     }
     expect(createProject).not.toHaveBeenCalled();
-    expect(await readUnresolved(SESSION, scope)).not.toBeNull();
+    expect((await held()).kind).toBe('PENDING');
+  });
+
+  describe('two dispatches of one scope are never in flight at once', () => {
+    function slowCreate() {
+      let finish!: (result: unknown) => void;
+      createProject.mockImplementationOnce(() => new Promise((resolve) => void (finish = resolve)));
+      return (result: unknown) => finish(result);
+    }
+    const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+    it('the same key pressed twice: the second is HELD IN_PROGRESS and sends nothing', async () => {
+      const finish = slowCreate();
+      const form = formData();
+      const firstPress = submit(form).catch((e: Error) => e.message);
+      await tick();
+      expect(await held()).toMatchObject({ kind: 'PENDING', request: { inFlight: true } });
+      expect(await submit(form)).toMatchObject({ kind: 'HELD', reason: 'IN_PROGRESS' });
+      expect(createProject).toHaveBeenCalledTimes(1);
+      finish(created);
+      expect(await firstPress).toMatch(/NEXT_REDIRECT/);
+      expect(await held()).toEqual({ kind: 'NONE' });
+    });
+
+    it('two tabs with K1 and K2: only one dispatches, the other is held; K1 created leaves nothing of K2', async () => {
+      const finish = slowCreate();
+      const tab1 = formData();
+      const tab2 = formData();
+      const first = submit(tab1).catch((e: Error) => e.message);
+      await tick();
+      expect(await submit(tab2)).toMatchObject({ kind: 'HELD' });
+      expect(createProject).toHaveBeenCalledTimes(1);
+      finish(created);
+      await first;
+      // K1's confirmed answer deleted only its own record, and K2 never made one.
+      expect(await held()).toEqual({ kind: 'NONE' });
+      createProject.mockResolvedValue(created);
+      await submit(tab2).catch(() => undefined);
+      expect(createProject).toHaveBeenCalledTimes(2);
+      expect(createProject.mock.calls[1]![2]).toBe(tab2.get(SUBMISSION_FIELD));
+    });
+  });
+
+  describe('when the store cannot be trusted', () => {
+    const broken = (): UnresolvedStore => {
+      const fail = async () => {
+        throw new UnresolvedStoreUnavailable(new Error('ECONNREFUSED'));
+      };
+      return { reserve: fail, read: fail, settle: fail, release: fail, purge: fail };
+    };
+
+    it('sends nothing, says the pending requests cannot be checked, and holds no record', async () => {
+      useUnresolvedStore(broken());
+      expect(await submit(formData())).toMatchObject({ kind: 'NOT_CHECKED' });
+      expect(createProject).not.toHaveBeenCalled();
+      useUnresolvedStore(memoryUnresolvedStore());
+      expect(await held()).toEqual({ kind: 'NONE' });
+      createProject.mockResolvedValue(created);
+      await submit(formData()).catch(() => undefined);
+      expect(createProject).toHaveBeenCalledTimes(1);
+    });
+
+    it('a read that fails is UNAVAILABLE, never "no hold"', async () => {
+      useUnresolvedStore(broken());
+      expect(await held()).toEqual({ kind: 'UNAVAILABLE' });
+    });
+
+    it('an answer lost AFTER the dispatch still ends unconfirmed, and the lease makes it unresolved', async () => {
+      const inner = memoryUnresolvedStore();
+      useUnresolvedStore({
+        ...inner,
+        settle: async () => {
+          throw new UnresolvedStoreUnavailable(new Error('gone'));
+        },
+      });
+      createProject.mockResolvedValue(unconfirmed);
+      expect(await submit(formData())).toMatchObject({ kind: 'UNCONFIRMED' });
+      useUnresolvedStore(inner);
+      expect((await held()).kind).toBe('PENDING');
+    });
+  });
+
+  it('refuses a new scope before dispatch when the login holds 50 pending requests', async () => {
+    for (let n = 0; n < 50; n += 1) {
+      const out = await reserveUnresolved(
+        SESSION,
+        { purpose: 'filler', target: `T${n}` },
+        {
+          key: `k${n}`,
+          digest: 'd',
+          ref: null,
+          issuedAt: Date.now(),
+          deadline: null,
+          windowMs: null,
+          retry: false,
+        },
+      );
+      expect(out.kind).toBe('RESERVED');
+    }
+    expect(await submit(formData())).toMatchObject({ kind: 'CAPACITY' });
+    expect(createProject).not.toHaveBeenCalled();
   });
 
   describe('send as new', () => {
-    const release = (fields: Record<string, string>) => {
+    const release = async (
+      fields: Record<string, string>,
+      csrf: string | null = SESSION.csrfToken,
+    ) => {
       const form = new FormData();
-      form.set(CSRF_FIELD, SESSION.csrfToken);
+      if (csrf !== null) form.set(CSRF_FIELD, csrf);
       for (const [name, value] of Object.entries(fields)) form.set(name, value);
       return releaseUnresolvedCreate(form).catch((error: Error) => error.message);
     };
+    const tokenFor = async () => releaseToken(SESSION, scope, await heldRequest());
 
     it('does nothing without the confirmation that names the duplicate risk', async () => {
       await sendAndLose();
-      expect(await release({})).toBe('NEXT_REDIRECT:/projects');
-      expect(await release({ [CONFIRM_DUPLICATE_FIELD]: 'no' })).toBe('NEXT_REDIRECT:/projects');
-      expect(await readUnresolved(SESSION, scope)).not.toBeNull();
+      const token = await tokenFor();
+      expect(await release({ [RELEASE_FIELD]: token })).toBe('NEXT_REDIRECT:/projects');
+      expect(await release({ [RELEASE_FIELD]: token, [CONFIRM_DUPLICATE_FIELD]: 'no' })).toBe(
+        'NEXT_REDIRECT:/projects',
+      );
+      expect((await held()).kind).toBe('PENDING');
     });
 
     it('does nothing without the CSRF token', async () => {
       await sendAndLose();
-      const form = new FormData();
-      form.set(CONFIRM_DUPLICATE_FIELD, CONFIRM_DUPLICATE_VALUE);
-      await releaseUnresolvedCreate(form).catch(() => undefined);
-      expect(await readUnresolved(SESSION, scope)).not.toBeNull();
+      await release(
+        { [RELEASE_FIELD]: await tokenFor(), [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE },
+        null,
+      );
+      expect((await held()).kind).toBe('PENDING');
     });
 
-    it('with the confirmation forgets it, and a fresh key is then sent', async () => {
+    it('with the confirmation and the current record’s name forgets it, and a fresh key is then sent', async () => {
       await sendAndLose();
-      await release({ [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE });
-      expect(await readUnresolved(SESSION, scope)).toBeNull();
-      createProject.mockClear();
-      createProject.mockResolvedValue({
-        kind: 'CREATED',
-        data: { id: PROJECT_ID },
-        correlationId: 'c',
+      await release({
+        [RELEASE_FIELD]: await tokenFor(),
+        [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE,
       });
+      expect(await held()).toEqual({ kind: 'NONE' });
+      createProject.mockClear();
+      createProject.mockResolvedValue(created);
       await submit(formData()).catch(() => undefined);
       expect(createProject).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses a form drawn for an earlier record: a newer unresolved request stays', async () => {
+      await sendAndLose();
+      const stale = await tokenFor();
+      await release({ [RELEASE_FIELD]: stale, [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE });
+      const second = await sendAndLose({ ...VALID, title: 'عنوان دوم' });
+      expect(
+        await release({
+          [RELEASE_FIELD]: stale,
+          [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE,
+        }),
+      ).toBe('NEXT_REDIRECT:/projects?release=STALE');
+      expect((await heldRequest()).key).toBe(second.get(SUBMISSION_FIELD));
+    });
+
+    it.each([null, 'garbage'])('refuses the release name %j', async (name) => {
+      await sendAndLose();
+      const fields: Record<string, string> = { [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE };
+      if (name !== null) fields[RELEASE_FIELD] = name;
+      expect(await release(fields)).toBe('NEXT_REDIRECT:/projects?release=STALE');
+      expect((await held()).kind).toBe('PENDING');
     });
   });
 
@@ -494,8 +694,8 @@ describe('an unresolved create outlives the form that sent it', () => {
       ['the same person acting for another organization', { ...SESSION, organizationId: 'ORG-2' }],
     ])('is not seen by %s', async (_name, other) => {
       await sendAndLose();
-      expect(await readUnresolved(other, scope)).toBeNull();
-      expect(await readUnresolved(SESSION, scope)).not.toBeNull();
+      expect(await readUnresolved(other, scope)).toEqual({ kind: 'NONE' });
+      expect((await held()).kind).toBe('PENDING');
     });
   });
 });

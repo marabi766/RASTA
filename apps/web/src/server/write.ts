@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import {
   callGateway,
+  GatewayNeverSentError,
   GatewayOutcomeUnknownError,
   GatewayRequestError,
   type GatewayProblem,
@@ -47,8 +48,19 @@ export type WriteResult<T, F extends string> =
   /** The thing written *about* is not visible to this person — the platform's
    *  non-disclosure 404. */
   | { readonly kind: 'NOT_FOUND'; readonly correlationId: string }
-  /** Refused before it could act: nothing was written. */
-  | { readonly kind: 'UNAVAILABLE'; readonly status: number; readonly correlationId: string }
+  /**
+   * Refused before it could act: nothing was written. `neverSent` is set when
+   * the request provably never left this portal (connection refused, DNS …):
+   * unlike a 503 the platform answered, which may follow a commit, that one is
+   * known not to have reached anything — a write need not remember it as
+   * unresolved.
+   */
+  | {
+      readonly kind: 'UNAVAILABLE';
+      readonly status: number;
+      readonly correlationId: string;
+      readonly neverSent?: true;
+    }
   /**
    * Sent, and possibly committed, but not confirmed (Codex post-merge review
    * of #106): the connection failed after dispatch, this portal's deadline
@@ -224,6 +236,9 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
     if (status === 404) return { kind: 'NOT_FOUND', correlationId };
     if ((status === 400 || status === 422 || status === 409) && problem) {
       return { kind: 'INVALID', correlationId, ...mapProblemToFields(problem, call.mapping) };
+    }
+    if (error instanceof GatewayNeverSentError) {
+      return { kind: 'UNAVAILABLE', status, correlationId, neverSent: true };
     }
     return { kind: 'UNAVAILABLE', status, correlationId };
   }

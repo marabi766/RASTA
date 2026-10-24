@@ -2,8 +2,10 @@ import { Alert, Button } from '@/ui';
 import { CSRF_FIELD } from '@/lib/form-fields';
 import { mayResend, type UnresolvedRequest } from '@/server/unresolved-request';
 
+import { HELD_IN_PROGRESS_MESSAGE } from '@/lib/project-commands';
+
 import { releaseUnresolvedCreate } from './actions';
-import { CONFIRM_DUPLICATE_FIELD, CONFIRM_DUPLICATE_VALUE } from './form-state';
+import { CONFIRM_DUPLICATE_FIELD, CONFIRM_DUPLICATE_VALUE, RELEASE_FIELD } from './form-state';
 
 /**
  * Shown on `/projects` for as long as an earlier create is unresolved
@@ -19,10 +21,13 @@ const CONFIRM_ID = 'confirm-duplicate-create';
 export function UnresolvedCreateNotice({
   request,
   csrfToken,
+  releaseToken,
   now,
 }: {
   request: UnresolvedRequest;
   csrfToken: string;
+  /** Signed name of `request`, bound to this login: the release acts only on that record. */
+  releaseToken: string;
   now: number;
 }) {
   const resendable = mayResend(request, now);
@@ -34,8 +39,10 @@ export function UnresolvedCreateNotice({
           <a className="underline" href="/projects">
             فهرست کامل پروژه‌ها (بدون فیلتر)
           </a>{' '}
-          را بررسی کنید، چون فهرست فیلترشده پروژه تازه را نشان نمی‌دهد.
+          را بررسی کنید، چون فهرست فیلترشده پروژه تازه را نشان نمی‌دهد. حتی فهرست کامل (بیست ردیف،
+          فقط پروژه‌هایی که اجازه دیدنشان را دارید) ثابت نمی‌کند که درخواست نخست انجام نشده است.
         </p>
+        {request.inFlight ? <p>{HELD_IN_PROGRESS_MESSAGE}</p> : null}
         <p>
           {resendable
             ? 'همان درخواست را با همان مقدارها می‌توانید دوباره بفرستید؛ با همان کلید، پروژه دوبار ساخته نمی‌شود. فرم زیر برای همان درخواست است.'
@@ -43,6 +50,7 @@ export function UnresolvedCreateNotice({
         </p>
         <form action={releaseUnresolvedCreate} className="flex flex-col gap-2">
           <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
+          <input type="hidden" name={RELEASE_FIELD} value={releaseToken} />
           <label htmlFor={CONFIRM_ID} className="flex items-start gap-2">
             <input
               id={CONFIRM_ID}

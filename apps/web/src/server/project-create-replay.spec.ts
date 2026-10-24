@@ -4,7 +4,7 @@
 import {
   checkCreateStamp,
   createReplayWindowSeconds,
-  createStampDeadline,
+  createStampTerms,
   mintCreateStamp,
   mintCreateSubmission,
 } from './project-create-replay';
@@ -76,7 +76,13 @@ describe('the create replay window', () => {
     const issuedEnd = T0 + (3600 - 600) * 1000;
     expect(checkCreateStamp(SESSION, replay, id, issuedEnd, raised)).toBe('OK');
     expect(checkCreateStamp(SESSION, replay, id, T0 + 65 * 60_000, raised)).toBe('EXPIRED');
-    expect(createStampDeadline(SESSION, replay, id, T0)).toBe(issuedEnd);
+    expect(createStampTerms(SESSION, replay, id, T0, raised)).toEqual({
+      issuedAt: T0,
+      deadline: issuedEnd,
+      windowMs: createReplayWindowSeconds(raised) * 1000,
+    });
+    // The record keeps the shorter of the two, so raising the window later cannot lengthen it.
+    expect(createStampTerms(SESSION, replay, id, T0, issuedAt)?.deadline).toBe(issuedEnd);
   });
 
   it('is still EXPIRED, not forged, a day after the window', () => {

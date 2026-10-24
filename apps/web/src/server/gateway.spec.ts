@@ -12,6 +12,7 @@ import {
   GatewayRequestError,
   callGateway,
   gatewayUrl,
+  GatewayNeverSentError,
   neverSent,
   parseRetryAfter,
 } from './gateway';
@@ -246,6 +247,7 @@ describe('a read keeps today’s outcome; a write learns the outcome is unknown 
 
     expect(error).toBeInstanceOf(GatewayRequestError);
     expect(error).not.toBeInstanceOf(GatewayOutcomeUnknownError);
+    expect(error).toBeInstanceOf(GatewayNeverSentError);
     expect(error).toMatchObject({ status: 503 });
   });
 

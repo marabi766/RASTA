@@ -78,15 +78,28 @@ export function mintCreateStamp(
   );
 }
 
-/** The signed deadline of a stamp this login holds, or null: for display next to an unresolved request. */
-export function createStampDeadline(
+/**
+ * What a stamp this login holds says about the request's time: when it was
+ * issued, its effective deadline (the signed one or the current configuration's,
+ * whichever is earlier — the same rule `checkCreateStamp` applies) and the
+ * current window in ms, which bounds every later retry of a held request
+ * (`server/unresolved-request.ts`). Null for a stamp that is not ours.
+ */
+export function createStampTerms(
   session: WebSession,
   token: unknown,
   submissionId: string,
   now: number = Date.now(),
-): number | null {
+  env: ReplayEnv = webServerEnv(),
+): { readonly issuedAt: number; readonly deadline: number; readonly windowMs: number } | null {
   const payload = verifyPayload(session, PURPOSE, token, replaySchema, now);
-  return payload === null || payload.submissionId !== submissionId ? null : payload.deadline;
+  if (payload === null || payload.submissionId !== submissionId) return null;
+  const windowMs = createReplayWindowSeconds(env) * 1000;
+  return {
+    issuedAt: payload.issuedAt,
+    deadline: Math.min(payload.deadline, payload.issuedAt + windowMs),
+    windowMs,
+  };
 }
 
 /** A fresh submission id for the create form, with its stamp. */
@@ -122,6 +135,13 @@ export function checkCreateStamp(
 
 /** Where the create form's unresolved request is kept (`server/unresolved-request.ts`); the organization comes from the login. */
 export const PROJECT_CREATE_UNRESOLVED = { purpose: 'project-create' } as const;
+
+/**
+ * An unresolved create may be sent again with its own key and body: construction-service
+ * answers a repeated `Idempotency-Key` with the first result while it keeps the key
+ * (`project.service.ts`), and the stored deadline stops a send past that.
+ */
+export const PROJECT_CREATE_RETRY = true;
 
 /** The digest the unresolved request carries: of the body as it is sent. */
 export function createBodyDigest(session: WebSession, body: unknown): string {

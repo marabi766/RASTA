@@ -48,15 +48,23 @@ export type CreateProjectFormState =
   | { readonly kind: 'EXPIRED'; readonly values: ProjectFormValues }
   /**
    * An earlier request of this form is unresolved (`server/unresolved-request.ts`)
-   * and this post is not exactly that request: another key (`OTHER_REQUEST`) or
-   * other values under the same key (`CHANGED_BODY`). Nothing was sent. Only
+   * and this post is not exactly that request: another key (`OTHER_REQUEST`),
+   * other values under the same key (`CHANGED_BODY`), or the request is being
+   * dispatched right now (`IN_PROGRESS`, e.g. from another tab). Nothing was sent. Only
    * "send as new", with its confirmation, replaces the unresolved request.
    */
   | {
       readonly kind: 'HELD';
-      readonly reason: 'OTHER_REQUEST' | 'CHANGED_BODY';
+      readonly reason: 'IN_PROGRESS' | 'OTHER_REQUEST' | 'CHANGED_BODY';
       readonly values: ProjectFormValues;
-    };
+    }
+  /**
+   * The store of unresolved requests could not be reached or read, so the
+   * portal could not check whether one exists: nothing was sent (fail closed).
+   */
+  | { readonly kind: 'NOT_CHECKED'; readonly values: ProjectFormValues }
+  /** This login already holds the most unresolved requests it may; a new one was not sent. */
+  | { readonly kind: 'CAPACITY'; readonly values: ProjectFormValues };
 
 export const IDLE_CREATE_PROJECT_FORM: CreateProjectFormState = { kind: 'IDLE' };
 
@@ -67,3 +75,6 @@ export const IDLE_CREATE_PROJECT_FORM: CreateProjectFormState = { kind: 'IDLE' }
  */
 export const CONFIRM_DUPLICATE_FIELD = 'confirmDuplicate';
 export const CONFIRM_DUPLICATE_VALUE = 'yes';
+
+/** The hidden field of the release form: the signed name of the record it was drawn for. */
+export const RELEASE_FIELD = 'release';
