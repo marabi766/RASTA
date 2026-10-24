@@ -23,6 +23,12 @@ const organizationId = seedIdSchema(ID_PREFIXES.organization);
  * an identifier — the rule exists to reject control characters and markup, not
  * to police what a person may be called.
  *
+ * Deliberately NOT the shared display-text rule: no digits, no comma-like
+ * punctuation. Whitespace stays `\s`, exactly as before the display-text work:
+ * a stored name may hold a tab or a line break, and the unchanged PATCH of it
+ * must keep validating. Tightening it (one line, no BOM) is a separate change
+ * that canonicalises the stored names first.
+ *
  * The lookahead refuses every bidirectional control (`\p{Bidi_Control}`): the
  * script class alone admits U+061C ARABIC LETTER MARK, an Arabic-script one.
  * One pattern, so the published OpenAPI `pattern` states both rules.
