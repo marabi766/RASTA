@@ -14,7 +14,7 @@ import { inspect } from 'node:util';
 
 export const SENTINELS = Object.freeze(['private-sentinel-79', 'JZ97-another-secret']);
 
-/** Each sentinel as an environment key fragment: `PRIVATE_SENTINEL_79`, `JZ97_ANOTHER_SECRET`. */
+/** Each sentinel as an environment key spells it: upper-cased, with `-` as `_`. */
 export const KEY_SENTINELS = Object.freeze(
   SENTINELS.map((sentinel) => sentinel.replaceAll('-', '_').toUpperCase()),
 );
