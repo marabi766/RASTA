@@ -168,7 +168,7 @@ async function run(command, argv, options = {}) {
 
 const compose = (argv, options) =>
   run('docker', ['compose', '--project-name', project, '--file', composeFile, ...argv], options);
-const psql = (container, database, input) =>
+const psql = (container, database, input, options = {}) =>
   run(
     'docker',
     [
@@ -185,7 +185,7 @@ const psql = (container, database, input) =>
       '-d',
       database,
     ],
-    { input },
+    { input, ...options },
   );
 
 let dumpVersion;
@@ -228,7 +228,9 @@ async function collectReference(container, database, sourceDump) {
   let reference, fixedPoint;
   try {
     for (const [index, name] of scratch.entries()) {
-      await psql(container, 'postgres', `CREATE DATABASE "${name}" TEMPLATE template0;`);
+      await psql(container, 'postgres', `CREATE DATABASE "${name}" TEMPLATE template0;`, {
+        privateOutput: true,
+      });
       const fd = openSync(index === 0 ? separate.path : reference.path, 'r');
       try {
         await run(
@@ -268,7 +270,9 @@ async function collectReference(container, database, sourceDump) {
     // Signals use the same owned-cluster teardown, even when a child was killed mid-restore.
     if (!interrupted)
       for (const name of scratch)
-        await psql(container, 'postgres', `DROP DATABASE IF EXISTS "${name}" WITH (FORCE);`);
+        await psql(container, 'postgres', `DROP DATABASE IF EXISTS "${name}" WITH (FORCE);`, {
+          privateOutput: true,
+        });
   }
 }
 

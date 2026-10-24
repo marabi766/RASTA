@@ -11,6 +11,7 @@ import {
   existsSync,
   readdirSync,
   symlinkSync,
+  statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -437,6 +438,15 @@ for (const mode of [
       const exited = once(child, 'exit');
       if (mode.startsWith('signal-')) {
         await waitFor(join(directory, 'started'));
+        const privateDirectory = join(
+          directory,
+          readdirSync(directory).find((name) => name.startsWith('rasta-restore-drill-')),
+        );
+        assert.equal(statSync(privateDirectory).mode & 0o777, 0o700);
+        const sqlFiles = readdirSync(privateDirectory).filter((name) => name.endsWith('.sql'));
+        assert.ok(sqlFiles.length >= 2);
+        for (const name of sqlFiles)
+          assert.equal(statSync(join(privateDirectory, name)).mode & 0o777, 0o600);
         child.kill('SIGTERM');
       }
       const [code] = await exited;
