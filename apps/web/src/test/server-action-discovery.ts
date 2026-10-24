@@ -1,5 +1,5 @@
-import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { isAbsolute, join, relative } from 'node:path';
 
 import * as ts from 'typescript';
 
@@ -22,11 +22,16 @@ function hasDirective(statements: readonly ts.Statement[]): ts.StringLiteral | u
 
 /**
  * Finds `'use server'` directives by parsing, not by matching text: quote style,
- * comments, blank lines and a missing semicolon do not matter, and only a
+ * comments, blank lines, a missing semicolon, escapes and line continuations do not
+ * matter (the parser hands over the cooked string, as Next's does), and only a
  * directive in a prologue counts (a string in the middle of a file is not one).
+ * This is the ONE place a directive is recognised; no text filter runs before it.
+ *
+ * Scope: a fast local early warning. The authority on which modules define server
+ * actions is the compiler's own manifest (`scripts/check-server-action-coverage.mjs`).
  */
 export function scanServerActions(source: string, fileName: string): ServerActionScan {
-  const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true);
+  const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, false);
   const inline: number[] = [];
   const visit = (node: ts.Node): void => {
     if (ts.isFunctionLike(node) && 'body' in node && node.body && ts.isBlock(node.body)) {
@@ -67,8 +72,10 @@ const OUTPUT_DIRECTORIES = new Set([
 const TEST_ONLY = /(\.(spec|test)\.[a-z]+$|(^|\/)(test|tests|__tests__|__mocks__|fixtures|e2e)\/)/;
 
 export interface Discovery {
-  /** Paths from `repoRoot`, extension included, of every non-test module with a file-level directive. */
+  /** Real paths from the real `repoRoot`, extension included, of every non-test module with a file-level directive. */
   readonly modules: string[];
+  /** Static runtime export names of each of those modules (`'*'` for `export *`, `'default'` for the default). */
+  readonly exports: Record<string, string[]>;
   /** `file:line` of every function-scoped directive. */
   readonly inline: string[];
   /** `file:line` of every directive of either kind in a test-only file. */
@@ -77,6 +84,67 @@ export interface Discovery {
   readonly ambiguous: string[];
   /** Source files read and parsed (cost report). */
   reads: number;
+}
+
+/** The key of one server action everywhere (discovery, refusal cases, compiler manifest). */
+export function actionKey(module: string, exportedName: string): string {
+  return `${module} ${exportedName}`;
+}
+
+function bindingNames(name: ts.BindingName, into: Set<string>): void {
+  if (ts.isIdentifier(name)) {
+    into.add(name.text);
+    return;
+  }
+  for (const element of name.elements) {
+    if (ts.isBindingElement(element)) bindingNames(element.name, into);
+  }
+}
+
+/** Runtime export names of a module, from its syntax (types do not exist at runtime). */
+export function exportedNames(source: string, fileName: string): string[] {
+  const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, false);
+  const names = new Set<string>();
+  for (const statement of file.statements) {
+    const modifiers = ts.canHaveModifiers(statement) ? ts.getModifiers(statement) : undefined;
+    const has = (kind: ts.SyntaxKind): boolean => !!modifiers?.some((m) => m.kind === kind);
+    if (ts.isExportAssignment(statement)) {
+      names.add(statement.isExportEquals ? '=' : 'default');
+    } else if (ts.isExportDeclaration(statement)) {
+      if (statement.isTypeOnly) continue;
+      const clause = statement.exportClause;
+      if (!clause) names.add('*');
+      else if (ts.isNamespaceExport(clause)) names.add(clause.name.text);
+      else {
+        for (const element of clause.elements)
+          if (!element.isTypeOnly) names.add(element.name.text);
+      }
+    } else if (!has(ts.SyntaxKind.ExportKeyword)) {
+      continue;
+    } else if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        bindingNames(declaration.name, names);
+      }
+    } else if (
+      ts.isFunctionDeclaration(statement) ||
+      ts.isClassDeclaration(statement) ||
+      (ts.isEnumDeclaration(statement) && !has(ts.SyntaxKind.ConstKeyword))
+    ) {
+      names.add(
+        has(ts.SyntaxKind.DefaultKeyword) ? 'default' : (statement.name?.text ?? 'default'),
+      );
+    }
+  }
+  return [...names].sort();
+}
+
+/** Every (module, export) the refusal cases must cover: the one set the compiler manifest is held to. */
+export function coveredActions(discovery: Discovery): Set<string> {
+  return new Set(
+    discovery.modules.flatMap((module) =>
+      (discovery.exports[module] ?? []).map((name) => actionKey(module, name)),
+    ),
+  );
 }
 
 /** The web app is walked with only dependencies and `.next` skipped; a package also skips build output. */
@@ -96,9 +164,6 @@ function walkSources(
     }
   }
 }
-
-/** Quick filter: only a file that can spell the directive is parsed (escapes keep it in). */
-const MAY_HAVE_DIRECTIVE = /server|\\u|\\x/;
 
 /**
  * The whole directory (not only `src`) of every workspace package the web app depends
@@ -148,7 +213,9 @@ export function workspacePackageDirs(repoRoot: string, appDir: string): string[]
  * fenced off by `server-action-boundary.spec.ts`.
  */
 export function discoverServerActions(repoRoot: string, appDir: string): Discovery {
+  const root = realpathSync(repoRoot);
   const modules: string[] = [];
+  const exports: Record<string, string[]> = {};
   const inline: string[] = [];
   const inTestFiles: string[] = [];
   const ambiguous: string[] = [];
@@ -160,22 +227,28 @@ export function discoverServerActions(repoRoot: string, appDir: string): Discove
       OUTPUT_DIRECTORIES,
     ]),
   ];
-  for (const [root, skipped] of roots) {
+  for (const [scanRoot, skipped] of roots) {
     const byBase = new Map<string, string[]>();
-    walkSources(root, skipped, (full) => {
-      const rel = relative(repoRoot, full);
+    walkSources(scanRoot, skipped, (visited) => {
+      const full = realpathSync(visited);
+      const rel = relative(root, full);
+      if (rel.startsWith('..') || isAbsolute(rel)) {
+        throw new Error(`${visited}: resolves outside the repository`);
+      }
       const key = full.replace(SOURCE, '');
       byBase.set(key, [...(byBase.get(key) ?? []), rel]);
       const text = readFileSync(full, 'utf8');
       reads += 1;
-      if (!MAY_HAVE_DIRECTIVE.test(text)) return;
       const scan = scanServerActions(text, full);
       if (TEST_ONLY.test(rel)) {
         if (scan.fileLevel) inTestFiles.push(`${rel}:${scan.fileLevel}`);
         for (const line of scan.inline) inTestFiles.push(`${rel}:${line}`);
         return;
       }
-      if (scan.fileLevel) modules.push(rel);
+      if (scan.fileLevel) {
+        modules.push(rel);
+        exports[rel] = exportedNames(text, full);
+      }
       for (const line of scan.inline) inline.push(`${rel}:${line}`);
     });
     for (const files of byBase.values()) {
@@ -184,6 +257,7 @@ export function discoverServerActions(repoRoot: string, appDir: string): Discove
   }
   return {
     modules: modules.sort(),
+    exports,
     inline: inline.sort(),
     inTestFiles: inTestFiles.sort(),
     ambiguous: ambiguous.sort(),
