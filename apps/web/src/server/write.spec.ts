@@ -403,7 +403,7 @@ describe('an unknown English service message (the class: never shown raw)', () =
     paths: { hours: 'hours' as const },
     messages: { 'Known sentence': 'متن شناخته‌شده' },
   };
-  const ECHO = 'Q-110 open question; you typed secret-value-123';
+  const ECHO = 'Q-110 open question; you typed typed-input-xyz';
 
   it.each<[string, { details?: { path: string; message: string }[] }, 'field' | 'message']>([
     ['a detail on a field', { details: [{ path: 'hours', message: ECHO }] }, 'field'],
@@ -417,7 +417,7 @@ describe('an unknown English service message (the class: never shown raw)', () =
     const shown = where === 'field' ? mapped.fieldErrors.hours : mapped.message;
     expect(shown).toBe(GENERIC_REFUSAL_MESSAGE);
     expect(JSON.stringify(mapped)).not.toContain('Q-110');
-    expect(JSON.stringify(mapped)).not.toContain('secret-value-123');
+    expect(JSON.stringify(mapped)).not.toContain('typed-input-xyz');
   });
 
   it('uses the mapping’s own fallback in place of the generic sentence', () => {
@@ -493,7 +493,7 @@ describe('an unknown English service message (the class: never shown raw)', () =
       messageSha256: expect.stringMatching(/^[0-9a-f]{16}$/),
     });
     expect(lines[0]).not.toContain('Q-110');
-    expect(lines[0]).not.toContain('secret-value-123');
+    expect(lines[0]).not.toContain('typed-input-xyz');
   });
 
   it('never turns a timeout into "nothing saved": the unknown outcome is not a refusal', async () => {

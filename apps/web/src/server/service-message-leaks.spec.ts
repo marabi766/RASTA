@@ -79,7 +79,7 @@ describe('every write module’s mapping', () => {
   });
 
   describe.each(MAPPINGS)('%s', (_name, mapping) => {
-    const ECHO = 'Some new rule about Q-110 and your input secret-value-123';
+    const ECHO = 'Some new rule about Q-110 and your input typed-input-xyz';
 
     it('never shows an unknown English sentence, in a message or on a field', () => {
       const field = Object.keys(mapping.paths)[0] ?? 'x';
@@ -99,7 +99,7 @@ describe('every write module’s mapping', () => {
         expect(shown.length).toBeGreaterThan(0);
         for (const text of shown) {
           expect(text).not.toContain('Q-110');
-          expect(text).not.toContain('secret-value-123');
+          expect(text).not.toContain('typed-input-xyz');
           expect(text).not.toMatch(LATIN_WORD);
         }
       }
