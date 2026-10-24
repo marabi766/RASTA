@@ -534,6 +534,8 @@ export const tenderPublishedPayload = z
     bidOpeningAt: isoTimestamp,
     bidClosingAt: isoTimestamp,
     criteriaCount: z.number().int().positive(),
+    procurementThresholdPolicyId: identifier.optional(),
+    procurementThresholdWarning: z.literal('PROCUREMENT_AMOUNT_OUTSIDE_RANGE').optional(),
     keyId: identifier,
     /** The approved request this publication used up (CON-002 PR 11). */
     approvalRequestId: identifier,

@@ -1554,3 +1554,24 @@ describe('a dated policy that expires while waiting for its locks', () => {
     expect(h.tx.organizationPolicy.create).not.toHaveBeenCalled();
   });
 });
+
+describe('procurement thresholds service boundary', () => {
+  it('refuses person callers before any policy or organization read, including system administrators', async () => {
+    const h = harness();
+    await expect(
+      runWithContext(operatorContext(), () => h.service.procurementThresholds(DEH1)),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(h.repository.readSnapshot).not.toHaveBeenCalled();
+    expect(h.repository.getPath).not.toHaveBeenCalled();
+  });
+  it('refuses a mismatched signed organization before any policy or organization read', async () => {
+    const h = harness();
+    await expect(
+      runWithContext(context({ authType: 'SERVICE', organizationId: COUNTY }), () =>
+        h.service.procurementThresholds(DEH1),
+      ),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(h.repository.readSnapshot).not.toHaveBeenCalled();
+    expect(h.repository.getPath).not.toHaveBeenCalled();
+  });
+});

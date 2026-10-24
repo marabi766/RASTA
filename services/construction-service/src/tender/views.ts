@@ -15,6 +15,12 @@ export function toTenderView(row: Tender): TenderView {
     title: row.title,
     scopeOfWork: row.scopeOfWork,
     procurementNature: row.procurementNature,
+    ...(row.estimatedCostMinor !== null
+      ? { estimatedCostMinor: row.estimatedCostMinor.toString() }
+      : {}),
+    ...(row.procurementThresholdWarning === 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE'
+      ? { procurementThresholdWarning: row.procurementThresholdWarning }
+      : {}),
     visibility: row.visibility,
     bidOpeningAt: row.bidOpeningAt?.toISOString() ?? null,
     bidClosingAt: row.bidClosingAt?.toISOString() ?? null,
