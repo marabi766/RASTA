@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { amountMinorSchema, currencySchema, plainText } from '@rasta/contracts';
+import { amountMinorSchema, currencySchema, plainText, numberInput } from '@rasta/contracts';
 import { STATEMENT_STATES } from './statement.state-machine';
 
 /**
@@ -150,7 +150,7 @@ export const listStatementsQuerySchema = z
       .refine((value) => Number(value) <= 2_147_483_647, 'cursor is out of range')
       .optional()
       .describe('Opaque, server-issued.'),
-    limit: z.coerce.number().int().min(1).max(50).default(20),
+    limit: numberInput(z.number().int().min(1).max(50)).default(20),
   })
   .strict();
 export type ListStatementsQuery = z.infer<typeof listStatementsQuerySchema>;

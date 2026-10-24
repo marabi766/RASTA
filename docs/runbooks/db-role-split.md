@@ -30,8 +30,17 @@ construction، تغییرناپذیری دفتر کل در economic، فقط‌�
 
 - `default` — DML روی همهٔ جدول‌های فعلی، و با `ALTER DEFAULT PRIVILEGES FOR ROLE rasta_<svc>_migrator IN SCHEMA public`
   روی هر جدول و Sequenceی که مهاجر بعداً بسازد.
-- `migration` — هیچ حقی در اسکریپت؛ هر جدول حقش را از Migration خود سرویس می‌گیرد. فقط supplier: روی جدول‌های
+- `migration` — هیچ حقی در اسکریپت؛ هر جدول حقش را از Migration خود سرویس می‌گیرد. supplier و analytics: روی جدول‌های
   فقط‌افزودنی کمتر از DML می‌دهد.
+
+Analytics (RUN-001 PR 2) uses migration-managed grants. Apply the split script first, then
+`20261024130000_analytics_runtime_privileges`: it removes the old table/sequence default privileges
+and existing runtime grants, then grants only `SELECT, INSERT` on `fact_maintenance` and
+`processed_event`, and `SELECT` on `baseline_metric`. No baseline writer is enabled. A split rerun
+cannot restore blanket DML for analytics, even if an older caller explicitly requests `default`.
+The privilege migration's rollback revokes these grants; it never restores unsafe legacy defaults.
+The baseline rollback takes an exclusive lock and refuses if any baseline row exists. There is no
+operator bypass flag; scratch tests explicitly remove only their own synthetic measurements first.
 
 **دفتر Migration** (`_prisma_migrations`) را خود اسکریپت تقسیم، **پیش از هر Migration**، با DDL دقیق Prisma می‌سازد:
 مالکش مهاجر است و به هیچ نقشی (نه `PUBLIC`، نه نقش اجرا) حقی ندارد (بازبینی Codex روی #176). اگر Prisma آن را بسازد، از
@@ -128,7 +137,7 @@ psql URL بی گذرواژه می‌گیرد و گذرواژه را از `PGPASS
 
    هیچ داده‌ای جابه‌جا نمی‌شود؛ مالکیت با `REASSIGN OWNED` منتقل می‌شود و دفتر Migration موجود حق نقش اجرا را از دست
    می‌دهد. Idempotent است. در حالت `default` نقش اجرا
-   بلافاصله DML روی جدول‌های موجود دارد، پس سرویس قطع نمی‌شود. (supplier، حالت `migration`: تا گام ۳ حق جدول ندارد.)
+   بلافاصله DML روی جدول‌های موجود دارد، پس سرویس قطع نمی‌شود. (supplier و analytics، حالت `migration`: تا گام ۳ حق جدول ندارند.)
 
 3. **Migration با مهاجر:** `pnpm --filter @rasta/<svc>-service db:migrate` (اسکریپت `DATABASE_URL_<SVC>_MIGRATOR` را
    ترجیح می‌دهد و حق نقش اجرا روی `_prisma_migrations` را می‌گیرد).

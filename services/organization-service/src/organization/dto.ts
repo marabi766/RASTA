@@ -5,6 +5,7 @@ import {
   ID_PREFIXES,
   plainText,
   withoutBidiControlDeep,
+  numberInput,
 } from '@rasta/contracts';
 
 /**
@@ -214,12 +215,12 @@ export type AddLocationDto = z.infer<typeof addLocationSchema>;
 
 export const nearbyQuerySchema = z
   .object({
-    latitude: z.coerce.number().min(-90).max(90),
-    longitude: z.coerce.number().min(-180).max(180),
+    latitude: numberInput(z.number().min(-90).max(90)),
+    longitude: numberInput(z.number().min(-180).max(180)),
     /** Search radius in metres. Capped so one query cannot scan the country. */
-    radiusMeters: z.coerce.number().int().min(1).max(500_000).default(50_000),
+    radiusMeters: numberInput(z.number().int().min(1).max(500_000)).default(50_000),
     type: organizationTypeSchema.optional(),
-    limit: z.coerce.number().int().min(1).max(100).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).default(25),
   })
   .strict();
 

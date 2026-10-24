@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { cursorPaginationSchema } from '@rasta/contracts';
+import { cursorPaginationSchema, digitsToBigInt, numberInput } from '@rasta/contracts';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
 import { amountMinorInput } from '../project/dto';
 import { APPROVAL_STATES, POLICY_STATES, WORKFLOW_KEYS } from './approval.state-machine';
@@ -39,10 +39,14 @@ export const policyStepInput = z
   })
   .strict()
   .refine(
-    (step) =>
-      step.minAmountMinor === undefined ||
-      step.maxAmountMinor === undefined ||
-      BigInt(step.minAmountMinor) < BigInt(step.maxAmountMinor),
+    (step) => {
+      if (step.minAmountMinor === undefined || step.maxAmountMinor === undefined) return true;
+      // zod runs this even when a bound failed its own pattern, with the raw text: only digits
+      // are compared, and a malformed bound is reported by its pattern alone.
+      const min = digitsToBigInt(step.minAmountMinor);
+      const max = digitsToBigInt(step.maxAmountMinor);
+      return min === undefined || max === undefined || min < max;
+    },
     { message: 'minAmountMinor must be less than maxAmountMinor', path: ['maxAmountMinor'] },
   );
 
@@ -131,7 +135,7 @@ export type InboxQuery = z.infer<typeof inboxQuerySchema>;
 export const projectApprovalsQuerySchema = z
   .object({
     workflowKey: z.enum(WORKFLOW_KEYS).optional(),
-    round: z.coerce.number().int().min(1).optional(),
+    round: numberInput(z.number().int().min(1)).optional(),
   })
   .strict();
 export type ProjectApprovalsQuery = z.infer<typeof projectApprovalsQuerySchema>;
