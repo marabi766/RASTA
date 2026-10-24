@@ -12,6 +12,7 @@ import {
 } from '@/ui';
 import { formatJalaliDateTime, formatMoney, toPersianDigits } from '@/lib/format';
 import { bidStatusLabel } from '@/lib/bid-fields';
+import { roleLabel } from '@/lib/organization-fields';
 import {
   OWNER_RESENT_NOTE,
   ownerDoneText,
@@ -20,6 +21,14 @@ import {
   type OwnerDone,
 } from '@/lib/tender-owner-fields';
 import type { ReadResult } from '@/server/assets';
+import {
+  THRESHOLD_WARNING_TEXT,
+  THRESHOLD_REJECT_TEXT,
+  THRESHOLD_REQUIRED_TEXT,
+  THRESHOLD_UNREAD_TEXT,
+  THRESHOLD_PREVIEW_NOTE,
+} from '@/lib/procurement-threshold-fields';
+import type { ThresholdPreview } from '@/server/tender-owner';
 import type { ApprovalRequest, OwnerBids, OwnerNote } from '@/server/tender-owner';
 
 /**
@@ -70,6 +79,8 @@ function Notes({ notes }: { readonly notes: readonly OwnerNote[] }) {
 }
 
 export interface PublicationSectionProps {
+  readonly thresholdPreview?: ReadResult<ThresholdPreview> | null;
+  readonly tenderVersion?: number;
   /** The newest publication request; null when not read (the tender is past its draft). */
   readonly request: ReadResult<ApprovalRequest | null> | null;
   readonly notes: readonly OwnerNote[];
@@ -77,15 +88,46 @@ export interface PublicationSectionProps {
 }
 
 /** The publication and its approval round: who decides, and where each step stands. */
-export function PublicationSection({ request, notes, commands }: PublicationSectionProps) {
+export function PublicationSection({
+  request,
+  notes,
+  commands,
+  thresholdPreview,
+  tenderVersion,
+}: PublicationSectionProps) {
   return (
     <Section headingId="tender-publication" title="انتشار و موافقت">
       <div className="flex flex-col gap-4">
+        {thresholdPreview ? (
+          <ThresholdPreviewView result={thresholdPreview} tenderVersion={tenderVersion} />
+        ) : null}
         <RequestView request={request} />
         <Notes notes={notes} />
         {commands}
       </div>
     </Section>
+  );
+}
+
+export function ThresholdPreviewView({
+  result,
+  tenderVersion,
+}: {
+  readonly result: ReadResult<ThresholdPreview>;
+  readonly tenderVersion?: number;
+}) {
+  if (result.kind !== 'OK' || result.data.tenderVersion !== tenderVersion)
+    return <Alert tone="warning">{THRESHOLD_UNREAD_TEXT}</Alert>;
+  const decision = result.data.decision;
+  return (
+    <div>
+      {decision === 'WARN' ? <Alert tone="warning">{THRESHOLD_WARNING_TEXT}</Alert> : null}
+      {decision === 'REJECT' ? <Alert tone="danger">{THRESHOLD_REJECT_TEXT}</Alert> : null}
+      {decision === 'ESTIMATE_REQUIRED' ? (
+        <Alert tone="danger">{THRESHOLD_REQUIRED_TEXT}</Alert>
+      ) : null}
+      <p className="text-sm text-content-muted">{THRESHOLD_PREVIEW_NOTE}</p>
+    </div>
   );
 }
 
@@ -141,6 +183,9 @@ export function RequestView({
           <dd>{formatJalaliDateTime(latest.requestedAt)}</dd>
         </div>
       </dl>
+      {latest.procurementThresholdWarning ? (
+        <Alert tone="warning">{THRESHOLD_WARNING_TEXT}</Alert>
+      ) : null}
       <ol className="flex flex-col gap-2" aria-label="مراحل موافقت">
         {latest.steps.map((step) => (
           <li
@@ -154,7 +199,7 @@ export function RequestView({
             <span className="text-content-muted">
               {' '}
               · سازمان <Identifier>{step.authorityOrganizationId}</Identifier> · نقش{' '}
-              <Identifier>{step.authorityRole}</Identifier> · {stepStatusLabel(step.status)}
+              {roleLabel(step.authorityRole)} · {stepStatusLabel(step.status)}
               {step.decidedAt ? ` · ${formatJalaliDateTime(step.decidedAt)}` : ''}
             </span>
           </li>

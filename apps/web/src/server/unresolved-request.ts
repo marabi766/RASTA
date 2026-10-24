@@ -7,7 +7,7 @@ import { webServerEnv } from './env';
 import type { RedisLike } from './refresh-coordinator';
 import type { WebSession } from './session';
 import { signPayload, verifyPayload } from './signed-payload';
-import { MAX_CLOCK_SKEW_MS, policyOf } from './unresolved-request-policy';
+import { LEGACY_V1_SCOPES, MAX_CLOCK_SKEW_MS, policyOf } from './unresolved-request-policy';
 import {
   deadlineOf,
   INFLIGHT_LEASE_MS,
@@ -54,14 +54,21 @@ import {
  *      again only when the purpose's policy says the service answers a repeated
  *      key with the first result (`retry`); otherwise the person reconciles.
  *      The store unreachable or unreadable: `UNAVAILABLE` — nothing is sent.
+ *      The record's deadline comes back with `RESERVED`: the dispatch sends it to the
+ *      owning service, which compares it with its own clock (PM decision D-065).
  *   2. The dispatch.
  *   3. `settleUnresolved`, fenced by the record's `id` and this attempt's id:
  *      `CONFIRMED` deletes; `REFUSED` / `NEVER_SENT` delete only a record this
  *      attempt created and that was never ambiguous (a refusal of a *retry* says
- *      nothing about the earlier attempt), else put it back to `UNRESOLVED`;
- *      `UNRESOLVED` keeps it. A settle that cannot reach the store is not an
- *      error to the person: the in-flight record turns `UNRESOLVED` by itself
- *      once its lease (`INFLIGHT_LEASE_MS`) runs out.
+ *      nothing about the earlier attempt — this holds for EVERY refusal, a service's
+ *      `REPLAY_WINDOW_CLOSED` and this portal's own pre-dispatch deadline check
+ *      included: they prove only that THIS attempt did not execute), else put it
+ *      back to `UNRESOLVED`; `UNRESOLVED` keeps it. A settle that cannot reach the
+ *      store is not an error to the person: the in-flight record turns `UNRESOLVED`
+ *      by itself once its lease (`INFLIGHT_LEASE_MS`) runs out. **Time never
+ *      releases a hold** (D-065): an aged lease means ambiguous, never free — only
+ *      a dispatch proven not sent (`NEVER_SENT`, same attempt) or a person's
+ *      explicit release (with the duplicate-risk confirmation) deletes a record.
  *
  * ## The deadline
  *
@@ -296,7 +303,18 @@ export interface ReserveInput {
 }
 
 export type ReserveOutcome =
-  | { readonly kind: 'RESERVED'; readonly attempt: UnresolvedAttempt; readonly retry: boolean }
+  | {
+      readonly kind: 'RESERVED';
+      readonly attempt: UnresolvedAttempt;
+      readonly retry: boolean;
+      /**
+       * The record's deadline after this reserve (a retry's is the earlier of the stored one and the
+       * current window): what the dispatch sends as the replay deadline. Null for a purpose without one.
+       */
+      readonly deadline: number | null;
+      /** The store's time at the reserve. */
+      readonly now: number;
+    }
   | { readonly kind: 'HELD'; readonly reason: HeldReason; readonly request: UnresolvedRequest }
   /** Past its deadline (less the skew budget). `request` is null for a first send: nothing was kept. */
   | { readonly kind: 'EXPIRED'; readonly request: UnresolvedRequest | null }
@@ -368,6 +386,8 @@ export async function reserveUnresolved(
     return {
       kind: 'RESERVED',
       retry: reply.retry,
+      deadline: deadlineOf(reply.record),
+      now: reply.now,
       attempt: { binding: keys, id: reply.record.id, attemptId: reply.record.attemptId },
     };
   } catch (error) {
@@ -474,7 +494,14 @@ export async function releaseUnresolved(
 export async function purgeUnresolved(session: WebSession): Promise<boolean> {
   try {
     const keys = keysFor(session, { purpose: 'purge' });
-    return await defaultStore().purge({ setKey: keys.setKey, org: keys.org, login: keys.login });
+    return await defaultStore().purge({
+      setKey: keys.setKey,
+      org: keys.org,
+      login: keys.login,
+      // What a legacy record's ownership is proven against: derived here from the session, never read
+      // from the stored record.
+      legacyBinds: LEGACY_V1_SCOPES.map((scope) => keysFor(session, scope).bind),
+    });
   } catch (error) {
     if (!(error instanceof UnresolvedStoreUnavailable)) throw error;
     return false;

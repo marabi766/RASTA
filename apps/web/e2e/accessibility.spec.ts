@@ -100,6 +100,7 @@ const SIGNED_IN_PAGES: readonly { readonly path: string; readonly title: string 
   { path: '/maintenance/MNT-SEED-0001', title: /.+/ },
   { path: '/usage', title: 'ثبت کارکرد' },
   { path: '/suppliers', title: 'تامین‌کنندگان' },
+  { path: '/projects', title: 'پروژه‌های عمرانی' },
   { path: '/organizations', title: /.+/ },
 ];
 

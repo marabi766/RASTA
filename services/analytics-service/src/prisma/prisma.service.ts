@@ -14,7 +14,7 @@ import { PrismaClient } from '../generated/prisma';
  * silent cross-tenant read. `tenant-scope.spec.ts` derives the expected list from
  * `schema.prisma`, so an omission fails a unit test rather than passing review.
  */
-export const TENANT_SCOPED_MODELS = ['FactMaintenance'] as const;
+export const TENANT_SCOPED_MODELS = ['FactMaintenance', 'BaselineMetric'] as const;
 
 /**
  * Models that carry an organization column and are still not guarded. None: the only

@@ -470,7 +470,9 @@ describe('what the service says, in fixed Persian words', () => {
     expect(result).toMatchObject({
       kind: 'INVALID',
       fieldErrors: {
-        displayName: INVALID_INPUT_MESSAGE,
+        // A closed, number-only pattern the shared mapper renders itself (write.ts COMMON_PATTERNS);
+        // the sentence the service sent is not shown.
+        displayName: 'این متن دست‌کم ۲ نویسه باشد',
         capabilities: 'هر دسته را فقط یک بار بنویسید',
       },
       message: INVALID_INPUT_MESSAGE,

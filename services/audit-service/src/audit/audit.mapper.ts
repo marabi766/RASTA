@@ -1,5 +1,5 @@
 import { ulid } from 'ulid';
-import { SENSITIVE_KEYS, REDACTED } from '@rasta/logging';
+import { SENSITIVE_KEYS } from '@rasta/logging';
 import type { AuditChange, EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
 import { toContractRefusalProjection } from './contract-refusal-projection';
@@ -160,40 +160,21 @@ export function isSensitiveKey(key: string): boolean {
   return SENSITIVE.has(key.toLowerCase());
 }
 
-/**
- * How AUD-001 represents a payload: it does not.
- *
- * ADR-053 § 5 allows only a bounded, redacted, structured delta in `changes`,
- * and path A cannot build one — a domain envelope carries the new state, not
- * before/after pairs. The honest options were a raw dump or nothing, and a raw
- * dump is the failure the ADR spends a section refusing: it would put bid
- * amounts, sealed payloads and national identifiers into the one table nobody
- * is allowed to delete from.
- *
- * So `changes` stays null in AUD-001 and the payload is never persisted — except
- * for the one event that *is* a before/after pair: `COMMISSION_RULE_CHANGED`,
- * whose allow-listed, validated delta `commission-rule-change-projection.ts`
- * builds (docs/23 D-057). This function exists for the diagnostics path only —
- * it is what a log line or an error may say about a payload — and it returns
- * key names, never values.
- */
-export function describePayloadKeys(payload: unknown): string {
-  if (payload === null || payload === undefined) return '(none)';
-  if (typeof payload !== 'object' || Array.isArray(payload)) return `(${typeof payload})`;
-
-  const keys = Object.keys(payload as Record<string, unknown>);
-  if (keys.length === 0) return '(empty)';
-
-  // Names only, and sensitive names masked even so: a key called
-  // `nationalIdHash` tells an observer the field exists, which is as much as a
-  // diagnostic needs.
-  const shown = keys
-    .slice(0, 20)
-    .map((key) => (isSensitiveKey(key) ? REDACTED : key))
-    .join(',');
-
-  return keys.length > 20 ? `${shown},…(${keys.length} keys)` : shown;
-}
+// How AUD-001 represents a payload: it does not.
+//
+// ADR-053 § 5 allows only a bounded, redacted, structured delta in `changes`,
+// and path A cannot build one — a domain envelope carries the new state, not
+// before/after pairs. The honest options were a raw dump or nothing, and a raw
+// dump is the failure the ADR spends a section refusing: it would put bid
+// amounts, sealed payloads and national identifiers into the one table nobody
+// is allowed to delete from.
+//
+// So `changes` stays null in AUD-001 and the payload is never persisted — except
+// for the one event that *is* a before/after pair: `COMMISSION_RULE_CHANGED`,
+// whose allow-listed, validated delta `commission-rule-change-projection.ts`
+// builds (docs/23 D-057). A diagnostic does not describe the payload either,
+// not even by its key names, which a producer chooses (`refusal-diagnostics.ts`,
+// PR #378 r1 F3).
 
 /** The columns a record takes from its envelope and delivery, on either path. */
 export type AuditEnvelopeProvenance = Pick<

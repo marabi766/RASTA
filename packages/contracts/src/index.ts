@@ -19,14 +19,18 @@ export {
 export type { IdPrefix, OrganizationId, UserId, AssetId } from './common/identifiers';
 
 export {
+  DISPLAY_TEXT_PATTERN,
   WITHOUT_BIDI_CONTROL,
   WITHOUT_CONTROL_CHARACTER,
   UNSUPPORTED_CHARACTERS,
   containsBidiControl,
+  displayText,
   plainText,
   referenceId,
   withoutBidiControlDeep,
 } from './common/text';
+
+export { withMaxKeys } from './common/bounds';
 
 export {
   CURRENCIES,
@@ -42,14 +46,19 @@ export {
   addMoney,
   subtractMoney,
   applyBasisPoints,
+  digitsToBigInt,
 } from './common/money';
 export type { Currency, Money, SignedMoney } from './common/money';
+
+export { numberInput } from './common/number-input';
 
 export { BUSINESS_LINES, businessLineSchema } from './common/business-line';
 export type { BusinessLine } from './common/business-line';
 
 export { ERROR_CODES, ERROR_STATUS, errorDetailSchema, apiErrorSchema } from './common/errors';
 export type { ErrorCode, ErrorDetail, ApiError } from './common/errors';
+
+export { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from './common/replay-window';
 
 export {
   DEFAULT_PAGE_SIZE,
@@ -123,8 +132,17 @@ export {
   brokerAcls,
   brokerAclDocument,
   brokerTopics,
+  brokerTopicLine,
+  deadLetterSources,
   BROKER_PROFILES,
 } from './events/broker-acls';
+export {
+  TOPIC_MESSAGE_MAX_BYTES,
+  DLQ_HEADER_VALUE_MAX_BYTES,
+  DLQ_ADDED_HEADERS_MAX_BYTES,
+  gzipGrowthMaxBytes,
+  deadLetterMessageMaxBytes,
+} from './events/dead-letter-size';
 export type {
   AclBinding,
   AclOperation,
@@ -262,6 +280,11 @@ export type {
   ShipmentDispatchedPayload,
   ShipmentDeliveredPayload,
 } from './events/inventory-shipments';
+export {
+  PROCUREMENT_THRESHOLDS_KEY,
+  procurementThresholdsSchema,
+} from './common/procurement-thresholds';
+export type { ProcurementThresholds } from './common/procurement-thresholds';
 export type {
   AuditOutcome,
   AuditTrailActor,

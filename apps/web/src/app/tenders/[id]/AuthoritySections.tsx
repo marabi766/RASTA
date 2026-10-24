@@ -6,6 +6,7 @@ import { awardRequestStatusLabel } from '@/lib/tender-evaluation-fields';
 import { stepStatusLabel } from '@/lib/tender-owner-fields';
 import type { AuthorityNote, AuthorityStep } from '@/server/tender-authority';
 
+import { THRESHOLD_WARNING_TEXT } from '@/lib/procurement-threshold-fields';
 import { StepBid } from './EvaluationSections';
 
 /**
@@ -137,6 +138,9 @@ function AuthoritySteps({ steps }: { readonly steps: readonly AuthorityStepView[
                 </dd>
               </div>
             </dl>
+            {step.request?.procurementThresholdWarning ? (
+              <Alert tone="warning">{THRESHOLD_WARNING_TEXT}</Alert>
+            ) : null}
             {step.request?.bid ? <StepBid bid={step.request.bid} /> : null}
             {notes.map((note) => (
               <Alert key={note} tone="info">

@@ -64,9 +64,15 @@ Object.assign(process.env, {
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const actions = require('./supplier-actions') as typeof import('./supplier-actions');
-const { readUnresolved, releaseToken, reserveUnresolved, useUnresolvedStore } =
-  require('@/server/unresolved-request') as typeof import('@/server/unresolved-request');
-const { memoryUnresolvedStore, redisUnresolvedStore, recordKeyPrefix } =
+const {
+  purgeUnresolved,
+  readUnresolved,
+  releaseToken,
+  requestDigest,
+  reserveUnresolved,
+  useUnresolvedStore,
+} = require('@/server/unresolved-request') as typeof import('@/server/unresolved-request');
+const { MAX_PENDING_PER_LOGIN, memoryUnresolvedStore, redisUnresolvedStore, recordKeyPrefix } =
   require('@/server/unresolved-request-store') as typeof import('@/server/unresolved-request-store');
 const { policyOf, purposePolicies } =
   require('@/server/unresolved-request-policy') as typeof import('@/server/unresolved-request-policy');
@@ -203,6 +209,7 @@ describe.each(BACKENDS)('supplier-write holds on %s', (_name, real) => {
       ['a numeric deadline on a NONE purpose', edit((r) => (r.deadline = Date.now() + 1e6))],
       ['an unknown state', edit((r) => (r.state = 'BOGUS'))],
       ['the project-create purpose', edit((r) => (r.purpose = 'project-create'))],
+      ['a purpose the table does not know', edit((r) => (r.purpose = 'future-purpose'))],
       ['another organization', edit((r) => (r.org = 'ORG-OTHER'))],
       ['another login', edit((r) => (r.login = 'f'.repeat(64)))],
       ['another target', edit((r) => (r.target = 'supplier:SUP_OTHER'))],
@@ -273,5 +280,60 @@ describe.each(BACKENDS)('supplier-write holds on %s', (_name, real) => {
         expect(suspendSupplier).toHaveBeenCalledTimes(1);
       },
     );
+
+    // Fail closed beyond the transport: a slot is freed only by a person's own release or by the
+    // record's own expiry — never by a full store, an unreadable member or a purge that did not finish.
+    const hold = (supplierId: string, key: string) =>
+      reserveUnresolved(session, supplierWriteScope(supplierId), {
+        key,
+        digest: requestDigest(session, 'supplier-write', { supplierId }),
+        ref: null,
+        issuedAt: Date.now(),
+        deadline: null,
+        windowMs: null,
+      });
+
+    it('capacity exhausted: the next supplier write is refused, nothing is evicted, no slot is freed', async () => {
+      for (let i = 0; i < MAX_PENDING_PER_LOGIN; i += 1) {
+        expect((await hold(`SUP_CAP_${i}`, `sub_${i}`)).kind).toBe('RESERVED');
+      }
+      const before = await rawOf.keys(session.organizationId!, mem);
+      expect(before).toHaveLength(MAX_PENDING_PER_LOGIN);
+      expect((await hold('SUP_CAP_NEW', 'sub_new')).kind).toBe('CAPACITY');
+      // The same supplier again is its own scope: held, not a reason to make room.
+      expect((await hold('SUP_CAP_0', 'sub_0')).kind).not.toBe('CAPACITY');
+      expect((await rawOf.keys(session.organizationId!, mem)).sort()).toEqual([...before].sort());
+    });
+
+    it('a failed purge (a member that is not valid) frees no slot and deletes nothing', async () => {
+      suspendSupplier.mockResolvedValue(lost);
+      await suspend();
+      const key = await only();
+      const good = (await rawOf.get(key, mem))!;
+      expect((await hold('SUP_SECOND', 'sub_second')).kind).toBe('RESERVED');
+      const bad = edit((r) => (r.purpose = 'future-purpose'))(good);
+      await rawOf.set(key, bad, mem);
+      const keysBefore = (await rawOf.keys(session.organizationId!, mem)).sort();
+
+      expect(await purgeUnresolved(session)).toBe(false);
+
+      expect((await rawOf.keys(session.organizationId!, mem)).sort()).toEqual(keysBefore);
+      expect(await rawOf.get(key, mem)).toBe(bad);
+    });
+
+    it('a legacy-shaped record under the supplier slot is not read as this login’s and stays', async () => {
+      suspendSupplier.mockResolvedValue(lost);
+      await suspend();
+      const key = await only();
+      const record = JSON.parse((await rawOf.get(key, mem))!);
+      record.v = 1;
+      for (const f of ['purpose', 'target', 'org', 'login', 'deadline']) delete record[f];
+      const legacy = JSON.stringify(record);
+      await rawOf.set(key, legacy, mem);
+
+      expect(await purgeUnresolved(session)).toBe(false);
+      expect(await readUnresolved(session, scope())).toEqual({ kind: 'UNAVAILABLE' });
+      expect(await rawOf.get(key, mem)).toBe(legacy);
+    });
   });
 });

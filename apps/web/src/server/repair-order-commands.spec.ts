@@ -30,6 +30,7 @@ import {
   sealRepairOrderBaseline,
   startRepair,
 } from './repair-order-commands';
+import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
 
 /**
@@ -642,13 +643,13 @@ describe('writing', () => {
       });
     });
 
-    it('shows a sentence under a code with no fallback as it arrived, never hidden', async () => {
+    it('shows the generic Persian sentence under a code with no fallback, never the English', async () => {
       const result = await call(
         recording(409, { code: 'SOME_NEW_CODE', message: 'A repair order cannot be frobbed' }).impl,
       );
       expect(result).toMatchObject({
         kind: 'INVALID',
-        message: 'A repair order cannot be frobbed',
+        message: GENERIC_REFUSAL_MESSAGE,
       });
     });
   });

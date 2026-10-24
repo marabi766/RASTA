@@ -56,6 +56,7 @@ export function classifyServices({
  *   * TRUNCATE, REFERENCES or TRIGGER on any table;
  *   * membership in any role that owns something here, is named `*_migrator`,
  *     or is superuser-capable;
+ *   * extension relation writes, including inherited/PUBLIC and column grants;
  *   * any right on the migration ledger `_prisma_migrations`, table or column.
  */
 export const FINDINGS_SQL = String.raw`
@@ -109,6 +110,22 @@ SELECT finding FROM (
   SELECT priv || ' on ' || t.nspname || '.' || t.relname
     FROM user_tables t, me, unnest(ARRAY['TRUNCATE', 'REFERENCES', 'TRIGGER']) priv
    WHERE t.relkind IN ('r', 'p') AND has_table_privilege(me.oid, t.oid, priv)
+  UNION ALL
+  SELECT priv || ' on extension relation ' || t.nspname || '.' || t.relname
+    FROM user_tables t, me,
+         unnest(ARRAY['INSERT', 'UPDATE', 'DELETE', 'REFERENCES']) priv
+   WHERE t.relkind IN ('r', 'p', 'v', 'm', 'f')
+     AND EXISTS (SELECT 1 FROM pg_depend d
+                  WHERE d.classid = 'pg_class'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+     AND (has_table_privilege(me.oid, t.oid, priv)
+          OR (priv IN ('INSERT', 'UPDATE', 'REFERENCES') AND has_any_column_privilege(me.oid, t.oid, priv)))
+  UNION ALL
+  SELECT priv || ' on extension sequence ' || t.nspname || '.' || t.relname
+    FROM user_tables t, me, unnest(ARRAY['USAGE', 'UPDATE']) priv
+   WHERE t.relkind = 'S'
+     AND EXISTS (SELECT 1 FROM pg_depend d
+                  WHERE d.classid = 'pg_class'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+     AND has_sequence_privilege(me.oid, t.oid, priv)
   UNION ALL
   SELECT 'member of ' || m.rolname || ' (could SET ROLE to an owner or superuser-capable role)'
     FROM pg_roles m, me

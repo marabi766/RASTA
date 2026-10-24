@@ -3,9 +3,12 @@ import {
   amountMinorSchema,
   cursorPaginationSchema,
   currencySchema,
+  displayText,
+  digitsToBigInt,
   seedIdSchema,
   ID_PREFIXES,
   referenceId,
+  numberInput,
 } from '@rasta/contracts';
 
 /**
@@ -73,9 +76,14 @@ export const MAX_AMOUNT_MINOR = 9_223_372_036_854_775_807n;
  * (`amountMinorSchema`) and no larger than {@link MAX_AMOUNT_MINOR}.
  */
 export const boundedAmountMinorSchema = amountMinorSchema
-  .refine((value) => BigInt(value) <= MAX_AMOUNT_MINOR, {
-    message: 'Amount is larger than the maximum this system can hold (9223372036854775807)',
-  })
+  // zod runs this even when the pattern failed, with the raw text: only digits are converted.
+  .refine(
+    (value) => {
+      const amount = digitsToBigInt(value);
+      return amount === undefined || amount <= MAX_AMOUNT_MINOR;
+    },
+    { message: 'Amount is larger than the maximum this system can hold (9223372036854775807)' },
+  )
   .describe('Minor units, as a string of digits, at most 9223372036854775807.');
 
 export const maintenanceTypeSchema = z.enum(MAINTENANCE_TYPES);
@@ -86,24 +94,6 @@ export const severitySchema = z.enum(BREAKDOWN_SEVERITIES);
 export const repairOrderStatusSchema = z.enum(REPAIR_ORDER_STATUS_VALUES);
 export const partSourceSchema = z.enum(PART_SOURCES);
 export const directCostCategorySchema = z.enum(DIRECT_COST_CATEGORIES);
-
-/**
- * Persian display text, allowing ZWNJ and the usual punctuation.
- *
- * The lookahead refuses every bidirectional control (`\p{Bidi_Control}`): the
- * script class alone admits U+061C ARABIC LETTER MARK, an Arabic-script one.
- * One pattern, so the published OpenAPI `pattern` states both rules.
- */
-const displayText = (min: number, max: number) =>
-  z
-    .string()
-    .trim()
-    .min(min)
-    .max(max)
-    .regex(
-      /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/:+]+$/u,
-      'Contains unsupported characters',
-    );
 
 /**
  * A non-negative quantity with at most two decimals, accepted as a string.
@@ -139,14 +129,14 @@ const partQuantity = z
 
 const scheduleIntervals = {
   /** Elapsed days since the last service. */
-  intervalDays: z.coerce.number().int().min(1).max(3650).optional(),
+  intervalDays: numberInput(z.number().int().min(1).max(3650)).optional(),
   /** Engine hours since the last service. */
   intervalHours: quantity(8).optional(),
   /** Kilometres since the last service. */
   intervalKilometres: quantity(10).optional(),
 
   /** How far ahead of each trigger the schedule announces itself. */
-  leadDays: z.coerce.number().int().min(0).max(365).optional(),
+  leadDays: numberInput(z.number().int().min(0).max(365)).optional(),
   leadHours: quantity(8).optional(),
   leadKilometres: quantity(10).optional(),
 };
@@ -214,10 +204,10 @@ export type CreateScheduleDto = z.infer<typeof createScheduleSchema>;
 export const updateScheduleSchema = z
   .object({
     title: displayText(2, 200).optional(),
-    intervalDays: z.coerce.number().int().min(1).max(3650).nullable().optional(),
+    intervalDays: numberInput(z.number().int().min(1).max(3650)).nullable().optional(),
     intervalHours: quantity(8).nullable().optional(),
     intervalKilometres: quantity(10).nullable().optional(),
-    leadDays: z.coerce.number().int().min(0).max(365).nullable().optional(),
+    leadDays: numberInput(z.number().int().min(0).max(365)).nullable().optional(),
     leadHours: quantity(8).nullable().optional(),
     leadKilometres: quantity(10).nullable().optional(),
     /**

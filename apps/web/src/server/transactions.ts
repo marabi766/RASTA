@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText, toPersianDigits } from '@/lib/format';
 import {
   DISPUTE_COMMAND_FIELDS,
@@ -281,12 +282,7 @@ export function parseDisputeCommand(input: DisputeFormInput): ParsedDisputeComma
     return { ok: true, request: { command, body: { [field]: text } } };
   }
 
-  const fieldErrors: Partial<Record<DisputeField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const key = issue.path[0];
-    if (key === field) fieldErrors[field] ??= issue.message;
-  }
-  return { ok: false, command, fieldErrors };
+  return { ok: false, command, fieldErrors: firstIssuePerField(parsed.error, [field]) };
 }
 
 /**

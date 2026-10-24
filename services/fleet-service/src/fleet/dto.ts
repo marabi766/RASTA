@@ -1,5 +1,12 @@
 import { z } from 'zod';
-import { cursorPaginationSchema, seedIdSchema, ID_PREFIXES, plainText } from '@rasta/contracts';
+import {
+  cursorPaginationSchema,
+  displayText,
+  seedIdSchema,
+  ID_PREFIXES,
+  plainText,
+  numberInput,
+} from '@rasta/contracts';
 
 /**
  * Request and response shapes for fleet.
@@ -28,24 +35,6 @@ export const usageSourceSchema = z.enum(USAGE_SOURCES);
 export const assignmentEndReasonSchema = z.enum(ASSIGNMENT_END_REASONS);
 
 /**
- * Persian display text, allowing ZWNJ and the usual punctuation.
- *
- * The lookahead refuses every bidirectional control (`\p{Bidi_Control}`): the
- * script class alone admits U+061C ARABIC LETTER MARK, an Arabic-script one.
- * One pattern, so the published OpenAPI `pattern` states both rules.
- */
-const displayText = (min: number, max: number) =>
-  z
-    .string()
-    .trim()
-    .min(min)
-    .max(max)
-    .regex(
-      /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/:+]+$/u,
-      'Contains unsupported characters',
-    );
-
-/**
  * A non-negative quantity with at most two decimals, accepted as a string.
  *
  * A string rather than a number for the same reason money is (ADR-022): the
@@ -59,9 +48,58 @@ const quantity = (maxIntegerDigits: number) =>
     .string()
     .trim()
     .regex(/^\d+(\.\d{1,2})?$/, 'Expected a non-negative number with at most two decimals')
+    .transform(canonicalQuantity)
     .refine((value) => (value.split('.')[0] ?? '').length <= maxIntegerDigits, {
       message: `At most ${maxIntegerDigits} digits before the decimal point`,
     });
+
+// ---------------------------------------------------------------------------
+// Canonical forms
+//
+// One value, one spelling — before a value is length-checked, compared, hashed
+// or stored. A `clientReference` replays only to an equal request (UsageService),
+// and two spellings of the same reading must not be told apart there (#372 r1
+// F1). Each is exact: no float, no rounding. Omitted stays omitted: these apply
+// to values present, so "no hours" and "0 hours" remain two requests.
+// ---------------------------------------------------------------------------
+
+/**
+ * A quantity's digits, by exact value: `"7.50"`, `"07.5"` → `"7.5"`; `"7.00"` →
+ * `"7"`; `"0.0"` → `"0"`. String work on a value `quantity` has already matched,
+ * never a float.
+ */
+export function canonicalQuantity(value: string): string {
+  const [integer = '', fraction = ''] = value.split('.');
+  const whole = integer.replace(/^0+(?=\d)/, '');
+  const decimals = fraction.replace(/0+$/, '');
+  return decimals ? `${whole}.${decimals}` : whole;
+}
+
+/**
+ * An instant in one UTC spelling, `toISOString()`'s: `"…06:00:00Z"` and
+ * `"…06:00:00.000Z"` → `"…06:00:00.000Z"`. That is also exactly what the
+ * column keeps — a JS `Date`, milliseconds — so a finer fraction the stored
+ * value cannot tell apart is not told apart here either.
+ */
+export function canonicalInstant(value: string): string {
+  return new Date(value).toISOString();
+}
+
+/**
+ * Free text in one spelling: CRLF and lone CR → LF, and Unicode NFC, so a
+ * precomposed `"é"` (U+00E9) and `"e"` + U+0301 are one note (#372 r2 F1), as
+ * is a Persian letter typed precomposed or with its combining mark. Applied
+ * before the length check, so the limit counts the composed form.
+ */
+export function canonicalText(value: string): string {
+  return value.replace(/\r\n?/g, '\n').normalize('NFC');
+}
+
+/**
+ * An instant as `datetime()` accepts it (UTC, `Z`), in its canonical spelling.
+ * `datetime()` has already refused a date `Date` could not represent.
+ */
+const instant = () => z.string().datetime().transform(canonicalInstant);
 
 // ---------------------------------------------------------------------------
 // Driver
@@ -188,8 +226,8 @@ export const recordUsageSchema = z
      */
     driverId: driverId.optional(),
 
-    periodStart: z.string().datetime(),
-    periodEnd: z.string().datetime(),
+    periodStart: instant(),
+    periodEnd: instant(),
 
     /** Engine hours consumed during the period. */
     hours: quantity(8).optional(),
@@ -201,7 +239,16 @@ export const recordUsageSchema = z
     odometer: quantity(10).optional(),
 
     source: usageSourceSchema.default('MANUAL'),
-    notes: displayText(1, 1000).optional(),
+    /**
+     * Made canonical first (LF, NFC), so neither CRLF nor a decomposed
+     * accent is counted twice or makes a different request.
+     */
+    notes: z
+      .preprocess(
+        (value) => (typeof value === 'string' ? canonicalText(value) : value),
+        displayText(1, 1000),
+      )
+      .optional(),
 
     /**
      * Deduplication key for offline capture.
@@ -209,7 +256,9 @@ export const recordUsageSchema = z
      * The product asks for a field PWA that queues readings and syncs later
      * (docs/17), which means the same reading will be submitted twice. A
      * resubmission carrying the same reference returns the original record
-     * instead of creating a second one.
+     * instead of creating a second one — to the same caller sending the same
+     * body only; anything else under a taken reference is `409
+     * IDEMPOTENCY_KEY_REUSED` (UsageService).
      */
     clientReference: plainText().min(8).max(128).optional(),
   })
@@ -288,7 +337,7 @@ export const utilizationQuerySchema = z
     assetId: assetId.optional(),
     from: z.string().datetime().optional(),
     to: z.string().datetime().optional(),
-    limit: z.coerce.number().int().min(1).max(200).default(50),
+    limit: numberInput(z.number().int().min(1).max(200)).default(50),
   })
   .strict();
 

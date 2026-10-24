@@ -584,6 +584,14 @@ Migration نخستش `down.sql` ندارد (مثل `identity`) از این را�
 یک فایل است، نه یک Rollback. برای شکل ۱، افزودن اشیاء تازه به نگاشت `EXPECTED` هم لازم
 است؛ Migrationی که فقط یک Index می‌سازد و نامش در آن نگاشت نیست، **به‌کلی** نامرئی است.
 
+**نکته 2026-10-23 — در CI این سه شکل در چند Job موازی اجرا می‌شوند (task 082).** Job ‏`migration-reversibility-chain`
+یک Matrix است و هر Leg آن، برای گروهی از سرویس‌ها، کل زنجیره را (شکل ۱) روی PostgreSQL خودش بررسی می‌کند؛ شکل ۲ و ۳ و
+گاردهای پایگاه داده در `migration-guards` اجرا می‌شوند. Check الزامی «Migration reversibility and database guards» فقط
+تجمیع این دو است و اگر یکی شکست بخورد یا Skip شود، شکست می‌خورد. سرویس تازه‌ای که Migration دارد باید هم در
+`test:migration` و هم در **یکی** از Shardهای `include` در `.github/workflows/ci.yml` بیاید (در سبک‌ترین Shard)؛ وگرنه
+`scripts/verify-migration-reversible-lib.test.mjs` (با `scripts/ci-migration-reversibility-lib.mjs`) شکست می‌خورد.
+`pnpm test:migration` همچنان همه را پشت سر هم اجرا می‌کند.
+
 ---
 
 ## ۱۴٫۴ تست قرارداد
@@ -933,6 +941,56 @@ PostgreSQL آن نقض کل تراکنش را Abort می‌کند و هر دست
 
 ---
 
+## RUN-003 reference restore — PM decision D-068
+
+For every discovered database (currently all 16), collect a separate schema-only
+SOURCE dump with the same pinned `pg_dump` and flags. Restore it into a fresh
+scratch database, then dump that database to obtain REF. Do not modify SOURCE.
+Compare the real archive's restored schema with REF using strict byte equality;
+strip only the two generated version header lines at their exact header position.
+No SQL, whitespace or expression normalization is allowed.
+
+Between SOURCE and REF only, equal line counts and an identical multiset of CHECK
+identities (database, schema, table, constraint name) are required. Every differing
+line must be a whole `CONSTRAINT "name" CHECK (...)` line in actual CREATE TABLE
+SQL context. Function bodies, comments and COMMENT strings never qualify. A
+non-CHECK difference, dropped/extra object or renamed constraint refuses. Report
+only the observed number of differing CHECK lines per database; do not hard-code
+exceptions or print expressions. Rows/MD5 digests, migration records, sequences,
+ACLs, ledger and wallet remain compared against SOURCE; REF contains schema only.
+
+PostgreSQL CHECK deparse is not idempotent on the first round trip. For example,
+`= ANY ((ARRAY['USER'::character varying, ...])::"text"[])` can return as
+`= ANY (ARRAY[('USER'::character varying)::"text", ...])`.
+
+REF equality proves the backup under test restores to exactly what PostgreSQL itself produces from the source schema. The SOURCE-vs-REF allowance TRUSTS PostgreSQL's own schema dump/restore for CHECK text: it does not prove semantic equivalence of those lines (a same-name CHECK with a different bound would also pass that structural guard — e.g. economic init migration :648-649). The fixed point proves stability for one more round trip only.
+
+Restore REF into a second fresh scratch database and dump it: these bytes must
+also equal REF. Missing REF, missing fixed-point evidence, a skipped allowance
+guard, or any failed reference restore/dump refuses operator acceptance. The drill
+creates both databases with its random suffix inside its existing single active
+PostgreSQL server (512 MiB, one CPU). It drops them after collection, and removes
+the owned cluster/volume on success, failure and signals. Ownership comes from
+names created by this invocation, never from a restored disposable marker.
+All new SQL files are private 0600 inside the 0700 directory. Plain-SQL restore
+stdout/stderr are captured and never printed, including on failure. Writers,
+services, consumers and publishers stay stopped throughout SOURCE, REF and archive
+collection; restored outboxes never publish.
+
+Version 5 JSON includes mandatory `referenceChecked`, `allowanceChecked` and
+`fixedPointEqual` gates plus per-database `before.reference.checkLinesDifferent`
+and `before.reference.milliseconds` (extra reference collection/restore/dump and
+fixed-point time). The PG suite prints that extra time separately in local and CI
+logs. CI budgets remain **10 minutes per job / 5 minutes for the PG test step**;
+main integration job/step budgets are unchanged. Runtime tenant isolation is not
+proved. This drill does not prove PITR, WAL archiving, operational RPO/RTO,
+large-data recovery time, direct equality of every column value (rows use MD5
+rather than collision-free proof), production-role recovery (bootstrap supplies
+development roles), runtime role access or runtime tenant isolation, API or real
+payment flows, Keycloak/Temporal storage, object-storage file contents, backup
+encryption/off-host transfer and retention, Kafka offsets, distributed snapshot
+consistency with active writers, or full-system recovery.
+
 ## ۱۴٫۱۱ اجرای تست‌ها
 
 ```bash
@@ -949,13 +1007,13 @@ pnpm verify                     # دروازه کامل کیفیت
 **اجرای محلی Suite یکپارچگی یک سرویس (از #131، Broker با SASL_SSL).** Suiteها `.env` را خودشان نمی‌خوانند؛ باید در Shell
 Export شود. CI همین متغیرها را صریح در `env:` هر گام می‌دهد (`.github/workflows/ci.yml`، گام «Integration tests»).
 
-**چیدمان CI (از 2026-10-14).** کار یکپارچگی که به ۳۳–۳۴ دقیقه رسیده بود، چهار Job موازی است و هرکدام PostgreSQL،
+**چیدمان CI (از 2026-10-14).** کار یکپارچگی که به ۳۳–۳۴ دقیقه رسیده بود، پنج Job موازی است. چهار Job نخست PostgreSQL،
 Broker و — فقط جایی که Suiteهایش می‌خوانند — MinIO، ClamAV و Redis خودش را بالا می‌آورد: `integration-suites` (گام
 «Integration tests» و سپس نگهبان‌های فقط-PostgreSQL)، `integration-security` (استقلال تست F-25، جداسازی Tenant و
 مجوز، Retry replay)، `integration-coverage-critical` (دروازه‌های پوشش construction، contract و inventory) و
-`integration-coverage` (هفت دروازهٔ پوشش دیگر). همان دستورها، همان `env:` و همان مهلت هر گام. Job ‏`integration` با
+`integration-coverage` (هفت دروازه پوشش دیگر). Job پنجم `integration-backup-drill` فقط PostgreSQL دارد و آزمون بازیابی را اجرا می‌کند. همان دستورها، همان `env:` و همان مهلت هر گام. Job ‏`integration` با
 نام «Integration and security tests» — همان Check الزامی Branch protection و Merge queue — فقط تجمیع می‌کند: با
-`always()` اجرا می‌شود و جز وقتی هر چهار `success` باشند شکست می‌خورد (شکست، لغو یا Skip). ‏`pnpm
+`always()` اجرا می‌شود و جز وقتی هر پنج `success` باشند شکست می‌خورد (شکست، لغو یا Skip). ‏`pnpm
 test:ci-integration-split` (در Job کیفیت) رد می‌کند اگر Job ‏`integration-*`ی بیرون از آن بماند، گامی از کار قدیم در هیچ
 Jobی یا در دو Job اجرا شود، یا گامی بدون زیرساختی که می‌خواند اجرا شود.
 

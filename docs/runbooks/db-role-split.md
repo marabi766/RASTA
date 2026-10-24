@@ -30,8 +30,61 @@ construction، تغییرناپذیری دفتر کل در economic، فقط‌�
 
 - `default` — DML روی همهٔ جدول‌های فعلی، و با `ALTER DEFAULT PRIVILEGES FOR ROLE rasta_<svc>_migrator IN SCHEMA public`
   روی هر جدول و Sequenceی که مهاجر بعداً بسازد.
-- `migration` — هیچ حقی در اسکریپت؛ هر جدول حقش را از Migration خود سرویس می‌گیرد. فقط supplier: روی جدول‌های
+- `migration` — هیچ حقی در اسکریپت؛ هر جدول حقش را از Migration خود سرویس می‌گیرد. supplier و analytics: روی جدول‌های
   فقط‌افزودنی کمتر از DML می‌دهد.
+
+Analytics (RUN-001 PR 2) uses migration-managed grants. Apply the split script first.
+B (`20261024120000_baseline_metric`) grants baseline `SELECT` and revokes baseline/sequence writes
+inside its transaction. P (`20261024130000_analytics_runtime_privileges`) removes legacy table/sequence
+defaults and existing named grants, then grants only `SELECT, INSERT` on `fact_maintenance` and
+`processed_event`; baseline `SELECT` belongs to B and stays. No baseline writer is enabled. A split
+rerun cannot restore blanket DML for analytics, even if an older caller requests `default`.
+P's down revokes only the fact/marker grants; it keeps B's baseline `SELECT` and never restores unsafe
+defaults. B's down takes an exclusive lock and refuses if any baseline row exists; there is no bypass.
+
+P requires **`current_user = rasta_analytics_migrator`**. A DBA/superuser connection is also refused
+with SQLSTATE `42501`. A failed Prisma ledger row blocks later deploys with **P3009**. Recovery:
+
+1. Keep the service stopped. Inspect the failed row for exactly
+   `20261024130000_analytics_runtime_privileges` (`finished_at IS NULL AND rolled_back_at IS NULL`).
+   Confirm the error is the migrator-role refusal and that the migration transaction rolled back:
+   compare relation, column and default ACLs with the pre-deploy snapshot. Do not resolve if any ACL
+   changed or the failure has another cause; investigate first. The guard precedes every ACL statement.
+2. Correct `DATABASE_URL_ANALYTICS_MIGRATOR` in the migration environment so its connected
+   `current_user` is exactly `rasta_analytics_migrator`; confirm it with `SELECT current_user`.
+   Credentials stay in the environment or `.env.migrator`, never command arguments.
+3. Mark only that rolled-back attempt through the migrator wrapper (same procedure as
+   [docs/23 recovery](../23-risks-and-tradeoffs.md)):
+
+   ```bash
+   pnpm --dir services/analytics-service exec node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate resolve --rolled-back 20261024130000_analytics_runtime_privileges
+   pnpm --dir services/analytics-service db:migrate
+   ```
+
+4. Run `pnpm check:db-runtime-privileges` and verify baseline read-only plus fact/marker `SELECT, INSERT`
+   before restarting. Never mark the failed migration `--applied` to bypass its guard.
+
+**Extension relations, all services.** The split runs as superuser and removes extension relation
+writes, including column grants, PUBLIC grants and grants inherited by the runtime role. Existing
+`SELECT` stays: asset's geography distance/nearby reads (`asset.repository.ts:391-417`) and
+construction's GeoJSON/geography conversion (`project.repository.ts:117-130`) use PostGIS indirectly.
+No service needs runtime extension DML. Application relation grants and integrity triggers are unchanged.
+Split reruns keep explicit EXECUTE grants on SECURITY INVOKER functions: economic
+`20261016120000_commission_business_lines/migration.sql:208-210` and procurement
+`20261017120000_aggregation_window_sweep/migration.sql:120` require them. PUBLIC EXECUTE and direct
+runtime EXECUTE on definer/trigger functions are still revoked in the standard split; no new function
+grant is made. Audit keeps its migration-managed function grants as before.
+
+| Mode        | Services                                                                                                                                         | Expected extension rights after split                                                                                            |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `migration` | supplier, analytics                                                                                                                              | At most existing `SELECT`; application grants come from migrations.                                                              |
+| `default`   | construction, identity, notification, organization, asset, fleet, maintenance, marketplace, document, procurement, inventory, contract, economic | At most `SELECT`; ordinary application tables keep DML, sequences keep USAGE/SELECT.                                             |
+| `audit`     | audit (separate split path)                                                                                                                      | No public schema USAGE; at most existing extension `SELECT`, never extension writes. Audit append grants stay in its migrations. |
+
+Fresh bootstrap splits **before** installing extensions as superuser, so no legacy extension DML
+exists yet. Upgrades and reruns with extensions present remove legacy writes after application grants
+are set; running the split twice converges to the same privileges. The catalogue checker also rejects
+effective extension INSERT/UPDATE/DELETE, including column-only and inherited/PUBLIC grants.
 
 **دفتر Migration** (`_prisma_migrations`) را خود اسکریپت تقسیم، **پیش از هر Migration**، با DDL دقیق Prisma می‌سازد:
 مالکش مهاجر است و به هیچ نقشی (نه `PUBLIC`، نه نقش اجرا) حقی ندارد (بازبینی Codex روی #176). اگر Prisma آن را بسازد، از
@@ -128,7 +181,7 @@ psql URL بی گذرواژه می‌گیرد و گذرواژه را از `PGPASS
 
    هیچ داده‌ای جابه‌جا نمی‌شود؛ مالکیت با `REASSIGN OWNED` منتقل می‌شود و دفتر Migration موجود حق نقش اجرا را از دست
    می‌دهد. Idempotent است. در حالت `default` نقش اجرا
-   بلافاصله DML روی جدول‌های موجود دارد، پس سرویس قطع نمی‌شود. (supplier، حالت `migration`: تا گام ۳ حق جدول ندارد.)
+   بلافاصله DML روی جدول‌های موجود دارد، پس سرویس قطع نمی‌شود. (supplier و analytics، حالت `migration`: تا گام ۳ حق جدول ندارند.)
 
 3. **Migration با مهاجر:** `pnpm --filter @rasta/<svc>-service db:migrate` (اسکریپت `DATABASE_URL_<SVC>_MIGRATOR` را
    ترجیح می‌دهد و حق نقش اجرا روی `_prisma_migrations` را می‌گیرد).

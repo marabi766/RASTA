@@ -5,7 +5,6 @@ import {
   AUDIT_DEAD_LETTER_TOPIC,
   DOMAIN_PROJECTOR_CONSUMER,
   DOMAIN_TOPICS,
-  describePayloadKeys,
   isSensitiveKey,
   toAuditEventRecord,
   toEnvelopeProvenance,
@@ -271,36 +270,5 @@ describe('redaction reuses the platform list', () => {
       expect(isSensitiveKey(key.toUpperCase())).toBe(true);
     }
     expect(isSensitiveKey('assetId')).toBe(false);
-  });
-
-  it('describes a payload by key names only, never values', () => {
-    const described = describePayloadKeys({
-      assetId: 'AST_1',
-      password: 'hunter2',
-      token: 'eyJhbGciOi',
-    });
-
-    // The whole point: no value from the payload may appear.
-    expect(described).not.toContain('hunter2');
-    expect(described).not.toContain('eyJhbGciOi');
-    expect(described).not.toContain('AST_1');
-    expect(described).toContain('assetId');
-    expect(described).toContain('[REDACTED]');
-  });
-
-  it('bounds a wide payload description', () => {
-    const wide = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`field${i}`, i]));
-    const described = describePayloadKeys(wide);
-
-    expect(described).toContain('(60 keys)');
-    expect(described.length).toBeLessThan(500);
-  });
-
-  it('handles payloads that are not objects', () => {
-    expect(describePayloadKeys(undefined)).toBe('(none)');
-    expect(describePayloadKeys(null)).toBe('(none)');
-    expect(describePayloadKeys({})).toBe('(empty)');
-    expect(describePayloadKeys('a string')).toBe('(string)');
-    expect(describePayloadKeys([1, 2, 3])).toBe('(object)');
   });
 });

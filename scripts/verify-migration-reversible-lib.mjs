@@ -2628,6 +2628,8 @@ export const EXPECTED = {
     // 20260930180000_tender_publication: a tender's key is never deleted and its
     // public half never changes.
     triggers: [
+      'tg_approval_threshold_snapshot',
+      'tg_tender_procurement_estimate',
       'tg_tender_criterion_freeze',
       'tg_tender_publish_requires_criteria',
       'tg_tender_status_transition',
@@ -2683,6 +2685,7 @@ export const EXPECTED = {
       'bid_evaluation_guard',
       'bid_recusal_guard',
       'bid_score_guard',
+      'guard_tender_procurement_estimate',
       'tender_award_guard',
       'tender_award_recorded',
       'bid_award_recorded',
@@ -2709,6 +2712,9 @@ export const EXPECTED = {
       // A completed idempotency key always names the resource it created.
       'ck_idempotency_completed_has_result',
       'ck_idempotency_claim_token_not_blank',
+      // 20261024120000_idempotency_replay_deadline (PM decision D-065): a stored replay deadline never
+      // lies past its record's own expiry.
+      'ck_idempotency_replay_deadline_within_expiry',
       // The tenant-bound foreign key: a need can only reference a project of
       // its own organization.
       'project_need_organization_id_project_id_fkey',
@@ -2751,6 +2757,8 @@ export const EXPECTED = {
       // its project's tenant, names who acted, has a real bidding window, is
       // never published on a default, and a cancellation says why.
       'tender_organization_id_project_id_fkey',
+      'ck_tender_estimate_nonnegative',
+      'ck_tender_threshold_warning',
       'ck_tender_text_not_blank',
       'ck_tender_actor_recorded',
       'ck_tender_version_positive',

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { firstIssuePerField } from './form-issues';
 import { normalizePersianText, toPersianDigits } from './format';
 import { SESSION_REFUSAL_MESSAGES } from './session-refusal';
 import { SUPPLIER_CAPABILITIES } from './supplier-fields';
@@ -338,13 +339,7 @@ function parseWith<B, F extends string>(
 ): ParsedSupplierForm<B, F> {
   const parsed = schema.safeParse(input);
   if (parsed.success) return { ok: true, body: parsed.data };
-  const fieldErrors: Partial<Record<F, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (typeof field === 'string' && (fields as readonly string[]).includes(field)) {
-      fieldErrors[field as F] ??= issue.message;
-    }
-  }
+  const fieldErrors = firstIssuePerField(parsed.error, fields);
   return { ok: false, fieldErrors };
 }
 

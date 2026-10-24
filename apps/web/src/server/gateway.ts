@@ -162,6 +162,14 @@ export interface GatewayCall {
    * about which routes need one stays where it belongs — in the gateway.
    */
   readonly idempotencyKey?: string;
+  /**
+   * Sent as `Idempotency-Replay-Deadline`: the last instant (ms since the epoch) this request may be
+   * executed under its key. The owning service compares it with the clock that expires its
+   * idempotency record and refuses a later attempt with `409 REPLAY_WINDOW_CLOSED` before it writes
+   * anything (PM decision D-065) — the guarantee a clock in this portal can never give. Only with an
+   * `idempotencyKey`, and only a positive safe integer; anything else is a programming error.
+   */
+  readonly replayDeadline?: number;
   readonly fetchImpl?: typeof fetch;
   /** Overrides {@link GATEWAY_TIMEOUT_MS}. Exists for tests. */
   readonly timeoutMs?: number;
@@ -192,6 +200,14 @@ export interface GatewayResponse<T> {
  */
 export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse<T>> {
   const url = gatewayUrl(call.baseUrl, call.path);
+  if (
+    call.replayDeadline !== undefined &&
+    (call.idempotencyKey === undefined ||
+      !Number.isSafeInteger(call.replayDeadline) ||
+      call.replayDeadline <= 0)
+  ) {
+    throw new Error('a replay deadline needs an idempotency key and a positive safe integer');
+  }
   const correlationId = call.correlationId ?? randomUUID();
   const fetchImpl = call.fetchImpl ?? fetch;
 
@@ -205,6 +221,9 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
         'x-correlation-id': correlationId,
         ...(call.body === undefined ? {} : { 'content-type': 'application/json' }),
         ...(call.idempotencyKey === undefined ? {} : { 'idempotency-key': call.idempotencyKey }),
+        ...(call.replayDeadline === undefined
+          ? {}
+          : { 'idempotency-replay-deadline': String(call.replayDeadline) }),
       },
       body: call.body === undefined ? undefined : JSON.stringify(call.body),
       cache: 'no-store',

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '@rasta/contracts';
+import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, numberInput } from '@rasta/contracts';
 
 /**
  * The request shapes of the notification read API (ADR-054 § 11).
@@ -31,11 +31,7 @@ export type InAppState = (typeof IN_APP_STATES)[number];
  */
 export const listNotificationsQuerySchema = z
   .object({
-    limit: z.coerce
-      .number()
-      .int()
-      .min(1)
-      .max(MAX_PAGE_SIZE)
+    limit: numberInput(z.number().int().min(1).max(MAX_PAGE_SIZE))
       .default(DEFAULT_PAGE_SIZE)
       .describe(`Page size. Defaults to ${DEFAULT_PAGE_SIZE}; above ${MAX_PAGE_SIZE} is refused.`),
     cursor: z
