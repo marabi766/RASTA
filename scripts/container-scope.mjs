@@ -28,6 +28,7 @@ let selected = [...services];
 let failureReason = 'missing or malformed base SHA';
 try {
   if (process.argv.includes('--all')) {
+    failureReason = 'service selection failed';
     selected = servicesToBuild(services, 'all');
   } else {
     const args = process.argv.slice(2);
@@ -56,11 +57,12 @@ try {
     let workflowUnchanged = false;
     if (changed.includes('.github/workflows/ci.yml')) {
       failureReason = 'committed workflow unavailable';
-      workflowUnchanged = await imageWorkflowUnchanged(
-        git('show', `${mergeBase}:.github/workflows/ci.yml`),
-        git('show', 'HEAD:.github/workflows/ci.yml'),
-      );
+      const baseWorkflow = git('show', `${mergeBase}:.github/workflows/ci.yml`);
+      const headWorkflow = git('show', 'HEAD:.github/workflows/ci.yml');
+      failureReason = 'workflow comparison failed';
+      workflowUnchanged = await imageWorkflowUnchanged(baseWorkflow, headWorkflow);
     }
+    failureReason = 'service selection failed';
     selected = servicesToBuild(services, changed, workflowUnchanged);
   }
 } catch {
