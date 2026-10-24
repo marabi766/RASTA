@@ -1,10 +1,11 @@
-import { z } from 'zod';
-
-import type { WebServerEnv } from './env';
 import { webServerEnv } from './env';
-import { signPayload, verifyPayload } from './signed-payload';
+import {
+  createReplayWindowSeconds,
+  replayStamps,
+  type ReplayEnv,
+  type StampTerms,
+} from './replay-stamp';
 import type { WebSession } from './session';
-import { mintSubmissionId } from './submission';
 import { requestDigest } from './unresolved-request';
 
 /**
@@ -30,36 +31,9 @@ import { requestDigest } from './unresolved-request';
  * Bound to this login (`signed-payload.ts`); readable, not secret.
  */
 
-const PURPOSE = 'project-create-replay';
+const STAMPS = replayStamps('project-create-replay');
 
-/** The signature's own expiry: far beyond any window, so "too late" is not "forged". */
-const TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
-
-const replaySchema = z.object({
-  submissionId: z.string().min(1).max(200),
-  /** When the page signed it, milliseconds since the epoch, server clock. */
-  issuedAt: z.number().int().nonnegative(),
-  /**
-   * The last instant the request may be sent, fixed when the page was drawn:
-   * issue time plus the window **as configured then**. The service's own record
-   * of the key expires on a clock that was fixed at claim time, so a setting
-   * raised later cannot lengthen it.
-   */
-  deadline: z.number().int().nonnegative(),
-});
-
-type ReplayEnv = Pick<
-  WebServerEnv,
-  'WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS' | 'WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS'
->;
-
-/** Seconds from the page being drawn until the same request may no longer be sent. */
-export function createReplayWindowSeconds(env: ReplayEnv = webServerEnv()): number {
-  return (
-    env.WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS * 60 * 60 -
-    env.WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS
-  );
-}
+export { createReplayWindowSeconds };
 
 /** The stamp for `submissionId`, from `now`. */
 export function mintCreateStamp(
@@ -68,14 +42,7 @@ export function mintCreateStamp(
   now: number = Date.now(),
   env: ReplayEnv = webServerEnv(),
 ): string {
-  const deadline = now + createReplayWindowSeconds(env) * 1000;
-  return signPayload(
-    session,
-    PURPOSE,
-    { submissionId, issuedAt: now, deadline },
-    TOKEN_TTL_SECONDS,
-    now,
-  );
+  return STAMPS.mint(session, submissionId, '', now, env);
 }
 
 /**
@@ -91,15 +58,8 @@ export function createStampTerms(
   submissionId: string,
   now: number = Date.now(),
   env: ReplayEnv = webServerEnv(),
-): { readonly issuedAt: number; readonly deadline: number; readonly windowMs: number } | null {
-  const payload = verifyPayload(session, PURPOSE, token, replaySchema, now);
-  if (payload === null || payload.submissionId !== submissionId) return null;
-  const windowMs = createReplayWindowSeconds(env) * 1000;
-  return {
-    issuedAt: payload.issuedAt,
-    deadline: Math.min(payload.deadline, payload.issuedAt + windowMs),
-    windowMs,
-  };
+): StampTerms | null {
+  return STAMPS.terms(session, token, submissionId, '', now, env);
 }
 
 /** A fresh submission id for the create form, with its stamp. */
@@ -108,8 +68,7 @@ export function mintCreateSubmission(
   now: number = Date.now(),
   env: ReplayEnv = webServerEnv(),
 ): { readonly id: string; readonly replay: string } {
-  const id = mintSubmissionId(session);
-  return { id, replay: mintCreateStamp(session, id, now, env) };
+  return STAMPS.mintSubmission(session, '', now, env);
 }
 
 /**
@@ -124,13 +83,7 @@ export function checkCreateStamp(
   now: number = Date.now(),
   env: ReplayEnv = webServerEnv(),
 ): 'OK' | 'EXPIRED' | null {
-  const payload = verifyPayload(session, PURPOSE, token, replaySchema, now);
-  if (payload === null || payload.submissionId !== submissionId) return null;
-  const deadline = Math.min(
-    payload.deadline,
-    payload.issuedAt + createReplayWindowSeconds(env) * 1000,
-  );
-  return now > deadline ? 'EXPIRED' : 'OK';
+  return STAMPS.check(session, token, submissionId, '', now, env);
 }
 
 /** Where the create form's unresolved request is kept (`server/unresolved-request.ts`); the organization comes from the login. */

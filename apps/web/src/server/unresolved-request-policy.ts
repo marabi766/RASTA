@@ -11,6 +11,7 @@ import { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
  * | purpose          | retry | deadline   | stored as                         |
  * | ---------------- | ----- | ---------- | --------------------------------- |
  * | `project-create` | true  | `REQUIRED` | a finite integer (ms since epoch) |
+ * | `project-need-create` | false | `NONE`  | the string `"NONE"`               |
  *
  *   - `retry` — may an unresolved record with the very same key and body be
  *     sent again. True only where the service answers a repeated key with the
@@ -24,6 +25,12 @@ import { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
  *
  * A purpose that is not in the table is refused (fail closed). Supplier
  * purposes (#366) add their own rows: `retry: false, deadline: 'NONE'`.
+ *
+ * `project-need-create` is `retry: false` although construction-service stores the key of
+ * `POST /v1/projects/{id}/needs`: that endpoint takes no `Idempotency-Replay-Deadline`, so the
+ * service cannot refuse a resend past its own retention (D-065) and the portal alone must not
+ * promise one. An unresolved need create is reconciled by looking at the project's needs, or
+ * released with the duplicate-risk confirmation.
  *
  * ## Who guarantees what (PM decision D-065)
  *
@@ -105,6 +112,7 @@ export interface PurposePolicy {
 
 const PURPOSES: Readonly<Record<string, PurposePolicy>> = {
   'project-create': { retry: true, deadline: 'REQUIRED' },
+  'project-need-create': { retry: false, deadline: 'NONE' },
 };
 
 /** The table, as the scripts receive it. A function so a test can stand in extra purposes. */

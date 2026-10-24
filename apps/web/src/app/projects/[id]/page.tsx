@@ -8,6 +8,12 @@ import {
   type ProjectCommand,
   type ProjectFormValues,
 } from '@/lib/project-commands';
+import {
+  NEED_NOTICES,
+  normalizeNeedValues,
+  type NeedCommand,
+  type NeedFormValues,
+} from '@/lib/project-need-commands';
 import { currentSession } from '@/server/current-session';
 import { readFlash } from '@/server/flash';
 import {
@@ -18,20 +24,32 @@ import {
   sealProjectBaseline,
   type ProjectBaseline,
 } from '@/server/project-commands';
+import {
+  mayAddNeed,
+  mintNeedSubmission,
+  needCreateScope,
+  needEditDigests,
+  offeredNeedCommands,
+  sealNeedBaseline,
+} from '@/server/project-need-commands';
 import { webServerEnv } from '@/server/env';
 import { tokenWriteRoles } from '@/server/realm-roles';
 import {
   fetchExecutionPolicy,
   fetchProject,
   fetchProjectApprovals,
+  fetchProjectNeeds,
   type ProjectApproval,
   type ProjectDetail,
+  type ProjectNeed,
 } from '@/server/projects';
+import { readUnresolved, releaseToken } from '@/server/unresolved-request';
 import type { WebSession } from '@/server/session';
 import { mintSubmissionId } from '@/server/submission';
 import { fetchDemoMode } from '@/server/demo-mode';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
+import { NeedsSection, type AddNeedSlot, type NeedTokens } from './NeedsSection';
 import { ApprovalsSection, ProjectApprovals, type DecisionTokens } from './ProjectApprovals';
 import {
   PolicyState,
@@ -117,6 +135,85 @@ function decisionTokens(
   return tokens;
 }
 
+/** A need's record as the edit form's text — the one source for what it shows and what it signs. */
+function needEditValuesOf(need: ProjectNeed): NeedFormValues {
+  return normalizeNeedValues({
+    title: need.title,
+    description: need.description,
+    quantity: need.quantity ?? '',
+    unit: need.unit ?? '',
+    estimatedCost: need.estimatedCostMinor ?? '',
+  });
+}
+
+/** For each need the commands its status and its project's offer, each with a baseline signed for it. */
+function needTokens(
+  session: WebSession,
+  project: ProjectDetail,
+  needs: readonly ProjectNeed[],
+  editValues: Readonly<Record<string, NeedFormValues>>,
+  canWrite: boolean,
+): NeedTokens {
+  const tokens: Record<
+    string,
+    Partial<Record<NeedCommand, { submissionId: string; baseline: string }>>
+  > = {};
+  for (const need of needs) {
+    const offered = offeredNeedCommands({
+      projectStatus: project.status,
+      needStatus: need.status,
+      canWrite,
+    });
+    const own: Partial<Record<NeedCommand, { submissionId: string; baseline: string }>> = {};
+    for (const command of offered) {
+      const values = editValues[need.id];
+      own[command] = {
+        submissionId: mintSubmissionId(session),
+        baseline: sealNeedBaseline(session, {
+          needId: need.id,
+          projectId: project.id,
+          command,
+          version: need.version,
+          status: need.status,
+          digests: command === 'edit' && values ? needEditDigests(values) : null,
+        }),
+      };
+    }
+    tokens[need.id] = own;
+  }
+  return tokens;
+}
+
+/**
+ * What the area under the needs draws. An unresolved add is shown whatever the
+ * project's status is now (it is only ever released by the person), a form only
+ * for an editable project, a person who may write projects and a list that could
+ * be read; a store that could not say is not "no hold".
+ */
+function addSlot(input: {
+  readonly session: WebSession;
+  readonly projectId: string;
+  readonly projectStatus: string;
+  readonly canWrite: boolean;
+  readonly listRead: boolean;
+  readonly pending: Awaited<ReturnType<typeof readUnresolved>> | null;
+}): AddNeedSlot {
+  if (!input.canWrite) return { kind: 'NOT_OFFERED', reason: 'ROLE' };
+  const offered = mayAddNeed({ projectStatus: input.projectStatus, canWrite: input.canWrite });
+  const pending = input.pending;
+  if (pending?.kind === 'PENDING') {
+    return {
+      kind: 'PENDING',
+      request: pending.request,
+      releaseToken: releaseToken(input.session, needCreateScope(input.projectId), pending.request),
+    };
+  }
+  if (!offered) return { kind: 'NOT_OFFERED', reason: 'STATUS' };
+  if (pending === null || pending.kind === 'UNAVAILABLE') return { kind: 'UNCHECKED' };
+  if (!input.listRead) return { kind: 'LIST_UNREAD' };
+  return { kind: 'FORM', submission: mintNeedSubmission(input.session, input.projectId) };
+}
+
 /** The statuses in which the approval policy decides whether the next step can be taken. */
 const POLICY_RELEVANT = ['DRAFT', 'CHANGES_REQUESTED', 'PENDING_APPROVAL'];
 
@@ -132,10 +229,17 @@ export default async function ProjectPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/projects/${id}`)}`);
 
-  const [result, approvals, demoMode] = await Promise.all([
+  const canWrite = canWriteProjects(tokenWriteRoles(session.accessToken), webServerEnv());
+  const needsCursor = typeof query.needs === 'string' && query.needs !== '' ? query.needs : null;
+
+  const [result, approvals, demoMode, needsRead, pendingAdd] = await Promise.all([
     fetchProject(session, id),
     fetchProjectApprovals(session, id),
     fetchDemoMode(session),
+    fetchProjectNeeds(session, id, needsCursor ?? undefined),
+    // An unresolved add is looked for whatever the project's status is now: it stays
+    // until it is resolved or released, and nothing the person does elsewhere erases it.
+    canWrite ? readUnresolved(session, needCreateScope(id)) : Promise.resolve(null),
   ]);
 
   const project = result.kind === 'OK' ? result.data : null;
@@ -148,7 +252,6 @@ export default async function ProjectPage({
   // "closed" — the request stays offered and the service decides.
   const closed = policy?.kind === 'OK' && policy.data.kind === 'CLOSED';
 
-  const canWrite = canWriteProjects(tokenWriteRoles(session.accessToken), webServerEnv());
   const offered = project
     ? offeredCommands({ status: project.status, canWrite, policyClosed: closed })
     : [];
@@ -159,6 +262,24 @@ export default async function ProjectPage({
       : {};
   const decisions =
     project && approvals.kind === 'OK' ? decisionTokens(session, id, approvals.data) : {};
+
+  const needList = needsRead.kind === 'OK' ? needsRead.data.items : [];
+  const needEditValues = Object.fromEntries(
+    needList.map((need) => [need.id, needEditValuesOf(need)]),
+  );
+  const needCommandTokens = project
+    ? needTokens(session, project, needList, needEditValues, canWrite)
+    : {};
+  const add = addSlot({
+    session,
+    projectId: id,
+    projectStatus: project?.status ?? '',
+    canWrite,
+    listRead: needsRead.kind === 'OK',
+    pending: pendingAdd,
+  });
+  const release = typeof query.release === 'string' ? query.release : undefined;
+  const releaseRefused = release === 'STALE' || release === 'IN_PROGRESS' ? release : null;
 
   const flash = query[FLASH_PARAM];
 
@@ -186,12 +307,24 @@ export default async function ProjectPage({
         <ProjectDetailScreen
           result={result}
           demoMode={demoMode}
-          notice={readFlash(
-            session,
-            typeof flash === 'string' ? flash : undefined,
-            id,
-            PROJECT_NOTICES,
-          )}
+          notice={readFlash(session, typeof flash === 'string' ? flash : undefined, id, [
+            ...PROJECT_NOTICES,
+            ...NEED_NOTICES,
+          ])}
+          needList={
+            project ? (
+              <NeedsSection
+                projectId={id}
+                csrfToken={session.csrfToken}
+                result={needsRead}
+                cursor={needsCursor}
+                tokens={needCommandTokens}
+                editValues={needEditValues}
+                add={add}
+                releaseRefused={releaseRefused}
+              />
+            ) : undefined
+          }
           approvals={
             project ? (
               <ApprovalsSection>

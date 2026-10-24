@@ -14,6 +14,7 @@
     "test": {
       "inputs": [
         "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/docs/api/construction-service.openapi.json",
         "$TURBO_ROOT$/packages/contracts/src/common/errors.ts",
         "$TURBO_ROOT$/packages/contracts/src/common/money.ts",
         "$TURBO_ROOT$/packages/contracts/src/events/inventory-returns.ts",
@@ -40,6 +41,8 @@
         "$TURBO_ROOT$/services/construction-service/src/project/dto.ts",
         "$TURBO_ROOT$/services/construction-service/src/project/execution.service.ts",
         "$TURBO_ROOT$/services/construction-service/src/project/lifecycle.controller.ts",
+        "$TURBO_ROOT$/services/construction-service/src/project/need.service.ts",
+        "$TURBO_ROOT$/services/construction-service/src/project/need.state-machine.ts",
         "$TURBO_ROOT$/services/construction-service/src/project/project.controller.ts",
         "$TURBO_ROOT$/services/construction-service/src/project/project.service.ts",
         "$TURBO_ROOT$/services/construction-service/src/project/project.state-machine.ts",
@@ -140,6 +143,7 @@
     "test:unit": {
       "inputs": [
         "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/docs/api/construction-service.openapi.json",
         "$TURBO_ROOT$/packages/contracts/src/common/errors.ts",
         "$TURBO_ROOT$/packages/contracts/src/common/money.ts",
         "$TURBO_ROOT$/packages/contracts/src/events/inventory-returns.ts",
@@ -166,6 +170,8 @@
         "$TURBO_ROOT$/services/construction-service/src/project/dto.ts",
         "$TURBO_ROOT$/services/construction-service/src/project/execution.service.ts",
         "$TURBO_ROOT$/services/construction-service/src/project/lifecycle.controller.ts",
+        "$TURBO_ROOT$/services/construction-service/src/project/need.service.ts",
+        "$TURBO_ROOT$/services/construction-service/src/project/need.state-machine.ts",
         "$TURBO_ROOT$/services/construction-service/src/project/project.controller.ts",
         "$TURBO_ROOT$/services/construction-service/src/project/project.service.ts",
         "$TURBO_ROOT$/services/construction-service/src/project/project.state-machine.ts",

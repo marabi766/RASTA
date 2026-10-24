@@ -76,6 +76,13 @@ const { memoryUnresolvedStore, UnresolvedStoreUnavailable } =
   require('@/server/unresolved-request-store') as typeof import('@/server/unresolved-request-store');
 const { PROJECT_CREATE_UNRESOLVED, mintCreateSubmission } =
   require('@/server/project-create-replay') as typeof import('@/server/project-create-replay');
+const { NeedsSection } = require('./[id]/NeedsSection') as typeof import('./[id]/NeedsSection');
+const { openNeedBaseline } =
+  require('@/server/project-need-commands') as typeof import('@/server/project-need-commands');
+const { mintNeedSubmission, needCreateScope } =
+  require('@/server/project-need-commands') as typeof import('@/server/project-need-commands');
+const { releaseUnresolved } =
+  require('@/server/unresolved-request') as typeof import('@/server/unresolved-request');
 const { UnresolvedCreateNotice } =
   require('./UnresolvedCreateNotice') as typeof import('./UnresolvedCreateNotice');
 /* eslint-enable @typescript-eslint/no-require-imports */
@@ -392,6 +399,341 @@ describe('/projects/[id]', () => {
     expect(
       propsOf<{ notice?: string }>(ofType(forged, ProjectDetailScreen)[0]).notice,
     ).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The needs on /projects/[id]
+// ---------------------------------------------------------------------------
+
+describe('/projects/[id] — the needs', () => {
+  let memoryStore = memoryUnresolvedStore();
+  beforeEach(() => {
+    memoryStore = memoryUnresolvedStore();
+    useUnresolvedStore(memoryStore);
+  });
+
+  const NEED = (id: string, status: string, over: Record<string, unknown> = {}) => ({
+    id,
+    projectId: 'PRJ_1',
+    title: `نیاز ${id}`,
+    description: 'شرح',
+    quantity: '25.5',
+    unit: 'متر مکعب',
+    estimatedCostMinor: '1500000',
+    status,
+    createdAt: '2026-10-20T08:00:00.000Z',
+    submittedAt: null,
+    withdrawnAt: null,
+    withdrawalReason: null,
+    version: 4,
+    ...over,
+  });
+  const NEEDS = [NEED('NED_1', 'DRAFT'), NEED('NED_2', 'SUBMITTED'), NEED('NED_3', 'WITHDRAWN')];
+  const PAGE_OF = (items: unknown[], over: Record<string, unknown> = {}) => ({
+    kind: 'OK',
+    data: { items, nextCursor: null, hasMore: false, ...over },
+  });
+
+  async function withNeeds(
+    status: string,
+    options: {
+      needs?: unknown;
+      project?: unknown;
+      flash?: string;
+      query?: Record<string, string>;
+    } = {},
+  ) {
+    mockAnswers['fetchProjectNeeds'] = options.needs ?? PAGE_OF(NEEDS);
+    mockAnswers['fetchProject'] = options.project ?? { kind: 'OK', data: PROJECT(status) };
+    mockAnswers['fetchProjectApprovals'] = { kind: 'OK', data: [] };
+    mockAnswers['fetchExecutionPolicy'] = OPEN;
+    return DetailPage({
+      params: Promise.resolve({ id: 'PRJ_1' }),
+      searchParams: Promise.resolve({
+        ...options.query,
+        ...(options.flash ? { flash: options.flash } : {}),
+      }),
+    });
+  }
+
+  type SectionProps = React.ComponentProps<typeof NeedsSection>;
+  const sectionOf = (tree: ReactNode): SectionProps =>
+    propsOf<SectionProps>(ofType(tree, NeedsSection)[0]);
+  const offeredFor = (tree: ReactNode) =>
+    Object.fromEntries(
+      Object.entries(sectionOf(tree).tokens).map(([id, tokens]) => [
+        id,
+        Object.keys(tokens).sort(),
+      ]),
+    );
+
+  it('reads the needs with the page and draws them in a section of their own', async () => {
+    const tree = await withNeeds('DRAFT');
+    expect(mockFetched).toContain('fetchProjectNeeds');
+    expect(ofType(tree, NeedsSection)).toHaveLength(1);
+    expect(sectionOf(tree).result).toEqual(PAGE_OF(NEEDS));
+    expect(sectionOf(tree).cursor).toBeNull();
+    expect(sectionOf(tree).projectId).toBe('PRJ_1');
+  });
+
+  it('passes the page cursor on, and ignores a cursor that is not text', async () => {
+    expect(sectionOf(await withNeeds('DRAFT', { query: { needs: 'CUR_2' } })).cursor).toBe('CUR_2');
+    expect(sectionOf(await withNeeds('DRAFT', { query: { needs: '' } })).cursor).toBeNull();
+  });
+
+  it.each([['DRAFT'], ['CHANGES_REQUESTED']])(
+    'draws, in a %s project, what each need’s status offers',
+    async (status) => {
+      const tree = await withNeeds(status);
+      expect(offeredFor(tree)).toEqual({
+        NED_1: ['edit', 'submit', 'withdraw'],
+        NED_2: ['withdraw'],
+        NED_3: [],
+      });
+      expect(sectionOf(tree).add).toMatchObject({ kind: 'FORM' });
+    },
+  );
+
+  it.each([['PENDING_APPROVAL'], ['APPROVED'], ['IN_PROGRESS'], ['COMPLETED'], ['CANCELLED']])(
+    'draws no need command and no add form in a %s project, and says why',
+    async (status) => {
+      const tree = await withNeeds(status);
+      expect(offeredFor(tree)).toEqual({ NED_1: [], NED_2: [], NED_3: [] });
+      expect(sectionOf(tree).add).toEqual({ kind: 'NOT_OFFERED', reason: 'STATUS' });
+      // The list itself is still drawn.
+      expect(sectionOf(tree).result).toEqual(PAGE_OF(NEEDS));
+    },
+  );
+
+  it('signs each command for itself: the need, the project, the command, the version and the status shown', async () => {
+    const tree = await withNeeds('DRAFT');
+    const tokens = sectionOf(tree).tokens;
+    const session = mockSession.current as Parameters<typeof openNeedBaseline>[0];
+    for (const command of ['edit', 'submit', 'withdraw'] as const) {
+      const token = tokens['NED_1']![command]!;
+      expect(openNeedBaseline(session, token.baseline, command)).toMatchObject({
+        needId: 'NED_1',
+        projectId: 'PRJ_1',
+        command,
+        version: 4,
+        status: 'DRAFT',
+      });
+      // …and for no other command.
+      expect(
+        openNeedBaseline(session, token.baseline, command === 'edit' ? 'submit' : 'edit'),
+      ).toBeNull();
+      expect(token.submissionId).toMatch(/^sub_/);
+    }
+    expect(
+      openNeedBaseline(session, tokens['NED_1']!.edit!.baseline, 'edit')?.digests,
+    ).toMatchObject({ title: expect.any(String), quantity: expect.any(String) });
+    expect(
+      openNeedBaseline(session, tokens['NED_1']!.submit!.baseline, 'submit')?.digests,
+    ).toBeNull();
+    // A submitted need is signed at its own status and version.
+    expect(
+      openNeedBaseline(session, tokens['NED_2']!.withdraw!.baseline, 'withdraw'),
+    ).toMatchObject({ needId: 'NED_2', status: 'SUBMITTED', version: 4 });
+  });
+
+  it('draws every need’s edit form from its own record, with the quantity in canonical form', async () => {
+    const tree = await withNeeds('DRAFT', {
+      needs: PAGE_OF([
+        NEED('NED_1', 'DRAFT', { quantity: '7.5', unit: null, estimatedCostMinor: null }),
+      ]),
+    });
+    expect(sectionOf(tree).editValues['NED_1']).toEqual({
+      title: 'نیاز NED_1',
+      description: 'شرح',
+      quantity: '7.5',
+      unit: '',
+      estimatedCost: '',
+    });
+  });
+
+  it('draws no command for a reader, for the oversight role or for a token with no organization — and reads no hold for them', async () => {
+    const hold = async (session: ReturnType<typeof signedInWith>) => {
+      const sent = mintNeedSubmission(session, 'PRJ_1');
+      const reserved = await reserveUnresolved(session, needCreateScope('PRJ_1'), {
+        key: sent.id,
+        digest: 'digest',
+        ref: sent.replay,
+        issuedAt: Date.now(),
+        deadline: null,
+        windowMs: null,
+      });
+      if (reserved.kind !== 'RESERVED') throw new Error(reserved.kind);
+      await settleUnresolved(reserved.attempt, 'UNRESOLVED');
+    };
+    for (const [index, base] of [
+      signedInWith(['FLEET_MANAGER']),
+      signedInWith(['ORGANIZATION_ADMIN', 'AUDITOR']),
+    ].entries()) {
+      // A login of its own each, so each has a hold of its own.
+      const session = { ...base, csrfToken: `reader-login-${index}` };
+      mockSession.current = session;
+      await hold(session);
+      const tree = await withNeeds('DRAFT');
+      expect(offeredFor(tree)).toEqual({ NED_1: [], NED_2: [], NED_3: [] });
+      expect(sectionOf(tree).add).toEqual({ kind: 'NOT_OFFERED', reason: 'ROLE' });
+    }
+    mockSession.current = signedInWith([], null);
+    const tree = await withNeeds('DRAFT');
+    expect(sectionOf(tree).add).toEqual({ kind: 'NOT_OFFERED', reason: 'ROLE' });
+  });
+
+  it('a stamp minted for the add form is this project’s own', async () => {
+    const tree = await withNeeds('DRAFT');
+    const add = sectionOf(tree).add;
+    if (add.kind !== 'FORM') throw new Error(add.kind);
+    expect(add.submission.id).toMatch(/^sub_/);
+    expect(add.submission.replay).toEqual(expect.any(String));
+  });
+
+  describe('an unresolved add', () => {
+    const remember = async () => {
+      const session = mockSession.current as ReturnType<typeof signedInWith>;
+      const sent = mintNeedSubmission(session, 'PRJ_1');
+      const reserved = await reserveUnresolved(session, needCreateScope('PRJ_1'), {
+        key: sent.id,
+        digest: 'digest',
+        ref: sent.replay,
+        issuedAt: Date.now(),
+        deadline: null,
+        windowMs: null,
+      });
+      if (reserved.kind !== 'RESERVED') throw new Error(reserved.kind);
+      // The response that would have carried the news is lost: only the server's record remains.
+      await settleUnresolved(reserved.attempt, 'UNRESOLVED');
+      return sent;
+    };
+
+    it('is said on every reload and replaces the add form — with no way to send it again, only to release it', async () => {
+      const sent = await remember();
+      for (const query of [{}, { needs: 'CUR_2' }] as Record<string, string>[]) {
+        const add = sectionOf(await withNeeds('DRAFT', { query })).add;
+        if (add.kind !== 'PENDING') throw new Error(add.kind);
+        expect(add.request.key).toBe(sent.id);
+      }
+    });
+
+    it('stays said when the project is no longer editable, and when the needs could not be read', async () => {
+      await remember();
+      for (const tree of [
+        await withNeeds('PENDING_APPROVAL'),
+        await withNeeds('DRAFT', {
+          needs: { kind: 'UNAVAILABLE', status: 503, correlationId: 'c' },
+        }),
+      ]) {
+        expect(sectionOf(tree).add.kind).toBe('PENDING');
+      }
+    });
+
+    it('is another project’s own: the hold of one project does not show on another', async () => {
+      await remember();
+      mockAnswers['fetchProject'] = { kind: 'OK', data: PROJECT('DRAFT', { id: 'PRJ_2' }) };
+      mockAnswers['fetchProjectNeeds'] = PAGE_OF([]);
+      mockAnswers['fetchProjectApprovals'] = { kind: 'OK', data: [] };
+      mockAnswers['fetchExecutionPolicy'] = OPEN;
+      const tree = await DetailPage({
+        params: Promise.resolve({ id: 'PRJ_2' }),
+        searchParams: Promise.resolve({}),
+      });
+      expect(sectionOf(tree).add.kind).toBe('FORM');
+    });
+
+    it('is not another person’s: the same project, another login, sees no hold', async () => {
+      await remember();
+      mockSession.current = { ...signedInWith(['ORGANIZATION_ADMIN']), csrfToken: 'another-login' };
+      expect(sectionOf(await withNeeds('DRAFT')).add.kind).toBe('FORM');
+    });
+
+    it('offers a release that names this record, and the release lets go of it', async () => {
+      const sent = await remember();
+      const add = sectionOf(await withNeeds('DRAFT')).add;
+      if (add.kind !== 'PENDING') throw new Error(add.kind);
+      const session = mockSession.current as Parameters<typeof releaseUnresolved>[0];
+      expect(await releaseUnresolved(session, needCreateScope('PRJ_2'), add.releaseToken)).toBe(
+        'STALE',
+      );
+      expect(await releaseUnresolved(session, needCreateScope('PRJ_1'), add.releaseToken)).toBe(
+        'RELEASED',
+      );
+      expect(sectionOf(await withNeeds('DRAFT')).add.kind).toBe('FORM');
+      expect(sent.id).toMatch(/^sub_/);
+    });
+
+    it('passes a refused release on, and nothing else the query says', async () => {
+      for (const [release, expected] of [
+        ['STALE', 'STALE'],
+        ['IN_PROGRESS', 'IN_PROGRESS'],
+        ['RELEASED', null],
+        ['anything', null],
+      ] as const) {
+        expect(sectionOf(await withNeeds('DRAFT', { query: { release } })).releaseRefused).toBe(
+          expected,
+        );
+      }
+    });
+  });
+
+  it('FAILS CLOSED when the store cannot say: a notice, NO add form, no fresh key', async () => {
+    const fail = async () => {
+      throw new UnresolvedStoreUnavailable(new Error('ECONNREFUSED'));
+    };
+    useUnresolvedStore({ reserve: fail, read: fail, settle: fail, release: fail, purge: fail });
+    const tree = await withNeeds('DRAFT');
+    expect(sectionOf(tree).add).toEqual({ kind: 'UNCHECKED' });
+    // The commands that carry their own version are not held back by the store.
+    expect(offeredFor(tree)['NED_1']).toEqual(['edit', 'submit', 'withdraw']);
+    // A project that is not editable has no add form to hold back.
+    expect((await withNeeds('APPROVED').then(sectionOf)).add).toEqual({
+      kind: 'NOT_OFFERED',
+      reason: 'STATUS',
+    });
+  });
+
+  it.each([
+    [{ kind: 'FORBIDDEN' }],
+    [{ kind: 'NOT_FOUND' }],
+    [{ kind: 'UNAVAILABLE', status: 503, correlationId: 'c' }],
+    [{ kind: 'MALFORMED', correlationId: 'c' }],
+  ])('a needs read that answered %j draws no command and no add form', async (needs) => {
+    const tree = await withNeeds('DRAFT', { needs });
+    expect(sectionOf(tree).result).toEqual(needs);
+    expect(sectionOf(tree).tokens).toEqual({});
+    expect(sectionOf(tree).add).toEqual({ kind: 'LIST_UNREAD' });
+  });
+
+  it('draws no needs section for a project that could not be read', async () => {
+    for (const project of [
+      { kind: 'NOT_FOUND' },
+      { kind: 'FORBIDDEN' },
+      { kind: 'UNAVAILABLE', status: 503, correlationId: 'c' },
+    ]) {
+      const tree = await withNeeds('DRAFT', { project });
+      expect(ofType(tree, NeedsSection)).toHaveLength(0);
+    }
+  });
+
+  it('shows a need’s confirmation only for the project it was signed for', async () => {
+    const session = mockSession.current as Parameters<typeof mintFlash>[0];
+    for (const notice of ['needAdded', 'needUpdated', 'needSubmitted', 'needWithdrawn'] as const) {
+      const mine = await withNeeds('DRAFT', { flash: mintFlash(session, 'PRJ_1', notice) });
+      expect(propsOf<{ notice?: string }>(ofType(mine, ProjectDetailScreen)[0]).notice).toBe(
+        notice,
+      );
+      const other = await withNeeds('DRAFT', { flash: mintFlash(session, 'PRJ_2', notice) });
+      expect(
+        propsOf<{ notice?: string }>(ofType(other, ProjectDetailScreen)[0]).notice,
+      ).toBeUndefined();
+    }
+    // The stale notice of the project's own commands is the need commands' too.
+    const stale = await withNeeds('DRAFT', { flash: mintFlash(session, 'PRJ_1', 'stale') });
+    expect(propsOf<{ notice?: string }>(ofType(stale, ProjectDetailScreen)[0]).notice).toBe(
+      'stale',
+    );
   });
 });
 
