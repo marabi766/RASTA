@@ -12,6 +12,7 @@ import { RecordInspectionForm, RecordPolicyForm } from './assets/[id]/AssetRecor
 import { DeclareAvailabilityForm } from './assets/[id]/AvailabilityForms';
 import { ChangeStatusForm as DriverChangeStatusForm } from './drivers/[id]/ChangeStatusForm';
 import { EndAssignmentForm } from './drivers/[id]/EndAssignmentForm';
+import { NewDriverForm } from './drivers/NewDriverForm';
 import { PlaceOrderForm } from './marketplace/[productId]/PlaceOrderForm';
 import { ReportRequestForm } from './maintenance/ReportRequestForm';
 import { RecordCostForm, RecordPartForm } from './maintenance/[id]/RepairOrderForms';
@@ -55,6 +56,10 @@ jest.mock('./assets/[id]/record-actions', () => {
 jest.mock('./drivers/[id]/actions', () => {
   const { refuse } = jest.requireActual('@/test/refusal');
   return { submitChangeStatus: refuse, submitEndAssignment: refuse };
+});
+jest.mock('./drivers/actions', () => {
+  const { refuse } = jest.requireActual('@/test/refusal');
+  return { submitCreateDriver: refuse };
 });
 jest.mock('./marketplace/[productId]/place-order-actions', () => {
   const { refuse } = jest.requireActual('@/test/refusal');
@@ -178,6 +183,23 @@ const CASES = [
         assignmentId="ASG_01J00000000000000000000000"
         csrfToken={CSRF}
         submissionId={SUBMISSION}
+      />
+    ),
+  },
+  {
+    form: 'register driver (the member picked)',
+    select: 'userId',
+    mount: () => (
+      <NewDriverForm
+        csrfToken={CSRF}
+        submissionId={SUBMISSION}
+        picker={{
+          kind: 'PICK',
+          candidates: [
+            { userId: 'USR_01J00000000000000000000001', name: 'نخست', username: 'one' },
+            { userId: 'USR_01J00000000000000000000002', name: 'دوم', username: 'two' },
+          ],
+        }}
       />
     ),
   },

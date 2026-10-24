@@ -61,13 +61,15 @@ export interface MemberListQuery {
   readonly q?: string;
   readonly role?: string;
   readonly cursor?: string;
+  /** Rows per page; {@link MEMBERS_PER_PAGE} unless a caller reads every page. */
+  readonly limit?: number;
 }
 
 export async function fetchMembers(
   session: WebSession,
   query: MemberListQuery = {},
 ): Promise<ReadResult<MemberPage>> {
-  const search = new URLSearchParams({ limit: String(MEMBERS_PER_PAGE) });
+  const search = new URLSearchParams({ limit: String(query.limit ?? MEMBERS_PER_PAGE) });
   if (query.q) search.set('q', query.q);
   if (query.role) search.set('role', query.role);
   if (query.cursor) search.set('cursor', query.cursor);

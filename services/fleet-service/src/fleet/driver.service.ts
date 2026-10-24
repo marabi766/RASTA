@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
@@ -7,6 +7,7 @@ import { FLEET_EVENTS, validateFleetPayload } from './events';
 import { FLEET_TOPIC } from '../config/env';
 import { assertOwnDriverRecord, currentFleetScope } from './access';
 import { assertDriverTransition } from './driver-lifecycle';
+import { MEMBERSHIP_SOURCE, notAMember, type MembershipSource } from './membership';
 import type {
   ChangeDriverStatusDto,
   CreateDriverDto,
@@ -28,7 +29,15 @@ import type {
 export class DriverService {
   private readonly logger = new Logger(DriverService.name);
 
-  constructor(private readonly repository: FleetRepository) {}
+  constructor(
+    private readonly repository: FleetRepository,
+    /**
+     * identity-service's answer to "is this user a live member here" (task
+     * 095). Required, with no default: a construction that forgets it does not
+     * compile, rather than registering anybody.
+     */
+    @Inject(MEMBERSHIP_SOURCE) private readonly membership: MembershipSource,
+  ) {}
 
   // =========================================================================
   // Reads
@@ -83,6 +92,8 @@ export class DriverService {
     const organizationId = getOrganizationId();
     const actor = getContext().userId ?? 'SYSTEM';
     const id = `${ID_PREFIXES.driver}_${ulid()}`;
+
+    await this.assertLiveMember(organizationId, dto.userId);
 
     try {
       const created = await this.repository.transaction(async (tx) => {
@@ -210,6 +221,10 @@ export class DriverService {
 
     assertDriverTransition(driver.status, dto.status);
 
+    // Reactivating makes the row an assignable driver again, as registering
+    // does: only for a person who is still a live member (task 095).
+    if (dto.status === 'ACTIVE') await this.assertLiveMember(driver.organizationId, driver.userId);
+
     const actor = getContext().userId ?? 'SYSTEM';
     const now = new Date();
     const barred = dto.status !== 'ACTIVE';
@@ -283,6 +298,21 @@ export class DriverService {
     });
 
     return toDriverView(updated);
+  }
+
+  /**
+   * Only a live member of the organization may be its driver (task 095): the
+   * one check behind every command that makes a row an active driver —
+   * registering one, and reactivating a suspended one. Asked on every request
+   * (a form drawn earlier, for another organization or before the membership
+   * ended, proves nothing now) and before the transaction, so no connection is
+   * held across the call. Fails closed: no answer throws, and the caller writes
+   * nothing. What it cannot see is a membership ending between this answer and
+   * the commit, or any time after: the row then stays assignable until somebody
+   * suspends it (docs/24 Q-154).
+   */
+  private async assertLiveMember(organizationId: string, userId: string): Promise<void> {
+    if (!(await this.membership.isLiveMember(organizationId, userId))) throw notAMember();
   }
 }
 

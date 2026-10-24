@@ -80,6 +80,15 @@ const PROFILE_ADMIN_ROLES: readonly string[] = ['ORGANIZATION_ADMIN', 'SYSTEM_AD
  */
 export const MEMBERSHIP_READ_CALLERS = ['construction-service', 'procurement-service'] as const;
 
+/**
+ * The services that may ask the one-bit question "is this user a live member of the
+ * organization my token is signed for" (`GET /v1/users/:id/live-membership`):
+ * fleet-service, before it registers a driver (task 095). A list of its own rather than
+ * an entry in {@link MEMBERSHIP_READ_CALLERS}: that route answers every organization a
+ * user belongs to, with roles, and fleet needs none of it.
+ */
+export const LIVE_MEMBERSHIP_CALLERS = ['fleet-service'] as const;
+
 @Injectable()
 export class IdentityService {
   private readonly logger = new Logger(IdentityService.name);
@@ -184,6 +193,35 @@ export class IdentityService {
     }
     const live = await this.repository.findLiveMemberships(userId);
     return { userId, memberships: live.memberships, asOf: live.asOf.toISOString() };
+  }
+
+  /**
+   * Whether `userId` is a live member of the organization the caller's token is signed
+   * for, and when (the database's clock): fleet-service's check before it registers a
+   * driver (task 095). Service-only: one of {@link LIVE_MEMBERSHIP_CALLERS} with a token
+   * signed **for a tenant** (ADR-035) — the organization is the signed claim, never a
+   * parameter, so a caller can ask only about the organization it is acting for.
+   *
+   * One bit and nothing else: no roles, no other organization, no name. A user who does
+   * not exist, a member of another organization and a lapsed, revoked or suspended member
+   * all get the same `live: false`, so the answer does not say whether the user exists.
+   */
+  async getLiveMembership(
+    userId: string,
+  ): Promise<{ userId: string; organizationId: string; live: boolean; asOf: string }> {
+    const context = getContext();
+    const organizationId = context.organizationId;
+    if (
+      context.authType !== 'SERVICE' ||
+      !LIVE_MEMBERSHIP_CALLERS.some((caller) => caller === context.callerService) ||
+      organizationId === undefined
+    ) {
+      throw RastaError.forbidden(
+        'Only fleet-service, acting for an organization, may ask whether a user is its member',
+      );
+    }
+    const answer = await this.repository.findLiveMembershipInScope(userId);
+    return { userId, organizationId, live: answer.live, asOf: answer.asOf.toISOString() };
   }
 
   async getUser(id: string): Promise<UserView> {
