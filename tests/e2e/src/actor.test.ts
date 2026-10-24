@@ -1,3 +1,5 @@
+import { createServer as createHttpServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import { describe, it } from 'node:test';
@@ -302,4 +304,54 @@ describe('failureMessage', () => {
     );
     assert.equal(failureMessage(`raw ${TOKEN}`), 'raw [redacted]');
   });
+});
+
+describe('internal-token redirect rejection', () => {
+  for (const status of [301, 302, 303, 307, 308])
+    for (const sameOrigin of [false, true])
+      for (const method of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const) {
+        it(`${method} ${status} sameOrigin=${sameOrigin} sends one exchange and never forwards credentials`, async () => {
+          let sent = 0;
+          const reached: unknown[] = [];
+          const target = createHttpServer((req, res) => {
+            reached.push(req.headers['x-internal-token']);
+            res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}');
+          });
+          await new Promise<void>((resolve) => target.listen(0, '127.0.0.1', resolve));
+          const targetUrl = `http://127.0.0.1:${(target.address() as AddressInfo).port}`;
+          const source = createHttpServer((req, res) => {
+            req.resume();
+            if (req.url === '/redirect-target') {
+              reached.push(req.headers['x-internal-token']);
+              res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}');
+              return;
+            }
+            sent += 1;
+            assert.equal(req.method, method);
+            assert.equal(req.headers['x-internal-token'], INTERNAL_TOKEN);
+            res
+              .writeHead(status, {
+                location: sameOrigin ? '/redirect-target' : `${targetUrl}/redirect-target`,
+              })
+              .end('untrusted');
+          });
+          await new Promise<void>((resolve) => source.listen(0, '127.0.0.1', resolve));
+          try {
+            const baseUrl = `http://127.0.0.1:${(source.address() as AddressInfo).port}`;
+            const error = await actor(undefined, baseUrl)
+              .call(method, '/v1/internal/x', { internalToken: INTERNAL_TOKEN })
+              .catch((error: unknown) => error);
+            assert.ok(error instanceof TransportError);
+            assert.equal(error.causeCode, 'REDIRECT');
+            assertNoCredential(everything(error));
+            assert.equal(sent, 1);
+            assert.deepEqual(reached, []);
+          } finally {
+            for (const server of [source, target]) {
+              server.closeAllConnections();
+              await new Promise<void>((resolve) => server.close(() => resolve()));
+            }
+          }
+        });
+      }
 });
