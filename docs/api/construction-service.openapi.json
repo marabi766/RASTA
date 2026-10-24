@@ -10603,7 +10603,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {

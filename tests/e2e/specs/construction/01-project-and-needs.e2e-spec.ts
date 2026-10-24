@@ -92,7 +92,7 @@ test.describe.serial('construction projects and needs (CON-001 PR 1)', () => {
     expect(ids.filter((id) => id === projectId)).toHaveLength(1);
   });
 
-  test('the replay deadline travels the whole stack: stored on the first claim, a replay inside it, refused past it, nothing created twice (PM D-065)', async ({
+  test('the replay deadline travels the whole stack: stored on the first claim, a replay inside it, refused past it or beyond the retention, nothing created twice (PM D-065, D-067)', async ({
     tenantA,
   }) => {
     const key = idempotencyKey('con-fence');
@@ -120,6 +120,15 @@ test.describe.serial('construction projects and needs (CON-001 PR 1)', () => {
     expect(late.status).toBe(409);
     expect(errorCode(late.body)).toBe('REPLAY_WINDOW_CLOSED');
 
+    // A deadline beyond what the retention can guarantee is refused, not clamped (PM D-067): 400.
+    const far = await tenantA.post('/v1/projects', {
+      idempotencyKey: idempotencyKey('con-fence-far'),
+      replayDeadline: Date.now() + 10 * 365 * 24 * 60 * 60 * 1000,
+      body: { ...PROJECT, title: 'Replay fence project, far' },
+    });
+    expect(far.status).toBe(400);
+    expect(errorCode(far.body)).toBe('VALIDATION_FAILED');
+
     // Not one canonical integer, or no key beside it: 400, nothing claimed.
     for (const value of ['0123', '1.5', '1e12', '-4']) {
       const bad = await tenantA.post('/v1/projects', {
@@ -139,6 +148,7 @@ test.describe.serial('construction projects and needs (CON-001 PR 1)', () => {
     const titles = (list.body as { items: { title: string }[] }).items.map((item) => item.title);
     expect(titles.filter((title) => title === 'Replay fence project')).toHaveLength(1);
     expect(titles).not.toContain('Replay fence project, late');
+    expect(titles).not.toContain('Replay fence project, far');
   });
 
   test('a project and its need walk their lifecycle', async ({ tenantA }) => {

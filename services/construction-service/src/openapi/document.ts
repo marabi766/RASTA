@@ -930,10 +930,19 @@ export function formatDocument(document: OpenAPIObject, filePath: string): strin
   const result = spawnSync(
     process.execPath,
     [cli, '--parser', 'json', '--stdin-filepath', filePath],
-    { input: JSON.stringify(document, null, 2), encoding: 'utf8' },
+    {
+      input: JSON.stringify(document, null, 2),
+      encoding: 'utf8',
+      // Node's default (1 MiB) is below this document's size: past it the child is killed and `status`
+      // is null with an empty stderr, so the generator failed with no message (the file was 1 031 771
+      // bytes on main and 1 049 395 with the replay-deadline text).
+      maxBuffer: 64 * 1024 * 1024,
+    },
   );
   if (result.status !== 0) {
-    throw new Error(`prettier failed to format the OpenAPI document: ${result.stderr}`);
+    throw new Error(
+      `prettier failed to format the OpenAPI document: ${result.error ?? result.stderr}`,
+    );
   }
   return result.stdout;
 }

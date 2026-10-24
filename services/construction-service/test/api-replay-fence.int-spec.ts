@@ -126,6 +126,23 @@ describe('Idempotency-Replay-Deadline (real HTTP)', () => {
     });
   });
 
+  it('a deadline beyond the retention (D-067): 400 VALIDATION_FAILED with a fixed message, no clamp, nothing written', async () => {
+    const before = { projects: (await projects()).length, keys: (await keyRows()).length };
+    const tenYears = String(Date.now() + 10 * 365 * 24 * 3600 * 1000);
+    const response = await request(server)
+      .post('/v1/projects')
+      .set('authorization', `Bearer ${token()}`)
+      .set('idempotency-key', 'fence-http-far')
+      .set('idempotency-replay-deadline', tenYears)
+      .send(PROJECT)
+      .expect(400);
+    expect(response.body.code).toBe('VALIDATION_FAILED');
+    // Nothing of the limit, the clock or any stored value is in the body.
+    expect(JSON.stringify(response.body)).not.toContain(tenYears);
+    expect(JSON.stringify(response.body)).toContain('Idempotency-Replay-Deadline');
+    expect({ projects: (await projects()).length, keys: (await keyRows()).length }).toEqual(before);
+  });
+
   it('a request without the header is what it always was: no deadline stored', async () => {
     await request(server)
       .post('/v1/projects')
