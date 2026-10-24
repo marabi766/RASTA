@@ -25,15 +25,47 @@ export const MAX_LOG_LINE_LENGTH = 64 * 1024;
  */
 export const MAX_LOG_STRING_LENGTH = 16 * 1024;
 
-/** Written whenever a line cannot be scrubbed or logging itself fails. */
-export const FALLBACK_LINE = '{"level":"error","msg":"log record dropped: not serialisable"}\n';
+/** Captured independently of the serialised record, never parsed from a dropped line. */
+export interface DropEnvelope {
+  /** Known oversize argument length; the input is bounded before pino sees it. */
+  originalLength?: number;
+  time: string;
+  level: string;
+  service: string;
+  correlationId?: string;
+  tenantId?: string;
+  organizationId?: string;
+}
+
+/** IDs are bounded whole values, never a truncated credential or arbitrary text. */
+const MAX_ENVELOPE_FIELD_LENGTH = 256;
+function safeField(value: unknown): string | undefined {
+  return typeof value === 'string' &&
+    value.length <= MAX_ENVELOPE_FIELD_LENGTH &&
+    /^[A-Za-z0-9._:-]+$/.test(value)
+    ? value
+    : undefined;
+}
+
+function droppedLine(reason: string, envelope?: DropEnvelope, length?: number): string {
+  return `${JSON.stringify({
+    time: safeField(envelope?.time) ?? new Date().toISOString(),
+    level: safeField(envelope?.level) ?? 'error',
+    service: safeField(envelope?.service) ?? 'unknown',
+    correlationId: safeField(envelope?.correlationId),
+    tenantId: safeField(envelope?.tenantId),
+    organizationId: safeField(envelope?.organizationId),
+    msg: `log record dropped: ${reason}`,
+    ...(length === undefined ? {} : { length }),
+  })}\n`;
+}
 
 const METADATA = Symbol.for('pino.metadata');
 const BACKSLASH = 0x5c;
 const QUOTE = 0x22;
 
-function oversizeLine(length: number): string {
-  return `{"level":"error","msg":"log record dropped: line too long","length":${length}}\n`;
+function oversizeLine(length: number, envelope?: DropEnvelope): string {
+  return droppedLine('line too long', envelope, length);
 }
 
 /**
@@ -43,8 +75,9 @@ function oversizeLine(length: number): string {
  * re-encoded only if the scrub changed it. Throws on a line that is not
  * well-formed (an unterminated literal or a bad escape).
  */
-export function scrubLine(line: string): string {
-  if (line.length > MAX_LOG_LINE_LENGTH) return oversizeLine(line.length);
+export function scrubLine(line: string, envelope?: DropEnvelope): string {
+  const length = Math.max(line.length, envelope?.originalLength ?? 0);
+  if (length > MAX_LOG_LINE_LENGTH) return oversizeLine(length, envelope);
 
   let out = '';
   let copied = 0;
@@ -78,16 +111,16 @@ export function scrubLine(line: string): string {
   const scrubbed = copied === 0 ? line : `${out}${line.slice(copied)}`;
   // Replacement text and re-escaping can make a line longer than it came in, so
   // the limit is enforced on what is about to be written, not only on the input.
-  return scrubbed.length > MAX_LOG_LINE_LENGTH ? oversizeLine(scrubbed.length) : scrubbed;
+  return scrubbed.length > MAX_LOG_LINE_LENGTH ? oversizeLine(scrubbed.length, envelope) : scrubbed;
 }
 
-/** Writes {@link FALLBACK_LINE}; a destination that fails again is left alone. */
-export function writeFallback(destination: DestinationStream): void {
+/** Writes only a safe envelope and fixed reason; a second write failure is contained. */
+export function writeFallback(destination: DestinationStream, envelope?: DropEnvelope): void {
   try {
     if ((destination as unknown as Record<symbol, unknown>)[METADATA] === true) {
       (destination as unknown as { lastLevel?: number }).lastLevel = 50;
     }
-    destination.write(FALLBACK_LINE);
+    destination.write(droppedLine('not serialisable', envelope));
   } catch {
     // Logging must never be what takes the caller down.
   }
@@ -136,19 +169,22 @@ export function containErrors(stream: unknown): void {
  * that ask for it is the unscrubbed input of the line: `lastMsg` is scrubbed,
  * `lastObj` and `lastLogger` are withheld.
  */
-export function scrubbingDestination(inner: DestinationStream): DestinationStream {
+export function scrubbingDestination(
+  inner: DestinationStream,
+  envelope: () => DropEnvelope | undefined = () => undefined,
+): DestinationStream {
   containErrors(inner);
   const write = (chunk: unknown): void => {
     let line: string;
     try {
-      line = scrubLine(String(chunk));
+      line = scrubLine(String(chunk), envelope());
     } catch {
-      line = FALLBACK_LINE;
+      line = droppedLine('not serialisable', envelope());
     }
     try {
       inner.write(line);
     } catch {
-      writeFallback(inner);
+      writeFallback(inner, envelope());
     }
   };
 
