@@ -251,6 +251,11 @@ export class AuthGuard implements CanActivate {
       // above, so merging it could only ever re-admit one (ADR-060 § 4).
       organizationIds,
       roles: rolesForRequest(organizationId, organizationRoles, claims.roles),
+      token: {
+        ...(claims.issuedAt !== undefined ? { issuedAt: claims.issuedAt } : {}),
+        expiresAt: claims.expiresAt,
+        tenantRoles: rolesForRequest(organizationId, organizationRoles, []),
+      },
       username: claims.username,
     };
 
@@ -495,6 +500,13 @@ export interface AuthState {
    */
   organizationIds?: string[];
   roles: string[];
+  /**
+   * User tokens only: what the gateway's revocation list compares (ADR-060,
+   * gateway revocation list addendum) — the token's `iat` and `exp` in epoch
+   * milliseconds, and the roles its `org_roles` grants in the resolved
+   * organization, before the global ones are added. Nothing else reads them.
+   */
+  token?: { issuedAt?: number; expiresAt: number; tenantRoles: string[] };
   username?: string;
   callerService?: string;
 }

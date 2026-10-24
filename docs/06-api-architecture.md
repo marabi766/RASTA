@@ -366,7 +366,7 @@ Charset یا Content-Encoding پشتیبانی‌نشده (`charset.unsupported`
 | 400   | `VALIDATION_FAILED` · `MALFORMED_REQUEST`                                                                                                         |
 | 413   | `PAYLOAD_TOO_LARGE`                                                                                                                               |
 | 415   | `UNSUPPORTED_MEDIA_TYPE`                                                                                                                          |
-| 401   | `UNAUTHENTICATED` · `TOKEN_EXPIRED` · `TOKEN_INVALID`                                                                                             |
+| 401   | `UNAUTHENTICATED` · `TOKEN_EXPIRED` · `TOKEN_INVALID` · `TOKEN_REVOKED`                                                                           |
 | 403   | `FORBIDDEN` · `INSUFFICIENT_ROLE` · **`TENANT_MISMATCH`**                                                                                         |
 | 404   | `NOT_FOUND`                                                                                                                                       |
 | 409   | `ALREADY_EXISTS` · `CONFLICT` · `IDEMPOTENCY_KEY_REUSED` · `REPLAY_WINDOW_CLOSED` · `INVALID_STATE_TRANSITION` · `OPTIMISTIC_LOCK_FAILED`         |
@@ -1135,12 +1135,12 @@ X-Organization-Id: <optional; must MATCH the token's signed org_id>
 
 قواعد:
 
-| قاعده           | مقدار                                                            |
-| --------------- | ---------------------------------------------------------------- |
-| Timeout         | ۳ ثانیه پیش‌فرض؛ ۱۰ ثانیه برای عملیات سنگین                      |
-| Retry           | حداکثر ۲ بار، فقط روی خطای گذرا، با Exponential Backoff + Jitter |
-| Circuit Breaker | باز شدن پس از ۵ خطای متوالی؛ نیمه‌باز پس از ۳۰ ثانیه             |
-| Fallback        | Replica مرجع محلی، یا `UPSTREAM_UNAVAILABLE` صریح                |
+| قاعده           | مقدار                                                                                                                                                                                                         |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Timeout         | ۳ ثانیه پیش‌فرض؛ ۱۰ ثانیه برای عملیات سنگین                                                                                                                                                                   |
+| Retry           | حداکثر ۲ بار، فقط روی خطای گذرا، با Exponential Backoff + Jitter                                                                                                                                              |
+| Circuit Breaker | باز شدن پس از ۵ خطای متوالی؛ نیمه‌باز پس از ۳۰ ثانیه؛ رد مورد انتظار identity (`503` با `KEYCLOAK_UNAVAILABLE` یا `KEYCLOAK_WRITE_SETTLING` و پاکت کامل همان درخواست) خطا شمرده نمی‌شود (ADR-060، #381 r3 F2) |
+| Fallback        | Replica مرجع محلی، یا `UPSTREAM_UNAVAILABLE` صریح                                                                                                                                                             |
 
 **`Retry-After` روی Circuit باز.** وقتی Circuit Breaker Gateway باز است، درخواست بدون
 تماس با سرویس با `503 UPSTREAM_UNAVAILABLE` رد می‌شود و `Retry-After` مدت باقی‌ماندهٔ

@@ -51,6 +51,13 @@ export interface UserClaims {
   username?: string;
   email?: string;
   expiresAt: number;
+  /**
+   * The token's `iat` in epoch milliseconds, when it is a finite, non-negative
+   * number; absent otherwise. jose does not require it, and no service but the
+   * gateway's revocation list reads it — that one refuses a token without it
+   * (ADR-060, gateway revocation list addendum).
+   */
+  issuedAt?: number;
 }
 
 /**
@@ -142,6 +149,7 @@ export class TokenVerifier {
       username: readString(payload, 'preferred_username'),
       email: readString(payload, 'email'),
       expiresAt: expiryMillis(payload),
+      ...issuedAtMillis(payload),
     };
   }
 }
@@ -252,6 +260,14 @@ function expiryMillis(payload: JWTPayload): number {
     throw new RastaError('TOKEN_INVALID', 'Token has no expiry');
   }
   return payload.exp * 1000;
+}
+
+/** `iat` in epoch milliseconds, or nothing: a missing or non-numeric claim is never defaulted. */
+function issuedAtMillis(payload: JWTPayload): { issuedAt?: number } {
+  const iat = payload.iat;
+  return typeof iat === 'number' && Number.isFinite(iat) && iat >= 0
+    ? { issuedAt: iat * 1000 }
+    : {};
 }
 
 function mapJoseError(error: unknown): RastaError {

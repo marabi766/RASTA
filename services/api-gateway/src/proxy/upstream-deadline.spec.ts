@@ -13,6 +13,7 @@ import { SERVICE_NAMES, type ServiceUrls } from '../config/routes';
 import { GatewayController } from './gateway.controller';
 import { ProxyService, proxyOptionsOf } from './proxy.service';
 import type { RateLimiter, RateLimitRule } from './rate-limiter';
+import { RevocationGate } from '../revocation/revocation-gate';
 
 /**
  * Codex r2 on #250, G1: the gateway's upstream deadline for opening a tender's bids.
@@ -44,6 +45,7 @@ const BASE_ENV: NodeJS.ProcessEnv = {
   OIDC_JWKS_URI: 'http://localhost:8080/realms/rasta/protocol/openid-connect/certs',
   OIDC_AUDIENCE: 'rasta-api',
   INTERNAL_TOKEN_SECRET: 'a_secret_that_is_at_least_thirty_two_chars',
+  NODE_ENV: 'test',
 };
 
 const userContext: RequestContext = {
@@ -104,7 +106,7 @@ async function startGateway(upstream: Upstream, env: GatewayEnv) {
     new InternalTokenService(randomBytes(32).toString('hex'), 'rasta-internal', 300),
     proxyOptionsOf(env),
   );
-  const controller = new GatewayController(proxy, allowingLimiter, env);
+  const controller = new GatewayController(proxy, allowingLimiter, env, RevocationGate.off());
 
   const app = new ExpressAdapter().getInstance();
   app.all(/^\/v1\/.*/, (req: never, res: never) => {

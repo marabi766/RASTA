@@ -144,6 +144,16 @@ Keycloak تصمیم اپراتور است.
 آن حساب نقشی می‌دهد که ندارد، یا نقشی را که دارد از او می‌گیرد. این همان شرط «تا این گزارش صفر واگرایی نشان ندهد، گام ۳
 شروع نمی‌شود» در ADR-060 است.
 
+## فهرست ابطال Gateway (EXT-005)
+
+`GATEWAY_REVOCATION_LIST` روی Gateway باید صریح باشد (`off` در این نسخه؛ بی آن، بیرون از development و test راه نمی‌افتد).
+وقتی `enforce` روشن است (پس از EXT-005 PR 2): افزایش `rasta_gateway_revocation_refusals_total{reason="unavailable"}`، یا
+`rasta_gateway_revocation_feed_staleness_seconds` بالای `GATEWAY_REVOCATION_MAX_STALENESS_SECONDS`، یا `degraded` شامل
+`revocation-list` در `/health/ready` یعنی هر درخواست مستاجردار `503` می‌گیرد؛ نخست دسترسی Gateway به بروکر و
+`rasta_gateway_revocation_feed_lag_records` را ببینید، سپس Log «could not be applied» (Partition و Offset پیام ناخوانا؛ نگه‌داشتن
+پس از پنجره‌ی نگهداری — امروز ۹۲۱ ثانیه — خودش برداشته می‌شود). رویداد عضویت بی `streamSeq` و `streamKey` (تولیدکننده‌ی پیش از ADR-051 B3) هم
+ناخواناست: Gateway آن را به Timestamp مرتب نمی‌کند. طراحی: افزوده‌ی فهرست ابطال در ADR-060.
+
 ## چیزی که این Runbook پوشش نمی‌دهد
 
 - **کهنگی توکن.** Projection درست است ولی توکنی که پیش از آن صادر شده، تا انقضا (≤ ۹۰۰ ثانیه) همان را می‌گوید. این

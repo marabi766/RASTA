@@ -194,18 +194,26 @@ export class ProxyService {
         signal: controller.signal,
       });
 
-      // 5xx counts toward the circuit; 4xx does not. A client sending bad
-      // requests is not evidence that the downstream is unhealthy.
-      if (response.status >= 500) {
-        this.recordFailure(request.service);
-        failureRecorded = true;
-      } else {
-        this.recordSuccess(request.service);
-      }
+      // 4xx does not count toward the circuit: a client sending bad requests
+      // is not evidence that the downstream is unhealthy.
+      if (response.status < 500) this.recordSuccess(request.service);
 
       const text = await response.text();
 
       if (response.status >= 500) {
+        // A 5xx counts toward the circuit — unless it is one of identity's
+        // expected, per-request refusals (ADR-060, D-069, #381 r3 F2): a
+        // narrowing change refused because Keycloak could not be written
+        // first, or because an earlier write of that one user may still land.
+        // Identity answered, promptly and as designed; counting those would let
+        // five refusals for one user cut every tenant off from identity. Neither
+        // a success nor a failure: they leave the circuit as it was. Counted
+        // once, when the body is in: a body that fails to read is still a
+        // failure, recorded in the catch below.
+        if (!isExpectedIdentityRefusal(request.service, response.status, text)) {
+          this.recordFailure(request.service);
+          failureRecorded = true;
+        }
         // Parsed once, and only the parsed, allow-listed fields travel. The
         // schema accepting a body says nothing about what else the body held:
         // a `stack` or an internal field beside a valid envelope would reach
@@ -472,6 +480,59 @@ class UpstreamMalformedError extends Error {
  * the path alone and a route-not-found `message` is the request's own
  * (see {@link relayedMessage}).
  */
+/**
+ * identity's expected refusals of a narrowing change (ADR-060, D-064/D-069):
+ * neither says the service is unhealthy. `KEYCLOAK_UNAVAILABLE` — Keycloak
+ * could not be written before the change; `KEYCLOAK_WRITE_SETTLING` — an
+ * earlier Keycloak write of that one user may still land.
+ */
+export const IDENTITY_EXPECTED_REFUSALS: ReadonlySet<string> = new Set([
+  ERROR_CODES.KEYCLOAK_UNAVAILABLE,
+  ERROR_CODES.KEYCLOAK_WRITE_SETTLING,
+]);
+
+/** Exactly the keys the platform's exception filter writes; nothing else. */
+const ENVELOPE_KEYS: ReadonlySet<string> = new Set([
+  'code',
+  'message',
+  'correlationId',
+  'traceId',
+  'timestamp',
+  'path',
+]);
+
+/**
+ * Whether a 5xx is one of identity's expected refusals, and so not counted
+ * against its circuit (#381 r3 F2). Fail closed — counted — unless all of it
+ * holds: the identity service; 503, the status both codes have
+ * (`ERROR_STATUS`); a JSON body that is the complete platform envelope — every
+ * required field and no other key (so no `details`, no `stack`);
+ * one of the two codes; and the correlation id of this very request, which a
+ * cached or proxied page cannot carry. What the caller receives is unchanged:
+ * the same allow-listed envelope as any other 5xx (`platformErrorEnvelope`).
+ */
+export function isExpectedIdentityRefusal(
+  service: ServiceName,
+  status: number,
+  text: string,
+): boolean {
+  if (service !== 'identity' || status !== HttpStatus.SERVICE_UNAVAILABLE) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
+  if (!Object.keys(parsed).every((key) => ENVELOPE_KEYS.has(key))) return false;
+  const result = apiErrorSchema.safeParse(parsed);
+  if (!result.success) return false;
+  return (
+    IDENTITY_EXPECTED_REFUSALS.has(result.data.code) &&
+    result.data.correlationId === getContext().correlationId
+  );
+}
+
 function platformErrorEnvelope(
   status: number,
   text: string,

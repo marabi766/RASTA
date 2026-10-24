@@ -4,6 +4,7 @@ import { runWithContext, type RequestContext } from '@rasta/nest-common';
 import type { RateLimiter, RateLimitRule } from './rate-limiter';
 import type { ProxyService } from './proxy.service';
 import type { GatewayEnv } from '../config/env';
+import { RevocationGate } from '../revocation/revocation-gate';
 
 /**
  * The catalogue's writes require an `Idempotency-Key` at the gateway; its reads
@@ -70,7 +71,12 @@ async function send(
   headers?: Record<string, string>,
 ): Promise<boolean> {
   const forward = jest.fn(async () => ({ status: 200, headers: {}, body: {} }));
-  const controller = new GatewayController({ forward } as unknown as ProxyService, limiter, env);
+  const controller = new GatewayController(
+    { forward } as unknown as ProxyService,
+    limiter,
+    env,
+    RevocationGate.off(),
+  );
   await runWithContext(context, () =>
     controller.handle(requestFor(method, path, headers), response()),
   );
