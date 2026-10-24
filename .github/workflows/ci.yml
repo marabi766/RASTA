@@ -1522,7 +1522,9 @@ jobs:
         # PostgreSQL they measured shared WAL load, not the upsert (docs/14
         # § 14.3). Never `turbo run test:integration` directly — that runs
         # the workspace phase only; `check:test-phases` enforces it.
-        timeout-minutes: 12
+        # 16 is a STOPGAP (owner decision 2026-10-24): main measured 7m26s to
+        # 11m29s against the old 12. The sharding PR returns it to 12.
+        timeout-minutes: 16
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
