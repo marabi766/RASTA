@@ -235,7 +235,7 @@ ErrorState   — پیام قابل فهم + دکمه تلاش دوباره + cor
 | `/returns/[id]`            | جزئیات درخواست بازگشت      | PROCUREMENT_USER، SUPPLIER        | P0    |
 | `/procurement/demands`     | ثبت نیاز و تجمیع           | PROCUREMENT_USER                  | P1    |
 | `/procurement/rfqs`        | استعلام‌ها                 | PROCUREMENT_USER، SUPPLIER        | P1    |
-| `/suppliers`               | تأمین‌کنندگان              | PROCUREMENT_USER                  | P1    |
+| `/suppliers`               | تامین‌کنندگان              | PROCUREMENT_USER                  | P1    |
 | `/projects`                | پروژه‌های عمرانی           | ORGANIZATION_ADMIN                | P0    |
 | `/projects/[id]`           | جزئیات + گردش موافقت       | ORGANIZATION_ADMIN                | P0    |
 | `/tenders`                 | مناقصه‌ها                  | ORGANIZATION_ADMIN، CONTRACTOR    | P0    |
@@ -273,7 +273,7 @@ ErrorState   — پیام قابل فهم + دکمه تلاش دوباره + cor
 > هر دو در این تنظیم‌ها راه‌اندازی پورتال را متوقف می‌کند. مجوز را همچنان سرویس می‌دهد. هیچ دستور نوشتنی
 > (دریافت، تعدیل، رزرو) در این برش نیست؛ ارسال و رهگیری در برش بعد، پس از ادغام مسیرهای آن در دروازه.
 
-> **پیوند «تأمین‌کنندگان» و صفحه‌های `/suppliers` و `/suppliers/[id]` (`EXP-004`، برش ۵، فقط‌خواندنی).**
+> **پیوند «تامین‌کنندگان» و صفحه‌های `/suppliers` و `/suppliers/[id]` (`EXP-004`، برش ۵، فقط‌خواندنی).**
 > `/suppliers` فهرست باز و بین‌مستأجری است (`GET /v1/suppliers`، `docs/04` § ۴٫۱۰): نام، وضعیت
 > (`ACTIVE`/`SUSPENDED`)، دسته‌های اعلام‌شده و دسته‌هایی که اکنون صلاحیت فعال دارد — تصویر کاتالوگی،
 > بدون شناسهٔ سند، یادداشت تصمیم، شناسهٔ عامل یا دلیل تعلیق. `/suppliers/[id]` پروندهٔ خصوصی است
