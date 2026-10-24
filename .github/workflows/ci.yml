@@ -681,6 +681,17 @@ jobs:
           --filter=@rasta/supplier-service...
           --filter=@rasta/audit-service...
 
+      - name: Server-action coverage (compiler manifest)
+        # The compiler is the authority on which modules define server actions: the
+        # build above wrote every one it compiled to
+        # apps/web/.next/server/server-reference-manifest.json. This fails when one
+        # is not covered by the refusal cases of write-session-refusal.spec.ts, and
+        # when the manifest is missing, unparseable, empty or of an unknown shape
+        # (a restored build without it is a failure, not a pass). apps/web's turbo
+        # build is never cached, so the manifest cannot be older than the sources.
+        # Scope: refusal coverage of server actions only.
+        run: pnpm --filter @rasta/web run check:server-actions
+
       - name: Start MinIO and create the document bucket
         # EXP-002 slice 7: the portal attaches a file by having its server ask
         # document-service for a signed URL and put the bytes in object storage
