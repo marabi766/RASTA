@@ -2,6 +2,7 @@ import {
   MAX_AMOUNT_MINOR,
   MIN_SIGNED_AMOUNT_MINOR,
   amountMinorSchema,
+  digitsToBigInt,
   moneySchema,
   signedAmountMinorSchema,
 } from './money';
@@ -68,5 +69,35 @@ describe('signedAmountMinorSchema', () => {
   it('still refuses a malformed amount without throwing', () => {
     expect(signedAmountMinorSchema.safeParse('--1').success).toBe(false);
     expect(signedAmountMinorSchema.safeParse('1.0').success).toBe(false);
+  });
+});
+
+/**
+ * The guard a refinement puts in front of `BigInt` (task 011): a value converts
+ * only when it is a plain string of decimal digits. It owns no acceptance rule —
+ * thirty-one digits or leading zeros convert, and each schema's pattern decides.
+ */
+describe('digitsToBigInt', () => {
+  it('converts a string of digits exactly as BigInt does, leading zeros and all', () => {
+    for (const value of ['0', '00', '007', '1', MAX, PAST_MAX, '9'.repeat(40)]) {
+      expect(digitsToBigInt(value)).toBe(BigInt(value));
+    }
+  });
+
+  it.each([
+    ['a fraction', '1.5'],
+    ['an exponent', '1e3'],
+    ['letters', 'abc'],
+    ['nothing', ''],
+    ['a leading space', ' 1'],
+    ['a trailing newline', '1\n'],
+    ['a plus sign', '+1'],
+    ['a minus sign', '-1'],
+    ['a hexadecimal literal', '0x10'],
+    ['a binary literal', '0b1'],
+    ['Persian digits', '۱۲۳'],
+    ['a sentinel', 'private-invoice-reference-123'],
+  ])('answers undefined for %s, without throwing', (_label, value) => {
+    expect(digitsToBigInt(value)).toBeUndefined();
   });
 });

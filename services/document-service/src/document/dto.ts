@@ -5,6 +5,7 @@ import {
   WITHOUT_BIDI_CONTROL,
   plainText,
   referenceId,
+  numberInput,
 } from '@rasta/contracts';
 import { DOCUMENT_CLASSES } from '../content/policy';
 
@@ -177,7 +178,7 @@ export const listDocumentsQuerySchema = z
      * change an API response and so want their own atomic change.
      */
     includeDeleted: queryBoolean(false),
-    limit: z.coerce.number().int().min(1).max(100).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).default(25),
     cursor: identifier.optional(),
   })
   .strict();

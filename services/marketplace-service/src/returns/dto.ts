@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { plainText } from '@rasta/contracts';
+import { plainText, numberInput } from '@rasta/contracts';
 import { RETURN_STATUSES } from './state-machine';
 
 /**
@@ -81,7 +81,7 @@ export const listReturnsQuerySchema = z
      */
     role: z.enum(['BUYER', 'SUPPLIER']).default('BUYER'),
     cursor: z.string().optional(),
-    limit: z.coerce.number().int().min(1).max(100).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).default(25),
   })
   .strict();
 

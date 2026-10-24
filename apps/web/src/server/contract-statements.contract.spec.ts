@@ -152,7 +152,7 @@ describe('the bodies the portal sends', () => {
 
   it('pages the list at most fifty at a time', () => {
     expect(squash(topLevelConst(dto, 'listStatementsQuerySchema').getText())).toContain(
-      'limit:z.coerce.number().int().min(1).max(50).default(20)',
+      'limit:numberInput(z.number().int().min(1).max(50)).default(20)',
     );
     expect(STATEMENTS_PER_PAGE).toBeLessThanOrEqual(50);
   });
