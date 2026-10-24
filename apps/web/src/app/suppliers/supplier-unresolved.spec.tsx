@@ -90,12 +90,25 @@ describe.each(Object.entries(FORMS))('the %s form', (name, draw) => {
 });
 
 describe('the notice', () => {
-  const request = { key: 'sub_x', digest: 'd', deadline: null, ref: 'corr-lost' };
+  const request = {
+    id: 'a'.repeat(32),
+    key: 'sub_x',
+    digest: 'd',
+    deadline: null,
+    ref: 'corr-lost',
+    inFlight: false,
+  };
+  const notice = (over: Partial<typeof request> = {}, supplierId: string | null = 'SUP_1') => (
+    <UnresolvedSupplierNotice
+      request={{ ...request, ...over }}
+      supplierId={supplierId}
+      csrfToken="csrf"
+      releaseToken="signed-release-token"
+    />
+  );
 
   it('names the correlation id, offers no resend, and asks for the confirmation', () => {
-    const { container } = render(
-      <UnresolvedSupplierNotice request={request} supplierId="SUP_1" csrfToken="csrf" />,
-    );
+    const { container } = render(notice());
     expect(screen.getByText(/corr-lost/)).toBeInTheDocument();
     expect(container.querySelector('input[type="checkbox"]')).toBeRequired();
     expect(container.querySelector('[name="csrf"]')).toHaveValue('csrf');
@@ -103,10 +116,19 @@ describe('the notice', () => {
     expect(screen.queryByText(/ارسال دوباره همان/)).toBeNull();
   });
 
+  it('names the held request it was drawn for, so a stale form cannot release a newer one', () => {
+    const { container } = render(notice());
+    expect(container.querySelector('[name="release"]')).toHaveValue('signed-release-token');
+  });
+
+  it('falls back to the key as the reference when none was kept, and says a send is under way', () => {
+    render(notice({ ref: null as never, inFlight: true }));
+    expect(screen.getByText(/sub_x/)).toBeInTheDocument();
+    expect(screen.getByText(/هم‌اکنون در حال فرستاده شدن/)).toBeInTheDocument();
+  });
+
   it('has no U+0654 or hamza letter in what it says', () => {
-    const { container } = render(
-      <UnresolvedSupplierNotice request={request} supplierId={null} csrfToken="csrf" />,
-    );
+    const { container } = render(notice({ inFlight: true }, null));
     expect(container.textContent ?? '').not.toMatch(/[ٔأإؤئ]/);
   });
 });

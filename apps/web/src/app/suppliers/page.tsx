@@ -6,16 +6,16 @@ import { currentSession } from '@/server/current-session';
 import { fetchSuppliers, type SupplierListQuery } from '@/server/suppliers';
 import { mintSubmissionId } from '@/server/submission';
 import { canRegisterSupplier, supplierActor } from '@/server/supplier-commands';
-import { supplierWriteScope } from '@/server/supplier-unresolved';
+import { RELEASE_PARAM, supplierWriteScope } from '@/server/supplier-unresolved';
 import { readUnresolved } from '@/server/unresolved-request';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { RegisterSupplierForm } from './SupplierForms';
 import { SuppliersScreen } from './SuppliersScreen';
-import { UnresolvedSupplierNotice } from './UnresolvedSupplierNotice';
+import { SupplierPendingNotices } from './UnresolvedSupplierNotice';
 
 /**
- * The `/suppliers` route — تأمین‌کنندگان (docs/16 § ۱۶٫۶): the directory, and
+ * The `/suppliers` route — تامین‌کنندگان (docs/16 § ۱۶٫۶): the directory, and
  * the form that registers this organization's own profile.
  *
  * **No access decision for the directory here**, as on every portal route:
@@ -74,8 +74,8 @@ export default async function SuppliersPage({
       sidebar={<PortalSidebar session={session} currentHref="/suppliers" />}
     >
       <PageHeader
-        title="تأمین‌کنندگان"
-        description="تأمین‌کنندگان کالا، تعمیرگاه‌ها و پیمانکارانی که این سازمان می‌تواند ببیند."
+        title="تامین‌کنندگان"
+        description="تامین‌کنندگان کالا، تعمیرگاه‌ها و پیمانکارانی که این سازمان می‌تواند ببیند."
       />
       <div className="mt-4">
         <SuppliersScreen
@@ -85,18 +85,17 @@ export default async function SuppliersPage({
           register={
             actor && canRegisterSupplier(actor) ? (
               <div className="flex flex-col gap-4">
-                {unresolved ? (
-                  <UnresolvedSupplierNotice
-                    request={unresolved}
-                    supplierId={null}
-                    csrfToken={session.csrfToken}
-                  />
-                ) : null}
+                <SupplierPendingNotices
+                  session={session}
+                  pending={unresolved}
+                  supplierId={null}
+                  release={one(params[RELEASE_PARAM])}
+                />
                 <RegisterSupplierForm
-                  key={unresolved ? 'held' : 'open'}
+                  key={unresolved.kind === 'NONE' ? 'open' : 'held'}
                   csrfToken={session.csrfToken}
                   submissionId={mintSubmissionId(session)}
-                  held={unresolved !== null}
+                  held={unresolved.kind !== 'NONE'}
                 />
               </div>
             ) : null

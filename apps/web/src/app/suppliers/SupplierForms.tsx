@@ -14,6 +14,7 @@ import {
   EMPTY_SUBMIT_FORM,
   EVIDENCE_ID_PREFIX,
   EVIDENCE_LABEL_PREFIX,
+  HELD_IN_PROGRESS_MESSAGE,
   INITIAL_EVIDENCE_ROWS,
   MAX_DISPLAY_NAME_LENGTH,
   MAX_DOCUMENT_ID_LENGTH,
@@ -23,6 +24,8 @@ import {
   MAX_REASON_LENGTH,
   MAX_STATEMENT_LENGTH,
   MIN_REASON_LENGTH,
+  PENDING_CAPACITY_MESSAGE,
+  PENDING_UNCHECKED_MESSAGE,
   REVIEWER_NOTE_HINT,
   SUPPLIER_COMMAND_CONSEQUENCES,
   SUPPLIER_FORBIDDEN_MESSAGE,
@@ -149,6 +152,12 @@ function Banner({ state }: { state: SupplierFormState<unknown, string> }) {
           {supplierFailureText(state.status)} کد پیگیری: {state.correlationId}
         </Alert>
       );
+    case 'BUSY':
+      return <Alert tone="warning">{HELD_IN_PROGRESS_MESSAGE}</Alert>;
+    case 'NOT_CHECKED':
+      return <Alert tone="warning">{PENDING_UNCHECKED_MESSAGE}</Alert>;
+    case 'CAPACITY':
+      return <Alert tone="warning">{PENDING_CAPACITY_MESSAGE}</Alert>;
     case 'IDLE':
       return null;
   }

@@ -65,7 +65,7 @@ function hrefWith(query: SupplierListQuery, changes: Partial<SupplierListQuery>)
 function StatusFilter({ query }: { query: SupplierListQuery }) {
   const items: readonly (SupplierStatus | undefined)[] = [undefined, ...SUPPLIER_STATUSES];
   return (
-    <nav aria-label="وضعیت تأمین‌کننده" className="flex flex-wrap gap-2">
+    <nav aria-label="وضعیت تامین‌کننده" className="flex flex-wrap gap-2">
       {items.map((status) => (
         <Link
           key={status ?? 'ALL'}
@@ -87,7 +87,7 @@ function StatusFilter({ query }: { query: SupplierListQuery }) {
 function CapabilityFilter({ query }: { query: SupplierListQuery }) {
   const items: readonly (SupplierCapability | undefined)[] = [undefined, ...SUPPLIER_CAPABILITIES];
   return (
-    <nav aria-label="دستهٔ تأمین‌کننده" className="flex flex-wrap gap-2">
+    <nav aria-label="دسته‌ی تامین‌کننده" className="flex flex-wrap gap-2">
       {items.map((capability) => (
         <Link
           key={capability ?? 'ALL'}
@@ -121,7 +121,7 @@ function SupplierRow({ supplier, own }: { supplier: SupplierSummary; own: boolea
       </div>
       <p className="mt-2 text-sm text-content-muted">
         {supplier.capabilities.length === 0
-          ? 'بدون دستهٔ اعلام‌شده'
+          ? 'بدون دسته‌ی اعلام‌شده'
           : supplier.capabilities
               .map((capability) => supplierCapabilityLabel(capability))
               .join(' · ')}
@@ -134,7 +134,7 @@ function SupplierRow({ supplier, own }: { supplier: SupplierSummary; own: boolea
               .join(' · ')}`}
       </p>
       <p className="mt-1 text-sm text-content-muted">
-        شناسه <Identifier>{supplier.id}</Identifier> · شناسهٔ سازمان{' '}
+        شناسه <Identifier>{supplier.id}</Identifier> · شناسه‌ی سازمان{' '}
         <Identifier>{supplier.organizationId}</Identifier> · ثبت در{' '}
         {formatJalaliDateLong(supplier.registeredAt)}
       </p>
@@ -168,19 +168,19 @@ function SuppliersBody({
   ownOrganizationId,
 }: SuppliersScreenProps & { ownOrganizationId: string | null }) {
   if (result.kind === 'FORBIDDEN') {
-    return <NoAccessState description="فهرست تأمین‌کنندگان در اختیار شما نیست." />;
+    return <NoAccessState description="فهرست تامین‌کنندگان در اختیار شما نیست." />;
   }
 
   if (result.kind === 'NOT_FOUND') {
     return (
-      <EmptyState title="تأمین‌کننده‌ای یافت نشد" description="این نشست سازمان فعالی ندارد." />
+      <EmptyState title="تامین‌کننده‌ای یافت نشد" description="این نشست سازمان فعالی ندارد." />
     );
   }
 
   if (result.kind === 'UNAVAILABLE' || result.kind === 'MALFORMED') {
     return (
       <ErrorState
-        description="فهرست تأمین‌کنندگان خوانده نشد. کمی بعد دوباره تلاش کنید."
+        description="فهرست تامین‌کنندگان خوانده نشد. کمی بعد دوباره تلاش کنید."
         correlationId={result.correlationId}
       />
     );
@@ -189,20 +189,20 @@ function SuppliersBody({
   const page = result.data;
 
   return (
-    <Section headingId="suppliers" title="تأمین‌کنندگان">
+    <Section headingId="suppliers" title="تامین‌کنندگان">
       {page.items.length === 0 ? (
         <EmptyState
-          title="تأمین‌کننده‌ای نیست"
+          title="تامین‌کننده‌ای نیست"
           description={
             query.status || query.capability
-              ? 'تأمین‌کننده‌ای با این فیلتر یافت نشد.'
-              : 'هنوز تأمین‌کننده‌ای در این فهرست نیست.'
+              ? 'تامین‌کننده‌ای با این فیلتر یافت نشد.'
+              : 'هنوز تامین‌کننده‌ای در این فهرست نیست.'
           }
         />
       ) : (
         <>
           <p className="mb-3 text-sm text-content-muted">
-            {toPersianDigits(String(page.items.length))} تأمین‌کننده در این صفحه
+            {toPersianDigits(String(page.items.length))} تامین‌کننده در این صفحه
           </p>
           <ul className="flex flex-col gap-3">
             {page.items.map((supplier) => (
@@ -219,7 +219,7 @@ function SuppliersBody({
       {page.nextCursor ? (
         <div className="mt-4">
           <ButtonLink href={hrefWith(query, { cursor: page.nextCursor })} tone="secondary">
-            صفحهٔ بعد
+            صفحه‌ی بعد
           </ButtonLink>
         </div>
       ) : null}

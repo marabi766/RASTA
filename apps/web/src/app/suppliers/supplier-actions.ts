@@ -30,9 +30,11 @@ import { currentSession } from '@/server/current-session';
 import {
   RECONCILED_FIELD,
   RECONCILED_VALUE,
+  RELEASE_FIELD,
+  RELEASE_PARAM,
   supplierWriteScope,
 } from '@/server/supplier-unresolved';
-import { clearUnresolved } from '@/server/unresolved-request';
+import { releaseUnresolved } from '@/server/unresolved-request';
 import {
   approveQualification,
   rejectQualification,
@@ -182,6 +184,12 @@ export async function submitReinstateSupplier(
  * the registration) so a new one may be sent. There is no key to send again, so
  * this is the only way out, and only with the confirmation that names what the
  * person did — without it nothing changes. It sends nothing to the service.
+ *
+ * The form names the held request it was drawn for (a signed token, bound to
+ * this login); the record goes only if it is still that one, compared and
+ * deleted in one step on the server. A stale form — the request it concerned was
+ * reconciled in another tab and a newer one is held now — is refused and the
+ * newer one stays.
  */
 export async function reconcileSupplierWrite(
   supplierId: string | null,
@@ -191,8 +199,13 @@ export async function reconcileSupplierWrite(
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(back)}`);
   if (!verifyCsrf(session, form).ok) redirect(back);
-  if (form.get(RECONCILED_FIELD) === RECONCILED_VALUE) {
-    await clearUnresolved(supplierWriteScope(supplierId));
-  }
-  redirect(back);
+  if (form.get(RECONCILED_FIELD) !== RECONCILED_VALUE) redirect(back);
+  const outcome = await releaseUnresolved(
+    session,
+    supplierWriteScope(supplierId),
+    form.get(RELEASE_FIELD),
+  );
+  redirect(
+    outcome === 'RELEASED' || outcome === 'GONE' ? back : `${back}?${RELEASE_PARAM}=${outcome}`,
+  );
 }

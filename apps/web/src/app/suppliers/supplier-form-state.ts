@@ -34,6 +34,12 @@ export type SupplierFormState<V, F extends string> =
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   /** Refused before it could act (the gateway or the service was unavailable): nothing was written. */
   | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
+  /** An earlier send on this record is in flight right now: nothing was sent. */
+  | { readonly kind: 'BUSY' }
+  /** The pending-request store could not be checked: nothing was sent. */
+  | { readonly kind: 'NOT_CHECKED' }
+  /** This login holds the most unresolved requests allowed: nothing was sent. */
+  | { readonly kind: 'CAPACITY' }
   | UnconfirmedWriteState;
 
 export const IDLE_SUPPLIER_FORM = { kind: 'IDLE' } as const;

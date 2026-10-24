@@ -5,7 +5,8 @@
 /**
  * `/suppliers` and `/suppliers/[id]` as the server components they are, with the
  * reads stubbed: a write whose answer was lost is still on the page after a
- * reload or a visit from elsewhere (it lives in a signed cookie, not in a form),
+ * reload or a visit from elsewhere (it lives in the platform's Redis, not in a form
+ * or a cookie),
  * every command form is drawn disabled while it lasts, and nobody else — another
  * person, organization, login or supplier — is shown it.
  */
@@ -39,15 +40,6 @@ jest.mock('@/server/current-session', () => ({
   currentSession: async () => mockSession.current,
   missingSessionReason: async () => 'NO_SESSION',
 }));
-const jar = new Map<string, string>();
-jest.mock('next/headers', () => ({
-  cookies: async () => ({
-    get: (name: string) => (jar.has(name) ? { name, value: jar.get(name)! } : undefined),
-    getAll: () => [...jar].map(([name, value]) => ({ name, value })),
-    set: (name: string, value: string) => void jar.set(name, value),
-    delete: (name: string) => void jar.delete(name),
-  }),
-}));
 jest.mock('next/navigation', () => ({
   redirect: (url: string) => {
     throw new Error(`NEXT_REDIRECT:${url}`);
@@ -73,8 +65,12 @@ const { UnresolvedSupplierNotice } =
   require('./UnresolvedSupplierNotice') as typeof import('./UnresolvedSupplierNotice');
 const { SubmitQualificationForm, RegisterSupplierForm } =
   require('./SupplierForms') as typeof import('./SupplierForms');
-const { rememberUnresolved } =
+const { SupplierPendingNotices } =
+  require('./UnresolvedSupplierNotice') as typeof import('./UnresolvedSupplierNotice');
+const { reserveUnresolved, settleUnresolved, useUnresolvedStore } =
   require('@/server/unresolved-request') as typeof import('@/server/unresolved-request');
+const { memoryUnresolvedStore, UnresolvedStoreUnavailable } =
+  require('@/server/unresolved-request-store') as typeof import('@/server/unresolved-request-store');
 const { supplierWriteScope } =
   require('@/server/supplier-unresolved') as typeof import('@/server/supplier-unresolved');
 /* eslint-enable @typescript-eslint/no-require-imports */
@@ -115,22 +111,53 @@ const props = (tree: ReactElement, type: unknown) =>
     .filter((element) => element.type === type)
     .map((element) => element.props as Record<string, unknown>);
 
-const detailTree = () =>
+const detailTree = (searchParams: Record<string, string> = {}) =>
   DetailPage({
     params: Promise.resolve({ id: SUPPLIER_ID }),
-    searchParams: Promise.resolve({}),
+    searchParams: Promise.resolve(searchParams),
   });
-const listTree = () => ListPage({ searchParams: Promise.resolve({}) });
+const listTree = (searchParams: Record<string, string> = {}) =>
+  ListPage({ searchParams: Promise.resolve(searchParams) });
+
+/**
+ * What the page's notices draw: the page hands `SupplierPendingNotices` its
+ * reading of the slot, and that component is what puts the notice on screen.
+ */
+const noticesOf = (tree: ReactElement): ReactElement[] => {
+  const mounted = props(tree, SupplierPendingNotices);
+  expect(mounted).toHaveLength(1);
+  return elements((SupplierPendingNotices as unknown as (p: unknown) => ReactElement)(mounted[0]));
+};
+const noticeProps = (tree: ReactElement) =>
+  noticesOf(tree)
+    .filter((element) => element.type === UnresolvedSupplierNotice)
+    .map((element) => element.props as Record<string, unknown>);
+
+/** A write that was sent and whose answer was lost: reserved, then left unresolved. */
+async function lose(scope: ReturnType<typeof supplierWriteScope>, key: string, session = SESSION) {
+  const reserved = await reserveUnresolved(session, scope, {
+    key,
+    digest: 'd',
+    ref: null,
+    issuedAt: Date.now(),
+    deadline: null,
+    windowMs: null,
+    retry: false,
+  });
+  if (reserved.kind !== 'RESERVED') throw new Error(reserved.kind);
+  await settleUnresolved(reserved.attempt, 'UNRESOLVED');
+}
 
 beforeEach(() => {
-  jar.clear();
+  useUnresolvedStore(memoryUnresolvedStore());
   mockSession.current = SESSION;
 });
+afterEach(() => useUnresolvedStore(undefined));
 
 describe('a supplier page with nothing unresolved', () => {
   it('draws no notice and enabled forms', async () => {
     const tree = await detailTree();
-    expect(props(tree, UnresolvedSupplierNotice)).toHaveLength(0);
+    expect(noticeProps(tree)).toHaveLength(0);
     expect(props(tree, SubmitQualificationForm)).toEqual([
       expect.objectContaining({ held: false }),
     ]);
@@ -139,21 +166,17 @@ describe('a supplier page with nothing unresolved', () => {
 
 describe('a supplier page with an unresolved write', () => {
   beforeEach(async () => {
-    await rememberUnresolved(SESSION, supplierWriteScope(SUPPLIER_ID), {
-      key: 'sub_x',
-      digest: 'd',
-      deadline: null,
-      ref: 'corr-lost',
-    });
+    await lose(supplierWriteScope(SUPPLIER_ID), 'sub_x');
   });
 
-  it('shows its warning and correlation id on a reload, and draws the forms held', async () => {
+  it('shows its warning and reference on a reload, with a confirmation naming it, and draws the forms held', async () => {
     for (let visit = 0; visit < 2; visit += 1) {
       const tree = await detailTree();
-      expect(props(tree, UnresolvedSupplierNotice)).toEqual([
+      expect(noticeProps(tree)).toEqual([
         expect.objectContaining({
           supplierId: SUPPLIER_ID,
-          request: expect.objectContaining({ ref: 'corr-lost' }),
+          request: expect.objectContaining({ key: 'sub_x', inFlight: false }),
+          releaseToken: expect.any(String),
         }),
       ]);
       expect(props(tree, SubmitQualificationForm)).toEqual([
@@ -170,7 +193,7 @@ describe('a supplier page with an unresolved write', () => {
     ];
     for (const other of others) {
       mockSession.current = other;
-      expect(props(await detailTree(), UnresolvedSupplierNotice)).toHaveLength(0);
+      expect(noticeProps(await detailTree())).toHaveLength(0);
     }
     mockSession.current = SESSION;
     mockDetail.id = 'SUP_OTHER';
@@ -179,29 +202,58 @@ describe('a supplier page with an unresolved write', () => {
         params: Promise.resolve({ id: 'SUP_OTHER' }),
         searchParams: Promise.resolve({}),
       });
-      expect(props(tree, UnresolvedSupplierNotice)).toHaveLength(0);
+      expect(noticeProps(tree)).toHaveLength(0);
     } finally {
       mockDetail.id = SUPPLIER_ID;
     }
   });
 
   it('is not shown on the directory page, whose registration has its own slot', async () => {
-    expect(props(await listTree(), UnresolvedSupplierNotice)).toHaveLength(0);
+    expect(noticeProps(await listTree())).toHaveLength(0);
   });
 });
 
 describe('the registration with an unresolved write', () => {
   it('keeps the notice on /suppliers and draws the form held', async () => {
-    await rememberUnresolved(SESSION, supplierWriteScope(null), {
-      key: 'sub_r',
-      digest: 'd',
-      deadline: null,
-      ref: 'corr-reg',
-    });
+    await lose(supplierWriteScope(null), 'sub_r');
     const tree = await listTree();
-    expect(props(tree, UnresolvedSupplierNotice)).toEqual([
-      expect.objectContaining({ supplierId: null }),
-    ]);
+    expect(noticeProps(tree)).toEqual([expect.objectContaining({ supplierId: null })]);
     expect(props(tree, RegisterSupplierForm)).toEqual([expect.objectContaining({ held: true })]);
+  });
+});
+
+describe('a store that cannot say', () => {
+  const unreachable = () => {
+    const down = () => {
+      throw new UnresolvedStoreUnavailable(new Error('ECONNREFUSED'));
+    };
+    return { read: down, reserve: down, settle: down, release: down, purge: down };
+  };
+
+  it('is not "nothing held": the supplier page warns and draws its forms held', async () => {
+    useUnresolvedStore(unreachable() as never);
+    const tree = await detailTree();
+    expect(props(tree, SubmitQualificationForm)).toEqual([expect.objectContaining({ held: true })]);
+    const mounted = props(tree, SupplierPendingNotices);
+    expect(mounted).toEqual([expect.objectContaining({ pending: { kind: 'UNAVAILABLE' } })]);
+  });
+
+  it('does the same for the registration', async () => {
+    useUnresolvedStore(unreachable() as never);
+    const tree = await listTree();
+    expect(props(tree, RegisterSupplierForm)).toEqual([expect.objectContaining({ held: true })]);
+  });
+});
+
+describe('back from a refused reconciliation', () => {
+  it('says nothing changed, on the supplier page and on /suppliers', async () => {
+    const detail = await detailTree({ release: 'STALE' });
+    expect(props(detail, SupplierPendingNotices)).toEqual([
+      expect.objectContaining({ release: 'STALE' }),
+    ]);
+    const list = await listTree({ release: 'IN_PROGRESS' });
+    expect(props(list, SupplierPendingNotices)).toEqual([
+      expect.objectContaining({ release: 'IN_PROGRESS' }),
+    ]);
   });
 });

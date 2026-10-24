@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import {
   callGateway,
+  GatewayNeverSentError,
   GatewayOutcomeUnknownError,
   GatewayRequestError,
   type GatewayProblem,
@@ -54,7 +55,10 @@ export type WriteResult<T, F extends string> =
    * as `503`). A keyed write may resend it under the same key, which replays
    * rather than repeats; a key-less one (`idempotency: 'NONE'`) must treat a
    * `5xx` as unconfirmed — `supplier-runner.ts` does (Codex review of PR 366,
-   * finding 3).
+   * finding 3). `neverSent` is set when the request provably never left this
+   * portal (connection refused, DNS …): unlike a 503 the platform answered,
+   * which may follow a commit, that one is known not to have reached anything —
+   * a write need not remember it as unresolved.
    */
   | {
       readonly kind: 'UNAVAILABLE';
@@ -62,6 +66,7 @@ export type WriteResult<T, F extends string> =
       readonly correlationId: string;
       /** The platform error `code` (docs/06 § 6.7), when the response — a `4xx` — carried one. */
       readonly code?: string;
+      readonly neverSent?: true;
     }
   /**
    * Sent, and possibly committed, but not confirmed (Codex post-merge review
@@ -261,6 +266,9 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
     if (status === 404) return { kind: 'NOT_FOUND', correlationId };
     if ((status === 400 || status === 422 || status === 409) && problem) {
       return { kind: 'INVALID', correlationId, ...mapProblemToFields(problem, call.mapping) };
+    }
+    if (error instanceof GatewayNeverSentError) {
+      return { kind: 'UNAVAILABLE', status, correlationId, neverSent: true };
     }
     return {
       kind: 'UNAVAILABLE',

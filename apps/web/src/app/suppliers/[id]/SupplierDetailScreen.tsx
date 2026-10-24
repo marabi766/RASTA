@@ -53,13 +53,13 @@ export function SupplierDetailScreen({
   commands = NO_COMMANDS,
 }: SupplierDetailScreenProps) {
   if (result.kind === 'FORBIDDEN') {
-    return <NoAccessState description="این تأمین‌کننده در اختیار شما نیست." />;
+    return <NoAccessState description="این تامین‌کننده در اختیار شما نیست." />;
   }
 
   if (result.kind === 'NOT_FOUND') {
     return (
       <EmptyState
-        title="این تأمین‌کننده پیدا نشد"
+        title="این تامین‌کننده پیدا نشد"
         description="شناسه اشتباه است یا در سازمان فعال شما نیست."
       />
     );
@@ -68,7 +68,7 @@ export function SupplierDetailScreen({
   if (result.kind === 'UNAVAILABLE' || result.kind === 'MALFORMED') {
     return (
       <ErrorState
-        description="پروندهٔ تأمین‌کننده خوانده نشد. کمی بعد دوباره تلاش کنید."
+        description="پرونده‌ی تامین‌کننده خوانده نشد. کمی بعد دوباره تلاش کنید."
         correlationId={result.correlationId}
       />
     );
@@ -88,7 +88,7 @@ export function SupplierDetailScreen({
             شناسه <Identifier>{supplier.id}</Identifier>
           </span>
           <span className="text-sm text-content-muted">
-            شناسهٔ سازمان <Identifier>{supplier.organizationId}</Identifier>
+            شناسه‌ی سازمان <Identifier>{supplier.organizationId}</Identifier>
           </span>
         </div>
         <dl className="mt-4 grid gap-3 sm:grid-cols-2">
@@ -96,7 +96,7 @@ export function SupplierDetailScreen({
             <dt className="text-sm text-content-muted">دسته‌های اعلام‌شده</dt>
             <dd>
               {supplier.capabilities.length === 0
-                ? 'بدون دستهٔ اعلام‌شده'
+                ? 'بدون دسته‌ی اعلام‌شده'
                 : supplier.capabilities
                     .map((capability) => supplierCapabilityLabel(capability))
                     .join(' · ')}
@@ -209,7 +209,7 @@ function QualificationsSection({
       {qualifications.length === 0 ? (
         <EmptyState
           title="هیچ درخواست صلاحیتی ثبت نشده"
-          description="این تأمین‌کننده هنوز برای هیچ دسته‌ای صلاحیت ارسال نکرده است."
+          description="این تامین‌کننده هنوز برای هیچ دسته‌ای صلاحیت ارسال نکرده است."
         />
       ) : (
         <ul className="flex flex-col gap-3">
@@ -260,11 +260,11 @@ function SuspensionsSection({
   suspension: ReactNode;
 }) {
   return (
-    <Section headingId="supplier-suspensions" title="تاریخچهٔ تعلیق">
+    <Section headingId="supplier-suspensions" title="تاریخچه‌ی تعلیق">
       {suspensions.length === 0 ? (
         <EmptyState
           title="هیچ تعلیقی ثبت نشده"
-          description="این تأمین‌کننده تا کنون تعلیق نشده است."
+          description="این تامین‌کننده تا کنون تعلیق نشده است."
         />
       ) : (
         <ul className="flex flex-col gap-3">

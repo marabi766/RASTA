@@ -22,8 +22,18 @@ import {
   type SupplierBaseline,
   type WrittenSupplier,
 } from '@/server/supplier-commands';
-import { supplierWriteScope, SUPPLIER_WRITE_PURPOSE } from '@/server/supplier-unresolved';
-import { readUnresolved, rememberUnresolved, requestDigest } from '@/server/unresolved-request';
+import {
+  supplierWriteScope,
+  SUPPLIER_WRITE_PURPOSE,
+  SUPPLIER_WRITE_RETRY,
+} from '@/server/supplier-unresolved';
+import {
+  readUnresolved,
+  requestDigest,
+  reserveUnresolved,
+  settleUnresolved,
+  type SettleOutcome,
+} from '@/server/unresolved-request';
 import type { WriteResult } from '@/server/write';
 
 import type { SupplierFormState } from './supplier-form-state';
@@ -58,11 +68,15 @@ import type { SupplierFormState } from './supplier-form-state';
  *
  * That state cannot help once the first write was rejected by someone else in
  * between: a retry would then be a second qualification (Codex review of PR 366,
- * round 3). So a write whose answer was lost is **remembered** (`UNCONFIRMED`,
- * `remember`) and nothing new is sent for that supplier until the person says,
- * on the page, that they re-read the record (`reconcileSupplierWrite`). The hold
- * is decided before the form is read, so an invalid resubmission cannot replace
- * the warning, and it lives in a signed cookie, so navigation and a remount keep it.
+ * round 3). So the request is **reserved on the server before it is sent**
+ * (`reserveUnresolved`: one atomic step per supplier, or per registration), and
+ * kept when the answer is ambiguous — a lost response to the browser loses
+ * nothing, because nothing lives in the response (round 4). Nothing new is sent
+ * for that slot until the person says, on the page, that they re-read the record
+ * (`reconcileSupplierWrite`), and the request is never sent again (no key). The
+ * hold is checked before the form is read, so an invalid resubmission cannot
+ * replace the warning; the pages read the same record, so navigation and a
+ * remount keep it. The store unreachable is not "no hold": nothing is sent.
  */
 
 export interface SupplierCommandSpec<V, B, F extends string> {
@@ -104,31 +118,102 @@ async function gate(form: FormData): Promise<Gated> {
 
 /**
  * The warning of a write that is still unresolved for this slot, as the state a
- * form shows — or null when nothing is held. Nothing is sent while it exists.
+ * form shows — or null when nothing is held. Nothing is sent while it exists,
+ * and the store that cannot answer is not "nothing held".
  */
 async function heldState(
   session: WebSession,
   supplierId: string | null,
 ): Promise<SupplierFormState<never, never> | null> {
   const held = await readUnresolved(session, supplierWriteScope(supplierId));
-  return held === null ? null : { kind: 'UNCONFIRMED', correlationId: held.ref ?? held.key };
+  switch (held.kind) {
+    case 'NONE':
+      return null;
+    case 'UNAVAILABLE':
+      return { kind: 'NOT_CHECKED' };
+    case 'PENDING':
+      return held.request.inFlight
+        ? { kind: 'BUSY' }
+        : { kind: 'UNCONFIRMED', correlationId: held.request.ref ?? held.request.key };
+  }
 }
 
-/** Remembers a write that may have committed; the digest names what it carried. */
-async function remember(
+/** What the dispatch showed, as the store records it. */
+function outcomeOf(result: WriteResult<WrittenSupplier, string>): SettleOutcome {
+  switch (result.kind) {
+    case 'CREATED':
+      return 'CONFIRMED';
+    case 'INVALID':
+    case 'FORBIDDEN':
+    case 'NOT_FOUND':
+      return 'REFUSED';
+    case 'UNAVAILABLE':
+      // Connection refused and the like: no byte left this portal.
+      if (result.neverSent) return 'NEVER_SENT';
+      return provenUnwritten(result.status, result.code) ? 'REFUSED' : 'UNRESOLVED';
+    case 'IN_PROGRESS':
+    case 'UNKNOWN_OUTCOME':
+      return 'UNRESOLVED';
+  }
+}
+
+type Sent<F extends string> =
+  | { readonly sent: false; readonly state: SupplierFormState<never, never> }
+  | { readonly sent: true; readonly result: WriteResult<WrittenSupplier, F> };
+
+/**
+ * Reserves the slot, sends, and settles — in that order, so that a response
+ * lost on the way back to the browser still leaves the record: it is on the
+ * server before a byte goes out and stays unless the outcome is known.
+ */
+async function sendReserved<F extends string>(
   session: WebSession,
   supplierId: string | null,
   submissionId: string,
   body: unknown,
-  state: SupplierFormState<unknown, string>,
-): Promise<void> {
-  if (state.kind !== 'UNCONFIRMED') return;
-  await rememberUnresolved(session, supplierWriteScope(supplierId), {
+  send: () => Promise<WriteResult<WrittenSupplier, F>>,
+): Promise<Sent<F>> {
+  const reserved = await reserveUnresolved(session, supplierWriteScope(supplierId), {
     key: submissionId,
     digest: requestDigest(session, SUPPLIER_WRITE_PURPOSE, body),
+    ref: null,
+    issuedAt: Date.now(),
     deadline: null,
-    ref: state.correlationId,
+    windowMs: null,
+    retry: SUPPLIER_WRITE_RETRY,
   });
+  switch (reserved.kind) {
+    case 'UNAVAILABLE':
+      return { sent: false, state: { kind: 'NOT_CHECKED' } };
+    case 'CAPACITY':
+      return { sent: false, state: { kind: 'CAPACITY' } };
+    case 'HELD':
+    case 'EXPIRED':
+      return {
+        sent: false,
+        state:
+          reserved.kind === 'HELD' && reserved.reason === 'IN_PROGRESS'
+            ? { kind: 'BUSY' }
+            : {
+                kind: 'UNCONFIRMED',
+                correlationId: reserved.request.ref ?? reserved.request.key,
+              },
+      };
+    case 'RESERVED':
+      break;
+  }
+  const { attempt } = reserved;
+
+  let result: WriteResult<WrittenSupplier, F>;
+  try {
+    result = await send();
+  } catch (error) {
+    // Anything unexpected after the request may have gone out: unresolved.
+    await settleUnresolved(attempt, 'UNRESOLVED');
+    throw error;
+  }
+  await settleUnresolved(attempt, outcomeOf(result));
+  return { sent: true, result };
 }
 
 /** Everything a failed write can still say, once success (a redirect) is out of the way. */
@@ -153,7 +238,11 @@ function failure<V, F extends string>(
     case 'UNAVAILABLE':
       // "Nothing changed" only where the answer proves it (Codex review of
       // PR 366, finding 3): a 500 can follow a commit whose answer failed to
-      // read back, and a 503 can be an upstream reset after the commit.
+      // read back, and a 503 can be an upstream reset after the commit. A
+      // connection that never opened proves it too (`neverSent`).
+      if (result.neverSent) {
+        return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+      }
       return provenUnwritten(result.status, result.code)
         ? { kind: 'FAILED', status: result.status, correlationId: result.correlationId }
         : { kind: 'UNCONFIRMED', correlationId: result.correlationId };
@@ -190,13 +279,15 @@ export async function runRegister(
     };
   }
 
-  const result = await registerSupplier(gated.session, parsed.body);
+  const sent = await sendReserved(gated.session, null, gated.submissionId, parsed.body, () =>
+    registerSupplier(gated.session, parsed.body),
+  );
+  if (!sent.sent) return sent.state;
+  const { result } = sent;
   if (result.kind === 'CREATED') {
     redirect(supplierPath(result.data.id, mintFlash(gated.session, result.data.id, 'registered')));
   }
-  const state = failure(result, gated.submissionId, values);
-  await remember(gated.session, null, gated.submissionId, parsed.body, state);
-  return state;
+  return failure(result, gated.submissionId, values);
 }
 
 export async function runOnSupplier<V, B, F extends string>(
@@ -249,7 +340,20 @@ export async function runOnSupplier<V, B, F extends string>(
     };
   }
 
-  const result = await command.send(session, baseline, parsed.body);
+  const sent = await sendReserved(
+    session,
+    supplierId,
+    submissionId,
+    {
+      command: command.command,
+      supplierId,
+      qualificationId: baseline.qualificationId,
+      body: parsed.body,
+    },
+    () => command.send(session, baseline, parsed.body),
+  );
+  if (!sent.sent) return sent.state;
+  const { result } = sent;
 
   if (result.kind === 'CREATED') {
     // Redirect, not state: a refreshed page must not resubmit, and the page the
@@ -264,18 +368,5 @@ export async function runOnSupplier<V, B, F extends string>(
     // offered back for another try: the person sees the record as it is.
     redirect(supplierPath(baseline.supplierId, mintFlash(session, baseline.supplierId, 'stale')));
   }
-  const state = failure(result, submissionId, values);
-  await remember(
-    session,
-    supplierId,
-    submissionId,
-    {
-      command: command.command,
-      supplierId,
-      qualificationId: baseline.qualificationId,
-      body: parsed.body,
-    },
-    state,
-  );
-  return state;
+  return failure(result, submissionId, values);
 }

@@ -3,6 +3,11 @@
  */
 const LOGIN = { csrfToken: 'csrf-token-for-this-session' };
 jest.mock('@/server/current-session', () => ({ readSession: async () => LOGIN }));
+const purge = jest.fn<Promise<boolean>, [unknown]>(async () => true);
+jest.mock('@/server/unresolved-request', () => ({
+  ...jest.requireActual('@/server/unresolved-request'),
+  purgeUnresolved: (session: unknown) => purge(session),
+}));
 jest.mock('next/headers', () => ({
   cookies: async () => ({
     getAll: () => [
@@ -27,7 +32,19 @@ beforeEach(() => {
 const { POST } = require('./route') as typeof import('./route');
 
 describe('logout', () => {
-  it('removes the session cookie and every unresolved-request cookie, and no other', async () => {
+  it('deletes what this login holds on the server, and still logs out when the store cannot be reached', async () => {
+    const body = new FormData();
+    body.set('csrf', LOGIN.csrfToken);
+    purge.mockClear();
+    purge.mockResolvedValueOnce(false);
+    const response = await POST(
+      new Request('http://localhost:3200/auth/logout', { method: 'POST', body }),
+    );
+    expect(purge).toHaveBeenCalledWith(LOGIN);
+    expect(response.headers.getSetCookie().join('\n')).toMatch(/rasta_session=;/);
+  });
+
+  it('removes the session cookie and every legacy unresolved-request cookie, and no other', async () => {
     const body = new FormData();
     body.set('csrf', LOGIN.csrfToken);
     const response = await POST(

@@ -442,7 +442,7 @@ function drawn(
   memberships?: string[],
 ) {
   const session = sessionFor(tokenFor(organizationId, roles, memberships));
-  const commands = supplierCommandsFor(session, detail);
+  const commands = supplierCommandsFor(session, detail, false);
   return render(<SupplierDetailScreen result={{ kind: 'OK', data: detail }} commands={commands} />);
 }
 
@@ -516,9 +516,15 @@ describe('who is drawn which form on a supplier', () => {
     expect(screen.getByText('نقش شما در این پرونده فقط خواندن را می‌دهد.')).toBeInTheDocument();
   });
 
+  it('cannot be asked for its forms without saying whether a write is held', () => {
+    const session = sessionFor('not-a-jwt');
+    // @ts-expect-error `held` is required: omitting it must not draw the forms open.
+    expect(() => supplierCommandsFor(session, DETAIL)).not.toThrow();
+  });
+
   it('draws nothing for a token it cannot read', () => {
     const session = sessionFor('not-a-jwt');
-    expect(supplierCommandsFor(session, DETAIL)).toEqual(NO_COMMANDS);
+    expect(supplierCommandsFor(session, DETAIL, false)).toEqual(NO_COMMANDS);
   });
 
   it('signs every form for its own command, supplier and — for a decision — qualification', () => {
@@ -558,7 +564,7 @@ describe('the suspension episode each form is signed with (Codex review of PR 36
     const { container } = render(
       <SupplierDetailScreen
         result={{ kind: 'OK', data: detail }}
-        commands={supplierCommandsFor(session, detail)}
+        commands={supplierCommandsFor(session, detail, false)}
       />,
     );
     return [...container.querySelectorAll(`input[name="${BASELINE_FIELD}"]`)]

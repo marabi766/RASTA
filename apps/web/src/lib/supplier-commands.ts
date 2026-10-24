@@ -394,6 +394,25 @@ export const SUSPENSION_EPISODE_CHANGED = 'SUSPENSION_EPISODE_CHANGED';
 export const STALE_MESSAGE =
   'وضعیت پرونده با این فرم نمی‌خواند: درخواست پیش‌تر تصمیم گرفته شده، درخواست دیگری برای همین دسته هست، یا وضعیت تعلیق عوض شده است. صفحه را تازه کنید.';
 
+/** Another send on this supplier's record is in flight right now (another tab, a double press): nothing was sent. */
+export const HELD_IN_PROGRESS_MESSAGE =
+  'درخواست دیگری روی همین پرونده هم‌اکنون در حال فرستاده شدن است (برای نمونه در زبانه دیگر)، پس چیزی فرستاده نشد. ' +
+  'چند لحظه صبر کنید، صفحه را تازه کنید و وضعیت را ببینید.';
+
+/** The store of unresolved requests could not be checked: nothing was sent. */
+export const PENDING_UNCHECKED_MESSAGE =
+  'اکنون نمی‌توان بررسی کرد که درخواست روشن‌نشده‌ای روی این پرونده هست یا نه، پس چیزی فرستاده نشد و فرمی نشان داده نمی‌شود. ' +
+  'چند لحظه بعد صفحه را تازه کنید.';
+
+/** This login holds the most unresolved requests allowed. */
+export const PENDING_CAPACITY_MESSAGE =
+  'شمار درخواست‌های روشن‌نشده این نشست به سقف رسیده است و چیزی فرستاده نشد. ' +
+  'نخست درخواست‌های روشن‌نشده را بررسی و رها کنید.';
+
+/** The confirmation form was drawn for a request that has since changed. */
+export const RELEASE_STALE_MESSAGE =
+  'درخواست روشن‌نشده از زمان باز شدن این صفحه تغییر کرده است و چیزی تغییر نکرد. صفحه را تازه کنید و دوباره بررسی کنید.';
+
 export const BUSINESS_RULE_MESSAGE =
   'این کار با قواعد سامانه سازگار نیست. صفحه را تازه کنید و وضعیت را ببینید.';
 

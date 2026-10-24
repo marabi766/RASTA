@@ -76,9 +76,13 @@ export const READ_ONLY_NOTE = 'نقش شما در این پرونده فقط خ�
 export function supplierCommandsFor(
   session: WebSession,
   supplier: SupplierDetail,
+  /**
+   * An earlier write on this supplier is unresolved, or the store that would say
+   * could not be checked: the forms cannot send. Required — omitting it must not
+   * open a path (a form drawn "open" by default).
+   */
+  held: boolean,
   actor: SupplierActor | null = supplierActor(session.accessToken),
-  /** An earlier write on this supplier is unresolved: the forms cannot send. */
-  held = false,
 ): SupplierCommandsView {
   if (!actor) return NO_COMMANDS;
 
