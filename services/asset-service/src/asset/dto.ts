@@ -8,7 +8,9 @@ import {
   displayText,
   plainText,
   referenceId,
+  withMaxKeys,
   withoutBidiControlDeep,
+  numberInput,
 } from '@rasta/contracts';
 import { canonicalIdentifier } from './identifier';
 
@@ -72,10 +74,20 @@ const identifierText = (min: number, max: number) =>
   plainText().transform(canonicalIdentifier).pipe(z.string().min(min).max(max));
 
 /**
+ * How many top-level attributes `specifications` may carry. A spec sheet names
+ * tens of fields (engine, capacity, axles…), and no screen writes it today
+ * (apps/web `asset-form-fields.ts`); a hundred is room, not a target. Counted
+ * before any entry is parsed (GHSA-mrhx-c7xc-m3w5, see `withMaxKeys`).
+ */
+export const MAX_SPECIFICATION_KEYS = 100;
+
+/**
  * Type-specific attributes: any shape, but no bidi control in any key or string
  * value at any depth (#209) — they are stored and shown like any other text.
  */
-const freeFormSpecifications = withoutBidiControlDeep(z.record(z.unknown()));
+const freeFormSpecifications = withoutBidiControlDeep(
+  withMaxKeys(z.record(z.unknown()), MAX_SPECIFICATION_KEYS),
+);
 
 /**
  * A document-service id, stored as given and never resolved here. No control
@@ -109,7 +121,7 @@ export const createAssetSchema = z
     manufacturer: displayText(1, 120).optional(),
     model: plainText().min(1).max(120).optional(),
     serialNumber: identifierText(3, 120).optional(),
-    manufactureYear: z.coerce.number().int().min(1300).max(2100).optional(),
+    manufactureYear: numberInput(z.number().int().min(1300).max(2100)).optional(),
 
     /** Type-specific attributes; free-form so a new type needs no migration. */
     specifications: freeFormSpecifications.default({}),
@@ -152,7 +164,7 @@ export const updateAssetSchema = z
     assetTag: identifierText(1, 64).nullable().optional(),
     manufacturer: displayText(1, 120).nullable().optional(),
     model: plainText().min(1).max(120).nullable().optional(),
-    manufactureYear: z.coerce.number().int().min(1300).max(2100).nullable().optional(),
+    manufactureYear: numberInput(z.number().int().min(1300).max(2100)).nullable().optional(),
     specifications: freeFormSpecifications.optional(),
     expectedVersion,
   })
@@ -175,7 +187,7 @@ export const listAssetsQuerySchema = cursorPaginationSchema
     type: assetTypeSchema.optional(),
     q: z.string().trim().min(1).max(100).optional(),
     /** Assets whose insurance or inspection lapses within N days. */
-    expiringWithinDays: z.coerce.number().int().min(1).max(365).optional(),
+    expiringWithinDays: numberInput(z.number().int().min(1).max(365)).optional(),
   })
   .strict();
 
@@ -252,9 +264,9 @@ export type AttachDocumentDto = z.infer<typeof attachDocumentSchema>;
 
 export const nearbyQuerySchema = z
   .object({
-    latitude: z.coerce.number().min(-90).max(90),
-    longitude: z.coerce.number().min(-180).max(180),
-    radiusMeters: z.coerce.number().int().min(1).max(500_000).default(50_000),
+    latitude: numberInput(z.number().min(-90).max(90)),
+    longitude: numberInput(z.number().min(-180).max(180)),
+    radiusMeters: numberInput(z.number().int().min(1).max(500_000)).default(50_000),
     type: assetTypeSchema.optional(),
     /**
      * Only assets that could actually be dispatched.
@@ -266,7 +278,7 @@ export const nearbyQuerySchema = z
      * response is a plausible shorter list rather than an error.
      */
     availableOnly: queryBoolean(false),
-    limit: z.coerce.number().int().min(1).max(100).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).default(25),
   })
   .strict();
 

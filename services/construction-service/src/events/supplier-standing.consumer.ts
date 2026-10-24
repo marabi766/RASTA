@@ -47,7 +47,10 @@ const instant = z
 
 const qualifiedPayload = z.object({
   organizationId: identifier,
-  qualifiedFor: z.array(z.string()).min(1),
+  // supplier-service qualifies for at most its three capabilities at once;
+  // the cap only stops a payload whose length alone makes it a defect
+  // (GHSA-mrhx-c7xc-m3w5).
+  qualifiedFor: z.array(z.string()).min(1).max(50),
   decidedAt: instant,
 });
 const suspendedPayload = z.object({

@@ -30,6 +30,8 @@ export {
   withoutBidiControlDeep,
 } from './common/text';
 
+export { withMaxKeys } from './common/bounds';
+
 export {
   CURRENCIES,
   MAX_AMOUNT_MINOR,
@@ -44,8 +46,11 @@ export {
   addMoney,
   subtractMoney,
   applyBasisPoints,
+  digitsToBigInt,
 } from './common/money';
 export type { Currency, Money, SignedMoney } from './common/money';
+
+export { numberInput } from './common/number-input';
 
 export { BUSINESS_LINES, businessLineSchema } from './common/business-line';
 export type { BusinessLine } from './common/business-line';
@@ -125,8 +130,17 @@ export {
   brokerAcls,
   brokerAclDocument,
   brokerTopics,
+  brokerTopicLine,
+  deadLetterSources,
   BROKER_PROFILES,
 } from './events/broker-acls';
+export {
+  TOPIC_MESSAGE_MAX_BYTES,
+  DLQ_HEADER_VALUE_MAX_BYTES,
+  DLQ_ADDED_HEADERS_MAX_BYTES,
+  gzipGrowthMaxBytes,
+  deadLetterMessageMaxBytes,
+} from './events/dead-letter-size';
 export type {
   AclBinding,
   AclOperation,

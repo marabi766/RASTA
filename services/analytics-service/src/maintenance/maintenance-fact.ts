@@ -1,4 +1,4 @@
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, digitsToBigInt, type EventEnvelope } from '@rasta/contracts';
 import {
   UnprocessableEventError,
   invalidPayloadError,
@@ -54,7 +54,12 @@ const maintenanceCompletedPayload = z.object({
   totalCostMinor: z
     .string()
     .regex(/^\d{1,19}$/)
-    .refine((value) => BigInt(value) <= BIGINT_MAX),
+    // zod runs this even when the pattern failed, with the raw text: only digits are converted,
+    // so a malformed cost is VALIDATION_FAILED, never a SyntaxError quoting it into x-dlq-error.
+    .refine((value) => {
+      const cost = digitsToBigInt(value);
+      return cost === undefined || cost <= BIGINT_MAX;
+    }),
   currency: z.string().regex(/^[A-Z]{3}$/),
 });
 

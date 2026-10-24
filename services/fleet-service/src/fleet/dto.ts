@@ -5,6 +5,7 @@ import {
   seedIdSchema,
   ID_PREFIXES,
   plainText,
+  numberInput,
 } from '@rasta/contracts';
 
 /**
@@ -336,7 +337,7 @@ export const utilizationQuerySchema = z
     assetId: assetId.optional(),
     from: z.string().datetime().optional(),
     to: z.string().datetime().optional(),
-    limit: z.coerce.number().int().min(1).max(200).default(50),
+    limit: numberInput(z.number().int().min(1).max(200)).default(50),
   })
   .strict();
 

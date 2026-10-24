@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { amountMinorSchema, businessLineSchema, organizationIdSchema } from '@rasta/contracts';
+import {
+  amountMinorSchema,
+  businessLineSchema,
+  organizationIdSchema,
+  numberInput,
+} from '@rasta/contracts';
 import { TRANSACTION_TYPES } from '../transaction/dto';
 import { COMMISSION_OUTCOMES } from './rule-engine';
 import { cursorQueryParameter } from '../shared/cursor';
@@ -120,7 +125,7 @@ export type ListCommissionRulesQuery = z.infer<typeof listCommissionRulesQuerySc
 export const listCommissionsQuerySchema = z
   .object({
     cursor: cursorQueryParameter,
-    limit: z.coerce.number().int().min(1).max(100).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).default(25),
     /** Revenue of one business line (ADR-045 Consequences). */
     businessLine: businessLineSchema.optional(),
     /** `NO_ACTIVE_RULE` lists what no rule priced — reportable, per ADR-045 § 2. */
