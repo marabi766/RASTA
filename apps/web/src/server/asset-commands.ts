@@ -1,5 +1,7 @@
+import { DISPLAY_TEXT_PATTERN } from '@rasta/contracts';
 import { z } from 'zod';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { ASSET_TYPES } from '@/lib/asset-fields';
 import {
   REGISTER_ASSET_FIELDS,
@@ -55,16 +57,13 @@ export function canManageAssets(roles: readonly string[]): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * What asset-service's `displayText` accepts: Arabic and Latin script, digits,
- * combining marks, whitespace, ZWNJ and a short list of punctuation.
- *
- * Copied, not imported (A-02 forbids reaching into `services/*\/src`), and
- * pinned: `asset-commands.contract.spec.ts` reads the pattern out of the
- * service's `dto.ts` and fails the moment the two disagree on any of a corpus
- * of probe strings — the way `labels.contract.spec.ts` pins the vocabularies.
+ * What asset-service's `displayText` accepts — the very pattern, imported from
+ * `@rasta/contracts` (`DISPLAY_TEXT_PATTERN`) rather than copied: a copy is how
+ * the Persian comma «،» came to be refused here and in four services at once.
+ * `asset-commands.contract.spec.ts` pins that the service imports the same
+ * helper and defines none of its own.
  */
-export const ASSET_DISPLAY_TEXT =
-  /^[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s\u200c()«»'’\-.,/:+]+$/u;
+export const ASSET_DISPLAY_TEXT = DISPLAY_TEXT_PATTERN;
 
 const UNSUPPORTED_CHARACTERS = 'نویسهٔ غیرمجاز دارد؛ حروف فارسی و لاتین، رقم و علائم معمول مجازند';
 const BIDI_CONTROL_MESSAGE = 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد';
@@ -182,19 +181,7 @@ const responseSchema = z.object({ id: z.string().min(1) });
 
 export type WrittenAsset = z.infer<typeof responseSchema>;
 
-export function firstIssuePerField<F extends string>(
-  error: z.ZodError,
-  isField: (value: string) => value is F,
-): Partial<Record<F, string>> {
-  const fieldErrors: Partial<Record<F, string>> = {};
-  for (const issue of error.issues) {
-    const field = issue.path[0];
-    if (typeof field === 'string' && isField(field) && fieldErrors[field] === undefined) {
-      fieldErrors[field] = issue.message;
-    }
-  }
-  return fieldErrors;
-}
+export { firstIssuePerField };
 
 export function readFields<F extends string>(
   form: FormData,

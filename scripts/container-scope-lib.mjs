@@ -16,7 +16,9 @@
  *  - ci.yml affects all unless its parsed workflow settings and both image
  *    jobs are unchanged between the PR base and HEAD (other jobs still gate
  *    containers through its unchanged needs);
- *  - anything else (docs, apps, tests, planning, other scripts) affects none.
+ *  - only docs/ and tests/ (excluded by .dockerignore) may affect none;
+ *    README.md is re-included, and manifests/shared inputs always win;
+ *  - any unrecognised path affects all (including apps and other scripts).
  *
  * The service list is every directory under `services/` with a Dockerfile,
  * not a hand-kept matrix: three services once went unbuilt and unscanned for
@@ -26,12 +28,14 @@ import { isDeepStrictEqual } from 'node:util';
 
 export const SHARED_INPUTS = [
   /^packages\//,
-  /^pnpm-lock\.yaml$/,
-  /^pnpm-workspace\.yaml$/,
-  /^package\.json$/,
+  /(^|\/)pnpm-lock\.yaml$/,
+  /(^|\/)pnpm-workspace\.yaml$/,
+  /(^|\/)package\.json$/,
   /^tsconfig[^/]*\.json$/,
-  /^\.dockerignore$/,
-  /^\.npmrc$/,
+  /(^|\/)\.dockerignore$/,
+  /(^|\/)\.npmrc$/,
+  /(^|\/)Dockerfile(?:\.[^/]*)?$/,
+  /(^|\/)\.trivyignore\.services$/,
   /^turbo\.json$/,
   /^scripts\/copy-prisma-client\.mjs$/,
   /^\.github\/workflows\/ci\.yml$/,
@@ -43,8 +47,14 @@ export const SHARED_INPUTS = [
  * Missing jobs, ambiguous YAML and any parser failure retain the ALL default.
  */
 export async function imageWorkflowUnchanged(baseSource, headSource) {
+  let parseDocument;
   try {
-    const { parseDocument } = await import('yaml');
+    ({ parseDocument } = await import('yaml'));
+  } catch {
+    warnScopeFallback('YAML parser unavailable');
+    return false;
+  }
+  try {
     const parse = (source) => {
       const document = parseDocument(source, { intAsBigInt: true });
       if (document.errors.length || document.warnings.length) {
@@ -69,8 +79,17 @@ export async function imageWorkflowUnchanged(baseSource, headSource) {
       isDeepStrictEqual(baseJobs['container-scope'], headJobs['container-scope'])
     );
   } catch {
+    // Fixed reasons only: parser errors may contain source text or newlines.
+    warnScopeFallback('invalid or ambiguous workflow YAML');
     return false;
   }
+}
+
+// Callers supply fixed reasons, never error.message or file contents.
+export function warnScopeFallback(reason) {
+  process.stderr.write(
+    `::warning::Container scope: ${reason}; building and scanning every image.\n`,
+  );
 }
 
 /**
@@ -81,14 +100,27 @@ export async function imageWorkflowUnchanged(baseSource, headSource) {
  */
 export function servicesToBuild(services, changed, workflowUnchanged = false) {
   if (changed === 'all') return [...services];
-  const paths = changed
-    .map((path) => path.trim())
-    .filter((path) => path.length > 0)
-    .filter((path) => !(workflowUnchanged && path === '.github/workflows/ci.yml'));
+  const paths = changed.filter(
+    (path) => !(workflowUnchanged && path === '.github/workflows/ci.yml'),
+  );
   if (paths.some((path) => /^scripts\/container-scope[^/]*\.mjs$/.test(path))) {
     return [...services];
   }
   if (paths.some((path) => SHARED_INPUTS.some((pattern) => pattern.test(path)))) {
+    return [...services];
+  }
+  // .dockerignore excludes these directories (lines 23-24); its README.md
+  // exception (line 26) is deliberately not exempted. Neither scan reads them.
+  // No blanket *.md or apps exemption: every Dockerfile does COPY . . .
+  const excludedFromImages = (path) =>
+    /^(docs|tests)\//.test(path) && !/(^|\/)README\.md$/.test(path);
+  if (
+    paths.some(
+      (path) =>
+        !excludedFromImages(path) &&
+        !services.some((service) => path.startsWith(`services/${service}/`)),
+    )
+  ) {
     return [...services];
   }
   return services.filter((service) =>

@@ -2,7 +2,14 @@ import { render, screen, within } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
-import type { Order, OrderPage, ReadResult } from '@/server/orders';
+import { EMPTY_ORDER_COMMAND_FORM } from '@/lib/order-fields';
+import {
+  ORDER_COMMAND_FIELD_MAPPING,
+  RECEIPT_NOTE_REFUSAL,
+  type Order,
+  type OrderPage,
+  type ReadResult,
+} from '@/server/orders';
 
 import { OrdersScreen, formatOrderAmount } from './OrdersScreen';
 import { OrderDetailScreen } from './[id]/OrderDetailScreen';
@@ -227,7 +234,7 @@ describe('the command forms', () => {
     expect(screen.getByText(/corr-7/)).toBeInTheDocument();
   });
 
-  it('renders an overtaken command as the service’s sentence', () => {
+  it('renders an overtaken command as the Persian sentence the server mapped', () => {
     currentState = {
       kind: 'INVALID',
       command: 'CONFIRM',
@@ -245,10 +252,61 @@ describe('the command forms', () => {
         acknowledge: '',
       },
       fieldErrors: {},
-      message: 'Order ORD_1 cannot move from DISPUTED to CONFIRMED',
+      message: ORDER_COMMAND_FIELD_MAPPING.byCode!.BUSINESS_RULE_VIOLATION!,
     };
     renderDetail({ ...ORDER, status: 'FUNDS_HELD', availableActions: ['CONFIRM'] });
-    expect(screen.getByText(/cannot move from DISPUTED/)).toBeInTheDocument();
+    expect(screen.getByText(/وضعیت سفارش اجازه‌ی این اقدام را نمی‌دهد/)).toBeInTheDocument();
+  });
+
+  // Q-110: marketplace-service refuses a non-empty receipt note and has nowhere
+  // to keep one, so the buyer's one money step must not offer a field that makes
+  // it fail. FULFILL's note is stored and stays.
+  describe('the note (Q-110)', () => {
+    it('is not offered on confirm-receipt', () => {
+      const { container } = renderDetail({ ...ORDER, availableActions: ['CONFIRM_RECEIPT'] });
+      const form = container.querySelector('form')!;
+      expect(form.querySelector('[name="note"]')).toBeNull();
+      expect(within(form).queryByLabelText(/یادداشت/)).toBeNull();
+      expect(form.textContent).not.toContain('Q-110');
+    });
+
+    it('is still offered on fulfil, where the service stores it', () => {
+      const { container } = renderDetail({
+        ...ORDER,
+        status: 'CONFIRMED',
+        availableActions: ['FULFILL'],
+      });
+      expect(container.querySelector('form [name="note"]')).toBeInTheDocument();
+    });
+
+    it('shows the Persian refusal of a stale or crafted post that still carried a note', () => {
+      currentState = {
+        kind: 'INVALID',
+        command: 'CONFIRM_RECEIPT',
+        submissionId: 'sub_CCCCCCCCCCCCCCCCCCCC',
+        values: { ...EMPTY_ORDER_COMMAND_FORM, command: 'CONFIRM_RECEIPT', note: 'سلام' },
+        fieldErrors: { note: RECEIPT_NOTE_REFUSAL },
+        message: null,
+      };
+      const { container } = renderDetail({ ...ORDER, availableActions: ['CONFIRM_RECEIPT'] });
+      expect(screen.getByRole('alert')).toHaveTextContent(RECEIPT_NOTE_REFUSAL);
+      expect(container.querySelector('[name="note"]')).toBeNull();
+    });
+  });
+});
+
+describe('a failed order', () => {
+  it('never shows the economic service’s English refusal text, only the Persian cause', () => {
+    renderDetail({
+      ...ORDER,
+      status: 'FAILED',
+      failureReason: 'Insufficient available balance in wallet WAL_01J (needs 90000000)',
+    });
+    expect(document.body.textContent).not.toContain('Insufficient');
+    expect(document.body.textContent).not.toContain('WAL_01J');
+    expect(
+      screen.getByText(/دلیل ناکامی: نگه‌داشت وجه برای این سفارش انجام نشد/),
+    ).toBeInTheDocument();
   });
 });
 

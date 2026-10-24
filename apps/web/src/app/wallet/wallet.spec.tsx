@@ -3,6 +3,7 @@ import { axe } from 'jest-axe';
 
 import { WalletScreen } from './WalletScreen';
 import { formatMoney } from '@/lib/format';
+import { providerNotice } from '@/lib/wallet-fields';
 import type {
   HoldsPage,
   PaymentProviderDisclosure,
@@ -81,7 +82,6 @@ const TRANSACTIONS: TransactionPage = {
 const PROVIDER: PaymentProviderDisclosure = {
   provider: 'mock',
   simulated: true,
-  notice: 'Simulated payment provider. No bank connection, no real funds, no custody of money.',
 };
 
 function render_(
@@ -128,8 +128,31 @@ describe('the balance', () => {
 describe('the top-up section', () => {
   it('shows the simulation disclosure and the form when the provider read succeeds', () => {
     const { getByText, container } = render_();
-    expect(getByText(PROVIDER.notice)).toBeInTheDocument();
+    expect(getByText(providerNotice(true))).toBeInTheDocument();
     expect(container.querySelector('[name="amountMinor"]')).toBeInTheDocument();
+  });
+
+  it('words the disclosure in Persian from the provider state, never the service’s English sentence', () => {
+    // The service still sends its English `notice`; the page does not render it.
+    const english =
+      'Simulated payment provider. No bank connection, no real funds, no custody of money.';
+    const { container, queryByText } = render_({
+      provider: {
+        kind: 'OK',
+        data: { ...PROVIDER, notice: english } as unknown as PaymentProviderDisclosure,
+      },
+    });
+    expect(queryByText(english)).toBeNull();
+    expect(container.textContent).not.toMatch(/Simulated|bank connection|custody/);
+    expect(container.textContent).toContain(providerNotice(true));
+  });
+
+  it('says the live provider in Persian too', () => {
+    const { container } = render_({
+      provider: { kind: 'OK', data: { ...PROVIDER, simulated: false } },
+    });
+    expect(container.textContent).toContain(providerNotice(false));
+    expect(container.textContent).not.toMatch(/Live payment provider/);
   });
 
   it('withholds the form rather than showing an amount field with no disclosure above it', () => {
@@ -152,7 +175,7 @@ describe('the whole screen: «حالت نمایشی» (Q-14)', () => {
     const { queryByText, container } = render_({
       provider: {
         kind: 'OK',
-        data: { ...PROVIDER, simulated: false, notice: 'Live payment provider.' },
+        data: { ...PROVIDER, simulated: false },
       },
     });
     expect(queryByText('حالت نمایشی')).toBeNull();
