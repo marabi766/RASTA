@@ -8,6 +8,7 @@ import { mintSubmissionId } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { MaintenanceScreen } from './MaintenanceScreen';
 import { ReportRequestForm } from './ReportRequestForm';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/maintenance` route (docs/16 § 16.6).
@@ -54,8 +55,9 @@ export default async function MaintenancePage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

@@ -203,7 +203,7 @@ export function ReturnCommandForm({
       } catch (error) {
         // Done: the action redirects to the request.
         if (isRedirect(error)) {
-          clearUnresolvedReturn(scope, sentId);
+          clearUnresolvedReturn(scope, sentId, binding);
           throw error;
         }
         const ended = await sessionHasEnded();
@@ -215,7 +215,7 @@ export function ReturnCommandForm({
       // Still in doubt: kept. A definite answer to THIS submission's first send:
       // its own record is dropped — never another's.
       if (next.kind === 'UNCONFIRMED') saveUnresolvedReturn(scope, next, binding);
-      else if (firstSend) clearUnresolvedReturn(scope, sentId);
+      else if (firstSend) clearUnresolvedReturn(scope, sentId, binding);
       return next;
     },
     [scope, command, replay, binding, sessionMaxAgeSeconds, lines],
@@ -232,7 +232,7 @@ export function ReturnCommandForm({
         csrfToken={csrfToken}
         headingId={headingId}
         pageHref={pageHref}
-        onForget={() => clearUnresolvedReturn(scope, state.submissionId)}
+        onForget={() => clearUnresolvedReturn(scope, state.submissionId, binding)}
       />
     );
   }

@@ -80,6 +80,7 @@ import {
   PublicationSection,
 } from './OwnerSections';
 import { OpenTenderDetailScreen, OwnBidSection, OwnTenderDetailScreen } from './TenderDetailScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/tenders/[id]` route — جزئیات مناقصه (docs/16 § ۱۶٫۶). Read-only.
@@ -167,7 +168,7 @@ export default async function TenderPage({
                   : []
               }
               csrfToken={session.csrfToken}
-              owner={submissionBinding(session).owner}
+              account={submissionBinding(session)}
               pageHref={pageHref}
             />
           }
@@ -202,8 +203,9 @@ export default async function TenderPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -302,7 +304,7 @@ function authorityStepViews(
   pageSubmissionIds: readonly string[],
   firstShowsRestored: boolean,
 ): AuthorityStepView[] {
-  const ownerTag = submissionBinding(session).owner;
+  const account = submissionBinding(session);
   return views.map(({ step, notes, decisions }, index) => ({
     step,
     notes,
@@ -311,7 +313,7 @@ function authorityStepViews(
         tenderId={id}
         offered={decisions}
         csrfToken={session.csrfToken}
-        owner={ownerTag}
+        account={account}
         pageHref={tenderDetailPath(id, 'own')}
         showsRestored={firstShowsRestored && index === 0}
         pageSubmissionIds={pageSubmissionIds}
@@ -401,7 +403,7 @@ function sessionRecovery(session: WebSession, tenderId: string): ReactNode {
         tenderId={tenderId}
         offered={[]}
         csrfToken={session.csrfToken}
-        owner={submissionBinding(session).owner}
+        account={submissionBinding(session)}
         pageHref={tenderDetailPath(tenderId, 'own')}
         showsRestored
         pageSubmissionIds={[]}
@@ -464,7 +466,7 @@ async function bidSideOnlyBody(
       tenderId={id}
       offered={offered}
       csrfToken={session.csrfToken}
-      owner={submissionBinding(session).owner}
+      account={submissionBinding(session)}
       pageHref={tenderDetailPath(id, 'own')}
       showsRestored={showsRestored}
       pageSubmissionIds={pageSubmissionIds}
@@ -572,14 +574,14 @@ async function ownerSections(
   const done = readFlash(session, typeof flash === 'string' ? flash : undefined, id, OWNER_DONE);
 
   const pageHref = tenderDetailPath(id, 'own');
-  const ownerTag = submissionBinding(session).owner;
+  const account = submissionBinding(session);
   const pageSubmissionIds = submissionIdsOf(forms);
   const group = (offered: typeof forms.publication, showsRestored: boolean) => (
     <OwnerCommands
       tenderId={id}
       offered={offered}
       csrfToken={session.csrfToken}
-      owner={ownerTag}
+      account={account}
       pageHref={pageHref}
       showsRestored={showsRestored}
       pageSubmissionIds={pageSubmissionIds}

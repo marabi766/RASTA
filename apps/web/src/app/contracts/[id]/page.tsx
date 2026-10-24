@@ -20,6 +20,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ContractDetailScreen } from './ContractDetailScreen';
 import { contractCommandOffers } from './contract-offers';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/contracts/[id]` route — جزئیات قرارداد (docs/16 § ۱۶٫۶, ADR-068).
@@ -123,8 +124,9 @@ export default async function ContractPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

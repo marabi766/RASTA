@@ -8,6 +8,7 @@ import { fetchOrders, type OrderListQuery } from '@/server/orders';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { OrdersScreen } from './OrdersScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/orders` route — سفارش‌ها (docs/16 § ۱۶٫۶, `PROCUREMENT_USER`,
@@ -58,8 +59,9 @@ export default async function OrdersPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

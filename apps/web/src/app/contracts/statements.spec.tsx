@@ -26,6 +26,7 @@ import { ContractDetailScreen } from './[id]/ContractDetailScreen';
 import { StatementCommandForm } from './[id]/StatementCommandForm';
 import type { StatementFormState } from './[id]/statement-form-state';
 import { StatementDetailScreen } from './[id]/statements/[statementId]/StatementDetailScreen';
+import { bindingOf } from '@/test/unresolved-binding';
 
 // Each test renders a whole statement screen and runs jest-axe over it. On a loaded CI runner
 // one such test took longer than jest's 5 s default (main 59785c26); the axe run it left behind
@@ -67,7 +68,7 @@ afterEach(() => {
 });
 
 const CSRF = 'csrf-token-for-this-session';
-const BINDING = { owner: 'owner-tag', session: 'session-tag' };
+const BINDING = bindingOf('owner-tag', 'session-tag');
 const SESSION_MAX_AGE = 12 * 60 * 60;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const STAMP = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };

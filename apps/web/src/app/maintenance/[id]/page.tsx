@@ -26,6 +26,7 @@ import {
   RecordPartForm,
   StartRepairForm,
 } from './RepairOrderForms';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/maintenance/[id]` route (docs/16 § 16.6).
@@ -134,8 +135,9 @@ export default async function MaintenanceRequestPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

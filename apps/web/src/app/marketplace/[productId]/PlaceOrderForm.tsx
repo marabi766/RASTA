@@ -149,7 +149,7 @@ function OrderForm({
       } catch (error) {
         // The order was placed: the action redirects to it. Nothing is unresolved now.
         if (isRedirect(error)) {
-          clearUnresolvedOrder(productId);
+          clearUnresolvedOrder(productId, binding);
           throw error;
         }
         // The call itself failed — a lost response after the order may have
@@ -176,7 +176,7 @@ function OrderForm({
       if (firstSend) {
         // Answered: with the correlation id if it is still in doubt, else settled.
         if (next.kind === 'UNCONFIRMED') saveUnresolvedOrder(productId, next, binding);
-        else if (unsent) clearUnresolvedOrder(productId);
+        else if (unsent) clearUnresolvedOrder(productId, binding);
       }
       return next;
     },
@@ -193,7 +193,7 @@ function OrderForm({
         csrfToken={csrfToken}
         offers={offers}
         newOrderHref={newOrderHref}
-        onStartNew={() => clearUnresolvedOrder(productId)}
+        onStartNew={() => clearUnresolvedOrder(productId, binding)}
       />
     );
   }

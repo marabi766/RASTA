@@ -8,6 +8,7 @@ import { fetchDemoMode } from '@/server/demo-mode';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ProjectsScreen } from './ProjectsScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/projects` route — پروژه‌های عمرانی (docs/16 § ۱۶٫۶).
@@ -48,8 +49,9 @@ export default async function ProjectsPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

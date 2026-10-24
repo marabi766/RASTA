@@ -8,6 +8,7 @@ import type { WebSession } from '@/server/session';
 import { RECEIPT_NOTE_REFUSAL } from '@/server/orders';
 
 import { IDLE_ORDER_COMMAND_FORM } from './form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The one server action behind every order command.
@@ -56,7 +57,7 @@ const SESSION = {
   subject: 'USR_1',
   username: 'buyer',
   organizationId: 'ORG_BUYER',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG_BUYER'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

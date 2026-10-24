@@ -7,6 +7,7 @@ import { fetchSuppliers, type SupplierListQuery } from '@/server/suppliers';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { SuppliersScreen } from './SuppliersScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/suppliers` route — تأمین‌کنندگان (docs/16 § ۱۶٫۶). Read-only.
@@ -46,8 +47,9 @@ export default async function SuppliersPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

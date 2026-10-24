@@ -9,6 +9,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 import { ASSET_STATUSES, ASSET_TYPES, oneOf } from '@/lib/asset-fields';
 import { AssetsScreen } from './AssetsScreen';
 import { RegisterAssetForm } from './RegisterAssetForm';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/assets` route.
@@ -58,8 +59,9 @@ export default async function AssetsPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

@@ -10,6 +10,7 @@ import { fetchOpenTenders, fetchTenders } from '@/server/tenders';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { TendersScreen, type TendersQuery, type TendersView } from './TendersScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/tenders` route — مناقصه‌ها (docs/16 § ۱۶٫۶). Read-only.
@@ -60,8 +61,9 @@ export default async function TendersPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

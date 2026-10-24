@@ -17,6 +17,7 @@ import { LINE_A, LINE_B, ORDER_ID, RETURN_ID } from '@/test/return-fixtures';
 import { ReturnCommandForm } from './ReturnCommandForm';
 import { ReturnCommands } from './ReturnCommands';
 import type { ReturnFormState } from './return-form-state';
+import { OTHER_PERSON, bindingOf, keyFor } from '@/test/unresolved-binding';
 
 /**
  * The unconfirmed path with the real `useActionState` — the statement and
@@ -46,12 +47,12 @@ const sessionProbe = jest.fn<Promise<{ status: number }>, [string]>();
 
 const KEY = 'sub_FIRSTKEYFIRSTKEYFIRS';
 const FRESH = 'sub_FRESHKEYFRESHKEYFRE';
-const BINDING = { owner: 'owner-tag-A', session: 'session-tag-1' };
+const BINDING = bindingOf('owner-tag-A', 'session-tag-1');
 const SESSION_MAX_AGE = 12 * 60 * 60;
 const ORDER_SCOPE: ReturnScope = { kind: 'ORDER', orderId: ORDER_ID };
 const RETURN_SCOPE: ReturnScope = { kind: 'RETURN', returnId: RETURN_ID };
-const ORDER_SLOT = `rasta.unresolved-return.order.${ORDER_ID}`;
-const RETURN_SLOT = `rasta.unresolved-return.return.${RETURN_ID}`;
+const ORDER_SLOT = keyFor('rasta.unresolved-return.', BINDING, `order.${ORDER_ID}`);
+const RETURN_SLOT = keyFor('rasta.unresolved-return.', BINDING, `return.${RETURN_ID}`);
 const STAMP: ReplayStamp = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };
 const REASON = 'سه کیسه از شن رسیده خیس بود.';
 const BODY = { reason: REASON, lines: [{ orderLineId: LINE_A, quantity: 3 }] };
@@ -287,7 +288,7 @@ describe('never silently gone', () => {
         SESSION_MAX_AGE,
       )?.kind,
     ).toBe('VIEW_ONLY');
-    purgeForeignUnresolvedReturns('owner-tag-B');
+    purgeForeignUnresolvedReturns({ person: OTHER_PERSON, legacy: [] });
     expect(restoreUnresolvedReturn(RETURN_SCOPE, BINDING, SESSION_MAX_AGE)).toBeNull();
   });
 
@@ -474,9 +475,9 @@ describe('one unresolved command per return request', () => {
         ),
       ).toBe('HELD');
     }
-    clearUnresolvedReturn(RETURN_SCOPE, REJECT_KEY);
+    clearUnresolvedReturn(RETURN_SCOPE, REJECT_KEY, BINDING);
     expect(slot()).toMatchObject({ submissionId: AUTHORIZE_KEY, command: 'AUTHORIZE' });
-    clearUnresolvedReturn(RETURN_SCOPE, AUTHORIZE_KEY);
+    clearUnresolvedReturn(RETURN_SCOPE, AUTHORIZE_KEY, BINDING);
     expect(slot()).toBeNull();
   });
 

@@ -5,7 +5,15 @@ import {
   type StatementCommand,
 } from './statement-fields';
 import type { StatementLineRequest } from './statement-draft';
-import type { Binding } from './unresolved-order';
+import {
+  keysUnder,
+  locate,
+  ownedHere,
+  purgeForeign,
+  tenantKey,
+  type AccountTags,
+  type Binding,
+} from './unresolved-tenancy';
 
 /**
  * A statement command whose outcome is unknown, kept in `sessionStorage` so
@@ -150,8 +158,8 @@ function storage(): Storage | null {
   }
 }
 
-function keyOf(scope: StatementScope): string {
-  return `${KEY_PREFIX}${scope.contractId}.${scope.statementId ?? 'draft'}`;
+function scopeOf(scope: StatementScope): string {
+  return `${scope.contractId}.${scope.statementId ?? 'draft'}`;
 }
 
 function tag(value: unknown): value is string {
@@ -253,22 +261,13 @@ function markerOf(entry: Stored): string {
   });
 }
 
-function ownKeys(store: Storage): string[] {
-  const keys: string[] = [];
-  for (let index = 0; index < store.length; index += 1) {
-    const key = store.key(index);
-    if (key !== null && key.startsWith(KEY_PREFIX)) keys.push(key);
-  }
-  return keys;
-}
-
 /** Logout: every entry reduced to a marker; unreadable ones removed. */
 export function purgeAllUnresolvedStatements(): void {
   markStatementsClosing();
   try {
     const store = storage();
     if (!store) return;
-    for (const key of ownKeys(store)) {
+    for (const key of keysUnder(store, KEY_PREFIX)) {
       const raw = store.getItem(key);
       const entry = raw === null ? null : parse(raw);
       if (entry) store.setItem(key, markerOf(entry));
@@ -280,16 +279,15 @@ export function purgeAllUnresolvedStatements(): void {
   changed();
 }
 
-/** A page for `owner`: entries of anyone else, and unreadable ones, are removed. */
-export function purgeForeignUnresolvedStatements(owner: string): void {
+/**
+ * A page for this person: entries of anyone else, and unreadable ones, are
+ * removed; theirs stay, for every organization (`lib/unresolved-tenancy.ts`).
+ */
+export function purgeForeignUnresolvedStatements(tags: AccountTags): void {
   try {
     const store = storage();
     if (!store) return;
-    for (const key of ownKeys(store)) {
-      const raw = store.getItem(key);
-      const entry = raw === null ? null : parse(raw);
-      if (!entry || entry.owner !== owner) store.removeItem(key);
-    }
+    purgeForeign(store, KEY_PREFIX, tags, parse);
   } catch {
     // See above.
   }
@@ -312,17 +310,24 @@ export function saveUnresolvedStatement(
   try {
     const store = storage();
     if (!store) return 'UNAVAILABLE';
-    const previous = store.getItem(keyOf(scope));
-    const parsed = previous === null ? null : parse(previous);
+    const found = locate(store, KEY_PREFIX, binding, scopeOf(scope));
+    const parsed = found === null ? null : parse(found.raw);
     // Someone else's is not this person's to keep (`purgeForeignUnresolvedStatements`).
-    const earlier = parsed?.owner === binding.owner ? parsed : null;
-    // Another submission's record — even a marker — is never replaced.
-    if (earlier !== null && earlier.submissionId !== entry.submissionId) return 'HELD';
+    const earlier =
+      found !== null && parsed !== null && ownedHere(binding, found.legacy, parsed.owner)
+        ? parsed
+        : null;
+    // Another submission's record — even a marker — is never replaced; nor is
+    // a record from before records were kept per organization, which is only
+    // ever shown (it may have been another organization's).
+    if (earlier !== null && (found?.legacy || earlier.submissionId !== entry.submissionId)) {
+      return 'HELD';
+    }
     // A marker is never turned back into something that can be re-sent.
     if (earlier?.marker) return 'SAVED';
     const same = earlier !== null;
     store.setItem(
-      keyOf(scope),
+      tenantKey(KEY_PREFIX, binding, scopeOf(scope)),
       JSON.stringify({
         v: VERSION,
         marker: false,
@@ -347,16 +352,21 @@ export function saveUnresolvedStatement(
 
 /**
  * Forgets the record of `submissionId` — and only that one: a record another
- * submission holds stays (PR 332 review 1). An unreadable record is left to
+ * submission holds stays (PR 332 review 1), and so does every other
+ * organization's. An unreadable record is left to
  * `restoreUnresolvedStatement`, which removes it.
  */
-export function clearUnresolvedStatement(scope: StatementScope, submissionId: string): void {
+export function clearUnresolvedStatement(
+  scope: StatementScope,
+  submissionId: string,
+  binding: Binding,
+): void {
   try {
     const store = storage();
-    const raw = store?.getItem(keyOf(scope));
-    if (!store || raw === null || raw === undefined) return;
-    if (parse(raw)?.submissionId !== submissionId) return;
-    store.removeItem(keyOf(scope));
+    const found = store ? locate(store, KEY_PREFIX, binding, scopeOf(scope)) : null;
+    if (!store || found === null) return;
+    if (parse(found.raw)?.submissionId !== submissionId) return;
+    store.removeItem(found.key);
   } catch {
     // See above.
     return;
@@ -377,17 +387,17 @@ export function restoreUnresolvedStatement(
 ): RestoredStatement | null {
   try {
     const store = storage();
-    const raw = store?.getItem(keyOf(scope));
-    if (!store || raw === null || raw === undefined) return null;
+    const found = store ? locate(store, KEY_PREFIX, binding, scopeOf(scope)) : null;
+    if (!store || found === null) return null;
 
-    const entry = parse(raw);
-    if (!entry || entry.owner !== binding.owner) {
-      store.removeItem(keyOf(scope));
+    const entry = parse(found.raw);
+    if (!entry || !ownedHere(binding, found.legacy, entry.owner)) {
+      store.removeItem(found.key);
       return null;
     }
     const { command, submissionId, correlationId, savedAt } = entry;
     if (entry.marker || now - savedAt > maxAgeSeconds * 1000) {
-      if (!entry.marker) store.setItem(keyOf(scope), markerOf(entry));
+      if (!entry.marker) store.setItem(found.key, markerOf(entry));
       return {
         kind: 'VIEW_ONLY',
         entry: {
@@ -410,8 +420,12 @@ export function restoreUnresolvedStatement(
       replay: entry.replay,
       marker: false,
     };
+    // An old-format record may have been sent for another organization: never re-sent.
     const retryable =
-      entry.session === binding.session && entry.replay !== null && now < entry.replay.until;
+      !found.legacy &&
+      entry.session === binding.session &&
+      entry.replay !== null &&
+      now < entry.replay.until;
     return { kind: retryable ? 'RETRYABLE' : 'VIEW_ONLY', entry: restored };
   } catch {
     return null;

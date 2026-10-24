@@ -5,10 +5,15 @@ import { refuseBeforeBody } from '@/server/request-gate';
 import { sealSession, type WebSession } from '@/server/session';
 import type { Offer } from '@/server/marketplace';
 
-import { markAccountOpen, purgeAllUnresolvedOrders } from '@/lib/unresolved-order';
+import {
+  markAccountOpen,
+  purgeAllUnresolvedOrders,
+  purgeForeignUnresolvedOrders,
+} from '@/lib/unresolved-order';
 
 import { PlaceOrderForm, type PlaceOrderFormProps } from './PlaceOrderForm';
 import type { PlaceOrderFormState } from './place-order-form-state';
+import { OTHER_PERSON as OTHER_PERSON_TAG, bindingOf, keyFor } from '@/test/unresolved-binding';
 
 /**
  * What survives a reload, the sort form's GET navigation, a call the gate
@@ -63,11 +68,12 @@ const OFFER: Offer = {
 
 const KEY = 'sub_KEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKE';
 const PAGE_KEY = 'sub_PAGEPAGEPAGEPAGEPAGEPAGEPAGEPAGEPAGEPAGEPA';
-const STORAGE_KEY = 'rasta.unresolved-order.PRD_1'; // gitleaks:allow
 
-const LOGIN_1 = { owner: 'owner-1', session: 'login-1' };
-const LOGIN_2 = { owner: 'owner-1', session: 'login-2' };
-const OTHER_PERSON = { owner: 'owner-2', session: 'login-9' };
+const LOGIN_1 = bindingOf('owner-1', 'login-1');
+const LOGIN_2 = bindingOf('owner-1', 'login-2');
+const OTHER_PERSON = bindingOf('owner-2', 'login-9', OTHER_PERSON_TAG);
+/** Where the page's own entry for PRD_1 is kept: this person, this organization. */
+const STORAGE_KEY = keyFor('rasta.unresolved-order.', LOGIN_1, 'PRD_1'); // gitleaks:allow
 
 function pageProps(overrides: Partial<PlaceOrderFormProps> = {}): PlaceOrderFormProps {
   return {
@@ -120,7 +126,7 @@ function stored(): Record<string, unknown> | null {
 
 function plant(overrides: Record<string, unknown> = {}, binding = LOGIN_1) {
   window.sessionStorage.setItem(
-    STORAGE_KEY,
+    keyFor('rasta.unresolved-order.', binding, 'PRD_1'),
     JSON.stringify({
       v: 1,
       submissionId: KEY,
@@ -356,13 +362,18 @@ describe('an unresolved order survives a navigation (F1)', () => {
     expect(submit).not.toHaveBeenCalled();
   });
 
-  it('another person’s entry is not shown, and is removed', async () => {
+  it('another person’s entry is not shown, and the account boundary removes it', async () => {
     plant({}, OTHER_PERSON);
+    const theirs = keyFor('rasta.unresolved-order.', OTHER_PERSON, 'PRD_1');
     const { container } = loadPage();
 
-    await waitFor(() => expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull());
-    expect(container.querySelector('[name="submission"]')).toHaveValue(PAGE_KEY);
+    await waitFor(() =>
+      expect(container.querySelector('[name="submission"]')).toHaveValue(PAGE_KEY),
+    );
     expect(screen.queryByText(/ممکن است سفارش ثبت شده باشد/)).toBeNull();
+    // `AccountBoundary` on this person's first page.
+    purgeForeignUnresolvedOrders({ person: LOGIN_1.person, legacy: [] });
+    expect(window.sessionStorage.getItem(theirs)).toBeNull();
   });
 
   it('an entry older than the session lifetime is discarded', async () => {
@@ -747,5 +758,44 @@ describe('what is remembered is what was sent (F2)', () => {
     plant({ values: { offerId: 'OFR_1', quantity: '0' } });
     loadPage();
     await waitFor(() => expect(stored()).toBeNull());
+  });
+});
+
+describe('an organization switch while an answer is out (task 100)', () => {
+  const IN_A = bindingOf('owner-A', 'login-A');
+  const IN_B = bindingOf('owner-B', 'login-B');
+  const PREFIX = 'rasta.unresolved-order.';
+  /** A route as every page draws it: its tree keyed to the organization (`actingScope`). */
+  const route = (binding: typeof IN_A, organization: string, submissionId: string) => (
+    <div key={`organization:${organization}`}>
+      <PlaceOrderForm {...pageProps({ binding, submissionId })} />
+    </div>
+  );
+
+  it('A’s late answer is kept as A’s, and never drawn on — or stored for — the page now drawn for B', async () => {
+    let answer: (state: PlaceOrderFormState) => void = () => undefined;
+    submit.mockImplementation(
+      () =>
+        new Promise<PlaceOrderFormState>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    const { container, rerender } = render(route(IN_A, 'A', KEY));
+    await fillAndSend(container);
+    expect(window.sessionStorage.getItem(keyFor(PREFIX, IN_A, 'PRD_1'))).not.toBeNull();
+
+    // A refresh re-rendered the route for B while A's send was still out.
+    rerender(route(IN_B, 'B', PAGE_KEY));
+    await act(async () => {
+      answer(UNCONFIRMED);
+    });
+
+    expect(screen.queryByText(/ممکن است سفارش ثبت شده باشد/)).toBeNull();
+    expect(container.querySelector('[name="submission"]')).toHaveValue(PAGE_KEY);
+    expect(window.sessionStorage.getItem(keyFor(PREFIX, IN_B, 'PRD_1'))).toBeNull();
+    // A's own, still in doubt, kept for A to reconcile.
+    expect(
+      JSON.parse(window.sessionStorage.getItem(keyFor(PREFIX, IN_A, 'PRD_1')) ?? 'null'),
+    ).toMatchObject({ submissionId: KEY, correlationId: 'COR_ORIGINAL', owner: 'owner-A' });
   });
 });

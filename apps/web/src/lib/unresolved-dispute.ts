@@ -6,7 +6,16 @@ import {
   type DisputeCommand,
   type DisputeFormValues,
 } from './transaction-dispute-fields';
-import type { Binding } from './unresolved-order';
+import {
+  keysUnder,
+  legacyKey,
+  locate,
+  ownedHere,
+  purgeForeign,
+  tenantKey,
+  type AccountTags,
+  type Binding,
+} from './unresolved-tenancy';
 
 /**
  * A dispute command whose outcome is unknown, kept in `sessionStorage` per
@@ -134,10 +143,6 @@ function storage(): Storage | null {
   }
 }
 
-function keyOf(transactionId: string): string {
-  return `${KEY_PREFIX}${transactionId}`;
-}
-
 function tag(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= MAX_TAG_LENGTH;
 }
@@ -221,15 +226,6 @@ function markerOf(entry: Stored): string {
   });
 }
 
-function ownKeys(store: Storage): string[] {
-  const keys: string[] = [];
-  for (let index = 0; index < store.length; index += 1) {
-    const key = store.key(index);
-    if (key !== null && key.startsWith(KEY_PREFIX)) keys.push(key);
-  }
-  return keys;
-}
-
 /**
  * Logout: the text of an unresolved dispute does not outlive the login that
  * wrote it, but the fact that its outcome is unknown does — reduced to a
@@ -241,7 +237,7 @@ export function purgeAllUnresolvedDisputes(): void {
   try {
     const store = storage();
     if (!store) return;
-    for (const key of ownKeys(store)) {
+    for (const key of keysUnder(store, KEY_PREFIX)) {
       const raw = store.getItem(key);
       const entry = raw === null ? null : parse(raw);
       if (entry) store.setItem(key, markerOf(entry));
@@ -252,16 +248,15 @@ export function purgeAllUnresolvedDisputes(): void {
   }
 }
 
-/** A page for `owner`: entries of anyone else, and unreadable ones, are removed. */
-export function purgeForeignUnresolvedDisputes(owner: string): void {
+/**
+ * A page for this person: entries of anyone else, and unreadable ones, are
+ * removed; theirs stay, for every organization (`lib/unresolved-tenancy.ts`).
+ */
+export function purgeForeignUnresolvedDisputes(tags: AccountTags): void {
   try {
     const store = storage();
     if (!store) return;
-    for (const key of ownKeys(store)) {
-      const raw = store.getItem(key);
-      const entry = raw === null ? null : parse(raw);
-      if (!entry || entry.owner !== owner) store.removeItem(key);
-    }
+    purgeForeign(store, KEY_PREFIX, tags, parse);
   } catch {
     // See above.
   }
@@ -278,15 +273,22 @@ export function saveUnresolvedDispute(
   try {
     const store = storage();
     if (!store) return false;
-    const previous = store.getItem(keyOf(transactionId));
-    const earlier = previous === null ? null : parse(previous);
+    const found = locate(store, KEY_PREFIX, binding, transactionId);
+    const parsed = found === null ? null : parse(found.raw);
+    const earlier =
+      found !== null && parsed !== null && ownedHere(binding, found.legacy, parsed.owner)
+        ? parsed
+        : null;
+    // An entry from before entries were kept per organization is only ever
+    // shown (it may have been another organization's): nothing is sent over it.
+    if (earlier !== null && found?.legacy) return false;
     // A marker is never turned back into something that can be re-sent.
     if (earlier?.marker) return earlier.submissionId === dispute.submissionId;
     // The original save time stays: the entry dates from the first send.
     const same = earlier !== null && earlier.submissionId === dispute.submissionId;
     const field = DISPUTE_COMMAND_FIELDS[dispute.command];
     store.setItem(
-      keyOf(transactionId),
+      tenantKey(KEY_PREFIX, binding, transactionId),
       JSON.stringify({
         v: VERSION,
         marker: false,
@@ -307,9 +309,16 @@ export function saveUnresolvedDispute(
   }
 }
 
-export function clearUnresolvedDispute(transactionId: string): void {
+/**
+ * Drops this page's entry for the transaction: this organization's, and an
+ * entry from before entries were kept per organization that the page showed in
+ * its place. Another organization's stays.
+ */
+export function clearUnresolvedDispute(transactionId: string, binding: Binding): void {
   try {
-    storage()?.removeItem(keyOf(transactionId));
+    const store = storage();
+    store?.removeItem(tenantKey(KEY_PREFIX, binding, transactionId));
+    store?.removeItem(legacyKey(KEY_PREFIX, transactionId));
   } catch {
     // See above.
   }
@@ -330,18 +339,18 @@ export function restoreUnresolvedDispute(
 ): RestoredDispute | null {
   try {
     const store = storage();
-    const raw = store?.getItem(keyOf(transactionId));
-    if (!store || raw === null || raw === undefined) return null;
+    const found = store ? locate(store, KEY_PREFIX, binding, transactionId) : null;
+    if (!store || found === null) return null;
 
-    const entry = parse(raw);
-    if (!entry || entry.owner !== binding.owner) {
-      store.removeItem(keyOf(transactionId));
+    const entry = parse(found.raw);
+    if (!entry || !ownedHere(binding, found.legacy, entry.owner)) {
+      store.removeItem(found.key);
       return null;
     }
 
     const { command, submissionId, correlationId, savedAt } = entry;
     if (entry.marker || now - savedAt > maxAgeSeconds * 1000) {
-      if (!entry.marker) store.setItem(keyOf(transactionId), markerOf(entry));
+      if (!entry.marker) store.setItem(found.key, markerOf(entry));
       return {
         kind: 'VIEW_ONLY',
         dispute: {
@@ -366,7 +375,9 @@ export function restoreUnresolvedDispute(
       replay,
       marker: false,
     };
-    const retryable = entry.session === binding.session && replay !== null && now < replay.until;
+    // An old-format entry may have been sent for another organization: never re-sent.
+    const retryable =
+      !found.legacy && entry.session === binding.session && replay !== null && now < replay.until;
     return { kind: retryable ? 'RETRYABLE' : 'VIEW_ONLY', dispute };
   } catch {
     return null;

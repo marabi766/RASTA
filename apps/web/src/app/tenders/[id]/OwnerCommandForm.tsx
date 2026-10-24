@@ -52,6 +52,7 @@ import {
   type OwnerFormState,
   type UnconfirmedOwnerCommand,
 } from './owner-form-state';
+import type { Binding } from '@/lib/unresolved-tenancy';
 
 /**
  * One command the owner's side may issue on a tender — publish, decide a
@@ -101,7 +102,8 @@ export interface OwnerCommandFormProps {
   readonly replay: ReplayStamp | null;
   /** The body the stamp binds by digest, posted beside it (a score's criteria, an award's terms). */
   readonly binding?: string;
-  readonly owner: string;
+  /** This person's one-way tags for this organization (`submissionBinding`). */
+  readonly account: Binding;
   readonly pageHref: string;
   readonly initial?: OwnerFormState;
   readonly heldBy?: string | null;
@@ -141,7 +143,7 @@ export function OwnerCommandForm({
   submissionId,
   replay,
   binding,
-  owner,
+  account,
   pageHref,
   initial = IDLE_OWNER_FORM,
   heldBy = null,
@@ -154,12 +156,12 @@ export function OwnerCommandForm({
       const sent = form.get(SUBMISSION_FIELD);
       const sentId = firstSend ? (typeof sent === 'string' ? sent : '') : previous.submissionId;
       if (firstSend) {
-        const holder = restoreUnresolvedOwnerCommand(tenderId, owner);
+        const holder = restoreUnresolvedOwnerCommand(tenderId, account);
         if (holder && holder.submissionId !== sentId) return { kind: 'HELD' };
       } else if (previous.viewOnly || previous.restored) {
         return previous;
       } else if (
-        restoreUnresolvedOwnerCommand(tenderId, owner)?.submissionId !== previous.submissionId
+        restoreUnresolvedOwnerCommand(tenderId, account)?.submissionId !== previous.submissionId
       ) {
         return { ...previous, viewOnly: true };
       }
@@ -171,7 +173,7 @@ export function OwnerCommandForm({
         ? saveUnresolvedOwnerCommand(
             tenderId,
             { command, submissionId: sentId, correlationId: null },
-            owner,
+            account,
           )
         : null;
       if (saved === 'HELD') return { kind: 'HELD' };
@@ -182,7 +184,7 @@ export function OwnerCommandForm({
         next = await submitOwnerCommand(tenderId, previous, form);
       } catch (error) {
         if (isRedirect(error)) {
-          clearUnresolvedOwnerCommand(tenderId, sentId);
+          clearUnresolvedOwnerCommand(tenderId, sentId, account);
           throw error;
         }
         const ended = await sessionHasEnded();
@@ -217,16 +219,16 @@ export function OwnerCommandForm({
         saveUnresolvedOwnerCommand(
           tenderId,
           { command, submissionId: next.submissionId, correlationId: next.correlationId },
-          owner,
+          account,
         );
       } else if (firstSend) {
-        clearUnresolvedOwnerCommand(tenderId, sentId);
+        clearUnresolvedOwnerCommand(tenderId, sentId, account);
       }
       return next;
     },
     // `context` is the props' own: a new one each render says nothing new.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tenderId, command, replay, owner, scoreRows, award],
+    [tenderId, command, replay, account, scoreRows, award],
   );
   const [state, action, pending] = useActionState(send, initial);
   const headingId = `owner-command-${command}${scope ? `-${idPart(scope)}` : ''}`;
@@ -255,7 +257,7 @@ export function OwnerCommandForm({
         csrfToken={csrfToken}
         headingId={headingId}
         pageHref={pageHref}
-        onForget={() => clearUnresolvedOwnerCommand(tenderId, state.submissionId)}
+        onForget={() => clearUnresolvedOwnerCommand(tenderId, state.submissionId, account)}
       />
     );
   }

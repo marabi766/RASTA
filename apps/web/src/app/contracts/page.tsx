@@ -8,6 +8,7 @@ import { fetchContracts, type ContractListQuery } from '@/server/contracts';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ContractsScreen } from './ContractsScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/contracts` route — قراردادها (docs/16 § ۱۶٫۶, ADR-068).
@@ -49,8 +50,9 @@ export default async function ContractsPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

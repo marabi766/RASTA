@@ -37,6 +37,7 @@ import {
   purgeAllUnresolvedOwnerCommands,
   purgeForeignUnresolvedOwnerCommands,
 } from '@/lib/unresolved-tender-command';
+import type { AccountTags } from '@/lib/unresolved-tenancy';
 
 /**
  * The browser's side of an account boundary: what an unresolved order,
@@ -59,11 +60,17 @@ import {
  *   command repeated under a fresh key can act on a newer dispute, so the same
  *   person signing in again must not be offered a fresh form over it (PR 319
  *   review 2, finding 1). The next point removes it for anyone else.
- * - **A page for another person.** A page drawn for `owner` removes the entries
- *   of anyone else (and any it cannot read) on its first load, so a tab handed
- *   from one person to the next never shows the first one's offer, quantity or
- *   tracking code, even when the first one never pressed "log out" (a session
- *   that expired, a closed laptop). The same person after a re-login keeps theirs.
+ * - **A page for another person.** A page drawn for a person removes the
+ *   entries of anyone else (and any it cannot read) on its first load, so a tab
+ *   handed from one person to the next never shows the first one's offer,
+ *   quantity or tracking code, even when the first one never pressed "log out"
+ *   (a session that expired, a closed laptop). The same person after a re-login
+ *   keeps theirs.
+ * - **Another organization is not another person.** Entries are kept per
+ *   person and organization (`lib/unresolved-tenancy.ts`): after a switch from
+ *   A to B nothing of A's is removed here, and none of it is shown or resolved
+ *   on B's pages — each store reads only the page's own organization — so back
+ *   on A every unresolved request of A's is still there to reconcile (task 100).
  *
  * - **Nothing is written after a logout starts.** The purge also sets an in-memory
  *   flag that `saveUnresolvedOrder` honours, so the answer to a send still in
@@ -71,13 +78,18 @@ import {
  *   instead: that would also drop the order of a person whose session merely
  *   expired and who may still be in doubt (view-only after the re-login).
  *
- * `owner` is the one-way tag `submissionBinding` computes — null on a page with
- * no login (the sign-in page), where nothing is removed: the person signing back
- * in may be the one whose order is still in doubt.
+ * `account` is the person's one-way tags `submissionBinding` computes — null on
+ * a page with no login (the sign-in page, a session `readSession()` refuses),
+ * where nothing is removed: the person signing back in may be the one whose
+ * order is still in doubt.
  */
-export function AccountBoundary({ owner }: { readonly owner: string | null }) {
+export function AccountBoundary({ account }: { readonly account: AccountTags | null }) {
+  // Primitive dependencies: a new array of the same tags is not a new person.
+  const person = account?.person ?? null;
+  const legacy = account?.legacy.join(' ') ?? '';
   useEffect(() => {
-    if (owner === null) return;
+    if (person === null) return;
+    const tags: AccountTags = { person, legacy: legacy === '' ? [] : legacy.split(' ') };
     markAccountOpen();
     markDisputesOpen();
     markReturnsOpen();
@@ -85,14 +97,14 @@ export function AccountBoundary({ owner }: { readonly owner: string | null }) {
     markContractCommandsOpen();
     markBidsOpen();
     markOwnerCommandsOpen();
-    purgeForeignUnresolvedOrders(owner);
-    purgeForeignUnresolvedDisputes(owner);
-    purgeForeignUnresolvedReturns(owner);
-    purgeForeignUnresolvedStatements(owner);
-    purgeForeignUnresolvedContractCommands(owner);
-    purgeForeignUnresolvedBids(owner);
-    purgeForeignUnresolvedOwnerCommands(owner);
-  }, [owner]);
+    purgeForeignUnresolvedOrders(tags);
+    purgeForeignUnresolvedDisputes(tags);
+    purgeForeignUnresolvedReturns(tags);
+    purgeForeignUnresolvedStatements(tags);
+    purgeForeignUnresolvedContractCommands(tags);
+    purgeForeignUnresolvedBids(tags);
+    purgeForeignUnresolvedOwnerCommands(tags);
+  }, [person, legacy]);
 
   useEffect(() => {
     const onSubmit = (event: Event) => {

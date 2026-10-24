@@ -18,6 +18,7 @@ import { BidCommandForm, UNREPEATABLE_BID_TEXT } from './[id]/BidCommandForm';
 import { BidCommands, type OfferedBidCommand } from './[id]/BidCommands';
 import type { BidFormState } from './[id]/bid-form-state';
 import { OpenTenderDetailScreen, OwnBidSection } from './[id]/TenderDetailScreen';
+import { bindingOf } from '@/test/unresolved-binding';
 
 // Each test renders a whole tender screen and runs jest-axe over it; on a loaded runner one can
 // take longer than jest's 5 s default (#341). One test per state, each with room to finish.
@@ -85,7 +86,7 @@ function page(
               offered={options.offered ?? []}
               criteria={CRITERIA}
               csrfToken={CSRF}
-              owner={OWNER}
+              account={bindingOf(OWNER, 'session-tag')}
               pageHref={PAGE}
             />
           }
@@ -104,7 +105,7 @@ function form(command: BidCommand, heldBy: string | null = null) {
       csrfToken={CSRF}
       submissionId="sub_AAAAAAAAAAAAAAAAAAAA"
       replay={STAMP}
-      owner={OWNER}
+      account={bindingOf(OWNER, 'session-tag')}
       pageHref={PAGE}
       heldBy={heldBy}
     />,
@@ -361,7 +362,7 @@ describe('a replacement or a withdrawal whose outcome is unknown', () => {
           csrfToken={CSRF}
           submissionId="sub_AAAAAAAAAAAAAAAAAAAA"
           replay={STAMP}
-          owner={OWNER}
+          account={bindingOf(OWNER, 'session-tag')}
           pageHref={PAGE}
         />,
       );

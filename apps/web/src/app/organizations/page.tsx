@@ -20,6 +20,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { MembersScreen } from './MembersScreen';
 import { OrganizationProfileForm } from './OrganizationProfileForm';
+import { actingOrganizationId, actingScope } from '@/server/session-organization';
 
 /**
  * The `/organizations` route — سازمان و اعضا (docs/16 § ۱۶٫۶, role
@@ -128,7 +129,7 @@ export default async function OrganizationsPage({
     cursor: one(params.cursor),
   };
 
-  const organizationId = session.organizationId;
+  const organizationId = actingOrganizationId(session);
 
   const [currentUser, organization, members] = await Promise.all([
     fetchCurrentUser(session),
@@ -143,6 +144,7 @@ export default async function OrganizationsPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
         <TopBar organizationName={organizationId ?? 'بدون سازمان فعال'}>
           <form method="post" action="/auth/logout">

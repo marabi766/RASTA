@@ -15,6 +15,8 @@ import { OPEN_TENDER, TENDER_ID } from '@/test/bid-fixtures';
 import { BidCommandForm } from './[id]/BidCommandForm';
 import { BidCommands } from './[id]/BidCommands';
 import type { BidFormState } from './[id]/bid-form-state';
+import { OTHER_PERSON, bindingOf, keyFor } from '@/test/unresolved-binding';
+import type { Binding } from '@/lib/unresolved-tenancy';
 
 // Each test renders a form and may run jest-axe over it (#341): room to finish.
 jest.setTimeout(20_000);
@@ -44,7 +46,8 @@ const KEY = 'sub_FIRSTKEYFIRSTKEYFIRS';
 const OTHER = 'sub_OTHERKEYOTHERKEYOTH';
 const FRESH = 'sub_FRESHKEYFRESHKEYFRE';
 const OWNER = 'owner-tag-A';
-const STORE_KEY = `rasta.unresolved-bid.${TENDER_ID}`;
+const ACCOUNT = bindingOf(OWNER, 'session-tag-1');
+const STORE_KEY = keyFor('rasta.unresolved-bid.', ACCOUNT, TENDER_ID);
 const STAMP: ReplayStamp = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };
 const PAGE = `/tenders/${TENDER_ID}?view=open`;
 const CRITERIA = OPEN_TENDER.criteria.map(({ code, label }) => ({ code, label }));
@@ -62,21 +65,21 @@ function renderForm(command: 'SUBMIT' | 'REVISE' | 'WITHDRAW' = 'SUBMIT', submis
       csrfToken="csrf"
       submissionId={submissionId}
       replay={STAMP}
-      owner={OWNER}
+      account={ACCOUNT}
       pageHref={PAGE}
     />,
   );
 }
 
 /** What the tender page draws: what a reload brings back. */
-function renderCommands(owner = OWNER) {
+function renderCommands(account: Binding = ACCOUNT) {
   return render(
     <BidCommands
       tenderId={TENDER_ID}
       offered={[{ command: 'SUBMIT', submission: { id: FRESH, replay: STAMP } }]}
       criteria={CRITERIA}
       csrfToken="csrf"
-      owner={owner}
+      account={account}
       pageHref={PAGE}
     />,
   );
@@ -245,7 +248,7 @@ describe('after a reload', () => {
     saveUnresolvedBid(
       TENDER_ID,
       { command: 'SUBMIT', submissionId: KEY, correlationId: 'COR_ORIGINAL' },
-      OWNER,
+      ACCOUNT,
     );
     const { container } = renderCommands();
     expect(container.querySelector(`input[value="${FRESH}"]`)).toBeNull();
@@ -259,23 +262,24 @@ describe('after a reload', () => {
     expect(stored()).toBeNull();
   });
 
-  it('another person’s page never shows it, and removes it', () => {
+  it('another person’s page never shows it, and the account boundary removes it', () => {
     saveUnresolvedBid(
       TENDER_ID,
       { command: 'SUBMIT', submissionId: KEY, correlationId: null },
-      OWNER,
+      ACCOUNT,
     );
-    const { container, unmount } = renderCommands('owner-tag-B');
+    const { container, unmount } = renderCommands(
+      bindingOf('owner-tag-B', 'session-tag-B', OTHER_PERSON),
+    );
     expect(container.querySelector(`input[value="${FRESH}"]`)).not.toBeNull();
-    expect(stored()).toBeNull();
     unmount();
 
     saveUnresolvedBid(
       TENDER_ID,
       { command: 'SUBMIT', submissionId: KEY, correlationId: null },
-      OWNER,
+      ACCOUNT,
     );
-    purgeForeignUnresolvedBids('owner-tag-B');
+    purgeForeignUnresolvedBids({ person: OTHER_PERSON, legacy: [] });
     expect(stored()).toBeNull();
   });
 
@@ -292,7 +296,7 @@ describe('after a reload', () => {
         priceMinor: '1',
       }),
     );
-    expect(restoreUnresolvedBid(TENDER_ID, OWNER)).toBeNull();
+    expect(restoreUnresolvedBid(TENDER_ID, ACCOUNT)).toBeNull();
     expect(stored()).toBeNull();
   });
 });
@@ -302,7 +306,7 @@ describe('one slot per tender', () => {
     saveUnresolvedBid(
       TENDER_ID,
       { command: 'REVISE', submissionId: OTHER, correlationId: 'COR_OTHER' },
-      OWNER,
+      ACCOUNT,
     );
     const { container } = renderForm('WITHDRAW');
     await submit(container);
@@ -315,14 +319,14 @@ describe('one slot per tender', () => {
     saveUnresolvedBid(
       TENDER_ID,
       { command: 'REVISE', submissionId: OTHER, correlationId: 'COR_OTHER' },
-      OWNER,
+      ACCOUNT,
       1000,
     );
     expect(
       saveUnresolvedBid(
         TENDER_ID,
         { command: 'WITHDRAW', submissionId: KEY, correlationId: null },
-        OWNER,
+        ACCOUNT,
       ),
     ).toBe('HELD');
     expect(stored()).toEqual({
@@ -338,7 +342,7 @@ describe('one slot per tender', () => {
       saveUnresolvedBid(
         TENDER_ID,
         { command: 'REVISE', submissionId: OTHER, correlationId: 'COR_2' },
-        OWNER,
+        ACCOUNT,
       ),
     ).toBe('SAVED');
     expect(stored()).toMatchObject({ correlationId: 'COR_2', savedAt: 1000 });
@@ -353,7 +357,7 @@ describe('one slot per tender', () => {
         csrfToken="csrf"
         submissionId={KEY}
         replay={STAMP}
-        owner={OWNER}
+        account={ACCOUNT}
         pageHref={PAGE}
         heldBy={OTHER}
       />,
@@ -367,7 +371,7 @@ describe('at logout', () => {
     saveUnresolvedBid(
       TENDER_ID,
       { command: 'SUBMIT', submissionId: KEY, correlationId: null },
-      OWNER,
+      ACCOUNT,
     );
     purgeAllUnresolvedBids();
     expect(stored()).toMatchObject({ submissionId: KEY });
@@ -375,7 +379,7 @@ describe('at logout', () => {
       saveUnresolvedBid(
         'TND_OTHER',
         { command: 'SUBMIT', submissionId: OTHER, correlationId: null },
-        OWNER,
+        ACCOUNT,
       ),
     ).toBe('UNAVAILABLE');
   });

@@ -17,6 +17,7 @@ import { PlaceOrderForm } from './marketplace/[productId]/PlaceOrderForm';
 import { ReportRequestForm } from './maintenance/ReportRequestForm';
 import { RecordCostForm, RecordPartForm } from './maintenance/[id]/RepairOrderForms';
 import { StatementCommandForm } from './contracts/[id]/StatementCommandForm';
+import { bindingOf } from '@/test/unresolved-binding';
 
 /**
  * A `<select>` keeps the choice a person made after an attempt is refused.
@@ -213,7 +214,7 @@ const CASES = [
         submissionId={SUBMISSION}
         newOrderHref="/marketplace/PRD_1"
         productId="PRD_1"
-        binding={{ owner: 'owner-tag', session: 'session-tag' }}
+        binding={bindingOf('owner-tag', 'session-tag')}
         sessionMaxAgeSeconds={3600}
       />
     ),
@@ -243,7 +244,7 @@ const CASES = [
         csrfToken={CSRF}
         submissionId={SUBMISSION}
         replay={{ token: 'stamp', until: Date.now() + 60_000 }}
-        binding={{ owner: 'owner-tag', session: 'session-tag' }}
+        binding={bindingOf('owner-tag', 'session-tag')}
         sessionMaxAgeSeconds={3600}
         milestones={[
           { id: 'MST_1', title: 'نخست' },

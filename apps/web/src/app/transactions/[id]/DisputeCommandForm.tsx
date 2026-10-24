@@ -164,7 +164,7 @@ export function DisputeCommandForm({
       } catch (error) {
         // Done: the action redirects to the transaction. Nothing is unresolved now.
         if (isRedirect(error)) {
-          clearUnresolvedDispute(transactionId);
+          clearUnresolvedDispute(transactionId, binding);
           throw error;
         }
         // The call itself failed. A lost response after the command may have
@@ -182,7 +182,7 @@ export function DisputeCommandForm({
       // refusal of a first send that never left (dropped). A retry is always
       // answered in doubt: only the redirect above ends it.
       if (next.kind === 'UNCONFIRMED') saveUnresolvedDispute(transactionId, next, binding);
-      else if (firstSend) clearUnresolvedDispute(transactionId);
+      else if (firstSend) clearUnresolvedDispute(transactionId, binding);
       return next;
     },
     [transactionId, command, replay, binding, sessionMaxAgeSeconds],
@@ -199,7 +199,7 @@ export function DisputeCommandForm({
         csrfToken={csrfToken}
         headingId={headingId}
         transactionHref={`/transactions/${encodeURIComponent(transactionId)}`}
-        onForget={() => clearUnresolvedDispute(transactionId)}
+        onForget={() => clearUnresolvedDispute(transactionId, binding)}
       />
     );
   }

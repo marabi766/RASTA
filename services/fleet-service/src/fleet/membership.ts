@@ -81,6 +81,16 @@ export interface LiveMembershipClientOptions {
  * truth — nothing was saved — rather than the "may have been saved" a `504`
  * means to the portal (`apps/web/src/server/write.ts`). Nothing from a failure
  * (URL, body, transport error) goes into the error.
+ *
+ * **No redirect is followed** (PR 405 review 1, F2). `fetch` follows one by
+ * default, re-sending the request — `x-internal-token` included — to wherever
+ * `Location` points, and the status checked afterwards is the last hop's: a
+ * proxy answering `302` towards another host that says `live: true` would have
+ * registered the driver, and handed that host a token signed for this
+ * organization. With `redirect: 'manual'` the first answer is the only one: a
+ * `3xx` (or the opaque redirect a browser-style fetch returns, status 0) is not
+ * a 200, so it is refused like any other — one request, nothing written. A
+ * `fetch` that reports having followed one anyway (`redirected`) is refused too.
  */
 export class LiveMembershipClient implements MembershipSource {
   private readonly fetchImpl: typeof fetch;
@@ -113,9 +123,9 @@ export class LiveMembershipClient implements MembershipSource {
       const response = await this.fetchImpl(
         `${this.options.baseUrl.replace(/\/+$/, '')}/v1/users/` +
           `${encodeURIComponent(userId)}/live-membership`,
-        { method: 'GET', headers, signal: controller.signal },
+        { method: 'GET', headers, signal: controller.signal, redirect: 'manual' },
       );
-      if (response.status === 200) {
+      if (response.status === 200 && !response.redirected) {
         text = await readCapped(response, MAX_MEMBERSHIP_ANSWER_BYTES);
       } else {
         await response.body?.cancel().catch(() => undefined);

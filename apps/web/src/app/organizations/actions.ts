@@ -24,6 +24,7 @@ import type {
   UpdateMemberRolesFormState,
   UpdateOrganizationFormState,
 } from './form-state';
+import { actingOrganizationId } from '@/server/session-organization';
 
 /**
  * The `/organizations` server actions.
@@ -65,8 +66,14 @@ export async function submitUpdateOrganization(
   const gated = await gate(form);
   if (!gated.ok) return gated.state;
 
+  // Only the organization this request acts for (`session-organization.ts`):
+  // a form naming any other is refused before anything is sent.
   const organizationId = form.get('organizationId');
-  if (typeof organizationId !== 'string' || organizationId.length === 0) {
+  if (
+    typeof organizationId !== 'string' ||
+    organizationId.length === 0 ||
+    organizationId !== actingOrganizationId(gated.session)
+  ) {
     return { kind: 'REFUSED', reason: 'SUBMISSION' };
   }
 

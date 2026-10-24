@@ -6,6 +6,7 @@ import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import { IDLE_CREATE_DRIVER_FORM } from './form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The `/drivers` registration form's write path, from a posted form to a
@@ -45,7 +46,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'manager',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -295,17 +296,23 @@ describe('who may be registered: fleet-service decides on every POST (task 095)'
   });
 
   describe('a form drawn for one organization, sent after the token moved to another', () => {
-    const token = (org: string) =>
-      `h.${Buffer.from(JSON.stringify({ org_id: org })).toString('base64url')}.s`;
-    const inA = { ...SESSION, accessToken: token('ORG-DEH-0001') };
-    const inB = { ...SESSION, accessToken: token('ORG-DEH-0002') };
+    const inA = {
+      ...SESSION,
+      organizationId: 'ORG-DEH-0001',
+      accessToken: actingAccessToken('ORG-DEH-0001'),
+    };
+    const inB = {
+      ...SESSION,
+      organizationId: 'ORG-DEH-0002',
+      accessToken: actingAccessToken('ORG-DEH-0002'),
+    };
 
     it('is refused as stale and sent nowhere — a member picked from A’s list is never registered in B', async () => {
       const { impl, calls } = gatewayAnswering(201, { id: 'DRV_NEVER' });
       // Drawn while the token acted for A…
       const form = formData(VALID, { submission: mintSubmissionId(inA) });
-      // …sent after a refresh brought a token for B (the session's own
-      // organizationId does not move on a refresh).
+      // …sent after a refresh brought a token for B (and, since task 100, the
+      // session's stored organization with it).
       currentSession.mockResolvedValue(inB);
       const state = await send(impl, form);
       expect(state).toEqual({ kind: 'REFUSED', reason: 'SUBMISSION' });

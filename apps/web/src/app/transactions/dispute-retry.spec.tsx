@@ -15,6 +15,7 @@ import {
 import { DisputeCommandForm } from './[id]/DisputeCommandForm';
 import { DisputeCommands } from './[id]/DisputeCommands';
 import type { DisputeFormState } from './[id]/form-state';
+import { OTHER_PERSON, bindingOf, keyFor } from '@/test/unresolved-binding';
 
 /**
  * The unconfirmed path with the real `useActionState`: only the action's own
@@ -46,9 +47,9 @@ const KEY = 'sub_FIRSTKEYFIRSTKEYFIRS';
 const FRESH = 'sub_FRESHKEYFRESHKEYFRE';
 const REASON = 'کالا تحویل نشده و پاسخی هم نیامده است';
 const RESOLUTION = 'کالا با تأخیر رسید و پذیرفته شد';
-const BINDING = { owner: 'owner-tag-A', session: 'session-tag-1' };
+const BINDING = bindingOf('owner-tag-A', 'session-tag-1');
 const SESSION_MAX_AGE = 12 * 60 * 60;
-const STORE_KEY = 'rasta.unresolved-dispute.TXN_1';
+const STORE_KEY = keyFor('rasta.unresolved-dispute.', BINDING, 'TXN_1');
 /** What the page signed with the key (`server/dispute-replay.ts`); opaque here. */
 const STAMP: ReplayStamp = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };
 const FRESH_STAMP: ReplayStamp = { token: 'signed-fresh-stamp', until: STAMP.until };
@@ -352,18 +353,34 @@ describe('remembered across a reload (finding 2)', () => {
 
   it('from another login: shown, never re-sent (the key is bound to the old login)', async () => {
     saveUnresolvedDispute('TXN_1', remembered(), BINDING);
-    renderCommands(['DISPUTE'], { owner: BINDING.owner, session: 'session-tag-2' });
+    renderCommands(['DISPUTE'], bindingOf(BINDING.owner, 'session-tag-2'));
     await waitFor(() => expect(screen.getByText(/نشست پیشین/)).toBeInTheDocument());
     expect(screen.queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
   });
 
-  it('someone else’s entry is never shown, and is removed', async () => {
+  it('someone else’s entry is never shown, and the account boundary removes it', async () => {
     saveUnresolvedDispute('TXN_1', remembered(), BINDING);
-    const { container } = renderCommands(['DISPUTE'], { owner: 'owner-tag-B', session: 'x' });
+    const { container } = renderCommands(['DISPUTE'], bindingOf('owner-tag-B', 'x', OTHER_PERSON));
     await waitFor(() => expect(container.querySelector('textarea')).not.toBeNull());
     expect(container.querySelector('[name="submission"]')).toHaveValue(FRESH);
     expect(container.textContent).not.toContain(REASON);
+    purgeForeignUnresolvedDisputes({ person: OTHER_PERSON, legacy: [] });
     expect(window.sessionStorage.getItem(STORE_KEY)).toBeNull();
+  });
+
+  it('the same person acting for another organization: not shown there, kept for this one (task 100)', async () => {
+    saveUnresolvedDispute('TXN_1', remembered(), BINDING);
+    const inB = renderCommands(['DISPUTE'], bindingOf('owner-tag-B', 'x'));
+    await waitFor(() => expect(inB.container.querySelector('textarea')).not.toBeNull());
+    expect(inB.container.textContent).not.toContain(REASON);
+    purgeForeignUnresolvedDisputes({ person: BINDING.person, legacy: [] });
+    expect(window.sessionStorage.getItem(STORE_KEY)).not.toBeNull();
+    inB.unmount();
+    // Back on A: the same unresolved command, retryable under its own key.
+    expect(restoreUnresolvedDispute('TXN_1', BINDING, SESSION_MAX_AGE)).toMatchObject({
+      kind: 'RETRYABLE',
+      dispute: { submissionId: KEY },
+    });
   });
 
   it('not sent at all when it cannot be remembered', async () => {
@@ -407,7 +424,7 @@ describe('never silently forgotten: the outcome-unknown marker (PR 319 review 2,
       Date.now() - (SESSION_MAX_AGE + 1) * 1000,
     );
 
-    const first = renderCommands(['RESOLVE_DISPUTE'], { owner: BINDING.owner, session: 's-new' });
+    const first = renderCommands(['RESOLVE_DISPUTE'], bindingOf(BINDING.owner, 's-new'));
     await waitFor(() =>
       expect(screen.getByText(/متن آن دیگر نگه داشته نمی‌شود/)).toBeInTheDocument(),
     );
@@ -427,7 +444,7 @@ describe('never silently forgotten: the outcome-unknown marker (PR 319 review 2,
     first.unmount();
 
     // Another reload: still the marker, still no fresh form.
-    const again = renderCommands(['RESOLVE_DISPUTE'], { owner: BINDING.owner, session: 's-new' });
+    const again = renderCommands(['RESOLVE_DISPUTE'], bindingOf(BINDING.owner, 's-new'));
     await waitFor(() =>
       expect(screen.getByText(/متن آن دیگر نگه داشته نمی‌شود/)).toBeInTheDocument(),
     );
@@ -471,8 +488,8 @@ describe('never silently forgotten: the outcome-unknown marker (PR 319 review 2,
 
     // Signed in again (`AccountBoundary`): same owner, a new login.
     markDisputesOpen();
-    purgeForeignUnresolvedDisputes(BINDING.owner);
-    const { container } = renderCommands(['DISPUTE'], { owner: BINDING.owner, session: 's-new' });
+    purgeForeignUnresolvedDisputes({ person: BINDING.person, legacy: [] });
+    const { container } = renderCommands(['DISPUTE'], bindingOf(BINDING.owner, 's-new'));
     await waitFor(() =>
       expect(screen.getByText(/متن آن دیگر نگه داشته نمی‌شود/)).toBeInTheDocument(),
     );
@@ -483,7 +500,7 @@ describe('never silently forgotten: the outcome-unknown marker (PR 319 review 2,
     saveUnresolvedDispute('TXN_1', remembered(), BINDING);
     purgeAllUnresolvedDisputes();
     markDisputesOpen();
-    purgeForeignUnresolvedDisputes('owner-tag-B');
+    purgeForeignUnresolvedDisputes({ person: OTHER_PERSON, legacy: [] });
     expect(window.sessionStorage.getItem(STORE_KEY)).toBeNull();
   });
 });

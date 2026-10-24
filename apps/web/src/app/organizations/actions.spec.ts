@@ -10,6 +10,7 @@ import {
   IDLE_UPDATE_MEMBER_ROLES_FORM,
   IDLE_UPDATE_ORGANIZATION_FORM,
 } from './form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The three `/organizations` write paths, from a posted form to a call.
@@ -68,7 +69,7 @@ const SESSION = {
   subject: 'USR_1',
   username: 'admin',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG_1'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -231,6 +232,16 @@ describe('editing the organization profile', () => {
     );
 
     expect(state).toMatchObject({ kind: 'INVALID', fieldErrors: { name: expect.any(String) } });
+    expect(updateOrganization).not.toHaveBeenCalled();
+  });
+
+  it('refuses a profile form naming another organization than the one this request acts for (task 100)', async () => {
+    const state = await submitUpdateOrganization(
+      IDLE_UPDATE_ORGANIZATION_FORM,
+      formData([...ORG_FORM.filter(([k]) => k !== 'organizationId'), ['organizationId', 'ORG_2']]),
+    );
+
+    expect(state).toEqual({ kind: 'REFUSED', reason: 'SUBMISSION' });
     expect(updateOrganization).not.toHaveBeenCalled();
   });
 

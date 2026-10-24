@@ -8,6 +8,7 @@ import { fetchStock, fetchWarehouse, fetchWarehouses } from '@/server/inventory'
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { InventoryScreen, type InventoryQuery, type InventorySelection } from './InventoryScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/inventory` route — انبار (docs/16 § ۱۶٫۶). Read-only.
@@ -50,8 +51,9 @@ export default async function InventoryPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

@@ -16,6 +16,7 @@ import { CONTRACT_ID, STATEMENT_ID } from '@/test/statement-fixtures';
 import { StatementCommandForm } from './[id]/StatementCommandForm';
 import { StatementCommands } from './[id]/StatementCommands';
 import type { StatementFormState } from './[id]/statement-form-state';
+import { OTHER_PERSON, bindingOf, keyFor } from '@/test/unresolved-binding';
 
 /**
  * The unconfirmed path with the real `useActionState`, `dispute-retry.spec.tsx`
@@ -47,11 +48,11 @@ const sessionProbe = jest.fn<Promise<{ status: number }>, [string]>();
 
 const KEY = 'sub_FIRSTKEYFIRSTKEYFIRS';
 const FRESH = 'sub_FRESHKEYFRESHKEYFRE';
-const BINDING = { owner: 'owner-tag-A', session: 'session-tag-1' };
+const BINDING = bindingOf('owner-tag-A', 'session-tag-1');
 const SESSION_MAX_AGE = 12 * 60 * 60;
 const DRAFT_SCOPE = { contractId: CONTRACT_ID, statementId: null };
 const STATEMENT_SCOPE = { contractId: CONTRACT_ID, statementId: STATEMENT_ID };
-const STORE_KEY = `rasta.unresolved-statement.${CONTRACT_ID}.draft`;
+const STORE_KEY = keyFor('rasta.unresolved-statement.', BINDING, `${CONTRACT_ID}.draft`);
 const STAMP: ReplayStamp = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };
 const LINES = [{ description: 'آسفالت', amountMinor: '1100000000' }];
 
@@ -284,7 +285,7 @@ describe('never silently gone', () => {
         SESSION_MAX_AGE,
       )?.kind,
     ).toBe('VIEW_ONLY');
-    purgeForeignUnresolvedStatements('owner-tag-B');
+    purgeForeignUnresolvedStatements({ person: OTHER_PERSON, legacy: [] });
     expect(restoreUnresolvedStatement(STATEMENT_SCOPE, BINDING, SESSION_MAX_AGE)).toBeNull();
   });
 
@@ -319,7 +320,7 @@ describe('one unresolved command per statement', () => {
   const REJECT_KEY = 'sub_REJECTKEYREJECTKEYRE';
   const APPROVE_STAMP: ReplayStamp = { token: 'approve-stamp', until: STAMP.until };
   const REJECT_STAMP: ReplayStamp = { token: 'reject-stamp', until: STAMP.until };
-  const SLOT = `rasta.unresolved-statement.${CONTRACT_ID}.${STATEMENT_ID}`;
+  const SLOT = keyFor('rasta.unresolved-statement.', BINDING, `${CONTRACT_ID}.${STATEMENT_ID}`);
   const slot = () =>
     JSON.parse(window.sessionStorage.getItem(SLOT) ?? 'null') as {
       submissionId: string;
@@ -463,9 +464,9 @@ describe('one unresolved command per statement', () => {
         BINDING,
       ),
     ).toBe('HELD');
-    clearUnresolvedStatement(STATEMENT_SCOPE, REJECT_KEY);
+    clearUnresolvedStatement(STATEMENT_SCOPE, REJECT_KEY, BINDING);
     expect(slot()).toMatchObject({ submissionId: APPROVE_KEY, command: 'APPROVE' });
-    clearUnresolvedStatement(STATEMENT_SCOPE, APPROVE_KEY);
+    clearUnresolvedStatement(STATEMENT_SCOPE, APPROVE_KEY, BINDING);
     expect(slot()).toBeNull();
   });
 

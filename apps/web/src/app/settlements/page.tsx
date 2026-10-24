@@ -7,6 +7,7 @@ import { fetchSettlements, type SettlementListQuery } from '@/server/settlements
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { SettlementsScreen } from './SettlementsScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/settlements` route — تسویه‌ها (docs/16 § ۱۶٫۶), read-only.
@@ -42,8 +43,9 @@ export default async function SettlementsPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

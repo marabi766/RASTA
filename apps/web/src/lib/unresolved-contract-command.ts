@@ -6,7 +6,16 @@ import {
   type ContractSlot,
 } from './contract-command-fields';
 import { isCommandInput, type CommandInput } from './contract-command-input';
-import type { Binding } from './unresolved-order';
+import {
+  keysUnder,
+  locate,
+  ownedHere,
+  purgeForeign,
+  storedKeyOf,
+  tenantKey,
+  type AccountTags,
+  type Binding,
+} from './unresolved-tenancy';
 
 /**
  * A contract command whose outcome is unknown, kept in `sessionStorage` so
@@ -151,8 +160,8 @@ function storage(): Storage | null {
   }
 }
 
-function keyOf(scope: ContractScope): string {
-  return `${KEY_PREFIX}${scope.contractId}.${scope.slot}.${scope.subjectId ?? '-'}`;
+function scopeText(scope: ContractScope): string {
+  return `${scope.contractId}.${scope.slot}.${scope.subjectId ?? '-'}`;
 }
 
 /** Whether `command` is held in `scope`'s slot — a record of another slot is not this one's. */
@@ -239,9 +248,8 @@ function markerOf(entry: Stored): string {
   });
 }
 
-/** The scope a stored key names, or null — for the purges, which read every slot. */
-function scopeOfKey(key: string): ContractScope | null {
-  const rest = key.slice(KEY_PREFIX.length);
+/** The scope a stored key's scope text names, or null — for the purges, which read every slot. */
+function scopeOfText(rest: string): ContractScope | null {
   const parts = rest.split('.');
   if (parts.length < 3) return null;
   const subject = parts.pop() as string;
@@ -251,19 +259,15 @@ function scopeOfKey(key: string): ContractScope | null {
   return { contractId, slot, subjectId: subject === '-' ? null : subject };
 }
 
-function ownKeys(store: Storage): string[] {
-  const keys: string[] = [];
-  for (let index = 0; index < store.length; index += 1) {
-    const key = store.key(index);
-    if (key !== null && key.startsWith(KEY_PREFIX)) keys.push(key);
-  }
-  return keys;
+function parseIn(raw: string, scopeText: string): Stored | null {
+  const scope = scopeOfText(scopeText);
+  return scope === null ? null : parse(raw, scope);
 }
 
 function stored(store: Storage, key: string): Stored | null {
   const raw = store.getItem(key);
-  const scope = scopeOfKey(key);
-  return raw === null || scope === null ? null : parse(raw, scope);
+  const located = storedKeyOf(KEY_PREFIX, key);
+  return raw === null || located === null ? null : parseIn(raw, located.scope);
 }
 
 /** Logout: every entry reduced to a marker; unreadable ones removed. */
@@ -272,7 +276,7 @@ export function purgeAllUnresolvedContractCommands(): void {
   try {
     const store = storage();
     if (!store) return;
-    for (const key of ownKeys(store)) {
+    for (const key of keysUnder(store, KEY_PREFIX)) {
       const entry = stored(store, key);
       if (entry) store.setItem(key, markerOf(entry));
       else store.removeItem(key);
@@ -283,15 +287,15 @@ export function purgeAllUnresolvedContractCommands(): void {
   changed();
 }
 
-/** A page for `owner`: entries of anyone else, and unreadable ones, are removed. */
-export function purgeForeignUnresolvedContractCommands(owner: string): void {
+/**
+ * A page for this person: entries of anyone else, and unreadable ones, are
+ * removed; theirs stay, for every organization (`lib/unresolved-tenancy.ts`).
+ */
+export function purgeForeignUnresolvedContractCommands(tags: AccountTags): void {
   try {
     const store = storage();
     if (!store) return;
-    for (const key of ownKeys(store)) {
-      const entry = stored(store, key);
-      if (!entry || entry.owner !== owner) store.removeItem(key);
-    }
+    purgeForeign(store, KEY_PREFIX, tags, (raw, key) => parseIn(raw, key.scope));
   } catch {
     // See above.
   }
@@ -314,17 +318,24 @@ export function saveUnresolvedContractCommand(
   try {
     const store = storage();
     if (!store) return 'UNAVAILABLE';
-    const previous = store.getItem(keyOf(scope));
-    const parsed = previous === null ? null : parse(previous, scope);
+    const found = locate(store, KEY_PREFIX, binding, scopeText(scope));
+    const parsed = found === null ? null : parse(found.raw, scope);
     // Someone else's is not this person's to keep (`purgeForeignUnresolvedContractCommands`).
-    const earlier = parsed?.owner === binding.owner ? parsed : null;
-    // Another submission's record — even a marker — is never replaced.
-    if (earlier !== null && earlier.submissionId !== entry.submissionId) return 'HELD';
+    const earlier =
+      found !== null && parsed !== null && ownedHere(binding, found.legacy, parsed.owner)
+        ? parsed
+        : null;
+    // Another submission's record — even a marker — is never replaced; nor is
+    // a record from before records were kept per organization, which is only
+    // ever shown (it may have been another organization's).
+    if (earlier !== null && (found?.legacy || earlier.submissionId !== entry.submissionId)) {
+      return 'HELD';
+    }
     // A marker is never turned back into something that can be re-sent.
     if (earlier?.marker) return 'SAVED';
     const same = earlier !== null;
     store.setItem(
-      keyOf(scope),
+      tenantKey(KEY_PREFIX, binding, scopeText(scope)),
       JSON.stringify({
         v: VERSION,
         marker: false,
@@ -349,16 +360,21 @@ export function saveUnresolvedContractCommand(
 
 /**
  * Forgets the record of `submissionId` — and only that one: a record another
- * submission holds stays. An unreadable record is left to
- * `restoreUnresolvedContractCommand`, which removes it.
+ * submission holds stays, and so does every other organization's. An
+ * unreadable record is left to `restoreUnresolvedContractCommand`, which
+ * removes it.
  */
-export function clearUnresolvedContractCommand(scope: ContractScope, submissionId: string): void {
+export function clearUnresolvedContractCommand(
+  scope: ContractScope,
+  submissionId: string,
+  binding: Binding,
+): void {
   try {
     const store = storage();
-    const raw = store?.getItem(keyOf(scope));
-    if (!store || raw === null || raw === undefined) return;
-    if (parse(raw, scope)?.submissionId !== submissionId) return;
-    store.removeItem(keyOf(scope));
+    const found = store ? locate(store, KEY_PREFIX, binding, scopeText(scope)) : null;
+    if (!store || found === null) return;
+    if (parse(found.raw, scope)?.submissionId !== submissionId) return;
+    store.removeItem(found.key);
   } catch {
     // See above.
     return;
@@ -379,17 +395,17 @@ export function restoreUnresolvedContractCommand(
 ): RestoredContractCommand | null {
   try {
     const store = storage();
-    const raw = store?.getItem(keyOf(scope));
-    if (!store || raw === null || raw === undefined) return null;
+    const found = store ? locate(store, KEY_PREFIX, binding, scopeText(scope)) : null;
+    if (!store || found === null) return null;
 
-    const entry = parse(raw, scope);
-    if (!entry || entry.owner !== binding.owner) {
-      store.removeItem(keyOf(scope));
+    const entry = parse(found.raw, scope);
+    if (!entry || !ownedHere(binding, found.legacy, entry.owner)) {
+      store.removeItem(found.key);
       return null;
     }
     const { command, submissionId, correlationId, savedAt } = entry;
     if (entry.marker || now - savedAt > maxAgeSeconds * 1000) {
-      if (!entry.marker) store.setItem(keyOf(scope), markerOf(entry));
+      if (!entry.marker) store.setItem(found.key, markerOf(entry));
       return {
         kind: 'VIEW_ONLY',
         entry: {
@@ -412,8 +428,12 @@ export function restoreUnresolvedContractCommand(
       replay: entry.replay,
       marker: false,
     };
+    // An old-format record may have been sent for another organization: never re-sent.
     const retryable =
-      entry.session === binding.session && entry.replay !== null && now < entry.replay.until;
+      !found.legacy &&
+      entry.session === binding.session &&
+      entry.replay !== null &&
+      now < entry.replay.until;
     return { kind: retryable ? 'RETRYABLE' : 'VIEW_ONLY', entry: restored };
   } catch {
     return null;

@@ -1,5 +1,6 @@
 import { isOwnerCommand, type OwnerCommand } from './tender-owner-fields';
 import { markerStore, type SaveOutcome, type UnresolvedMarker } from './unresolved-marker';
+import type { AccountTags, Binding } from './unresolved-tenancy';
 import type { ReplayStamp } from './unresolved-statement';
 
 export type { ReplayStamp, SaveOutcome };
@@ -40,20 +41,23 @@ export const markOwnerCommandsOpen = (): void => store.markOpen();
 
 export const purgeAllUnresolvedOwnerCommands = (): void => store.purgeAll();
 
-export const purgeForeignUnresolvedOwnerCommands = (owner: string): void =>
-  store.purgeForeign(owner);
+export const purgeForeignUnresolvedOwnerCommands = (tags: AccountTags): void =>
+  store.purgeForeign(tags);
 
 export const saveUnresolvedOwnerCommand = (
   tenderId: string,
   entry: Omit<UnresolvedOwnerCommand, 'savedAt'>,
-  owner: string,
+  binding: Binding,
   now?: number,
-): SaveOutcome => store.save(tenderId, entry, owner, now);
+): SaveOutcome => store.save(tenderId, entry, binding, now);
 
-export const clearUnresolvedOwnerCommand = (tenderId: string, submissionId: string): void =>
-  store.clear(tenderId, submissionId);
+export const clearUnresolvedOwnerCommand = (
+  tenderId: string,
+  submissionId: string,
+  binding: Binding,
+): void => store.clear(tenderId, submissionId, binding);
 
 export const restoreUnresolvedOwnerCommand = (
   tenderId: string,
-  owner: string,
-): UnresolvedOwnerCommand | null => store.restore(tenderId, owner);
+  binding: Binding,
+): UnresolvedOwnerCommand | null => store.restore(tenderId, binding);

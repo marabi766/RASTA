@@ -1,4 +1,16 @@
 import { canonicalQuantity, type PlaceOrderFormValues } from './place-order-fields';
+import {
+  keysUnder,
+  legacyKey,
+  locate,
+  ownedHere,
+  purgeForeign,
+  tenantKey,
+  type AccountTags,
+  type Binding,
+} from './unresolved-tenancy';
+
+export type { AccountTags, Binding };
 
 /**
  * An order whose outcome is unknown, kept in `sessionStorage` so that a reload,
@@ -50,12 +62,6 @@ export interface UnresolvedOrder {
   readonly savedAt: number;
 }
 
-/** The two tags the page computed for the current login; see `submissionBinding`. */
-export interface Binding {
-  readonly owner: string;
-  readonly session: string;
-}
-
 interface Stored extends UnresolvedOrder {
   readonly v: typeof VERSION;
   /** Saved before the action was sent; the outcome of the send is not known. */
@@ -67,7 +73,11 @@ interface Stored extends UnresolvedOrder {
 export type RestoredOrder =
   /** Same login: the stored id still verifies, so the retry button may be offered. */
   | { readonly kind: 'RETRYABLE'; readonly order: UnresolvedOrder }
-  /** Same person, another login: the id is refused by the server now; show it, never re-send it. */
+  /**
+   * Same person, another login — or an entry from before entries were kept per
+   * organization (`lib/unresolved-tenancy.ts`): the id is refused by the server
+   * now, or may be another organization's; show it, never re-send it.
+   */
   | { readonly kind: 'VIEW_ONLY'; readonly order: UnresolvedOrder };
 
 /** Set when a logout starts; this document writes no entry after it. Cleared by a page drawn for a login. */
@@ -87,10 +97,6 @@ function storage(): Storage | null {
   } catch {
     return null;
   }
-}
-
-function keyOf(productId: string): string {
-  return `${KEY_PREFIX}${productId}`;
 }
 
 function text(value: unknown, max = MAX_FIELD_LENGTH): value is string {
@@ -138,16 +144,6 @@ function parse(raw: string): Stored | null {
   };
 }
 
-/** Every key this module owns, in the order storage lists them. */
-function ownKeys(store: Storage): string[] {
-  const keys: string[] = [];
-  for (let index = 0; index < store.length; index += 1) {
-    const key = store.key(index);
-    if (key !== null && key.startsWith(KEY_PREFIX)) keys.push(key);
-  }
-  return keys;
-}
-
 /**
  * Account boundary, logout: nothing of an unresolved order outlives the person
  * who signed out, whatever product it was for. (A session that merely *expires*
@@ -158,26 +154,23 @@ export function purgeAllUnresolvedOrders(): void {
   try {
     const store = storage();
     if (!store) return;
-    for (const key of ownKeys(store)) store.removeItem(key);
+    for (const key of keysUnder(store, KEY_PREFIX)) store.removeItem(key);
   } catch {
     // See above.
   }
 }
 
 /**
- * Account boundary, a page for `owner`: entries of anyone else — and entries
- * that cannot be read as anyone's — are removed. The same person after a
- * re-login keeps theirs (view-only, `restoreUnresolvedOrder`).
+ * Account boundary, a page for this person: entries of anyone else — and
+ * entries that cannot be read as anyone's — are removed. The same person keeps
+ * theirs, for every organization (`lib/unresolved-tenancy.ts`), and after a
+ * re-login (view-only, `restoreUnresolvedOrder`).
  */
-export function purgeForeignUnresolvedOrders(owner: string): void {
+export function purgeForeignUnresolvedOrders(tags: AccountTags): void {
   try {
     const store = storage();
     if (!store) return;
-    for (const key of ownKeys(store)) {
-      const raw = store.getItem(key);
-      const entry = raw === null ? null : parse(raw);
-      if (!entry || entry.owner !== owner) store.removeItem(key);
-    }
+    purgeForeign(store, KEY_PREFIX, tags, parse);
   } catch {
     // See above.
   }
@@ -205,7 +198,7 @@ export function saveUnresolvedOrder(
     };
     const store = storage();
     if (!store) return false;
-    store.setItem(keyOf(productId), JSON.stringify(stored));
+    store.setItem(tenantKey(KEY_PREFIX, binding, productId), JSON.stringify(stored));
     return true;
   } catch {
     // Unavailable or full: the caller decides what that means.
@@ -213,17 +206,25 @@ export function saveUnresolvedOrder(
   }
 }
 
-export function clearUnresolvedOrder(productId: string): void {
+/**
+ * Drops this page's entry for the product: this organization's, and an entry
+ * from before entries were kept per organization that the page showed in its
+ * place. Another organization's stays.
+ */
+export function clearUnresolvedOrder(productId: string, binding: Binding): void {
   try {
-    storage()?.removeItem(keyOf(productId));
+    const store = storage();
+    store?.removeItem(tenantKey(KEY_PREFIX, binding, productId));
+    store?.removeItem(legacyKey(KEY_PREFIX, productId));
   } catch {
     // See above.
   }
 }
 
 /**
- * The unresolved order for this product, if there is one this person may see.
- * An unreadable, aged-out or someone else's entry is removed and reads as none.
+ * The unresolved order for this product, if there is one this person may see
+ * here, for this organization. An unreadable, aged-out or someone else's entry
+ * is removed and reads as none; another organization's is not read at all.
  */
 export function restoreUnresolvedOrder(
   productId: string,
@@ -233,19 +234,21 @@ export function restoreUnresolvedOrder(
 ): RestoredOrder | null {
   try {
     const store = storage();
-    const raw = store?.getItem(keyOf(productId));
-    if (!store || raw === null || raw === undefined) return null;
+    const found = store ? locate(store, KEY_PREFIX, binding, productId) : null;
+    if (!store || found === null) return null;
 
-    const entry = parse(raw);
+    const entry = parse(found.raw);
     const aged = entry !== null && now - entry.savedAt > maxAgeSeconds * 1000;
-    if (!entry || aged || entry.owner !== binding.owner) {
-      store.removeItem(keyOf(productId));
+    if (!entry || aged || !ownedHere(binding, found.legacy, entry.owner)) {
+      store.removeItem(found.key);
       return null;
     }
 
     const { submissionId, values, correlationId, savedAt } = entry;
     const order: UnresolvedOrder = { submissionId, values, correlationId, savedAt };
-    return { kind: entry.session === binding.session ? 'RETRYABLE' : 'VIEW_ONLY', order };
+    // An old-format entry may have been sent for another organization: never re-sent.
+    const retryable = !found.legacy && entry.session === binding.session;
+    return { kind: retryable ? 'RETRYABLE' : 'VIEW_ONLY', order };
   } catch {
     return null;
   }

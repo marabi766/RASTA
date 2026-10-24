@@ -10,6 +10,15 @@ import { AccountBoundary } from './AccountBoundary';
 const PERSON_1 = 'owner-tag-1';
 const PERSON_2 = 'owner-tag-2';
 
+/**
+ * The entries below are in the format from before entries were kept per
+ * organization (`lib/unresolved-tenancy.ts`): kept for the person whose old
+ * tags they carry. `lib/unresolved-tenancy.spec.tsx` covers the per-organization
+ * keys.
+ */
+const ACCOUNT_1 = { person: 'person-1', legacy: [PERSON_1] };
+const ACCOUNT_2 = { person: 'person-2', legacy: [PERSON_2] };
+
 function entry(owner: string, productId: string, session = 'login-1') {
   window.sessionStorage.setItem(
     `rasta.unresolved-order.${productId}`,
@@ -35,7 +44,7 @@ describe('logout purges every remembered order', () => {
   function logoutPage() {
     return render(
       <>
-        <AccountBoundary owner={PERSON_1} />
+        <AccountBoundary account={ACCOUNT_1} />
         <form
           method="post"
           action="/auth/logout"
@@ -97,20 +106,20 @@ describe('a page for another person purges what is not theirs', () => {
     entry(PERSON_2, 'PRD_2');
     entry(PERSON_2, 'PRD_3', 'login-0');
 
-    render(<AccountBoundary owner={PERSON_2} />);
+    render(<AccountBoundary account={ACCOUNT_2} />);
 
     expect(keys()).toEqual(['rasta.unresolved-order.PRD_2', 'rasta.unresolved-order.PRD_3']);
   });
 
   it('removes entries that cannot be read as anyone’s', () => {
     window.sessionStorage.setItem('rasta.unresolved-order.PRD_9', 'not json');
-    render(<AccountBoundary owner={PERSON_1} />);
+    render(<AccountBoundary account={ACCOUNT_1} />);
     expect(keys()).toEqual([]);
   });
 
   it('a page with no login (the sign-in page) removes nothing: the same person may sign back in', () => {
     entry(PERSON_1, 'PRD_1');
-    render(<AccountBoundary owner={null} />);
+    render(<AccountBoundary account={null} />);
     expect(keys()).toEqual(['rasta.unresolved-order.PRD_1']);
   });
 
@@ -123,7 +132,7 @@ describe('a page for another person purges what is not theirs', () => {
       },
     });
     try {
-      expect(() => render(<AccountBoundary owner={PERSON_1} />)).not.toThrow();
+      expect(() => render(<AccountBoundary account={ACCOUNT_1} />)).not.toThrow();
     } finally {
       if (original) Object.defineProperty(window, 'sessionStorage', original);
     }

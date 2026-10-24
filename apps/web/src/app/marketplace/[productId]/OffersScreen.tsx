@@ -15,6 +15,7 @@ import { formatMoney, toPersianDigits } from '@/lib/format';
 import type { OffersPage, Product, ReadResult } from '@/server/marketplace';
 
 import { PlaceOrderForm } from './PlaceOrderForm';
+import type { Binding } from '@/lib/unresolved-tenancy';
 
 /**
  * `/marketplace/[productId]` — مقایسه پیشنهادها (docs/16 § ۱۶٫۶, role
@@ -49,7 +50,7 @@ export interface OffersScreenProps {
     readonly mintSubmissionId: () => string;
     readonly organizationId: string | null;
     /** One-way tags of this login, so a form can recognise its own remembered order (`submissionBinding`). */
-    readonly binding: { readonly owner: string; readonly session: string };
+    readonly binding: Binding;
     /** The session's lifetime: a remembered unresolved order is not kept longer than that. */
     readonly sessionMaxAgeSeconds: number;
   };

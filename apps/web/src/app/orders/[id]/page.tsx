@@ -19,6 +19,7 @@ import { mintSubmissionId, submissionBinding } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { OrderDetailScreen, type OrderDetailScreenProps } from './OrderDetailScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/orders/[id]` route — جزئیات سفارش + Stepper (docs/16 § ۱۶٫۶).
@@ -104,8 +105,9 @@ export default async function OrderPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

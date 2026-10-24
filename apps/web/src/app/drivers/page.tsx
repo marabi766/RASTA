@@ -9,6 +9,7 @@ import { mintSubmissionId } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { DriversScreen } from './DriversScreen';
 import { NewDriverForm } from './NewDriverForm';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/drivers` route — راننده و تخصیص (docs/16 § ۱۶٫۶, role `FLEET_MANAGER`).
@@ -72,8 +73,9 @@ export default async function DriversPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

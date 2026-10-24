@@ -14,9 +14,21 @@
  *
  * One record per scope, never replaced: saving another submission's record
  * over it is refused (`HELD`), and a record is cleared only by the submission
- * it belongs to. A page for another person drops every entry of anyone else; a
- * logout writes nothing more and leaves the markers.
+ * it belongs to. Records are kept per person and organization
+ * (`lib/unresolved-tenancy.ts`): a page for another organization of the same
+ * person neither shows nor clears them, a page for another person drops every
+ * entry of anyone else, and a logout writes nothing more and leaves the markers.
  */
+
+import {
+  keysUnder,
+  locate,
+  ownedHere,
+  purgeForeign,
+  tenantKey,
+  type AccountTags,
+  type Binding,
+} from './unresolved-tenancy';
 
 const VERSION = 1;
 const SUBMISSION_ID = /^sub_[A-Za-z0-9_-]{8,128}$/;
@@ -42,15 +54,15 @@ export interface MarkerStore<C extends string> {
   subscribe(listener: () => void): () => void;
   markOpen(): void;
   purgeAll(): void;
-  purgeForeign(owner: string): void;
+  purgeForeign(tags: AccountTags): void;
   save(
     scope: string,
     entry: Omit<UnresolvedMarker<C>, 'savedAt'>,
-    owner: string,
+    binding: Binding,
     now?: number,
   ): SaveOutcome;
-  clear(scope: string, submissionId: string): void;
-  restore(scope: string, owner: string): UnresolvedMarker<C> | null;
+  clear(scope: string, submissionId: string, binding: Binding): void;
+  restore(scope: string, binding: Binding): UnresolvedMarker<C> | null;
 }
 
 type Stored<C extends string> = UnresolvedMarker<C> & {
@@ -80,7 +92,6 @@ export function markerStore<C extends string>(
   const changed = (): void => {
     for (const listener of [...listeners]) listener();
   };
-  const keyOf = (scope: string): string => `${keyPrefix}${scope}`;
 
   function parse(raw: string): Stored<C> | null {
     let value: unknown;
@@ -115,15 +126,6 @@ export function markerStore<C extends string>(
     };
   }
 
-  function ownKeys(store: Storage): string[] {
-    const keys: string[] = [];
-    for (let index = 0; index < store.length; index += 1) {
-      const key = store.key(index);
-      if (key !== null && key.startsWith(keyPrefix)) keys.push(key);
-    }
-    return keys;
-  }
-
   return {
     subscribe(listener) {
       listeners.add(listener);
@@ -141,7 +143,7 @@ export function markerStore<C extends string>(
       try {
         const store = storage();
         if (!store) return;
-        for (const key of ownKeys(store)) {
+        for (const key of keysUnder(store, keyPrefix)) {
           const raw = store.getItem(key);
           if (raw === null || parse(raw) === null) store.removeItem(key);
         }
@@ -151,29 +153,33 @@ export function markerStore<C extends string>(
       changed();
     },
 
-    purgeForeign(owner) {
+    purgeForeign(tags) {
       try {
         const store = storage();
         if (!store) return;
-        for (const key of ownKeys(store)) {
-          const raw = store.getItem(key);
-          const entry = raw === null ? null : parse(raw);
-          if (!entry || entry.owner !== owner) store.removeItem(key);
-        }
+        purgeForeign(store, keyPrefix, tags, parse);
       } catch {
         // See above.
       }
     },
 
-    save(scope, entry, owner, now = Date.now()) {
+    save(scope, entry, binding, now = Date.now()) {
       if (accountClosing) return 'UNAVAILABLE';
       try {
         const store = storage();
         if (!store) return 'UNAVAILABLE';
-        const previous = store.getItem(keyOf(scope));
-        const parsed = previous === null ? null : parse(previous);
-        const earlier = parsed?.owner === owner ? parsed : null;
-        if (earlier !== null && earlier.submissionId !== entry.submissionId) return 'HELD';
+        const found = locate(store, keyPrefix, binding, scope);
+        const parsed = found === null ? null : parse(found.raw);
+        const earlier =
+          found !== null && parsed !== null && ownedHere(binding, found.legacy, parsed.owner)
+            ? parsed
+            : null;
+        // A record from before records were kept per organization holds its
+        // scope like any other — it may be another organization's, so it is
+        // never taken over, even by the same submission.
+        if (earlier !== null && (found?.legacy || earlier.submissionId !== entry.submissionId)) {
+          return 'HELD';
+        }
         const record: Stored<C> = {
           v: VERSION,
           command: entry.command,
@@ -181,9 +187,9 @@ export function markerStore<C extends string>(
           correlationId: entry.correlationId,
           // The entry dates from the first send.
           savedAt: earlier?.savedAt ?? now,
-          owner,
+          owner: binding.owner,
         };
-        store.setItem(keyOf(scope), JSON.stringify(record));
+        store.setItem(tenantKey(keyPrefix, binding, scope), JSON.stringify(record));
         changed();
         return 'SAVED';
       } catch {
@@ -191,27 +197,27 @@ export function markerStore<C extends string>(
       }
     },
 
-    clear(scope, submissionId) {
+    clear(scope, submissionId, binding) {
       try {
         const store = storage();
-        const raw = store?.getItem(keyOf(scope));
-        if (!store || raw === null || raw === undefined) return;
-        if (parse(raw)?.submissionId !== submissionId) return;
-        store.removeItem(keyOf(scope));
+        const found = store ? locate(store, keyPrefix, binding, scope) : null;
+        if (!store || found === null) return;
+        if (parse(found.raw)?.submissionId !== submissionId) return;
+        store.removeItem(found.key);
       } catch {
         return;
       }
       changed();
     },
 
-    restore(scope, owner) {
+    restore(scope, binding) {
       try {
         const store = storage();
-        const raw = store?.getItem(keyOf(scope));
-        if (!store || raw === null || raw === undefined) return null;
-        const entry = parse(raw);
-        if (!entry || entry.owner !== owner) {
-          store.removeItem(keyOf(scope));
+        const found = store ? locate(store, keyPrefix, binding, scope) : null;
+        if (!store || found === null) return null;
+        const entry = parse(found.raw);
+        if (!entry || !ownedHere(binding, found.legacy, entry.owner)) {
+          store.removeItem(found.key);
           return null;
         }
         const { command, submissionId, correlationId, savedAt } = entry;

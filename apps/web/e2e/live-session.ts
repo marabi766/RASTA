@@ -6,6 +6,7 @@ import { decodeJwt } from 'jose';
 import { z } from 'zod';
 
 import { SESSION_COOKIE, newCsrfToken, sealSession } from '../src/server/session';
+import { storedOrganizationFor } from '../src/server/session-organization';
 
 /**
  * A real portal session for the live-stack browser scenario.
@@ -276,7 +277,9 @@ async function installSession(context: BrowserContext, fixture: Fixture): Promis
     {
       subject: claims.sub,
       username: claims.preferred_username,
-      organizationId: claims.org_id,
+      // As `auth/callback` stores it: the access token's organization, resolved
+      // the way the guard and every portal reader resolve it (task 100).
+      organizationId: storedOrganizationFor(tokens.access_token),
       accessToken: tokens.access_token,
       accessTokenExpiresAt: expiresAt,
       refreshToken: tokens.refresh_token,

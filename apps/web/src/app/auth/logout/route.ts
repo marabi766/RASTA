@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { webServerEnv } from '@/server/env';
-import { readSession } from '@/server/current-session';
+import { readStoredSessionForLogout } from '@/server/current-session';
 import { endpointsFor } from '@/server/oidc';
 import { SESSION_COOKIE, csrfMatches } from '@/server/session';
 
@@ -21,7 +21,9 @@ export const dynamic = 'force-dynamic';
 
 export async function POST(request: Request): Promise<NextResponse> {
   const env = webServerEnv();
-  const session = await readSession();
+  // Not `readSession()`: a session whose organization cannot be told must
+  // still be able to sign out (`readStoredSessionForLogout`).
+  const session = await readStoredSessionForLogout();
 
   if (!session) return NextResponse.redirect(`${env.WEB_PUBLIC_ORIGIN}/login`);
 

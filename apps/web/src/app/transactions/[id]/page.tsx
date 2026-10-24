@@ -13,6 +13,7 @@ import { disputeCommandsFor, fetchTransaction } from '@/server/transactions';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { TransactionDetailScreen } from './TransactionDetailScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/transactions/[id]` route — one transaction and its dispute (EXP-003).
@@ -66,8 +67,9 @@ export default async function TransactionPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

@@ -48,6 +48,7 @@ import { AssetDocuments } from './AssetDocuments';
 import { AttachDocumentForm } from './AssetDocumentForm';
 import { AssetAvailability } from './AssetAvailability';
 import { DeclareAvailabilityForm, RevokeAvailabilityForm } from './AvailabilityForms';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/assets/[id]` route.
@@ -200,8 +201,9 @@ export default async function AssetDossierPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

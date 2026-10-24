@@ -20,6 +20,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import type { OfferedStatementCommand } from '../../StatementCommands';
 import { StatementDetailScreen } from './StatementDetailScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/contracts/[id]/statements/[statementId]` route — one statement, its
@@ -103,8 +104,9 @@ export default async function StatementPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

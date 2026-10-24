@@ -12,6 +12,7 @@ import {
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ReturnsScreen } from './ReturnsScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/returns` route — درخواست‌های بازگشت کالا (EXP-003, RUN-005).
@@ -63,8 +64,9 @@ export default async function ReturnsPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

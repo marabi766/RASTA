@@ -272,13 +272,13 @@ const idTokenClaimsSchema = z.object({
   nonce: z.string().min(1),
   preferred_username: z.string().min(1).optional(),
   email: z.string().optional(),
-  org_id: z.string().optional(),
 });
 
 export interface VerifiedIdentity {
   readonly subject: string;
   readonly username: string;
-  readonly organizationId: string | null;
+  // No organization: the access token's is the only one the portal reads
+  // (`session-organization.ts`); the id token's claim was a second copy.
 }
 
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
@@ -352,7 +352,6 @@ export async function verifyIdToken(
   return {
     subject: parsed.data.sub,
     username: parsed.data.preferred_username ?? parsed.data.email ?? parsed.data.sub,
-    organizationId: parsed.data.org_id ?? null,
   };
 }
 

@@ -294,7 +294,7 @@ describe('verifying the id token', () => {
         { issuer: ISSUER, clientId: CLIENT, jwksUri: endpoints.jwks, nonce },
         KEY,
       ),
-    ).resolves.toEqual({ subject: 'USR_1', username: 'dehyar', organizationId: null });
+    ).resolves.toEqual({ subject: 'USR_1', username: 'dehyar' });
   });
 
   it('refuses a token that answers a different login attempt', async () => {

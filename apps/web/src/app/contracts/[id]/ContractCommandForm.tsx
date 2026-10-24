@@ -201,7 +201,7 @@ export function ContractCommandForm({
       } catch (error) {
         // Done: the action redirects to the contract.
         if (isRedirect(error)) {
-          clearUnresolvedContractCommand(scope, sentId);
+          clearUnresolvedContractCommand(scope, sentId, binding);
           throw error;
         }
         const ended = await sessionHasEnded();
@@ -213,7 +213,7 @@ export function ContractCommandForm({
       // Still in doubt: kept. A definite answer to THIS submission's first send:
       // its own record is dropped — never another's.
       if (next.kind === 'UNCONFIRMED') saveUnresolvedContractCommand(scope, next, binding);
-      else if (firstSend) clearUnresolvedContractCommand(scope, sentId);
+      else if (firstSend) clearUnresolvedContractCommand(scope, sentId, binding);
       return next;
     },
     [scope, command, replay, binding, sessionMaxAgeSeconds],
@@ -232,7 +232,7 @@ export function ContractCommandForm({
         csrfToken={csrfToken}
         headingId={headingId}
         pageHref={pageHref}
-        onForget={() => clearUnresolvedContractCommand(scope, state.submissionId)}
+        onForget={() => clearUnresolvedContractCommand(scope, state.submissionId, binding)}
       />
     );
   }

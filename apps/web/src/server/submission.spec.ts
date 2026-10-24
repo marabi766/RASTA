@@ -1,5 +1,7 @@
 import { isBoundSubmissionId, mintSubmissionId, submissionBinding } from './submission';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+import { UnresolvedSessionOrganization } from './session-organization';
 
 /**
  * The submission id: a per-render reference, sent back with its form, bound to
@@ -17,7 +19,7 @@ describe('submission ids', () => {
     subject: 'USR_1',
     username: 'operator',
     organizationId: 'ORG_1',
-    accessToken: 'access-token-value',
+    accessToken: actingAccessToken('ORG_1'),
     accessTokenExpiresAt: 2_000_000_000,
     refreshToken: 'refresh-token-value',
     csrfToken: 'csrf-token-for-this-session',
@@ -85,19 +87,18 @@ describe('submission ids', () => {
     expect(
       isBoundSubmissionId(id, {
         ...SESSION,
-        accessToken: 'refreshed',
+        accessToken: actingAccessToken('ORG_1', ['OPERATOR'], { jti: 'refreshed' }),
         accessTokenExpiresAt: 2_100_000_000,
       }),
     ).toBe(true);
   });
 
   describe('bound to the organization the access token acts for (task 095)', () => {
-    /** A token as the portal reads it: only the payload is decoded, never verified. */
-    const token = (claims: Record<string, unknown>) =>
-      `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`;
+    /** A session whose token — and so its stored copy — acts for `org` (none: undefined). */
     const forOrg = (org: string | undefined, extra: Record<string, unknown> = {}): WebSession => ({
       ...SESSION,
-      accessToken: token({ ...(org === undefined ? {} : { org_id: org }), ...extra }),
+      organizationId: org ?? null,
+      accessToken: actingAccessToken(org ?? null, ['OPERATOR'], extra),
     });
 
     it('survives a refresh that keeps the organization', () => {
@@ -106,7 +107,6 @@ describe('submission ids', () => {
     });
 
     it('refuses a form drawn for one organization once the token acts for another', () => {
-      // The session's own organizationId does not move on a refresh; the token's does.
       const id = mintSubmissionId(forOrg('ORG-DEH-0001'));
       expect(isBoundSubmissionId(id, forOrg('ORG-DEH-0002'))).toBe(false);
       expect(isBoundSubmissionId(id, forOrg(undefined))).toBe(false);
@@ -119,6 +119,22 @@ describe('submission ids', () => {
     it('reads the claim strictly: an organization id the guard would not accept binds nothing', () => {
       const id = mintSubmissionId(forOrg('ORG-DEH-0001'));
       expect(isBoundSubmissionId(id, forOrg('ORG-DEH-0001:FLEET_MANAGER'))).toBe(false);
+    });
+
+    it('mints nothing and accepts nothing for a session whose organization cannot be told (task 100)', () => {
+      const id = mintSubmissionId(forOrg('ORG-DEH-0001'));
+      const unreadable = { ...forOrg('ORG-DEH-0001'), accessToken: 'opaque' };
+      // A token whose org_id it does not list as a membership: the guard says TENANT_MISMATCH.
+      const notListed = {
+        ...forOrg('ORG-DEH-0001'),
+        accessToken: actingAccessToken('ORG-DEH-0001', ['OPERATOR'], { org_ids: ['ORG-DEH-0009'] }),
+      };
+      // The stored copy says A, the token B: a cookie sealed before task 100.
+      const diverged = { ...forOrg('ORG-DEH-0002'), organizationId: 'ORG-DEH-0001' };
+      for (const session of [unreadable, notListed, diverged]) {
+        expect(isBoundSubmissionId(id, session)).toBe(false);
+        expect(() => mintSubmissionId(session)).toThrow();
+      }
     });
   });
 
@@ -184,10 +200,57 @@ describe('submission ids', () => {
       expect(relogin.session).not.toBe(binding.session);
 
       expect(submissionBinding({ ...SESSION, subject: 'USR_2' }).owner).not.toBe(binding.owner);
-      expect(submissionBinding({ ...SESSION, organizationId: 'ORG_2' }).owner).not.toBe(
-        binding.owner,
-      );
-      expect(submissionBinding({ ...SESSION, organizationId: null }).owner).not.toBe(binding.owner);
+      expect(submissionBinding({ ...SESSION, subject: 'USR_2' }).person).not.toBe(binding.person);
+    });
+
+    describe('per organization: the token’s, never a stale copy (task 100)', () => {
+      const inOrg = (org: string | null, memberships?: string[]): WebSession => ({
+        ...SESSION,
+        organizationId: org,
+        accessToken: actingAccessToken(
+          org,
+          ['OPERATOR'],
+          memberships ? { org_ids: memberships } : {},
+        ),
+      });
+
+      it('another organization is another owner and another login tag, the same person', () => {
+        const a = submissionBinding(inOrg('ORG_1'));
+        const b = submissionBinding(inOrg('ORG_2'));
+        const none = submissionBinding(inOrg(null));
+        expect(b.owner).not.toBe(a.owner);
+        expect(b.session).not.toBe(a.session);
+        expect(none.owner).not.toBe(a.owner);
+        expect(b.person).toBe(a.person);
+        expect(none.person).toBe(a.person);
+      });
+
+      it('after a refresh from A to B the owner is B’s, and back on A it is A’s again', () => {
+        const a = submissionBinding(inOrg('ORG_1'));
+        expect(submissionBinding(inOrg('ORG_2')).owner).not.toBe(a.owner);
+        expect(submissionBinding(inOrg('ORG_1'))).toEqual(a);
+      });
+
+      it('refuses to tag a session whose stored copy disagrees with its token', () => {
+        expect(() => submissionBinding({ ...inOrg('ORG_2'), organizationId: 'ORG_1' })).toThrow(
+          UnresolvedSessionOrganization,
+        );
+        expect(() => submissionBinding({ ...SESSION, accessToken: 'opaque' })).toThrow(
+          UnresolvedSessionOrganization,
+        );
+      });
+
+      it('recognizes an entry written before entries were tagged per organization: every membership’s owner tag, and none', () => {
+        const binding = submissionBinding(inOrg('ORG_2', ['ORG_1', 'ORG_2', 'ORG_3']));
+        const owners = [null, 'ORG_1', 'ORG_2', 'ORG_3'].map(
+          (org) => submissionBinding(inOrg(org)).owner,
+        );
+        expect([...binding.legacy].sort()).toEqual([...new Set(owners)].sort());
+        // Another person's old tag is not among them.
+        expect(binding.legacy).not.toContain(
+          submissionBinding({ ...inOrg('ORG_1'), subject: 'USR_2' }).owner,
+        );
+      });
     });
 
     it('reveals none of the session’s values, and depends on the server’s secret', () => {
@@ -203,6 +266,9 @@ describe('submission ids', () => {
       }
       expect(binding.owner).toMatch(/^[A-Za-z0-9_-]{16}$/);
       expect(binding.session).toMatch(/^[A-Za-z0-9_-]{16}$/);
+      expect(binding.person).toMatch(/^[A-Za-z0-9_-]{16}$/);
+      for (const tag of binding.legacy) expect(tag).toMatch(/^[A-Za-z0-9_-]{16}$/);
+      expect(text).not.toContain(SESSION.organizationId!);
 
       // `webServerEnv()` caches per module instance: load one with another secret.
       let other = binding;

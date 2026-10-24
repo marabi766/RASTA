@@ -7,6 +7,7 @@ import type { ReadResult, Transaction } from '@/server/transactions';
 import { TransactionDetailScreen } from './[id]/TransactionDetailScreen';
 import { DisputeCommandForm } from './[id]/DisputeCommandForm';
 import type { DisputeFormState } from './[id]/form-state';
+import { bindingOf } from '@/test/unresolved-binding';
 
 /**
  * What `/transactions/[id]` renders: every outcome the read can hand back, the
@@ -49,7 +50,7 @@ afterEach(() => {
 });
 
 const CSRF = 'csrf-token-for-this-session';
-const BINDING = { owner: 'owner-tag', session: 'session-tag' };
+const BINDING = bindingOf('owner-tag', 'session-tag');
 const SESSION_MAX_AGE = 12 * 60 * 60;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const STAMP = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };

@@ -9,6 +9,7 @@ import { fetchDemoMode } from '@/server/demo-mode';
 import { mintSubmissionId } from '@/server/submission';
 
 import { UsageForm } from './UsageForm';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/usage` route — recording machine usage (docs/16 § ۱۶٫۶).
@@ -45,8 +46,9 @@ export default async function UsagePage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

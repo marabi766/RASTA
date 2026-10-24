@@ -25,6 +25,7 @@ import {
 } from '@/test/contract-command-fixtures';
 
 import { IDLE_CONTRACT_FORM, type UnconfirmedContractCommand } from './contract-form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The contract commands' write path — the order of checks every portal write
@@ -62,7 +63,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'contractor',
   organizationId: 'ORG-CON-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-CON-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

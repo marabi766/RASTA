@@ -234,6 +234,109 @@ describe('LiveMembershipClient', () => {
   });
 });
 
+/**
+ * PR 405 review 1, F2: a redirect is not an answer. Real `fetch`, two loopback
+ * servers — identity's stand-in, which redirects, and another origin (another
+ * port), which would answer exactly what was asked with `live: true` and
+ * records every request that reaches it.
+ */
+describe('a redirect from identity (or a proxy in front of it)', () => {
+  let elsewhere: Server;
+  let elsewhereUrl: string;
+  const reached: { url: string; token: string }[] = [];
+
+  beforeAll(async () => {
+    elsewhere = createServer((request, response) => {
+      reached.push({
+        url: request.url ?? '',
+        token: String(request.headers['x-internal-token'] ?? ''),
+      });
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(answer()));
+    });
+    await new Promise<void>((resolve) => elsewhere.listen(0, '127.0.0.1', resolve));
+    elsewhereUrl = `http://127.0.0.1:${(elsewhere.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    elsewhere.closeAllConnections();
+    await new Promise<void>((resolve) => elsewhere.close(() => resolve()));
+  });
+
+  beforeEach(() => {
+    reached.length = 0;
+  });
+
+  const redirecting =
+    (status: number): Handler =>
+    (request, response) => {
+      response.writeHead(status, {
+        location: `${elsewhereUrl}${request.url ?? '/'}`,
+        'content-type': 'application/json',
+      });
+      // The redirect's own body says live too: it is not read either.
+      response.end(JSON.stringify(answer()));
+    };
+
+  it('the other host really would say live: true (the stand-in is sound)', async () => {
+    const direct = new LiveMembershipClient({ baseUrl: elsewhereUrl, timeoutMs: 2_000, tokens });
+    await expect(direct.isLiveMember(ORG, USER)).resolves.toBe(true);
+    expect(reached).toHaveLength(1);
+  });
+
+  it.each([301, 302, 303, 307, 308])(
+    'a %s is refused as 503 after exactly one request: the other host is never asked, the token never leaves',
+    async (status) => {
+      handler = redirecting(status);
+      await expectUnavailable(client().isLiveMember(ORG, USER));
+      expect(seen).toHaveLength(1);
+      expect(reached).toEqual([]);
+    },
+  );
+
+  it('is refused the same way to a relative Location on identity itself', async () => {
+    handler = (request, response) => {
+      if (request.url?.startsWith('/moved')) return json(answer())(request, response);
+      response.writeHead(302, { location: `/moved${request.url ?? ''}` });
+      response.end();
+    };
+    await expectUnavailable(client().isLiveMember(ORG, USER));
+    expect(seen).toHaveLength(1);
+  });
+
+  it('a fetch that followed one anyway is refused: its answer came from somewhere else', async () => {
+    const followed = new LiveMembershipClient({
+      baseUrl,
+      timeoutMs: 2_000,
+      tokens,
+      fetch: (async () => {
+        const response = new Response(JSON.stringify(answer()), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+        Object.defineProperty(response, 'redirected', { value: true });
+        return response;
+      }) as typeof fetch,
+    });
+    await expectUnavailable(followed.isLiveMember(ORG, USER));
+  });
+
+  it('asks fetch not to follow: redirect is manual on every request', async () => {
+    let init: RequestInit | undefined;
+    const recording = new LiveMembershipClient({
+      baseUrl,
+      timeoutMs: 2_000,
+      tokens,
+      fetch: (async (_input: unknown, given?: RequestInit) => {
+        init = given;
+        return new Response(JSON.stringify(answer()), { status: 200 });
+      }) as typeof fetch,
+    });
+    await recording.isLiveMember(ORG, USER);
+    expect(init?.redirect).toBe('manual');
+  });
+});
+
 describe('notAMember', () => {
   it('is a 422 with the closed reason on userId, the same for every way of not being a member', () => {
     const error = notAMember();

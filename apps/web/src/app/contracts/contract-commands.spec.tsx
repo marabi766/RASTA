@@ -27,6 +27,7 @@ import type { OfferedContractCommand } from './[id]/ContractCommands';
 import { ContractDetailScreen } from './[id]/ContractDetailScreen';
 import type { ContractCommandOffers, SigningNote } from './[id]/contract-offers';
 import type { ContractFormState } from './[id]/contract-form-state';
+import { bindingOf } from '@/test/unresolved-binding';
 
 // Each test renders a whole contract screen and runs jest-axe over it; give each room on a
 // loaded runner, as `statements.spec.tsx` does (main 59785c26).
@@ -75,7 +76,7 @@ const offer = (
 
 const CONTEXT = {
   csrfToken: 'csrf',
-  binding: { owner: 'owner-tag', session: 'session-tag' },
+  binding: bindingOf('owner-tag', 'session-tag'),
   sessionMaxAgeSeconds: 12 * 60 * 60,
   pageHref: `/contracts/${CONTRACT_ID}`,
 };

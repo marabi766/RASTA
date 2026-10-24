@@ -430,6 +430,124 @@ describe('driver registration needs a live member of the organization (task 095)
       ],
     ];
 
+    /**
+     * PR 405 review 1, F2: a redirect is refused before a second request is
+     * made, on both write paths. `elsewhere` is another origin (another port)
+     * that would answer exactly what was asked with `live: true`; it records
+     * every request that reaches it — none may.
+     */
+    describe('a redirect is not an answer — on create and on reactivation', () => {
+      let elsewhere: Server;
+      let elsewhereUrl: string;
+      const reached: string[] = [];
+      let identityRequests = 0;
+
+      beforeAll(async () => {
+        elsewhere = createServer((request, response) => {
+          reached.push(String(request.headers['x-internal-token'] ?? ''));
+          const match = /^\/v1\/users\/([^/]+)\/live-membership$/.exec(request.url ?? '');
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end(
+            liveAnswer({
+              organizationId: org.a,
+              userId: decodeURIComponent(match?.[1] ?? ''),
+            }),
+          );
+        });
+        await new Promise<void>((resolve) => elsewhere.listen(0, '127.0.0.1', resolve));
+        elsewhereUrl = `http://127.0.0.1:${(elsewhere.address() as AddressInfo).port}`;
+      });
+
+      afterAll(async () => {
+        elsewhere.closeAllConnections();
+        await new Promise<void>((resolve) => elsewhere.close(() => resolve()));
+      });
+
+      beforeEach(() => {
+        reached.length = 0;
+        identityRequests = 0;
+      });
+
+      const redirecting =
+        (status: number): Handler =>
+        (request, response) => {
+          identityRequests += 1;
+          response.writeHead(status, { location: `${elsewhereUrl}${request.url ?? '/'}` });
+          response.end();
+        };
+
+      const statusOf = async (driverId: string) =>
+        (
+          await runUnscoped('the test reads the row it would have changed', async () =>
+            prisma.client.driver.findFirstOrThrow({ where: { id: driverId } }),
+          )
+        ).status;
+      const statusEvents = (driverId: string) =>
+        prisma.client.outboxMessage.count({
+          where: { aggregateId: driverId, eventName: 'DRIVER_STATUS_CHANGED' },
+        });
+
+      async function unavailable(promise: Promise<unknown>): Promise<void> {
+        const error = await promise.then(
+          () => undefined,
+          (thrown: unknown) => thrown,
+        );
+        expect(error).toBeInstanceOf(RastaError);
+        expect({ status: (error as RastaError).status, code: (error as RastaError).code }).toEqual({
+          status: 503,
+          code: 'UPSTREAM_UNAVAILABLE',
+        });
+      }
+
+      it('the other origin really would admit the user (the stand-in is sound)', async () => {
+        const userId = newUser();
+        const direct = new DriverService(
+          repository,
+          new LiveMembershipClient({ baseUrl: elsewhereUrl, timeoutMs: 2_000, tokens }),
+        );
+        await create(direct, org.a, userId);
+        await registeredOnce(org.a, userId);
+        expect(reached).toHaveLength(1);
+      });
+
+      it.each([301, 302, 303, 307, 308])(
+        'create, %s: 503 after one request, nothing reaches the other origin, no driver row, no outbox row',
+        async (status) => {
+          const userId = newUser();
+          live.add(`${org.a}\n${userId}`);
+          behave = redirecting(status);
+          await unavailable(create(service(), org.a, userId));
+          expect(identityRequests).toBe(1);
+          expect(reached).toEqual([]);
+          await nothingWritten(userId);
+        },
+      );
+
+      it.each([301, 302, 303, 307, 308])(
+        'reactivation SUSPENDED → ACTIVE, %s: 503 after one request, nothing reaches the other origin, status and outbox unchanged',
+        async (status) => {
+          const userId = newUser();
+          live.add(`${org.a}\n${userId}`);
+          const driver = await create(service(), org.a, userId);
+          await asActor({ organizationId: org.a }, () =>
+            service().changeStatus(driver.id, { status: 'SUSPENDED', reason: 'task 100' } as never),
+          );
+          expect(await statusEvents(driver.id)).toBe(1);
+
+          behave = redirecting(status);
+          await unavailable(
+            asActor({ organizationId: org.a }, () =>
+              service().changeStatus(driver.id, { status: 'ACTIVE', reason: 'task 100' } as never),
+            ),
+          );
+          expect(identityRequests).toBe(1);
+          expect(reached).toEqual([]);
+          expect(await statusOf(driver.id)).toBe('SUSPENDED');
+          expect(await statusEvents(driver.id)).toBe(1);
+        },
+      );
+    });
+
     it.each(failures)(
       'refuses on %s (fail closed): 503, no driver row, no outbox event',
       async (_label, handler) => {

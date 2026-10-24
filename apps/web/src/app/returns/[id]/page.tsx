@@ -21,6 +21,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import type { OfferedReturnCommand } from '../ReturnCommands';
 import { ReturnDetailScreen } from './ReturnDetailScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/returns/[id]` route — one return request (EXP-003, RUN-005).
@@ -94,8 +95,9 @@ export default async function ReturnPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

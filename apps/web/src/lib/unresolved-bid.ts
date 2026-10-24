@@ -1,5 +1,6 @@
 import { isBidCommand, type BidCommand } from './bid-fields';
 import { markerStore, type SaveOutcome, type UnresolvedMarker } from './unresolved-marker';
+import type { AccountTags, Binding } from './unresolved-tenancy';
 import type { ReplayStamp } from './unresolved-statement';
 
 export type { ReplayStamp, SaveOutcome };
@@ -62,20 +63,23 @@ export const markBidsOpen = (): void => store.markOpen();
 /** Logout: nothing is saved from here on; unreadable entries are removed, markers stay. */
 export const purgeAllUnresolvedBids = (): void => store.purgeAll();
 
-/** A page for `owner`: entries of anyone else, and unreadable ones, are removed. */
-export const purgeForeignUnresolvedBids = (owner: string): void => store.purgeForeign(owner);
+/** A page for this person: entries of anyone else, and unreadable ones, are removed; theirs stay, for every organization. */
+export const purgeForeignUnresolvedBids = (tags: AccountTags): void => store.purgeForeign(tags);
 
 export const saveUnresolvedBid = (
   tenderId: string,
   entry: Omit<UnresolvedBid, 'savedAt'>,
-  owner: string,
+  binding: Binding,
   now?: number,
-): SaveOutcome => store.save(tenderId, entry, owner, now);
+): SaveOutcome => store.save(tenderId, entry, binding, now);
 
 /** Forgets the record of `submissionId` — and only that one. */
-export const clearUnresolvedBid = (tenderId: string, submissionId: string): void =>
-  store.clear(tenderId, submissionId);
+export const clearUnresolvedBid = (
+  tenderId: string,
+  submissionId: string,
+  binding: Binding,
+): void => store.clear(tenderId, submissionId, binding);
 
 /** The unresolved bid command on this tender, if this person has one; anything else is removed. */
-export const restoreUnresolvedBid = (tenderId: string, owner: string): UnresolvedBid | null =>
-  store.restore(tenderId, owner);
+export const restoreUnresolvedBid = (tenderId: string, binding: Binding): UnresolvedBid | null =>
+  store.restore(tenderId, binding);

@@ -191,7 +191,7 @@ export function StatementCommandForm({
       } catch (error) {
         // Done: the action redirects to the statement.
         if (isRedirect(error)) {
-          clearUnresolvedStatement(scope, sentId);
+          clearUnresolvedStatement(scope, sentId, binding);
           throw error;
         }
         const ended = await sessionHasEnded();
@@ -203,7 +203,7 @@ export function StatementCommandForm({
       // Still in doubt: kept. A definite answer to THIS submission's first send:
       // its own record is dropped — never another's.
       if (next.kind === 'UNCONFIRMED') saveUnresolvedStatement(scope, next, binding);
-      else if (firstSend) clearUnresolvedStatement(scope, sentId);
+      else if (firstSend) clearUnresolvedStatement(scope, sentId, binding);
       return next;
     },
     [scope, command, replay, binding, sessionMaxAgeSeconds],
@@ -220,7 +220,7 @@ export function StatementCommandForm({
         csrfToken={csrfToken}
         headingId={headingId}
         pageHref={pageHref}
-        onForget={() => clearUnresolvedStatement(scope, state.submissionId)}
+        onForget={() => clearUnresolvedStatement(scope, state.submissionId, binding)}
       />
     );
   }
