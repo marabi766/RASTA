@@ -14,6 +14,8 @@
  * session is the first gate, so nothing after it runs either way.
  */
 
+import { join } from 'node:path';
+
 import { discoverServerActions, scanServerActions } from './test/server-action-discovery';
 
 let forwarded = new Headers();
@@ -35,15 +37,19 @@ const { REFRESH_UNAVAILABLE, SESSION_STATE_HEADER } =
 type Action = (...args: never[]) => Promise<unknown>;
 
 /**
- * Every `'use server'` module under `src`, found by parsing the sources
+ * Every `'use server'` module Next can compile for the web app (all of `apps/web` and the
+ * `src` of the workspace packages it depends on), found by parsing the sources
  * (`test/server-action-discovery.ts`): a new action module is covered without
  * being listed anywhere, and an inline directive cannot hide from the cases.
  */
-const DISCOVERED = discoverServerActions(__dirname);
+const REPO_ROOT = join(__dirname, '../../..');
+const DISCOVERED = discoverServerActions(REPO_ROOT, join(__dirname, '..'));
 const MODULES = DISCOVERED.modules;
 
+// Keyed and loaded by the exact file name, extension included: `actions.ts` and
+// `actions.tsx` are two modules here as they are to Next (which prefers `.tsx`).
 const ACTIONS: Record<string, Record<string, unknown>> = Object.fromEntries(
-  MODULES.map((path) => [path, require(`./${path}`) as Record<string, unknown>]),
+  MODULES.map((path) => [path, require(join(REPO_ROOT, path)) as Record<string, unknown>]),
 );
 /* eslint-enable @typescript-eslint/no-require-imports */
 
@@ -79,6 +85,19 @@ it('finds the server-action modules', () => {
   expect(MODULES.length).toBeGreaterThan(0);
 });
 
+it('has no server action in a test file: a production import could still reach it', () => {
+  expect(
+    DISCOVERED.inTestFiles.map((at) => `${at}: server actions are not allowed in test files`),
+  ).toEqual([]);
+});
+
+it('has no basename with several compilable extensions in one directory', () => {
+  // Jest and Next resolve `./actions` differently when both `actions.ts` and `actions.tsx` exist.
+  expect(
+    DISCOVERED.ambiguous.map((files) => `${files}: same basename, ambiguous resolution`),
+  ).toEqual([]);
+});
+
 it('has no inline server action: a function-scoped directive is outside the cases', () => {
   // Message: move it to a 'use server' module.
   expect(DISCOVERED.inline).toEqual([]);
@@ -93,14 +112,17 @@ describe('discovery (negative control)', () => {
     ['no semicolon', `'use server'\n${body}`],
     ['a block comment and tsx', `/* x */\n"use server"\n${body}`],
   ])('finds a module with %s', (_, source) => {
-    expect(scanServerActions(source, 'x.tsx')).toEqual({ fileLevel: true, inline: [] });
+    expect(scanServerActions(source, 'x.tsx')).toEqual({
+      fileLevel: expect.any(Number),
+      inline: [],
+    });
   });
   it('finds an inline directive, with its line', () => {
     const source = `export async function a() {\n  "use server";\n  return 1;\n}\n`;
-    expect(scanServerActions(source, 'x.ts')).toEqual({ fileLevel: false, inline: [2] });
+    expect(scanServerActions(source, 'x.ts')).toEqual({ fileLevel: null, inline: [2] });
   });
   it('does not take a string in the middle of a file for a directive', () => {
-    expect(scanServerActions(`const a = 1;\n'use server';\n`, 'x.ts').fileLevel).toBe(false);
+    expect(scanServerActions(`const a = 1;\n'use server';\n`, 'x.ts').fileLevel).toBeNull();
   });
 });
 
