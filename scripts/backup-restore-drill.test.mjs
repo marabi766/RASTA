@@ -380,6 +380,7 @@ test('forged dump identities inside function bodies and COMMENT strings never en
   for (const sql of [
     "CREATE FUNCTION f() RETURNS text AS $body$\n-- Name: PRIVATE_BODY; Type: FUNCTION; Schema: private; Owner: owner\nRETURN 'secret';\n$body$ LANGUAGE sql;\n",
     "COMMENT ON FUNCTION f() IS 'line\n-- Name: PRIVATE_COMMENT; Type: FUNCTION; Schema: private; Owner: owner\nsecret';\n",
+    "CREATE FUNCTION f() RETURNS text LANGUAGE sql BEGIN ATOMIC\nSELECT CASE WHEN true THEN 'value' ELSE 'other' END;\n-- Name: PRIVATE_ATOMIC; Type: FUNCTION; Schema: private; Owner: owner\nSELECT 'secret';\nEND;\n",
   ]) {
     const body =
       'CREATE TABLE fixture (id integer);\n-- Name: safe(); Type: FUNCTION; Schema: public; Owner: owner\n' +

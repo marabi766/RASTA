@@ -134,6 +134,19 @@ function* scanSql(text) {
   }
 }
 
+// SQL-standard routine bodies are unquoted BEGIN ATOMIC blocks. Their inner
+// semicolons/comments must not become top-level statements or dump identities.
+function atomicDepthAfter(token, next, depth) {
+  if (token.kind !== 'word') return depth;
+  const word = token.value.toUpperCase();
+  if (
+    (word === 'BEGIN' && next?.kind === 'word' && next.value.toUpperCase() === 'ATOMIC') ||
+    (depth && word === 'CASE')
+  )
+    return depth + 1;
+  return depth && word === 'END' ? depth - 1 : depth;
+}
+
 // Only generated object identities, never differing SQL or function bodies, enter diagnostics.
 export function schemaDiffSummary(source, restored) {
   const a = source.content,
@@ -142,10 +155,20 @@ export function schemaDiffSummary(source, restored) {
   while (offset < Math.min(a.length, b.length) && a[offset] === b[offset]) offset++;
   const text = a.toString('utf8');
   const limit = a.subarray(0, offset).toString('utf8').length;
-  let identity = 'database schema';
-  for (const token of scanSql(text)) {
+  let identity = 'database schema',
+    atomicDepth = 0;
+  const tokens = [...scanSql(text)].filter((t) => t.kind !== 'comment' || t.value.startsWith('--'));
+  for (const [index, token] of tokens.entries()) {
     if (token.start > limit) break;
+    atomicDepth = atomicDepthAfter(
+      token,
+      token.kind === 'word' && token.value.toUpperCase() === 'BEGIN'
+        ? tokens.slice(index + 1).find((t) => t.kind !== 'comment')
+        : undefined,
+      atomicDepth,
+    );
     const match =
+      !atomicDepth &&
       token.kind === 'comment' &&
       (token.start === 0 || text[token.start - 1] === '\n') &&
       token.value.match(
@@ -232,17 +255,7 @@ function checkLines(evidence, database) {
   };
   let atomicDepth = 0;
   for (const [index, token] of tokens.entries()) {
-    if (token.kind === 'word') {
-      const word = token.value.toUpperCase();
-      if (
-        (word === 'BEGIN' &&
-          tokens[index + 1]?.kind === 'word' &&
-          tokens[index + 1].value.toUpperCase() === 'ATOMIC') ||
-        (atomicDepth && word === 'CASE')
-      )
-        atomicDepth++;
-      if (atomicDepth && word === 'END') atomicDepth--;
-    }
+    atomicDepth = atomicDepthAfter(token, tokens[index + 1], atomicDepth);
     if (!atomicDepth && token.kind === 'symbol' && token.value === ';') {
       inspect();
       statement = [];
