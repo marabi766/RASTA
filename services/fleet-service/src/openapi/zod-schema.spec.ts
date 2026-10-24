@@ -1,3 +1,4 @@
+import { DISPLAY_TEXT_PATTERN } from '@rasta/contracts';
 import { z } from 'zod';
 import { toJsonSchema } from '@rasta/nest-common';
 import {
@@ -143,5 +144,18 @@ describe('zod to JSON Schema', () => {
         expect(Object.keys(s.properties as object).length).toBeGreaterThan(0);
       }
     });
+  });
+});
+
+describe('the published display-text pattern', () => {
+  it('is the shared rule in full: the Bidi_Control lookahead and the Persian punctuation', () => {
+    const properties = toJsonSchema(createDriverSchema).properties as Record<
+      string,
+      { pattern?: string }
+    >;
+    expect(properties.notes?.pattern).toBe(DISPLAY_TEXT_PATTERN.source);
+    expect(properties.notes?.pattern).toContain('\\p{Bidi_Control}');
+    expect(properties.notes?.pattern).toContain('\\u060c');
+    expect(new RegExp(properties.notes!.pattern!, 'u').test('شیفت شب، پایه دو؛')).toBe(true);
   });
 });

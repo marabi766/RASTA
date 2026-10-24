@@ -84,7 +84,11 @@ export type TransactionPage = z.infer<typeof transactionPageSchema>;
 const providerSchema = z.object({
   provider: z.string(),
   simulated: z.boolean(),
-  notice: z.string(),
+  // The service also sends an English `notice`. It is deliberately not kept:
+  // what the person reads is `providerNotice(simulated)` (lib/wallet-fields.ts),
+  // worded here from the boolean, so a reworded or missing sentence cannot put
+  // English on the page. `simulated` stays required — a read without it is
+  // MALFORMED and the top-up is withheld (fail closed).
 });
 
 export type PaymentProviderDisclosure = z.infer<typeof providerSchema>;

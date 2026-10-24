@@ -2,6 +2,7 @@
  * @jest-environment node
  */
 import {
+  ASSET_DISPLAY_TEXT,
   ASSET_EDIT_CONFLICT_MESSAGE,
   canManageAssets,
   changedUpdateFields,
@@ -17,6 +18,7 @@ import {
   UPDATE_ASSET_FIELD_MAPPING,
 } from './asset-commands';
 import { EMPTY_REGISTER_ASSET_FORM, EMPTY_UPDATE_ASSET_FORM } from '@/lib/asset-form-fields';
+import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
 
 /**
@@ -566,7 +568,7 @@ describe('writing', () => {
       kind: 'INVALID',
       fieldErrors: {
         name: expect.stringContaining('نویسهٔ غیرمجاز'),
-        siteName: 'String must contain at most 200 character(s)',
+        siteName: 'این متن حداکثر ۲۰۰ نویسه باشد',
       },
     });
   });
@@ -582,12 +584,12 @@ describe('writing', () => {
     });
   });
 
-  it('shows a sentence it does not know as it arrived, never hidden', async () => {
+  it('shows the generic Persian sentence for one it does not know, never the English', async () => {
     const { impl } = recording(422, { code: 'BUSINESS_RULE_VIOLATION', message: 'A new rule' });
 
     const result = await updateAsset(SESSION, 'AST_1', UPDATE, 4, 'sub_abc', impl);
 
-    expect(result).toMatchObject({ kind: 'INVALID', message: 'A new rule' });
+    expect(result).toMatchObject({ kind: 'INVALID', message: GENERIC_REFUSAL_MESSAGE });
   });
 
   it('says the version conflict in Persian: the machine changed after the form was drawn', async () => {
@@ -637,5 +639,40 @@ describe('writing', () => {
     expect(await registerAsset(SESSION, REGISTER, 'sub_abc', impl)).toMatchObject({
       kind: 'UNKNOWN_OUTCOME',
     });
+  });
+});
+
+describe('Persian punctuation «،» «؛» «؟» in free text', () => {
+  const TEXT = 'گریدر راهسازی، شماره دو؛ آماده؟';
+
+  it('is accepted in every display-text field when registering a machine', () => {
+    const parsed = parseRegisterAssetForm({
+      ...EMPTY_REGISTER_ASSET_FORM,
+      name: TEXT,
+      type: 'GRADER',
+      manufacturer: 'کوماتسو، ژاپن',
+      siteName: 'انبار مرکزی؛ دهیاری',
+    });
+    expect(parsed).toMatchObject({
+      ok: true,
+      request: {
+        name: TEXT,
+        manufacturer: 'کوماتسو، ژاپن',
+        location: { siteName: 'انبار مرکزی؛ دهیاری' },
+      },
+    });
+  });
+
+  it('is accepted when editing a machine', () => {
+    const parsed = parseUpdateAssetForm(
+      { ...EMPTY_UPDATE_ASSET_FORM, name: TEXT, manufacturer: 'کوماتسو، ژاپن' },
+      ['name', 'manufacturer'],
+    );
+    expect(parsed).toMatchObject({ ok: true });
+  });
+
+  it('is the same rule the services use: the shared pattern', () => {
+    expect(ASSET_DISPLAY_TEXT.test(TEXT)).toBe(true);
+    expect(ASSET_DISPLAY_TEXT.test(`${TEXT}‮`)).toBe(false);
   });
 });
