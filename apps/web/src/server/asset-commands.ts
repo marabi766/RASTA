@@ -1,6 +1,7 @@
 import { DISPLAY_TEXT_PATTERN } from '@rasta/contracts';
 import { z } from 'zod';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { ASSET_TYPES } from '@/lib/asset-fields';
 import {
   REGISTER_ASSET_FIELDS,
@@ -180,19 +181,7 @@ const responseSchema = z.object({ id: z.string().min(1) });
 
 export type WrittenAsset = z.infer<typeof responseSchema>;
 
-export function firstIssuePerField<F extends string>(
-  error: z.ZodError,
-  isField: (value: string) => value is F,
-): Partial<Record<F, string>> {
-  const fieldErrors: Partial<Record<F, string>> = {};
-  for (const issue of error.issues) {
-    const field = issue.path[0];
-    if (typeof field === 'string' && isField(field) && fieldErrors[field] === undefined) {
-      fieldErrors[field] = issue.message;
-    }
-  }
-  return fieldErrors;
-}
+export { firstIssuePerField };
 
 export function readFields<F extends string>(
   form: FormData,

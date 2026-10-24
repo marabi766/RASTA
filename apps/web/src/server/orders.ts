@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText, toLatinDigits, toPersianDigits } from '@/lib/format';
 import {
   DISPUTE_OUTCOMES,
@@ -347,15 +348,9 @@ export function parseOrderCommand(values: OrderCommandFormValues): ParsedOrderCo
     return { ok: true, request: { command, body } };
   }
 
-  const fieldErrors: Partial<Record<OrderCommandField, string>> = {};
-  if (!parsed.success) {
-    for (const issue of parsed.error.issues) {
-      const field = issue.path[0];
-      if (typeof field === 'string' && field !== 'command') {
-        fieldErrors[field as OrderCommandField] ??= issue.message;
-      }
-    }
-  }
+  const fieldErrors: Partial<Record<OrderCommandField, string>> = parsed.success
+    ? {}
+    : firstIssuePerField(parsed.error, (field): field is OrderCommandField => field !== 'command');
   if (!acknowledged) {
     fieldErrors.acknowledge = 'برای ادامه تأیید کنید که این اقدام بازگشت‌پذیر نیست';
   }

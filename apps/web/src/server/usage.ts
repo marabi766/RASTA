@@ -2,6 +2,7 @@ import { TZDate } from '@date-fns/tz';
 import { ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import {
   DISPLAY_TIME_ZONE,
   normalizePersianText,
@@ -190,14 +191,7 @@ export function parseUsageForm(values: UsageFormValues, submissionId: string): P
     };
   }
 
-  const fieldErrors: Partial<Record<UsageField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (typeof field === 'string' && isUsageField(field) && fieldErrors[field] === undefined) {
-      fieldErrors[field] = issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isUsageField) };
 }
 
 function isUsageField(value: string): value is UsageField {

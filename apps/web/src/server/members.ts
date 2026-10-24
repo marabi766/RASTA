@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText } from '@/lib/format';
 import type {
   RevokeMembershipField,
@@ -163,14 +164,10 @@ export function parseUpdateMemberRolesForm(
   const parsed = updateMemberRolesFormSchema.safeParse(values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<UpdateMemberRolesField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (field === 'membershipId' || field === 'roles' || field === 'reason') {
-      fieldErrors[field] ??= issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.error, ['membershipId', 'roles', 'reason'] as const),
+  };
 }
 
 export const UPDATE_MEMBER_ROLES_FIELD_MAPPING: FieldMapping<UpdateMemberRolesField> = {
@@ -233,12 +230,10 @@ export function parseRevokeMembershipForm(
   const parsed = revokeMembershipFormSchema.safeParse(values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<RevokeMembershipField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (field === 'membershipId' || field === 'reason') fieldErrors[field] ??= issue.message;
-  }
-  return { ok: false, fieldErrors };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.error, ['membershipId', 'reason'] as const),
+  };
 }
 
 export const REVOKE_MEMBERSHIP_FIELD_MAPPING: FieldMapping<RevokeMembershipField> = {

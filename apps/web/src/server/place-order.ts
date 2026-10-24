@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { BIDI_CONTROL, toLatinDigits, toPersianDigits } from '@/lib/format';
 import {
   EMPTY_PLACE_ORDER_FORM,
@@ -76,12 +77,14 @@ const quantitySchema = z
   .pipe(
     z
       .number()
-      .int()
       .min(1, 'تعداد باید دست‌کم ۱ باشد')
+      // Before `.int()`: 400 digits parse to Infinity, which is both too big and
+      // not an integer, and the person should read the first (the limit).
       .max(
         LIMITS.quantity.max,
         `تعداد نباید بیش از ${toPersianDigits(String(LIMITS.quantity.max))} باشد`,
-      ),
+      )
+      .int('تعداد را به‌صورت عدد صحیح وارد کنید'),
   );
 
 const placeOrderSchema = z.object({
@@ -109,14 +112,7 @@ export type ParsedPlaceOrderForm =
 export function parsePlaceOrderForm(values: PlaceOrderFormValues): ParsedPlaceOrderForm {
   const parsed = placeOrderSchema.safeParse(values);
   if (!parsed.success) {
-    const fieldErrors: Partial<Record<PlaceOrderField, string>> = {};
-    for (const issue of parsed.error.issues) {
-      const field = issue.path[0];
-      if (typeof field === 'string') {
-        fieldErrors[field as PlaceOrderField] ??= issue.message;
-      }
-    }
-    return { ok: false, fieldErrors };
+    return { ok: false, fieldErrors: firstIssuePerField(parsed.error, PLACE_ORDER_FIELDS) };
   }
 
   const { offerId, quantity } = parsed.data;
