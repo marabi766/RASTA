@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -33,6 +41,7 @@ import {
 } from './verify-migration-reversible-lib.mjs';
 import {
   AGGREGATE_JOB,
+  BY_NAME_COMMANDS,
   CHAIN_JOB,
   GUARDS_JOB,
   chainShards,
@@ -788,10 +797,36 @@ test('the migration gate refuses a shard list, job or aggregate that would verif
   refuses((_, jobs) => {
     delete step(jobs[CHAIN_JOB], 'Migration reversibility, whole chain').env.MIGRATION_SERVICES;
   }, /must set MIGRATION_SERVICES/);
+  // A shell that does not stop at a failed command (round 2 on #376): on the
+  // step, as the job's default, or as the workflow's.
+  const noErrexit = 'bash {0}';
+  refuses((_, jobs) => {
+    step(jobs[CHAIN_JOB], 'Migration reversibility, whole chain').shell = noErrexit;
+  }, /whole chain" runs under "bash \{0\}" \(its shell\)/);
+  refuses((_, jobs) => {
+    step(jobs[GUARDS_JOB], 'Migration reversibility, by-name verifiers').shell = noErrexit;
+  }, /by-name verifiers" runs under "bash \{0\}" \(its shell\)/);
+  refuses((_, jobs) => {
+    jobs[CHAIN_JOB].defaults = { run: { shell: noErrexit } };
+  }, /whole chain" runs under "bash \{0\}" \(the job's defaults\.run\.shell\)/);
+  refuses((_, jobs) => {
+    jobs[GUARDS_JOB].defaults = { run: { shell: 'sh {0}' } };
+  }, /by-name verifiers" runs under "sh \{0\}" \(the job's defaults\.run\.shell\)/);
+  refuses((gate) => {
+    gate.workflow.defaults = { run: { shell: noErrexit } };
+  }, /whole chain" runs under "bash \{0\}" \(the workflow's defaults\.run\.shell\)/);
+  refuses((gate) => {
+    gate.workflow.defaults = { run: { shell: noErrexit } };
+  }, /by-name verifiers" runs under "bash \{0\}" \(the workflow's/);
+  // A step's own errexit shell is not overridden by an unsafe default above it.
+  refuses((gate, jobs) => {
+    jobs[CHAIN_JOB].defaults = { run: { shell: noErrexit } };
+    step(jobs[CHAIN_JOB], 'Migration reversibility, whole chain').shell = 'bash -e {0}';
+  }, /"Apply migrations" runs under "bash \{0\}"/);
   // A by-name verifier or a database guard dropped, or run before what it reads.
   refuses((_, jobs) => {
     const verifiers = step(jobs[GUARDS_JOB], 'Migration reversibility, by-name verifiers');
-    verifiers.run = verifiers.run.replace(/.*--in-place\n/, '');
+    verifiers.run = verifiers.run.replace(/.*--in-place.*\n/, '');
   }, /by-name verifiers" must run exactly/);
   refuses((_, jobs) => {
     const steps = jobs[GUARDS_JOB].steps;
@@ -840,6 +875,86 @@ test('the migration gate refuses a shard list, job or aggregate that would verif
       '',
     );
   }, /test:migration must end with/);
+});
+
+test('the gate accepts every shell that stops at a failed command, wherever it is set', () => {
+  for (const shell of ['bash', 'bash -e {0}', 'bash --noprofile --norc -eo pipefail {0}']) {
+    const gate = structuredClone(migrationGate());
+    gate.workflow.defaults = { run: { shell } };
+    gate.workflow.jobs[GUARDS_JOB].defaults = { run: { shell } };
+    for (const candidate of gate.workflow.jobs[CHAIN_JOB].steps) {
+      if ('run' in candidate) candidate.shell = shell;
+    }
+    assert.deepEqual(gateProblems(gate), [], shell);
+  }
+});
+
+// The guard pins the commands and refuses a shell without errexit; this runs
+// the pinned scripts themselves, as CI's run steps hold them, under such a
+// shell anyway, with a verifier failing in the middle: each must still fail,
+// and run nothing after it.
+function runWithFailingVerifier(run, failing, env = {}) {
+  const directory = mkdtempSync(join(tmpdir(), 'migration-loop-'));
+  try {
+    const bin = join(directory, 'bin');
+    mkdirSync(bin);
+    const log = join(directory, 'ran');
+    writeFileSync(log, '');
+    // `node` that records its arguments and fails for the one named.
+    writeFileSync(
+      join(bin, 'node'),
+      '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$RAN_LOG"\n' +
+        'case "$*" in *"$FAILING"*) exit 3 ;; esac\nexit 0\n',
+    );
+    chmodSync(join(bin, 'node'), 0o755);
+    const script = join(directory, 'step.sh');
+    writeFileSync(script, run);
+    // `bash {0}`: what GitHub runs for that shell, no -e, no pipefail.
+    const outcome = spawnSync('bash', [script], {
+      env: { PATH: `${bin}:/usr/bin:/bin`, RAN_LOG: log, FAILING: failing, ...env },
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    assert.ifError(outcome.error);
+    return { status: outcome.status, ran: readFileSync(log, 'utf8').split('\n').filter(Boolean) };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test('a failed verifier mid-run fails the step even under a shell without errexit', () => {
+  const { workflow } = migrationGate();
+  const runOf = (job, name) => workflow.jobs[job].steps.find((step) => step.name === name).run;
+  const chain = runOf(CHAIN_JOB, 'Migration reversibility, whole chain');
+  const byName = runOf(GUARDS_JOB, 'Migration reversibility, by-name verifiers');
+  const services = { MIGRATION_SERVICES: 'document economic notification procurement' };
+
+  const passing = runWithFailingVerifier(chain, 'nothing-fails', services);
+  assert.equal(passing.status, 0);
+  assert.equal(passing.ran.length, 4);
+
+  const chainFailed = runWithFailingVerifier(chain, 'economic', services);
+  assert.notEqual(chainFailed.status, 0, 'economic failed, the shard passed');
+  assert.deepEqual(chainFailed.ran, [
+    'scripts/verify-migration-reversible.mjs document',
+    'scripts/verify-migration-reversible.mjs economic',
+  ]);
+  assert.notEqual(
+    runWithFailingVerifier(chain, 'nothing-fails', { MIGRATION_SERVICES: '' }).status,
+    0,
+  );
+
+  const byNameFailed = runWithFailingVerifier(byName, 'verify-security-event-outbox-migration');
+  assert.notEqual(byNameFailed.status, 0, 'the security-event verifier failed, the step passed');
+  assert.deepEqual(
+    byNameFailed.ran,
+    BY_NAME_COMMANDS.slice(0, 2).map((c) => c.slice('node '.length)),
+  );
+  assert.equal(runWithFailingVerifier(byName, 'nothing-fails').status, 0);
+
+  // The harness tells: round 1's loop, without `|| exit 1`, passes here.
+  const round1 = chain.replaceAll(' || exit 1', '');
+  assert.equal(runWithFailingVerifier(round1, 'economic', services).status, 0);
 });
 
 // ---------------------------------------------------------------------------

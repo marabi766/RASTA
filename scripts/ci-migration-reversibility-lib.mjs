@@ -25,6 +25,13 @@
  *     in-place verifier before the seed guard, the runtime-privileges check
  *     last in each job, after its reversals;
  *   - `if:` or `continue-on-error` on either job or any of their steps;
+ *   - a step of either job whose effective shell — its own `shell`, else the
+ *     job's `defaults.run.shell`, else the workflow's, else the runner's
+ *     `bash -e {0}` — does not stop at a failed command: under `bash {0}` the
+ *     loop's exit status is its last service's, so one failed verifier
+ *     followed by passing ones would leave the shard green (round 2 on #376).
+ *     The loop and the by-name commands also exit on a failure themselves
+ *     (`|| exit 1`), so even a shell that slipped past this cannot hide one;
  *   - an aggregate that does not need exactly both jobs, that does not run
  *     always() (a job skipped because its dependency failed reports
  *     "skipped", which a required check counts as passing), or whose verdict
@@ -54,11 +61,14 @@ const B2_STEP = "Outbox B2 vacuum is the owner's, and verified (D-045)";
 const SEED_STEP = 'Demo seeds refuse outside development and test';
 const PRIVILEGES_STEP = 'Runtime roles own nothing (D-045), after the reversals';
 
-/** The whole-chain loop, line by line. */
+/**
+ * The whole-chain loop, line by line. Each command exits on its own failure,
+ * whatever the shell's options.
+ */
 export const CHAIN_RUN = [
-  'test -n "${MIGRATION_SERVICES}"',
+  'test -n "${MIGRATION_SERVICES}" || exit 1',
   'for service in ${MIGRATION_SERVICES}; do',
-  'node scripts/verify-migration-reversible.mjs "${service}"',
+  'node scripts/verify-migration-reversible.mjs "${service}" || exit 1',
   'done',
 ];
 const CHAIN_ENV = { MIGRATION_SERVICES: '${{ matrix.services }}' };
@@ -69,6 +79,8 @@ export const BY_NAME_COMMANDS = [
   'node scripts/verify-security-event-outbox-migration.mjs',
   'node scripts/verify-audit-correction-command-migration.mjs',
 ];
+/** The by-name verifiers as their CI step runs them: each exits on its own failure. */
+export const BY_NAME_RUN = BY_NAME_COMMANDS.map((command) => `${command} || exit 1`);
 
 /**
  * Each job's steps, in the order they must run, with the exact command of the
@@ -84,7 +96,7 @@ const JOB_STEPS = {
   [GUARDS_JOB]: [
     { name: PROVISION_STEP },
     { name: MIGRATE_STEP, run: ['pnpm run db:migrate'] },
-    { name: BY_NAME_STEP, run: BY_NAME_COMMANDS },
+    { name: BY_NAME_STEP, run: BY_NAME_RUN },
     {
       name: LIB_STEP,
       run: ['pnpm run test:migration-lib'],
@@ -97,6 +109,14 @@ const JOB_STEPS = {
 };
 
 const BASH_OPTIONS = ['--noprofile', '--norc', '-eo', 'pipefail'];
+
+/**
+ * The shells a step of either job may run under, all of them stopping at a
+ * failed command: none set (the runner's `bash -e {0}`), that explicitly, and
+ * `bash` — GitHub's name for `bash --noprofile --norc -eo pipefail {0}` — or
+ * that spelled out.
+ */
+export const ERREXIT_SHELLS = ['bash -e {0}', 'bash', 'bash --noprofile --norc -eo pipefail {0}'];
 const NEEDS_EXPRESSION = '${{ toJSON(needs) }}';
 
 const isMapping = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -142,7 +162,10 @@ export function checkMigrationReversibility(workflow, { services, testMigration 
   if (problems.length > 0) return problems;
 
   problems.push(...matrixProblems(jobs[CHAIN_JOB], services));
-  for (const id of [CHAIN_JOB, GUARDS_JOB]) problems.push(...jobProblems(id, jobs[id]));
+  const workflowShell = workflow?.defaults?.run?.shell;
+  for (const id of [CHAIN_JOB, GUARDS_JOB]) {
+    problems.push(...jobProblems(id, jobs[id]), ...shellProblems(id, jobs[id], workflowShell));
+  }
   problems.push(...aggregateProblems(jobs[AGGREGATE_JOB]));
   problems.push(...testMigrationProblems(testMigration, services));
   return problems;
@@ -226,6 +249,35 @@ function jobProblems(id, job) {
       if (squash(env[key] ?? '') !== squash(value)) {
         problems.push(`${label}'s "${expected.name}" must set ${key}: ${value}`);
       }
+    }
+  }
+  return problems;
+}
+
+/**
+ * Every run step's effective shell: the step's `shell`, else the job's
+ * `defaults.run.shell`, else the workflow's; none at all is the runner's
+ * `bash -e {0}`.
+ */
+function shellProblems(id, job, workflowShell) {
+  const label = `"${id}"`;
+  const jobShell = isMapping(job.defaults?.run) ? job.defaults.run.shell : undefined;
+  const steps = Array.isArray(job.steps) ? job.steps.filter(isMapping) : [];
+  const problems = [];
+  for (const step of steps.filter((candidate) => 'run' in candidate)) {
+    const [shell, from] =
+      step.shell !== undefined
+        ? [step.shell, 'its shell']
+        : jobShell !== undefined
+          ? [jobShell, "the job's defaults.run.shell"]
+          : workflowShell !== undefined
+            ? [workflowShell, "the workflow's defaults.run.shell"]
+            : [undefined, ''];
+    if (shell !== undefined && !ERREXIT_SHELLS.includes(squash(shell))) {
+      problems.push(
+        `${label}: "${step.name ?? step.run}" runs under ${JSON.stringify(shell)} (${from}),` +
+          ` which does not stop at a failed command; allowed: none, ${ERREXIT_SHELLS.join(', ')}`,
+      );
     }
   }
   return problems;

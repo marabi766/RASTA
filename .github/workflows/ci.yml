@@ -2901,12 +2901,17 @@ jobs:
         # template1 rather than a schema, because their migrations use ltree
         # and geography unqualified; the service roles hold CREATEDB for this.
         #
+        # Each command exits on its own failure (`|| exit 1`), not only through
+        # the runner's `bash -e`: under a shell without errexit the loop would
+        # end with its last service's status, and a failed one before it would
+        # pass. The guard also refuses such a shell on any step here.
+        #
         # About twice the heaviest shard's 369 s.
         timeout-minutes: 13
         run: |
-          test -n "${MIGRATION_SERVICES}"
+          test -n "${MIGRATION_SERVICES}" || exit 1
           for service in ${MIGRATION_SERVICES}; do
-            node scripts/verify-migration-reversible.mjs "${service}"
+            node scripts/verify-migration-reversible.mjs "${service}" || exit 1
           done
         env:
           MIGRATION_SERVICES: ${{ matrix.services }}
@@ -3072,14 +3077,14 @@ jobs:
         # migrated above), and identity's security-event and audit-correction
         # tables, which check behaviour the catalogue comparison does not
         # (constraints refusing rows, triggers firing). Same order as in
-        # `test:migration`.
+        # `test:migration`. Each exits on its own failure, as the chain's loop.
         #
         # About twice their 320 s.
         timeout-minutes: 11
         run: |
-          node scripts/verify-outbox-claim-migration.mjs --in-place
-          node scripts/verify-security-event-outbox-migration.mjs
-          node scripts/verify-audit-correction-command-migration.mjs
+          node scripts/verify-outbox-claim-migration.mjs --in-place || exit 1
+          node scripts/verify-security-event-outbox-migration.mjs || exit 1
+          node scripts/verify-audit-correction-command-migration.mjs || exit 1
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
