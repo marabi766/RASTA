@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { codePointLength, toJsonSchema, type JsonSchema } from './zod-schema';
+import { codePointLength, toJsonSchema, type JsonSchema } from '@rasta/nest-common';
 import {
   aggregationViewSchema,
   cancelAggregationSchema,

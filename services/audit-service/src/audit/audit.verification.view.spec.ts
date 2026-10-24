@@ -9,7 +9,7 @@ import {
   type AuditChainVerification,
 } from './audit.verification.view';
 import { CANONICAL_VERSION } from './audit.canonical';
-import { toJsonSchema } from '../openapi/zod-schema';
+import { toJsonSchema } from '@rasta/nest-common';
 
 /**
  * The response contract, asserted as a set of refusals.

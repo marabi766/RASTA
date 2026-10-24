@@ -1,6 +1,6 @@
 import { WITHOUT_CONTROL_CHARACTER } from '@rasta/contracts';
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
+import { toJsonSchema } from '@rasta/nest-common';
 import {
   approveRequestSchema,
   completeRepairSchema,

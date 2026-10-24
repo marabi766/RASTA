@@ -3,7 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
+import { toJsonSchema } from '@rasta/nest-common';
 import { DashboardController } from '../maintenance/dashboard.controller';
 import { DashboardService } from '../maintenance/dashboard.service';
 import { fleetDashboardQuerySchema, fleetDashboardViewSchema } from '../maintenance/dto';
@@ -22,7 +22,7 @@ import { fleetDashboardQuerySchema, fleetDashboardViewSchema } from '../maintena
  *     application.
  *
  * Payload shapes come from the Zod schemas the pipes validate with (`src/maintenance/dto.ts`),
- * converted by `zod-schema.ts`; Nest supplies paths, methods and parameters from the decorators.
+ * converted by `toJsonSchema`; Nest supplies paths, methods and parameters from the decorators.
  *
  * Regenerate after changing the API: `pnpm --filter @rasta/analytics-service openapi:generate`.
  */

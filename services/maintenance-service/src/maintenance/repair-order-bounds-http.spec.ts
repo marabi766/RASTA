@@ -1,12 +1,11 @@
 import { VersioningType, type INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
-import { AllExceptionsFilter } from '@rasta/nest-common';
+import { AllExceptionsFilter, toJsonSchema } from '@rasta/nest-common';
 import { MAX_AMOUNT_MINOR } from './dto';
 import { RepairOrderController } from './repair-order.controller';
 import { RepairOrderService } from './repair-order.service';
 import { IdempotencyStore } from './idempotency';
-import { toJsonSchema } from '../openapi/zod-schema';
 import { recordCostSchema, recordLabourSchema, recordPartSchema } from './dto';
 
 /**
