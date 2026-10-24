@@ -1,5 +1,15 @@
--- Destructive rollback: reference measurements cannot be reconstructed from Kafka.
--- Run only as the migrator; removes this migration's objects, preserving PR 1's facts.
+-- Refuse to erase reference evidence (ADR-071 § 7). Lock before checking so
+-- an insert cannot race the check. The file runner applies this atomically.
+SET LOCAL lock_timeout = '5s';
+LOCK TABLE "baseline_metric" IN ACCESS EXCLUSIVE MODE;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM "baseline_metric") THEN
+    RAISE EXCEPTION 'baseline_metric contains reference evidence; rollback refused';
+  END IF;
+END;
+$$;
+
 DROP TRIGGER IF EXISTS "tg_baseline_metric_recorded_at" ON "baseline_metric";
 DROP TRIGGER IF EXISTS "tg_baseline_metric_no_truncate" ON "baseline_metric";
 DROP TRIGGER IF EXISTS "tg_baseline_metric_append_only" ON "baseline_metric";

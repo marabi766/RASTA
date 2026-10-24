@@ -282,7 +282,8 @@
                             "required": ["key", "unit", "dependsOnBaseline", "status", "value"],
                             "additionalProperties": false
                           }
-                        ]
+                        ],
+                        "description": "MAINTENANCE_COMPLETED_COUNT: AVAILABLE \"0\" can mean no facts held for the window (earliestCompletionAt is null or after from, or the consumer is disabled). Absence of held facts does not establish that no maintenance occurred."
                       }
                     }
                   },

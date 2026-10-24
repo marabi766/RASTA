@@ -15,8 +15,18 @@ export type KpiValue = z.infer<typeof kpiValueSchema>;
 
 const kpiMetadata = z
   .object({
-    key: z.enum([KPI_DEFINITIONS[0].key, KPI_DEFINITIONS[1].key]),
-    unit: z.enum(['COUNT', 'MINUTES']),
+    key: z.enum(
+      KPI_DEFINITIONS.map((definition) => definition.key) as [
+        (typeof KPI_DEFINITIONS)[number]['key'],
+        ...(typeof KPI_DEFINITIONS)[number]['key'][],
+      ],
+    ),
+    unit: z.enum(
+      KPI_DEFINITIONS.map((definition) => definition.unit) as [
+        (typeof KPI_DEFINITIONS)[number]['unit'],
+        ...(typeof KPI_DEFINITIONS)[number]['unit'][],
+      ],
+    ),
     dependsOnBaseline: z.boolean(),
   })
   .strict();
@@ -46,7 +56,13 @@ export const kpisViewSchema = z
         'Earliest completion held here in any window; null means no facts received. ' +
           'A zero count describes only the events this service received, not historical coverage.',
       ),
-    kpis: z.array(kpiSchema),
+    kpis: z.array(
+      kpiSchema.describe(
+        'MAINTENANCE_COMPLETED_COUNT: AVAILABLE "0" can mean no facts held for the window ' +
+          '(earliestCompletionAt is null or after from, or the consumer is disabled). ' +
+          'Absence of held facts does not establish that no maintenance occurred.',
+      ),
+    ),
   })
   .strict();
 export type KpisView = z.infer<typeof kpisViewSchema>;

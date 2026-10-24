@@ -18,7 +18,10 @@ export class KpiRepository {
 
   async read(from: Date, to: Date): Promise<KpiRead> {
     const organizationId = getOrganizationId();
-    const baseline = KPI_DEFINITIONS[1];
+    const baseline = KPI_DEFINITIONS.find(
+      (definition) => definition.key === 'MAINTENANCE_DOWNTIME_BASELINE_MINUTES',
+    );
+    if (!baseline) throw new Error('Required baseline definition is missing');
     // Raw SQL is outside the tenant extension: EVERY table read has its own tenant predicate
     // from the active context, never a caller argument. One statement gives one snapshot.
     // No sums through Prisma's bigint decoder; count and baseline are exact decimal strings.
@@ -37,8 +40,8 @@ export class KpiRepository {
             AND period_start = ${from}::timestamptz
             AND period_end = ${to}::timestamptz
             AND unit = ${baseline.unit}
-            AND currency IS NULL
-          ORDER BY recorded_at DESC, id DESC
+            AND COALESCE(currency, '') = ''
+          ORDER BY version DESC
           LIMIT 1) AS baseline_minutes`;
     return readSchema.parse(row);
   }

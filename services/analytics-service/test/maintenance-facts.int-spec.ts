@@ -336,8 +336,8 @@ describe('a fact is never changed or erased', () => {
   it.each([
     ['UPDATE', `UPDATE "fact_maintenance" SET "total_cost_minor" = 0 WHERE "organization_id" = $1`],
     ['DELETE', `DELETE FROM "fact_maintenance" WHERE "organization_id" = $1`],
-  ])('refuses %s, even by the service’s own role', async (operation, sql) => {
-    await expect(runtime.$executeRawUnsafe(sql, tenant)).rejects.toThrow(
+  ])('refuses %s, even by the owner', async (operation, sql) => {
+    await expect(owner.$executeRawUnsafe(sql, tenant)).rejects.toThrow(
       new RegExp(`ck_fact_maintenance_append_only.*${operation} refused`),
     );
     expect(await factsOf(tenant)).toHaveLength(1);

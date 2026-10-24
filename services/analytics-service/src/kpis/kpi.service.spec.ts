@@ -35,7 +35,9 @@ describe('KpiService', () => {
     baseline_minutes: null,
   });
   const repository = { read } as unknown as KpiRepository;
-  const service = new KpiService(new DashboardAccess(environment), repository);
+  const service = new KpiService(new DashboardAccess(environment), repository, {
+    error: jest.fn(),
+  });
 
   it('keeps large values exact and absent baselines null, canonicalizing the requested instants', async () => {
     const result = await runWithContext(context(['FLEET_MANAGER']), async () =>

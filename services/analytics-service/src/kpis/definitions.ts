@@ -15,7 +15,7 @@ export const KPI_DEFINITIONS = [
     unit: 'MINUTES',
     dependsOnBaseline: true,
     formula:
-      'Identity: latest recorded baseline for this key, organization scope, exact period and unit; no currency.',
+      'Identity: latest inserted baseline (database identity order) for this key, organization scope, exact period and unit; no currency.',
   },
 ] as const;
 

@@ -101,6 +101,9 @@ describe('the committed OpenAPI document', () => {
       properties: {
         kpis: {
           items: {
+            description: expect.stringContaining(
+              'MAINTENANCE_COMPLETED_COUNT: AVAILABLE "0" can mean no facts held for the window',
+            ),
             anyOf: [
               {
                 properties: {

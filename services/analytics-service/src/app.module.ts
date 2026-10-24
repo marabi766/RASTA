@@ -32,7 +32,7 @@ import {
 import { DashboardService } from './maintenance/dashboard.service';
 import { DashboardController } from './maintenance/dashboard.controller';
 import { KpiController } from './kpis/kpi.controller';
-import { KpiService } from './kpis/kpi.service';
+import { KpiService, KPI_VALUE_READERS, kpiValueReaders } from './kpis/kpi.service';
 import { KpiRepository } from './kpis/kpi.repository';
 import { HealthController, MetricsController } from './health/health.controller';
 import { ENV, LOGGER } from './tokens';
@@ -94,6 +94,7 @@ import { loadAnalyticsEnv, SERVICE_NAME, type AnalyticsEnv } from './config/env'
     DashboardService,
     KpiRepository,
     KpiService,
+    { provide: KPI_VALUE_READERS, useValue: kpiValueReaders },
 
     {
       provide: MaintenanceFactsConsumer,

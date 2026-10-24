@@ -84,10 +84,12 @@ model ProcessedEvent {
 }
 
 /// Append-only reference measurements (ADR-071 § 6, Q-142 (1)). No application writer or seed.
-/// New versions are new rows; the latest recorded row for the exact key/scope/period is read.
+/// New versions are new rows; database identity order decides the latest exact match.
 model BaselineMetric {
   organizationId String   @map("organization_id") @db.VarChar(128)
   id             String   @db.VarChar(128)
+  /// SQL uses GENERATED ALWAYS: caller IDs and clock precision cannot choose the version.
+  version        BigInt   @default(autoincrement())
   metricKey      String   @map("metric_key") @db.VarChar(64)
   scopeKind      String   @map("scope_kind") @db.VarChar(32)
   periodStart    DateTime @map("period_start") @db.Timestamptz(3)
@@ -100,6 +102,8 @@ model BaselineMetric {
   recordedAt     DateTime @default(dbgenerated("clock_timestamp()")) @map("recorded_at") @db.Timestamptz(3)
 
   @@id([organizationId, id])
-  @@index([organizationId, metricKey, scopeKind, periodStart, periodEnd, recordedAt(sort: Desc), id(sort: Desc)], map: "ix_baseline_metric_org_key_scope_period")
+  // SQL owns ix_baseline_metric_org_key_scope_period: organization_id, metric_key,
+  // scope_kind, unit, COALESCE(currency, ''), period_start, period_end, version DESC.
+  // Prisma cannot express an expression index; do not replace it with a column-only index.
   @@map("baseline_metric")
 }

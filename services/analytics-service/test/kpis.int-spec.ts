@@ -90,12 +90,13 @@ describe('GET /v1/kpis — exact baseline matching', () => {
     });
   });
 
-  it('reads an exact baseline as a decimal string; versions append and latest recorded wins', async () => {
+  it('reads exact decimal strings; database versions increase and the latest insert (including zero) wins', async () => {
     const id = organization();
-    await owner.baselineMetric.create({ data: baselineFixture(id, { value: 1n }) });
-    await owner.baselineMetric.create({
+    const first = await owner.baselineMetric.create({ data: baselineFixture(id, { value: 1n }) });
+    const second = await owner.baselineMetric.create({
       data: baselineFixture(id, { value: 9223372036854775807n }),
     });
+    expect(second.version).toBeGreaterThan(first.version);
     const response = await kpis(actor(id, ['FLEET_MANAGER']), {
       from: '2026-10-01T03:30:00+03:30',
       to: KPI_WINDOW.to,
@@ -104,7 +105,8 @@ describe('GET /v1/kpis — exact baseline matching', () => {
       status: 'AVAILABLE',
       value: '9223372036854775807',
     });
-    await owner.baselineMetric.create({ data: baselineFixture(id, { value: 0n }) });
+    const zero = await owner.baselineMetric.create({ data: baselineFixture(id, { value: 0n }) });
+    expect(zero.version).toBeGreaterThan(second.version);
     expect((await view(id)).kpis[1]).toMatchObject({ status: 'AVAILABLE', value: '0' });
   });
 

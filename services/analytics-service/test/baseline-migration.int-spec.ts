@@ -1,8 +1,12 @@
-import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { ulid } from 'ulid';
 import { PrismaClient } from '../src/generated/prisma';
 import { baselineFixture, cleanupBaselines } from './baseline-helpers';
+import { applyMigration } from './migration-helpers';
+import { createSystemContext, runWithContext } from '@rasta/nest-common';
+import { PrismaService } from '../src/prisma/prisma.service';
+import { KpiRepository } from '../src/kpis/kpi.repository';
+import { KPI_WINDOW } from './baseline-helpers';
 import { databaseUrl, newOrganizationId, ownerClient, ownerDatabaseUrl } from './helpers';
 
 describe('baseline append-only database controls', () => {
@@ -24,12 +28,12 @@ describe('baseline append-only database controls', () => {
   });
 
   it.each(['UPDATE', 'DELETE'] as const)(
-    'runtime %s is refused by the trigger on a real row',
+    'owner %s is refused by the trigger on a real row',
     async (operation) => {
       const action =
         operation === 'UPDATE'
-          ? runtime.baselineMetric.updateMany({ where: { organizationId }, data: { value: 0n } })
-          : runtime.baselineMetric.deleteMany({ where: { organizationId } });
+          ? owner.baselineMetric.updateMany({ where: { organizationId }, data: { value: 0n } })
+          : owner.baselineMetric.deleteMany({ where: { organizationId } });
       await expect(action).rejects.toThrow(/ck_baseline_metric_append_only/);
       expect(
         (await owner.baselineMetric.findFirstOrThrow({ where: { organizationId } })).value,
@@ -55,30 +59,7 @@ describe('baseline migration reversibility on a non-empty isolated schema', () =
   const baseline = join(migrations, '20261024120000_baseline_metric');
 
   function apply(directory: string, file: string): void {
-    // Run the repository's supported file runner in native ESM. It uses libpqInvocation,
-    // keeps passwords out of argv and pins search_path before applying the file atomically.
-    // A native subprocess avoids requiring the ESM tool through Jest's CommonJS transformer.
-    const result = spawnSync(
-      process.execPath,
-      [
-        '--input-type=module',
-        '-e',
-        `
-        import { psqlFileRunner } from './scripts/verify-migration-reversible-lib.mjs';
-        const result = psqlFileRunner(process.env.DATABASE_URL_ANALYTICS_MIGRATOR, process.argv[1])(process.argv[2]);
-        if (!result.ok) { process.stderr.write(result.output); process.exit(1); }
-      `,
-        schema,
-        join(directory, file),
-      ],
-      {
-        encoding: 'utf8',
-        cwd: join(__dirname, '..', '..', '..'),
-        env: { ...process.env, DATABASE_URL_ANALYTICS_MIGRATOR: ownerDatabaseUrl() },
-      },
-    );
-    if (result.error || result.status !== 0)
-      throw new Error(`Migration file ${file} failed: ${result.error?.message ?? result.stderr}`);
+    applyMigration(ownerDatabaseUrl(), schema, join(directory, file));
   }
 
   beforeAll(async () => {
@@ -87,6 +68,19 @@ describe('baseline migration reversibility on a non-empty isolated schema', () =
     await scratch.$executeRawUnsafe(
       'CREATE TABLE "_prisma_migrations" ("migration_name" text PRIMARY KEY)',
     );
+    apply(baseline, 'migration.sql');
+  });
+  afterEach(async () => {
+    // Each case starts without another case's synthetic reference measurements.
+    await scratch.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE baseline_metric DISABLE TRIGGER tg_baseline_metric_append_only',
+      );
+      await tx.baselineMetric.deleteMany();
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE baseline_metric ENABLE TRIGGER tg_baseline_metric_append_only',
+      );
+    });
   });
   afterAll(async () => {
     await scratch.$disconnect();
@@ -112,13 +106,43 @@ describe('baseline migration reversibility on a non-empty isolated schema', () =
     await scratch.processedEvent.create({
       data: { eventId: 'preserved-event', consumerName: 'test-consumer' },
     });
-    apply(baseline, 'migration.sql');
     await scratch.$executeRawUnsafe(
       "INSERT INTO _prisma_migrations VALUES ('20261024120000_baseline_metric')",
     );
     await scratch.baselineMetric.create({ data: baselineFixture(organizationId) });
     expect(await scratch.baselineMetric.count()).toBe(1);
 
+    const triggersBefore = await scratch.$queryRaw`
+      SELECT tgname, tgenabled FROM pg_trigger
+      WHERE tgrelid = 'baseline_metric'::regclass AND NOT tgisinternal ORDER BY tgname`;
+    expect(triggersBefore).toHaveLength(3);
+    expect(() => apply(baseline, 'down.sql')).toThrow(
+      /contains reference evidence; rollback refused/,
+    );
+    expect(await scratch.baselineMetric.count()).toBe(1);
+    expect(
+      await scratch.$queryRaw`
+      SELECT tgname, tgenabled FROM pg_trigger
+      WHERE tgrelid = 'baseline_metric'::regclass AND NOT tgisinternal ORDER BY tgname`,
+    ).toEqual(triggersBefore);
+    expect(await scratch.$queryRaw`SELECT * FROM _prisma_migrations`).toEqual([
+      { migration_name: '20261024120000_baseline_metric' },
+    ]);
+    await expect(scratch.baselineMetric.deleteMany()).rejects.toThrow(
+      /ck_baseline_metric_append_only/,
+    );
+
+    // Owner removes only this scratch schema's synthetic rows, explicitly, before rollback.
+    // There is no operator opt-in or bypass flag in down.sql.
+    await scratch.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE baseline_metric DISABLE TRIGGER tg_baseline_metric_append_only',
+      );
+      await tx.baselineMetric.deleteMany();
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE baseline_metric ENABLE TRIGGER tg_baseline_metric_append_only',
+      );
+    });
     apply(baseline, 'down.sql');
     const [catalog] = await scratch.$queryRaw<
       { tables: bigint; functions: bigint; triggers: bigint; ledger: bigint }[]
@@ -147,5 +171,91 @@ describe('baseline migration reversibility on a non-empty isolated schema', () =
       (await scratch.baselineMetric.findFirstOrThrow({ where: { id: inserted.id } })).value,
     ).toBe(600n);
     expect(await scratch.factMaintenance.count()).toBe(1);
+  });
+
+  it('database identity wins 50 real recorded_at collisions, including zero, independent of IDs', async () => {
+    const prisma = new PrismaService(url.toString());
+    const repository = new KpiRepository(prisma);
+    try {
+      for (let iteration = 0; iteration < 50; iteration += 1) {
+        const organizationId = newOrganizationId();
+        const [earlier, later] = await scratch.$transaction(async (tx) => {
+          // Isolated scratch schema only. Production's stamping trigger stays enabled.
+          await tx.$executeRawUnsafe(
+            'ALTER TABLE baseline_metric DISABLE TRIGGER tg_baseline_metric_recorded_at',
+          );
+          const recordedAt = new Date('2026-10-10T00:00:00.000Z');
+          const first = await tx.baselineMetric.create({
+            data: baselineFixture(organizationId, {
+              id: 'z-earlier',
+              value: 999n,
+              recordedAt,
+            }),
+          });
+          const second = await tx.baselineMetric.create({
+            data: baselineFixture(organizationId, {
+              id: 'a-later',
+              value: iteration % 2 === 0 ? 0n : 9223372036854775807n,
+              recordedAt,
+            }),
+          });
+          await tx.$executeRawUnsafe(
+            'ALTER TABLE baseline_metric ENABLE TRIGGER tg_baseline_metric_recorded_at',
+          );
+          return [first, second] as const;
+        });
+        expect(earlier.recordedAt).toEqual(later.recordedAt);
+        expect(later.version).toBeGreaterThan(earlier.version);
+        const result = await runWithContext(
+          createSystemContext({ organizationId, correlationId: 'collision-test' }),
+          () => repository.read(new Date(KPI_WINDOW.from), new Date(KPI_WINDOW.to)),
+        );
+        expect(result.baseline_minutes).toBe(later.value.toString());
+      }
+    } finally {
+      await prisma.disconnect();
+    }
+  });
+
+  it('GENERATED ALWAYS refuses a writer-supplied version', async () => {
+    await expect(
+      scratch.$executeRawUnsafe(`
+      INSERT INTO baseline_metric (organization_id,id,version,metric_key,scope_kind,period_start,period_end,value,unit,source,recorded_by)
+      VALUES ('identity-probe','probe',999,'METRIC','ORGANIZATION','2026-10-01','2026-11-01',1,'COUNT','test','test')`),
+    ).rejects.toThrow(/Code: `428C9`/);
+  });
+
+  it('uses the full equality index with LIMIT 1 on a populated table', async () => {
+    await scratch.$executeRawUnsafe(`INSERT INTO baseline_metric
+      (organization_id,id,metric_key,scope_kind,unit,currency,period_start,period_end,value,source,recorded_by)
+      SELECT 'plan-org', 'plan-' || n, 'MAINTENANCE_DOWNTIME_BASELINE_MINUTES', 'ORGANIZATION',
+        'MINUTES', NULL, '2026-10-01', '2026-11-01', n, 'test', 'test'
+      FROM generate_series(1,10000) n`);
+    await scratch.$executeRawUnsafe('ANALYZE baseline_metric');
+    const plan = await scratch.$queryRawUnsafe<{ 'QUERY PLAN': string }[]>(`EXPLAIN (COSTS OFF)
+      SELECT value::text FROM baseline_metric
+      WHERE organization_id = 'plan-org' AND metric_key = 'MAINTENANCE_DOWNTIME_BASELINE_MINUTES'
+        AND scope_kind = 'ORGANIZATION' AND unit = 'MINUTES' AND COALESCE(currency, '') = ''
+        AND period_start = '2026-10-01'::timestamptz AND period_end = '2026-11-01'::timestamptz
+      ORDER BY version DESC LIMIT 1`);
+    const text = plan.map((row) => row['QUERY PLAN']).join('\n');
+    expect(text).toMatch(/^Limit/);
+    expect(text).toContain('Index Scan using ix_baseline_metric_org_key_scope_period');
+    expect(text).not.toMatch(/Sort|Seq Scan|Filter:/);
+    const indexCondition = plan.find((row) => row['QUERY PLAN'].includes('Index Cond:'))?.[
+      'QUERY PLAN'
+    ];
+    expect(indexCondition).toBeDefined();
+    for (const field of [
+      'organization_id',
+      'metric_key',
+      'scope_kind',
+      'unit',
+      'currency',
+      'period_start',
+      'period_end',
+    ]) {
+      expect(indexCondition).toContain(field);
+    }
   });
 });

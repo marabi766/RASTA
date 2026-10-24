@@ -2,6 +2,7 @@
 CREATE TABLE "baseline_metric" (
     "organization_id" VARCHAR(128) NOT NULL,
     "id" VARCHAR(128) NOT NULL,
+    "version" BIGINT GENERATED ALWAYS AS IDENTITY NOT NULL,
     "metric_key" VARCHAR(64) NOT NULL,
     "scope_kind" VARCHAR(32) NOT NULL,
     "period_start" TIMESTAMPTZ(3) NOT NULL,
@@ -26,8 +27,11 @@ CREATE TABLE "baseline_metric" (
     CONSTRAINT "ck_baseline_metric_currency" CHECK ("currency" IS NULL OR "currency" ~ '^[A-Z]{3}$')
 );
 
+-- Empty currency is forbidden by ck_baseline_metric_currency. Normalizing NULL
+-- to '' gives the planner an equality pathkey; IS NULL alone cannot skip the
+-- nullable currency key when satisfying ORDER BY version DESC on PostgreSQL 16.
 CREATE INDEX "ix_baseline_metric_org_key_scope_period"
-  ON "baseline_metric"("organization_id", "metric_key", "scope_kind", "period_start", "period_end", "recorded_at" DESC, "id" DESC);
+  ON "baseline_metric"("organization_id", "metric_key", "scope_kind", "unit", (COALESCE("currency", '')), "period_start", "period_end", "version" DESC);
 
 CREATE FUNCTION "baseline_metric_append_only"() RETURNS trigger AS $$
 BEGIN
