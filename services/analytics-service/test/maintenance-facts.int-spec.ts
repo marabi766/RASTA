@@ -1,8 +1,14 @@
-import { DLQ_REASONS } from '@rasta/contracts';
+import { inspect } from 'node:util';
+import { DLQ_HEADERS, DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import { UnprocessableEventError, createSystemContext, runWithContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { PrismaClient } from '../src/generated/prisma';
-import { MAINTENANCE_FACTS_CONSUMER } from '../src/maintenance/maintenance-fact';
+import { ANALYTICS_DEAD_LETTER_TOPIC } from '../src/config/env';
+import { MAINTENANCE_FACTS_CONSUMER, MAINTENANCE_TOPIC } from '../src/maintenance/maintenance-fact';
+import {
+  MaintenanceFactsConsumer,
+  maintenanceFactsConsumerFactory,
+} from '../src/maintenance/maintenance-facts.consumer';
 import {
   cleanup,
   databaseUrl,
@@ -403,5 +409,210 @@ describe('recorded_at is the database clock at the insert (ADR-071 § 2 (8))', (
     });
 
     expect(stamp!.recorded.getTime()).toBeGreaterThanOrEqual(stamp!.started.getTime() + 250);
+  });
+});
+
+/**
+ * Task 011 (#385 r1 F1): the cost's bound refinement ran on a cost the pattern had refused, and
+ * `BigInt` threw a SyntaxError out of the handler — retried three times, then dead-lettered as
+ * MAX_RETRIES_EXCEEDED with the cost in x-dlq-error. Through the real `EventConsumer` this
+ * service builds (`maintenanceFactsConsumerFactory`) over a fake kafkajs that commits an offset
+ * only when `eachMessage` returns, as kafkajs 2.2.4's runner does.
+ */
+describe('a malformed cost, through the shared consumer', () => {
+  const SENTINEL = 'private-invoice-reference-123';
+
+  type EachMessage = (payload: {
+    topic: string;
+    partition: number;
+    message: { value: Buffer; headers: Record<string, never>; offset: string; key: null };
+    heartbeat: () => Promise<void>;
+    pause: () => () => void;
+  }) => Promise<void>;
+
+  async function broker(options: { dlqFails?: boolean } = {}) {
+    const lines: string[] = [];
+    const record =
+      (level: string) =>
+      (...args: unknown[]) =>
+        void lines.push(`${level} ${inspect(args, { depth: null })}`);
+    const logger = { info: record('info'), warn: record('warn'), error: record('error') };
+    let eachMessage: EachMessage | undefined;
+    const committed: string[] = [];
+    const uncommitted: { offset: string; error: unknown }[] = [];
+    const sent: { topic: string; messages: { headers: Record<string, unknown> }[] }[] = [];
+    const consumer = new MaintenanceFactsConsumer(
+      (handler) => {
+        const real = maintenanceFactsConsumerFactory(
+          { brokers: ['localhost:9092'], clientId: 'analytics-itest' },
+          logger,
+        )(handler);
+        (real as unknown as { kafka: unknown }).kafka = {
+          consumer: () => ({
+            connect: async () => undefined,
+            subscribe: async () => undefined,
+            disconnect: async () => undefined,
+            run: async (config: { eachMessage: EachMessage }) => {
+              eachMessage = config.eachMessage;
+            },
+          }),
+          producer: () => ({
+            connect: async () => undefined,
+            disconnect: async () => undefined,
+            send: async (sentRecord: (typeof sent)[number]) => {
+              if (options.dlqFails) throw new Error('The dead-letter broker is down');
+              sent.push(sentRecord);
+            },
+          }),
+        };
+        return real;
+      },
+      w.prisma,
+      w.facts,
+      { info: logger.info, warn: logger.warn, debug: record('debug') },
+    );
+    await consumer.start();
+    return {
+      deliver: (envelope: EventEnvelope, offset: string) =>
+        eachMessage!({
+          topic: MAINTENANCE_TOPIC,
+          partition: 0,
+          message: {
+            value: Buffer.from(JSON.stringify(envelope), 'utf8'),
+            headers: {},
+            offset,
+            key: null,
+          },
+          heartbeat: async () => undefined,
+          pause: () => () => undefined,
+        }).then(
+          () => void committed.push(offset),
+          (error: unknown) => void uncommitted.push({ offset, error }),
+        ),
+      stop: () => consumer.stop(),
+      consumer,
+      committed,
+      uncommitted,
+      sent,
+      lines,
+    };
+  }
+
+  it.each([
+    ['a fraction', '1.5'],
+    ['letters', 'abc'],
+    ['nothing', ''],
+    ['free text', SENTINEL],
+  ])(
+    'dead-letters %s at once as VALIDATION_FAILED, moves the partition on, writes nothing, and repeats it nowhere',
+    async (_label, totalCostMinor) => {
+      const tenant = org();
+      const completion = newCompletion(tenant);
+      const eventId = ulid();
+      events.push(eventId);
+      const b = await broker();
+      try {
+        await b.deliver(
+          maintenanceCompleted(completion, { eventId, payload: { totalCostMinor } }),
+          '7',
+        );
+      } finally {
+        await b.stop();
+      }
+
+      // A verdict, not a failure: no retry, one dead letter, the offset committed.
+      expect(b.lines.filter((line) => line.includes('Attempt'))).toEqual([]);
+      expect(b.sent).toHaveLength(1);
+      expect(b.sent[0]!.topic).toBe(ANALYTICS_DEAD_LETTER_TOPIC);
+      const headers = b.sent[0]!.messages[0]!.headers;
+      expect(headers[DLQ_HEADERS.reason]).toBe(DLQ_REASONS.VALIDATION_FAILED);
+      expect(String(headers[DLQ_HEADERS.error])).toBe(
+        `Handler refused (VALIDATION_FAILED): MAINTENANCE_COMPLETED ${eventId} payload fails its schema: totalCostMinor invalid_string`,
+      );
+      expect(b.committed).toEqual(['7']);
+      expect(b.uncommitted).toEqual([]);
+      expect(await factsOf(tenant)).toEqual([]);
+      expect(await markersOf(eventId)).toEqual([]);
+      const written = [
+        ...b.lines,
+        ...Object.values(headers).map((value) =>
+          Buffer.isBuffer(value) ? value.toString('utf8') : String(value),
+        ),
+      ].join('\n');
+      expect(written).not.toContain(SENTINEL);
+    },
+  );
+
+  it('leaves the offset uncommitted when the dead letter cannot be written', async () => {
+    const tenant = org();
+    const eventId = ulid();
+    events.push(eventId);
+    const b = await broker({ dlqFails: true });
+    try {
+      await b.deliver(
+        maintenanceCompleted(newCompletion(tenant), {
+          eventId,
+          payload: { totalCostMinor: '1.5' },
+        }),
+        '8',
+      );
+    } finally {
+      await b.stop();
+    }
+
+    expect(b.committed).toEqual([]);
+    expect(b.uncommitted.map((entry) => entry.offset)).toEqual(['8']);
+    expect(String(b.uncommitted[0]!.error)).toContain('The dead-letter broker is down');
+    expect(await factsOf(tenant)).toEqual([]);
+    expect(await markersOf(eventId)).toEqual([]);
+  });
+
+  it('applies the corrected event under the same id once, and a duplicate is no second effect', async () => {
+    const tenant = org();
+    const completion = newCompletion(tenant);
+    const eventId = ulid();
+    events.push(eventId);
+    const b = await broker();
+    try {
+      await b.deliver(
+        maintenanceCompleted(completion, { eventId, payload: { totalCostMinor: '4500000.5' } }),
+        '9',
+      );
+      await b.deliver(maintenanceCompleted(completion, { eventId }), '10');
+      await b.deliver(maintenanceCompleted(completion, { eventId }), '11');
+    } finally {
+      await b.stop();
+    }
+
+    expect(b.committed).toEqual(['9', '10', '11']);
+    expect(b.sent).toHaveLength(1);
+    const facts = await factsOf(tenant);
+    expect(facts).toHaveLength(1);
+    expect(facts[0]).toMatchObject({ sourceEventId: eventId, totalCostMinor: 4_500_000n });
+    expect(await markersOf(eventId)).toHaveLength(1);
+  });
+
+  it('still refuses a payload organization that is not the envelope’s, with a good cost', async () => {
+    const tenant = org();
+    const stranger = org();
+    const eventId = ulid();
+    events.push(eventId);
+    const b = await broker();
+    try {
+      await b.deliver(
+        maintenanceCompleted(newCompletion(tenant), { eventId, tenantId: stranger }),
+        '12',
+      );
+    } finally {
+      await b.stop();
+    }
+
+    const headers = b.sent[0]!.messages[0]!.headers;
+    expect(headers[DLQ_HEADERS.reason]).toBe(DLQ_REASONS.VALIDATION_FAILED);
+    expect(String(headers[DLQ_HEADERS.error])).toContain('tenant_mismatch');
+    expect(b.committed).toEqual(['12']);
+    expect(await factsOf(tenant)).toEqual([]);
+    expect(await factsOf(stranger)).toEqual([]);
+    expect(await markersOf(eventId)).toEqual([]);
   });
 });

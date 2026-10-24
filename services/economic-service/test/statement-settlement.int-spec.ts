@@ -1,4 +1,6 @@
 import type { Server } from 'node:http';
+import { inspect } from 'node:util';
+import { Logger } from '@nestjs/common';
 import request from 'supertest';
 import { ulid } from 'ulid';
 import { DLQ_HEADERS, DLQ_REASONS, MAX_AMOUNT_MINOR, type EventEnvelope } from '@rasta/contracts';
@@ -511,6 +513,94 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
       await consumer.handle(event);
       expect(await obligationsOf(fact.statementId)).toHaveLength(1);
       expect(await readBalances(prisma, walletId)).toEqual(before);
+    });
+
+    /**
+     * Task 011: the net's bound refinement ran on a net the pattern had refused, and `BigInt`
+     * threw a SyntaxError carrying the owner's text out of the client — retried, then
+     * MAX_RETRIES_EXCEEDED with that text in x-dlq-error. A malformed net is a body that does
+     * not parse: the client's UPSTREAM_UNAVAILABLE, the path every unparseable answer takes.
+     */
+    describe('an owner whose net is malformed', () => {
+      const SENTINEL = 'private-invoice-reference-123';
+
+      it.each([
+        ['a fractional net', '12.5'],
+        ['a net in letters', 'abc'],
+        ['a net that is free text', SENTINEL],
+      ])(
+        'through the real EventConsumer: %s is UPSTREAM_UNAVAILABLE, the partition moves on, nothing is recorded, the text is nowhere',
+        async (_label, netMinor) => {
+          const { walletId } = await fundWallet(wiring, employer, 500_000n);
+          const before = await readBalances(prisma, walletId);
+          const { fact, payload } = approved({ netMinor });
+          const event = envelope(payload);
+          const nest = captureNestLogs();
+
+          const broker = await brokerOver(consumer);
+          try {
+            await broker.deliver(event, '41');
+          } finally {
+            nest.restore();
+            await broker.stop();
+          }
+
+          // Retried as an owner that could not be asked, never acted on, then dead-lettered.
+          expect(broker.lines.filter((line) => line.startsWith('warn Attempt'))).toHaveLength(2);
+          expect(broker.dlq.sent).toHaveLength(1);
+          const headers = broker.dlq.sent[0]!.messages[0]!.headers;
+          expect(headers[DLQ_HEADERS.reason]).toBe(DLQ_REASONS.UPSTREAM_UNAVAILABLE);
+          // The dead letter written, the offset is committed: the partition is not held.
+          expect(broker.committed).toEqual(['41']);
+          expect(broker.uncommitted).toEqual([]);
+          // Every question was signed for the employer the event names (ADR-061 § 4).
+          const asked = contract.asked.filter((a) => a.statementId === fact.statementId);
+          expect(asked).toHaveLength(3);
+          expect(asked.every((a) => a.organizationId === employer)).toBe(true);
+          // No obligation, no marker, no money.
+          expect(await obligationsOf(fact.statementId)).toHaveLength(0);
+          expect(await processedCount(event.eventId)).toBe(0);
+          expect(await readBalances(prisma, walletId)).toEqual(before);
+          if (netMinor === SENTINEL) {
+            const written = [
+              ...broker.lines,
+              ...nest.lines(),
+              ...Object.values(headers).map((value) =>
+                Buffer.isBuffer(value) ? value.toString('utf8') : String(value),
+              ),
+            ].join('\n');
+            expect(written).not.toContain(SENTINEL);
+          }
+
+          // The owner corrects its answer; the replay of the same event records it once …
+          contract.record({ ...fact, netMinor: '7350000' });
+          await expect(consumer.handle(event)).resolves.toBeUndefined();
+          expect(await obligationsOf(fact.statementId)).toHaveLength(1);
+          expect(await processedCount(event.eventId)).toBe(1);
+          // … and a duplicate delivery is no second effect.
+          await expect(consumer.handle(event)).resolves.toBe('SKIPPED');
+          expect(await obligationsOf(fact.statementId)).toHaveLength(1);
+        },
+      );
+
+      it('leaves the offset uncommitted when the dead letter cannot be written', async () => {
+        const { fact, payload } = approved({ netMinor: '12.5' });
+        const event = envelope(payload);
+
+        const broker = await brokerOver(consumer, { dlqFails: true });
+        try {
+          await broker.deliver(event, '42');
+        } finally {
+          await broker.stop();
+        }
+
+        expect(broker.committed).toEqual([]);
+        expect(broker.uncommitted.map((entry) => entry.offset)).toEqual(['42']);
+        // Held because the dead letter's send failed, and for no other reason.
+        expect(String(broker.uncommitted[0]!.error)).toContain('The dead-letter broker is down');
+        expect(await obligationsOf(fact.statementId)).toHaveLength(0);
+        expect(await processedCount(event.eventId)).toBe(0);
+      });
     });
   });
 
@@ -1109,5 +1199,102 @@ function realConsumerOver(statements: StatementSettlementConsumer) {
       ),
     dlq,
     lines,
+  };
+}
+
+/**
+ * The consumer's handler run by a real, started `EventConsumer` over a fake kafkajs: the
+ * runner's `eachMessage` is driven the way kafkajs 2.2.4 drives it — an offset is committed
+ * when `eachMessage` returns and stays uncommitted when it throws (nest-common's
+ * `consumer/__tests__/fake-kafka.ts`, which a service cannot import). The dead-letter producer
+ * records what it was given, or refuses every send (`dlqFails`), a broker that is down.
+ */
+async function brokerOver(
+  statements: StatementSettlementConsumer,
+  options: { dlqFails?: boolean } = {},
+) {
+  const lines: string[] = [];
+  const logger: ConsumerLogger = {
+    log: (message) => lines.push(`log ${message}`),
+    warn: (message) => lines.push(`warn ${message}`),
+    error: (message) => lines.push(`error ${message}`),
+  };
+  type EachMessage = (payload: {
+    topic: string;
+    partition: number;
+    message: { value: Buffer; headers: Record<string, never>; offset: string; key: null };
+    heartbeat: () => Promise<void>;
+    pause: () => () => void;
+  }) => Promise<void>;
+  let eachMessage: EachMessage | undefined;
+  const committed: string[] = [];
+  const uncommitted: { offset: string; error: unknown }[] = [];
+  const dlq = {
+    sent: [] as SentRecord[],
+    connect: async () => undefined,
+    disconnect: async () => undefined,
+    send: async (record: SentRecord) => {
+      if (options.dlqFails) throw new Error('The dead-letter broker is down');
+      dlq.sent.push(record);
+    },
+  };
+  const consumer = new EventConsumer(
+    {
+      brokers: ['localhost:9092'],
+      clientId: 'statement-settlement-itest',
+      groupId: 'economic-service.statement-settlement',
+      topics: ['rasta.contract.v1'],
+      deadLetterTopic: 'rasta.economic.v1.dlq',
+      maxRetries: 3,
+      retryBackoffMs: 0,
+    },
+    (envelope) => statements.handle(envelope),
+    logger,
+  );
+  (consumer as unknown as { kafka: unknown }).kafka = {
+    consumer: () => ({
+      connect: async () => undefined,
+      subscribe: async () => undefined,
+      disconnect: async () => undefined,
+      run: async (config: { eachMessage: EachMessage }) => {
+        eachMessage = config.eachMessage;
+      },
+    }),
+    producer: () => dlq,
+  };
+  await consumer.start();
+  return {
+    deliver: (envelope: EventEnvelope, offset: string) =>
+      eachMessage!({
+        topic: 'rasta.contract.v1',
+        partition: 0,
+        message: {
+          value: Buffer.from(JSON.stringify(envelope), 'utf8'),
+          headers: {},
+          offset,
+          key: null,
+        },
+        heartbeat: async () => undefined,
+        pause: () => () => undefined,
+      }).then(
+        () => void committed.push(offset),
+        (error: unknown) => void uncommitted.push({ offset, error }),
+      ),
+    stop: () => consumer.stop(),
+    committed,
+    uncommitted,
+    dlq,
+    lines,
+  };
+}
+
+/** What Nest's `Logger` writes while a test runs — the consumers' own log lines. */
+function captureNestLogs(): { lines: () => string[]; restore: () => void } {
+  const spies = (['log', 'warn', 'error', 'debug', 'verbose'] as const).map((level) =>
+    jest.spyOn(Logger.prototype, level),
+  );
+  return {
+    lines: () => spies.flatMap((spy) => spy.mock.calls.map((call) => inspect(call))),
+    restore: () => spies.forEach((spy) => spy.mockRestore()),
   };
 }

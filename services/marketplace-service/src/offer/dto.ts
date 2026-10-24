@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { amountMinorSchema, currencySchema, plainText } from '@rasta/contracts';
+import { amountMinorSchema, currencySchema, plainText, numberInput } from '@rasta/contracts';
 
 /**
  * Catalogue request and response shapes.
@@ -67,7 +67,7 @@ export const searchProductsQuerySchema = z
     q: z.string().trim().min(1).max(200).optional(),
     category: z.string().trim().min(1).max(100).optional(),
     sort: z.enum(['PRICE_ASC', 'PRICE_DESC', 'LEAD_TIME_ASC']).default('PRICE_ASC'),
-    limit: z.coerce.number().int().min(1).max(100).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).default(25),
   })
   .strict();
 
