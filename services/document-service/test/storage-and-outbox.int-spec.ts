@@ -1,3 +1,4 @@
+import { expireClaim, makeDue } from '@rasta/testing';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
@@ -283,14 +284,18 @@ describe('the outbox store, against a real database', () => {
    *
    * These assertions are about which rows the query returns; the token
    * mechanics have their own suite against an isolated schema
-   * (`outbox-durable-claim.int-spec.ts`). A zero lease is used so a claim here
-   * never parks rows for another suite.
+   * (`outbox-durable-claim.int-spec.ts`). Explicit expiry after each claim
+   * avoids parking rows for other suites without relying on zero-lease rounding.
    */
-  const claimRows = async (limit: number) =>
-    (await store.claimPending({ limit, owner: 'int-spec', leaseSeconds: 0 })).rows;
-
-  const claimWithToken = (limit: number) =>
-    store.claimPending({ limit, owner: 'int-spec', leaseSeconds: 0 });
+  const claimWithToken = async (limit: number) => {
+    const claimed = await store.claimPending({ limit, owner: 'int-spec', leaseSeconds: 60 });
+    await expireClaim(
+      prisma,
+      claimed.rows.map((row) => row.id),
+    );
+    return claimed;
+  };
+  const claimRows = async (limit: number) => (await claimWithToken(limit)).rows;
 
   beforeAll(() => {
     prisma = newPrisma();
@@ -456,10 +461,11 @@ describe('the outbox store, against a real database', () => {
 
     // Each failure releases the claim, so the row is re-claimed for the second
     // one — which is exactly what the relay does on the next tick.
-    const backoff = { baseSeconds: 0, maxSeconds: 0 };
+    const backoff = { baseSeconds: 5, maxSeconds: 60 };
     const first = await claimWithToken(100);
     expect(await store.markFailed(id, first.token!, 'broker refused the write', backoff)).toBe(1);
 
+    await makeDue(prisma, [id]);
     const second = await claimWithToken(100);
     expect(
       await store.markFailed(id, second.token!, 'broker refused the write again', backoff),
