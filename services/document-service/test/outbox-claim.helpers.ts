@@ -51,6 +51,12 @@ export async function createProtocolSchema(): Promise<void> {
       `CREATE TABLE "${PROTOCOL_SCHEMA}".outbox_message
          (LIKE public.outbox_message INCLUDING ALL)`,
     );
+    // Explicit search_path opt-in only: ordinary sessions still resolve pg_catalog.now.
+    await admin.client.$executeRawUnsafe(
+      `CREATE FUNCTION "${PROTOCOL_SCHEMA}".now() RETURNS timestamptz
+         LANGUAGE sql STABLE
+         AS 'SELECT pg_catalog.date_trunc(''milliseconds'', pg_catalog.now())'`,
+    );
     await admin.client.$executeRawUnsafe(
       `GRANT USAGE ON SCHEMA "${PROTOCOL_SCHEMA}" TO "${runtime}"`,
     );
