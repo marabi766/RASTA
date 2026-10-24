@@ -1,0 +1,16 @@
+# Time-boxed exception for the pinned ClamAV sidecar image ONLY (ci.yml job
+# `clamav-signatures`, ADR-049 § "Temporary exception"). Never used by the
+# Rasta service image scans.
+#
+# CVE-2026-111497 — out-of-bounds write in the Google Brotli decoder
+# (brotli-libs). Fixed in brotli-libs 1.2.1-r0, which Alpine 3.24 already
+# ships, but the newest upstream clamav/clamav:1.5.4 image (rebuilt
+# 2026-10-19, sha256:e19130cd…) still carries 1.2.0-r1, so no digest bump
+# closes it. In the pinned image only libcurl depends on brotli-libs, and only
+# `freshclam` links libcurl; `clamd`, `clamdscan` and libclamav do not link
+# brotli at all (checked with ldd on the pinned digest). Scanned documents
+# therefore never reach the vulnerable decoder; exploiting it needs control of
+# the HTTPS responses from the signature mirror (database.clamav.net).
+# Expires on its own: on 2026-10-31 the scan fails again unless upstream has
+# shipped a fixed image (bump the digest) or the exception is re-reviewed.
+CVE-2026-111497 exp:2026-10-31

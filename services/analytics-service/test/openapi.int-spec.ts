@@ -55,6 +55,6 @@ describe('the published OpenAPI contract (real application)', () => {
       Object.keys(item as object).map((method) => `${method.toUpperCase()} ${path}`),
     );
     expect(documented.sort()).toEqual([...runtimeRoutes()].sort());
-    expect(documented).toEqual(['GET /v1/dashboards/fleet']);
+    expect(documented).toEqual(['GET /v1/dashboards/fleet', 'GET /v1/kpis']);
   });
 });

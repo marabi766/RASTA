@@ -3,9 +3,11 @@ import {
   amountMinorSchema,
   cursorPaginationSchema,
   currencySchema,
+  digitsToBigInt,
   seedIdSchema,
   ID_PREFIXES,
   referenceId,
+  numberInput,
 } from '@rasta/contracts';
 
 /**
@@ -73,9 +75,14 @@ export const MAX_AMOUNT_MINOR = 9_223_372_036_854_775_807n;
  * (`amountMinorSchema`) and no larger than {@link MAX_AMOUNT_MINOR}.
  */
 export const boundedAmountMinorSchema = amountMinorSchema
-  .refine((value) => BigInt(value) <= MAX_AMOUNT_MINOR, {
-    message: 'Amount is larger than the maximum this system can hold (9223372036854775807)',
-  })
+  // zod runs this even when the pattern failed, with the raw text: only digits are converted.
+  .refine(
+    (value) => {
+      const amount = digitsToBigInt(value);
+      return amount === undefined || amount <= MAX_AMOUNT_MINOR;
+    },
+    { message: 'Amount is larger than the maximum this system can hold (9223372036854775807)' },
+  )
   .describe('Minor units, as a string of digits, at most 9223372036854775807.');
 
 export const maintenanceTypeSchema = z.enum(MAINTENANCE_TYPES);
@@ -139,14 +146,14 @@ const partQuantity = z
 
 const scheduleIntervals = {
   /** Elapsed days since the last service. */
-  intervalDays: z.coerce.number().int().min(1).max(3650).optional(),
+  intervalDays: numberInput(z.number().int().min(1).max(3650)).optional(),
   /** Engine hours since the last service. */
   intervalHours: quantity(8).optional(),
   /** Kilometres since the last service. */
   intervalKilometres: quantity(10).optional(),
 
   /** How far ahead of each trigger the schedule announces itself. */
-  leadDays: z.coerce.number().int().min(0).max(365).optional(),
+  leadDays: numberInput(z.number().int().min(0).max(365)).optional(),
   leadHours: quantity(8).optional(),
   leadKilometres: quantity(10).optional(),
 };
@@ -214,10 +221,10 @@ export type CreateScheduleDto = z.infer<typeof createScheduleSchema>;
 export const updateScheduleSchema = z
   .object({
     title: displayText(2, 200).optional(),
-    intervalDays: z.coerce.number().int().min(1).max(3650).nullable().optional(),
+    intervalDays: numberInput(z.number().int().min(1).max(3650)).nullable().optional(),
     intervalHours: quantity(8).nullable().optional(),
     intervalKilometres: quantity(10).nullable().optional(),
-    leadDays: z.coerce.number().int().min(0).max(365).nullable().optional(),
+    leadDays: numberInput(z.number().int().min(0).max(365)).nullable().optional(),
     leadHours: quantity(8).nullable().optional(),
     leadKilometres: quantity(10).nullable().optional(),
     /**

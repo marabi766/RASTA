@@ -131,12 +131,12 @@ tests:
         exp_alerts: []
       - eval_time: 4m
         alertname: RastaSettlementNoActiveRule
-        exp_alerts:
+        exp_alerts: &settlement_no_active_rule_alerts
           - exp_labels:
               severity: warning
             exp_annotations:
               summary: 'Settlements refused: no active commission rule for the line'
-              description: 'At least one settlement in the last 15 minutes was refused with 422 NO_ACTIVE_RULE: no active commission rule covers its business line, and settlement fails closed. Nothing moved and the funds stay held; the payee is not paid until a rule for the line is in force. The SETTLEMENT_REFUSED events name the transactions and lines; this alert deliberately carries none.'
+              description: 'A settlement refusal with 422 NO_ACTIVE_RULE was observed in the last 15 minutes (a counter increase or a newly observed positive series): no active commission rule covers its business line, and settlement fails closed. Nothing moved and the funds stay held; the payee is not paid until a rule for the line is in force. The SETTLEMENT_REFUSED events name the transactions and lines; this alert deliberately carries none.'
               runbook: docs/runbooks/settlement-no-active-rule.md
       # Fifteen minutes with no new refusal: it clears.
       - eval_time: 25m
@@ -148,7 +148,7 @@ tests:
   - interval: 1m
     input_series:
       - series: 'rasta_economic_settlement_failures_total{job="economic-service",instance="host.docker.internal:3112",environment="local",service="economic-service",reason="no_active_rule"}'
-        values: '1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 _ _ 0 1 1 1'
+        values: '1x19 _ _ 0 1+0x20'
     alert_rule_test:
       - eval_time: 22m
         alertname: RastaSettlementNoActiveRule
@@ -160,11 +160,14 @@ tests:
               severity: warning
             exp_annotations:
               summary: 'Settlements refused: no active commission rule for the line'
-              description: 'At least one settlement in the last 15 minutes was refused with 422 NO_ACTIVE_RULE: no active commission rule covers its business line, and settlement fails closed. Nothing moved and the funds stay held; the payee is not paid until a rule for the line is in force. The SETTLEMENT_REFUSED events name the transactions and lines; this alert deliberately carries none.'
+              description: 'A settlement refusal with 422 NO_ACTIVE_RULE was observed in the last 15 minutes (a counter increase or a newly observed positive series): no active commission rule covers its business line, and settlement fails closed. Nothing moved and the funds stay held; the payee is not paid until a rule for the line is in force. The SETTLEMENT_REFUSED events name the transactions and lines; this alert deliberately carries none.'
               runbook: docs/runbooks/settlement-no-active-rule.md
+      - eval_time: 40m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []
 
-  # Why the zero is exported: a series that first appears at 1 has no increase
-  # for this expression to see, and the isolated refusal would never page.
+  # A refusal before the first scrape: no observed zero and no increase, but
+  # the newly observed positive series must page until its 15-minute window ends.
   - interval: 1m
     input_series:
       - series: 'rasta_economic_settlement_failures_total{job="economic-service",instance="host.docker.internal:3112",environment="local",service="economic-service",reason="no_active_rule"}'
@@ -172,8 +175,99 @@ tests:
     alert_rule_test:
       - eval_time: 5m
         alertname: RastaSettlementNoActiveRule
-        exp_alerts: []
+        exp_alerts: *settlement_no_active_rule_alerts
       - eval_time: 15m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: *settlement_no_active_rule_alerts
+      - eval_time: 18m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []
+
+  # Instance A's older zero must not hide instance B's first-scrape refusal.
+  # B arrives after A has more than a window of history; matching must retain
+  # instance labels until after the increase/new-series branches are combined.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_economic_settlement_failures_total{job="economic-service",instance="instance-a:3112",environment="local",service="economic-service",reason="no_active_rule"}'
+        values: '0x50'
+      - series: 'rasta_economic_settlement_failures_total{job="economic-service",instance="instance-b:3112",environment="local",service="economic-service",reason="no_active_rule"}'
+        values: '_x25 1+0x25'
+    alert_rule_test:
+      - eval_time: 24m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []
+      # Fire even with only one sample, then keep firing with steady samples.
+      - eval_time: 25m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: *settlement_no_active_rule_alerts
+      - eval_time: 27m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: *settlement_no_active_rule_alerts
+      - eval_time: 39m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: *settlement_no_active_rule_alerts
+      # Exactly 15 minutes after B's first sample, and later: resolved.
+      - eval_time: 40m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []
+
+  # Exporting zero from startup must never page, including before any history
+  # exists at the 15-minute offset.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_economic_settlement_failures_total{job="economic-service",instance="host.docker.internal:3112",environment="local",service="economic-service",reason="no_active_rule"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []
+
+  # A long-running instance with an old positive count must not page just
+  # because counter > 0. Check the window boundary and well after it.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_economic_settlement_failures_total{job="economic-service",instance="host.docker.internal:3112",environment="local",service="economic-service",reason="no_active_rule"}'
+        values: '7x45'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []
+
+  # The increase branch on its own: an established series (zero for longer
+  # than the window, so the new-series branch is silent) refuses once at 20m.
+  # It must page for the whole 15-minute window, not a shorter one.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_economic_settlement_failures_total{job="economic-service",instance="host.docker.internal:3112",environment="local",service="economic-service",reason="no_active_rule"}'
+        values: '0x19 1+0x40'
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: *settlement_no_active_rule_alerts
+      # Last minute whose window still holds the zero before the step
+      # (Prometheus 3 ranges are left-open), then resolved.
+      - eval_time: 33m
+        alertname: RastaSettlementNoActiveRule
+        exp_alerts: *settlement_no_active_rule_alerts
+      - eval_time: 34m
         alertname: RastaSettlementNoActiveRule
         exp_alerts: []
 

@@ -2,6 +2,7 @@ import { TOPIC_PRODUCERS, RETRY_TOPIC_SUFFIX } from './topic-producers';
 import { CONSUMER_GROUP_SEPARATOR, TOPIC_CONSUMERS } from './topic-consumers';
 import { AUDIT_TRAIL_TOPIC, NEVER_AUTO_REPLAY_TOPICS } from './envelope';
 import { OPS_REPLAY_PRODUCER, OPS_REPLAY_TOPIC } from './ops-replay';
+import { TOPIC_MESSAGE_MAX_BYTES, deadLetterMessageMaxBytes } from './dead-letter-size';
 
 /**
  * The broker's principals and ACLs, derived from the topology contracts
@@ -238,6 +239,24 @@ export type BrokerTopicKind = 'stream' | 'retry' | 'dead-letter' | 'audit-trail'
 export interface BrokerTopic {
   readonly name: string;
   readonly kind: BrokerTopicKind;
+  /**
+   * Its `max.message.bytes`, always stated (PR #378 r2 F1): a source topic
+   * keeps Kafka's default, {@link TOPIC_MESSAGE_MAX_BYTES}; a dead-letter
+   * topic is above the largest limit of any topic that dead-letters into it
+   * by the added-header bound and GZIP's worst-case growth
+   * ({@link deadLetterMessageMaxBytes}). What that does and does not cover —
+   * not every source encoding, not fleet's parked dead letters — is stated in
+   * `dead-letter-size.ts`.
+   */
+  readonly maxMessageBytes: number;
+  /**
+   * A dead-letter topic's sources ({@link deadLetterSources}): every topic
+   * whose records its consumers can dead-letter into it. `create-topics.sh`
+   * derives the topic's limit on a running broker from their effective limits
+   * there, which may be larger than planned (PR #378 r4 F2). Absent for any
+   * other kind.
+   */
+  readonly sources?: readonly string[];
 }
 
 /**
@@ -250,14 +269,59 @@ export interface BrokerTopic {
  */
 export function brokerTopics(): BrokerTopic[] {
   const out = new Map<string, BrokerTopic>();
-  const add = (name: string, kind: BrokerTopicKind): void => {
-    out.set(name, { name, kind });
+  const add = (
+    name: string,
+    kind: BrokerTopicKind,
+    maxMessageBytes: number,
+    sources?: readonly string[],
+  ): void => {
+    out.set(name, { name, kind, maxMessageBytes, ...(sources ? { sources } : {}) });
   };
   for (const name of declaredTopics()) {
     // Evidence, retained as such: the explicit audit trail and the replay record.
-    add(name, name === AUDIT_TRAIL_TOPIC || name === OPS_REPLAY_TOPIC ? 'audit-trail' : 'stream');
-    add(`${name}${RETRY_TOPIC_SUFFIX}`, 'retry');
+    const kind = name === AUDIT_TRAIL_TOPIC || name === OPS_REPLAY_TOPIC ? 'audit-trail' : 'stream';
+    add(name, kind, TOPIC_MESSAGE_MAX_BYTES);
+    add(`${name}${RETRY_TOPIC_SUFFIX}`, 'retry', TOPIC_MESSAGE_MAX_BYTES);
   }
-  for (const [, { deadLetterTopic }] of consumers()) add(deadLetterTopic, 'dead-letter');
+  for (const [deadLetterTopic, sources] of deadLetterSources()) {
+    const limits = sources.map((source) => {
+      const topic = out.get(source);
+      if (!topic)
+        throw new Error(
+          `${deadLetterTopic} takes dead letters from ${source}, which no producer declares`,
+        );
+      return topic.maxMessageBytes;
+    });
+    const largest = Math.max(...limits);
+    add(deadLetterTopic, 'dead-letter', deadLetterMessageMaxBytes(largest), sources);
+  }
   return [...out.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * A topic's line in `topics.txt`: `<name> <kind> <max.message.bytes>`, and for
+ * a dead-letter topic its sources, comma-separated — what `create-topics.sh`
+ * reads (it has no topic list or topology of its own).
+ */
+export function brokerTopicLine(topic: BrokerTopic): string {
+  const line = `${topic.name} ${topic.kind} ${topic.maxMessageBytes}`;
+  return topic.sources ? `${line} ${topic.sources.join(',')}` : line;
+}
+
+/**
+ * Each dead-letter topic and every topic whose records can be dead-lettered
+ * into it: what its consumers subscribe to, and each one's `.retry` twin, which
+ * they read under the same declaration. From `TOPIC_CONSUMERS` alone.
+ */
+export function deadLetterSources(): Map<string, string[]> {
+  const sources = new Map<string, Set<string>>();
+  for (const [, { subscribes, deadLetterTopic }] of consumers()) {
+    const into = sources.get(deadLetterTopic) ?? new Set<string>();
+    for (const topic of subscribes) {
+      into.add(topic);
+      into.add(`${topic}${RETRY_TOPIC_SUFFIX}`);
+    }
+    sources.set(deadLetterTopic, into);
+  }
+  return new Map([...sources].map(([dlq, topics]) => [dlq, [...topics].sort()]));
 }

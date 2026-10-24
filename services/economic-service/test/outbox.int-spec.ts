@@ -1,3 +1,4 @@
+import { expireClaim, makeDue } from '@rasta/testing';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { asActor, cleanup, fundWallet, newPrisma, tenants, wire, type Wiring } from './helpers';
@@ -359,13 +360,19 @@ describe('transactional outbox (real database)', () => {
      * The claim window, without the fencing protocol.
      *
      * The token mechanics have their own suite against an isolated schema
-     * (document-service, `outbox-durable-claim.int-spec.ts`). A zero lease is
-     * used here so a claim never parks rows for another suite.
+     * (document-service, `outbox-durable-claim.int-spec.ts`). Explicit expiry
+     * after each claim avoids parking rows for another suite.
      */
-    const claimOwned = (limit: number) =>
-      store.claimPending({ limit, owner: 'econ-int-spec', leaseSeconds: 0 });
+    const claimOwned = async (limit: number) => {
+      const claimed = await store.claimPending({ limit, owner: 'econ-int-spec', leaseSeconds: 60 });
+      await expireClaim(
+        prisma,
+        claimed.rows.map((row) => row.id),
+      );
+      return claimed;
+    };
 
-    const NO_BACKOFF = { baseSeconds: 0, maxSeconds: 0 };
+    const BACKOFF = { baseSeconds: 5, maxSeconds: 60 };
 
     it('claims only unpublished rows, oldest first', async () => {
       const organizationId = `${org.a}-OUTBOX-CLAIM`;
@@ -412,7 +419,7 @@ describe('transactional outbox (real database)', () => {
       );
 
       const owned = await claimOwned(500);
-      expect(await store.markFailed(id, owned.token!, 'broker unreachable', NO_BACKOFF)).toBe(1);
+      expect(await store.markFailed(id, owned.token!, 'broker unreachable', BACKOFF)).toBe(1);
 
       const row = await runUnscoped('the outbox audit reads platform plumbing', () =>
         prisma.client.outboxMessage.findUnique({ where: { id } }),
@@ -450,12 +457,14 @@ describe('transactional outbox (real database)', () => {
       // Each failure releases the claim, so the row is re-claimed for the
       // second one — which is exactly what the relay does on its next tick.
       const first = await claimOwned(500);
-      expect(await store.markFailed(id, first.token!, 'broker unreachable', NO_BACKOFF)).toBe(1);
+      expect(await store.markFailed(id, first.token!, 'broker unreachable', BACKOFF)).toBe(1);
+      await makeDue(prisma, [id]);
       const second = await claimOwned(500);
-      expect(
-        await store.markFailed(id, second.token!, 'broker unreachable again', NO_BACKOFF),
-      ).toBe(1);
+      expect(await store.markFailed(id, second.token!, 'broker unreachable again', BACKOFF)).toBe(
+        1,
+      );
 
+      await makeDue(prisma, [id]);
       const retried = (await claimOwned(500)).rows.find((row) => row.id === id);
 
       expect(retried).toBeDefined();

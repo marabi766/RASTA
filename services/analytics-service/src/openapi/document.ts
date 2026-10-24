@@ -7,6 +7,9 @@ import { toJsonSchema } from './zod-schema';
 import { DashboardController } from '../maintenance/dashboard.controller';
 import { DashboardService } from '../maintenance/dashboard.service';
 import { fleetDashboardQuerySchema, fleetDashboardViewSchema } from '../maintenance/dto';
+import { KpiController } from '../kpis/kpi.controller';
+import { KpiService } from '../kpis/kpi.service';
+import { kpisQuerySchema, kpisViewSchema } from '../kpis/dto';
 
 /**
  * The published contract of analytics-service — **OpenAPI first**.
@@ -42,11 +45,13 @@ const apiErrorSchema = z
 /** Success responses, each with the status the handler actually answers. */
 export const RESPONSE_BODIES: Record<string, { status: '200'; schema: z.ZodTypeAny }> = {
   'GET /v1/dashboards/fleet': { status: '200', schema: fleetDashboardViewSchema },
+  'GET /v1/kpis': { status: '200', schema: kpisViewSchema },
 };
 
 /** Query parameters, from the schema the pipe validates with. */
 export const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/dashboards/fleet': fleetDashboardQuerySchema,
+  'GET /v1/kpis': kpisQuerySchema,
 };
 
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
@@ -65,7 +70,9 @@ const DESCRIPTION =
   'The governance view (aggregate-only, for AUDITOR) is not served yet; when it is, it answers ' +
   'only an organization that is a root of the hierarchy, as one group, for one closed period, ' +
   'from an immutable release — never a child subtree, never live facts (ADR-071 § 5). The ' +
-  'KPIs with INSUFFICIENT_BASELINE and the other dashboards follow (ADR-071 implementation plan).';
+  'tenant KPIs include completed-maintenance count and the recorded downtime baseline itself; ' +
+  'a missing exact baseline is INSUFFICIENT_BASELINE with value null. No savings formula is ' +
+  'chosen here. Other dashboards follow (ADR-071 implementation plan).';
 
 /** Builds the finished document for a booted application. */
 export function buildAnalyticsOpenApiDocument(app: INestApplication): OpenAPIObject {
@@ -86,8 +93,11 @@ export function buildAnalyticsOpenApiDocument(app: INestApplication): OpenAPIObj
  * endpoint and produces the same bytes on every machine.
  */
 @Module({
-  controllers: [DashboardController],
-  providers: [{ provide: DashboardService, useValue: {} }],
+  controllers: [DashboardController, KpiController],
+  providers: [
+    { provide: DashboardService, useValue: {} },
+    { provide: KpiService, useValue: {} },
+  ],
 })
 class DocumentationModule {}
 

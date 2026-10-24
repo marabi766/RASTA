@@ -128,7 +128,8 @@ export const STEP_INVENTORY = Object.freeze({
       REDIS_URL: ANY,
       ...MAILPIT,
     },
-    timeout: 12,
+    // Stopgap until the integration step is sharded (owner, 2026-10-24); back to 12 then.
+    timeout: 16,
   },
   'Economic coverage gate': coverageGate('economic'),
   'Marketplace coverage gate': coverageGate('marketplace'),
