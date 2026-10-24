@@ -44,32 +44,64 @@ tests:
         exp_alerts: []
 
   # ---------------------------------------------------------------------------
-  # RastaIdentityKeycloakReassertMarkLost
+  # RastaIdentityKeycloakAccountMissing (D-069)
   # ---------------------------------------------------------------------------
   - interval: 1m
     input_series:
-      # Marks stored throughout; one fails at minute 5.
-      - series: 'rasta_identity_keycloak_reassert_marks_total{reason="unconfirmed",outcome="recorded",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
-        values: '0+1x20'
-      - series: 'rasta_identity_keycloak_reassert_marks_total{reason="rolled_back",outcome="failed",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
-        values: '0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+      # Live and due fences come and go; one becomes terminal at minute 5 and an
+      # operator resolves it at minute 12.
+      - series: 'rasta_identity_keycloak_write_fences{state="live",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '3x20'
+      - series: 'rasta_identity_keycloak_write_fences{state="due",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '1x20'
+      - series: 'rasta_identity_keycloak_write_fences{state="account_missing",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0 0 0 0 0 1x6 0x8'
     alert_rule_test:
-      # Stored marks alone never fire it.
+      # Live and due fences alone never fire it.
       - eval_time: 4m
-        alertname: RastaIdentityKeycloakReassertMarkLost
+        alertname: RastaIdentityKeycloakAccountMissing
         exp_alerts: []
-      - eval_time: 6m
-        alertname: RastaIdentityKeycloakReassertMarkLost
+      - eval_time: 5m
+        alertname: RastaIdentityKeycloakAccountMissing
         exp_alerts:
           - exp_labels:
-              severity: critical
+              severity: warning
             exp_annotations:
-              summary: 'A Keycloak re-assertion mark could not be stored'
-              description: "identity-service could not record that a user's Keycloak attributes may disagree with the database (a write whose answer was lost, or one that landed in a rolled-back transaction). Until a projection of that user lands, Keycloak may hold more or less than the rows. Run keycloak:reconcile, then keycloak:backfill once the database is healthy. The log names the user; this alert deliberately does not."
+              summary: '1 Keycloak write fences name an account Keycloak no longer has'
+              description: "On re-assertion, Keycloak answered 404 for the account a write of these users addressed. Their fences are terminal (keycloak_write_attempt.account_missing_at): not retried, kept for an operator. No token can be minted for a missing account. Find the users in keycloak_write_attempt WHERE account_missing_at IS NOT NULL, and either restore the account and run keycloak:backfill, or correct the user's keycloak_id; the fence is cleared by the next projection that lands. The log names each user; this alert deliberately does not."
               runbook: docs/runbooks/keycloak-projection.md
-      # Ten minutes on, the failure has left the window.
-      - eval_time: 16m
-        alertname: RastaIdentityKeycloakReassertMarkLost
+      # Resolved: the next pass publishes zero.
+      - eval_time: 12m
+        alertname: RastaIdentityKeycloakAccountMissing
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaIdentityKeycloakReassertBacklog (D-069)
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # One due fence from minute 1, re-asserted at minute 25.
+      - series: 'rasta_identity_keycloak_write_fences{state="due",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0 1x23 0x6'
+      # Terminal fences are not a backlog: they are never retried.
+      - series: 'rasta_identity_keycloak_write_fences{state="account_missing",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0x30'
+    alert_rule_test:
+      # Due, but within the sweep's backoff: not yet.
+      - eval_time: 20m
+        alertname: RastaIdentityKeycloakReassertBacklog
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: RastaIdentityKeycloakReassertBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: '1 Keycloak write fences are past takeover and not re-asserted'
+              description: "Keycloak writes whose outcome was never confirmed can no longer land, but for 20 minutes the sweep has not managed to write the users' committed state over them (keycloak_write_attempt, takeover_at passed). Until it does, Keycloak may hold what an old write carried — at most what the rows granted when it was sent — and that user's tokens may say so; a narrowing change of the user is not held back by these. Restore Keycloak; the sweep retries on its own, and keycloak:backfill re-asserts everyone. The log names the users; this alert deliberately does not."
+              runbook: docs/runbooks/keycloak-projection.md
+      - eval_time: 26m
+        alertname: RastaIdentityKeycloakReassertBacklog
         exp_alerts: []
 
   # ---------------------------------------------------------------------------
@@ -100,7 +132,7 @@ tests:
               severity: warning
             exp_annotations:
               summary: 'Demotions and revocations are being refused: Keycloak cannot be written'
-              description: 'For ten minutes, role removals, revocations or lapses have been refused (503 KEYCLOAK_UNAVAILABLE) because their write to Keycloak was refused, went unanswered, or a lost write of the same user was still settling. Nothing was committed: the old roles still stand in the database and in Keycloak. Restore Keycloak; the requests can be repeated as they are, and the expiry sweep retries on its own.'
+              description: 'For ten minutes, role removals, revocations or lapses have been refused (503 KEYCLOAK_UNAVAILABLE, or KEYCLOAK_WRITE_SETTLING for one user) because their write to Keycloak was refused, went unanswered, or an earlier write of the same user could still land. Nothing was committed: the old roles still stand in the database and in Keycloak. Restore Keycloak; the requests can be repeated as they are, and the expiry sweep retries on its own.'
               runbook: docs/runbooks/keycloak-projection.md
       # Keycloak back at 16: no new refusals within the 5-minute window after 21.
       - eval_time: 23m

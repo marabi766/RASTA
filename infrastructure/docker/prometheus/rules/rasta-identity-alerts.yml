@@ -11,7 +11,8 @@
 #   promtool test rules /etc/prometheus/tests/rasta-identity-alerts.test.yml
 #
 # What is at stake: a demotion, a revocation or a lapse is written to Keycloak before
-# it commits, and refused (503 KEYCLOAK_UNAVAILABLE) when Keycloak cannot be written.
+# it commits, and refused (503 KEYCLOAK_UNAVAILABLE) when Keycloak cannot be written, or
+# (503 KEYCLOAK_WRITE_SETTLING) while an earlier write of that user may still land (D-069).
 # Nothing is ever committed unenforced, so none of these is a token leak; each is a
 # change the platform has not been able to make yet, or a repair it cannot schedule.
 #
@@ -40,17 +41,34 @@ groups:
           description: "The membership expiry sweep has lapses past validUntil that it has not acted on for 20 minutes. identity-service already refuses them, but each stays in the user's Keycloak attributes, and so in new tokens, until its write lands; the gateway's cutoff covers those tokens only once the lapse is acted on and its MEMBERSHIP_EXPIRED is out. The identity-service log names each membership and why it failed (Keycloak refused, unreachable, or a write of the user still settling). This alert deliberately carries none of them."
           runbook: docs/runbooks/keycloak-projection.md
 
-      # A re-assertion mark could not be stored: a Keycloak write of a user ended
-      # without an answer, or landed in a transaction that rolled back, and the database
-      # refused the mark. That user is neither held back from a narrowing that an old
-      # write could overtake, nor re-projected by the sweep. Any one is acted on.
-      - alert: RastaIdentityKeycloakReassertMarkLost
-        expr: sum(increase(rasta_identity_keycloak_reassert_marks_total{outcome="failed"}[10m])) > 0
+      # D-069: a Keycloak write fence became terminal — on re-assertion, Keycloak answered
+      # 404 for the account the write addressed. Nothing can mint a token for an account
+      # that does not exist, so no access is at stake; but the user row names an account
+      # Keycloak no longer has (deleted in the console, a realm restored from an old
+      # export), which only an operator can resolve. The fence stays in the table, is
+      # never retried, and keeps this alert up until an operator acts. Any one is acted on.
+      - alert: RastaIdentityKeycloakAccountMissing
+        expr: max(rasta_identity_keycloak_write_fences{state="account_missing"}) > 0
         labels:
-          severity: critical
+          severity: warning
         annotations:
-          summary: 'A Keycloak re-assertion mark could not be stored'
-          description: "identity-service could not record that a user's Keycloak attributes may disagree with the database (a write whose answer was lost, or one that landed in a rolled-back transaction). Until a projection of that user lands, Keycloak may hold more or less than the rows. Run keycloak:reconcile, then keycloak:backfill once the database is healthy. The log names the user; this alert deliberately does not."
+          summary: '{{ $value }} Keycloak write fences name an account Keycloak no longer has'
+          description: "On re-assertion, Keycloak answered 404 for the account a write of these users addressed. Their fences are terminal (keycloak_write_attempt.account_missing_at): not retried, kept for an operator. No token can be minted for a missing account. Find the users in keycloak_write_attempt WHERE account_missing_at IS NOT NULL, and either restore the account and run keycloak:backfill, or correct the user's keycloak_id; the fence is cleared by the next projection that lands. The log names each user; this alert deliberately does not."
+          runbook: docs/runbooks/keycloak-projection.md
+
+      # D-069: write fences past takeover that the sweep has not re-asserted. A fence is
+      # due once its write can no longer land (deadline + KEYCLOAK_WRITE_SETTLE_SECONDS);
+      # the sweep re-asserts every interval and backs a failing user off up to 16
+      # intervals, so a due fence that lasts 20 minutes is a user it keeps failing to
+      # re-assert. Until it is, Keycloak may hold what an old write carried.
+      - alert: RastaIdentityKeycloakReassertBacklog
+        expr: max(rasta_identity_keycloak_write_fences{state="due"}) > 0
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $value }} Keycloak write fences are past takeover and not re-asserted'
+          description: "Keycloak writes whose outcome was never confirmed can no longer land, but for 20 minutes the sweep has not managed to write the users' committed state over them (keycloak_write_attempt, takeover_at passed). Until it does, Keycloak may hold what an old write carried — at most what the rows granted when it was sent — and that user's tokens may say so; a narrowing change of the user is not held back by these. Restore Keycloak; the sweep retries on its own, and keycloak:backfill re-asserts everyone. The log names the users; this alert deliberately does not."
           runbook: docs/runbooks/keycloak-projection.md
 
       # Narrowing changes refused because Keycloak could not be written first, for ten
@@ -63,5 +81,5 @@ groups:
           severity: warning
         annotations:
           summary: 'Demotions and revocations are being refused: Keycloak cannot be written'
-          description: 'For ten minutes, role removals, revocations or lapses have been refused (503 KEYCLOAK_UNAVAILABLE) because their write to Keycloak was refused, went unanswered, or a lost write of the same user was still settling. Nothing was committed: the old roles still stand in the database and in Keycloak. Restore Keycloak; the requests can be repeated as they are, and the expiry sweep retries on its own.'
+          description: 'For ten minutes, role removals, revocations or lapses have been refused (503 KEYCLOAK_UNAVAILABLE, or KEYCLOAK_WRITE_SETTLING for one user) because their write to Keycloak was refused, went unanswered, or an earlier write of the same user could still land. Nothing was committed: the old roles still stand in the database and in Keycloak. Restore Keycloak; the requests can be repeated as they are, and the expiry sweep retries on its own.'
           runbook: docs/runbooks/keycloak-projection.md
