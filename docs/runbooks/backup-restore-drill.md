@@ -45,7 +45,7 @@ dump متوقف می‌شود و PostgreSQL تازه با volume جدا شروع
 
 گزارش JSON با مجوز `0600` و نسخه قالب `2` نوشته می‌شود. `passed: true` و کد خروج
 صفر فقط وقتی رخ می‌دهد که همه مقایسه‌ها و پاکسازی موفق باشند. `databases` برای هر
-پایگاه `before`، `after`، `tablesEqual`، `migrationsEqual` و `databaseStateEqual` دارد. شمارش‌ها و مبالغ
+پایگاه `before`، `after`، `tablesEqual`، `migrationsEqual` و `databaseStateEqual` دارد. تعداد سطرها و مبالغ
 به صورت رشته دهدهی هستند؛ تبدیل به Number انجام نمی‌شود.
 
 - فهرست همه جدول‌های غیرسیستمی در همه schemaها و تعداد دقیق سطرها برابر است؛

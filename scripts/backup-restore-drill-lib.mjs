@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 
-// Counts and money stay decimal strings: PostgreSQL count/SUM can exceed JS's safe integer.
+// Row counts and money stay decimal strings: PostgreSQL count/SUM can exceed JS's safe integer.
 function count(value) {
   if (typeof value !== 'string' || !/^\d+$/.test(value)) throw new Error('Invalid count');
   return BigInt(value);
