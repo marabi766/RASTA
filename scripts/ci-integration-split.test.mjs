@@ -229,7 +229,7 @@ test('a test step without its time limit, or above it, is refused', () => {
   fails(expression, /"Construction coverage gate" has no timeout-minutes/);
   const aboveJob = real();
   aboveJob.jobs['integration-suites']['timeout-minutes'] = 10;
-  fails(aboveJob, /"Integration tests" has timeout-minutes 12, above its job's 10/);
+  fails(aboveJob, /"Integration tests" has timeout-minutes 16, above its job's 10/);
   const tightened = real();
   stepNamed(tightened, 'Construction coverage gate')['timeout-minutes'] = 7;
   assert.deepEqual(checkIntegrationSplit(tightened), []);

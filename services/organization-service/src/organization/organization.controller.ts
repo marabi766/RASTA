@@ -99,6 +99,21 @@ export class OrganizationController {
     return this.organizations.get(id);
   }
 
+  @Get(':id/procurement-thresholds')
+  @AllowService(CONSTRUCTION_SERVICE)
+  @ApiOperation({
+    summary: 'Effective procurement thresholds for construction-service',
+    description:
+      'Service callers only (construction-service). Person/session callers and other services ' +
+      'receive 403. The token organization must equal the requested id exactly; otherwise 404 ' +
+      'without existence details. Returns only { organizationId, policy: { id, value } | null }.',
+  })
+  procurementThresholds(
+    @Param('id') id: string,
+  ): ReturnType<OrganizationService['procurementThresholds']> {
+    return this.organizations.procurementThresholds(id);
+  }
+
   @Get(':id/children')
   @ApiOperation({ summary: 'Direct children' })
   children(@Param('id') id: string) {
@@ -176,7 +191,11 @@ export class OrganizationController {
    * and `OrganizationService.setPolicy` refuses every role not configured.
    */
   @Post(':id/policies')
-  @ApiOperation({ summary: 'Set a governance policy value' })
+  @ApiOperation({
+    summary: 'Set a governance policy value',
+    description:
+      'For construction.tender.procurement_thresholds, value must satisfy the strict procurementThresholdsSchema contract (all four natures, integer-string or null inclusive bounds, min <= max, WARN or REJECT). Malformed tables answer 400 VALIDATION_FAILED before any policy replacement.',
+  })
   setPolicy(@Param('id') id: string, @Body(zodPipe(setPolicySchema)) dto: SetPolicyDto) {
     return this.organizations.setPolicy(id, dto);
   }
