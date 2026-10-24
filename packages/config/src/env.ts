@@ -7,6 +7,7 @@ import {
   withUtcSession,
 } from './database-session';
 import { envIssues, type EnvIssue } from './env-issues';
+import { tryReadUrl } from './url-reader';
 
 export type { EnvIssue } from './env-issues';
 
@@ -36,10 +37,8 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 export function urlWithProtocol(protocols: readonly string[], label: string) {
   const messages = urlWithProtocolMessages(protocols, label);
   return z.string().superRefine((value, ctx) => {
-    let parsed: URL;
-    try {
-      parsed = new URL(value);
-    } catch {
+    const parsed = tryReadUrl(value);
+    if (parsed === null) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: messages.invalid });
       return;
     }
@@ -70,6 +69,23 @@ export function urlWithProtocolMessages(protocols: readonly string[], label: str
 }
 
 export const httpUrlSchema = urlWithProtocol(['http:', 'https:'], 'URL');
+
+/** What {@link serviceUrlSchema} refuses a URL with a username or password with. */
+export const URL_CREDENTIALS_REFUSED = 'URL must not include a username or password';
+
+/**
+ * The base URL of a service called with `fetch`: an http(s) URL with a host,
+ * and **no username or password**. `fetch` refuses
+ * to build a request from a URL with credentials, and its TypeError repeats the
+ * URL whole — the password in it — into whatever logs the failure (#385 r5).
+ * Nothing that works is refused: such a URL fails every call.
+ */
+export const serviceUrlSchema = httpUrlSchema.superRefine((value, ctx) => {
+  const parsed = tryReadUrl(value);
+  if (parsed !== null && (parsed.username !== '' || parsed.password !== '')) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: URL_CREDENTIALS_REFUSED });
+  }
+});
 export const postgresUrlSchema = urlWithProtocol(
   ['postgresql:', 'postgres:'],
   'Database connection string',
@@ -582,6 +598,7 @@ export const CONFIG_ENV_MESSAGES: readonly string[] = Object.freeze([
     urlWithProtocolMessages(['postgresql:', 'postgres:'], 'Database connection string'),
     urlWithProtocolMessages(['redis:', 'rediss:'], 'Redis URL'),
   ].flatMap((messages) => Object.values(messages)),
+  URL_CREDENTIALS_REFUSED,
   DATABASE_URL_CONTROL_CHARACTER,
   DATABASE_URL_REPEATED_OPTIONS,
 ]);

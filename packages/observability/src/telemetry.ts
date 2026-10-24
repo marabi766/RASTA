@@ -28,6 +28,8 @@ import {
   type SpanKind,
   type Link,
 } from '@opentelemetry/api';
+import { tryReadUrl } from '@rasta/config';
+import { installSafeDiagnostics, withoutSdkLogLevel } from './diagnostics';
 import { RedactingSampler, RedactingSpanProcessor } from './url-redaction';
 
 /**
@@ -104,9 +106,29 @@ export class RastaSampler implements Sampler {
 
 let sdk: NodeSDK | undefined;
 
+/**
+ * What `initTelemetry` refuses an explicit OTLP endpoint that is not a URL
+ * with: the OTLP exporter's own refusal quotes it, credentials included.
+ */
+export const UNREADABLE_OTLP_ENDPOINT =
+  'OTEL_EXPORTER_OTLP_ENDPOINT cannot be read as a URL; its value is not repeated';
+
+/** What a failure to build the explicit trace exporter is reported with, instead of its error. */
+export const TRACE_EXPORTER_REFUSED =
+  'the OTLP trace exporter could not be built from OTEL_EXPORTER_OTLP_ENDPOINT; ' +
+  "the exporter's own error is withheld, it may repeat the endpoint";
+
 export function initTelemetry(config: TelemetryConfig): NodeSDK | undefined {
   if (config.enabled === false) return undefined;
   if (sdk) return sdk;
+
+  // Before anything of the SDK runs — `getNodeAutoInstrumentations` below reads
+  // its own variables, and the constructor reads the rest, `OTEL_SDK_DISABLED`
+  // first: whatever they report goes through the safe logger (diagnostics.ts).
+  const reinstallDiagnostics = installSafeDiagnostics();
+  if (config.otlpEndpoint !== undefined && tryReadUrl(config.otlpEndpoint) === null) {
+    throw new Error(UNREADABLE_OTLP_ENDPOINT);
+  }
 
   // OpenTelemetry 2.x replaced the `Resource` class with a factory; the
   // attributes it carries are unchanged.
@@ -119,39 +141,46 @@ export function initTelemetry(config: TelemetryConfig): NodeSDK | undefined {
 
   let spanProcessors: SpanProcessor[] | undefined;
 
-  sdk = new NodeSDK({
-    resource,
-    // Sanitizes what a span is started with before the SDK cuts it; the
-    // redacting span processor below takes everything written after.
-    sampler: new RedactingSampler(new RastaSampler(config.sampleRatio ?? 1)),
-    // Built when `start()` reads it — after NodeSDK has registered its meter
-    // provider, at the point where it would build the same processors itself —
-    // and not at all under `OTEL_SDK_DISABLED`, where `start()` reads nothing.
-    get spanProcessors(): SpanProcessor[] {
-      spanProcessors ??= spanPipeline(config);
-      return spanProcessors;
-    },
-    logRecordProcessors: config.logRecordExporter
-      ? [new logs.SimpleLogRecordProcessor({ exporter: config.logRecordExporter })]
-      : undefined,
-    instrumentations: [
-      getNodeAutoInstrumentations({
-        // Filesystem spans are enormous in volume and near-useless for
-        // diagnosing a distributed system.
-        '@opentelemetry/instrumentation-fs': { enabled: false },
-        '@opentelemetry/instrumentation-http': {
-          // Health and metrics endpoints are polled constantly; tracing them
-          // buries the requests that matter.
-          ignoreIncomingRequestHook: (request) => {
-            const url = request.url ?? '';
-            return url.startsWith('/health') || url.startsWith('/metrics');
-          },
+  // With OTEL_LOG_LEVEL hidden, so the constructor installs no console logger
+  // of its own over the safe one.
+  sdk = withoutSdkLogLevel(
+    () =>
+      new NodeSDK({
+        resource,
+        // Sanitizes what a span is started with before the SDK cuts it; the
+        // redacting span processor below takes everything written after.
+        sampler: new RedactingSampler(new RastaSampler(config.sampleRatio ?? 1)),
+        // Built when `start()` reads it — after NodeSDK has registered its meter
+        // provider, at the point where it would build the same processors itself —
+        // and not at all under `OTEL_SDK_DISABLED`, where `start()` reads nothing.
+        get spanProcessors(): SpanProcessor[] {
+          spanProcessors ??= spanPipeline(config);
+          return spanProcessors;
         },
+        logRecordProcessors: config.logRecordExporter
+          ? [new logs.SimpleLogRecordProcessor({ exporter: config.logRecordExporter })]
+          : undefined,
+        instrumentations: [
+          getNodeAutoInstrumentations({
+            // Filesystem spans are enormous in volume and near-useless for
+            // diagnosing a distributed system.
+            '@opentelemetry/instrumentation-fs': { enabled: false },
+            '@opentelemetry/instrumentation-http': {
+              // Health and metrics endpoints are polled constantly; tracing them
+              // buries the requests that matter.
+              ignoreIncomingRequestHook: (request) => {
+                const url = request.url ?? '';
+                return url.startsWith('/health') || url.startsWith('/metrics');
+              },
+            },
+          }),
+        ],
       }),
-    ],
-  });
-
+  );
+  // Again, after construction and after start, should anything have replaced it.
+  reinstallDiagnostics();
   sdk.start();
+  reinstallDiagnostics();
   return sdk;
 }
 
@@ -178,16 +207,26 @@ function spanPipeline(config: TelemetryConfig): SpanProcessor[] {
   const selfMetrics = core.getBooleanFromEnv('OTEL_NODE_EXPERIMENTAL_SDK_METRICS')
     ? metrics.getMeterProvider()
     : undefined;
-  const exporter =
-    config.traceExporter ??
-    (config.otlpEndpoint
-      ? new OTLPTraceExporter({ url: `${config.otlpEndpoint.replace(/\/$/, '')}/v1/traces` })
-      : undefined);
+  const exporter = config.traceExporter ?? otlpTraceExporter(config.otlpEndpoint);
   const exporting = exporter
     ? [createBatchSpanProcessorFromEnv(exporter, selfMetrics)]
     : getSpanProcessorsFromEnv(selfMetrics);
   return exporting.length > 0 ? [new RedactingSpanProcessor(), ...exporting] : [];
 }
+
+/**
+ * The OTLP exporter at `otlpEndpoint`, or undefined without one. Its own
+ * refusal of a URL it cannot use quotes the URL; this one is fixed.
+ */
+function otlpTraceExporter(otlpEndpoint: string | undefined): SpanExporter | undefined {
+  if (!otlpEndpoint) return undefined;
+  try {
+    return new OTLPTraceExporter({ url: `${otlpEndpoint.replace(/\/$/, '')}/v1/traces` });
+  } catch {
+    throw new Error(TRACE_EXPORTER_REFUSED);
+  }
+}
+
 export async function shutdownTelemetry(): Promise<void> {
   if (!sdk) return;
   await sdk.shutdown();

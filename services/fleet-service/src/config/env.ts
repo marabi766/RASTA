@@ -3,10 +3,10 @@ import {
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
-  httpUrlSchema,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import {
   CONSUMER_SESSION_TIMEOUT_MS,
@@ -32,14 +32,14 @@ export const fleetEnvSchema = baseEnvSchema
      * meets an expired transfer fence (ADR-062 § 3b). Required, with no
      * default: a missing one is found at boot, not at the first expired fence.
      */
-    ASSET_SERVICE_URL: httpUrlSchema,
+    ASSET_SERVICE_URL: serviceUrlSchema,
 
     /**
      * maintenance-service, asked whether a repair is in progress when a
      * replayed `MAINTENANCE_STARTED` / `MAINTENANCE_COMPLETED` refreshes the
      * replica's in-maintenance flag (D-039). Required, like the asset one.
      */
-    MAINTENANCE_SERVICE_URL: httpUrlSchema,
+    MAINTENANCE_SERVICE_URL: serviceUrlSchema,
 
     /** One such question, body included. A timeout refuses the assignment. */
     ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: z.coerce

@@ -7,6 +7,7 @@ import {
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { CLAIM_STATUSES } from '../asset/dto';
 import { INSURANCE_COVERAGES } from '../insurance/ownership';
@@ -124,14 +125,14 @@ export const assetEnvSchema = baseEnvSchema
      * transfer (ADR-062). Required, with no default: without them no transfer
      * can be cleared, which is better found at boot than at the first one.
      */
-    FLEET_SERVICE_URL: z.string().url(),
-    MAINTENANCE_SERVICE_URL: z.string().url(),
+    FLEET_SERVICE_URL: serviceUrlSchema,
+    MAINTENANCE_SERVICE_URL: serviceUrlSchema,
     /**
      * document-service, asked who owns a document before a reference to it is
      * stored (EXP-002 slice 7). Required: without it nothing can be verified,
      * and an unverified document is never attached.
      */
-    DOCUMENT_SERVICE_URL: z.string().url(),
+    DOCUMENT_SERVICE_URL: serviceUrlSchema,
     /** One document lookup, body included. A timeout refuses the attach (503-class). */
     ASSET_DOCUMENT_LOOKUP_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
 

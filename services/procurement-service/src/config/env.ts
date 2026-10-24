@@ -13,6 +13,7 @@ import {
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { procurementOperationBudgets } from './operation-budgets';
 import { isKekId, parseKekConfiguration, parseKekEntries } from '../rfq/key-provider';
@@ -332,7 +333,7 @@ export const procurementEnvSchema = baseEnvSchema
      * with a token signed for no tenant, before the issue's transaction. Unreachable, or anything
      * but a well-formed 200, refuses the issue (503; 504 past the timeout) and writes nothing.
      */
-    SUPPLIER_SERVICE_URL: z.string().url().default('http://localhost:3108'),
+    SUPPLIER_SERVICE_URL: serviceUrlSchema.default('http://localhost:3108'),
     PROCUREMENT_SUPPLIER_REQUEST_TIMEOUT_MS: z.coerce
       .number()
       .int()

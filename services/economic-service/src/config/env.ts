@@ -1,15 +1,16 @@
 import { z } from 'zod';
 import { businessLineSchema } from '@rasta/contracts';
 import {
-  EnvValidationError,
   authEnvSchema,
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
+  EnvValidationError,
   fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { economicOperationBudgets } from './operation-budgets';
 
@@ -236,10 +237,10 @@ export const economicEnvSchema = baseEnvSchema
      * confirm an approval, so it could never record an obligation. That is
      * better found at boot than as a DLQ full of good events.
      */
-    MAINTENANCE_SERVICE_URL: z.string().url(),
-    FLEET_SERVICE_URL: z.string().url(),
+    MAINTENANCE_SERVICE_URL: serviceUrlSchema,
+    FLEET_SERVICE_URL: serviceUrlSchema,
     /** The owner of an approved contract statement (ADR-068 § 6 (2)); required for the same reason. */
-    CONTRACT_SERVICE_URL: z.string().url(),
+    CONTRACT_SERVICE_URL: serviceUrlSchema,
 
     /**
      * The business line a contract statement's obligation is recorded under
@@ -267,7 +268,7 @@ export const economicEnvSchema = baseEnvSchema
      * organization-service, the owner of the hierarchy (A-13), asked as
      * construction-service and contract-service ask it.
      */
-    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+    ORGANIZATION_SERVICE_URL: serviceUrlSchema.default('http://localhost:3102'),
 
     /**
      * How long that question may take, body included. It is asked under the

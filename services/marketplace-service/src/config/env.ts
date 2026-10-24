@@ -10,6 +10,7 @@ import {
   loadEnv,
   outboxPurgeEnvSchema,
   PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { marketplaceOperationBudgets } from './operation-budgets';
 
@@ -38,7 +39,7 @@ export const marketplaceEnvSchema = baseEnvSchema
     CORS_ORIGINS: z.string().default(''),
 
     /** Where the order saga sends its financial commands (ADR-040). */
-    ECONOMIC_SERVICE_URL: z.string().url().default('http://localhost:3112'),
+    ECONOMIC_SERVICE_URL: serviceUrlSchema.default('http://localhost:3112'),
 
     /**
      * How long a call to economic-service may take before the activity fails
@@ -51,7 +52,7 @@ export const marketplaceEnvSchema = baseEnvSchema
      * dispute (docs/24 Q-136): organization-service, the owner of the
      * hierarchy (A-13), asked as economic-service asks it.
      */
-    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+    ORGANIZATION_SERVICE_URL: serviceUrlSchema.default('http://localhost:3102'),
 
     /**
      * How long that question may take, body included. It is asked under the
@@ -72,7 +73,7 @@ export const marketplaceEnvSchema = baseEnvSchema
      * cancelled whether a shipment exists for it, and asked to withdraw a dispatch reservation
      * when one is reconciled (Q-133 (9)(a)).
      */
-    INVENTORY_SERVICE_URL: z.string().url().default('http://localhost:3109'),
+    INVENTORY_SERVICE_URL: serviceUrlSchema.default('http://localhost:3109'),
 
     /**
      * How long that question may take, body included. Asked before the command's transaction,

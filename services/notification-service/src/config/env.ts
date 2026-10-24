@@ -4,10 +4,10 @@ import {
   baseEnvSchema,
   databaseEnvSchema,
   fixedEnvMessages,
-  httpUrlSchema,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { notificationOperationBudgets } from './operation-budgets';
 
@@ -95,7 +95,7 @@ export const notificationEnvSchema = baseEnvSchema
     CORS_ORIGINS: z.string().default(''),
 
     /** Where recipient resolution goes. Never the gateway (D-007). */
-    IDENTITY_SERVICE_URL: httpUrlSchema,
+    IDENTITY_SERVICE_URL: serviceUrlSchema,
 
     /** Per-call ceiling on the identity request. */
     NOTIFICATION_IDENTITY_REQUEST_TIMEOUT_MS: z.coerce

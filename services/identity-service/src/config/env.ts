@@ -1,13 +1,14 @@
 import { z } from 'zod';
 import {
+  authEnvSchema,
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
-  kafkaEnvSchema,
-  authEnvSchema,
   fixedEnvMessages,
+  kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { AGGREGATION_WINDOW_SECONDS } from '../security-events/refusal-aggregation';
 import { roleSchema, type PlatformRole } from '../identity/dto';
@@ -88,7 +89,7 @@ export const identityEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    KEYCLOAK_URL: z.string().url(),
+    KEYCLOAK_URL: serviceUrlSchema,
     KEYCLOAK_REALM: z.string().min(1),
     KEYCLOAK_BACKEND_CLIENT_ID: z.string().min(1),
     KEYCLOAK_BACKEND_CLIENT_SECRET: z.string().min(1),
@@ -146,7 +147,7 @@ export const identityEnvSchema = baseEnvSchema
      * Required, with no default: a correction must never be validated against
      * whatever happened to be listening on a guessed address.
      */
-    AUDIT_SERVICE_URL: z.string().url(),
+    AUDIT_SERVICE_URL: serviceUrlSchema,
 
     /**
      * The whole correction-target lookup, body included. Finite, so a slow

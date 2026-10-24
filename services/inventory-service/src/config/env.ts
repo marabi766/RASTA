@@ -9,6 +9,7 @@ import {
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { inventoryOperationBudgets } from './operation-budgets';
 
@@ -210,7 +211,7 @@ export const inventoryEnvSchema = baseEnvSchema
      * is recorded, the request is read there and its dispatch reserved (A-13, ADR-061 § 4; Codex
      * r1 on #336) — over REST with an internal token signed for the supplier, never its database.
      */
-    MARKETPLACE_SERVICE_URL: z.string().url().default('http://localhost:3106'),
+    MARKETPLACE_SERVICE_URL: serviceUrlSchema.default('http://localhost:3106'),
     /**
      * How long each of those two exchanges may take, body included. Both run before the
      * command's transaction, never inside it; one that does not answer in time refuses the

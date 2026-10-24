@@ -38,12 +38,13 @@
 // rows); KAFKA_SASL_PASSWORD_<SERVICE> and the producer's. The event id passes
 // from `refused` to `consumed` in PREFLIGHT_STATE_DIR (default /tmp/rasta-logs).
 // -----------------------------------------------------------------------------
-import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
+import { UnreadableUrlError, readUrl, tryReadUrl } from '../packages/config/src/url-reader.js';
 import { withUtcSession } from './prisma-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -200,9 +201,63 @@ const CONSUME_TIMEOUT_MS = 180_000;
 
 const required = (name) => {
   const value = process.env[name];
-  if (!value) throw new Error(`${name} is not set`);
+  if (!value) throw new PreflightFailure(`${name} is not set`);
   return value;
 };
+
+/**
+ * A refusal of this script, printed as it is: a fixed text, or one that quotes
+ * the service's output only after {@link withoutCredentials}. Not `node:assert`
+ * — an AssertionError's message and stack carry both compared values, here the
+ * owner URL's username, and the rejection handler below printed that stack
+ * (#385 r5).
+ */
+class PreflightFailure extends Error {
+  name = 'PreflightFailure';
+}
+
+/** Throws a {@link PreflightFailure} with `text` unless `condition` holds. */
+function check(condition, text) {
+  if (!condition) throw new PreflightFailure(text);
+}
+
+/**
+ * Every credential this run was handed — each `*PASSWORD*` variable's value,
+ * and the username and password of every URL in the environment, raw and
+ * decoded — longest first. Shorter than three characters is not looked for:
+ * it would be found in any text.
+ */
+function credentialsIn(env) {
+  const found = new Set();
+  for (const [name, value] of Object.entries(env)) {
+    if (!value) continue;
+    if (name.includes('PASSWORD')) found.add(value);
+    const url = tryReadUrl(value);
+    for (const part of url === null ? [] : [url.username, url.password]) {
+      found.add(part);
+      try {
+        found.add(decodeURIComponent(part));
+      } catch {
+        // Not percent-encoding: the raw form is looked for already.
+      }
+    }
+  }
+  return [...found].filter((part) => part.length >= 3).sort((a, b) => b.length - a.length);
+}
+
+const CREDENTIALS = credentialsIn(process.env);
+
+/**
+ * `text` this script did not write — the service's output, a Kafka or Prisma
+ * error — with every credential of this run replaced (#385 r5). What it passes
+ * through is the service's and the clients' own; the credentials are this
+ * run's, and never printed.
+ */
+const withoutCredentials = (text) =>
+  CREDENTIALS.reduce(
+    (shown, credential) => shown.replaceAll(credential, '<credential>'),
+    `${text}`,
+  );
 
 const kafkaAs = (principal) =>
   new Kafka({
@@ -304,12 +359,18 @@ function startWithOwnerUrl(service, spec, ownerUrl) {
 
 async function refused(service, spec) {
   const ownerUrl = required('PREFLIGHT_OWNER_URL');
-  assert.equal(new URL(ownerUrl).username, spec.migrator, `not ${spec.migrator}'s URL`);
-  const ownerPassword = decodeURIComponent(new URL(ownerUrl).password);
+  const owner = readUrl(ownerUrl, {
+    refusal: 'PREFLIGHT_OWNER_URL cannot be read as a URL; its value is not repeated',
+  });
+  check(
+    owner.username === spec.migrator,
+    `PREFLIGHT_OWNER_URL is not ${spec.migrator}'s URL; its username is not repeated`,
+  );
+  const ownerPassword = decodeURIComponent(owner.password);
   const group = spec.group();
 
   const before = await groupView(service, group, spec.topic);
-  assert.equal(before.state, 'Dead', `${group} has run before; the proof needs a fresh group`);
+  check(before.state === 'Dead', `${group} has run before; the proof needs a fresh group`);
   const eventId = await queueEvent(spec);
   writeFileSync(stateFile(service), JSON.stringify({ group, eventId, before: before.offsets }));
   console.log(
@@ -317,24 +378,28 @@ async function refused(service, spec) {
   );
 
   const run = await startWithOwnerUrl(service, spec, ownerUrl);
-  assert.equal(run.timedOut, false, `${service} kept running with the owner URL:\n${run.output}`);
-  assert.notEqual(run.code, 0, `${service} exited 0 with the owner URL:\n${run.output}`);
-  assert.match(run.output, /RuntimeRoleRefusedError/, run.output);
-  assert.match(
-    run.output,
-    new RegExp(`${service} refuses to start: it is connected as ${spec.migrator}`),
+  // Checked first, and the output is only ever quoted without this run's
+  // credentials: a service that printed the password must not have it
+  // printed again here.
+  check(!run.output.includes(ownerPassword), 'the owner password was printed');
+  const shown = withoutCredentials(run.output);
+  check(!run.timedOut, `${service} kept running with the owner URL:\n${shown}`);
+  check(run.code !== 0, `${service} exited 0 with the owner URL:\n${shown}`);
+  check(/RuntimeRoleRefusedError/.test(run.output), `no RuntimeRoleRefusedError:\n${shown}`);
+  check(
+    new RegExp(`${service} refuses to start: it is connected as ${spec.migrator}`).test(run.output),
+    `${service} did not refuse naming ${spec.migrator}:\n${shown}`,
   );
-  assert.ok(!run.output.includes(ownerPassword), 'the owner password was printed');
-  assert.doesNotMatch(run.output, /listening on :/, 'the application started listening');
-  assert.doesNotMatch(run.output, /Consuming /, 'a consumer started before the refusal');
+  check(!/listening on :/.test(run.output), 'the application started listening');
+  check(!/Consuming /.test(run.output), 'a consumer started before the refusal');
   console.log(`${service} with the owner URL exited ${run.code}: RuntimeRoleRefusedError`);
 
   // No consumer joined, nothing was committed, nothing was recorded.
   const after = await groupView(service, group, spec.topic);
-  assert.equal(after.state, 'Dead', `a consumer joined ${group} before the refusal`);
-  assert.deepEqual(after.offsets, before.offsets, `${group} committed an offset`);
+  check(after.state === 'Dead', `a consumer joined ${group} before the refusal`);
+  check(isDeepStrictEqual(after.offsets, before.offsets), `${group} committed an offset`);
   if (eventId && spec.records) {
-    assert.equal(await spec.records(eventId), 0, `${eventId} was recorded`);
+    check((await spec.records(eventId)) === 0, `${eventId} was recorded`);
   }
   console.log(`${group}: never formed, offsets unchanged; nothing consumed`);
 }
@@ -353,7 +418,9 @@ async function consumed(service, spec) {
   const deadline = Date.now() + CONSUME_TIMEOUT_MS;
   while (!(await done())) {
     if (Date.now() > deadline) {
-      throw new Error(`never ${what} once ${service} ran properly: the refusal proves nothing`);
+      throw new PreflightFailure(
+        `never ${what} once ${service} ran properly: the refusal proves nothing`,
+      );
     }
     await new Promise((wake) => setTimeout(wake, 2_000));
   }
@@ -372,7 +439,13 @@ if (!run || !spec) {
 run(service, spec).then(
   () => process.exit(0),
   (error) => {
-    console.error(`runtime-preflight ${mode}: ${error.stack ?? error}`);
+    // This script's own refusals as written; anything else — a Kafka or Prisma
+    // error — only without this run's credentials (#385 r5).
+    const text =
+      error instanceof PreflightFailure || error instanceof UnreadableUrlError
+        ? error.message
+        : withoutCredentials(error?.stack ?? error);
+    console.error(`runtime-preflight ${mode}: ${text}`);
     process.exit(1);
   },
 );

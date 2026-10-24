@@ -38,6 +38,8 @@ export {
   urlWithProtocolMessages,
   CONFIG_ENV_MESSAGES,
   httpUrlSchema,
+  serviceUrlSchema,
+  URL_CREDENTIALS_REFUSED,
   postgresUrlSchema,
   redisUrlSchema,
 } from './env';
@@ -94,3 +96,5 @@ export {
   assertNoMigratorCredentials,
   migratorCredentialsIn,
 } from './owner-credentials';
+
+export { UNREADABLE_URL, UnreadableUrlError, readUrl, tryReadUrl } from './url-reader';

@@ -32,6 +32,7 @@
  */
 
 import { UNREGISTERED_DATABASE_URL, registeredDatabaseSettings } from './database-services.mjs';
+import { tryReadUrl } from '../packages/config/src/url-reader.js';
 
 /** The only host the committed local PostgreSQL defaults may name. */
 export const REQUIRED_HOST = '127.0.0.1';
@@ -182,10 +183,8 @@ export function validateLocalPostgresConfig(text, registered = registeredDatabas
     }
 
     postgresUrls.push(assignment.name);
-    let url;
-    try {
-      url = new URL(assignment.value);
-    } catch {
+    const url = tryReadUrl(assignment.value);
+    if (url === null) {
       errors.push(`${where}: malformed PostgreSQL URL`);
       continue;
     }

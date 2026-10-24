@@ -3,6 +3,8 @@
 // running Prisma.
 // -----------------------------------------------------------------------------
 
+import { tryReadUrl } from '../packages/config/src/url-reader.js';
+
 const IDENTIFIER = /^[a-z_][a-z0-9_]*$/;
 
 /**
@@ -63,14 +65,17 @@ export function ledgerRevoke({ migratorUrl, runtimeUrl }) {
 
 /** The parts `ledgerRevoke` needs, or null when either URL cannot be read. */
 function readUrls(migratorUrl, runtimeUrl) {
+  const migrator = tryReadUrl(migratorUrl);
+  const runtime = tryReadUrl(runtimeUrl);
+  if (migrator === null || runtime === null) return null;
   try {
-    const migrator = new URL(migratorUrl);
     return {
       migratorRole: decodeURIComponent(migrator.username),
-      runtime: decodeURIComponent(new URL(runtimeUrl).username),
+      runtime: decodeURIComponent(runtime.username),
       schema: migrator.searchParams.get('schema') ?? 'public',
     };
   } catch {
+    // A username that is not valid percent-encoding: unreadable too.
     return null;
   }
 }

@@ -9,6 +9,7 @@ import {
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { contractOperationBudgets } from './operation-budgets';
 
@@ -202,7 +203,7 @@ export const contractEnvSchema = baseEnvSchema
       .default('ORGANIZATION_ADMIN')
       .pipe(roleList('CONTRACT_READER_ROLES', { min: 1 })),
 
-    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+    ORGANIZATION_SERVICE_URL: serviceUrlSchema.default('http://localhost:3102'),
 
     CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: z.coerce
       .number()
@@ -286,11 +287,11 @@ export const contractEnvSchema = baseEnvSchema
     CONTRACT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
     CONTRACT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(10).max(900).default(120),
 
-    CONSTRUCTION_SERVICE_URL: z.string().url().default('http://localhost:3110'),
+    CONSTRUCTION_SERVICE_URL: serviceUrlSchema.default('http://localhost:3110'),
 
     CONTRACT_AWARD_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
 
-    ECONOMIC_SERVICE_URL: z.string().url().default('http://localhost:3112'),
+    ECONOMIC_SERVICE_URL: serviceUrlSchema.default('http://localhost:3112'),
 
     // At most half the consumer's session timeout (60 s): one question to economic-service never
     // outlasts the heartbeats around it (review of #343 round 1, F2).

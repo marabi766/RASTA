@@ -93,6 +93,12 @@ const base = tseslint.config(
     },
   },
   {
+    // @rasta/config's URL reader is plain CommonJS so the scripts can import
+    // it before any build (url-reader.js); Node's CommonJS globals apply.
+    files: ['**/src/url-reader.js'],
+    languageOptions: { sourceType: 'commonjs', globals: { ...globals.node } },
+  },
+  {
     // `env-issues.spec.ts` builds environment schemas as `env.ts` does, from
     // the same string-only `process.env` input, to test their refusal texts.
     files: ['**/env.ts', '**/env-issues.spec.ts'],

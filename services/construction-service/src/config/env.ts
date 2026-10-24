@@ -9,6 +9,7 @@ import {
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { isKekId, parseKekConfiguration, parseKekEntries } from '../tender/sealing/key-provider';
 import { EVIDENCE_MAX_CHAIN_LINKS } from '../tender/evidence-limits';
@@ -366,14 +367,14 @@ export const constructionEnvSchema = baseEnvSchema
      * Where organization-service answers "is this organization within the
      * union?" (Q-70 (7)). Anything but a 200 or a 404 refuses the policy write.
      */
-    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+    ORGANIZATION_SERVICE_URL: serviceUrlSchema.default('http://localhost:3102'),
     /**
      * Where the contractor-standing snapshot is read (CON-002 PR 5, ADR-061 § 4):
      * `GET {SUPPLIER_SERVICE_URL}/v1/suppliers/standing-snapshot`, a platform-wide
      * service call with a token signed for no tenant. Until it has been loaded
      * once, no contractor is eligible.
      */
-    SUPPLIER_SERVICE_URL: z.string().url().default('http://localhost:3108'),
+    SUPPLIER_SERVICE_URL: serviceUrlSchema.default('http://localhost:3108'),
     /**
      * Where the externally held receipt chain is read (CON-002 PR 6, ADR-066 § 2):
      * `GET {AUDIT_SERVICE_URL}/v1/internal/tender-evidence/{tenderId}/chain`, a
@@ -381,14 +382,14 @@ export const constructionEnvSchema = baseEnvSchema
      * takes the chain head from there and nowhere else: if it cannot be read, bids
      * are not opened.
      */
-    AUDIT_SERVICE_URL: z.string().url().default('http://localhost:3115'),
+    AUDIT_SERVICE_URL: serviceUrlSchema.default('http://localhost:3115'),
     /**
      * Where a user's current organizations are read (CON-002 PR 8, Q-91): `GET
      * {IDENTITY_SERVICE_URL}/v1/users/{id}/organizations`, a service call with a token
      * signed for no tenant. The conflict check at the approval of a bid opening uses it
      * for the proposer and the approver; if it cannot be read, the opening is refused.
      */
-    IDENTITY_SERVICE_URL: z.string().url().default('http://localhost:3101'),
+    IDENTITY_SERVICE_URL: serviceUrlSchema.default('http://localhost:3101'),
     CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS: z.coerce
       .number()
       .int()

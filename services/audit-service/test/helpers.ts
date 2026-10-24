@@ -1,4 +1,4 @@
-import { withUtcSession } from '@rasta/config';
+import { readUrl, withUtcSession } from '@rasta/config';
 import { ulid } from 'ulid';
 import { PrismaService } from '../src/prisma/prisma.service';
 
@@ -68,7 +68,7 @@ export function newPrisma(): PrismaService {
  * and a timeout would report a test-harness limit as a product failure.
  */
 export function newPrismaWithPool(connections: number): PrismaService {
-  const url = new URL(runtimeUrl());
+  const url = readUrl(runtimeUrl());
   url.searchParams.set('connection_limit', String(connections));
   url.searchParams.set('pool_timeout', '60');
   return new PrismaService(url.toString());
