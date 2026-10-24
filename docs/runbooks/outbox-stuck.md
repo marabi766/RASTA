@@ -79,9 +79,14 @@ kubectl logs -l app=marketplace-service -n rasta-prod --tail=200 | grep -i outbo
 این معمولاً یعنی یک رویداد جدید بدون افزودن Topic مستقر شده.
 
 ```bash
-docker compose exec kafka bash /create-topics.sh
+# همان Bootstrap یگانه‌ی Stack: create-topics.sh در Container kafka-init
+docker compose run --rm kafka-init
 # یا در Production، Topic خاص را بساز
 ```
+
+**پیش‌شرط (PR #378 r5، D-066):** هم‌زمان با این اجرا هیچ Provisioner دیگر، `kafka-configs --alter` دستی روی Topicها یا
+تغییر پیش‌فرض `message.max.bytes` Broker نباشد؛ تغییر Config در Kafka شرطی نیست. شرح و روش دستی:
+[`replay-dlq.md`](replay-dlq.md).
 
 سپس بررسی کن چرا Topic در `create-topics.sh` نبوده — این یک نقص فرآیندی است.
 

@@ -38,6 +38,106 @@
 
 **DLQ صندوق فراموشی نیست.** هر پیام باید بررسی و تعیین تکلیف شود.
 
+### اندازه‌ی پیام: سقف‌ها، آنچه ثابت شده و آنچه نه (PR #378 r2، r4، r5)
+
+هر Topic سقف `max.message.bytes` **صریح** دارد، ستون سوم
+[`topics.txt`](../../infrastructure/docker/kafka/topics.txt) که `pnpm kafka:acl:generate` از `TOPIC_CONSUMERS` می‌سازد.
+ستون چهارم هر DLQ فهرست Topicهایی است که در آن Dead letter می‌ریزند (هر Topic که مصرف‌کننده‌اش می‌خواند، و `.retry`
+آن)، و سطر `#@` سقف بایتی Headerهای افزوده‌ی DLQ را می‌گوید. سقف برنامه‌ریزی‌شده:
+
+| Topic                                 | `max.message.bytes` | از کجا                                                                         |
+| ------------------------------------- | ------------------- | ------------------------------------------------------------------------------ |
+| هر Topic مبدا، Audit trail و `.retry` | ۱٬۰۴۸٬۵۸۸           | همان پیش‌فرض `message.max.bytes` در Kafka 3.9                                  |
+| هر Topic DLQ                          | ۱٬۰۵۰٬۵۶۵           | ۱٬۰۴۸٬۵۸۸ + ۱٬۶۳۲ (`DLQ_ADDED_HEADERS_MAX_BYTES`) + ۳۴۵ (`gzipGrowthMaxBytes`) |
+
+**قاعده:** سقف هر DLQ دست‌کم بزرگ‌ترین سقف مبداهایش است، به‌اضافه‌ی بیشترین بایتی که Headerهای افزوده‌ی `EventConsumer`
+اضافه می‌کنند (هر Header با سقف بایتی، `deadLetterHeaders`؛ `x-dlq-error` حداکثر ۱٬۰۰۰ **بایت** UTF-8)، به‌اضافه‌ی
+بیشترین رشد GZIP همان اندازه. این رشد به اندازه بستگی دارد: ۳۴۵ بایت در ۱ MiB و ۶۶۵ بایت در ۲ MiB. `pnpm run
+check:kafka-topic-limits` برنامه را در `verify` و CI می‌سنجد.
+
+**آنچه ثابت شده:** Headerهای افزوده‌ی DLQ سقف بایتی دارند. Dead letter مصرف‌کننده‌ی مشترک از رکوردی که مبدا
+**بی‌فشرده‌سازی** پذیرفته، یا با GZIPی که آن را کوچک نکرده (بایت‌های فشرده‌نشدنی)، در DLQ جا می‌شود.
+
+**اندازه‌گیری‌شده، نه ثابت:** Batch مبدا با GZIP در سطح پیش‌فرض KafkaJS (۶) که فشرده می‌شود، تک‌رکورد یا چند رکورد
+که Relay با هم فرستاده. در ۴۰۰ Batch تصادفی، بدترین Dead letter ۳۰۲ بایت از کل Batch مبدا بزرگ‌تر بود، در برابر ۱٬۹۷۷
+بایت جا.
+
+**فرارهای شناخته‌شده** (اعداد از بازبینی r3؛ طراحی جدا، تصمیم PM D-063):
+
+1. **(i) مبدا با سطح فشرده‌سازی بالاتر از DLQ.** یک رکورد GZIP سطح ۹ با Batch ۱٬۰۳۰٬۴۹۹ بایتی، پس از فشرده‌سازی دوباره
+   در سطح ۶، Dead letter ۱٬۰۸۴٬۱۹۳ بایتی می‌شود؛ بیش از ۱٬۰۵۰٬۵۶۵. نه Broker و نه ACL سطح فشرده‌سازی را محدود نمی‌کند.
+   `scripts/dead-letter-escape.broker.test.mjs` رفتار امروز را ثابت نگه می‌دارد.
+2. **(ii) Dead letterهای Parked در fleet.** Headerهای پلتفرم از Envelope ذخیره‌شده دوباره ساخته می‌شوند
+   (`envelopeHeaders`). `eventId`، `eventName`، `correlationId`، `tenantId`، `causationId` و `traceparent` در Schema
+   سقف بایتی ندارند (`producer` حداکثر ۶۳ نویسه‌ی ASCII است، `streamSeq` عدد صحیح امن، `eventVersion` عدد): Batch
+   ۹۵۴٬۶۳۵ بایتی Dead letter ۱٬۹۰۸٬۹۸۰ بایتی شد، با `x-causation-id` ۱٬۲۶۶٬۶۶۸ بایتی که رکورد اصلی نداشت.
+3. **(iii) بازنویسی JSONB در fleet.** fleet بایت‌های اصلی را نمی‌فرستد، Envelope ذخیره‌شده در JSONB را دوباره JSON
+   می‌کند و ممکن است بدتر فشرده شود: **محتمل** (۵۸۷٬۹۹۳ به ۱٬۱۵۸٬۵۲۷ در شبیه‌سازی درون‌حافظه‌ی r3؛ روی PostgreSQL
+   بازتولید نشده).
+
+**وقتی DLQ پیام را رد کند** (روی main هم همین است؛ آنجا ارسال DLQ مشترک بی‌فشرده‌سازی بود و Topicها سقف صریح نداشتند و
+پیش‌فرض Broker را به ارث می‌بردند):
+
+- **مصرف‌کننده‌ی مشترک:** ارسال با `MESSAGE_TOO_LARGE` رد می‌شود. kafkajs این خطا را تکرارشدنی نمی‌داند: Consumer کرش
+  می‌کند و **خودش دوباره راه نمی‌افتد**؛ همه‌ی Partitionهایی که می‌خواند، نه فقط همان یکی، تا ری‌استارت سرویس
+  می‌ایستند، و `isRunning()` (و Health check که آن را می‌خواند) همچنان سالم می‌گوید. Offset آن پیام Commit نمی‌شود؛ پس از
+  ری‌استارت همان پیام دوباره تحویل می‌شود (Handler دوباره اجرا می‌شود) و Consumer دوباره کرش می‌کند. `rasta_dlq_messages_total`
+  بالا نمی‌رود، چون فقط پس از انتشار موفق شمرده می‌شود؛ نشانه، Log خطای kafkajs (`Crash: KafkaJSNonRetriableError`) و Lag
+  است، و Lag فقط برای دو گروه audit هشدار دارد (`RastaAuditConsumerLag`).
+- **fleet:** ردیف Outbox منتشر نمی‌شود، Failed می‌ماند و با Backoff دوباره تلاش می‌شود؛ Purge ردیف منتشرنشده را پاک
+  نمی‌کند. شمارنده هنگام Commit صف بالا رفته، نه هنگام انتشار: هشدار DLQ آمده ولی پیامی در DLQ نیست.
+- **از دست رفتن بی‌صدا نیست، با این قیدها:** رکورد مبدا فقط تا پایان Retention همان Topic می‌ماند (پیش‌فرض ۷ روز،
+  `KAFKA_TOPIC_RETENTION_MS` در `create-topics.sh`) و پس از آن پاک می‌شود. ردیف Parked در fleet بایت‌ها و Headerهای
+  اصلی را ندارد و Partition و Offset آن ممکن است خالی باشد.
+- **Offset گروه را جابه‌جا یا Reset نکن:** این همان پریدن بی‌صدا از رکورد است.
+- **چه کسی روی مبدا می‌نویسد:** ACL هر سرویس فقط به Producer اعلام‌شده اجازه می‌دهد؛ Admin بوت‌استرپ Superuser است، و
+  ACL سطح فشرده‌سازی را محدود نمی‌کند.
+
+**Broker موجود:** یک اجرای تنهای `create-topics.sh` هیچ سقفی را **پایین نمی‌آورد**. پیش از هر تغییر، سقف **واقعی** (Effective) همه‌ی Topicها را
+می‌خواند (`kafka-configs --describe --all`، پس پیش‌فرض به‌ارث‌رسیده از Broker هم دیده می‌شود) و اگر خروجی را با اطمینان
+نخواند، بی‌هیچ تغییری شکست می‌خورد. سپس اول همه‌ی DLQها را می‌سازد یا بالا می‌برد، تا بالای بزرگ‌ترین سقفی که مبداهایشان
+خواهند داشت (برنامه یا سقف بزرگ‌تر موجود)، و بازمی‌خواند؛ فقط بعد Topicهای دیگر را می‌سازد یا تا سقف برنامه بالا
+می‌برد. Topicی که سقف بزرگ‌تری دارد همان را نگه می‌دارد و نامش چاپ می‌شود. در پایان همه را بازمی‌خواند: هیچ‌کدام زیر
+هدفش یا زیر سقف قبلی‌اش نیست و هر DLQ بالای مبداهایش جا دارد. اجرای دوباره چیزی را تغییر نمی‌دهد؛ اجرای نیمه‌کاره هیچ
+مبدایی را بالاتر از جای DLQهایش نمی‌گذارد. Retention و Partition یک Topic موجود دست نمی‌خورد. سقفی که از پیش‌فرض Broker
+به ارث رسیده به ارث می‌ماند و با آن پیش‌فرض تغییر می‌کند. Topicی که باید کوچک شود کار اپراتور است، پس از تخلیه‌ی آن؛ این
+اسکریپت چنین گزینه‌ای ندارد.
+
+**هم‌زمانی (PR #378 r5، تصمیم PM D-066):** اسکریپت Topicها را یکی‌یکی و بی هیچ کار پس‌زمینه تغییر می‌دهد. پیش از
+بالا بردن هر Topic سقف واقعی **همان** Topic را دوباره می‌خواند و اگر با آنچه برنامه بر آن ساخته شده یکی نباشد، بی‌آنکه
+چیز دیگری را تغییر دهد می‌ایستد و می‌گوید دوباره اجرا کن؛ پس از بالا بردن، آن را بازمی‌خواند و اگر کمتر از بزرگ‌ترِ سقف
+قبلی و هدف باشد می‌ایستد. ساختن Topic شرطی است: اگر کسی در این فاصله آن را ساخته باشد Broker ساختن را رد می‌کند و اجرا
+می‌ایستد. اما تغییر Config در Kafka شرط «فقط اگر هنوز» ندارد — `IncrementalAlterConfigs` فقط نام، عمل و مقدار می‌گیرد
+([Schema نسخه‌ی 3.9.0](https://github.com/apache/kafka/blob/3.9.0/clients/src/main/resources/common/message/IncrementalAlterConfigsRequest.json)) —
+پس تغییری که میان آن خواندن دوباره و نوشتن این اجرا برسد **دیده نمی‌شود** و بازنویسی می‌شود: Provisioner دیگری روی
+Host دیگر فقط وقتی دیده می‌شود که تغییرش پیش از خواندن دوباره‌ی ما رسیده باشد. **پیش‌شرط:** در طول اجرا هیچ Provisioner
+دیگر، هیچ `kafka-configs --alter` دستی روی Topicها و هیچ تغییری در پیش‌فرض `message.max.bytes` خود Broker نباشد — دو
+Provisioner را هم‌زمان اجرا نکن. Compose برای هر Stack یک `kafka-init` دارد، هر Job در CI که Kafka لازم دارد Broker خودش
+را با `ci-up.sh` می‌سازد و یک بار Provision می‌کند، و تست‌های Broker اجراها را پشت سر هم می‌زنند. اگر اجرا با پیام
+«another writer» ایستاد، صبر کن تا نویسنده‌ی دیگر تمام کند و دوباره اجرا کن؛ اجرای دوباره DLQها را بالای سقف واقعی
+مبداها می‌برد.
+
+Broker محیط واقعی که پیش از این تغییر ساخته شده: اسکریپت را یک بار با Admin اجرا کن، یا دستی، فقط برای بالا بردن، با
+**همان پیش‌شرط** (هیچ Provisioner یا Operator دیگری هم‌زمان Config Topicها یا پیش‌فرض Broker را تغییر ندهد): درست پیش
+از `--alter` سقف واقعی را بخوان و پس از آن بازخوان:
+
+```bash
+kafka-configs.sh --bootstrap-server <broker> --command-config <admin.properties> \
+  --describe --all --entity-type topics --entity-name rasta.audit.v1.dlq | grep max.message.bytes
+# فقط اگر کمتر از سقف لازم است، و بلافاصله پس از خواندن بالا:
+kafka-configs.sh --bootstrap-server <broker> --command-config <admin.properties> \
+  --alter --entity-type topics --entity-name rasta.audit.v1.dlq \
+  --add-config max.message.bytes=1050565
+# بازخوانی: دست‌کم 1050565، وگرنه کس دیگری هم‌زمان نوشته است
+kafka-configs.sh --bootstrap-server <broker> --command-config <admin.properties> \
+  --describe --all --entity-type topics --entity-name rasta.audit.v1.dlq | grep max.message.bytes
+```
+
+اول DLQها، بعد مبداها؛ سقف لازم یک DLQ روی مبدای بزرگ‌تر از ۱٬۰۴۸٬۵۸۸ همان فرمول است (`deadLetterMessageMaxBytes`).
+
+**رسیدن به DLQ ≠ Projection به‌روز.** اثر رویدادی که به DLQ رفته (برای نمونه سازمان‌هایی که یک `ORGANIZATION_STATUS_CHANGED`
+غیرفعال می‌کرد) تا بازپخش آن **وجود ندارد**، مثل قبل.
+
 ---
 
 ## تشخیص
@@ -70,7 +170,9 @@ Headerهای کلیدی:
 
 `x-dlq-error` همیشه «دسته‌بندی ثابت (کد `DlqReason`): پیام» است — مثلاً `Handler failed 3x (MAX_RETRIES_EXCEEDED): …` یا
 `Unparseable message (VALIDATION_FAILED): the body is not valid JSON (N bytes)` — و محتوای بدنه را تکرار نمی‌کند؛ پیام Handler
-پاک‌سازی‌شده و حداکثر ۲۰۰ نویسه است. از Headerهای پیام اصلی فقط Headerهای پلتفرم (`EVENT_HEADERS`، از جمله
+پاک‌سازی‌شده و حداکثر ۲۰۰ نویسه است، و کل `x-dlq-error` حداکثر ۱٬۰۰۰ بایت UTF-8 (بریده روی مرز نویسه). Topic، Partition و
+Offset مبدا هرگز بریده نمی‌شوند: مقداری که هیچ Brokerی تحویل نمی‌دهد (نام Topic نامعتبر برای Kafka، Partition بیرون از int32،
+Offset بیرون از int64) نوشته نمی‌شود و پیام Commit نمی‌شود. از Headerهای پیام اصلی فقط Headerهای پلتفرم (`EVENT_HEADERS`، از جمله
 `x-correlation-id` و `traceparent`) در پیام DLQ می‌مانند؛ Header دیگری (مثلاً `authorization`) منتقل نمی‌شود (S-09).
 `x-producer` در پیام DLQ نام مصرف‌کننده‌ای است که آن را نوشت، نه ناشر اصلی؛ ناشر اصلی در `producer` بدنه است.
 

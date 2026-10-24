@@ -484,12 +484,13 @@ describe('refusing a message', () => {
       const text = loggedText(calls);
       expect(text).toContain('error');
       expect(text).toContain(reason);
-      expect(text).toContain('payload keys:');
+      // Never the payload's key names (PR #378 r1 F3).
+      expect(text).not.toContain('payload keys');
       expect(text).not.toContain('SENTINEL');
     },
   );
 
-  it('masks a sensitive payload key name in the diagnostic', async () => {
+  it('names no payload key in the diagnostic, sensitive or not (PR #378 r1 F3)', async () => {
     const calls: unknown[][] = [];
 
     await expect(
@@ -500,8 +501,8 @@ describe('refusing a message', () => {
     ).rejects.toThrow(AuditTrailRejectedError);
 
     const text = loggedText(calls);
-    expect(text).toContain(REDACTED);
     expect(text).not.toContain('password');
+    expect(text).not.toContain(REDACTED);
   });
 
   it('names a message whose identifiers are not identifier-shaped by placeholder', async () => {
@@ -515,8 +516,9 @@ describe('refusing a message', () => {
     ).rejects.toThrow(AuditTrailRejectedError);
 
     const text = loggedText(calls);
-    expect(text).toContain('(unnamed event) (unidentified)');
-    expect(text).toContain('payload keys: (string)');
+    // Type and version only: the version is shaped like one, the name is not.
+    expect(text).toContain('Rejected (unnamed event) v1 from');
+    expect(text).not.toContain('payload keys');
     expect(text).not.toContain('SENTINEL');
   });
 
