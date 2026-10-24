@@ -121,7 +121,8 @@ auditConfig:
     # runtime: every service validates request bodies with zod. Bounded by the
     # JSON body limit each service sets in main.ts (16 kb to 512 kb; gateway
     # 256 kb), so one request cannot allocate without limit. RE-CHECK BY
-    # 2026-10-30: the zod 4 migration must be merged and this entry deleted.
+    # 2026-10-30: the zod 4 migration must be merged and this entry deleted,
+    # together with its Trivy twin (CVE-2023-54404) in .trivyignore.services.
     - GHSA-mrhx-c7xc-m3w5
 # A transitive dependency may not arrive from a git URL or a tarball over
 # http. Everything here comes from the registry, and a sub-dependency that
