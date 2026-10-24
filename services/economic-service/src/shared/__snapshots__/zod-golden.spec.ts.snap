@@ -634,15 +634,63 @@ exports[`zod-3 golden: list queries as they arrive in a query string GET /v1/tra
     ],
     "refused": "VALIDATION_FAILED",
   },
+  "no": {
+    "hash": "414df24a640c887cc5c67fcd84f9c7923ef1496c5f75c5814092d3e388b9ca59",
+    "parsed": {
+      "includeIncoming": false,
+      "limit": 25,
+    },
+  },
   "notABoolean": {
     "details": [
       {
         "code": "custom",
-        "message": "Invalid input",
+        "message": "Expected a boolean such as "true" or "false"",
         "path": "includeIncoming",
       },
     ],
     "refused": "VALIDATION_FAILED",
+  },
+  "notABooleanOneCharacter": {
+    "details": [
+      {
+        "code": "custom",
+        "message": "Expected a boolean such as "true" or "false"",
+        "path": "includeIncoming",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "notABooleanTwoCharacters": {
+    "details": [
+      {
+        "code": "custom",
+        "message": "Expected a boolean such as "true" or "false"",
+        "path": "includeIncoming",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "off": {
+    "hash": "414df24a640c887cc5c67fcd84f9c7923ef1496c5f75c5814092d3e388b9ca59",
+    "parsed": {
+      "includeIncoming": false,
+      "limit": 25,
+    },
+  },
+  "on": {
+    "hash": "d559a85fd80723fa3c90cfe0e926e9c1356feaeae367b4fb91aa11c5e80000c9",
+    "parsed": {
+      "includeIncoming": true,
+      "limit": 25,
+    },
+  },
+  "one": {
+    "hash": "d559a85fd80723fa3c90cfe0e926e9c1356feaeae367b4fb91aa11c5e80000c9",
+    "parsed": {
+      "includeIncoming": true,
+      "limit": 25,
+    },
   },
   "range": {
     "hash": "e077d0379ce2f1947c27c26ceb36043180eba3c09c40307c955e16d543078b61",
@@ -679,12 +727,187 @@ exports[`zod-3 golden: list queries as they arrive in a query string GET /v1/tra
       "limit": 25,
     },
   },
+  "yes": {
+    "hash": "d559a85fd80723fa3c90cfe0e926e9c1356feaeae367b4fb91aa11c5e80000c9",
+    "parsed": {
+      "includeIncoming": true,
+      "limit": 25,
+    },
+  },
   "zero": {
     "hash": "414df24a640c887cc5c67fcd84f9c7923ef1496c5f75c5814092d3e388b9ca59",
     "parsed": {
       "includeIncoming": false,
       "limit": 25,
     },
+  },
+}
+`;
+
+exports[`zod-3 golden: reward rule conditions (recursive) POST /v1/reward-rules: leaves, all/any nesting and their bounds 1`] = `
+{
+  "anyOfLeaves": {
+    "hash": "effb024fd65409423d6f7b54197dd45a6d25be8f7be52ab4bb08b3b6e1b7b742",
+    "parsed": {
+      "condition": {
+        "any": [
+          {
+            "field": "hours",
+            "op": "gte",
+            "value": 4,
+          },
+          {
+            "field": "kind",
+            "op": "eq",
+            "value": "TRIP",
+          },
+        ],
+      },
+      "points": 10,
+      "rewardType": "POINTS",
+      "status": "ACTIVE",
+      "triggerEvent": "USAGE_RECORDED",
+    },
+  },
+  "badNestedLeaf": {
+    "details": [
+      {
+        "code": "too_small",
+        "message": "String must contain at least 1 character(s)",
+        "path": "condition.all[1].any[0].field",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "bothAllAndAny": {
+    "details": [
+      {
+        "code": "unrecognized_keys",
+        "message": "Unrecognized key(s) in object (1)",
+        "path": "condition",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "deep": {
+    "hash": "820c7a905889314d09e0bdbf75df0a8b059ff17380e519ebc404781374ed7098",
+    "parsed": {
+      "condition": {
+        "all": [
+          {
+            "all": [
+              {
+                "all": [
+                  {
+                    "all": [
+                      {
+                        "field": "hours",
+                        "op": "gte",
+                        "value": 4,
+                      },
+                      {
+                        "field": "kind",
+                        "op": "present",
+                      },
+                    ],
+                  },
+                  {
+                    "field": "kind",
+                    "op": "present",
+                  },
+                ],
+              },
+              {
+                "field": "kind",
+                "op": "present",
+              },
+            ],
+          },
+          {
+            "field": "kind",
+            "op": "present",
+          },
+        ],
+      },
+      "points": 10,
+      "rewardType": "POINTS",
+      "status": "ACTIVE",
+      "triggerEvent": "USAGE_RECORDED",
+    },
+  },
+  "elevenAny": {
+    "details": [
+      {
+        "code": "too_big",
+        "message": "Array must contain at most 10 element(s)",
+        "path": "condition.any",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "emptyAll": {
+    "details": [
+      {
+        "code": "too_small",
+        "message": "Array must contain at least 1 element(s)",
+        "path": "condition.all",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "leaf": {
+    "hash": "b084d84327a679cb3c27c851ea936b181886b20ec42a304483d073fb47a9c0d4",
+    "parsed": {
+      "condition": {
+        "field": "hours",
+        "op": "gte",
+        "value": 4,
+      },
+      "points": 10,
+      "rewardType": "POINTS",
+      "status": "ACTIVE",
+      "triggerEvent": "USAGE_RECORDED",
+    },
+  },
+  "leafExtraKey": {
+    "details": [
+      {
+        "code": "unrecognized_keys",
+        "message": "Unrecognized key(s) in object (1)",
+        "path": "condition",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "noCondition": {
+    "hash": "28336c5c51a9fa70cfc1543ee82a5a733a4d9b1236ed21b9035347c10e35404e",
+    "parsed": {
+      "condition": undefined,
+      "points": 10,
+      "rewardType": "POINTS",
+      "status": "ACTIVE",
+      "triggerEvent": "USAGE_RECORDED",
+    },
+  },
+  "objectValue": {
+    "details": [
+      {
+        "code": "invalid_union",
+        "message": "Invalid input",
+        "path": "condition",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "unknownOp": {
+    "details": [
+      {
+        "code": "invalid_union",
+        "message": "Invalid input",
+        "path": "condition",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
   },
 }
 `;

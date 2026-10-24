@@ -17,7 +17,11 @@ import {
   refundPaymentSchema,
   topUpSchema,
 } from '../payment/dto';
-import { createParticipationRuleSchema, createRecognitionRuleSchema } from '../reward/dto';
+import {
+  createParticipationRuleSchema,
+  createRecognitionRuleSchema,
+  createRewardRuleSchema,
+} from '../reward/dto';
 import { listSettlementsQuerySchema } from '../settlement/dto';
 
 /**
@@ -35,7 +39,14 @@ import { listSettlementsQuerySchema } from '../settlement/dto';
  * behaviour change, fixed in the code. Two things are deliberately not pinned:
  * an over-cap array of invalid elements (zod 3 reports every element after
  * `too_big` — the advisory itself, which B changes), and a non-digit top-up
- * amount (the top-up refinement's `BigInt` throws on it, a 500 today).
+ * amount. The top-up refinement's `BigInt` throws on it: a 500 whose exception
+ * text — the client's input — goes into the error log today, as the same
+ * conversion does into `x-dlq-error` on analytics' consumer. That is not an
+ * oracle to keep: it is owned by task 011 (W#7), which fixes every such
+ * conversion site, and recording it here would make B preserve the leak.
+ *
+ * These fixtures pin parsing and hashing only. Tenancy, the scoped cursor
+ * lookup and what `includeIncoming` widens are the services' own tests.
  */
 
 type Outcome = { parsed: unknown; hash: string } | { refused: string; details: unknown };
@@ -239,9 +250,16 @@ describe('zod-3 golden: list queries as they arrive in a query string', () => {
         explicitFalse: { includeIncoming: 'false' },
         explicitTrue: { includeIncoming: 'true' },
         zero: { includeIncoming: '0' },
+        one: { includeIncoming: '1' },
+        yes: { includeIncoming: 'yes' },
+        no: { includeIncoming: 'no' },
+        on: { includeIncoming: 'on' },
+        off: { includeIncoming: 'off' },
         blank: { includeIncoming: '' },
         upperYes: { includeIncoming: ' YES ' },
         notABoolean: { includeIncoming: 'maybe' },
+        notABooleanOneCharacter: { includeIncoming: 'x' },
+        notABooleanTwoCharacters: { includeIncoming: '42' },
         limit: { limit: '5' },
         limitZero: { limit: '0' },
         limitTooBig: { limit: '101' },
@@ -266,5 +284,68 @@ describe('zod-3 golden: list queries as they arrive in a query string', () => {
       }),
       settlements: cases(listSettlementsQuerySchema, { empty: {}, limit: { limit: '7' } }),
     }).toMatchSnapshot();
+  });
+
+  describe('an invalid boolean is refused with one fixed message, whatever was sent', () => {
+    // Through the pipe, whose echo backstop skips values under three characters
+    // (#385 r1 F2). Absence alone proves nothing for short inputs — `x` occurs in
+    // "Expected" — so each length from 1 to 4 is sent as two different sentinels
+    // made of characters in none of the detail's fixed text (`j z J Z 7 9`; the
+    // first test checks that), and both must produce the same, fixed detail.
+    const FIXED = {
+      path: 'includeIncoming',
+      message: 'Expected a boolean such as "true" or "false"',
+      code: 'custom',
+    };
+    const SENTINELS = [
+      ['j', 'Z'],
+      ['jz', 'Z7'],
+      ['jzj', 'Z79'],
+      ['jzjz', 'ZJ97'],
+    ] as const;
+
+    it('the sentinels occur in none of the fixed text', () => {
+      for (const character of 'jzJZ79') {
+        expect(Object.values(FIXED).join(' ')).not.toContain(character);
+        expect('VALIDATION_FAILED').not.toContain(character);
+      }
+    });
+
+    it.each(SENTINELS)('%p and %p', (a, b) => {
+      for (const value of [a, b]) {
+        expect(outcome(listTransactionsQuerySchema, { includeIncoming: value })).toEqual({
+          refused: 'VALIDATION_FAILED',
+          details: [FIXED],
+        });
+      }
+    });
+  });
+});
+
+describe('zod-3 golden: reward rule conditions (recursive)', () => {
+  it('POST /v1/reward-rules: leaves, all/any nesting and their bounds', () => {
+    const rule = (condition: unknown) => ({
+      triggerEvent: 'USAGE_RECORDED',
+      points: 10,
+      condition,
+    });
+    const leaf = { field: 'hours', op: 'gte', value: 4 };
+    const nest = (depth: number): unknown =>
+      depth === 0 ? leaf : { all: [nest(depth - 1), { field: 'kind', op: 'present' }] };
+    expect(
+      cases(createRewardRuleSchema, {
+        noCondition: rule(undefined),
+        leaf: rule({ field: ' hours ', op: 'gte', value: 4 }),
+        anyOfLeaves: rule({ any: [leaf, { field: 'kind', op: 'eq', value: 'TRIP' }] }),
+        deep: rule(nest(4)),
+        emptyAll: rule({ all: [] }),
+        elevenAny: rule({ any: Array.from({ length: 11 }, () => leaf) }),
+        unknownOp: rule({ field: 'hours', op: 'between', value: 4 }),
+        leafExtraKey: rule({ field: 'hours', op: 'gte', value: 4, unit: 'h' }),
+        badNestedLeaf: rule({ all: [leaf, { any: [{ field: '', op: 'eq' }] }] }),
+        bothAllAndAny: rule({ all: [leaf], any: [leaf] }),
+        objectValue: rule({ field: 'hours', op: 'eq', value: { n: 4 } }),
+      }),
+    ).toMatchSnapshot();
   });
 });

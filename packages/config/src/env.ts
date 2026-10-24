@@ -27,6 +27,9 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
  */
 export function urlWithProtocol(protocols: readonly string[], label: string) {
   const expected = protocols.map((p) => `${p}//`).join(' or ');
+  // Fixed per schema: never the protocol written. A value that failed this check is not
+  // known to be a URL, and what it carries goes into the boot error and its log (S-09).
+  const wrongProtocol = `${label} must start with ${expected}`;
   return z.string().superRefine((value, ctx) => {
     let parsed: URL;
     try {
@@ -36,10 +39,7 @@ export function urlWithProtocol(protocols: readonly string[], label: string) {
       return;
     }
     if (!protocols.includes(parsed.protocol)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `${label} must start with ${expected} (received "${parsed.protocol}//")`,
-      });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: wrongProtocol });
     }
     if (!parsed.hostname) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} must include a host` });
@@ -93,7 +93,14 @@ export function booleanEnv(defaultValue: boolean) {
  * they have to stay that way: the moment an environment flag and a query
  * parameter disagree about what `"off"` means, one of them is a defect waiting
  * to be found.
+ *
+ * The refusal is {@link BOOLEAN_EXPECTED} and nothing else, whatever was sent:
+ * through `queryBoolean` it is the client's own text, and the pipe's echo
+ * backstop does not look for values under three characters, so `?flag=42`
+ * would otherwise come back verbatim (S-09, #385 r1 F2).
  */
+const BOOLEAN_EXPECTED = 'Expected a boolean such as "true" or "false"';
+
 function booleanish(defaultValue: boolean) {
   return z
     .union([z.boolean(), z.string()])
@@ -105,10 +112,7 @@ function booleanish(defaultValue: boolean) {
       if (['true', '1', 'yes', 'on'].includes(normalised)) return true;
       if (['false', '0', 'no', 'off', ''].includes(normalised)) return false;
 
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `Expected a boolean such as "true" or "false", received "${value}"`,
-      });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: BOOLEAN_EXPECTED });
       return z.NEVER;
     });
 }

@@ -197,4 +197,32 @@ describe('zod-3 golden: signed tokens issued before the deploy', () => {
     );
     expect(verified).toMatchSnapshot();
   });
+
+  it('expiry boundaries: the last millisecond that verifies and the first that does not', () => {
+    // From the recorded tokens: a hand-signed payload's `exp` is 1800003600 (s),
+    // the flash's 1800000120, and a stamp's signed `exp` and replay window both
+    // end at 1800085800000 ms (24 h TTL − 600 s margin from NOW).
+    const PAYLOAD_EXP_MS = 1_800_003_600_000;
+    const FLASH_EXP_MS = 1_800_000_120_000;
+    const STAMP_END_MS = 1_800_085_800_000;
+    const stamp = (now: number) =>
+      verifyContractStamp(
+        SESSION,
+        ISSUED.sign,
+        scopeOfTarget(TARGETS.sign),
+        'SUB-sign',
+        now,
+        REPLAY_ENV,
+      ) ?? 'refused';
+    expect({
+      payloadAtExp: verifyPayload(SESSION, 'golden', ISSUED.exact, BASELINE, PAYLOAD_EXP_MS),
+      payloadAfterExp:
+        verifyPayload(SESSION, 'golden', ISSUED.exact, BASELINE, PAYLOAD_EXP_MS + 1) ?? 'refused',
+      flashAtExp: readFlash(SESSION, ISSUED.flash, 'CTR-1', ['SIGNED'], FLASH_EXP_MS),
+      flashAfterExp:
+        readFlash(SESSION, ISSUED.flash, 'CTR-1', ['SIGNED'], FLASH_EXP_MS + 1) ?? 'refused',
+      stampAtEnd: stamp(STAMP_END_MS),
+      stampAfterEnd: stamp(STAMP_END_MS + 1),
+    }).toMatchSnapshot();
+  });
 });

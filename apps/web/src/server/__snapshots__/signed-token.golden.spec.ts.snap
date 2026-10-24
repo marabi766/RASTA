@@ -55,6 +55,27 @@ exports[`zod-3 golden: signed tokens issued before the deploy contract-command s
 }
 `;
 
+exports[`zod-3 golden: signed tokens issued before the deploy expiry boundaries: the last millisecond that verifies and the first that does not 1`] = `
+{
+  "flashAfterExp": "refused",
+  "flashAtExp": "SIGNED",
+  "payloadAfterExp": "refused",
+  "payloadAtExp": {
+    "id": "AST-1",
+    "note": null,
+    "version": 2,
+  },
+  "stampAfterEnd": "refused",
+  "stampAtEnd": {
+    "command": "SIGN",
+    "expectedVersion": 3,
+    "side": "EMPLOYER",
+    "token": "eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOm51bGwsInN1Ym1pc3Npb25JZCI6IlNVQi1zaWduIiwiY29tbWFuZCI6IlNJR04iLCJpc3N1ZWRBdCI6MTgwMDAwMDAwMDAwMCwidW50aWwiOjE4MDAwODU4MDAwMDAsImV4cGVjdGVkVmVyc2lvbiI6Mywic2lkZSI6IkVNUExPWUVSIiwiZXhwIjoxODAwMDg1ODAwfQ.ZKteYajdiO7Zn4aFrX9ANG9Ot4iU3QNE3nCYC4zr660",
+    "until": 1800085800000,
+  },
+}
+`;
+
 exports[`zod-3 golden: signed tokens issued before the deploy the envelope and the strict parse of a hand-signed payload 1`] = `
 {
   "exact": {
