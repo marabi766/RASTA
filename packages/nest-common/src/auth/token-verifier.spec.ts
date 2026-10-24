@@ -41,13 +41,13 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
-function userToken(options: { exp?: boolean } = {}): Promise<string> {
+function userToken(options: { exp?: boolean; iat?: number | false } = {}): Promise<string> {
   const jwt = new SignJWT({ realm_access: { roles: ['DRIVER'] }, org_id: 'ORG_A' })
     .setProtectedHeader({ alg: 'RS256', kid: 'test-key' })
     .setSubject('kc-user-1')
     .setIssuer(ISSUER)
-    .setAudience(AUDIENCE)
-    .setIssuedAt();
+    .setAudience(AUDIENCE);
+  if (options.iat !== false) jwt.setIssuedAt(options.iat);
   if (options.exp !== false) jwt.setExpirationTime('5m');
   return jwt.sign(privateKey);
 }
@@ -73,6 +73,19 @@ describe('user tokens', () => {
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(RastaError);
     expect((error as RastaError).code).not.toBe('TOKEN_EXPIRED');
+  });
+
+  // The gateway's revocation list compares it with a revocation's cutoff (ADR-060, revocation
+  // list addendum): seconds on the wire, milliseconds here, like `expiresAt`.
+  it('reports `iat` in milliseconds', async () => {
+    const iat = Math.floor(Date.now() / 1000) - 30;
+    const claims = await verifier().verifyUserToken(await userToken({ iat }));
+    expect(claims.issuedAt).toBe(iat * 1000);
+  });
+
+  it('reports no `iat` for a token without one — never a default the gateway would compare', async () => {
+    const claims = await verifier().verifyUserToken(await userToken({ iat: false }));
+    expect(claims).not.toHaveProperty('issuedAt');
   });
 });
 

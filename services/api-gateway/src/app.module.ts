@@ -30,6 +30,7 @@ import { GatewayController } from './proxy/gateway.controller';
 import { ProxyService, proxyOptionsOf } from './proxy/proxy.service';
 import { RateLimiter } from './proxy/rate-limiter';
 import { loadGatewayEnv, SERVICE_NAME, type GatewayEnv } from './config/env';
+import { RevocationGate } from './revocation/revocation-gate';
 import { GATEWAY_ENV, GATEWAY_LOGGER } from './tokens';
 
 /**
@@ -40,6 +41,13 @@ import { GATEWAY_ENV, GATEWAY_LOGGER } from './tokens';
  * its own probe and handled by the circuit breaker. Cascading that into the
  * gateway's readiness would take the entire platform out of rotation because
  * one service is unwell.
+ *
+ * The revocation list is the exception, because it is the gateway's own: a
+ * replica that enforces it and cannot vouch for it — not yet caught up with
+ * the identity topic since it started, or no longer reading it — is not
+ * ready; one that cannot vouch for it for a reason every replica shares
+ * refuses every pair with 503 and reports itself degraded (ADR-060, gateway
+ * revocation list addendum § 4).
  */
 @ApiTags('health')
 @Controller({ path: 'health', version: VERSION_NEUTRAL })
@@ -49,6 +57,7 @@ export class GatewayHealthController {
   constructor(
     private readonly rateLimiter: RateLimiter,
     private readonly proxy: ProxyService,
+    private readonly revocation: RevocationGate,
   ) {}
 
   @Get('live')
@@ -68,15 +77,39 @@ export class GatewayHealthController {
   async ready(@Res({ passthrough: true }) response: Response) {
     const redis = await this.rateLimiter.isHealthy();
 
+    // Off, the answer is main's to the byte: no key a probe or a dashboard
+    // has not seen before (PR #381 r1 F4).
+    if (!this.revocation.isEnforcing()) {
+      // Redis being down degrades rate limiting but does not stop routing, so it
+      // is reported rather than treated as unreadiness.
+      response.status(HttpStatus.OK);
+
+      return {
+        status: 'ok',
+        service: SERVICE_NAME,
+        checks: { redis },
+        degraded: redis ? [] : ['rate-limiting'],
+        circuits: this.proxy.circuitStates(),
+      };
+    }
+
+    const revocationList = this.revocation.isReady();
+    const degraded = [
+      ...(redis ? [] : ['rate-limiting']),
+      ...(this.revocation.isRefusingEveryPair() ? ['revocation-list'] : []),
+    ];
+
     // Redis being down degrades rate limiting but does not stop routing, so it
-    // is reported rather than treated as unreadiness.
-    response.status(HttpStatus.OK);
+    // is reported rather than treated as unreadiness. So is a revocation list
+    // every replica shares the trouble of; one this replica alone has not
+    // caught up with is unreadiness.
+    response.status(revocationList ? HttpStatus.OK : HttpStatus.SERVICE_UNAVAILABLE);
 
     return {
-      status: 'ok',
+      status: revocationList ? 'ok' : 'unavailable',
       service: SERVICE_NAME,
-      checks: { redis },
-      degraded: redis ? [] : ['rate-limiting'],
+      checks: { redis, revocationList },
+      degraded,
       circuits: this.proxy.circuitStates(),
     };
   }
@@ -140,6 +173,19 @@ export class GatewayMetricsController {
     },
 
     {
+      provide: RevocationGate,
+      inject: [GATEWAY_ENV],
+      // `enforce` does not get past `loadGatewayEnv` until the identity-topic
+      // reader lands (EXT-005 PR 2); this is the one mode that reaches here.
+      useFactory: (env: GatewayEnv) => {
+        if (env.GATEWAY_REVOCATION_LIST !== 'off') {
+          throw new Error(`GATEWAY_REVOCATION_LIST=${env.GATEWAY_REVOCATION_LIST} is not wired`);
+        }
+        return RevocationGate.off();
+      },
+    },
+
+    {
       provide: AUTH_OPTIONS,
       inject: [GATEWAY_ENV],
       // The catch-all route is marked @Public, but that does NOT mean tokens
@@ -153,6 +199,8 @@ export class GatewayMetricsController {
           jwksUri: env.OIDC_JWKS_URI,
           issuer: env.OIDC_ISSUER_URL,
           audience: env.OIDC_AUDIENCE,
+          // The same value the revocation list keeps a revocation longer by.
+          clockToleranceSeconds: env.GATEWAY_OIDC_CLOCK_TOLERANCE_SECONDS,
         }),
         internalTokens: new InternalTokenService(
           env.INTERNAL_TOKEN_SECRET,
