@@ -129,6 +129,7 @@ describe('identity expected refusals and the circuit (PR #381 r3 F2, D-069)', ()
         path: '/v1/users/me',
         query: '',
         headers: {},
+        body: undefined,
       }),
     ).catch((error: unknown) => error);
 
@@ -227,6 +228,7 @@ describe('identity expected refusals and the circuit (PR #381 r3 F2, D-069)', ()
           path: '/v1/users/me',
           query: '',
           headers: {},
+          body: undefined,
         }),
       ).catch(() => undefined);
       expect(slow.circuitStates().identity).toEqual({ failures: 1, open: true });

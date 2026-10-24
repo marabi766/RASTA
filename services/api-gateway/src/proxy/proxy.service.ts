@@ -6,7 +6,7 @@ import {
   requestPath,
   type InternalTokenService,
 } from '@rasta/nest-common';
-import { ERROR_CODES, ERROR_STATUS, apiErrorSchema, type ApiError } from '@rasta/contracts';
+import { ERROR_CODES, apiErrorSchema, type ApiError } from '@rasta/contracts';
 import type { GatewayEnv } from '../config/env';
 import {
   TENDER_OPENING_ROUTES,
@@ -506,7 +506,7 @@ const ENVELOPE_KEYS: ReadonlySet<string> = new Set([
  * against its circuit (#381 r3 F2). Fail closed — counted — unless all of it
  * holds: the identity service; 503, the status both codes have
  * (`ERROR_STATUS`); a JSON body that is the complete platform envelope — every
- * required field, no `details`, no key the exception filter does not write;
+ * required field and no other key (so no `details`, no `stack`);
  * one of the two codes; and the correlation id of this very request, which a
  * cached or proxied page cannot carry. What the caller receives is unchanged:
  * the same allow-listed envelope as any other 5xx (`platformErrorEnvelope`).
@@ -526,8 +526,7 @@ export function isExpectedIdentityRefusal(
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
   if (!Object.keys(parsed).every((key) => ENVELOPE_KEYS.has(key))) return false;
   const result = apiErrorSchema.safeParse(parsed);
-  if (!result.success || result.data.details !== undefined) return false;
-  if (ERROR_STATUS[result.data.code as keyof typeof ERROR_STATUS] !== status) return false;
+  if (!result.success) return false;
   return (
     IDENTITY_EXPECTED_REFUSALS.has(result.data.code) &&
     result.data.correlationId === getContext().correlationId
