@@ -83,6 +83,7 @@ export const APPROVAL_REQUEST_SCHEMA = z.object({
   round: z.number().int(),
   tenderVersion: z.number().int(),
   status: z.string(),
+  procurementThresholdWarning: z.literal('PROCUREMENT_AMOUNT_OUTSIDE_RANGE').optional(),
   requestedBy: z.string(),
   requestedAt: utcInstant,
   endedAt: utcInstant.nullable(),
@@ -90,6 +91,23 @@ export const APPROVAL_REQUEST_SCHEMA = z.object({
   consumedAt: utcInstant.nullable(),
   steps: z.array(stepSchema),
 });
+
+export const THRESHOLD_PREVIEW_SCHEMA = z.object({
+  tenderVersion: z.number().int(),
+  decision: z.enum(['PASS', 'WARN', 'REJECT', 'ESTIMATE_REQUIRED']),
+  procurementThresholdPolicyId: z.string().nullable(),
+});
+export type ThresholdPreview = z.infer<typeof THRESHOLD_PREVIEW_SCHEMA>;
+export function fetchThresholdPreview(
+  session: WebSession,
+  tenderId: string,
+): Promise<ReadResult<ThresholdPreview>> {
+  return readOwnerView(
+    session,
+    `${tenderPath(tenderId)}/procurement-threshold-preview`,
+    THRESHOLD_PREVIEW_SCHEMA,
+  );
+}
 
 export type ApprovalRequest = z.infer<typeof APPROVAL_REQUEST_SCHEMA>;
 

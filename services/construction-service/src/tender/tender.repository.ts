@@ -42,6 +42,7 @@ export interface TenderCreateInput {
   title: string;
   scopeOfWork: string;
   procurementNature: Tender['procurementNature'];
+  estimatedCostMinor?: bigint | null;
   visibility: Tender['visibility'];
   bidOpeningAt: Date | null;
   bidClosingAt: Date | null;
@@ -72,6 +73,7 @@ export class TenderRepository {
         title: input.title,
         scopeOfWork: input.scopeOfWork,
         procurementNature: input.procurementNature,
+        estimatedCostMinor: input.estimatedCostMinor ?? null,
         visibility: input.visibility,
         bidOpeningAt: input.bidOpeningAt,
         bidClosingAt: input.bidClosingAt,
@@ -178,6 +180,8 @@ export class TenderRepository {
     input: {
       tenderId: string;
       expectedVersion: number;
+      procurementThresholdWarning?: string | null;
+      procurementThresholdPolicyId?: string | null;
       actor: string;
       /** The publisher's stable identity (#188), both or neither. */
       actorIdentity: StoredIdentity;
@@ -188,6 +192,8 @@ export class TenderRepository {
       where: { id: input.tenderId, status: 'DRAFT', version: input.expectedVersion },
       data: {
         status: 'PUBLISHED',
+        procurementThresholdWarning: input.procurementThresholdWarning ?? null,
+        procurementThresholdPolicyId: input.procurementThresholdPolicyId ?? null,
         publishedAt: input.at,
         publishedBy: input.actor,
         publishedByIssuer: input.actorIdentity.issuer,
