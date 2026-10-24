@@ -1,6 +1,8 @@
 import { z } from 'zod';
 
 import {
+  MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS,
+  MAX_REPLAY_MARGIN_SECONDS,
   projectCreateWindowFits,
   replayMarginCoversClockBudget,
 } from './unresolved-request-policy';
@@ -394,9 +396,14 @@ const schema = z.object({
    * window in which a bid re-sent under its original key is answered with its
    * stored receipt rather than run again (`server/bid-replay.ts`).
    *
-   * This **mirrors** construction-service's `CONSTRUCTION_IDEMPOTENCY_TTL_HOURS`
-   * (same bounds, 1..168) and must be changed together with it, or set lower.
-   * The default is that setting's floor, as for economic-service's above.
+   * This is the portal's own bound on construction-service's
+   * `CONSTRUCTION_IDEMPOTENCY_TTL_HOURS` (the service accepts 1..168 and keeps
+   * records that long): it must not exceed the service's setting, and it may be
+   * no more than `MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS` (1), the longest
+   * retention that can boot at all given the cap below
+   * (`unresolved-request-policy.ts` derives it; a larger value could only fail
+   * at start, so the schema refuses it here). The default is the service
+   * setting's floor.
    *
    * The project-create window (this retention less the margin below, plus the
    * portal's 30 s clock allowance) may not exceed
@@ -407,7 +414,12 @@ const schema = z.object({
    * honest client never meets the refusal. With 1 h that means a margin of at
    * least 330 s.
    */
-  WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+  WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS)
+    .default(1),
 
   /**
    * How much earlier than that retention the portal stops re-sending a bid
@@ -420,7 +432,7 @@ const schema = z.object({
     .number()
     .int()
     .min(60)
-    .max(30 * 60)
+    .max(MAX_REPLAY_MARGIN_SECONDS)
     .default(10 * 60),
 
   WEB_COOKIE_SECURE: z

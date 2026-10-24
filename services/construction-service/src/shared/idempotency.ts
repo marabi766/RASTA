@@ -6,6 +6,7 @@ import { isUniqueViolation } from '../shared/prisma-errors';
 import { idempotentReplaysTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
+import { decisionInstant } from './clock';
 import { forgettableWhere, mayForget } from './idempotency-forget';
 import {
   CLAIM_WAIT_MS,
@@ -106,8 +107,9 @@ export { CLAIM_WAIT_MS };
  * resending the same value cannot succeed.) An honest client never meets it: the portal and this
  * service are tied to one constant, `PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS`, and each refuses to
  * boot when its own settings break it (`config/env.ts`, `apps/web/src/server/env.ts`).
- * Otherwise the FIRST claim stores `D = H` (so `D + B ≤ expiresAt = C + TTL`, which the table's CHECK
- * also enforces) in `replayDeadlineAt`. There is no `min()`: a deadline that is stored is the one the
+ * Otherwise the FIRST claim stores `D = H` (so `D + B ≤ expiresAt = C + TTL`; the table's CHECK
+ * `ck_idempotency_replay_deadline_within_expiry` enforces only the weaker `D ≤ expiresAt`, the budget
+ * is this code's) in `replayDeadlineAt`. There is no `min()`: a deadline that is stored is the one the
  * caller sent, and a later one is not stored at all.
  *
  * Afterwards, for a request that matches the stored one (same requester and body — the actor and
@@ -119,6 +121,35 @@ export { CLAIM_WAIT_MS };
  *
  * A first claim whose header is already behind service-now is refused the same way, nothing written.
  * Equality: `now == D` is still allowed; the refusal is strictly `now > D`.
+ *
+ * ### Admission is decided AFTER the insert, on the database clock (PR #370 r8 F1)
+ *
+ * The two checks above read the replica's clock BEFORE the claim's transaction begins, and a request
+ * can be suspended between that read and the `BEGIN` (the driver has asynchronous boundaries there;
+ * the remaining claim budget is re-installed as a fresh relative timeout, so it does not notice).
+ * Meanwhile the original row can be legally forgotten, and the resumed insert then succeeds — a second
+ * execution. So the insert and the last word on the deadline are ONE transaction: after `create`
+ * succeeds — after any wait behind a lock, so `clock_timestamp()` and not `now()`, which is frozen at
+ * the transaction's start ({@link decisionInstant}) — the transaction reads the DATABASE clock `T` and,
+ * if `T > H`, throws `REPLAY_WINDOW_CLOSED`. Throwing rolls the insert back, so no claim of this attempt
+ * ever becomes visible: nothing is left to clean up, and no other row (another tenant's, a completed
+ * one, a replacement owner's) can be touched. It applies to every attempt of the claim loop (the first
+ * insert and every re-insert after a vanished or reclaimed row — they are the one insert site). A
+ * database clock that cannot be read fails the claim; the application clock is never the fallback.
+ * `T == H` is allowed. A request with no header is not touched (the shared store also serves tender
+ * awarding, which sends none).
+ *
+ * Why mixed clocks stay safe: let `t` be true time, `s` the bound on every clock's offset from it —
+ * replicas' and the database's, the one number `CONSTRUCTION_CLOCK_SKEW_SECONDS` and `B = 2s + m`
+ * already rest on. The insert can only succeed if the original row is absent at the insert, and the
+ * check follows the insert (`t_insert ≤ t_check`). Passing the check means `T ≤ H`, so `t_check ≤ H + s`.
+ * An original row accepted under `H` has `expiresAt ≥ H + B`, and a replica forgets it only on reading
+ * `now > expiresAt + B ≥ H + 2B`, i.e. at `t > H + 2B − s = H + 3s + 2m`. As `H + s < H + 3s + 2m`, a
+ * passing check proves the original row had NOT been forgotten when the insert succeeded; the row is
+ * then absent only because it never existed (or its owner released an `IN_PROGRESS` claim that never
+ * completed) — a first execution, not a repeat. The `Date` the driver returns has millisecond
+ * precision (the clock's microseconds are truncated), so `T > H` can admit up to 1 ms late — against
+ * a margin of at least `2s + 2m` seconds.
  *
  * ### One forget rule for every path
  *
@@ -248,6 +279,12 @@ interface Claim {
   token: string;
 }
 
+/**
+ * Where a claim can be suspended: before an insert's or a delete's transaction begins (after the
+ * remaining budget was read), or before the read of the row a failed insert collided with.
+ */
+export type ClaimPoint = 'insert' | 'read' | 'delete';
+
 /** How often a claim retries the atomic insert after its collision vanished. */
 const CLAIM_ATTEMPTS = 3;
 
@@ -270,6 +307,23 @@ export class IdempotencyStore {
    */
   protected nowMs(): number {
     return Date.now();
+  }
+
+  /**
+   * The database's clock, read inside the claim's transaction after the insert (the admission check of
+   * the replay fence). A test stands in a database clock by overriding it; it is never the application's.
+   */
+  protected databaseInstant(tx: ExtendedPrismaClient): Promise<Date> {
+    return decisionInstant(tx);
+  }
+
+  /**
+   * A seam that does nothing in production: called at the points where a request can be suspended
+   * between a decision and the statement it was made for. Tests park or reorder a claim here to
+   * interleave another replica's purge deterministically.
+   */
+  protected checkpoint(_point: ClaimPoint, _attempt: number): Promise<void> {
+    return Promise.resolve();
   }
 
   /** SHA-256 over the canonical form. See {@link hashRequestBody}. */
@@ -319,8 +373,8 @@ export class IdempotencyStore {
       const replayDeadlineAt = replayDeadlineMs === undefined ? null : new Date(replayDeadlineMs);
 
       try {
-        await this.withinBudget(endpoint, deadline, (tx) =>
-          tx.idempotencyKey.create({
+        await this.withinBudget(endpoint, deadline, 'insert', attempt, async (tx) => {
+          await tx.idempotencyKey.create({
             data: {
               key,
               organizationId,
@@ -331,13 +385,20 @@ export class IdempotencyStore {
               expiresAt,
               replayDeadlineAt,
             },
-          }),
-        );
+          });
+          // Admission, on the database clock, after the insert and any lock wait it made (see the
+          // replay fence above): throwing rolls the new claim back with the transaction.
+          if (replayDeadlineMs !== undefined) {
+            const databaseNow = await this.databaseInstant(tx);
+            if (databaseNow.getTime() > replayDeadlineMs) throw this.windowClosed(endpoint);
+          }
+        });
         return { kind: 'PROCEED', claim: { organizationId, endpoint, key, token } };
       } catch (error) {
         if (!isUniqueViolation(error)) throw error;
       }
 
+      await this.checkpoint('read', attempt);
       const existing = await this.prisma.client.idempotencyKey.findUnique({ where });
 
       // Released or purged between the failed insert and this read. Nothing
@@ -367,7 +428,7 @@ export class IdempotencyStore {
         )
       ) {
         // Waits for a domain transaction still holding the row — within the budget only.
-        await this.withinBudget(endpoint, deadline, (tx) =>
+        await this.withinBudget(endpoint, deadline, 'delete', attempt, (tx) =>
           tx.idempotencyKey.deleteMany({
             where: {
               organizationId,
@@ -401,11 +462,15 @@ export class IdempotencyStore {
   private async withinBudget<R>(
     endpoint: string,
     deadline: number,
+    point: ClaimPoint,
+    attempt: number,
     statement: (tx: ExtendedPrismaClient) => Promise<R>,
   ): Promise<R> {
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw this.inFlight(endpoint);
     const waitMs = Math.max(1, Math.ceil(remaining));
+    // After the budget was read and before BEGIN: the window a suspended request can sit in.
+    await this.checkpoint(point, attempt);
     try {
       return await this.prisma.transaction(
         async (tx) => {

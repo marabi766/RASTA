@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { loadWebServerEnv } from './env';
 import { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
 import {
+  MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS,
+  MAX_REPLAY_MARGIN_SECONDS,
   MIN_REPLAY_MARGIN_MS,
   projectCreateWindowFits,
   replayMarginCoversClockBudget,
@@ -352,8 +354,10 @@ describe('the bid replay deadline', () => {
     expect(env.WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS).toBe(600);
   });
 
-  it('mirrors the service’s bounds for the retention (1..168 hours) and bounds the margin', () => {
-    for (const value of ['0', '169', 'soon']) {
+  it('bounds the retention by what can boot (1 hour: derived from the 3 300 s limit) and bounds the margin', () => {
+    expect(MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS).toBe(1);
+    // No margin the schema allows lets 2 hours boot: 7 200 − 1 800 + 30 > 3 300. The schema says so itself.
+    for (const value of ['0', '2', '168', '169', 'soon']) {
       expect(() =>
         loadWebServerEnv({ ...REQUIRED, WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: value }),
       ).toThrow('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
@@ -377,9 +381,16 @@ describe('the bid replay deadline', () => {
     // 3600 − 330 = 3270; + 30 s = 3300 = K.
     expect(at('1', '330').WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS).toBe(330);
     expect(() => at('1', '329')).toThrow('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
-    // The setting's schema bound (168 h) cannot be bootable: 168 h − 1800 s is far past K.
+    // Beyond the schema's derived maximum: refused by the schema, and projectCreateWindowFits agrees
+    // for every margin the schema allows.
     expect(() => at('168', '1800')).toThrow('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
     expect(() => at('2', '1800')).toThrow('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+    for (let margin = 60; margin <= MAX_REPLAY_MARGIN_SECONDS; margin += 1) {
+      expect(projectCreateWindowFits(MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS + 1, margin)).toBe(
+        false,
+      );
+    }
+    expect(projectCreateWindowFits(MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS, 330)).toBe(true);
     // The defaults fit with room: 3 000 s window + 30 s = 3 030 s, slack 270 s.
     const defaults = loadWebServerEnv(REQUIRED);
     const window =

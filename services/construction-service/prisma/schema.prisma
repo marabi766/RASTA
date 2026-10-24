@@ -737,11 +737,13 @@ model IdempotencyKey {
   createdAt DateTime @default(now()) @map("created_at")
   expiresAt DateTime @map("expires_at")
 
-  /// Until when this request may still be executed under its key (PM decision D-065): fixed by the FIRST
-  /// claim from the caller's `Idempotency-Replay-Deadline`, clamped to `expiresAt` less the fence budget.
-  /// A later claim past it is refused (`REPLAY_WINDOW_CLOSED`), never run again. Null: no deadline was
-  /// sent (or the record predates the column) and the key behaves as it always did.
-  /// `ck_idempotency_replay_deadline_within_expiry`: never past `expiresAt`.
+  /// Until when this request may still be executed under its key (PM decisions D-065, D-067): fixed by
+  /// the FIRST claim to the caller's `Idempotency-Replay-Deadline`, stored as sent — a header later than
+  /// `expiresAt` less the fence budget is refused before any claim (400), never clamped. A later claim
+  /// past it is refused (`REPLAY_WINDOW_CLOSED`), never run again. Null: no deadline was sent (or the
+  /// record predates the column) and the key behaves as it always did.
+  /// `ck_idempotency_replay_deadline_within_expiry` enforces only `replayDeadlineAt <= expiresAt`; the
+  /// budget (`expiresAt - B`) is the service code's.
   replayDeadlineAt DateTime? @map("replay_deadline_at")
 
   @@id([organizationId, endpoint, key])

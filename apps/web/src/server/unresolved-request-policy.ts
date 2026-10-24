@@ -142,6 +142,26 @@ export function projectCreateWindowFits(ttlHours: number, marginSeconds: number)
   );
 }
 
+/** The largest `WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS` the setting's schema accepts. */
+export const MAX_REPLAY_MARGIN_SECONDS = 30 * 60;
+
+/**
+ * The largest `WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS` that can boot at all, derived from the inequality
+ * of {@link projectCreateWindowFits} and not chosen: the most generous margin the schema allows gives the
+ * longest retention whose window still fits,
+ *
+ *     TTL · 3600 − MAX_REPLAY_MARGIN + MAX_CLOCK_SKEW ≤ K    ⇒    TTL ≤ (K − skew + MAX_REPLAY_MARGIN) / 3600
+ *
+ * = (3 300 − 30 + 1 800) / 3 600 = 1.41 h, so 1. A larger value is refused at boot whatever the margin,
+ * so the schema refuses it up front instead of leaving a range that looks configurable and is not.
+ */
+export const MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS = Math.floor(
+  (PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS -
+    MAX_CLOCK_SKEW_MS / 1000 +
+    MAX_REPLAY_MARGIN_SECONDS) /
+    3600,
+);
+
 /** Whether the replay margin (seconds) covers the clock budget; the boot check. */
 export function replayMarginCoversClockBudget(marginSeconds: number): boolean {
   return marginSeconds * 1000 >= MIN_REPLAY_MARGIN_MS;
