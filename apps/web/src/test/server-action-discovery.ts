@@ -45,10 +45,24 @@ export function scanServerActions(source: string, fileName: string): ServerActio
   };
 }
 
-/** What Next's compiler turns into a module: `.d.ts` is types only. */
-const SOURCE = /\.(ts|tsx|js|jsx|mjs)$/;
-const DECLARATION = /\.d\.ts$/;
-const SKIPPED_DIRECTORIES = new Set(['node_modules', '.next']);
+/**
+ * The ONE list of extensions Next's webpack rule compiles as application code
+ * (`next/dist/build/webpack-config.js`, `codeCondition.test`). Discovery, the
+ * collision check and the spec all read it; `server-action-boundary.spec.ts`
+ * fails when the installed Next compiles an extension this list lacks.
+ */
+export const COMPILED_EXTENSIONS = ['ts', 'tsx', 'js', 'cjs', 'mjs', 'jsx'] as const;
+const SOURCE = new RegExp(`\\.(${COMPILED_EXTENSIONS.join('|')})$`);
+const DECLARATION = /\.d\.(ts|cts|mts)$/;
+/** Never source: dependencies and build output. */
+const OUTPUT_DIRECTORIES = new Set([
+  'node_modules',
+  '.next',
+  'dist',
+  'build',
+  '.turbo',
+  'coverage',
+]);
 /** Files a production build never ships on purpose: a server action in one is a defect. */
 const TEST_ONLY = /(\.(spec|test)\.[a-z]+$|(^|\/)(test|tests|__tests__|__mocks__|fixtures|e2e)\/)/;
 
@@ -61,21 +75,37 @@ export interface Discovery {
   readonly inTestFiles: string[];
   /** Directories where one basename has several compilable extensions: Jest and Next may load different files. */
   readonly ambiguous: string[];
+  /** Source files read and parsed (cost report). */
+  reads: number;
 }
 
-function walkSources(dir: string, visit: (file: string) => void): void {
+/** The web app is walked with only dependencies and `.next` skipped; a package also skips build output. */
+const APP_SKIPPED = new Set(['node_modules', '.next']);
+
+function walkSources(
+  dir: string,
+  skipped: ReadonlySet<string>,
+  visit: (file: string) => void,
+): void {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (!SKIPPED_DIRECTORIES.has(entry.name)) walkSources(full, visit);
+      if (!skipped.has(entry.name)) walkSources(full, skipped, visit);
     } else if (SOURCE.test(entry.name) && !DECLARATION.test(entry.name)) {
       visit(full);
     }
   }
 }
 
-/** `src` of every workspace package the web app depends on, transitively (`workspace:` in package.json). */
-export function workspacePackageSources(repoRoot: string, appDir: string): string[] {
+/** Quick filter: only a file that can spell the directive is parsed (escapes keep it in). */
+const MAY_HAVE_DIRECTIVE = /server|\\u|\\x/;
+
+/**
+ * The whole directory (not only `src`) of every workspace package the web app depends
+ * on, transitively, by any dependency field and any version range that names a workspace
+ * package: the package manager decides how it is linked, discovery does not.
+ */
+export function workspacePackageDirs(repoRoot: string, appDir: string): string[] {
   const byName = new Map<string, string>();
   for (const name of readdirSync(join(repoRoot, 'packages'))) {
     try {
@@ -87,46 +117,59 @@ export function workspacePackageSources(repoRoot: string, appDir: string): strin
       // not a package
     }
   }
-  const sources = new Set<string>();
+  const dirs = new Set<string>();
   const pending = [appDir];
   while (pending.length > 0) {
     const manifest = JSON.parse(
       readFileSync(join(pending.pop() as string, 'package.json'), 'utf8'),
     );
-    const deps = { ...manifest.dependencies, ...manifest.devDependencies } as Record<
-      string,
-      string
-    >;
-    for (const [dep, range] of Object.entries(deps)) {
+    const deps = {
+      ...manifest.dependencies,
+      ...manifest.devDependencies,
+      ...manifest.peerDependencies,
+      ...manifest.optionalDependencies,
+    } as Record<string, string>;
+    for (const dep of Object.keys(deps)) {
       const dir = byName.get(dep);
-      if (range.startsWith('workspace:') && dir && !sources.has(join(dir, 'src'))) {
-        sources.add(join(dir, 'src'));
+      if (dir && !dirs.has(dir)) {
+        dirs.add(dir);
         pending.push(dir);
       }
     }
   }
-  return [...sources].sort();
+  return [...dirs].sort();
 }
 
 /**
- * Every source Next can compile for the web app — all of `appDir` (not only `src`) and
- * the `src` of each workspace package it depends on — with no exclusion for a file name
- * or directory a production import could still reach. Test-only files are not skipped:
- * a directive in one is reported, so it cannot hide from the cases.
+ * Every source Next can compile for the web app — all of `appDir` and the whole directory
+ * of each workspace package it depends on — with no exclusion for a file name or directory
+ * a production import could still reach. Test-only files are not skipped: a directive in
+ * one is reported, so it cannot hide from the cases. What else the build could reach is
+ * fenced off by `server-action-boundary.spec.ts`.
  */
 export function discoverServerActions(repoRoot: string, appDir: string): Discovery {
   const modules: string[] = [];
   const inline: string[] = [];
   const inTestFiles: string[] = [];
   const ambiguous: string[] = [];
-  const roots = [appDir, ...workspacePackageSources(repoRoot, appDir)];
-  for (const root of roots) {
+  let reads = 0;
+  const roots: Array<[string, ReadonlySet<string>]> = [
+    [appDir, APP_SKIPPED],
+    ...workspacePackageDirs(repoRoot, appDir).map((dir): [string, ReadonlySet<string>] => [
+      dir,
+      OUTPUT_DIRECTORIES,
+    ]),
+  ];
+  for (const [root, skipped] of roots) {
     const byBase = new Map<string, string[]>();
-    walkSources(root, (full) => {
+    walkSources(root, skipped, (full) => {
       const rel = relative(repoRoot, full);
       const key = full.replace(SOURCE, '');
       byBase.set(key, [...(byBase.get(key) ?? []), rel]);
-      const scan = scanServerActions(readFileSync(full, 'utf8'), full);
+      const text = readFileSync(full, 'utf8');
+      reads += 1;
+      if (!MAY_HAVE_DIRECTIVE.test(text)) return;
+      const scan = scanServerActions(text, full);
       if (TEST_ONLY.test(rel)) {
         if (scan.fileLevel) inTestFiles.push(`${rel}:${scan.fileLevel}`);
         for (const line of scan.inline) inTestFiles.push(`${rel}:${line}`);
@@ -144,5 +187,6 @@ export function discoverServerActions(repoRoot: string, appDir: string): Discove
     inline: inline.sort(),
     inTestFiles: inTestFiles.sort(),
     ambiguous: ambiguous.sort(),
+    reads,
   };
 }

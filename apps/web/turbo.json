@@ -17,7 +17,8 @@
     "test": {
       "inputs": [
         "$TURBO_DEFAULT$",
-        "$TURBO_ROOT$/packages/contracts/src/**",
+        "$TURBO_ROOT$/packages/contracts/**",
+        "$TURBO_ROOT$/tsconfig.base.json",
         "$TURBO_ROOT$/packages/nest-common/src/**",
         "$TURBO_ROOT$/services/api-gateway/src/**",
         "$TURBO_ROOT$/services/asset-service/src/**",
@@ -36,7 +37,8 @@
     "test:unit": {
       "inputs": [
         "$TURBO_DEFAULT$",
-        "$TURBO_ROOT$/packages/contracts/src/**",
+        "$TURBO_ROOT$/packages/contracts/**",
+        "$TURBO_ROOT$/tsconfig.base.json",
         "$TURBO_ROOT$/packages/nest-common/src/**",
         "$TURBO_ROOT$/services/api-gateway/src/**",
         "$TURBO_ROOT$/services/asset-service/src/**",
