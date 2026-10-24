@@ -319,7 +319,10 @@ export const assetTransferredSchema = z
     // coverages that follow the vehicle, computed by asset-service at transfer
     // time. Absent on an older event: the projection then keeps no window.
     ownershipGeneration: z.number().int().nonnegative().optional(),
-    retainedCoverages: z.array(z.string().min(1)).optional(),
+    // A subset of asset-service's coverage kinds (four today), each once
+    // (asset `INSURANCE_COVERAGES_FOLLOWING_VEHICLE`). The cap only stops a
+    // payload whose length alone makes it a defect (GHSA-mrhx-c7xc-m3w5).
+    retainedCoverages: z.array(z.string().min(1)).max(50).optional(),
   })
   .passthrough()
   .refine((payload) => payload.fromOrganizationId !== payload.toOrganizationId, {

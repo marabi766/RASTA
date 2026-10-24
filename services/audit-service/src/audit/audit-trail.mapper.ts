@@ -1,4 +1,3 @@
-import type { ZodIssue } from 'zod';
 import {
   AUDIT_EVENT_RECORDED,
   AUDIT_EVENT_RECORDED_VERSION,
@@ -13,6 +12,7 @@ import {
 import type { EventDelivery } from '@rasta/nest-common';
 import { isSensitiveKey, toEnvelopeProvenance, type AuditEventRecord } from './audit.mapper';
 import { INGESTION_FAILURE_REASONS } from '../observability/metrics';
+import { declaredFieldNames, describeIssues } from './refusal-diagnostics';
 
 /**
  * Path B of ADR-053: one `AUDIT_EVENT_RECORDED` message becomes one audit row
@@ -95,20 +95,13 @@ function summarise(items: readonly string[]): string {
 }
 
 /**
- * Where a schema failed and how, without what it failed on.
- *
- * A path is made of declared schema keys and array indices only: every object
- * in the envelope and the v1 payload is a fixed-shape `z.object`, so no segment
- * can be a key the producer invented, and `unrecognized_keys` reports at the
- * parent's path without naming the extra key.
+ * The field names a rejection may print in an issue path: those the envelope
+ * and the v1 payload schemas declare. Every object in both is a fixed-shape
+ * `z.object` today, so no path segment can be a key the producer invented;
+ * the allow-list keeps that true if one ever gains an open record (S-09, PR
+ * #378 r1 F3). See `refusal-diagnostics.ts`.
  */
-function describeIssues(issues: readonly ZodIssue[]): string {
-  return summarise(
-    issues.map(
-      (issue) => `${issue.path.length === 0 ? '(root)' : issue.path.join('.')} ${issue.code}`,
-    ),
-  );
-}
+const TRAIL_FIELD_NAMES = declaredFieldNames(eventEnvelopeSchema, auditTrailPayloadSchemaV1);
 
 const isBlank = (value: string): boolean => value.trim().length === 0;
 
@@ -233,7 +226,7 @@ export function toAuditTrailRecord(
   if (!parsedEnvelope.success) {
     throw rejected(
       INGESTION_FAILURE_REASONS.TRAIL_INVALID_ENVELOPE,
-      describeIssues(parsedEnvelope.error.issues),
+      describeIssues(parsedEnvelope.error.issues, TRAIL_FIELD_NAMES),
     );
   }
   const checked: EventEnvelope = { ...parsedEnvelope.data, payload: parsedEnvelope.data.payload };
@@ -256,7 +249,7 @@ export function toAuditTrailRecord(
   if (!parsedPayload.success) {
     throw rejected(
       INGESTION_FAILURE_REASONS.TRAIL_INVALID_PAYLOAD,
-      describeIssues(parsedPayload.error.issues),
+      describeIssues(parsedPayload.error.issues, TRAIL_FIELD_NAMES),
     );
   }
   const payload = parsedPayload.data;

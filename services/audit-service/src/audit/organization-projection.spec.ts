@@ -352,6 +352,31 @@ describe('ORGANIZATION_STATUS_CHANGED', () => {
     },
   );
 
+  it('projects a cascade of 100,001 distinct identifiers, uncapped (PR #378 r1 F1)', () => {
+    // organization-service publishes the whole subtree, GZIP-compressed, so a
+    // cascade this long is a real one: refusing it would leave every listed
+    // descendant ACTIVE here. Distinct identifiers, so a de-duplicating
+    // implementation cannot pass by collapsing a repeated one.
+    const descendants = Array.from(
+      { length: 100_001 },
+      (_, index) => `ORG-D${String(index).padStart(6, '0')}`,
+    );
+    const projection = toOrganizationProjection(
+      envelope(ORGANIZATION_PROJECTION_EVENTS.STATUS_CHANGED, {
+        ...STATUS_PAYLOAD,
+        affectedIds: descendants,
+      }),
+      ORG_DELIVERY,
+    );
+    expect(projection).toMatchObject({ kind: 'STATUS_CHANGED' });
+    const affected = (projection as { affectedOrganizationIds: readonly string[] })
+      .affectedOrganizationIds;
+    // The subject first, then every descendant once.
+    expect(affected).toHaveLength(100_002);
+    expect(affected[0]).toBe('ORG-UNION');
+    expect(affected[100_001]).toBe('ORG-D100000');
+  });
+
   it('records a status this service has never heard of', () => {
     // The vocabulary belongs to another service. Failing to record a status
     // because it is new would stall the projection on a value that is not
