@@ -2628,6 +2628,8 @@ export const EXPECTED = {
     // 20260930180000_tender_publication: a tender's key is never deleted and its
     // public half never changes.
     triggers: [
+      'tg_approval_threshold_snapshot',
+      'tg_tender_procurement_estimate',
       'tg_tender_criterion_freeze',
       'tg_tender_publish_requires_criteria',
       'tg_tender_status_transition',
@@ -2683,6 +2685,7 @@ export const EXPECTED = {
       'bid_evaluation_guard',
       'bid_recusal_guard',
       'bid_score_guard',
+      'guard_tender_procurement_estimate',
       'tender_award_guard',
       'tender_award_recorded',
       'bid_award_recorded',
@@ -2754,6 +2757,8 @@ export const EXPECTED = {
       // its project's tenant, names who acted, has a real bidding window, is
       // never published on a default, and a cancellation says why.
       'tender_organization_id_project_id_fkey',
+      'ck_tender_estimate_nonnegative',
+      'ck_tender_threshold_warning',
       'ck_tender_text_not_blank',
       'ck_tender_actor_recorded',
       'ck_tender_version_positive',

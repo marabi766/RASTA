@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { currencySchema } from '@rasta/contracts';
+import { currencySchema, numberInput } from '@rasta/contracts';
 import { cursorQueryParameter } from '../shared/cursor';
 
 /** Ledger read shapes, and the one write a caller may ask for: a reversal. */
@@ -7,7 +7,7 @@ import { cursorQueryParameter } from '../shared/cursor';
 export const listEntriesQuerySchema = z
   .object({
     cursor: cursorQueryParameter,
-    limit: z.coerce.number().int().min(1).max(200).default(50),
+    limit: numberInput(z.number().int().min(1).max(200)).default(50),
   })
   .strict();
 

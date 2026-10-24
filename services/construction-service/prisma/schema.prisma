@@ -487,8 +487,13 @@ model Tender {
   scopeOfWork String @map("scope_of_work")
 
   /// Null until chosen; required from PUBLISHED on (`ck_tender_published_complete`).
-  procurementNature ProcurementNature? @map("procurement_nature")
-  visibility        TenderVisibility?
+  procurementNature            ProcurementNature? @map("procurement_nature")
+  /// Owner-entered estimate in rial, required only when procurement thresholds are configured.
+  estimatedCostMinor           BigInt?            @map("estimated_cost_minor")
+  /// Warning snapshot from publication; retained even when governance configuration changes.
+  procurementThresholdWarning  String?            @map("procurement_threshold_warning")
+  procurementThresholdPolicyId String?            @map("procurement_threshold_policy_id")
+  visibility                   TenderVisibility?
 
   /// The bidding window is [bid_opening_at, bid_closing_at), UTC (ADR-065 § 2).
   bidOpeningAt DateTime? @map("bid_opening_at") @db.Timestamptz(3)
@@ -1208,6 +1213,10 @@ model TenderApprovalRequest {
   /// A cancellation: the reason in words and its closed code (`OWNER_REQUEST`, `NO_QUALIFIED_BID`).
   reason               String?
   reasonCode           String?   @map("reason_code")
+
+  /// Publication threshold snapshot shown to approvers; execution checks the policy again.
+  procurementThresholdWarning String? @map("procurement_threshold_warning")
+  procurementThresholdPolicyId String? @map("procurement_threshold_policy_id")
 
   requestedBy            String   @map("requested_by")
   /// The requester's stable identity (#188), both or neither: what the approver is compared with.
