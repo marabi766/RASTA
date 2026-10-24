@@ -72,10 +72,22 @@ groups:
   - name: rasta-economic-settlement
     rules:
       - alert: RastaSettlementNoActiveRule
-        expr: sum(increase(rasta_economic_settlement_failures_total{reason="no_active_rule"}[15m])) > 0
+        # increase() misses refusals before the first scrape. Also accept a
+        # positive series absent 15m ago, matching all labels before summing so
+        # another instance cannot hide it. Filter zero increases before `or`
+        # so they cannot mask that branch; old steady positives then age out.
+        expr: >-
+          sum(
+            (increase(rasta_economic_settlement_failures_total{reason="no_active_rule"}[15m]) > 0)
+            or
+            (
+              (rasta_economic_settlement_failures_total{reason="no_active_rule"} > 0)
+              unless rasta_economic_settlement_failures_total{reason="no_active_rule"} offset 15m
+            )
+          ) > 0
         labels:
           severity: warning
         annotations:
           summary: 'Settlements refused: no active commission rule for the line'
-          description: 'At least one settlement in the last 15 minutes was refused with 422 NO_ACTIVE_RULE: no active commission rule covers its business line, and settlement fails closed. Nothing moved and the funds stay held; the payee is not paid until a rule for the line is in force. The SETTLEMENT_REFUSED events name the transactions and lines; this alert deliberately carries none.'
+          description: 'A settlement refusal with 422 NO_ACTIVE_RULE was observed in the last 15 minutes (a counter increase or a newly observed positive series): no active commission rule covers its business line, and settlement fails closed. Nothing moved and the funds stay held; the payee is not paid until a rule for the line is in force. The SETTLEMENT_REFUSED events name the transactions and lines; this alert deliberately carries none.'
           runbook: docs/runbooks/settlement-no-active-rule.md
