@@ -300,7 +300,9 @@ describe('the committed bootstrap files', () => {
   });
 
   it('topics.txt is what the contracts generate', () => {
-    expect(lines('topics.txt')).toEqual(brokerTopics().map((t) => `${t.name} ${t.kind}`));
+    expect(lines('topics.txt')).toEqual(
+      brokerTopics().map((t) => `${t.name} ${t.kind} ${t.maxMessageBytes}`),
+    );
   });
 
   it('creates exactly the topics the contracts and the ACLs name — no more, no fewer (review of #131, #2)', () => {

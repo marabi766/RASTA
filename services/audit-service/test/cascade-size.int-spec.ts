@@ -30,8 +30,9 @@ import { at, orgId, projectOrganization, queryWindow } from './fixtures';
  * union above them stops reaching them.
  *
  * The descendants are seeded directly as `PROJECTED` children of one branch
- * (100,000 creation events through the consumer would only measure the seeding);
- * the cascade itself goes through the real ingestion path —
+ * (100,000 creation events through the consumer would only measure the seeding),
+ * again before every test, so none depends on another having run (PR #378 r2
+ * F2); the cascade itself goes through the real ingestion path —
  * `toAuditEventRecord`, `toOrganizationProjection` and `AuditRepository.ingest`,
  * exactly as `DomainProjectorConsumer` calls them — in the one transaction and
  * the chunks of `STATUS_CASCADE_CHUNK` production uses. Distinct identifiers on
@@ -43,7 +44,6 @@ describe('audit hierarchy projection of a 100,001-organization cascade (real Pos
   let migrator: PrismaService;
   let repository: AuditRepository;
   let server: Server;
-  let elapsedMs = Number.NaN;
 
   /** The caller's union. Never named in the cascade, so it stays ACTIVE. */
   const UNION = orgId('CASCADE-UNION');
@@ -83,52 +83,13 @@ describe('audit hierarchy projection of a 100,001-organization cascade (real Pos
     return Number(row?.count ?? 0n);
   };
 
-  beforeAll(async () => {
-    migrator = newMigratorPrisma();
-    await migrator.onModuleInit();
-    api = await startApi();
-    server = api.app.getHttpServer() as Server;
-    repository = api.app.get(AuditRepository);
-
-    await projectOrganization(migrator, {
-      organizationId: UNION,
-      relationObservedAt: at(1),
-    });
-    await projectOrganization(migrator, {
-      organizationId: BRANCH,
-      parentOrganizationId: UNION,
-      relationObservedAt: at(2),
-    });
-    // One statement: every descendant a projected, active child of the branch,
-    // observed before the cascade so its monotonic guard lets the cascade in.
-    await migrator.client.$executeRawUnsafe(
-      `INSERT INTO organization_ref (
-         organization_id, parent_organization_id, status, relation_state, relation_observed_at
-       )
-       SELECT $1 || lpad(g::text, 6, '0'), $2, 'ACTIVE', 'PROJECTED', $3
-         FROM generate_series(1, $4::int) AS g`,
-      DESCENDANT_PREFIX,
-      BRANCH,
-      at(3),
-      DESCENDANT_COUNT,
-    );
-  }, 180_000);
-
-  afterAll(async () => {
-    await api?.close();
-    await cleanupRun(migrator);
-    await migrator.onModuleDestroy();
-  }, 180_000);
-
-  it('reaches every sampled descendant before the cascade (the positive control)', async () => {
-    expect(await countWithStatus('ACTIVE')).toBe(DESCENDANT_COUNT + 1);
-    for (const organizationId of [BRANCH, ...SAMPLES]) {
-      expect((await query(organizationId)).status).toBe(200);
-    }
-  });
-
-  it('accepts the cascade of 100,001 distinct identifiers within the ingest transaction budget', async () => {
-    expect(new Set(affectedIds).size).toBe(DESCENDANT_COUNT + 1);
+  /**
+   * The cascade, through the real ingestion path: `toAuditEventRecord`,
+   * `toOrganizationProjection` and `AuditRepository.ingest`, as
+   * `DomainProjectorConsumer` calls them. A new event id each time, so the
+   * processed marker never turns it into a redelivery.
+   */
+  async function cascade(): Promise<{ outcome: string; elapsedMs: number }> {
     const source = {
       eventId: id('EVT'),
       eventName: ORGANIZATION_PROJECTION_EVENTS.STATUS_CHANGED,
@@ -152,7 +113,65 @@ describe('audit hierarchy projection of a 100,001-organization cascade (real Pos
       DOMAIN_PROJECTOR_CONSUMER,
       projection,
     );
-    elapsedMs = performance.now() - started;
+    return { outcome, elapsedMs: performance.now() - started };
+  }
+
+  beforeAll(async () => {
+    migrator = newMigratorPrisma();
+    await migrator.onModuleInit();
+    api = await startApi();
+    server = api.app.getHttpServer() as Server;
+    repository = api.app.get(AuditRepository);
+  }, 180_000);
+
+  // Every test starts from the same hierarchy, all of it ACTIVE, whatever ran
+  // before it (AGENTS.md § 5): each one that needs the cascade runs it itself.
+  beforeEach(async () => {
+    await projectOrganization(migrator, {
+      organizationId: UNION,
+      relationObservedAt: at(1),
+    });
+    await projectOrganization(migrator, {
+      organizationId: BRANCH,
+      parentOrganizationId: UNION,
+      relationObservedAt: at(2),
+    });
+    // One statement: every descendant a projected, active child of the branch,
+    // observed before the cascade so its monotonic guard lets the cascade in.
+    await migrator.client.$executeRawUnsafe(
+      `INSERT INTO organization_ref (
+         organization_id, parent_organization_id, status, relation_state, relation_observed_at
+       )
+       SELECT $1 || lpad(g::text, 6, '0'), $2, 'ACTIVE', 'PROJECTED', $3
+         FROM generate_series(1, $4::int) AS g
+       ON CONFLICT (organization_id) DO UPDATE
+          SET parent_organization_id = EXCLUDED.parent_organization_id,
+              status                 = EXCLUDED.status,
+              relation_state         = EXCLUDED.relation_state,
+              relation_observed_at   = EXCLUDED.relation_observed_at`,
+      DESCENDANT_PREFIX,
+      BRANCH,
+      at(3),
+      DESCENDANT_COUNT,
+    );
+  }, 180_000);
+
+  afterAll(async () => {
+    await api?.close();
+    await cleanupRun(migrator);
+    await migrator.onModuleDestroy();
+  }, 180_000);
+
+  it('reaches every sampled descendant before the cascade (the positive control)', async () => {
+    expect(await countWithStatus('ACTIVE')).toBe(DESCENDANT_COUNT + 1);
+    for (const organizationId of [BRANCH, ...SAMPLES]) {
+      expect((await query(organizationId)).status).toBe(200);
+    }
+  });
+
+  it('accepts the cascade of 100,001 distinct identifiers within the ingest transaction budget', async () => {
+    expect(new Set(affectedIds).size).toBe(DESCENDANT_COUNT + 1);
+    const { outcome, elapsedMs } = await cascade();
 
     expect(outcome).toBe('WRITTEN');
     // One transaction (`INGEST_TRANSACTION`), ceil(100,001 / 500) = 201 chunks.
@@ -164,23 +183,25 @@ describe('audit hierarchy projection of a 100,001-organization cascade (real Pos
     expect(elapsedMs).toBeLessThan(INGEST_TRANSACTION_TIMEOUT_MS);
   }, 120_000);
 
-  it('leaves no listed organization ACTIVE in the projection', async () => {
-    expect(Number.isNaN(elapsedMs)).toBe(false);
+  it('leaves no listed organization ACTIVE after the cascade, and the union, which it did not name, ACTIVE', async () => {
+    expect(await countWithStatus('ACTIVE')).toBe(DESCENDANT_COUNT + 1);
+    expect((await cascade()).outcome).toBe('WRITTEN');
+
     expect(await countWithStatus('ACTIVE')).toBe(0);
     expect(await countWithStatus('DEACTIVATED')).toBe(DESCENDANT_COUNT + 1);
-  });
-
-  it("no longer lets the union's UNION_ADMIN reach a deactivated descendant", async () => {
-    for (const organizationId of [BRANCH, ...SAMPLES]) {
-      expect((await query(organizationId)).status).toBe(403);
-      expect(await repository.isWithinProjectedSubtree(UNION, organizationId)).toBe(false);
-    }
-  });
-
-  it('keeps the union itself, which the cascade did not name, ACTIVE', async () => {
     const union = await api.prisma.client.organizationRef.findUniqueOrThrow({
       where: { organizationId: UNION },
     });
     expect(union.status).toBe('ACTIVE');
-  });
+  }, 120_000);
+
+  it("no longer lets the union's UNION_ADMIN reach a deactivated descendant after the cascade", async () => {
+    expect((await query(BRANCH)).status).toBe(200);
+    expect((await cascade()).outcome).toBe('WRITTEN');
+
+    for (const organizationId of [BRANCH, ...SAMPLES]) {
+      expect((await query(organizationId)).status).toBe(403);
+      expect(await repository.isWithinProjectedSubtree(UNION, organizationId)).toBe(false);
+    }
+  }, 120_000);
 });

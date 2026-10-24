@@ -106,12 +106,18 @@ jobs:
         # $GITHUB_ENV, a job-level env or a launched service; the admin's
         # directory goes to the broker bootstrap and the broker tests alone
         # (reviews of #131).
+        #
+        # And every topic states its max.message.bytes, with each dead-letter
+        # topic's above its sources' by the added-header bound and the GZIP
+        # margin, so a refused record's dead letter always fits (PR #378 r2 F1).
         run: |
           pnpm run test:kafka-acl-lib
           pnpm run test:kafka-credential-scope
           pnpm run check:kafka-credential-scope
           pnpm run test:kafka-outbox-tables
           pnpm run test:replay-dlq-lib
+          pnpm run test:kafka-topic-limits-lib
+          pnpm run check:kafka-topic-limits
 
       - name: Role passwords are distinct and checked before any role changes
         # L7-33: the bootstrap and `pnpm db:rotate-role-passwords` refuse two

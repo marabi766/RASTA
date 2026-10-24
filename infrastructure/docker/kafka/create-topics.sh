@@ -6,6 +6,14 @@
 # TOPIC_CONSUMERS together with the ACLs, so the two cannot disagree (RUN-006).
 # TOPICS_FILE defaults to the copy next to this script.
 #
+# Every topic gets the `max.message.bytes` topics.txt states (PR #378 r2 F1):
+# Kafka's default for a source topic, more for a dead-letter topic, so the dead
+# letter of any record a source admitted fits. `--create --if-not-exists`
+# leaves an existing topic as it is, so the limits are then read back for every
+# topic and set where they differ: a re-run, or a broker provisioned before the
+# limits existed, converges, and the script fails unless every topic ends with
+# its limit. Retention and partitions of an existing topic are not touched.
+#
 # With KAFKA_PROVISION_PROFILE (compose's kafka-init) it first gives a
 # credential to any principal of that profile that has none — one added to
 # the contracts after the broker's log was formatted. It never overwrites one.
@@ -84,9 +92,8 @@ create_topic() {
   local name="$1"
   local partitions="$2"
   local retention="$3"
-  local extra="${4:-}"
+  local max_bytes="$4"
 
-  # shellcheck disable=SC2086
   "${KAFKA_BIN}"/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" "${ADMIN_CONFIG[@]}" \
     --create --if-not-exists \
     --topic "${name}" \
@@ -94,8 +101,8 @@ create_topic() {
     --replication-factor "${REPLICATION}" \
     --config "retention.ms=${retention}" \
     --config "min.insync.replicas=1" \
-    ${extra} >/dev/null
-  echo "    - ${name} (partitions=${partitions})"
+    --config "max.message.bytes=${max_bytes}" >/dev/null
+  echo "    - ${name} (partitions=${partitions}, max.message.bytes=${max_bytes})"
 }
 
 # Partitions and retention by kind. Dead letters need human eyes, not expiry;
@@ -103,10 +110,17 @@ create_topic() {
 # a real deployment, 30 days here only to keep laptops from filling up.
 create_kind() {
   local name="$1"
+  local max_bytes="$3"
+  case "${max_bytes}" in
+    '' | *[!0-9]*)
+      echo "==> ${name}: topics.txt states no max.message.bytes" >&2
+      return 1
+      ;;
+  esac
   case "$2" in
-    stream | retry) create_topic "${name}" "${PARTITIONS}" "${RETENTION_MS}" ;;
-    dead-letter) create_topic "${name}" 1 "2592000000" ;;
-    audit-trail) create_topic "${name}" "${PARTITIONS}" "2592000000" ;;
+    stream | retry) create_topic "${name}" "${PARTITIONS}" "${RETENTION_MS}" "${max_bytes}" ;;
+    dead-letter) create_topic "${name}" 1 "2592000000" "${max_bytes}" ;;
+    audit-trail) create_topic "${name}" "${PARTITIONS}" "2592000000" "${max_bytes}" ;;
     *)
       echo "==> ${name}: unknown kind $2" >&2
       return 1
@@ -120,9 +134,9 @@ echo "==> Creating topics from $(basename "${TOPICS_FILE}")"
 PARALLELISM="${KAFKA_TOPIC_PARALLELISM:-6}"
 pids=()
 failed=0
-while read -r name kind; do
+while read -r name kind max_bytes; do
   case "${name}" in '' | \#*) continue ;; esac
-  create_kind "${name}" "${kind}" &
+  create_kind "${name}" "${kind}" "${max_bytes}" &
   pids+=("$!")
   if [ "${#pids[@]}" -ge "${PARALLELISM}" ]; then
     for pid in "${pids[@]}"; do wait "${pid}" || failed=1; done
@@ -132,6 +146,51 @@ done < "${TOPICS_FILE}"
 for pid in "${pids[@]}"; do wait "${pid}" || failed=1; done
 if [ "${failed}" -ne 0 ]; then
   echo "==> A topic could not be created" >&2
+  exit 1
+fi
+
+# `<topic> <max.message.bytes>` for every topic that overrides it: one JVM for
+# all of them. A topic without the override inherits the broker's default and
+# is listed with none.
+topic_limits() {
+  "${KAFKA_BIN}"/kafka-configs.sh --bootstrap-server "${BOOTSTRAP}" "${ADMIN_CONFIG[@]}" \
+    --describe --entity-type topics |
+    awk '/^Dynamic configs for topic / { topic = $5 }
+         /^ +max\.message\.bytes=/ { split($1, kv, "="); print topic, kv[2] }'
+}
+
+# An existing topic keeps whatever it had: set the limit where it differs.
+echo "==> Applying max.message.bytes from $(basename "${TOPICS_FILE}")"
+current="$(topic_limits)"
+pids=()
+while read -r name _ max_bytes; do
+  case "${name}" in '' | \#*) continue ;; esac
+  if grep -qxF "${name} ${max_bytes}" <<< "${current}"; then continue; fi
+  (
+    "${KAFKA_BIN}"/kafka-configs.sh --bootstrap-server "${BOOTSTRAP}" "${ADMIN_CONFIG[@]}" \
+      --alter --entity-type topics --entity-name "${name}" \
+      --add-config "max.message.bytes=${max_bytes}" >/dev/null
+    echo "    - ${name}: max.message.bytes set to ${max_bytes}"
+  ) &
+  pids+=("$!")
+  if [ "${#pids[@]}" -ge "${PARALLELISM}" ]; then
+    for pid in "${pids[@]}"; do wait "${pid}" || failed=1; done
+    pids=()
+  fi
+done < "${TOPICS_FILE}"
+for pid in "${pids[@]}"; do wait "${pid}" || failed=1; done
+
+# Read back: every topic ends with exactly the limit topics.txt states.
+current="$(topic_limits)"
+while read -r name _ max_bytes; do
+  case "${name}" in '' | \#*) continue ;; esac
+  if ! grep -qxF "${name} ${max_bytes}" <<< "${current}"; then
+    echo "==> ${name}: max.message.bytes is not ${max_bytes}" >&2
+    failed=1
+  fi
+done < "${TOPICS_FILE}"
+if [ "${failed}" -ne 0 ]; then
+  echo "==> A topic's max.message.bytes could not be applied" >&2
   exit 1
 fi
 

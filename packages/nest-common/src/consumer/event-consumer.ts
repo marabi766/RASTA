@@ -7,6 +7,8 @@ import {
   type IHeaders,
 } from 'kafkajs';
 import {
+  DLQ_ADDED_HEADERS_MAX_BYTES,
+  DLQ_HEADER_VALUE_MAX_BYTES,
   DLQ_HEADERS,
   DLQ_REASONS,
   EVENT_HEADERS,
@@ -165,10 +167,13 @@ export interface DeadLetterDescription {
   readonly attempts: number;
   /**
    * Fixed text and identifiers only (S-09), like an {@link UnprocessableEventError}'s
-   * message; cut to 1000 characters, never otherwise rewritten.
+   * message; cut to 1,000 UTF-8 bytes on a character boundary, never otherwise rewritten.
    */
   readonly detail: string;
-  /** Who writes the dead letter: the consumer's client id, never the original producer. */
+  /**
+   * Who writes the dead letter: the consumer's client id, never the original
+   * producer. Cut to 128 UTF-8 bytes.
+   */
   readonly producer: string;
   readonly failedAt: Date;
 }
@@ -947,20 +952,59 @@ export function forwardedHeaders(headers: IHeaders | undefined): IHeaders {
 }
 
 /**
+ * The most a dead letter's headers add to the original record, serialized:
+ * every header {@link deadLetterHeaders} adds at its byte cap, and the varint
+ * framing they can grow (`@rasta/contracts`' `dead-letter-size.ts`, which the
+ * topic limits are derived from). Each dead-letter topic allows this much,
+ * plus GZIP's worst case, over the largest topic it takes dead letters from
+ * (`topics.txt`, `scripts/check-kafka-topic-limits.mjs`), so a dead letter of
+ * any record the source admitted fits (PR #378 r2 F1).
+ */
+export { DLQ_ADDED_HEADERS_MAX_BYTES };
+
+/**
  * The headers of a dead letter: the original's platform headers
  * ({@link forwardedHeaders}; any other is dropped), then why and from where
  * (`DLQ_HEADERS`) and who wrote it. The consumer's own dead letters use it, and
  * so does a service that dead-letters through its outbox an event it held back
  * (fleet's parked insurance events, #240 r9), so the replay tool and the
  * runbook read both alike.
+ *
+ * Every value it adds is bounded in UTF-8 bytes ({@link DLQ_ADDED_HEADERS_MAX_BYTES}).
+ * What a replay depends on — the original topic, partition and offset — is
+ * never cut: a value no broker could have delivered (a topic name Kafka would
+ * refuse, a partition outside int32, an offset outside int64) is refused with
+ * a {@link DeadLetterHeaderError}, and the message is not committed, as when
+ * the send fails. The error text and the client id are cut on a character
+ * boundary; the reason is one of `DLQ_REASONS`, the time an ISO instant.
  */
 export function deadLetterHeaders(
   original: IHeaders | undefined,
   letter: DeadLetterDescription,
 ): IHeaders {
+  const cap = DLQ_HEADER_VALUE_MAX_BYTES;
+  if (!KAFKA_TOPIC_NAME.test(letter.originalTopic)) {
+    throw new DeadLetterHeaderError('the original topic is not a Kafka topic name');
+  }
+  if (
+    letter.originalPartition !== undefined &&
+    !(
+      Number.isInteger(letter.originalPartition) &&
+      letter.originalPartition >= 0 &&
+      letter.originalPartition <= INT32_MAX
+    )
+  ) {
+    throw new DeadLetterHeaderError('the original partition is not a non-negative int32');
+  }
+  if (letter.originalOffset !== undefined && !KAFKA_OFFSET.test(letter.originalOffset)) {
+    throw new DeadLetterHeaderError('the original offset is not a non-negative int64');
+  }
+  if (!(Number.isSafeInteger(letter.attempts) && letter.attempts >= 0)) {
+    throw new DeadLetterHeaderError('the attempts are not a non-negative integer');
+  }
   return {
     ...forwardedHeaders(original),
-    [DLQ_HEADERS.reason]: letter.reason,
+    [DLQ_HEADERS.reason]: utf8Prefix(letter.reason, cap.reason),
     [DLQ_HEADERS.originalTopic]: letter.originalTopic,
     ...(letter.originalPartition === undefined
       ? {}
@@ -969,10 +1013,38 @@ export function deadLetterHeaders(
       ? {}
       : { [DLQ_HEADERS.originalOffset]: letter.originalOffset }),
     [DLQ_HEADERS.attempts]: String(letter.attempts),
-    [DLQ_HEADERS.error]: letter.detail.slice(0, 1000),
+    [DLQ_HEADERS.error]: utf8Prefix(letter.detail, cap.error),
     [DLQ_HEADERS.firstFailedAt]: letter.failedAt.toISOString(),
-    [EVENT_HEADERS.producer]: letter.producer,
+    [EVENT_HEADERS.producer]: utf8Prefix(letter.producer, cap.producer),
   };
+}
+
+/** A dead letter that would carry a value no broker delivers; never sent. */
+export class DeadLetterHeaderError extends Error {
+  override readonly name = 'DeadLetterHeaderError';
+
+  constructor(problem: string) {
+    super(`Dead letter not written: ${problem}`);
+  }
+}
+
+/** Kafka's own rule for a topic name. At most 249 bytes. */
+const KAFKA_TOPIC_NAME = /^[A-Za-z0-9._-]{1,249}$/;
+/** A kafkajs offset: a non-negative int64 in decimal, at most 19 digits. */
+const KAFKA_OFFSET = /^(0|[1-9][0-9]{0,18})$/;
+const INT32_MAX = 2_147_483_647;
+
+/**
+ * `text`, or its longest prefix of at most `maxBytes` UTF-8 bytes that ends on
+ * a character boundary. Measured as kafkajs writes a header (`Buffer.from`):
+ * a lone surrogate is three bytes.
+ */
+export function utf8Prefix(text: string, maxBytes: number): string {
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString('utf8');
 }
 
 /** The longest handler message a log line or `x-dlq-error` repeats, in characters. */

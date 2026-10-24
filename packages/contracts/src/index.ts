@@ -125,8 +125,16 @@ export {
   brokerAcls,
   brokerAclDocument,
   brokerTopics,
+  deadLetterSources,
   BROKER_PROFILES,
 } from './events/broker-acls';
+export {
+  TOPIC_MESSAGE_MAX_BYTES,
+  DLQ_HEADER_VALUE_MAX_BYTES,
+  DLQ_ADDED_HEADERS_MAX_BYTES,
+  gzipGrowthMaxBytes,
+  deadLetterMessageMaxBytes,
+} from './events/dead-letter-size';
 export type {
   AclBinding,
   AclOperation,

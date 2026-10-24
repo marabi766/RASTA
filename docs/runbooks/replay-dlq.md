@@ -38,6 +38,41 @@
 
 **DLQ صندوق فراموشی نیست.** هر پیام باید بررسی و تعیین تکلیف شود.
 
+### اندازه‌ی پیام: جا برای هر Dead letter (PR #378 r2)
+
+هر Topic سقف `max.message.bytes` **صریح** دارد، ستون سوم
+[`topics.txt`](../../infrastructure/docker/kafka/topics.txt) که `pnpm kafka:acl:generate` از `TOPIC_CONSUMERS` می‌سازد:
+
+| Topic                                 | `max.message.bytes` | از کجا                                                                         |
+| ------------------------------------- | ------------------- | ------------------------------------------------------------------------------ |
+| هر Topic مبدا، Audit trail و `.retry` | ۱٬۰۴۸٬۵۸۸           | همان پیش‌فرض `message.max.bytes` در Kafka 3.9؛ رفتار Producerها همان است       |
+| هر Topic DLQ                          | ۱٬۰۵۰٬۵۶۵           | ۱٬۰۴۸٬۵۸۸ + ۱٬۶۳۲ (`DLQ_ADDED_HEADERS_MAX_BYTES`) + ۳۴۵ (`gzipGrowthMaxBytes`) |
+
+**قاعده:** سقف هر DLQ دست‌کم برابر است با بزرگ‌ترین سقف Topicهایی که در آن Dead letter می‌ریزند (هر Topic که
+مصرف‌کننده‌اش می‌خواند، و `.retry` آن)، به‌اضافه‌ی بیشترین بایتی که Headerهای افزوده‌ی `EventConsumer` به رکورد اضافه
+می‌کنند (هر Header با سقف بایتی، `deadLetterHeaders`؛ `x-dlq-error` حداکثر ۱٬۰۰۰ **بایت** UTF-8)، به‌اضافه‌ی بیشترین رشد
+GZIP همان اندازه. `pnpm run check:kafka-topic-limits` آن را در `verify` و CI می‌سنجد. سقف یک Topic مبدا را بالا بردی؟ پس از
+آن `pnpm kafka:acl:generate` را اجرا کن تا سقف DLQهای آن هم بالا برود.
+
+**چرا:** Broker سقف را روی Batch ذخیره‌شده می‌سنجد. Dead letter همان رکورد مبدا (کلید، بدنه و Headerهای پلتفرم) به‌اضافه‌ی
+Headerهای DLQ است. با سقف برابر، رکوردی که Topic مبدا پذیرفته بود در DLQ با `MESSAGE_TOO_LARGE` رد می‌شد، Offset مبدا
+Commit نمی‌شد و همه‌ی پیام‌های بعدی آن Partition پشت آن می‌ماندند. ارسال DLQ که رد شود هنوز همین است: Commit نمی‌شود و
+مصرف‌کننده از پیام نمی‌گذرد؛ آنچه عوض شد این است که با این سقف‌ها ارسال رد نمی‌شود.
+
+**Broker موجود:** `create-topics.sh` سقف را روی Topicهای موجود هم می‌گذارد (`kafka-configs --alter`)، فقط جایی که متفاوت است،
+و در پایان سقف همه‌ی Topicها را بازمی‌خواند و اگر یکی درست نباشد شکست می‌خورد؛ اجرای دوباره چیزی را تغییر نمی‌دهد.
+Retention و Partition یک Topic موجود دست نمی‌خورد. Broker محیط واقعی که پیش از این تغییر ساخته شده: اسکریپت را یک بار
+با Admin اجرا کن، یا برای هر سطر `topics.txt`:
+
+```bash
+kafka-configs.sh --bootstrap-server <broker> --command-config <admin.properties> \
+  --alter --entity-type topics --entity-name rasta.audit.v1.dlq \
+  --add-config max.message.bytes=1050565
+```
+
+**رسیدن به DLQ ≠ Projection به‌روز.** این سقف‌ها فقط تضمین می‌کنند Partition مبدا پشت یک پیام نماند. اثر رویدادی که به
+DLQ رفته (برای نمونه سازمان‌هایی که یک `ORGANIZATION_STATUS_CHANGED` غیرفعال می‌کرد) تا بازپخش آن **وجود ندارد**، مثل قبل.
+
 ---
 
 ## تشخیص
@@ -70,7 +105,9 @@ Headerهای کلیدی:
 
 `x-dlq-error` همیشه «دسته‌بندی ثابت (کد `DlqReason`): پیام» است — مثلاً `Handler failed 3x (MAX_RETRIES_EXCEEDED): …` یا
 `Unparseable message (VALIDATION_FAILED): the body is not valid JSON (N bytes)` — و محتوای بدنه را تکرار نمی‌کند؛ پیام Handler
-پاک‌سازی‌شده و حداکثر ۲۰۰ نویسه است. از Headerهای پیام اصلی فقط Headerهای پلتفرم (`EVENT_HEADERS`، از جمله
+پاک‌سازی‌شده و حداکثر ۲۰۰ نویسه است، و کل `x-dlq-error` حداکثر ۱٬۰۰۰ بایت UTF-8 (بریده روی مرز نویسه). Topic، Partition و
+Offset مبدا هرگز بریده نمی‌شوند: مقداری که هیچ Brokerی تحویل نمی‌دهد (نام Topic نامعتبر برای Kafka، Partition بیرون از int32،
+Offset بیرون از int64) نوشته نمی‌شود و پیام Commit نمی‌شود. از Headerهای پیام اصلی فقط Headerهای پلتفرم (`EVENT_HEADERS`، از جمله
 `x-correlation-id` و `traceparent`) در پیام DLQ می‌مانند؛ Header دیگری (مثلاً `authorization`) منتقل نمی‌شود (S-09).
 `x-producer` در پیام DLQ نام مصرف‌کننده‌ای است که آن را نوشت، نه ناشر اصلی؛ ناشر اصلی در `producer` بدنه است.
 
