@@ -139,6 +139,9 @@ describe('the publication', () => {
     );
     const steps = screen.getByRole('list', { name: 'مراحل موافقت' });
     expect(steps).toHaveTextContent('مدیر سازمان (نمونه)');
+    // The role is named, not spelled as its code.
+    expect(steps).toHaveTextContent('نقش مدیر سازمان');
+    expect(steps).not.toHaveTextContent(/[A-Z_]{3,}_[A-Z]{3,}/);
     expect(steps).toHaveTextContent('در انتظار تصمیم');
     expect(screen.getByRole('form', { name: 'موافقت با انتشار' })).toBeInTheDocument();
     expect(

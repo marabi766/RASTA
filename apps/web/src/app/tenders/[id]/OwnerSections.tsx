@@ -12,6 +12,7 @@ import {
 } from '@/ui';
 import { formatJalaliDateTime, formatMoney, toPersianDigits } from '@/lib/format';
 import { bidStatusLabel } from '@/lib/bid-fields';
+import { roleLabel } from '@/lib/organization-fields';
 import {
   OWNER_RESENT_NOTE,
   ownerDoneText,
@@ -198,7 +199,7 @@ export function RequestView({
             <span className="text-content-muted">
               {' '}
               · سازمان <Identifier>{step.authorityOrganizationId}</Identifier> · نقش{' '}
-              <Identifier>{step.authorityRole}</Identifier> · {stepStatusLabel(step.status)}
+              {roleLabel(step.authorityRole)} · {stepStatusLabel(step.status)}
               {step.decidedAt ? ` · ${formatJalaliDateTime(step.decidedAt)}` : ''}
             </span>
           </li>

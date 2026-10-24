@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText } from '@/lib/format';
 import {
   UPDATE_ORGANIZATION_FIELDS,
@@ -124,17 +125,10 @@ export function parseUpdateOrganizationForm(
   const parsed = updateOrganizationFormSchema.safeParse(values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<UpdateOrganizationField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (
-      typeof field === 'string' &&
-      (UPDATE_ORGANIZATION_FIELDS as readonly string[]).includes(field)
-    ) {
-      fieldErrors[field as UpdateOrganizationField] ??= issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.error, UPDATE_ORGANIZATION_FIELDS),
+  };
 }
 
 export const UPDATE_ORGANIZATION_FIELD_MAPPING: FieldMapping<UpdateOrganizationField> = {
