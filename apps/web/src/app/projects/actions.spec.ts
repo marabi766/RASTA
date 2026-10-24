@@ -3,7 +3,11 @@
  */
 import { REPLAY_FIELD } from '@/lib/form-fields';
 import { CSRF_FIELD } from '@/server/csrf';
-import { mintCreateStamp, PROJECT_CREATE_UNRESOLVED } from '@/server/project-create-replay';
+import {
+  createReplayWindowSeconds,
+  mintCreateStamp,
+  PROJECT_CREATE_UNRESOLVED,
+} from '@/server/project-create-replay';
 import {
   readUnresolved,
   releaseToken,
@@ -43,6 +47,14 @@ jest.mock('@/server/current-session', () => ({
   currentSession: () => currentSession(),
   missingSessionReason: async () => 'NO_SESSION',
 }));
+// The real policy table has `project-create` only; the filler purpose of the capacity case needs a row.
+jest.mock('@/server/unresolved-request-policy', () => {
+  const actual = jest.requireActual('@/server/unresolved-request-policy');
+  const table = { ...actual.purposePolicies(), filler: { retry: false, deadline: 'NONE' } };
+  const policyOf = (purpose: string) =>
+    Object.hasOwn(table, purpose) ? table[purpose as keyof typeof table] : null;
+  return { ...actual, purposePolicies: () => table, policyOf };
+});
 jest.mock('next/navigation', () => ({ redirect: (url: string) => redirect(url) }));
 jest.mock('@/server/project-commands', () => {
   const actual = jest.requireActual('@/server/project-commands');
@@ -560,6 +572,19 @@ describe('an unresolved create outlives the form that sent it', () => {
     });
   });
 
+  it('refuses a stamp that ran out between the action’s own check and the reserve: nothing is sent, nothing is kept', async () => {
+    // This replica's clock says the stamp is still good; the store's clock is already
+    // inside the skew margin of its deadline. The reserve decides, atomically.
+    const form = formData();
+    const windowMs = createReplayWindowSeconds() * 1000;
+    const mem = memoryUnresolvedStore(() => Date.now() + windowMs);
+    useUnresolvedStore(mem);
+    expect(await submit(form)).toMatchObject({ kind: 'EXPIRED' });
+    expect(createProject).not.toHaveBeenCalled();
+    expect(mem.records.size).toBe(0);
+    expect(await held()).toEqual({ kind: 'NONE' });
+  });
+
   describe('when the store cannot be trusted', () => {
     const broken = (): UnresolvedStore => {
       const fail = async () => {
@@ -611,7 +636,6 @@ describe('an unresolved create outlives the form that sent it', () => {
           issuedAt: Date.now(),
           deadline: null,
           windowMs: null,
-          retry: false,
         },
       );
       expect(out.kind).toBe('RESERVED');
@@ -662,6 +686,31 @@ describe('an unresolved create outlives the form that sent it', () => {
       createProject.mockResolvedValue(created);
       await submit(formData()).catch(() => undefined);
       expect(createProject).toHaveBeenCalledTimes(1);
+    });
+
+    it('with a malformed record, the full release form (generation, CSRF, the box) still deletes nothing', async () => {
+      const mem = memoryUnresolvedStore();
+      useUnresolvedStore(mem);
+      await sendAndLose();
+      const token = await tokenFor();
+      const [key] = [...mem.records.keys()];
+      const rec = JSON.parse(mem.records.get(key!)!);
+      delete rec.deadline;
+      const bytes = JSON.stringify(rec);
+      mem.records.set(key!, bytes);
+      expect(
+        await release({
+          [RELEASE_FIELD]: token,
+          [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE,
+        }),
+      ).toBe('NEXT_REDIRECT:/projects?release=UNAVAILABLE');
+      expect(mem.records.get(key!)).toBe(bytes);
+      // …and the page cannot be used to send a fresh create either.
+      createProject.mockClear();
+      expect(await submit(formData({ ...VALID, title: 'عنوان دیگر' }))).toMatchObject({
+        kind: 'NOT_CHECKED',
+      });
+      expect(createProject).not.toHaveBeenCalled();
     });
 
     it('refuses a form drawn for an earlier record: a newer unresolved request stays', async () => {

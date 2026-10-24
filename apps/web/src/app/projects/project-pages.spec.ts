@@ -460,7 +460,6 @@ describe('/projects', () => {
         issuedAt: Date.now(),
         deadline: Date.now() + 60_000,
         windowMs: 60_000,
-        retry: true,
       });
       if (reserved.kind !== 'RESERVED') throw new Error(reserved.kind);
       // The response that would have carried the news is lost: only the server's record remains.
@@ -515,7 +514,6 @@ describe('/projects', () => {
         issuedAt: Date.now(),
         deadline: Date.now() + 60_000,
         windowMs: 60_000,
-        retry: true,
       });
       const tree = await list();
       expect(
@@ -549,14 +547,67 @@ describe('/projects', () => {
       await remember(session);
       useUnresolvedStore({
         ...memoryStore,
-        read: async (key, now) => {
-          const record = await memoryStore.read(key, now);
-          return record && { ...record, bind: 'f'.repeat(64) };
+        read: async (binding) => {
+          const out = await memoryStore.read(binding);
+          return { ...out, record: out.record && { ...out.record, bind: 'f'.repeat(64) } };
         },
       });
       const tree = await list();
       expect(ofType(tree, CreateProjectForm)).toHaveLength(0);
     });
+
+    it.each([
+      ['a missing deadline', (r: Record<string, unknown>) => delete r.deadline],
+      ['a null deadline', (r: Record<string, unknown>) => (r.deadline = null)],
+      ['an unknown state', (r: Record<string, unknown>) => (r.state = 'BOGUS')],
+      ['an extra field', (r: Record<string, unknown>) => (r.extra = 1)],
+    ])(
+      'FAILS CLOSED on a malformed stored record (%s): "cannot be checked now", no form, no fresh key, the record untouched',
+      async (_name, corrupt) => {
+        const session = signedInWith(['ORGANIZATION_ADMIN']);
+        await remember(session);
+        const [key] = [...memoryStore.records.keys()];
+        const rec = JSON.parse(memoryStore.records.get(key!)!);
+        corrupt(rec);
+        const bytes = JSON.stringify(rec);
+        memoryStore.records.set(key!, bytes);
+        const tree = await list();
+        expect(ofType(tree, CreateProjectForm)).toHaveLength(0);
+        expect(ofType(tree, UnresolvedCreateNotice)).toHaveLength(0);
+        expect(JSON.stringify(elements(tree).map((e) => e.props))).toContain('بررسی کرد');
+        expect(memoryStore.records.get(key!)).toBe(bytes);
+      },
+    );
+
+    it.each([61_000, -61_000])(
+      'judges "in flight" and the resend window by the STORE’s clock when this replica is %i ms off',
+      async (offset) => {
+        const session = signedInWith(['ORGANIZATION_ADMIN']);
+        const sent = mintCreateSubmission(session);
+        const reserved = await reserveUnresolved(session, PROJECT_CREATE_UNRESOLVED, {
+          key: sent.id,
+          digest: 'd',
+          ref: sent.replay,
+          issuedAt: Date.now(),
+          deadline: Date.now() + 10 * 60_000,
+          windowMs: 10 * 60_000,
+        });
+        if (reserved.kind !== 'RESERVED') throw new Error(reserved.kind);
+        const real = Date.now;
+        jest.spyOn(Date, 'now').mockImplementation(() => real() + offset);
+        try {
+          const notice = propsOf<{ request: { inFlight: boolean }; now: number }>(
+            ofType(await list(), UnresolvedCreateNotice)[0],
+          );
+          // The dispatch is 0 s old by the store's clock, however far this replica is off.
+          expect(notice.request.inFlight).toBe(true);
+          // And the notice is given the store's time, not this replica's.
+          expect(Math.abs(notice.now - real())).toBeLessThan(5_000);
+        } finally {
+          jest.restoreAllMocks();
+        }
+      },
+    );
 
     it('says a release form was refused as stale, and draws the current state', async () => {
       await remember();

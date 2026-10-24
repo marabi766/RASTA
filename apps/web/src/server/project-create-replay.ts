@@ -137,11 +137,12 @@ export function checkCreateStamp(
 export const PROJECT_CREATE_UNRESOLVED = { purpose: 'project-create' } as const;
 
 /**
- * An unresolved create may be sent again with its own key and body: construction-service
- * answers a repeated `Idempotency-Key` with the first result while it keeps the key
+ * Whether an unresolved create may be sent again with its own key and body is
+ * the purpose's row in `unresolved-request-policy.ts` (`retry: true`,
+ * `deadline: 'REQUIRED'`): construction-service answers a repeated
+ * `Idempotency-Key` with the first result while it keeps the key
  * (`project.service.ts`), and the stored deadline stops a send past that.
  */
-export const PROJECT_CREATE_RETRY = true;
 
 /** The digest the unresolved request carries: of the body as it is sent. */
 export function createBodyDigest(session: WebSession, body: unknown): string {

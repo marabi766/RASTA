@@ -93,7 +93,6 @@ export default async function ProjectsPage({
     readUnresolved(session, PROJECT_CREATE_UNRESOLVED),
     fetchDemoMode(session),
   ]);
-  const now = Date.now();
   const release = one(params.release);
   const releaseRefused = release === 'STALE' || release === 'IN_PROGRESS' ? release : null;
   const notice = readFlash(session, one(params[FLASH_PARAM]), INBOX_FLASH_SUBJECT, PROJECT_NOTICES);
@@ -149,7 +148,7 @@ export default async function ProjectsPage({
                     request={pending.request}
                     csrfToken={session.csrfToken}
                     releaseToken={releaseToken(session, PROJECT_CREATE_UNRESOLVED, pending.request)}
-                    now={now}
+                    now={pending.now}
                   />
                   {pending.request.ref ? (
                     // The held request keeps its key and its signed stamp: the

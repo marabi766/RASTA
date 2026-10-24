@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
+import { MAX_REQUEST_TIMEOUT_MS } from './unresolved-request-policy';
+
 /**
  * The only way this portal reaches the platform (ADR-058 § 3, ADR-059 § 3).
  *
@@ -174,7 +176,7 @@ export interface GatewayCall {
  * it — for as long as the platform's own socket timeout, which is a much
  * longer and much less predictable number than this one.
  */
-const GATEWAY_TIMEOUT_MS = 15_000;
+const GATEWAY_TIMEOUT_MS = MAX_REQUEST_TIMEOUT_MS;
 
 export interface GatewayResponse<T> {
   readonly data: T;

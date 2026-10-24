@@ -12,7 +12,6 @@ import {
   checkCreateStamp,
   createBodyDigest,
   createStampTerms,
-  PROJECT_CREATE_RETRY,
   PROJECT_CREATE_UNRESOLVED,
 } from '@/server/project-create-replay';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
@@ -94,7 +93,6 @@ export async function submitCreateProject(
     issuedAt: terms.issuedAt,
     deadline: terms.deadline,
     windowMs: terms.windowMs,
-    retry: PROJECT_CREATE_RETRY,
   });
   switch (reserved.kind) {
     case 'UNAVAILABLE':
