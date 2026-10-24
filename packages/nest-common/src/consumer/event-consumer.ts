@@ -1,4 +1,11 @@
-import { Kafka, KafkaJSError, type Consumer, type Producer, type IHeaders } from 'kafkajs';
+import {
+  CompressionTypes,
+  Kafka,
+  KafkaJSError,
+  type Consumer,
+  type Producer,
+  type IHeaders,
+} from 'kafkajs';
 import {
   DLQ_HEADERS,
   DLQ_REASONS,
@@ -759,6 +766,14 @@ export class EventConsumer {
     await producer.send({
       topic: target,
       acks: -1,
+      // GZIP, as every service publisher sends (organization-service's
+      // `kafka.publisher.ts`, for one). The broker's size limit applies to the
+      // compressed batch, so a message it admitted compressed can be far larger
+      // once decompressed — and these are the decompressed bytes. Sent
+      // uncompressed, such a dead letter can exceed the limit the original
+      // passed, the send fails, and the partition retries the same message
+      // forever (PR #378 r1 F2). The bytes themselves are unchanged.
+      compression: CompressionTypes.GZIP,
       messages: [
         {
           // The publisher's partition key (D-040): it carries the aggregate's

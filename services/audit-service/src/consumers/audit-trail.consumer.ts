@@ -5,7 +5,8 @@ import type { Logger } from '@rasta/logging';
 // Type-only, like `Logger` above: this provider is built by an explicit
 // `useFactory` in `app.module.ts`, exactly as the domain projector is.
 import type { AuditRepository, IngestOutcome } from '../audit/audit.repository';
-import { describePayloadKeys, type AuditEventRecord } from '../audit/audit.mapper';
+import type { AuditEventRecord } from '../audit/audit.mapper';
+import { describeEventType } from '../audit/refusal-diagnostics';
 import {
   AUDIT_TRAIL_CONSUMER,
   AuditTrailRejectedError,
@@ -33,12 +34,11 @@ const PRISMA_ERROR_CODE = /^P\d{4}$/;
 const SAFE_ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
 
 /**
- * Names a message for a log line without trusting anything in it.
- *
- * Called on the rejection path too, where the envelope may not have parsed at
- * all, so each identifier is printed only if it has the shape an identifier
- * has — otherwise a placeholder. A producer that put a value where an id
- * belongs gets a placeholder, never its value in the log.
+ * Names a recorded message for the duplicate line without trusting anything in
+ * it: each identifier is printed only if it has the shape an identifier has —
+ * otherwise a placeholder. A producer that put a value where an id belongs
+ * gets a placeholder, never its value in the log. (A rejection names the event
+ * type and version only: `describeEventType`.)
  */
 function describeMessage(envelope: unknown): string {
   const candidate = (typeof envelope === 'object' && envelope !== null ? envelope : {}) as {
@@ -54,12 +54,6 @@ function describeMessage(envelope: unknown): string {
       ? candidate.eventId
       : '(unidentified)';
   return `${name} ${id}`;
-}
-
-function payloadOf(envelope: unknown): unknown {
-  return typeof envelope === 'object' && envelope !== null
-    ? (envelope as { payload?: unknown }).payload
-    : undefined;
 }
 
 /**
@@ -161,9 +155,12 @@ export class AuditTrailConsumer implements OnModuleDestroy {
           : { reason: INGESTION_FAILURE_REASONS.UNMAPPABLE_ENVELOPE, message: 'unmappable' };
 
       auditIngestionFailuresTotal.inc({ reason: rejection.reason });
+      // The event type and version, validated, and the rejection — never the
+      // payload's key names, which a producer chooses and can fill with an
+      // email address (S-09; PR #378 r1 F3).
       this.logger.error(
-        `Rejected ${describeMessage(envelope)} from ${delivery.topic}[${delivery.partition}]: ` +
-          `${rejection.message} (payload keys: ${describePayloadKeys(payloadOf(envelope))})`,
+        `Rejected ${describeEventType(envelope)} from ${delivery.topic}[${delivery.partition}]: ` +
+          rejection.message,
       );
       throw error instanceof AuditTrailRejectedError
         ? error

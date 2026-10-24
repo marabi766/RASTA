@@ -123,9 +123,14 @@ export function updateMemberRolesFormValues(form: FormData): UpdateMemberRolesFo
  */
 /**
  * How many `roles` values a posted form may carry. The checkbox group offers
- * at most the platform's eleven roles (identity-service refuses more than
- * that after de-duplication); fifty leaves room for a malformed page that
- * posts each one twice, and stops a request whose length alone is the defect.
+ * at most the platform's eleven roles; fifty leaves room for a malformed page
+ * that posts each one twice, and stops a request whose length alone is the
+ * defect. This form de-duplicates before it sends (below), so identity-service
+ * receives at most eleven distinct roles. identity-service itself caps the
+ * **raw** posted list at eleven elements (its DTO counts elements, duplicates
+ * included) and writes the membership row as received, without
+ * de-duplicating; only the Keycloak attributes built from the rows are
+ * de-duplicated (`platform-attributes.ts`).
  */
 export const MAX_POSTED_ROLES = 50;
 
