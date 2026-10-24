@@ -86,9 +86,84 @@ export interface Discovery {
   reads: number;
 }
 
-/** The key of one server action everywhere (discovery, refusal cases, compiler manifest). */
+/**
+ * Export names this code accepts: a plain ASCII identifier, which includes `default`.
+ * Anything else is refused (fail closed), not escaped: a legal-but-exotic string name
+ * (`export { x as 'a b/c.ts d' }`) has no business in an action module and is exactly
+ * what an ambiguous identity would need. Module PATHS are ordinary paths (separators,
+ * extensions, spaces are fine); only control characters are refused in them.
+ */
+const PLAIN_EXPORT_NAME = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+
+/** Text for a diagnostic: every control character shown as an escape, never raw. */
+export function printable(text: string): string {
+  return JSON.stringify(text).replace(
+    /[\u007f-\u009f\u2028\u2029]/g,
+    (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
+}
+
+export function isPlainExportName(name: unknown): name is string {
+  return typeof name === 'string' && PLAIN_EXPORT_NAME.test(name);
+}
+
+/** Throws when an export name is not a plain identifier or `default`. */
+export function assertPlainExportName(name: unknown, where: string): asserts name is string {
+  if (!isPlainExportName(name)) {
+    throw new Error(
+      `${printable(where)}: export name ${printable(String(name))} is not a plain identifier or default`,
+    );
+  }
+}
+
+/** Throws when a module path contains a control character (before it is shown anywhere). */
+export function assertPlainModulePath(path: unknown): asserts path is string {
+  if (typeof path !== 'string' || path === '' || CONTROL_CHARACTER.test(path)) {
+    throw new Error(
+      `module path ${printable(String(path))} is empty or contains a control character`,
+    );
+  }
+}
+
+/**
+ * THE identity of one server action, everywhere it is built or compared (discovery, the
+ * refusal spec, the compiler-manifest check): the JSON of `[module, exportedName]`.
+ * JSON array encoding is injective for strings, so two different pairs never share a key
+ * whatever characters a path or an alias contains. Keys are compared, never displayed.
+ */
 export function actionKey(module: string, exportedName: string): string {
-  return `${module} ${exportedName}`;
+  return JSON.stringify([module, exportedName]);
+}
+
+/** Display text for a pair (messages, test titles). Never compared. */
+export function actionLabel(module: string, exportedName: string): string {
+  return `${printable(module)} ${printable(exportedName)}`;
+}
+
+export interface RuntimeExport {
+  readonly key: string;
+  readonly label: string;
+  readonly exported: string;
+  readonly value: unknown;
+}
+
+/** Every runtime export of one loaded module, identified by `actionKey`; refuses a name that is not plain. */
+export function runtimeExports(
+  module: string,
+  record: Readonly<Record<string, unknown>>,
+): RuntimeExport[] {
+  assertPlainModulePath(module);
+  return Object.entries(record).map(([exported, value]) => {
+    assertPlainExportName(exported, module);
+    return {
+      key: actionKey(module, exported),
+      label: actionLabel(module, exported),
+      exported,
+      value,
+    };
+  });
 }
 
 function bindingNames(name: ts.BindingName, into: Set<string>): void {
@@ -105,6 +180,10 @@ function bindingNames(name: ts.BindingName, into: Set<string>): void {
 export function exportedNames(source: string, fileName: string): string[] {
   const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, false);
   const names = new Set<string>();
+  const add = (name: string): void => {
+    assertPlainExportName(name, fileName);
+    names.add(name);
+  };
   for (const statement of file.statements) {
     const modifiers = ts.canHaveModifiers(statement) ? ts.getModifiers(statement) : undefined;
     const has = (kind: ts.SyntaxKind): boolean => !!modifiers?.some((m) => m.kind === kind);
@@ -114,25 +193,24 @@ export function exportedNames(source: string, fileName: string): string[] {
       if (statement.isTypeOnly) continue;
       const clause = statement.exportClause;
       if (!clause) names.add('*');
-      else if (ts.isNamespaceExport(clause)) names.add(clause.name.text);
+      else if (ts.isNamespaceExport(clause)) add(clause.name.text);
       else {
-        for (const element of clause.elements)
-          if (!element.isTypeOnly) names.add(element.name.text);
+        for (const element of clause.elements) if (!element.isTypeOnly) add(element.name.text);
       }
     } else if (!has(ts.SyntaxKind.ExportKeyword)) {
       continue;
     } else if (ts.isVariableStatement(statement)) {
       for (const declaration of statement.declarationList.declarations) {
-        bindingNames(declaration.name, names);
+        const bound = new Set<string>();
+        bindingNames(declaration.name, bound);
+        bound.forEach(add);
       }
     } else if (
       ts.isFunctionDeclaration(statement) ||
       ts.isClassDeclaration(statement) ||
       (ts.isEnumDeclaration(statement) && !has(ts.SyntaxKind.ConstKeyword))
     ) {
-      names.add(
-        has(ts.SyntaxKind.DefaultKeyword) ? 'default' : (statement.name?.text ?? 'default'),
-      );
+      add(has(ts.SyntaxKind.DefaultKeyword) ? 'default' : (statement.name?.text ?? 'default'));
     }
   }
   return [...names].sort();
@@ -232,6 +310,7 @@ export function discoverServerActions(repoRoot: string, appDir: string): Discove
     walkSources(scanRoot, skipped, (visited) => {
       const full = realpathSync(visited);
       const rel = relative(root, full);
+      assertPlainModulePath(rel);
       if (rel.startsWith('..') || isAbsolute(rel)) {
         throw new Error(`${visited}: resolves outside the repository`);
       }

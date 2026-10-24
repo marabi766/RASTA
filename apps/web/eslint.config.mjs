@@ -25,14 +25,6 @@ export default tseslint.config(
     },
   },
   {
-    // Build-time scripts run by Node itself (`scripts/*.mjs`).
-    files: ['scripts/**/*.mjs'],
-    languageOptions: {
-      sourceType: 'module',
-      globals: { console: 'readonly', process: 'readonly' },
-    },
-  },
-  {
     files: ['**/*.{ts,tsx}'],
     plugins: { 'jsx-a11y': jsxA11y, 'react-hooks': reactHooks },
     languageOptions: {

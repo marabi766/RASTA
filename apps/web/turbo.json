@@ -2,14 +2,6 @@
   "$schema": "https://turbo.build/schema.json",
   "extends": ["//"],
   "tasks": {
-    // Never answered from turbo's cache: `scripts/check-server-action-coverage.mjs` holds
-    // the manifest this build writes (`.next/server/server-reference-manifest.json`) to
-    // the refusal cases, and a restored manifest can be older than a source outside this
-    // package that it compiles (a deep import has no turbo input). A cache hit would
-    // make that check pass on a stale truth, so the compiler always runs.
-    "build": {
-      "cache": false
-    },
     // Contract specs read other packages' **source as text** to pin the portal's
     // copy of a rule to the original (`*.contract.spec.ts`: A-02 forbids
     // importing `services/*/src`, so the portal keeps copies and a test compares

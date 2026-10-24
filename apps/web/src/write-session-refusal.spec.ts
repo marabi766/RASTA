@@ -20,9 +20,12 @@ import { join } from 'node:path';
 
 import {
   actionKey,
+  actionLabel,
+  assertPlainModulePath,
   coveredActions,
   discoverServerActions,
   exportedNames,
+  runtimeExports,
   scanServerActions,
 } from './test/server-action-discovery';
 
@@ -50,10 +53,9 @@ type Action = (...args: never[]) => Promise<unknown>;
  * (`test/server-action-discovery.ts`): a new action module is covered without
  * being listed anywhere, and an inline directive cannot hide from the cases.
  *
- * The AUTHORITY on which modules define server actions is the compiler's manifest:
- * `scripts/check-server-action-coverage.mjs` (CI, after the web build) fails when the
- * build compiled an action whose (module, export) is not in this spec's cases. This
- * discovery is the fast local early warning, and it is the set the script compares with.
+ * This discovery is the fast local early warning. The authority is the compiler's
+ * manifest; holding it to these cases (by the same `actionKey` identity) follows in a
+ * separate, stacked change.
  */
 const REPO_ROOT = join(__dirname, '../../..');
 const DISCOVERED = discoverServerActions(REPO_ROOT, join(__dirname, '..'));
@@ -66,19 +68,17 @@ const ACTIONS: Record<string, Record<string, unknown>> = Object.fromEntries(
 );
 /* eslint-enable @typescript-eslint/no-require-imports */
 
-/** Every runtime export of every discovered module, as `<module> <export>`. */
-const EXPORTS = Object.entries(ACTIONS).flatMap(([route, module]) =>
-  Object.entries(module).map(([name, value]) => ({
-    name: `${route} ${name}`,
-    exported: name,
-    value,
-  })),
-);
+/**
+ * Every runtime export of every discovered module, identified by `actionKey` (the JSON of
+ * `[module, export]`); a name that is not a plain identifier or `default` throws here, so
+ * this spec fails to load. The `label` is for titles only and is never compared.
+ */
+const EXPORTS = Object.entries(ACTIONS).flatMap(([route, module]) => runtimeExports(route, module));
 
 /** One case per exported action; nothing here is listed by hand. */
 const CASES = EXPORTS.filter(
   ({ exported, value }) => exported.startsWith('submit') && typeof value === 'function',
-).map(({ name, value }) => ({ name, action: value as Action }));
+).map(({ key, label, value }) => ({ key, label, action: value as Action }));
 
 /** The action's own leading arguments (ids), then the previous state, then the form. */
 function call(action: Action): Promise<unknown> {
@@ -116,9 +116,9 @@ it('has no inline server action: a function-scoped directive is outside the case
   expect(DISCOVERED.inline).toEqual([]);
 });
 
-it('has a refusal case for exactly the (module, export) pairs the compiler manifest is held to', () => {
-  // `coveredActions` is what scripts/check-server-action-coverage.mjs compares the manifest with.
-  expect([...coveredActions(DISCOVERED)].sort()).toEqual(CASES.map(({ name }) => name).sort());
+it('has a refusal case for exactly the (module, export) pairs discovery finds', () => {
+  // Both sides are `actionKey` identities (tuples), never display text.
+  expect([...coveredActions(DISCOVERED)].sort()).toEqual(CASES.map(({ key }) => key).sort());
 });
 
 it('reads the same export names from syntax as the module has at runtime', () => {
@@ -151,8 +151,91 @@ describe('export names (negative control)', () => {
   it('flags a star re-export, which no case can name', () => {
     expect(exportedNames("'use server';\nexport * from './g';\n", 'x.ts')).toEqual(['*']);
   });
-  it('builds one key per pair', () => {
-    expect(actionKey('a/b.ts', 'submitX')).toBe('a/b.ts submitX');
+});
+
+describe('action identity (r5 F1)', () => {
+  // The reviewer's collision: with a space-delimited key these two pairs were the same string.
+  const COVERED = [
+    'packages/contracts/src/collision.js',
+    'submitX/build/probe.ts submitY',
+  ] as const;
+  const UNGATED = [
+    'packages/contracts/src/collision.js submitX/build/probe.ts',
+    'submitY',
+  ] as const;
+
+  it('gives two different pairs two different keys, whatever the characters', () => {
+    expect(actionKey(...COVERED)).not.toBe(actionKey(...UNGATED));
+    expect(actionKey('a/b.ts', 'submitX')).toBe('["a/b.ts","submitX"]');
+    const pairs: Array<[string, string]> = [
+      ['a b', 'c'],
+      ['a', 'b c'],
+      ['a"', ',"b'],
+      ['a",', '"b'],
+      ['a\\', 'b'],
+      ['a', '\\b'],
+    ];
+    expect(new Set(pairs.map(([m, e]) => actionKey(m, e))).size).toBe(pairs.length);
+  });
+
+  it('does not let a covered alias vouch for another module’s ungated action', () => {
+    const covered = new Set([actionKey(...COVERED)]);
+    expect(covered.has(actionKey(...UNGATED))).toBe(false);
+  });
+
+  it('refuses the alias export name in discovery (static)', () => {
+    const source =
+      "'use server';\nconst gated = async () => {};\nexport { gated as 'submitX/build/probe.ts submitY' };\n";
+    expect(() => exportedNames(source, 'collision.js')).toThrow(
+      /not a plain identifier or default/,
+    );
+  });
+
+  it('refuses the alias export name in the loaded module (runtime, the spec)', () => {
+    expect(() => runtimeExports(COVERED[0], { [COVERED[1]]: () => undefined })).toThrow(
+      /not a plain identifier or default/,
+    );
+  });
+
+  it.each([
+    ['a space', 'a b'],
+    ['a slash', 'a/b'],
+    ['a dot', 'a.b'],
+    ['a hyphen', 'a-b'],
+    ['a newline', 'a\nb'],
+    ['a NUL', 'a\u0000b'],
+    ['U+2028', 'a\u2028b'],
+    ['an empty name', ''],
+    ['a digit first', '1a'],
+    ['a non-ASCII letter', 'caf\u00e9'],
+    ['star', '*'],
+  ])('refuses an export name with %s, statically and at runtime', (_name, name) => {
+    expect(() => runtimeExports('a.ts', { [name]: 1 })).toThrow(/not a plain identifier/);
+    expect(() =>
+      exportedNames(`'use server';\nexport { x as ${JSON.stringify(name)} };`, 'a.ts'),
+    ).toThrow(/not a plain identifier/);
+  });
+
+  it('accepts identifiers, $ and _, and default', () => {
+    expect(
+      runtimeExports('a.ts', { submitX: 1, _a$1: 2, default: 3 }).map((e) => e.exported),
+    ).toEqual(['submitX', '_a$1', 'default']);
+  });
+
+  it('keeps ordinary module paths (separators, extensions, spaces) and refuses control characters', () => {
+    expect(() => assertPlainModulePath('apps/web/src/a b/actions.ts')).not.toThrow();
+    for (const bad of ['a\nb.ts', 'a\u0000b.ts', 'a\u2028b.ts', 'a\u007fb.ts', '']) {
+      expect(() => assertPlainModulePath(bad)).toThrow(/control character/);
+    }
+  });
+
+  it('shows a label with escapes, never raw control characters', () => {
+    expect(actionLabel('a\nb', 'c')).toBe('"a\\nb" "c"');
+    const raw = [...actionLabel('a\u2028b\u0085\u0000', 'c')].filter((ch) => {
+      const code = ch.charCodeAt(0);
+      return code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029;
+    });
+    expect(raw).toEqual([]);
   });
 });
 
@@ -232,12 +315,12 @@ describe('discovery (negative control)', () => {
 it('covers every exported action of every module: each is a `submit*` function', () => {
   // A `'use server'` export that is not exercised below would be an
   // unguarded write, so the exports and the cases must be the same set.
-  const covered = new Set(CASES.map(({ name }) => name));
-  const uncovered = EXPORTS.map(({ name }) => name).filter((name) => !covered.has(name));
+  const covered = new Set(CASES.map(({ key }) => key));
+  const uncovered = EXPORTS.filter(({ key }) => !covered.has(key)).map(({ label }) => label);
   expect(uncovered).toEqual([]);
 });
 
-describe.each(CASES)('$name', ({ action }) => {
+describe.each(CASES)('$label', ({ action }) => {
   it('a request middleware marked "refresh unavailable": SESSION_UNAVAILABLE, not ended', async () => {
     forwarded.set(SESSION_STATE_HEADER, REFRESH_UNAVAILABLE);
     expect(await call(action)).toEqual({ kind: 'REFUSED', reason: 'SESSION_UNAVAILABLE' });

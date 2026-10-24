@@ -5,10 +5,9 @@ import * as ts from 'typescript';
 
 /**
  * A FAST LOCAL EARLY WARNING, not the authority. The authority on which modules define
- * server actions is the compiler's own manifest, checked after `next build` by
- * `scripts/check-server-action-coverage.mjs` (CI: "Server-action coverage"). Do not
- * extend this file for every new resolver path a review finds: the manifest already
- * catches what the build reaches.
+ * server actions is the compiler's own manifest; checking it after `next build` follows
+ * in a separate change (stacked on this one). Do not extend this file for every new
+ * resolver path a review finds.
  *
  * Discovery scans the web app and the whole directory of each workspace package it
  * depends on. This file states a few cheap, obvious ways a build could reach outside that
@@ -23,9 +22,8 @@ export const REACH_OPTIONS = [
   'turbopack',
   'resolveAlias',
   'alias',
-  // Another tsconfig than the one checked here / another place for the manifest.
+  // Another tsconfig than the one checked here.
   'tsconfigPath',
-  'distDir',
 ] as const;
 
 /** The only next.config file name the checks understand. */
