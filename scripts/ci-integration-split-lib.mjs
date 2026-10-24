@@ -128,7 +128,7 @@ export const STEP_INVENTORY = Object.freeze({
       REDIS_URL: ANY,
       ...MAILPIT,
     },
-    timeout: 12,
+    timeout: 16,
   },
   'Economic coverage gate': coverageGate('economic'),
   'Marketplace coverage gate': coverageGate('marketplace'),

@@ -1210,7 +1210,7 @@ jobs:
     name: Integration tests and database guards
     runs-on: ubuntu-latest
     # About 11.5 minutes on main run 38600385830 (setup ~4m, the suites 428 s,
-    # the guards 28 s). 25 is twice that, and the suites carry their own 12.
+    # the guards 28 s). Keep the job bounded at 25 minutes.
     # History of the single job's limit: 60 (#197), 35 once reversibility
     # moved out (#198), 50 as #273's stopgap until this split.
     timeout-minutes: 25
@@ -1525,7 +1525,10 @@ jobs:
         # PostgreSQL they measured shared WAL load, not the upsert (docs/14
         # § 14.3). Never `turbo run test:integration` directly — that runs
         # the workspace phase only; `check:test-phases` enforces it.
-        timeout-minutes: 12
+        # Run 40048560391 spent 11m18s in the successful workspace phase,
+        # leaving too little of the old 12m for the mandatory exclusive phase.
+        # Keep both phases and every assertion; the enclosing job stays at 25m.
+        timeout-minutes: 16
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
