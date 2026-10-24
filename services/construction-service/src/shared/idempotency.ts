@@ -6,6 +6,7 @@ import { isUniqueViolation } from '../shared/prisma-errors';
 import { idempotentReplaysTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
+import { forgettableWhere, mayForget } from './idempotency-forget';
 import {
   CLAIM_WAIT_MS,
   WAIT_TRANSACTION_SLACK_MS,
@@ -83,7 +84,7 @@ export { CLAIM_WAIT_MS };
  */
 
 /**
- * ## The replay fence (PM decision D-065; project creation only so far)
+ * ## The replay fence (PM decisions D-065, D-067; project creation only so far)
  *
  * An expired key is reusable, which is right for a caller that never asked for more — and wrong for one
  * that retries a request which may have committed: after the key is gone the same request runs as a
@@ -93,14 +94,24 @@ export { CLAIM_WAIT_MS };
  * A request may carry `Idempotency-Replay-Deadline` (epoch ms, one canonical safe integer; only with an
  * `Idempotency-Key`): the last instant it may be executed under that key. Let `C` be the claiming
  * replica's clock when the key is first claimed, `TTL` the retention and
- * `B = 2·CONSTRUCTION_CLOCK_SKEW_SECONDS + margin` ({@link replayFenceBudgetMs}). The FIRST claim stores
+ * `B = 2·CONSTRUCTION_CLOCK_SKEW_SECONDS + margin` ({@link replayFenceBudgetMs}).
  *
- *     D = min(header, C + TTL − B)          expiresAt = C + TTL            (so  D + B ≤ expiresAt)
+ * ### Accepted, or refused outright (no clamp)
  *
- * in `replayDeadlineAt`. A header can only narrow: a forged later value is clamped, so it needs no
- * signature. Afterwards, for a request that matches the stored one (same requester and body — the
- * actor and tenant checks stay first, so another actor's or tenant's request meets exactly what it met
- * before):
+ * A header `H` later than `C + TTL − B` is REFUSED before any claim, `400 VALIDATION_FAILED`
+ * (`deadlineBeyondRetention`, a fixed message): it depends on nothing stored, so it discloses
+ * nothing, and no row is written for it. (400 rather than `REPLAY_WINDOW_CLOSED`: the request is
+ * malformed against this service's own limit, not late; `REPLAY_WINDOW_CLOSED` keeps its one
+ * meaning — time passed — and a client that sees the 400 knows the attempt did nothing and that
+ * resending the same value cannot succeed.) An honest client never meets it: the portal and this
+ * service are tied to one constant, `PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS`, and each refuses to
+ * boot when its own settings break it (`config/env.ts`, `apps/web/src/server/env.ts`).
+ * Otherwise the FIRST claim stores `D = H` (so `D + B ≤ expiresAt = C + TTL`, which the table's CHECK
+ * also enforces) in `replayDeadlineAt`. There is no `min()`: a deadline that is stored is the one the
+ * caller sent, and a later one is not stored at all.
+ *
+ * Afterwards, for a request that matches the stored one (same requester and body — the actor and
+ * tenant checks stay first, so another actor's or tenant's request meets exactly what it met before):
  *
  *   - service-now `>` D  →  `409 REPLAY_WINDOW_CLOSED`, before any write. Never the
  *     expired → delete → PROCEED path, whether the row is completed, in flight or past `expiresAt`;
@@ -109,24 +120,39 @@ export { CLAIM_WAIT_MS };
  * A first claim whose header is already behind service-now is refused the same way, nothing written.
  * Equality: `now == D` is still allowed; the refusal is strictly `now > D`.
  *
- * The purge keeps the row for the fence: it deletes a row carrying a deadline only when
- * `expiresAt < now − B` (strictly; a row without a deadline as before, `expiresAt < now`).
- * Retention inequality — every clock within `skew` of true time `t`, B = 2·skew + margin:
+ * ### One forget rule for every path
  *
- *     a request passes the check on clock R ≤ D          ⇒  t ≤ D + skew
- *     the purge deletes on clock P > expiresAt + B ≥ D + 2B   ⇒  t > D + 2B − skew
- *     D + skew < D + 2B − skew  ⇔  skew < B           (B = 2·skew + margin, margin > 0)
+ * A row is deleted, reclaimed or purged only when {@link mayForget} says so — `expiresAt < now − B`
+ * for a row with a stored deadline, `expiresAt ≤ now` for one without (`idempotency-forget.ts`).
+ * That covers the claim's reclaim of an expired row for a request that MATCHES and for one that does
+ * NOT (another actor, another body, no header), and the scheduled purge. A claimant that does not
+ * match a row which may not be forgotten gets the generic `IDEMPOTENCY_KEY_REUSED` (or the in-flight
+ * `CONFLICT`) BEFORE any delete, exactly what it would get for a live key: nothing of the stored
+ * deadline, hash or payload reaches it. Each delete carries the rule in its own `WHERE`
+ * ({@link forgettableWhere}) beside the tenant and the claim token, so a row replaced or completed
+ * since it was read is not touched. The one removal outside the rule is {@link release}: the owner's
+ * own `IN_PROGRESS` claim after its work rolled back — it cannot remove a completed claim, so there
+ * is nothing left to replay.
  *
- * so a request that passed the check always still finds its row. The claiming replica's own offset
- * does not enter: D and `expiresAt` are stored numbers. The stored `expiresAt` and `replayDeadlineAt`
- * govern: a TTL shortened by configuration never shortens a row that exists, and a purge uses the
+ * ### Why a replay of an accepted header can never meet a forgotten key
+ *
+ * Every replica's clock is within `s = CONSTRUCTION_CLOCK_SKEW_SECONDS` of true time `t`, and
+ * `B = 2s + m` with margin `m > 0`. The claim accepted `H ≤ C + TTL − B` and stored `expiresAt =
+ * C + TTL`, hence `H + B ≤ expiresAt`. A row may be forgotten only when a replica reads
+ * `now > expiresAt + B` (the rule's strict inequality, on the deleting replica's own clock), so in true time `t_forget > expiresAt + B − s ≥ H + 2B − s = H + 3s + 2m`.
+ * A request is allowed to execute only when its replica reads `R ≤ H`, i.e. `t ≤ H + s`. Because
+ * `H + s < H + 3s + 2m`, any request that is executable at all is executable only BEFORE the row
+ * can have been forgotten: after a legal forget every replay of `H` — by the original request or by
+ * a forged resend of the same header, from any replica — reads `R ≥ t − s > H + 2s + 2m > H` and is
+ * refused as a first claim. `C`'s own offset does not enter: `H`, `expiresAt` and `D` are stored
+ * numbers. A TTL shortened by configuration never shortens a row that exists, and the rule uses the
  * skew budget of the day — enough whenever the real offset is within the configured bound.
  *
  * What it does NOT cover (stated, not hidden): a request without the header, a row with a null
- * deadline (written before this fence), a key already purged before it shipped — all behave as before.
- * The guarantee covers header-carrying requests whose header is at most `C + TTL − B` (the caller's
- * window must be shorter than the retention; the clamp makes the stored one so, but a later request
- * claiming a purged key with a larger header meets a first claim).
+ * deadline (written before this fence), a key already purged before it shipped — all behave as
+ * before. Nor a user who deliberately sends a NEW header for the same key AFTER a legal forget: that
+ * is a new request by that user (same actor and body, a fresh `H' ≤ C' + TTL − B`), not a duplicate
+ * of the old one.
  */
 
 /**
@@ -275,7 +301,6 @@ export class IdempotencyStore {
 
     for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt += 1) {
       const nowMs = this.nowMs();
-      const now = new Date(nowMs);
       const token = randomUUID();
       const expiresAt = new Date(
         nowMs + this.env.CONSTRUCTION_IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000,
@@ -286,11 +311,12 @@ export class IdempotencyStore {
       if (replayDeadlineMs !== undefined && nowMs > replayDeadlineMs) {
         throw this.windowClosed(endpoint);
       }
-      // D = min(header, C + TTL − B): a header can only narrow (see the replay fence above).
-      const replayDeadlineAt =
-        replayDeadlineMs === undefined
-          ? null
-          : new Date(Math.min(replayDeadlineMs, expiresAt.getTime() - budgetMs));
+      // A header later than C + TTL − B is refused, never clamped (see the replay fence above): the
+      // deadline that is stored is the one the caller sent, and it is at least B before expiresAt.
+      if (replayDeadlineMs !== undefined && replayDeadlineMs > expiresAt.getTime() - budgetMs) {
+        throw this.deadlineBeyondRetention(endpoint);
+      }
+      const replayDeadlineAt = replayDeadlineMs === undefined ? null : new Date(replayDeadlineMs);
 
       try {
         await this.withinBudget(endpoint, deadline, (tx) =>
@@ -322,20 +348,25 @@ export class IdempotencyStore {
 
       // The fence: a row that carries a deadline answers the request it stored by that deadline, on this
       // replica's clock — never by `expiresAt`. Past it: refused, whatever the row's state, and never the
-      // delete-and-proceed below. Before it: live, even if `expiresAt` were behind us. A request that is
-      // not the stored one (another requester, another body) does not meet the fence and gets exactly
-      // what it always got.
+      // forget-and-proceed below. Before it: live. A request that is not the stored one (another
+      // requester, another body) does not meet the fence; it meets the forget rule like everyone.
       const storedDeadline =
         existing.replayDeadlineAt instanceof Date ? existing.replayDeadlineAt : null;
-      const fenced = storedDeadline !== null && matches;
-      if (fenced && nowMs > storedDeadline.getTime()) {
+      if (matches && storedDeadline !== null && nowMs > storedDeadline.getTime()) {
         throw this.windowClosed(endpoint);
       }
 
-      if (!fenced && existing.expiresAt <= now) {
-        // Only the row that was read, and only while it is still expired: a
-        // fresh claim another caller inserted meanwhile is never touched.
-        // Waits for a domain transaction still holding it — within the budget only.
+      // The one forget rule (idempotency-forget.ts), for a matching and a mismatched claimant alike:
+      // a row that may not be forgotten is never deleted here. The delete re-states the rule, with the
+      // tenant and the token, in its own WHERE — it removes the row as it is NOW, not as it was read.
+      if (
+        mayForget(
+          { expiresAt: existing.expiresAt, replayDeadlineAt: storedDeadline },
+          nowMs,
+          budgetMs,
+        )
+      ) {
+        // Waits for a domain transaction still holding the row — within the budget only.
         await this.withinBudget(endpoint, deadline, (tx) =>
           tx.idempotencyKey.deleteMany({
             where: {
@@ -343,7 +374,7 @@ export class IdempotencyStore {
               endpoint,
               key,
               claimToken: existing.claimToken,
-              expiresAt: { lte: now },
+              ...forgettableWhere(nowMs, budgetMs),
             },
           }),
         );
@@ -505,31 +536,24 @@ export class IdempotencyStore {
   }
 
   /**
-   * Removes expired records. Called on the same timer as the other upkeep.
+   * Removes records that may be forgotten ({@link mayForget} — the claim's reclaim uses the same rule:
+   * `expiresAt < now − B` for a row with a replay deadline, `expiresAt ≤ now` for one without, so the
+   * fence still finds what it needs). Called on the same timer as the other upkeep.
    *
    * Unscoped, and it has to be: the timer in `app.module.ts` runs outside any
    * request, so there is no tenant in context. Safe because the predicate is
-   * `expiresAt < now` (a row with a replay deadline: `expiresAt < now − B`, so
-   * the fence still finds it — see the replay fence above) and nothing else: it can only remove records
-   * that are already unusable, and it reads no tenant data. A work still running under
-   * a purged claim cannot complete it (see {@link complete}).
+   * the forget rule and nothing else: it can only remove records that are already unusable, and it
+   * reads no tenant data. A work still running under a purged claim cannot complete it (see
+   * {@link complete}).
    */
   async purgeExpired(): Promise<number> {
-    const nowMs = this.nowMs();
-    const beyondFence = new Date(
-      nowMs - replayFenceBudgetMs(this.env.CONSTRUCTION_CLOCK_SKEW_SECONDS),
+    const where = forgettableWhere(
+      this.nowMs(),
+      replayFenceBudgetMs(this.env.CONSTRUCTION_CLOCK_SKEW_SECONDS),
     );
     const result = await runUnscoped(
       'expired idempotency records are platform upkeep, deleted by age alone and never by tenant',
-      () =>
-        this.prisma.client.idempotencyKey.deleteMany({
-          where: {
-            OR: [
-              { replayDeadlineAt: null, expiresAt: { lt: new Date(nowMs) } },
-              { replayDeadlineAt: { not: null }, expiresAt: { lt: beyondFence } },
-            ],
-          },
-        }),
+      () => this.prisma.client.idempotencyKey.deleteMany({ where }),
     );
     return result.count;
   }
@@ -545,6 +569,24 @@ export class IdempotencyStore {
     return new RastaError('CONFLICT', 'This request is already being processed; retry shortly', {
       internalContext: { endpoint },
       retryAfterSeconds: IN_FLIGHT_RETRY_AFTER_SECONDS,
+    });
+  }
+
+  /**
+   * Proven refusal, before anything is read or written: the header asks for a deadline the retention
+   * cannot guarantee. Fixed message — no stored deadline, hash or limit value, and it depends on
+   * nothing stored, so it says the same to anyone about any key.
+   */
+  private deadlineBeyondRetention(endpoint: string): RastaError {
+    return new RastaError('VALIDATION_FAILED', `${REPLAY_DEADLINE_HEADER} is invalid`, {
+      details: [
+        {
+          path: REPLAY_DEADLINE_HEADER,
+          code: 'beyond_retention',
+          message: 'is later than this service can guarantee; this attempt did nothing',
+        },
+      ],
+      internalContext: { endpoint },
     });
   }
 

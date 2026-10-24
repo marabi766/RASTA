@@ -1,3 +1,5 @@
+import { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
+
 /**
  * What every unresolved-request purpose is allowed to do, and the one time
  * budget the replay deadlines rest on. Pure constants and two small functions:
@@ -117,6 +119,27 @@ export function policyOf(purpose: string): PurposePolicy | null {
   // A purpose that resends must have a finite deadline.
   if (policy.retry && policy.deadline !== 'REQUIRED') return null;
   return policy;
+}
+
+/**
+ * The other half of the same boot check (PM decision D-067). construction-service REFUSES a replay
+ * deadline later than `claim + TTL − B`; the portal cannot read that setting, so both sides are tied to
+ * one constant, `PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS` (K, `@rasta/contracts`), and the service
+ * refuses to boot unless `TTL − B − skew ≥ K`. The portal refuses to boot unless
+ *
+ *     window + MAX_CLOCK_SKEW_MS ≤ K          window = WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS · 3600
+ *                                                       − WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS
+ *
+ * so for every pair of bootable configurations `window + portalSkew + serviceSkew ≤ TTL − B`: the
+ * deadline the portal sends, read on the service's slowest legal clock, is never past the service's
+ * limit. An honest client never meets the refusal. (`WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS` also
+ * feeds the bid windows, so it is bounded for them too.)
+ */
+export function projectCreateWindowFits(ttlHours: number, marginSeconds: number): boolean {
+  const windowSeconds = ttlHours * 3600 - marginSeconds;
+  return (
+    windowSeconds * 1000 + MAX_CLOCK_SKEW_MS <= PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS * 1000
+  );
 }
 
 /** Whether the replay margin (seconds) covers the clock budget; the boot check. */

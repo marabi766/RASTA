@@ -1,6 +1,9 @@
 import { z } from 'zod';
 
-import { replayMarginCoversClockBudget } from './unresolved-request-policy';
+import {
+  projectCreateWindowFits,
+  replayMarginCoversClockBudget,
+} from './unresolved-request-policy';
 
 /**
  * Server-only configuration for the portal (ADR-059).
@@ -362,6 +365,15 @@ const schema = z.object({
    * This **mirrors** contract-service's `CONTRACT_IDEMPOTENCY_TTL_HOURS`
    * (same bounds, 1..168) and must be changed together with it, or set lower.
    * The default is that setting's floor, as for economic-service's above.
+   *
+   * The project-create window (this retention less the margin below, plus the
+   * portal's 30 s clock allowance) may not exceed
+   * `PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS` (`@rasta/contracts`, 3 300 s):
+   * construction-service refuses a replay deadline past its own retention
+   * less its fence budget, and refuses to start unless it can accept that
+   * much. Beyond it the portal refuses to start (`loadWebServerEnv`), so an
+   * honest client never meets the refusal. With 1 h that means a margin of at
+   * least 330 s.
    */
   WEB_CONTRACT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
 
@@ -385,6 +397,15 @@ const schema = z.object({
    * This **mirrors** construction-service's `CONSTRUCTION_IDEMPOTENCY_TTL_HOURS`
    * (same bounds, 1..168) and must be changed together with it, or set lower.
    * The default is that setting's floor, as for economic-service's above.
+   *
+   * The project-create window (this retention less the margin below, plus the
+   * portal's 30 s clock allowance) may not exceed
+   * `PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS` (`@rasta/contracts`, 3 300 s):
+   * construction-service refuses a replay deadline past its own retention
+   * less its fence budget, and refuses to start unless it can accept that
+   * much. Beyond it the portal refuses to start (`loadWebServerEnv`), so an
+   * honest client never meets the refusal. With 1 h that means a margin of at
+   * least 330 s.
    */
   WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
 
@@ -438,6 +459,19 @@ export function loadWebServerEnv(
     !replayMarginCoversClockBudget(parsed.data.WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS)
   ) {
     missing.push('WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS');
+  }
+  // The window itself must fit what construction-service accepts: its replay fence refuses a deadline
+  // later than its retention less B, and both sides are held to one shared constant
+  // (`PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS`). The portal cannot read the service's settings, so it is
+  // this side that refuses to start when its own window is too long (D-067).
+  if (
+    parsed.success &&
+    !projectCreateWindowFits(
+      parsed.data.WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS,
+      parsed.data.WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS,
+    )
+  ) {
+    missing.push('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
   }
 
   if (!parsed.success || missing.length > 0) {

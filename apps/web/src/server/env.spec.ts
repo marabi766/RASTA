@@ -4,7 +4,12 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadWebServerEnv } from './env';
-import { MIN_REPLAY_MARGIN_MS } from './unresolved-request-policy';
+import { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
+import {
+  MIN_REPLAY_MARGIN_MS,
+  projectCreateWindowFits,
+  replayMarginCoversClockBudget,
+} from './unresolved-request-policy';
 
 /**
  * What the portal refuses to start without, and why each refusal is the
@@ -360,6 +365,36 @@ describe('the bid replay deadline', () => {
     }
   });
 
+  // The window must fit what construction-service accepts (D-067): window + 30 s portal skew allowance
+  // ≤ PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS (3 300 s). With a 1 h retention the margin is ≥ 330 s.
+  it('refuses to start when the project-create window exceeds the shared maximum (boundary: = passes, +1 s refuses)', () => {
+    const at = (ttl: string, margin: string) =>
+      loadWebServerEnv({
+        ...REQUIRED,
+        WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: ttl,
+        WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: margin,
+      });
+    // 3600 − 330 = 3270; + 30 s = 3300 = K.
+    expect(at('1', '330').WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS).toBe(330);
+    expect(() => at('1', '329')).toThrow('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+    // The setting's schema bound (168 h) cannot be bootable: 168 h − 1800 s is far past K.
+    expect(() => at('168', '1800')).toThrow('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+    expect(() => at('2', '1800')).toThrow('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+    // The defaults fit with room: 3 000 s window + 30 s = 3 030 s, slack 270 s.
+    const defaults = loadWebServerEnv(REQUIRED);
+    const window =
+      defaults.WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS * 3600 -
+      defaults.WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS;
+    expect(window).toBe(3000);
+    expect(PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS - (window + 30)).toBe(270);
+  });
+
+  it('the shared maximum is the number the service tests against (one constant, packages/contracts)', () => {
+    expect(PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS).toBe(3300);
+    expect(projectCreateWindowFits(1, 330)).toBe(true);
+    expect(projectCreateWindowFits(1, 329)).toBe(false);
+  });
+
   // The clock budget (unresolved-request-policy.ts): margin ≥ 2 × skew + one request,
   // i.e. 2 × 30 s + 15 s = 75 s. Below it the portal does not start (fail closed).
   it('refuses to start when the margin does not cover two clock skews and a request', () => {
@@ -369,7 +404,13 @@ describe('the bid replay deadline', () => {
         loadWebServerEnv({ ...REQUIRED, WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: value }),
       ).toThrow('WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS');
     }
-    for (const value of ['75', '600']) {
+    // 75 s covers the clock budget, but with the 1 h retention the window would exceed the shared
+    // maximum (margin ≥ 330 s, D-067): it is the other check that refuses it.
+    expect(replayMarginCoversClockBudget(75)).toBe(true);
+    expect(() =>
+      loadWebServerEnv({ ...REQUIRED, WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: '75' }),
+    ).toThrow('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+    for (const value of ['330', '600']) {
       expect(
         loadWebServerEnv({ ...REQUIRED, WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: value })
           .WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS,

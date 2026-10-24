@@ -112,8 +112,41 @@ describe('IdempotencyStore.claim', () => {
       endpoint: ENDPOINT,
       key: 'k',
       claimToken: 'stale',
-      expiresAt: { lte: expect.any(Date) },
+      // The one forget rule rides in the DELETE's own WHERE (idempotency-forget.ts).
+      OR: [
+        { replayDeadlineAt: null, expiresAt: { lte: expect.any(Date) } },
+        { replayDeadlineAt: { not: null }, expiresAt: { lt: expect.any(Date) } },
+      ],
     });
+  });
+
+  it('a row that may not be forgotten is never deleted by a mismatched claimant: IDEMPOTENCY_KEY_REUSED first', async () => {
+    const { store, delegate } = fakeStore();
+    delegate.create.mockRejectedValue(UNIQUE);
+    // Expired 10 s ago, but carrying a deadline: forgettable only after expiresAt + B (67 s).
+    delegate.findUnique.mockResolvedValue(
+      row({
+        state: 'COMPLETED',
+        expiresAt: new Date(Date.now() - 10_000),
+        replayDeadlineAt: new Date(Date.now() - 100_000),
+      }),
+    );
+
+    await expect(inTenant(() => store.claim(ENDPOINT, 'k', { a: 2 }))).rejects.toMatchObject({
+      code: 'IDEMPOTENCY_KEY_REUSED',
+    });
+    expect(delegate.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('a header later than claim + TTL − B is refused before anything is read or written', async () => {
+    const { store, delegate } = fakeStore();
+    const limit = Date.now() + 24 * 3600_000 - 67_000;
+    await expect(
+      inTenant(() => store.claim(ENDPOINT, 'k', { a: 1 }, undefined, limit + 5_000)),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    expect(delegate.create).not.toHaveBeenCalled();
+    expect(delegate.findUnique).not.toHaveBeenCalled();
+    expect(delegate.deleteMany).not.toHaveBeenCalled();
   });
 
   it('replays a completed response and refuses a reused key with another body', async () => {

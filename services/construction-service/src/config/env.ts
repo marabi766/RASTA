@@ -11,7 +11,8 @@ import {
 } from '@rasta/config';
 import { isKekId, parseKekConfiguration, parseKekEntries } from '../tender/sealing/key-provider';
 import { EVIDENCE_MAX_CHAIN_LINKS } from '../tender/evidence-limits';
-import { constructionOperationBudgets } from './operation-budgets';
+import { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
+import { constructionOperationBudgets, replayFenceBudgetMs } from './operation-budgets';
 import {
   CANCELLABLE_BY_LIFECYCLE,
   PROJECT_STATES,
@@ -629,6 +630,22 @@ export const constructionEnvSchema = baseEnvSchema
           'CONSTRUCTION_EVALUATION_MIN_EVALUATORS may not exceed CONSTRUCTION_EVALUATION_MAX_EVALUATORS: no bid could ever be complete',
       });
     }
+    // The replay fence refuses a deadline later than claim + TTL − B (shared/idempotency.ts). The
+    // portal's window is capped by the same constant (PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS), so
+    // the service must be able to accept a window of that size on its slowest legal clock:
+    //   TTL − B − skew ≥ K        (B = 2 · skew + margin)
+    // Otherwise an honest client could meet the refusal: fail the boot instead (PM decision D-067).
+    if (replayWindowRoomSeconds(env) < PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['CONSTRUCTION_IDEMPOTENCY_TTL_HOURS'],
+        message:
+          'CONSTRUCTION_IDEMPOTENCY_TTL_HOURS · 3600 − B − CONSTRUCTION_CLOCK_SKEW_SECONDS must be at least ' +
+          `${PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS} s (PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS), ` +
+          'with B = 2 · CONSTRUCTION_CLOCK_SKEW_SECONDS + 7 s: otherwise a portal window its own boot check ' +
+          'accepts could be refused by the replay fence',
+      });
+    }
     if (
       !env.CONSTRUCTION_TENDER_OPEN_FOUR_EYES &&
       env.NODE_ENV !== 'development' &&
@@ -660,6 +677,24 @@ export const constructionEnvSchema = baseEnvSchema
   });
 
 export type ConstructionEnv = z.infer<typeof constructionEnvSchema>;
+
+/**
+ * The longest replay window (seconds, portal skew allowance included) this service can accept on its
+ * slowest legal clock: `TTL − B − skew`. The boot check holds it at or above
+ * `PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS`.
+ */
+export function replayWindowRoomSeconds(
+  env: Pick<
+    ConstructionEnv,
+    'CONSTRUCTION_IDEMPOTENCY_TTL_HOURS' | 'CONSTRUCTION_CLOCK_SKEW_SECONDS'
+  >,
+): number {
+  return (
+    env.CONSTRUCTION_IDEMPOTENCY_TTL_HOURS * 3600 -
+    replayFenceBudgetMs(env.CONSTRUCTION_CLOCK_SKEW_SECONDS) / 1000 -
+    env.CONSTRUCTION_CLOCK_SKEW_SECONDS
+  );
+}
 
 /** The narrowed type the service reads, so callers need no casts. */
 export type CancellableStates = readonly ProjectStateName[];

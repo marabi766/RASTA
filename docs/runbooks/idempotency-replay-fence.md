@@ -7,8 +7,8 @@
 ## ۱. چه تضمینی داده می‌شود (و چه نه)
 
 construction-service برای `POST /v1/projects` هدر `Idempotency-Replay-Deadline` (میلی‌ثانیه از epoch) را با **همان ساعتی** می‌سنجد که
-رکورد کلید را منقضی و پاک می‌کند (`shared/idempotency.ts`، docs/06 § 6.8). Claim نخست `min(هدر، لحظه‌ی Claim + نگهداشت − B)` را
-ذخیره می‌کند؛ Claim بعدیِ همان درخواست پس از آن لحظه `409 REPLAY_WINDOW_CLOSED` می‌گیرد، نه «منقضی ⇒ حذف ⇒ ادامه». `B = 2·CONSTRUCTION_CLOCK_SKEW_SECONDS + ۷
+رکورد کلید را منقضی و پاک می‌کند (`shared/idempotency.ts`، docs/06 § 6.8). هدرِ دیرتر از `لحظه‌ی Claim + نگهداشت − B` **رد می‌شود** (`400 VALIDATION_FAILED`، بدون برش و بدون نوشتن؛ تصمیم PM D-067)؛ وگرنه Claim نخست
+خودِ هدر را ذخیره می‌کند. هیچ مسیر حذفی ردیف دارای ددلاین را پیش از `expiresAt + B` برنمی‌دارد (پاک‌سازی و بازیابی هنگام Claim یک قاعده دارند). Claim بعدیِ همان درخواست پس از آن لحظه `409 REPLAY_WINDOW_CLOSED` می‌گیرد، نه «منقضی ⇒ حذف ⇒ ادامه». `B = 2·CONSTRUCTION_CLOCK_SKEW_SECONDS + ۷
 ثانیه` (پیش‌فرض ۶۷ ثانیه).
 
 **دامنه — فقط درخواست‌های هدردار پس از استقرار.** این‌ها رفتار امروز را نگه می‌دارند (کلید منقضی دوباره قابل استفاده است و ممکن است پروژه‌ی
@@ -21,6 +21,11 @@ construction-service برای `POST /v1/projects` هدر `Idempotency-Replay-Dea
 - `CONSTRUCTION_CLOCK_SKEW_SECONDS` (۰ تا ۳۰۰، پیش‌فرض ۳۰): بیشترین اختلاف ساعت هر replica با زمان واقعی. بیرون از بازه سرویس بالا نمی‌آید.
 - فرض تضمین: اختلاف ساعت واقعی کمتر از این مقدار است. **هشدار بدهید** وقتی اختلاف NTP هر نمونه‌ی construction یا پایگاه‌داده از نصف آن بیشتر شد؛
   با اختلاف بزرگ‌تر تضمین باطل است.
+- **یک ثابت مشترک** (`PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS`، ۳۳۰۰ ثانیه، `packages/contracts`) هر دو طرف را می‌بندد. سرویس بالا نمی‌آید مگر
+  `CONSTRUCTION_IDEMPOTENCY_TTL_HOURS·۳۶۰۰ − B − CONSTRUCTION_CLOCK_SKEW_SECONDS ≥` ثابت (با نگهداشت ۱ ساعت یعنی skew حداکثر ۹۷ ثانیه). پرتال بالا
+  نمی‌آید مگر `WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS·۳۶۰۰ − WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS + ۳۰ ≤` ثابت (با ۱ ساعت یعنی حاشیه حداقل ۳۳۰ ثانیه؛
+  `WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS` بالاتر از ۱ دیگر بالا نمی‌آید). پس برای هر پیکربندیِ بالاآمدنی
+  `پنجره‌ی پرتال + skew پرتال + skew سرویس ≤ TTL − B` و کاربر درستکار هرگز `400` ددلاین را نمی‌بیند. **پیش از استقرار** مقدار `WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS` محیط‌های واقعی را بررسی کنید.
 - کاهش `CONSTRUCTION_IDEMPOTENCY_TTL_HOURS` ردیف موجود را کوتاه نمی‌کند (`expires_at` و `replay_deadline_at` ذخیره‌شده حاکم‌اند)؛ پاک‌سازی از
   skew روز استفاده می‌کند. پنجره‌ی فراخوان (پرتال: `WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS − WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS`) باید کوتاه‌تر از نگهداشت سرویس بماند.
 
