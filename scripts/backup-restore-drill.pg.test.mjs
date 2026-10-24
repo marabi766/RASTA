@@ -95,6 +95,7 @@ before(() => {
     CREATE SCHEMA drill_metadata;
     CREATE TABLE drill_metadata.sample (id integer);
     CREATE TABLE drill_metadata.owned_sample (id integer);
+    REVOKE ALL ON drill_metadata.owned_sample FROM PUBLIC;
     CREATE SEQUENCE drill_metadata.counter;
     SELECT setval('drill_metadata.counter', 41, true);
     GRANT SELECT ON drill_metadata.sample TO drill_metadata_reader;
@@ -150,6 +151,8 @@ test('real ledger SQL returns exact amounts; unbalanced journal and wallet hold 
 });
 
 test('--create restores database ACL, owner, per-role settings, digests and exact ledger amounts; ACL drift fails', () => {
+  // pg_dump omits this redundant explicit owner ACL; restored NULL must normalize identically.
+  sql('REVOKE ALL ON drill_metadata.owned_sample FROM PUBLIC;');
   const before = snapshot();
   const beforeLedger = ledger();
   command('pg_dump', ['-Fc', '-d', database, '-f', dump]);
@@ -236,7 +239,22 @@ for (const [category, mutation, undo] of [
     );
     try {
       sql(`${mutation};`);
-      const comparison = compareSnapshots(source, snapshot());
+      const restored = snapshot();
+      if (category === 'table owner') {
+        assert.equal(
+          restored.objectState.relations.find(
+            (object) => object.name === 'drill_metadata.owned_sample',
+          ).owner,
+          'drill_metadata_owner',
+        );
+      }
+      if (category === 'schema owner') {
+        assert.equal(
+          restored.objectState.schemas.find((object) => object.name === 'drill_metadata').owner,
+          'drill_metadata_owner',
+        );
+      }
+      const comparison = compareSnapshots(source, restored);
       assert.equal(comparison.objectStateEqual, false, category);
       assert.equal(drillPassed([comparison], 1, sourceLedger, ledger()), false, category);
     } finally {

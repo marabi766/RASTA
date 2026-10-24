@@ -156,6 +156,7 @@ export function checkServiceCoverage(discovered, configured) {
 }
 
 // Use role names, never cluster-local OIDs. ACL text and all arrays use C ordering.
+// pg_dump omits redundant explicit owner-only ACLs: NULL means acldefault, not no grants.
 export const OBJECT_STATE_SQL = `
 WITH namespaces AS (
   SELECT * FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema')
@@ -169,7 +170,8 @@ SELECT json_build_object(
     'owner', pg_get_userbyid(nspowner)) ORDER BY nspname COLLATE "C"), '[]'::json) FROM namespaces),
   'relations', (SELECT coalesce(json_agg(json_build_object('name', nspname || '.' || relname,
     'kind', relkind, 'owner', pg_get_userbyid(relowner),
-    'acl', (SELECT json_agg(a::text ORDER BY a::text COLLATE "C") FROM unnest(relacl) a))
+    'acl', (SELECT json_agg(a::text ORDER BY a::text COLLATE "C") FROM unnest(coalesce(relacl, acldefault(
+      CASE WHEN relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relowner))) a))
     ORDER BY nspname COLLATE "C", relname COLLATE "C"), '[]'::json) FROM relations),
   'defaultPrivileges', (SELECT coalesce(json_agg(json_build_object(
     'role', pg_get_userbyid(d.defaclrole), 'schema', coalesce(n.nspname, '*'),
