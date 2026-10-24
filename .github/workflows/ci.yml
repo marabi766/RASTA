@@ -661,6 +661,11 @@ jobs:
           psql -v ON_ERROR_STOP=1 -h localhost -U rasta_marketplace -d rasta_marketplace
           -f apps/web/e2e/fixtures/marketplace-returns.sql
 
+      - name: Remove any earlier web build output
+        # The coverage check below reads the manifest of the build that follows, never an
+        # older `.next` (a fresh checkout has none; this keeps that true for any runner reuse).
+        run: rm -rf apps/web/.next
+
       - name: Build portal and live-path services
         # Build the exact deployable artifacts this job starts, plus their
         # workspace dependencies. Services run from dist, never watch mode.
@@ -681,6 +686,18 @@ jobs:
           --filter=@rasta/contract-service...
           --filter=@rasta/supplier-service...
           --filter=@rasta/audit-service...
+
+      - name: Server-action coverage (compiler manifest)
+        # The compiler is the authority on which modules define server actions: the
+        # build above wrote every one it compiled to
+        # apps/web/.next/server/server-reference-manifest.json, and `pnpm build` wrote
+        # a receipt (build id + manifest SHA-256) after `next build` exited 0. This fails
+        # when one is not covered by the refusal cases of write-session-refusal.spec.ts,
+        # when the receipt, BUILD_ID or manifest is missing or from different builds,
+        # when Next's effective config does not build into `.next`, or on a Node that
+        # cannot run the check. apps/web's turbo build is never cached.
+        # Scope: refusal coverage of server actions only.
+        run: pnpm --filter @rasta/web run check:server-actions
 
       - name: Start MinIO and create the document bucket
         # EXP-002 slice 7: the portal attaches a file by having its server ask

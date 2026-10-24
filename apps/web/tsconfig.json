@@ -9,6 +9,9 @@
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "jsx": "preserve",
     "noEmit": true,
+    // `scripts/check-server-action-coverage.mjs` runs src/test/server-action-*.ts under Node's
+    // type stripping, where a relative import needs its extension (`./x.ts`).
+    "allowImportingTsExtensions": true,
     "allowJs": true,
     "isolatedModules": true,
     "plugins": [{ "name": "next" }],
