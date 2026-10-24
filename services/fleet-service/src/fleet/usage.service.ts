@@ -11,8 +11,8 @@ import { hashRequest } from './idempotency';
 import { Prisma } from '../generated/prisma';
 import {
   canonicalInstant,
-  canonicalLineEndings,
   canonicalQuantity,
+  canonicalText,
   type ListUsageQuery,
   type RecordUsageDto,
   type UsageRecordView,
@@ -66,11 +66,16 @@ export class UsageService {
    * The read rule for one usage record, shared by {@link get} and every
    * replay: a supervisor (or a service caller) reads the organization's
    * records; anyone else only those filed under their own driver record.
+   * With `tx`, inside that transaction: a replay under the lock must not wait
+   * for a second connection while it holds one (#372 r2 F2).
    */
-  private async mayRead(record: Pick<UsageRow, 'driverId'>): Promise<boolean> {
+  private async mayRead(
+    record: Pick<UsageRow, 'driverId'>,
+    tx?: FleetTransaction,
+  ): Promise<boolean> {
     const scope = currentFleetScope();
     if (scope.kind === 'SUPERVISOR') return true;
-    const own = await this.repository.findDriverByUserId(scope.userId);
+    const own = await this.repository.findDriverByUserId(scope.userId, tx);
     return own !== null && record.driverId === own.id;
   }
 
@@ -138,11 +143,13 @@ export class UsageService {
       // this request may have committed after the look above and before that
       // state changed — the assignment ended, the machine transferred — and
       // then this is a replay the state no longer matters to (#372 r1 F2).
-      // So the reference once more, under the asset lock a twin in flight
-      // holds until it commits, and with the same binding and read rule;
-      // only a reference still free lets the refusal stand.
+      // So the reference once more, under the reference lock a twin in
+      // flight holds until it commits, and with the same binding and read
+      // rule; only a reference still free lets the refusal stand. Not under
+      // the asset lock: the asset may be another tenant's, and its lock
+      // would make this refusal wait on that tenant's writes (#372 r2 F3).
       if (binding && refusal instanceof RastaError) {
-        const settled = await this.findUnderAssetLock(dto.assetId, binding.reference);
+        const settled = await this.findUnderReferenceLock(organizationId, binding.reference);
         if (settled) return this.replay(settled, dto, binding.hash);
       }
       throw refusal;
@@ -166,6 +173,12 @@ export class UsageService {
 
     try {
       const outcome = await this.repository.transaction(async (tx) => {
+        // The reference first, so a twin refused on the state now can wait
+        // for this request without touching the asset (see above), then the
+        // asset — always in this order, the only one that takes both.
+        if (binding) {
+          await this.repository.lockUsageReference(tx, organizationId, binding.reference);
+        }
         // Locked before the overlap check, not after: without the lock, two
         // concurrent submissions for the same machine can both read "no
         // overlap" before either has inserted, and both succeed (L3-05).
@@ -174,15 +187,16 @@ export class UsageService {
         // The reference again, now under the lock and before anything else
         // can refuse. A twin of this request may have passed the check above
         // at the same moment and committed while this one waited for the
-        // lock; its period then overlaps this one exactly, and without this
+        // locks; its period then overlaps this one exactly, and without this
         // look the replay would be refused as `USAGE_PERIOD_OVERLAP` — the
-        // unique index below is never reached. Same binding, same read rule.
+        // unique index below is never reached. Same binding, same read rule,
+        // on this transaction's connection.
         if (binding) {
           const settled = await this.repository.findUsageByClientReference(binding.reference, tx);
           if (settled) {
             return {
               kind: 'REPLAYED',
-              view: await this.replay(settled, dto, binding.hash),
+              view: await this.replay(settled, dto, binding.hash, tx),
             } as const;
           }
         }
@@ -283,10 +297,13 @@ export class UsageService {
     }
   }
 
-  /** The record a reference names, read under the asset's lock: after any twin in flight. */
-  private async findUnderAssetLock(assetId: string, reference: string): Promise<UsageRow | null> {
+  /** The record a reference names, read under the reference's lock: after any twin in flight. */
+  private async findUnderReferenceLock(
+    organizationId: string,
+    reference: string,
+  ): Promise<UsageRow | null> {
     return this.repository.transaction(async (tx) => {
-      await this.repository.lockAssetRef(tx, assetId);
+      await this.repository.lockUsageReference(tx, organizationId, reference);
       return this.repository.findUsageByClientReference(reference, tx);
     });
   }
@@ -300,18 +317,20 @@ export class UsageService {
    * record holds.
    *
    * Reads only, so it can run before validation and inside the usage
-   * transaction alike.
+   * transaction alike — there with its `tx`, so every read of it stays on the
+   * connection the transaction holds.
    */
   private async replay(
     existing: UsageRow,
     dto: RecordUsageDto,
     requestHash: string,
+    tx?: FleetTransaction,
   ): Promise<UsageRecordView> {
     const bound =
       existing.requestHash === null
         ? sameLegacyRequest(existing, dto, getContext(), currentFleetScope())
         : existing.requestHash === requestHash;
-    if (!bound || !(await this.mayRead(existing))) throw usageReferenceReused(existing.id);
+    if (!bound || !(await this.mayRead(existing, tx))) throw usageReferenceReused(existing.id);
 
     usageDuplicatesTotal.inc({ service: SERVICE_NAME });
     // The record's id, not the client's reference: that is a key the client
@@ -373,6 +392,9 @@ export class UsageService {
   }
 }
 
+/** The client a usage transaction runs on. */
+type FleetTransaction = Parameters<Parameters<FleetRepository['transaction']>[0]>[0];
+
 /** Clock skew a field device is forgiven. */
 const FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
 
@@ -382,7 +404,8 @@ const FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
  * `IdempotencyStore.hash` gives an `Idempotency-Key`, through the same
  * {@link hashRequest}. Equivalent means canonically equal, one spelling per
  * value ({@link canonicalUsageRequest}): key order, `"7.50"` against `"7.5"`,
- * `…:00Z` against `…:00.000Z`, CRLF against LF in the notes — none of these
+ * `…:00Z` against `…:00.000Z`, CRLF against LF or a decomposed accent
+ * against a precomposed one in the notes — none of these
  * makes another request. An omitted quantity and `"0"` still do.
  *
  * The caller is the user; a service caller, which has no user, is its service
@@ -409,7 +432,7 @@ function canonicalUsageRequest(dto: RecordUsageDto): RecordUsageDto {
     ...present('kilometres', quantity(dto.kilometres)),
     ...present('hourMeter', quantity(dto.hourMeter)),
     ...present('odometer', quantity(dto.odometer)),
-    ...present('notes', dto.notes === undefined ? undefined : canonicalLineEndings(dto.notes)),
+    ...present('notes', dto.notes === undefined ? undefined : canonicalText(dto.notes)),
   };
 }
 
@@ -429,7 +452,7 @@ function usageCaller(context: RequestContext): Record<string, string> {
  * stored — so the stored columns stand in, compared one by one. It replays
  * only to the **same user** (`recordedBy`) sending the **same reading**:
  *
- * - asset, period, source and notes (line endings as LF) equal; each
+ * - asset, period, source and notes (LF line endings, NFC) equal; each
  *   quantity present on both sides and equal as a number (`7.50` and `7.5`:
  *   the column kept no more), or absent on both;
  * - the driver: see {@link sameLegacyOperator}.
@@ -455,7 +478,7 @@ function sameLegacyRequest(
     sameQuantity(row.hourMeter, dto.hourMeter) &&
     sameQuantity(row.odometer, dto.odometer) &&
     row.source === dto.source &&
-    (row.notes === null ? null : canonicalLineEndings(row.notes)) === (dto.notes ?? null) &&
+    (row.notes === null ? null : canonicalText(row.notes)) === (dto.notes ?? null) &&
     sameLegacyOperator(row.driverId, dto.driverId, scope)
   );
 }

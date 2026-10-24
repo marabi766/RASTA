@@ -96,9 +96,14 @@ export function canonicalInstant(value: string): string {
   return new Date(value).toISOString();
 }
 
-/** CRLF and lone CR → LF. */
-export function canonicalLineEndings(value: string): string {
-  return value.replace(/\r\n?/g, '\n');
+/**
+ * Free text in one spelling: CRLF and lone CR → LF, and Unicode NFC, so a
+ * precomposed `"é"` (U+00E9) and `"e"` + U+0301 are one note (#372 r2 F1), as
+ * is a Persian letter typed precomposed or with its combining mark. Applied
+ * before the length check, so the limit counts the composed form.
+ */
+export function canonicalText(value: string): string {
+  return value.replace(/\r\n?/g, '\n').normalize('NFC');
 }
 
 /**
@@ -245,10 +250,13 @@ export const recordUsageSchema = z
     odometer: quantity(10).optional(),
 
     source: usageSourceSchema.default('MANUAL'),
-    /** Line endings made LF first, so CRLF is neither counted twice nor a different request. */
+    /**
+     * Made canonical first (LF, NFC), so neither CRLF nor a decomposed
+     * accent is counted twice or makes a different request.
+     */
     notes: z
       .preprocess(
-        (value) => (typeof value === 'string' ? canonicalLineEndings(value) : value),
+        (value) => (typeof value === 'string' ? canonicalText(value) : value),
         displayText(1, 1000),
       )
       .optional(),

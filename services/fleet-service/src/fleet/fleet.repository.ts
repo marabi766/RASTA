@@ -130,8 +130,9 @@ export class FleetRepository {
     return (tx ?? this.client).driver.findFirst({ where: { id } });
   }
 
-  async findDriverByUserId(userId: string) {
-    return this.client.driver.findFirst({ where: { userId } });
+  /** With `tx`, on the transaction's own connection (#372 r2 F2). */
+  async findDriverByUserId(userId: string, tx?: ExtendedPrismaClient) {
+    return (tx ?? this.client).driver.findFirst({ where: { userId } });
   }
 
   async listDrivers(query: ListDriversQuery) {
@@ -317,6 +318,27 @@ export class FleetRepository {
    */
   async findUsageByClientReference(clientReference: string, tx?: ExtendedPrismaClient) {
     return (tx ?? this.client).usageRecord.findFirst({ where: { clientReference } });
+  }
+
+  /**
+   * Serialises, until the transaction ends, every request carrying one
+   * `clientReference` in one organization: each usage submission takes it
+   * before {@link lockAssetRef}, and a submission refused on the state now
+   * takes it alone to read the reference once more after any twin in flight.
+   *
+   * Keyed by the organization and the reference only — never by an asset the
+   * caller may not hold, so a refusal waits for nothing another tenant does
+   * (#372 r2 F3). A transaction-scoped advisory lock, because the row it
+   * guards may not exist yet. The key is JSON, so no reference can spell
+   * another organization's.
+   */
+  async lockUsageReference(
+    tx: ExtendedPrismaClient,
+    organizationId: string,
+    clientReference: string,
+  ): Promise<void> {
+    const key = `usage_ref:${JSON.stringify([organizationId, clientReference])}`;
+    await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
   }
 
   /**

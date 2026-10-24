@@ -89,7 +89,8 @@ export class UsageController {
       'is: a replay is answered only to the same caller (the user; for a service caller, the ' +
       'same service) sending an equivalent body (keys in any order, defaults applied, each ' +
       'quantity by exact value so "7.50" equals "7.5", each instant in one UTC spelling so ' +
-      '"…:00Z" equals "…:00.000Z", notes with CRLF read as LF; an omitted quantity is not ' +
+      '"…:00Z" equals "…:00.000Z", notes with CRLF read as LF and in Unicode NFC so a ' +
+      'decomposed accent equals the precomposed one; an omitted quantity is not ' +
       '"0"), and ' +
       'only while that caller may still read the record by the rule of GET ' +
       '/v1/usage-records/{id}. Any other request under a reference already taken — another ' +

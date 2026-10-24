@@ -3,7 +3,15 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { UsageService, usageRequestHash } from '../src/fleet/usage.service';
 import { recordUsageSchema, type RecordUsageDto, type UsageRecordView } from '../src/fleet/dto';
-import { asActor, cleanup, id, newPrisma, tenants, type ActorOptions } from './helpers';
+import {
+  asActor,
+  cleanup,
+  databaseUrl,
+  id,
+  newPrisma,
+  tenants,
+  type ActorOptions,
+} from './helpers';
 
 /**
  * A `clientReference` is bound to the request that took it (ADR-073 plan, PR 1
@@ -28,6 +36,9 @@ describe('usage replay binding', () => {
   const assetId = id('AST');
   const otherAssetId = id('AST');
   const transferredAssetId = id('AST');
+  const raceAssetId = id('AST');
+  /** Tenant B's machine, which tenant A may not touch. */
+  const tenantBAssetId = id('AST');
   const driverA = id('DRV');
   const driverB = id('DRV');
   const suffix = id('X').slice(-8);
@@ -47,6 +58,10 @@ describe('usage replay binding', () => {
     organizationId: org.a,
     userId: `USR-ITEST-DRVB-${suffix}`,
     roles: ['DRIVER'],
+  };
+  const tenantBSupervisor: ActorOptions = {
+    organizationId: org.b,
+    userId: `USR-ITEST-BSUP-${suffix}`,
   };
 
   beforeAll(async () => {
@@ -71,7 +86,7 @@ describe('usage replay binding', () => {
           },
         });
       }
-      for (const asset of [assetId, otherAssetId, transferredAssetId]) {
+      for (const asset of [assetId, otherAssetId, transferredAssetId, raceAssetId]) {
         await prisma.client.assetRef.create({
           data: {
             id: asset,
@@ -83,6 +98,17 @@ describe('usage replay binding', () => {
         });
       }
     });
+    await asActor({ organizationId: org.b }, () =>
+      prisma.client.assetRef.create({
+        data: {
+          id: tenantBAssetId,
+          organizationId: org.b,
+          status: 'ACTIVE',
+          syncedAt: new Date(),
+          sourceEvent: 'ITEST',
+        },
+      }),
+    );
   });
 
   afterEach(() => jest.restoreAllMocks());
@@ -171,17 +197,40 @@ describe('usage replay binding', () => {
     throw new Error(`fewer than ${n} sessions ever blocked`);
   }
 
+  /** An open assignment of `driverId` to `asset`, which `end()` closes. */
+  async function assign(driverId: string, asset: string) {
+    const assignment = await asActor({ organizationId: org.a }, () =>
+      prisma.client.assignment.create({
+        data: {
+          id: id('ASG'),
+          organizationId: org.a,
+          driverId,
+          assetId: asset,
+          startedAt: new Date(Date.UTC(2026, 0, 1)),
+          assignedBy: 'ITEST',
+        },
+      }),
+    );
+    const end = () =>
+      prisma.client.$executeRawUnsafe(
+        `UPDATE assignment SET ended_at = now(), end_reason = 'COMPLETED', ended_by = 'ITEST'
+         WHERE id = $1 AND ended_at IS NULL`,
+        assignment.id,
+      );
+    return { assignment, end };
+  }
+
   /**
    * Holds the next submission inside its transaction, just after its insert,
-   * until released: its asset lock and its uncommitted row stay in place.
+   * until released: its locks and its uncommitted row stay in place.
    */
-  function holdNextSubmission() {
-    const enqueue = repository.enqueueEvent.bind(repository);
+  function holdNextSubmission(on: FleetRepository = repository) {
+    const enqueue = on.enqueueEvent.bind(on);
     let release!: () => void;
     const released = new Promise<void>((resolve) => (release = resolve));
     let inserted!: () => void;
     const held = new Promise<void>((resolve) => (inserted = resolve));
-    jest.spyOn(repository, 'enqueueEvent').mockImplementationOnce(async (tx, event) => {
+    jest.spyOn(on, 'enqueueEvent').mockImplementationOnce(async (tx, event) => {
       inserted();
       await released;
       return enqueue(tx, event);
@@ -275,6 +324,18 @@ describe('usage replay binding', () => {
     );
   });
 
+  it('replays a note sent precomposed, then decomposed, as one request (#372 r2 F1)', async () => {
+    const base = reading();
+    const first = recordUsageSchema.parse({ ...base, notes: 'caf\u00e9 \u0622' });
+    const again = recordUsageSchema.parse({ ...base, notes: 'cafe\u0301 \u0627\u0653' });
+
+    const a = await asActor(supervisor, () => service.record(first));
+    await expect(asActor(supervisor, () => service.record(again))).resolves.toEqual(a);
+    expect(a.notes).toBe('caf\u00e9 \u0622');
+    expect(await rowsUnder(base.clientReference!)).toHaveLength(1);
+    expect(await eventsFor(a.id)).toBe(1);
+  });
+
   describe('a twin committed, then the state changed, before this request was validated (#372 r1 F2)', () => {
     /**
      * Lets this request's look before validation run and find nothing, then —
@@ -350,6 +411,104 @@ describe('usage replay binding', () => {
     });
   });
 
+  describe('a refusal re-checks under the reference lock, not the asset lock (#372 r2 F3)', () => {
+    it("answers tenant A's 404 for tenant B's machine while B holds that machine's lock", async () => {
+      // B is mid-submission on its own machine: asset lock taken, row
+      // inserted, uncommitted. A names B's machine. Before, A's refusal
+      // re-check took that same asset lock and its 404 waited for B.
+      const { held, release } = holdNextSubmission();
+      const b = asActor(tenantBSupervisor, () =>
+        service.record(reading({ assetId: tenantBAssetId })),
+      );
+      await held;
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        const answered = asActor(supervisor, () =>
+          service.record(reading({ assetId: tenantBAssetId })),
+        );
+        const waited = new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("waited on tenant B's lock")), 2000);
+        });
+        await expect(Promise.race([answered, waited])).rejects.toMatchObject({ status: 404 });
+      } finally {
+        clearTimeout(timer);
+        release();
+        await b;
+      }
+    });
+
+    it('still waits for a twin of its own in flight, and replays it', async () => {
+      // A is held inside its transaction under both locks. The assignment
+      // then ends, so B — the same driver, the same body — is refused 404
+      // before its transaction, re-checks, and must wait for A's reference
+      // lock rather than find nothing and let the 404 stand.
+      const { end } = await assign(driverA, raceAssetId);
+      const body = reading({ assetId: raceAssetId });
+      const { held, release } = holdNextSubmission();
+      const first = asActor(driverUserA, () => service.record(body));
+      await held;
+      await end();
+
+      const second = asActor(driverUserA, () => service.record(body));
+      await waitForBlocked(1);
+      release();
+      const [a, b] = await Promise.all([first, second]);
+
+      expect(b).toEqual(a);
+      expect(await rowsUnder(body.clientReference!)).toHaveLength(1);
+      expect(await eventsFor(a.id)).toBe(1);
+    });
+  });
+
+  describe('a DRIVER replay under the locks, on a pool of one connection (#372 r2 F2)', () => {
+    let narrow: PrismaService;
+    let narrowRepository: FleetRepository;
+    let narrowService: UsageService;
+
+    beforeAll(async () => {
+      const url = new URL(databaseUrl());
+      url.searchParams.set('connection_limit', '1');
+      url.searchParams.set('pool_timeout', '3');
+      narrow = new PrismaService(url.toString());
+      await narrow.onModuleInit();
+      narrowRepository = new FleetRepository(narrow);
+      narrowService = new UsageService(narrowRepository);
+    });
+
+    afterAll(() => narrow.onModuleDestroy());
+
+    it("returns the twin's record instead of waiting for a second connection", async () => {
+      // B's look before validation finds nothing; then A — the same driver,
+      // the same body, on another pool — commits. B is still assigned, enters
+      // its transaction holding the pool's only connection, and finds A's
+      // record under the locks. Its read rule needs the caller's driver
+      // record: on the ordinary client that is a second connection, which
+      // never comes while B holds the first.
+      const { end } = await assign(driverB, raceAssetId);
+      try {
+        const body = reading({ assetId: raceAssetId });
+        let a!: UsageRecordView;
+        const lookup = narrowRepository.findUsageByClientReference.bind(narrowRepository);
+        jest
+          .spyOn(narrowRepository, 'findUsageByClientReference')
+          .mockImplementationOnce(async (reference, tx) => {
+            const found = await lookup(reference, tx);
+            a = await asActor(driverUserB, () => service.record(body));
+            return found;
+          });
+
+        const b = await asActor(driverUserB, () => narrowService.record(body));
+
+        expect(b).toEqual(a);
+        expect(a.driverId).toBe(driverB);
+        expect(await rowsUnder(body.clientReference!)).toHaveLength(1);
+        expect(await eventsFor(a.id)).toBe(1);
+      } finally {
+        await end();
+      }
+    });
+  });
+
   describe('a row recorded before the binding (request_hash NULL)', () => {
     it('replays to the user who recorded it when every field is equal', async () => {
       const body = reading();
@@ -397,11 +556,11 @@ describe('usage replay binding', () => {
   });
 
   describe('concurrent twins', () => {
-    it('replays a twin that committed while this request waited for the asset lock, not USAGE_PERIOD_OVERLAP', async () => {
-      // A takes the lock and inserts, and is held there. B passes the first
+    it('replays a twin that committed while this request waited for the locks, not USAGE_PERIOD_OVERLAP', async () => {
+      // A takes the locks and inserts, and is held there. B passes the first
       // lookup (A is uncommitted), then waits on A's lock. A commits. B now
-      // holds the lock with A's overlapping period committed — and must replay
-      // A's record, not refuse it.
+      // holds the locks with A's overlapping period committed — and must
+      // replay A's record, not refuse it.
       const body = reading();
       const { held, release } = holdNextSubmission();
       const first = asActor(supervisor, () => service.record(body));
@@ -436,11 +595,11 @@ describe('usage replay binding', () => {
       await refused(second);
     });
 
-    it('binds the unique-violation path too: a twin under the same reference on another machine', async () => {
-      // Two machines, two locks: B is not serialised behind A, passes both
-      // lookups while A is uncommitted, and its insert waits on A's row in the
-      // unique index. A commits; B's insert fails, and the row it then finds
-      // is another request's.
+    it('serialises a twin under the same reference on another machine, and refuses it', async () => {
+      // Two machines, but one reference: B waits on A's reference lock, not
+      // on the unique index. A commits; B, under the locks, finds a row that
+      // is another request's. The unique index stays the backstop (unit:
+      // "after a unique violation").
       const body = reading();
       const { held, release } = holdNextSubmission();
       const first = asActor(supervisor, () => service.record(body));

@@ -86,7 +86,7 @@ describe('UsageService replay binding', () => {
     rows: {
       /** What the lookup before validation finds. */
       before?: Row | null;
-      /** What the lookup under the asset lock finds. */
+      /** What the lookup under the locks finds. */
       underLock?: Row | null;
       /** What the lookup after a unique violation finds. */
       afterViolation?: Row | null;
@@ -113,7 +113,7 @@ describe('UsageService replay binding', () => {
           (tx.usageRecord.create.mock.calls.length > 0 ? rows.afterViolation : rows.before) ?? null
         );
       }),
-      findDriverByUserId: jest.fn(async (userId: string) => drivers[userId] ?? null),
+      findDriverByUserId: jest.fn(async (userId: string, _tx?: unknown) => drivers[userId] ?? null),
       findAssetRef: jest.fn(async () => ({ id: ASSET, organizationId: ORG })),
       findActiveAssignmentForDriver: jest.fn(async (driverId: string) => ({
         id: `ASG_${driverId}`,
@@ -123,6 +123,7 @@ describe('UsageService replay binding', () => {
       findDriverById: jest.fn(async (driverId: string) => ({ id: driverId })),
       transaction: jest.fn(async (fn: (client: unknown) => Promise<unknown>) => fn(tx)),
       lockAssetRef: jest.fn(async () => undefined),
+      lockUsageReference: jest.fn(async () => undefined),
       findOverlappingUsage: jest.fn(async () => null),
       enqueueEvent: jest.fn(async () => undefined),
     };
@@ -187,6 +188,7 @@ describe('UsageService replay binding', () => {
 
       for (const spelling of [
         dto({ notes: 'shift A\nmeter checked', hours: '7.5' }),
+        dto({ notes: 'shift A\r\nmeter checked', hours: '7.50' }),
         dto({ notes: 'shift A\rmeter checked', hours: '07.50' }),
         dto({
           notes: 'shift A\r\nmeter checked',
@@ -198,6 +200,22 @@ describe('UsageService replay binding', () => {
           id: 'USG_STORED',
         });
       }
+    });
+
+    it('recognises the same note precomposed and decomposed (#372 r2 F1)', async () => {
+      // "café" as U+00E9, then as "e" + U+0301; and a Persian آ as U+0622,
+      // then as ا + U+0653. Canonically equal text, one request.
+      const composed = dto({ notes: 'caf\u00e9 \u0622' });
+      const { usage } = setup({ before: storedRow(supervisor1, composed) });
+
+      await expect(
+        as(supervisor1, () => usage.record(dto({ notes: 'cafe\u0301 \u0627\u0653' }))),
+      ).resolves.toMatchObject({ id: 'USG_STORED' });
+      expect(
+        runWithContext(supervisor1, () => usageRequestHash(dto({ notes: 'cafe\u0301' }))),
+      ).toBe(runWithContext(supervisor1, () => usageRequestHash(dto({ notes: 'caf\u00e9' }))));
+      // Equivalent is not equal-looking: another letter is another note.
+      await refusal(as(supervisor1, () => usage.record(dto({ notes: 'cafe \u0622' }))));
     });
 
     it('still tells an omitted quantity from zero', async () => {
@@ -277,6 +295,16 @@ describe('UsageService replay binding', () => {
       ).resolves.toMatchObject({ id: 'USG_STORED' });
     });
 
+    it('compares notes in NFC on both sides', async () => {
+      const { usage } = setup({
+        before: legacy(supervisor1, { driverId: null, notes: 'cafe\u0301\r\nchecked' }),
+      });
+
+      await expect(
+        as(supervisor1, () => usage.record(dto({ notes: 'caf\u00e9\nchecked' }))),
+      ).resolves.toMatchObject({ id: 'USG_STORED' });
+    });
+
     it('compares notes with LF line endings on both sides', async () => {
       const { usage } = setup({
         before: legacy(supervisor1, { driverId: null, notes: 'shift A\r\nchecked' }),
@@ -339,7 +367,7 @@ describe('UsageService replay binding', () => {
     });
   });
 
-  describe('under the asset lock', () => {
+  describe('under the locks', () => {
     it('replays a twin that committed while this request waited, before the overlap check', async () => {
       const request = dto();
       const { usage, repository, tx } = setup({ underLock: storedRow(supervisor1, request) });
@@ -358,6 +386,31 @@ describe('UsageService replay binding', () => {
       await refusal(as(supervisor1, () => usage.record(dto())));
       expect(repository.findOverlappingUsage).not.toHaveBeenCalled();
     });
+
+    it("reads a DRIVER's own record on the transaction, not a second connection (#372 r2 F2)", async () => {
+      const request = dto();
+      const { usage, repository, tx } = setup({
+        underLock: storedRow(driverA, request, { driverId: DRIVER_A }),
+      });
+
+      await expect(as(driverA, () => usage.record(request))).resolves.toMatchObject({
+        id: 'USG_STORED',
+      });
+      // Once to resolve the operator, before the transaction; then the read
+      // rule of the replay, inside it.
+      expect(repository.findDriverByUserId).toHaveBeenLastCalledWith('USR-DRIVER-A', tx);
+    });
+
+    it('takes the reference lock, then the asset lock', async () => {
+      const { usage, repository, tx } = setup();
+
+      await as(supervisor1, () => usage.record(dto()));
+
+      expect(repository.lockUsageReference).toHaveBeenCalledWith(tx, ORG, 'offline-ref-0001');
+      expect(repository.lockUsageReference.mock.invocationCallOrder[0]!).toBeLessThan(
+        repository.lockAssetRef.mock.invocationCallOrder[0]!,
+      );
+    });
   });
 
   describe('refused on the state now, with the reference taken meanwhile (#372 r1 F2)', () => {
@@ -373,7 +426,7 @@ describe('UsageService replay binding', () => {
       await expect(as(driverA, () => usage.record(request))).resolves.toMatchObject({
         id: 'USG_STORED',
       });
-      expect(repository.lockAssetRef).toHaveBeenCalledWith(tx, ASSET);
+      expect(repository.lockUsageReference).toHaveBeenCalledWith(tx, ORG, request.clientReference);
       expect(tx.usageRecord.create).not.toHaveBeenCalled();
     });
 
@@ -404,7 +457,18 @@ describe('UsageService replay binding', () => {
       await expect(as(supervisor1, () => usage.record(dto()))).rejects.toMatchObject({
         status: 404,
       });
-      expect(repository.lockAssetRef).toHaveBeenCalledTimes(1);
+      expect(repository.lockUsageReference).toHaveBeenCalledTimes(1);
+    });
+
+    it("never locks the machine it refused: it may be another tenant's (#372 r2 F3)", async () => {
+      const { usage, repository, tx } = setup();
+      repository.findAssetRef.mockResolvedValueOnce(null as never);
+
+      await expect(as(supervisor1, () => usage.record(dto()))).rejects.toMatchObject({
+        status: 404,
+      });
+      expect(repository.lockUsageReference).toHaveBeenCalledWith(tx, ORG, 'offline-ref-0001');
+      expect(repository.lockAssetRef).not.toHaveBeenCalled();
     });
 
     it('does not look without a reference', async () => {
@@ -465,12 +529,14 @@ describe('UsageService replay binding', () => {
     const { usage, tx } = setup();
 
     await as(supervisor1, () =>
-      usage.record(dto({ hours: '007.50', periodStart: '2026-08-01T06:00:00Z', notes: 'a\r\nb' })),
+      usage.record(
+        dto({ hours: '007.50', periodStart: '2026-08-01T06:00:00Z', notes: 'a\r\ne\u0301' }),
+      ),
     );
 
     expect(tx.usageRecord.create.mock.calls[0]![0].data).toMatchObject({
       hours: '7.5',
-      notes: 'a\nb',
+      notes: 'a\n\u00e9',
       periodStart: new Date('2026-08-01T06:00:00.000Z'),
     });
   });
@@ -503,6 +569,16 @@ describe('UsageService replay binding', () => {
       expect(recordUsageSchema.safeParse({ ...raw, notes }).success).toBe(true);
       expect(recordUsageSchema.safeParse({ ...raw, hours: '000000007.5' }).success).toBe(true);
       expect(recordUsageSchema.safeParse({ ...raw, hours: '123456789' }).success).toBe(false);
+    });
+
+    it('gives a note in NFC, and counts it so (#372 r2 F1)', () => {
+      expect(recordUsageSchema.parse({ ...raw, notes: 'cafe\u0301' }).notes).toBe('caf\u00e9');
+      // 2000 code units decomposed, 1000 composed: within the 1000 limit.
+      const notes = 'e\u0301'.repeat(1000);
+      expect(notes).toHaveLength(2000);
+      const parsed = recordUsageSchema.safeParse({ ...raw, notes });
+      expect(parsed.success && parsed.data.notes).toBe('\u00e9'.repeat(1000));
+      expect(recordUsageSchema.safeParse({ ...raw, notes: notes + 'e' }).success).toBe(false);
     });
   });
 
