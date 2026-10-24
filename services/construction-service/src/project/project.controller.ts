@@ -13,6 +13,7 @@ import {
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RastaError, zodPipe } from '@rasta/nest-common';
 import { z } from 'zod';
+import { parseReplayDeadline } from '../shared/idempotency';
 import { ProjectService } from './project.service';
 import { NeedService } from './need.service';
 import {
@@ -99,14 +100,18 @@ export class ProjectController {
     description:
       'The organization is the one the request acts for; there is no field for it. Fields are ' +
       'the provisional set of docs/24 Q-68 (from docs/03 and docs/05, not the product document). ' +
-      'An optional Idempotency-Key makes a retry return the first response. Publishes ' +
-      `PROJECT_CREATED in the same transaction. ${ROLES_NOTE}`,
+      'An optional Idempotency-Key makes a retry return the first response. With it, an ' +
+      'optional Idempotency-Replay-Deadline (epoch ms) is the last instant the request may be ' +
+      "executed: past it on this service's clock the answer is 409 REPLAY_WINDOW_CLOSED, nothing " +
+      `written. Publishes PROJECT_CREATED in the same transaction. ${ROLES_NOTE}`,
   })
   async create(
     @Body(zodPipe(createProjectSchema)) dto: CreateProjectDto,
     @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers('idempotency-replay-deadline') replayDeadline?: string,
   ) {
-    return this.projects.create(dto, parseIdempotencyKey(idempotencyKey));
+    const key = parseIdempotencyKey(idempotencyKey);
+    return this.projects.create(dto, key, parseReplayDeadline(replayDeadline, key));
   }
 
   @Get()

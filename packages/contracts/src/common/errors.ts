@@ -51,6 +51,12 @@ export const ERROR_CODES = {
   CONFLICT: 'CONFLICT',
   /** Same idempotency key, different request body. */
   IDEMPOTENCY_KEY_REUSED: 'IDEMPOTENCY_KEY_REUSED',
+  /**
+   * The caller said (`Idempotency-Replay-Deadline`) until when this request may still be executed
+   * under its key, and the service's own clock is past it. Refused before any write: THIS attempt
+   * did nothing; an earlier attempt under the same key may have (PM decision D-065).
+   */
+  REPLAY_WINDOW_CLOSED: 'REPLAY_WINDOW_CLOSED',
   /** The aggregate is not in a state that permits this transition. */
   INVALID_STATE_TRANSITION: 'INVALID_STATE_TRANSITION',
   OPTIMISTIC_LOCK_FAILED: 'OPTIMISTIC_LOCK_FAILED',
@@ -162,6 +168,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   ALREADY_EXISTS: 409,
   CONFLICT: 409,
   IDEMPOTENCY_KEY_REUSED: 409,
+  REPLAY_WINDOW_CLOSED: 409,
   INVALID_STATE_TRANSITION: 409,
   OPTIMISTIC_LOCK_FAILED: 409,
   ACTOR_IDENTITY_UNKNOWN: 422,

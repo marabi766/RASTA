@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
+import { MAX_REQUEST_TIMEOUT_MS } from './unresolved-request-policy';
+
 /**
  * The only way this portal reaches the platform (ADR-058 § 3, ADR-059 § 3).
  *
@@ -87,6 +89,20 @@ export class GatewayOutcomeUnknownError extends GatewayRequestError {
 }
 
 /**
+ * The request provably never left this portal (connection refused, DNS failure
+ * …, see `neverSent`): nothing reached the platform, so nothing happened. A
+ * `GatewayRequestError` with status 503 as before — every reader treats it so —
+ * but a write can tell it from a 503 that came back from the platform, which
+ * may follow a commit (`write.ts` carries it as `neverSent`).
+ */
+export class GatewayNeverSentError extends GatewayRequestError {
+  constructor(correlationId: string) {
+    super(503, correlationId, null);
+    this.name = 'GatewayNeverSentError';
+  }
+}
+
+/**
  * Connection failures that happen before a single byte of the request is
  * sent — nothing reached the gateway, so the outcome is known: nothing
  * happened. Anything else, including this portal's own deadline, may have
@@ -146,6 +162,14 @@ export interface GatewayCall {
    * about which routes need one stays where it belongs — in the gateway.
    */
   readonly idempotencyKey?: string;
+  /**
+   * Sent as `Idempotency-Replay-Deadline`: the last instant (ms since the epoch) this request may be
+   * executed under its key. The owning service compares it with the clock that expires its
+   * idempotency record and refuses a later attempt with `409 REPLAY_WINDOW_CLOSED` before it writes
+   * anything (PM decision D-065) — the guarantee a clock in this portal can never give. Only with an
+   * `idempotencyKey`, and only a positive safe integer; anything else is a programming error.
+   */
+  readonly replayDeadline?: number;
   readonly fetchImpl?: typeof fetch;
   /** Overrides {@link GATEWAY_TIMEOUT_MS}. Exists for tests. */
   readonly timeoutMs?: number;
@@ -160,7 +184,7 @@ export interface GatewayCall {
  * it — for as long as the platform's own socket timeout, which is a much
  * longer and much less predictable number than this one.
  */
-const GATEWAY_TIMEOUT_MS = 15_000;
+const GATEWAY_TIMEOUT_MS = MAX_REQUEST_TIMEOUT_MS;
 
 export interface GatewayResponse<T> {
   readonly data: T;
@@ -176,6 +200,14 @@ export interface GatewayResponse<T> {
  */
 export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse<T>> {
   const url = gatewayUrl(call.baseUrl, call.path);
+  if (
+    call.replayDeadline !== undefined &&
+    (call.idempotencyKey === undefined ||
+      !Number.isSafeInteger(call.replayDeadline) ||
+      call.replayDeadline <= 0)
+  ) {
+    throw new Error('a replay deadline needs an idempotency key and a positive safe integer');
+  }
   const correlationId = call.correlationId ?? randomUUID();
   const fetchImpl = call.fetchImpl ?? fetch;
 
@@ -189,6 +221,9 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
         'x-correlation-id': correlationId,
         ...(call.body === undefined ? {} : { 'content-type': 'application/json' }),
         ...(call.idempotencyKey === undefined ? {} : { 'idempotency-key': call.idempotencyKey }),
+        ...(call.replayDeadline === undefined
+          ? {}
+          : { 'idempotency-replay-deadline': String(call.replayDeadline) }),
       },
       body: call.body === undefined ? undefined : JSON.stringify(call.body),
       cache: 'no-store',
@@ -203,7 +238,7 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
     // makes that mapping actually total (`docs/16 § ۱۶٫۱۱`). Only a failure
     // before anything was sent is a plain one; after that, whether the
     // platform acted is unknown.
-    if (neverSent(error)) throw new GatewayRequestError(503, correlationId, null);
+    if (neverSent(error)) throw new GatewayNeverSentError(correlationId);
     throw new GatewayOutcomeUnknownError(503, correlationId, 'TRANSPORT');
   }
 
