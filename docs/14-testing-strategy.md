@@ -1011,7 +1011,7 @@ pnpm --filter @rasta/identity-service test:integration
   `.env`ِ ساخته‌شده از `.env.example` پیش از #131 باید دوباره ساخته شود.
 - **Observer:** Specهای Kafka به‌عنوان `itest-observer` می‌خوانند و گذرواژه‌اش فقط در
   `infrastructure/docker/kafka/bootstrap.env.example` (یا `bootstrap.env` محلی) است، نه `.env` — فقط همان یک خط را Export کن، نه
-  گذرواژهٔ admin یا ops-replay. بی آن، Spec با `KafkaConnectionConfigError: itest-observer refuses to reach Kafka …`
+  گذرواژهٔ admin یا ops-replay. بی آن، Spec با `KafkaConnectionConfigError: This Kafka client refuses to reach Kafka …`
   شکست می‌خورد.
 - **Skip بی‌صدا:** بی `KAFKA_BROKERS` این ده Spec با یک `console.warn` کنار گذاشته می‌شوند و اجرا سبز است:
   `identity-service/test/security-event-kafka`، `audit-service/test/kafka-projector`،

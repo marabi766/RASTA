@@ -40,6 +40,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { tryReadUrl } from '../packages/config/src/url-reader.js';
 import { withUtcSession } from './prisma-lib.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -138,8 +139,16 @@ const baseUrl =
   process.env.DATABASE_URL_IDENTITY ??
   process.env.DATABASE_URL;
 if (!baseUrl) fail('DATABASE_URL_IDENTITY is not set.');
-// In UTC whatever the server's or the role's default (L7-37).
-const url = new URL(withUtcSession(baseUrl));
+// In UTC whatever the server's or the role's default (L7-37). A URL that does
+// not parse is refused with a fixed text: `new URL`'s own error carries the
+// value whole, password included (#385 r5).
+const url = tryReadUrl(withUtcSession(baseUrl));
+if (url === null) {
+  fail(
+    'DATABASE_URL_IDENTITY_MIGRATOR (else DATABASE_URL_IDENTITY, else DATABASE_URL) cannot be ' +
+      'read as a URL; its value is not repeated.',
+  );
+}
 url.searchParams.set('schema', scratchSchema);
 const scratchUrl = url.toString();
 

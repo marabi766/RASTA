@@ -345,7 +345,11 @@ describe('the database pool and statement timeout (databaseEnvSchema)', () => {
 
       it('refuses the r5 example, whose last options parameter carries no timeout', () => {
         expect(new URL(R5).searchParams.getAll('options')).toHaveLength(2);
-        urlRefusal({ DATABASE_STATEMENT_TIMEOUT_MS: '15000' }, R5, '2 options parameters');
+        urlRefusal(
+          { DATABASE_STATEMENT_TIMEOUT_MS: '15000' },
+          R5,
+          'more than one options parameter',
+        );
       });
 
       it.each([
@@ -358,7 +362,7 @@ describe('the database pool and statement timeout (databaseEnvSchema)', () => {
           `${RAW_URL}&options=-c%20search_path%3Dx&%6Fptions=-c%20TimeZone%3DUTC`,
           `${RAW_URL}&options=-c%20TimeZone%3DUTC&options=`,
         ]) {
-          urlRefusal(pool, url, 'options parameters');
+          urlRefusal(pool, url, 'more than one options parameter');
         }
       });
     });

@@ -31,6 +31,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serviceStem } from './check-kafka-credential-scope-lib.mjs';
+import { registeredDatabaseSettings } from './database-services.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -179,11 +180,19 @@ export function checkKafkaClientEnv(env, services = kafkaServicesFromPrincipals(
  * Compose no longer reads them from `.env` either: the postgres container takes
  * them from .env.migrator.example / .env.migrator.
  */
-export function migratorCredentialsInEnvFile(fromEnvFile) {
-  const names = Object.keys(fromEnvFile)
+export function migratorCredentialsInEnvFile(
+  fromEnvFile,
+  registered = registeredDatabaseSettings(),
+) {
+  const found = Object.keys(fromEnvFile)
     .filter((name) => /^(?:DATABASE_URL|POSTGRES_PASSWORD)_[A-Z0-9_]+_MIGRATOR$/.test(name))
     .sort();
-  if (names.length === 0) return [];
+  if (found.length === 0) return [];
+  // Named only when registered; a name for no service is the file's own, and
+  // counted (#385 r4), as @rasta/config's boot refusal counts it.
+  const names = found.filter((name) => registered.has(name));
+  const others = found.length - names.length;
+  if (others > 0) names.push(`${others} more *_MIGRATOR variable(s) named for no service`);
   return [
     `.env holds database owner credentials (${names.join(', ')}), and every service refuses to ` +
       'start with one in its environment (D-045). Move them to .env.migrator ' +

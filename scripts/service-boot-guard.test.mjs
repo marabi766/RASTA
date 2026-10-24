@@ -51,6 +51,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { splitServicesFromLibrary } from './infra-preflight-lib.mjs';
+import { KEY_SENTINELS, assertNoSentinel } from './refusal-probes.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVICES = readdirSync(join(ROOT, 'services'))
@@ -97,6 +98,25 @@ for (const service of SERVICES) {
       assert.match(output, /MigratorCredentialInServiceError/, output.slice(0, 2000));
       assert.match(output, new RegExp(variable));
       assert.ok(!output.includes('owner_secret_value'), `${variable}: the value was printed`);
+    }
+    // #385 r4: a key named for no service came from the environment: the
+    // refusal counts it and the whole output repeats nothing of it.
+    for (const key of KEY_SENTINELS) {
+      const variable = `DATABASE_URL_${key}_MIGRATOR`;
+      const result = spawnSync(process.execPath, [main], {
+        cwd: join(ROOT, 'services', service),
+        env: { PATH: process.env.PATH, NODE_ENV: 'development', [variable]: 'x' },
+        encoding: 'utf8',
+        timeout: 30_000,
+      });
+      assert.notEqual(result.status, 0, `${variable}: the service did not refuse`);
+      const output = result.stdout + result.stderr;
+      assert.match(
+        output,
+        /1 more \*_MIGRATOR variable\(s\) named for no service/,
+        output.slice(0, 2000),
+      );
+      assertNoSentinel(output, `${service} ${variable}`);
     }
   });
 }

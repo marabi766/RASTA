@@ -10,7 +10,7 @@ import {
 import { canonicalize } from '@rasta/sealing';
 import { MAX_INVITEES_LIMIT } from '../config/env';
 import { MAX_QUANTITY, MAX_REASON_LENGTH } from '../demand/dto';
-import { codePointLength } from '../openapi/zod-schema';
+import { codePointLength } from '@rasta/nest-common';
 import { RFQ_STATES } from './rfq.state-machine';
 
 /**

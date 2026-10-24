@@ -40,6 +40,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
+import { readUrl, tryReadUrl } from '../packages/config/src/url-reader.js';
 import { withUtcSession } from './prisma-lib.mjs';
 
 // What each service's schema must contain, and the SQL that checks it. Kept in
@@ -50,6 +51,7 @@ import {
   verifierConnection,
   verifierRoleProblem,
   CONNECTED_ROLE_PROBE,
+  UNREADABLE_DATABASE_URL,
   assertionScript,
   assertSnapshotScript,
   createScratchDatabase,
@@ -103,6 +105,12 @@ if (connection.error) {
 }
 // In UTC whatever the server's or the role's default (L7-37).
 const baseUrl = withUtcSession(connection.url);
+// A URL that does not parse is refused here, by the variable's name only, before
+// any helper below would refuse it as an uncaught throw (#385 r5).
+if (tryReadUrl(baseUrl) === null) {
+  console.error(`${connection.key}: ${UNREADABLE_DATABASE_URL}. Refusing to verify.`);
+  process.exit(1);
+}
 
 // …and that variable really names the migrator, not a superuser or any other
 // role (verifierRoleProblem in the lib).
@@ -166,7 +174,7 @@ let scratchCreated = false;
 
 /** A throwaway schema (or database). Nothing this script does can reach the real one. */
 function scratchUrl(schema = targetSchema) {
-  const url = new URL(baseUrl);
+  const url = readUrl(baseUrl, { refusal: UNREADABLE_DATABASE_URL });
   if (scratchDatabase) url.pathname = `/${scratchDatabase}`;
   url.searchParams.set('schema', schema);
   return url.toString();

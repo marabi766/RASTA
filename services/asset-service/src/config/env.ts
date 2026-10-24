@@ -3,13 +3,18 @@ import {
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { CLAIM_STATUSES } from '../asset/dto';
 import { INSURANCE_COVERAGES } from '../insurance/ownership';
 import { assetOperationBudgets } from './operation-budgets';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
 
 /**
  * asset-service configuration.
@@ -57,7 +62,7 @@ export const assetEnvSchema = baseEnvSchema
     INSURANCE_CLAIM_APPROVAL_CEILING_MINOR: z
       .string()
       .trim()
-      .regex(/^\d{0,30}$/, 'Must be a non-negative integer in minor units, or empty')
+      .regex(/^\d{0,30}$/, fixed('Must be a non-negative integer in minor units, or empty'))
       .default('')
       .transform((raw) => (raw === '' ? null : BigInt(raw))),
 
@@ -82,7 +87,7 @@ export const assetEnvSchema = baseEnvSchema
           .array(z.enum(CLAIM_STATUSES))
           .nonempty()
           .refine((list) => new Set(list).size === list.length, {
-            message: 'INSURANCE_CLAIM_DOCUMENT_STATUSES lists a status more than once',
+            message: fixed('INSURANCE_CLAIM_DOCUMENT_STATUSES lists a status more than once'),
           }),
       ),
 
@@ -111,7 +116,7 @@ export const assetEnvSchema = baseEnvSchema
           // A repeated coverage is a typo, not a wider rule, and it made
           // "all four" and "this one" disagree (PR #108 round 2 #6).
           .refine((list) => new Set(list).size === list.length, {
-            message: 'INSURANCE_COVERAGES_FOLLOWING_VEHICLE lists a coverage more than once',
+            message: fixed('INSURANCE_COVERAGES_FOLLOWING_VEHICLE lists a coverage more than once'),
           }),
       ),
 
@@ -120,14 +125,14 @@ export const assetEnvSchema = baseEnvSchema
      * transfer (ADR-062). Required, with no default: without them no transfer
      * can be cleared, which is better found at boot than at the first one.
      */
-    FLEET_SERVICE_URL: z.string().url(),
-    MAINTENANCE_SERVICE_URL: z.string().url(),
+    FLEET_SERVICE_URL: serviceUrlSchema,
+    MAINTENANCE_SERVICE_URL: serviceUrlSchema,
     /**
      * document-service, asked who owns a document before a reference to it is
      * stored (EXP-002 slice 7). Required: without it nothing can be verified,
      * and an unverified document is never attached.
      */
-    DOCUMENT_SERVICE_URL: z.string().url(),
+    DOCUMENT_SERVICE_URL: serviceUrlSchema,
     /** One document lookup, body included. A timeout refuses the attach (503-class). */
     ASSET_DOCUMENT_LOOKUP_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
 
@@ -164,6 +169,8 @@ export const assetEnvSchema = baseEnvSchema
     ASSET_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(30).max(3_600).default(120),
   });
 
+export const ASSET_ENV_MESSAGES = seal();
+
 export type AssetEnv = z.infer<typeof assetEnvSchema>;
 
 export function loadAssetEnv(source: NodeJS.ProcessEnv = process.env): AssetEnv {
@@ -178,7 +185,7 @@ export function loadAssetEnv(source: NodeJS.ProcessEnv = process.env): AssetEnv 
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'asset-service.main',
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: assetOperationBudgets },
+    { operationBudgets: assetOperationBudgets, fixedMessages: ASSET_ENV_MESSAGES },
   );
 }
 

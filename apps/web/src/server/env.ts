@@ -31,6 +31,10 @@ const MIN_SECRET_LENGTH = 32;
  * fetched, and the failure would surface as a connection error at runtime
  * rather than as a refusal at boot — which is the whole point of validating
  * configuration.
+ *
+ * Nor a username or password in it: the portal calls these with `fetch`, which
+ * refuses such a URL on every call with a TypeError that repeats it whole —
+ * the password in it — into the server log (#385 r5).
  */
 const httpUrl = z
   .string()
@@ -38,7 +42,17 @@ const httpUrl = z
   .refine(
     (value) => value.startsWith('http://') || value.startsWith('https://'),
     'Expected an http(s) URL',
-  );
+  )
+  .refine((value) => {
+    // Not URL.parse: jsdom's URL (the tests' environment) has no static parse.
+    try {
+      const url = new URL(value);
+      return url.username === '' && url.password === '';
+    } catch {
+      // Not a URL: refused by `.url()` above. The error is dropped, not kept.
+      return true;
+    }
+  }, 'Expected a URL without a username or password');
 
 /** The oversight role has aggregate access only; no setting here may grant it a screen. */
 const OVERSIGHT_ROLE = 'AUDITOR';

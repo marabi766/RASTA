@@ -69,7 +69,14 @@ const env = {
   ...process.env,
   KAFKA_SSL_CA_FILE: configuredCa && isAbsolute(configuredCa) ? configuredCa : exportedCa,
 };
-const connection = connectionFor(spec.admin, env, (path) => readFileSync(path, 'utf8'));
+let connection;
+try {
+  connection = connectionFor(spec.admin, env, (path) => readFileSync(path, 'utf8'));
+} catch (error) {
+  // A fixed text (UNREADABLE_CA_FILE), printed alone: never the path (#385 r4).
+  process.stderr.write(`kafka acl: ${error.message}\n`);
+  process.exit(1);
+}
 if (!connection.sasl || !connection.ssl) {
   process.stderr.write(
     'kafka acl: KAFKA_SASL_PASSWORD_ADMIN is required — in development from ' +

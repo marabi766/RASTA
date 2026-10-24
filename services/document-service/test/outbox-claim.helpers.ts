@@ -1,6 +1,7 @@
 import { expireClaim } from '@rasta/testing';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl, ownerDatabaseUrl } from './helpers';
+import { readUrl } from '@rasta/config';
 
 /**
  * An isolated `outbox_message` for the ADR-050 protocol suite.
@@ -21,7 +22,7 @@ import { databaseUrl, ownerDatabaseUrl } from './helpers';
 export const PROTOCOL_SCHEMA = 'outbox_claim_protocol_test';
 
 function schemaUrl(schema: string): string {
-  const url = new URL(databaseUrl());
+  const url = readUrl(databaseUrl());
   url.searchParams.set('schema', schema);
   return url.toString();
 }
@@ -32,7 +33,7 @@ export function newProtocolPrisma(): PrismaService {
 }
 
 /** The role the service — and so every protocol "replica" — connects as. */
-const runtimeRole = () => decodeURIComponent(new URL(databaseUrl()).username);
+const runtimeRole = () => decodeURIComponent(readUrl(databaseUrl()).username);
 
 /**
  * Creates the isolated schema and table, as the owner (D-045: the runtime role
