@@ -13,6 +13,9 @@ import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { MaintenanceFactsConsumer } from '../src/maintenance/maintenance-facts.consumer';
 import { databaseUrl } from './helpers';
+import type { Logger } from '@rasta/logging';
+import { LOGGER } from '../src/tokens';
+import { KPI_VALUE_READERS, type KpiValueReaders } from '../src/kpis/kpi.service';
 
 /**
  * The HTTP surface, booted from the **real** `AppModule` — the harness construction-service
@@ -118,10 +121,15 @@ function applyEnvironment(): void {
 
 const inert = { start: async () => undefined, stop: async () => undefined, isRunning: () => false };
 
-export async function startApi(): Promise<ApiHarness> {
+export async function startApi(
+  options: {
+    kpiReaders?: KpiValueReaders;
+    logger?: Logger;
+  } = {},
+): Promise<ApiHarness> {
   applyEnvironment();
 
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+  const builder = Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(MaintenanceFactsConsumer)
     .useValue(inert)
     .overrideProvider(AUTH_OPTIONS)
@@ -151,8 +159,10 @@ export async function startApi(): Promise<ApiHarness> {
           // tests/e2e.
         } as unknown as TokenVerifier,
       }),
-    })
-    .compile();
+    });
+  if (options.kpiReaders) builder.overrideProvider(KPI_VALUE_READERS).useValue(options.kpiReaders);
+  if (options.logger) builder.overrideProvider(LOGGER).useValue(options.logger);
+  const moduleRef = await builder.compile();
 
   const app = moduleRef.createNestApplication();
   // Same as main.ts: without it every `@Controller({ version: '1' })` route is mounted at a path

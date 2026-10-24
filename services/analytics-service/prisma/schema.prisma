@@ -1,7 +1,7 @@
 // analytics-service — event-driven read models (RUN-001, ADR-071, docs/04 § 4.15).
 //
-// Everything here is owned by this service alone (AGENTS.md A-01) and every row was built
-// from a domain event, never from another service's database (ADR-071 § 1). There is no
+// Everything here is owned by this service alone (AGENTS.md A-01). Facts come from domain
+// events, never another service's database; baseline references have no writer yet (Q-142 (1)). There is no
 // foreign key into another service: `organizationId`, `requestId`, `assetId` and
 // `scheduleId` are external identifiers whose authority is their owner.
 //
@@ -81,4 +81,29 @@ model ProcessedEvent {
 
   @@id([eventId, consumerName])
   @@map("processed_event")
+}
+
+/// Append-only reference measurements (ADR-071 § 6, Q-142 (1)). No application writer or seed.
+/// New versions are new rows; database identity order decides the latest exact match.
+model BaselineMetric {
+  organizationId String   @map("organization_id") @db.VarChar(128)
+  id             String   @db.VarChar(128)
+  /// SQL uses GENERATED ALWAYS: caller IDs and clock precision cannot choose the version.
+  version        BigInt   @default(autoincrement())
+  metricKey      String   @map("metric_key") @db.VarChar(64)
+  scopeKind      String   @map("scope_kind") @db.VarChar(32)
+  periodStart    DateTime @map("period_start") @db.Timestamptz(3)
+  periodEnd      DateTime @map("period_end") @db.Timestamptz(3)
+  value          BigInt
+  unit           String   @db.VarChar(32)
+  currency       String?  @db.Char(3)
+  source         String   @db.VarChar(128)
+  recordedBy     String   @map("recorded_by") @db.VarChar(128)
+  recordedAt     DateTime @default(dbgenerated("clock_timestamp()")) @map("recorded_at") @db.Timestamptz(3)
+
+  @@id([organizationId, id])
+  // SQL owns ix_baseline_metric_org_key_scope_period: organization_id, metric_key,
+  // scope_kind, unit, COALESCE(currency, ''), period_start, period_end, version DESC.
+  // Prisma cannot express an expression index; do not replace it with a column-only index.
+  @@map("baseline_metric")
 }
