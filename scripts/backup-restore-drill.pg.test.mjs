@@ -56,7 +56,7 @@ before(() => {
     process.env.PGHOST && process.env.PGUSER,
     'Explicit disposable PGHOST and PGUSER required',
   );
-  sql(`CREATE DATABASE ${database}`, 'postgres');
+  sql(`CREATE DATABASE ${database} TEMPLATE template0`, 'postgres');
   created = true;
   sql(
     `REVOKE ALL ON DATABASE ${database} FROM PUBLIC;
