@@ -209,7 +209,7 @@ describe('dead-letter headers: the platform’s own only (F3)', () => {
 describe('dead letters are sent GZIP-compressed, bytes and key unchanged (PR #378 r1 F2)', () => {
   // The broker admitted the original compressed; the consumer holds its
   // decompressed bytes. Sent uncompressed, a dead letter can exceed the size
-  // limit the original passed, and the partition stalls on a failed send.
+  // limit the original passed, and nothing is committed past a failed send.
   const KEY = Buffer.from('AST_HYGIENE_1');
 
   it.each([

@@ -1,28 +1,66 @@
 import { DLQ_HEADERS, DLQ_REASONS, EVENT_HEADERS } from './envelope';
 
 /**
- * How large a dead letter can be, and so how large a dead-letter topic's
- * messages must be allowed to be (PR #378 r2 F1).
+ * How large a dead letter can be, and what a dead-letter topic's limit does
+ * and does not cover (PR #378 r2 F1; restated in r4 to claim only what is
+ * proved).
  *
- * A dead letter is the original record — the same key, the same value bytes,
- * the original's platform headers — plus the headers the shared consumer adds
- * (`deadLetterHeaders` in `@rasta/nest-common`), sent GZIP. The broker checks
- * a topic's `max.message.bytes` against the stored batch: compressed when it
- * was sent compressed. So a record the source topic admitted at its limit can
- * still be refused by a dead-letter topic with the same limit, and a refused
- * dead letter is never committed past: the partition stops there.
+ * The shared consumer's dead letter (`deadLetterHeaders` in
+ * `@rasta/nest-common`) is the original record — the same key, the same value
+ * bytes, a subset of its platform headers — plus the headers the consumer
+ * adds, sent GZIP at KafkaJS's default level (6). The broker checks a topic's
+ * `max.message.bytes` against the stored batch: compressed when it was sent
+ * compressed.
  *
- * The headroom is built, not hoped for:
+ * **Proved.**
  *
  *   - every value the consumer adds is bounded in UTF-8 bytes
  *     ({@link DLQ_HEADER_VALUE_MAX_BYTES}), so what it adds to the record, as
  *     Kafka serializes it, is at most {@link DLQ_ADDED_HEADERS_MAX_BYTES};
- *   - GZIP of N bytes is at most N + {@link gzipGrowthMaxBytes}(N), whatever
- *     the bytes;
- *   - every topic has an explicit limit, and a dead-letter topic's is at least
- *     {@link deadLetterMessageMaxBytes} of the largest limit of any topic that
- *     dead-letters into it (`brokerTopics`, checked by
- *     `scripts/check-kafka-topic-limits.mjs`).
+ *   - GZIP of N bytes, at the parameters kafkajs uses, is at most
+ *     N + {@link gzipGrowthMaxBytes}(N), whatever the bytes. The margin grows
+ *     with N: 345 bytes at the planned 1 MiB source limit, 665 at 2 MiB;
+ *   - so the shared consumer's dead letter of a source batch sent
+ *     uncompressed, or GZIP that did not shrink it (bytes that do not
+ *     compress), fits a topic limited to {@link deadLetterMessageMaxBytes} of
+ *     the source's limit.
+ *
+ * **Measured, not proved:** a source batch GZIP-compressed at KafkaJS's
+ * default level whose bytes do compress — one record, or several that a relay
+ * batched (`kafka.publisher.ts`). Over 400 random batches of 1–12 records the
+ * worst dead letter exceeded its whole source batch by 302 bytes, against
+ * 1,977 of headroom at the planned limit.
+ *
+ * **Known escapes** (PR #378 r3; a design task of their own, PM decision
+ * D-063). Measured by the r3 review with KafkaJS's encoder:
+ *
+ *   (i)   a source compressed at a higher level than the dead letter's
+ *         recompression: one record GZIP level 9, a 1,030,499-byte batch,
+ *         becomes a 1,084,193-byte dead letter at level 6, over the
+ *         1,050,565-byte limit. Neither the broker nor the ACLs restrict a
+ *         producer's compression level. Pinned as it behaves today by
+ *         `scripts/dead-letter-escape.broker.test.mjs`;
+ *   (ii)  fleet's parked dead letters rebuild their platform headers from the
+ *         stored envelope (`envelopeHeaders` in `asset-sync.consumer.ts`).
+ *         `eventId`, `eventName`, `correlationId`, `tenantId`, `causationId`
+ *         and `traceparent` have no byte bound in the envelope schema
+ *         (`producer` is a name of at most 63 ASCII characters, `streamSeq` a
+ *         safe integer, `eventVersion` a number): a 954,635-byte source batch
+ *         became a 1,908,980-byte dead letter with a 1,266,668-byte
+ *         `x-causation-id` that the original record did not carry;
+ *   (iii) fleet publishes the envelope re-serialized from its JSONB column,
+ *         not the original bytes, which can compress worse: probably
+ *         (587,993 → 1,158,527 bytes in r3's in-memory simulation; not
+ *         reproduced on PostgreSQL).
+ *
+ * In each the dead-letter send is refused MESSAGE_TOO_LARGE, as it is on main
+ * (whose shared send was uncompressed, to topics that inherit the broker's
+ * default limit). Nothing is committed past the record: the shared consumer
+ * crashes — kafkajs does not restart a consumer on a non-retriable error, so
+ * it stops on every partition it reads until the service restarts and meets
+ * the record again — and the record survives only as long as the source
+ * topic's retention; fleet's outbox row stays unpublished and is retried.
+ * The record is not lost silently; the consumer's availability is.
  */
 
 /**
@@ -30,8 +68,10 @@ import { DLQ_HEADERS, DLQ_REASONS, EVENT_HEADERS } from './envelope';
  * `message.max.bytes`, 1,048,588 bytes (1 MiB plus the 12-byte log overhead of
  * the batch's offset and length), which a topic inherits when it sets nothing.
  * Kafka 3.9 (`apache/kafka:3.9.0`, the broker compose and CI run) has that
- * default, and neither the broker nor any topic overrode it before this was
- * stated, so stating it changes nothing a producer sees.
+ * default, and neither the broker nor any topic in this repository overrode
+ * it before this was stated. On a broker where a topic has more, effective or
+ * inherited, `create-topics.sh` keeps it (it never lowers a limit, r4 F2), so
+ * stating it changes nothing a producer sees.
  */
 export const TOPIC_MESSAGE_MAX_BYTES = 1_048_588;
 
@@ -89,10 +129,13 @@ const ADDED_HEADERS: readonly (readonly [string, number])[] = [
  *     varints, whose size steps at 64, 8,192, 1,048,576 and 134,217,728.
  *     Adding 8 headers, or under 2 KB, crosses at most one step each.
  *
- * Nothing else grows. The key and the value are the original's bytes; the
- * forwarded headers are a subset of the original's; a lone record's offset and
- * timestamp deltas are 0, one byte each, never more than the original's; the
- * batch header is the same 61 bytes.
+ * Nothing else grows in the shared consumer's dead letter: the key and the
+ * value are the original's bytes; the forwarded headers are a subset of the
+ * original's; a lone record's offset and timestamp deltas are 0, one byte
+ * each, never more than the original's; the batch header is the same 61
+ * bytes. (Fleet's parked dead letters rebuild their forwarded headers and
+ * value; this bound covers only what `deadLetterHeaders` adds to them —
+ * known escapes (ii) and (iii) above.)
  */
 export const DLQ_ADDED_HEADERS_MAX_BYTES =
   ADDED_HEADERS.reduce(
@@ -119,19 +162,20 @@ export function gzipGrowthMaxBytes(n: number): number {
 }
 
 /**
- * The smallest `max.message.bytes` a dead-letter topic needs for every record
- * a topic limited to `sourceMaxBytes` admitted: the source's limit, plus what
- * the dead letter adds, plus what GZIP can add to the whole.
+ * The smallest `max.message.bytes` a dead-letter topic gets over sources
+ * limited to `sourceMaxBytes`: the source's limit, plus what the shared
+ * consumer's dead letter adds, plus what GZIP can add to the whole.
  *
  * A proof for a source batch sent uncompressed: its record is at most
- * `sourceMaxBytes` less the batch header, so the dead letter's records are at
- * most that plus {@link DLQ_ADDED_HEADERS_MAX_BYTES}, compressed into at most
- * that plus {@link gzipGrowthMaxBytes}. The same holds for a source sent GZIP
- * whose bytes do not compress (the r2 reproduction), whose batch is no smaller
- * than its record. For bytes that do compress it rests on GZIP shrinking the
- * copied record as it shrank the original — true of kafkajs's one-record
- * batches, not proved for a record that a producer batched after others it
- * could refer back to (deflate's 32 KiB window).
+ * `sourceMaxBytes` less the 61-byte batch header, so the dead letter's record
+ * is at most that plus {@link DLQ_ADDED_HEADERS_MAX_BYTES}, compressed into at
+ * most that plus {@link gzipGrowthMaxBytes}. The same holds for a source sent
+ * GZIP whose batch is no smaller than its record (bytes that do not compress,
+ * the r2 reproduction). For a source sent GZIP at KafkaJS's default level
+ * whose bytes do compress it is measured, not proved — one record, or several
+ * a relay batched (deflate's 32 KiB window can refer back to records before
+ * it). It does not hold for a source compressed at a higher level, nor for
+ * fleet's parked dead letters (the known escapes above).
  */
 export function deadLetterMessageMaxBytes(sourceMaxBytes: number): number {
   const uncompressed = sourceMaxBytes + DLQ_ADDED_HEADERS_MAX_BYTES;

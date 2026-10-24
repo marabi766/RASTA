@@ -724,8 +724,10 @@ describeWithKafka('domain projector over Kafka', () => {
   }, 300_000);
 
   /**
-   * PR #378 r2 F1: the dead letter of a record admitted at the source topic's
-   * limit fits its dead-letter topic, by construction.
+   * PR #378 r2 F1: the dead letter of a record admitted uncompressed at the
+   * source topic's limit fits its dead-letter topic — the case the headroom is
+   * proved for. A source compressed at a higher level than the dead letter's
+   * does not (known escape (i), `scripts/dead-letter-escape.broker.test.mjs`).
    *
    * The record is incompressible and sent uncompressed, so its batch is
    * exactly the source limit — one byte more is refused. Its bulk is random

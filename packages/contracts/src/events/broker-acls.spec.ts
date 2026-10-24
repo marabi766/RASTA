@@ -7,11 +7,14 @@ import {
   brokerAclDocument,
   brokerAcls,
   brokerPrincipals,
+  brokerTopicLine,
   brokerTopics,
+  deadLetterSources,
   BROKER_PROFILES,
   type AclBinding,
   type BrokerProfile,
 } from './broker-acls';
+import { DLQ_ADDED_HEADERS_MAX_BYTES } from './dead-letter-size';
 import { TOPIC_PRODUCERS } from './topic-producers';
 import { TOPIC_CONSUMERS } from './topic-consumers';
 import { NEVER_AUTO_REPLAY_TOPICS } from './envelope';
@@ -300,8 +303,33 @@ describe('the committed bootstrap files', () => {
   });
 
   it('topics.txt is what the contracts generate', () => {
-    expect(lines('topics.txt')).toEqual(
-      brokerTopics().map((t) => `${t.name} ${t.kind} ${t.maxMessageBytes}`),
+    expect(lines('topics.txt')).toEqual(brokerTopics().map(brokerTopicLine));
+    // create-topics.sh derives a dead-letter topic's limit on the broker from
+    // this bound and the effective limits of the sources listed (r4 F2).
+    expect(
+      readFileSync(resolve(dir, 'topics.txt'), 'utf8')
+        .split('\n')
+        .filter((line) => line.startsWith('#@ ')),
+    ).toEqual([`#@ dead-letter-added-headers-max-bytes ${DLQ_ADDED_HEADERS_MAX_BYTES}`]);
+  });
+
+  it('lists each dead-letter topic with its sources, and no other topic with any', () => {
+    const topics = brokerTopics();
+    const sources = deadLetterSources();
+    for (const topic of topics) {
+      if (topic.kind === 'dead-letter') {
+        expect(topic.sources).toEqual(sources.get(topic.name));
+        // No dead-letter topic is itself a source: create-topics.sh raises
+        // every dead-letter topic before any source.
+        for (const source of topic.sources ?? []) {
+          expect(topics.find((t) => t.name === source)?.kind).not.toBe('dead-letter');
+        }
+      } else {
+        expect(topic.sources).toBeUndefined();
+      }
+    }
+    expect(sources.get('rasta.economic.v1.dlq')).toEqual(
+      expect.arrayContaining(['rasta.fleet.v1', 'rasta.fleet.v1.retry', 'rasta.contract.v1']),
     );
   });
 

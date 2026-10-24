@@ -54,9 +54,17 @@ import { withinDeadline, type OutboxStopOptions } from '../outbox/outbox';
  * straight to the dead-letter topic under the reason it names.
  *
  * What it deliberately does not do is commit an offset it could not account
- * for. If even the dead-letter write fails, the error propagates, kafkajs
- * retries, and the partition stalls. A stalled partition is visible in lag
- * metrics and recoverable; a silently skipped financial event is neither.
+ * for. If even the dead-letter write fails, the error propagates and nothing
+ * is committed past the message. A retriable failure (a broker away) is
+ * retried by kafkajs and the partition stalls meanwhile. A non-retriable one —
+ * MESSAGE_TOO_LARGE, a dead letter its topic refuses — crashes the kafkajs
+ * consumer, which kafkajs does not restart: every partition this consumer
+ * reads stops until the service restarts and meets the message again, and
+ * {@link EventConsumer.isRunning} does not notice. Either is visible in lag
+ * (where lag is alerted on) and recoverable while the source topic retains
+ * the message; a silently skipped financial event is neither. Which dead
+ * letters can still be refused is stated in `@rasta/contracts`
+ * dead-letter-size.ts (known escapes; PR #378 r4).
  *
  * **What its log lines and dead-letter headers may carry (S-09).** Never the
  * message body: an unparseable one is described by fixed text and its size,
@@ -776,8 +784,9 @@ export class EventConsumer {
       // compressed batch, so a message it admitted compressed can be far larger
       // once decompressed — and these are the decompressed bytes. Sent
       // uncompressed, such a dead letter can exceed the limit the original
-      // passed, the send fails, and the partition retries the same message
-      // forever (PR #378 r1 F2). The bytes themselves are unchanged.
+      // passed and the send fails (PR #378 r1 F2). The bytes themselves are
+      // unchanged. At KafkaJS's default level: a source compressed at a higher
+      // level can still be refused (known escape (i), dead-letter-size.ts).
       compression: CompressionTypes.GZIP,
       messages: [
         {
@@ -957,8 +966,11 @@ export function forwardedHeaders(headers: IHeaders | undefined): IHeaders {
  * framing they can grow (`@rasta/contracts`' `dead-letter-size.ts`, which the
  * topic limits are derived from). Each dead-letter topic allows this much,
  * plus GZIP's worst case, over the largest topic it takes dead letters from
- * (`topics.txt`, `scripts/check-kafka-topic-limits.mjs`), so a dead letter of
- * any record the source admitted fits (PR #378 r2 F1).
+ * (`topics.txt`, `create-topics.sh`, `scripts/check-kafka-topic-limits.mjs`;
+ * PR #378 r2 F1). That is proved to fit this consumer's dead letter of a
+ * source batch sent uncompressed, or GZIP that did not shrink it; it is only
+ * measured for compressible GZIP batches, and does not cover the known
+ * escapes `dead-letter-size.ts` names.
  */
 export { DLQ_ADDED_HEADERS_MAX_BYTES };
 

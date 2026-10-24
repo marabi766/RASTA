@@ -242,10 +242,21 @@ export interface BrokerTopic {
   /**
    * Its `max.message.bytes`, always stated (PR #378 r2 F1): a source topic
    * keeps Kafka's default, {@link TOPIC_MESSAGE_MAX_BYTES}; a dead-letter
-   * topic has room for the dead letter of the largest record any topic that
-   * dead-letters into it admits ({@link deadLetterMessageMaxBytes}).
+   * topic is above the largest limit of any topic that dead-letters into it
+   * by the added-header bound and GZIP's worst-case growth
+   * ({@link deadLetterMessageMaxBytes}). What that does and does not cover —
+   * not every source encoding, not fleet's parked dead letters — is stated in
+   * `dead-letter-size.ts`.
    */
   readonly maxMessageBytes: number;
+  /**
+   * A dead-letter topic's sources ({@link deadLetterSources}): every topic
+   * whose records its consumers can dead-letter into it. `create-topics.sh`
+   * derives the topic's limit on a running broker from their effective limits
+   * there, which may be larger than planned (PR #378 r4 F2). Absent for any
+   * other kind.
+   */
+  readonly sources?: readonly string[];
 }
 
 /**
@@ -258,8 +269,13 @@ export interface BrokerTopic {
  */
 export function brokerTopics(): BrokerTopic[] {
   const out = new Map<string, BrokerTopic>();
-  const add = (name: string, kind: BrokerTopicKind, maxMessageBytes: number): void => {
-    out.set(name, { name, kind, maxMessageBytes });
+  const add = (
+    name: string,
+    kind: BrokerTopicKind,
+    maxMessageBytes: number,
+    sources?: readonly string[],
+  ): void => {
+    out.set(name, { name, kind, maxMessageBytes, ...(sources ? { sources } : {}) });
   };
   for (const name of declaredTopics()) {
     // Evidence, retained as such: the explicit audit trail and the replay record.
@@ -277,9 +293,19 @@ export function brokerTopics(): BrokerTopic[] {
       return topic.maxMessageBytes;
     });
     const largest = Math.max(...limits);
-    add(deadLetterTopic, 'dead-letter', deadLetterMessageMaxBytes(largest));
+    add(deadLetterTopic, 'dead-letter', deadLetterMessageMaxBytes(largest), sources);
   }
   return [...out.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * A topic's line in `topics.txt`: `<name> <kind> <max.message.bytes>`, and for
+ * a dead-letter topic its sources, comma-separated — what `create-topics.sh`
+ * reads (it has no topic list or topology of its own).
+ */
+export function brokerTopicLine(topic: BrokerTopic): string {
+  const line = `${topic.name} ${topic.kind} ${topic.maxMessageBytes}`;
+  return topic.sources ? `${line} ${topic.sources.join(',')}` : line;
 }
 
 /**

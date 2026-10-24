@@ -1,34 +1,53 @@
 /**
  * The rule `infrastructure/docker/kafka/topics.txt` must keep for message
- * sizes (PR #378 r2 F1): every topic states its `max.message.bytes`, and every
- * dead-letter topic has room for the dead letter of the largest record any of
- * its source topics admits.
+ * sizes (PR #378 r2 F1, r4 F2): every topic states its planned
+ * `max.message.bytes`; every dead-letter topic lists its sources — what each
+ * consumer writing it subscribes to, and each one's `.retry` twin, from
+ * `TOPIC_CONSUMERS` — and is planned above the largest of them by the bound on
+ * the headers the shared consumer adds (`DLQ_ADDED_HEADERS_MAX_BYTES`, also
+ * stated in the file's `#@` line) and GZIP's worst-case growth
+ * (`gzipGrowthMaxBytes`). `create-topics.sh` reads the sources and the bound
+ * to size each dead-letter topic over its sources' effective limits on a
+ * running broker.
  *
- * A dead letter is the source record plus the headers the shared consumer adds
- * (at most `DLQ_ADDED_HEADERS_MAX_BYTES` serialized), sent GZIP (at most
- * `gzipGrowthMaxBytes(n)` more than `n` bytes). A dead-letter topic with less
- * room refuses that send, the consumer never commits the source record, and
- * its partition stops. The sources of a dead-letter topic are read from
- * `TOPIC_CONSUMERS`: what each consumer writing it subscribes to, and each
- * one's `.retry` twin.
+ * That headroom covers the shared consumer's dead letter of a source batch
+ * sent uncompressed, or GZIP that did not shrink; for compressible batches it
+ * is measured, not proved, and it does not cover a source compressed at a
+ * higher level than the dead letter's, nor fleet's parked dead letters
+ * (`@rasta/contracts` dead-letter-size.ts). A dead letter the topic refuses is
+ * never committed past.
  *
  * Pure: the caller passes the parsed file and the contracts' values.
  */
 
-/** `topics.txt` as `Map<topic, { kind, maxMessageBytes }>`; a missing or unreadable limit is `undefined`. */
+/**
+ * `topics.txt` as `Map<topic, { kind, maxMessageBytes, sources }>`; a missing
+ * or unreadable limit is `undefined`, and so are the sources of a line with
+ * no fourth column.
+ */
 export function parseTopicLimits(text) {
   const topics = new Map();
   for (const line of text.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
-    const [name, kind, limit] = trimmed.split(/\s+/);
+    const [name, kind, limit, sources] = trimmed.split(/\s+/);
     topics.set(name, {
       kind,
       maxMessageBytes:
         limit !== undefined && /^[1-9][0-9]*$/.test(limit) ? Number(limit) : undefined,
+      sources: sources === undefined ? undefined : sources.split(','),
     });
   }
   return topics;
+}
+
+/** The added-header bound `topics.txt` states in its `#@` line; `undefined` unless exactly one. */
+export function parseAddedHeaderBound(text) {
+  const stated = text
+    .split('\n')
+    .map((line) => /^#@ dead-letter-added-headers-max-bytes ([1-9][0-9]*)$/.exec(line.trim()))
+    .filter(Boolean);
+  return stated.length === 1 ? Number(stated[0][1]) : undefined;
 }
 
 /** The smallest limit a dead-letter topic needs over a source limited to `sourceMaxBytes`. */
@@ -68,7 +87,21 @@ export function topicLimitProblems(topics, consumers, bounds, retrySuffix = '.re
     sources.set(deadLetterTopic, into);
   }
 
+  for (const [name, { kind, sources: listed }] of topics) {
+    if (kind !== 'dead-letter' && listed !== undefined) {
+      problems.push(`${name}: only a dead-letter topic lists sources`);
+    }
+  }
+
   for (const [deadLetterTopic, from] of sources) {
+    const listed = topics.get(deadLetterTopic)?.sources;
+    const expected = [...from].sort();
+    if (topics.has(deadLetterTopic) && listed?.join(',') !== expected.join(',')) {
+      problems.push(
+        `${deadLetterTopic}: lists sources ${listed?.join(',') ?? '(none)'}, but TOPIC_CONSUMERS ` +
+          `dead-letters ${expected.join(',')} into it; run pnpm kafka:acl:generate`,
+      );
+    }
     const limit = topics.get(deadLetterTopic)?.maxMessageBytes;
     for (const source of from) {
       const sourceLimit = topics.get(source)?.maxMessageBytes;
@@ -80,7 +113,7 @@ export function topicLimitProblems(topics, consumers, bounds, retrySuffix = '.re
       const required = requiredDeadLetterBytes(sourceLimit, bounds);
       if (limit < required) {
         problems.push(
-          `${deadLetterTopic}: max.message.bytes ${limit} leaves no room for a dead letter from ` +
+          `${deadLetterTopic}: planned max.message.bytes ${limit} leaves no headroom over ` +
             `${source} (${sourceLimit}); it needs at least ${required} ` +
             `(${sourceLimit} + ${bounds.addedHeadersMaxBytes} added headers + ` +
             `${bounds.gzipGrowthMaxBytes(sourceLimit + bounds.addedHeadersMaxBytes)} GZIP)`,

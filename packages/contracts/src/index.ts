@@ -125,6 +125,7 @@ export {
   brokerAcls,
   brokerAclDocument,
   brokerTopics,
+  brokerTopicLine,
   deadLetterSources,
   BROKER_PROFILES,
 } from './events/broker-acls';
