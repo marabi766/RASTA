@@ -6,10 +6,13 @@
 # TOPIC_CONSUMERS together with the ACLs, so the two cannot disagree (RUN-006).
 # TOPICS_FILE defaults to the copy next to this script.
 #
-# Every topic gets an explicit `max.message.bytes` (PR #378 r2 F1), and no
-# run ever lowers one (r4 F2). topics.txt plans Kafka's default for a source
-# topic; for a dead-letter topic, the largest limit of its sources plus the
-# bound on the headers the shared consumer adds and GZIP's worst-case growth
+# Every topic gets an explicit `max.message.bytes` (PR #378 r2 F1), and this
+# script never lowers one (r4 F2) — said exactly (r5, PM decision D-066):
+# a single provisioner never lowers a limit; a concurrent writer is detected
+# only if its change lands before this run's re-read of that topic, just ahead
+# of the write. topics.txt plans Kafka's default for a source topic; for a
+# dead-letter topic, the largest limit of its sources plus the bound on the
+# headers the shared consumer adds and GZIP's worst-case growth
 # (`@rasta/contracts` dead-letter-size.ts says what that covers and what it
 # does not). On a running broker:
 #
@@ -24,12 +27,28 @@
 #   4. everything is read back: each at least its target, none below what it
 #      had, every dead-letter topic with room over its sources as they are.
 #
+# Steps 2 and 3 take one topic at a time, nothing in the background. Before
+# raising a topic it reads that topic's limit again and stops, writing
+# nothing further, if it is not what the preflight read; after raising it, it
+# reads it back and stops unless it holds at least the larger of the two. A
+# create is refused by the broker if the topic exists by then, and stops the
+# run the same way. Kafka's config alter is unconditional (IncrementalAlter-
+# Configs carries a name, an operation and a value — nothing to compare), so
+# a change landing between that re-read and the write is overwritten unseen.
+#
+# PRECONDITION — one writer of topic configuration per broker at a time: while
+# this runs, no second provisioner, no manual `kafka-configs --alter` of a
+# topic and no change of the broker default `message.max.bytes`. Compose runs
+# one kafka-init per stack; every CI job that needs Kafka starts a broker of
+# its own (ci-up.sh) and provisions it once; the broker tests provision their
+# own topics one run after another. Nothing here can enforce it across hosts.
+#
 # A re-run changes nothing. A run that stops part-way leaves no source above
 # what its dead-letter topics have room for. Retention and partitions of an
-# existing topic are never touched, and nothing is ever lowered: a topic that
-# must shrink needs an operator, who drains it first (docs/runbooks/replay-dlq.md).
-# A limit a topic inherits from the broker default stays inherited, and moves
-# with that default.
+# existing topic are never touched, and this script has no way to lower a
+# limit: a topic that must shrink needs an operator, who drains it first
+# (docs/runbooks/replay-dlq.md). A limit a topic inherits from the broker
+# default stays inherited, and moves with that default.
 #
 # With KAFKA_PROVISION_PROFILE (compose's kafka-init) it first gives a
 # credential to any principal of that profile that has none — one added to
@@ -208,31 +227,61 @@ for name in "${OTHERS[@]}" "${DEAD_LETTERS[@]}"; do
   fi
 done
 
+# One topic's effective limit as `<value> <where it comes from>`, read now —
+# the same `--describe --all` and the same strict parser as the preflight.
+limit_now() {
+  local out line
+  out="$("${KAFKA_BIN}"/kafka-configs.sh --bootstrap-server "${BOOTSTRAP}" "${ADMIN_CONFIG[@]}" --describe --all --entity-type topics --entity-name "$1" | effective_limits)" ||
+    return 1
+  line="$(awk -v topic="$1" '$1 == topic { print $2, $3 }' <<< "${out}")"
+  [ -n "${line}" ] || return 1
+  echo "${line}"
+}
+
 create_topic() {
   local name="$1"
   local partitions="$2"
   local retention="$3"
   local max_bytes="$4"
 
+  # No --if-not-exists: the broker creates a topic only if it does not exist,
+  # so a topic another writer created since the preflight fails here instead
+  # of being taken for ours.
   "${KAFKA_BIN}"/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" "${ADMIN_CONFIG[@]}" \
-    --create --if-not-exists \
+    --create \
     --topic "${name}" \
     --partitions "${partitions}" \
     --replication-factor "${REPLICATION}" \
     --config "retention.ms=${retention}" \
     --config "min.insync.replicas=1" \
-    --config "max.message.bytes=${max_bytes}" >/dev/null || return 1
+    --config "max.message.bytes=${max_bytes}" >/dev/null ||
+    fail "${name} could not be created — another writer may have created it since this run read the broker; nothing further was changed. Re-run once no other provisioner or operator is changing topics."
   echo "    - ${name}: created (partitions=${partitions}, max.message.bytes=${max_bytes})"
 }
 
-# One topic: created with its target when absent; raised to it when below;
-# otherwise left exactly as it is, and said so when it keeps more than asked.
+# One topic, then the next — nothing runs in the background, so a refusal
+# below ends the run with nothing further changed (PR #378 r5, D-066):
+#
+#   - absent at the preflight: created with its target (a create the broker
+#     refuses if the topic now exists);
+#   - below what it is asked for: its effective limit is read AGAIN, and if
+#     that is not what the plan was built on, the run stops before writing —
+#     another writer has been here, and this plan may be smaller than theirs.
+#     Otherwise it is raised, read back, and must hold at least the larger of
+#     what it had and its target before the next topic is touched;
+#   - otherwise left exactly as it is, and said so when it keeps more.
+#
+# What this cannot see: a change that lands after that second read and before
+# this run's alter is overwritten (Kafka's alter has no "only if still"
+# condition — IncrementalAlterConfigs carries a name, an operation and a
+# value, nothing to compare). Hence the precondition in the header.
+#
 # Partitions and retention by kind. Dead letters need human eyes, not expiry;
 # the audit trail is the platform's tamper-evident record — never expire it in
 # a real deployment, 30 days here only to keep laptops from filling up.
 # Retention and partitions of an existing topic are never touched.
 apply_limit() {
-  local name="$1"
+  local name="$1" now attempt
   if [ "${EXISTS[${name}]}" = 0 ]; then
     case "${KIND[${name}]}" in
       stream | retry) create_topic "${name}" "${PARTITIONS}" "${RETENTION_MS}" "${TARGET[${name}]}" ;;
@@ -240,28 +289,26 @@ apply_limit() {
       audit-trail) create_topic "${name}" "${PARTITIONS}" "2592000000" "${TARGET[${name}]}" ;;
     esac
   elif [ "${CURRENT[${name}]}" -lt "${BASE[${name}]}" ]; then
-    "${KAFKA_BIN}"/kafka-configs.sh --bootstrap-server "${BOOTSTRAP}" "${ADMIN_CONFIG[@]}" --alter --entity-type topics --entity-name "${name}" --add-config "max.message.bytes=${BASE[${name}]}" >/dev/null || return 1
+    now="$(limit_now "${name}")" ||
+      fail "${name}: its limit could not be read again before raising it; nothing further was changed"
+    [ "${now}" = "${CURRENT[${name}]} ${ORIGIN[${name}]}" ] ||
+      fail "${name}: max.message.bytes is now ${now}, not the ${CURRENT[${name}]} (${ORIGIN[${name}]}) this run planned from — another writer changed it; nothing further was changed. Re-run once no other provisioner or operator is changing topics."
+    "${KAFKA_BIN}"/kafka-configs.sh --bootstrap-server "${BOOTSTRAP}" "${ADMIN_CONFIG[@]}" --alter --entity-type topics --entity-name "${name}" --add-config "max.message.bytes=${BASE[${name}]}" >/dev/null ||
+      fail "${name}: max.message.bytes could not be raised; nothing further was changed"
+    # A broker can answer a describe a moment before a change reaches it, so a
+    # shortfall is asked again twice. BASE is above CURRENT here, so it is the
+    # larger of the two.
+    for attempt in 1 2 3; do
+      if [ "${attempt}" -gt 1 ]; then sleep 2; fi
+      now="$(limit_now "${name}")" || continue
+      if [ "${now%% *}" -ge "${BASE[${name}]}" ]; then break; fi
+    done
+    [ -n "${now}" ] && [ "${now%% *}" -ge "${BASE[${name}]}" ] ||
+      fail "${name}: max.message.bytes read back as ${now:-nothing}, below the ${BASE[${name}]} just written; nothing further was changed"
     echo "    - ${name}: max.message.bytes ${CURRENT[${name}]} (${ORIGIN[${name}]}) raised to ${BASE[${name}]}"
   elif [ "${CURRENT[${name}]}" -gt "${BASE[${name}]}" ]; then
     echo "    - ${name}: keeps max.message.bytes ${CURRENT[${name}]} (${ORIGIN[${name}]}), more than the ${BASE[${name}]} asked for"
   fi
-}
-
-# Each kafka-topics.sh / kafka-configs.sh call is a JVM start, so a few run at
-# once (KAFKA_TOPIC_PARALLELISM, default 6). Fails if any of them failed.
-PARALLELISM="${KAFKA_TOPIC_PARALLELISM:-6}"
-apply_all() {
-  local pids=() failed=0 name pid
-  for name in "$@"; do
-    apply_limit "${name}" &
-    pids+=("$!")
-    if [ "${#pids[@]}" -ge "${PARALLELISM}" ]; then
-      for pid in "${pids[@]}"; do wait "${pid}" || failed=1; done
-      pids=()
-    fi
-  done
-  for pid in "${pids[@]}"; do wait "${pid}" || failed=1; done
-  return "${failed}"
 }
 
 # Read back: each topic named is at least its target, and none is below what
@@ -297,16 +344,15 @@ read_back() {
 # ---------------------------------------------------------------- apply
 # Dead-letter topics first, read back, and only then any other topic: a run
 # that stops part-way leaves no source raised, or created, above what its
-# dead-letter topics have room for (r4 F2).
+# dead-letter topics have room for (r4 F2). One topic at a time (r5): any
+# refusal in apply_limit ends the run there.
 echo "==> Dead-letter topics: max.message.bytes from their sources' limits (topics.txt)"
-apply_all "${DEAD_LETTERS[@]}" ||
-  fail "A dead-letter topic could not be created or raised; no other topic was created or changed"
+for name in "${DEAD_LETTERS[@]}"; do apply_limit "${name}"; done
 read_back "${DEAD_LETTERS[@]}" ||
   fail "A dead-letter topic's limit is not in place; no other topic was created or changed"
 
 echo "==> Every other topic: its planned max.message.bytes, or a larger one it has (topics.txt)"
-apply_all "${OTHERS[@]}" ||
-  fail "A topic could not be created or raised; the dead-letter topics already have room for every planned source limit"
+for name in "${OTHERS[@]}"; do apply_limit "${name}"; done
 read_back "${NAMES[@]}" || fail "A topic's max.message.bytes is not in place"
 
 # The headroom itself, on what the broker now has: every dead-letter topic at
@@ -321,7 +367,7 @@ for name in "${DEAD_LETTERS[@]}"; do
   [ "${READ[${name}]}" -ge "${need}" ] ||
     fail "${name}: max.message.bytes ${READ[${name}]} leaves no room over its sources' ${largest}; it needs ${need}"
 done
-echo "==> max.message.bytes in place; nothing lowered"
+echo "==> max.message.bytes in place; this run lowered nothing"
 
 # A freshly started broker lists topics while `__consumer_offsets` is still
 # loading, and a consumer joining in that window is told the coordinator is

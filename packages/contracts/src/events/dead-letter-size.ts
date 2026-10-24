@@ -70,8 +70,9 @@ import { DLQ_HEADERS, DLQ_REASONS, EVENT_HEADERS } from './envelope';
  * Kafka 3.9 (`apache/kafka:3.9.0`, the broker compose and CI run) has that
  * default, and neither the broker nor any topic in this repository overrode
  * it before this was stated. On a broker where a topic has more, effective or
- * inherited, `create-topics.sh` keeps it (it never lowers a limit, r4 F2), so
- * stating it changes nothing a producer sees.
+ * inherited, `create-topics.sh` keeps it (a single run never lowers a limit,
+ * r4 F2; r5 says what it sees of a concurrent writer), so stating it changes
+ * nothing a producer sees.
  */
 export const TOPIC_MESSAGE_MAX_BYTES = 1_048_588;
 

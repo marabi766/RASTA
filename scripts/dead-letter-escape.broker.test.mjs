@@ -3,7 +3,7 @@
  * (PR #378 r4, escape (i) of the r3 review; PM decision D-063 moves the class
  * to its own design task). The follow-up that closes it flips this test.
  *
- *   node --test scripts/dead-letter-escape.broker.test.mjs
+ *   RASTA_DISPOSABLE_BROKER=1 node --test scripts/dead-letter-escape.broker.test.mjs
  *
  * The headroom a dead-letter topic has over its sources (`@rasta/contracts`
  * dead-letter-size.ts) holds for a source batch sent uncompressed, or GZIP
@@ -30,10 +30,12 @@
  *
  * Needs the broker `infrastructure/docker/kafka/ci-up.sh` starts and the
  * `admin` scope of `kafka-credentials.sh` (the admin pre-commits the test's
- * group). It leaves the poison record on `rasta.organization.v1`: run it on a
- * disposable broker — CI runs it in the broker-authorisation job, after every
- * test that consumes.
+ * group). It leaves the poison record on `rasta.organization.v1`, so it
+ * refuses to start without the disposable-broker declaration
+ * (disposable-broker.mjs) — CI declares it in the broker-authorisation job
+ * alone and runs this after every test that consumes.
  */
+import './disposable-broker.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';

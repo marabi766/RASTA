@@ -231,20 +231,36 @@ test('describe output that cannot be read for certain fails, printing no limit a
   }
 });
 
-test('create-topics.sh reads every limit before any change, and raises dead-letter topics before any other', () => {
+test('create-topics.sh reads every limit before any change, raises dead-letter topics before any other, one topic at a time, and reads a topic again just before raising it', () => {
   const script = readFileSync(CREATE_TOPICS, 'utf8');
-  const at = (text) => {
-    const index = script.indexOf(text);
+  const at = (text, from = 0) => {
+    const index = script.indexOf(text, from);
     assert.ok(index >= 0, text);
     return index;
   };
   const preflight = at('described="$(describe_limits)"');
-  const deadLetters = at('apply_all "${DEAD_LETTERS[@]}"');
-  const others = at('apply_all "${OTHERS[@]}"');
+  const deadLetters = at('for name in "${DEAD_LETTERS[@]}"; do apply_limit "${name}"; done');
+  const others = at('for name in "${OTHERS[@]}"; do apply_limit "${name}"; done');
   assert.ok(preflight < deadLetters && deadLetters < at('read_back "${DEAD_LETTERS[@]}"'));
   assert.ok(at('read_back "${DEAD_LETTERS[@]}"') < others);
-  // No call creates or alters a topic outside apply_limit / create_topic.
+  // No call creates or alters a topic outside apply_limit / create_topic; a
+  // create is the broker's conditional one (no --if-not-exists).
   assert.equal(script.match(/--alter --entity-type topics/g)?.length, 1);
-  assert.equal(script.match(/--create --if-not-exists/g)?.length, 1);
-  assert.doesNotMatch(script, /--delete-config|--allow-decrease/);
+  assert.equal(script.match(/--create\b/g)?.length, 1);
+  // Nothing in the background (r5, D-066): a refusal ends the run there.
+  const code = script
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('#'))
+    .join('\n');
+  assert.doesNotMatch(code, /(^|[^&])&[ \t]*($|\))/m);
+  assert.doesNotMatch(code, /\bwait\b|PARALLELISM/);
+  assert.doesNotMatch(code, /--if-not-exists|--delete-config|--allow-decrease/);
+  // Inside apply_limit: the re-read and its comparison with the preflight,
+  // then the alter, then the read-back against the value just written.
+  const apply = at('apply_limit() {');
+  const reread = at('now="$(limit_now "${name}")" ||', apply);
+  const compared = at('[ "${now}" = "${CURRENT[${name}]} ${ORIGIN[${name}]}" ] ||', reread);
+  const alter = at('--alter --entity-type topics', compared);
+  const readBack = at('now="$(limit_now "${name}")" || continue', alter);
+  assert.ok(at('-ge "${BASE[${name}]}"', readBack) > readBack);
 });
