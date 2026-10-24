@@ -589,7 +589,14 @@ describe('sent, but not confirmed', () => {
     ['a connect timeout', 'UND_ERR_CONNECT_TIMEOUT'],
   ])('is still UNAVAILABLE for %s: nothing was sent', async (_label, code) => {
     const result = await call(rejecting(socket(code)));
+    expect(result).toMatchObject({ kind: 'UNAVAILABLE', status: 503, neverSent: true });
+  });
+
+  it('does not mark a 503 the platform answered as never sent: it may follow a commit', async () => {
+    const result = await call((async () =>
+      jsonResponse(503, { code: 'UNAVAILABLE', message: 'x' })) as unknown as typeof fetch);
     expect(result).toMatchObject({ kind: 'UNAVAILABLE', status: 503 });
+    expect(result).not.toHaveProperty('neverSent');
   });
 
   it('is UNKNOWN_OUTCOME for a 2xx whose body does not parse', async () => {

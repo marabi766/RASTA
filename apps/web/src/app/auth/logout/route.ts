@@ -1,8 +1,10 @@
+import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
 import { webServerEnv } from '@/server/env';
 import { readSession } from '@/server/current-session';
 import { endpointsFor } from '@/server/oidc';
 import { SESSION_COOKIE, csrfMatches } from '@/server/session';
+import { LEGACY_UNRESOLVED_COOKIE_PREFIX, purgeUnresolved } from '@/server/unresolved-request';
 
 /**
  * Ends the session (ADR-059 § 5).
@@ -38,5 +40,13 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   const response = NextResponse.redirect(endSession.toString());
   response.cookies.delete(SESSION_COOKIE);
+  // What this login held on the server (`server/unresolved-request.ts`) goes with
+  // it — deleted, not merely unreachable. A store that cannot be reached does not
+  // stop the logout; the records are bound to this login and expire on their own.
+  await purgeUnresolved(session);
+  // Cookies an earlier version kept the same state in.
+  for (const { name } of (await cookies()).getAll()) {
+    if (name.startsWith(LEGACY_UNRESOLVED_COOKIE_PREFIX)) response.cookies.delete(name);
+  }
   return response;
 }

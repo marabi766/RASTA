@@ -99,6 +99,7 @@ const SIGNED_IN_PAGES: readonly { readonly path: string; readonly title: string 
   { path: '/maintenance', title: 'نگهداری و تعمیرات' },
   { path: '/maintenance/MNT-SEED-0001', title: /.+/ },
   { path: '/usage', title: 'ثبت کارکرد' },
+  { path: '/projects', title: 'پروژه‌های عمرانی' },
   { path: '/organizations', title: /.+/ },
 ];
 
