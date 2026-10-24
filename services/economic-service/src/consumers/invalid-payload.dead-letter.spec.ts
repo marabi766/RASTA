@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import { DLQ_HEADERS, DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import { EventConsumer, type ConsumerLogger, type HandlerOutcome } from '@rasta/nest-common';
 import { dlqMessagesTotal } from '@rasta/observability';
+import { MAX_COST_BREAKDOWN_ROWS, maintenanceApprovedSchema } from '../events/consumed';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { SourceFacts } from '../provenance/source-facts.client';
 import type { RewardService } from '../reward/reward.service';
@@ -183,6 +184,48 @@ describe('a known event with a malformed payload, through the real EventConsumer
 
     expectDeadLetteredAtOnce(dlq, lines, 'approvedBy invalid_type; totalCostMinor invalid_string');
     expect(touched).not.toHaveBeenCalled();
+  });
+
+  describe('settlement-authority: a cost breakdown over MAX_COST_BREAKDOWN_ROWS (GHSA-mrhx-c7xc-m3w5)', () => {
+    const approved = (rows: number) => ({
+      requestId: 'MNT_1',
+      assetId: 'AST_1',
+      organizationId: 'ORG_INVALID',
+      approvedBy: 'USR_1',
+      approvedAt: '2026-10-03T09:00:00.000Z',
+      totalCostMinor: '1000',
+      currency: 'IRR',
+      costBreakdown: Array.from({ length: rows }, () => ({
+        category: SENTINEL,
+        amountMinor: '20',
+        currency: 'IRR',
+      })),
+    });
+
+    it('is dead-lettered at once for its length; nothing is touched', async () => {
+      const { prisma, touched } = untouchablePrisma();
+      const { deliver, dlq, lines } = deliverThrough(
+        (build) =>
+          new SettlementAuthorityConsumer(
+            build,
+            prisma,
+            {} as TransactionService,
+            {} as SourceFacts,
+          ),
+        envelope('MAINTENANCE_APPROVED', approved(MAX_COST_BREAKDOWN_ROWS + 1)),
+      );
+
+      await deliver();
+
+      expectDeadLetteredAtOnce(dlq, lines, 'costBreakdown too_big');
+      expect(touched).not.toHaveBeenCalled();
+    });
+
+    it('at the cap the payload still parses, so no real breakdown is refused', () => {
+      expect(maintenanceApprovedSchema.safeParse(approved(MAX_COST_BREAKDOWN_ROWS)).success).toBe(
+        true,
+      );
+    });
   });
 
   it('statement-settlement: STATEMENT_APPROVED is dead-lettered at once; nothing is touched', async () => {

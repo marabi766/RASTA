@@ -11,15 +11,18 @@ import type { Logger } from '@rasta/logging';
 // `useFactory` in `app.module.ts`, so Nest never reads `design:paramtypes` for
 // it and no constructor parameter here doubles as an injection token.
 import type { AuditRepository } from '../audit/audit.repository';
+import { DOMAIN_PROJECTOR_CONSUMER, toAuditEventRecord } from '../audit/audit.mapper';
 import {
-  DOMAIN_PROJECTOR_CONSUMER,
-  describePayloadKeys,
-  toAuditEventRecord,
-} from '../audit/audit.mapper';
-import {
+  ORGANIZATION_PROJECTION_FIELD_NAMES,
   toOrganizationProjection,
   type OrganizationProjection,
 } from '../audit/organization-projection';
+import {
+  describeErrorClass,
+  describeEventType,
+  describeIssues,
+  zodIssuesOf,
+} from '../audit/refusal-diagnostics';
 import {
   toPaymentReconciliationEvidence,
   type PaymentReconciliationEvidence,
@@ -31,6 +34,20 @@ import {
   auditRecordsIngestedTotal,
   INGESTION_FAILURE_REASONS,
 } from '../observability/metrics';
+
+/**
+ * A domain envelope this projector could not map or project, described without
+ * anything from its payload (see `refusal-diagnostics.ts`). Not an
+ * `UnprocessableEventError`: like the error it replaces, it is retried and then
+ * dead-lettered. The original is kept as `cause` for in-process debugging; the
+ * shared consumer prints `name: message` only.
+ */
+export class AuditMappingError extends Error {
+  constructor(message: string, cause: unknown) {
+    super(message, { cause });
+    this.name = 'AuditMappingError';
+  }
+}
 
 /** Builds the platform consumer this projector runs on. */
 export type ConsumerFactory = (
@@ -112,26 +129,28 @@ export class DomainProjectorConsumer implements OnModuleDestroy {
       record = toAuditEventRecord(envelope, delivery);
     } catch (error) {
       auditIngestionFailuresTotal.inc({ reason: INGESTION_FAILURE_REASONS.UNMAPPABLE_ENVELOPE });
-      // The event id, name and topic are identifiers, not content. The payload
-      // is described by key names only — never values — because this line ends
-      // up in a log aggregator with none of the audit store's access controls.
-      //
-      // A payload a strict projection rejected (the contract refusal events) is not
-      // described by key names at all: a producer can put text — an email — in a
-      // property name. Its refusal carries fixed schema paths and zod issue codes
-      // only, and that is all that is logged beside the event identifiers (S-09).
+      // Nothing taken from the payload — not its values and not its key names,
+      // which a producer chooses and can fill with an email address (S-09; PR
+      // #378 r1 F3). The event type and version, validated, and the topic,
+      // which is broker metadata. A refusal from a strict projection (the
+      // contract and settlement refusal events) is already built from schema
+      // paths and zod issue codes, and is rethrown as it is: the shared
+      // consumer dead-letters it at once.
+      const eventType = describeEventType(envelope);
       if (error instanceof UnprocessableEventError) {
-        this.logger.error(
-          `Cannot map ${envelope.eventName} ${envelope.eventId} from ${delivery.topic}: ` +
-            error.message,
-        );
+        this.logger.error(`Cannot map ${eventType} from ${delivery.topic}: ${error.message}`);
         throw error;
       }
-      this.logger.error(
-        `Cannot map ${envelope.eventName} ${envelope.eventId} from ${delivery.topic} ` +
-          `(payload keys: ${describePayloadKeys(envelope.payload)})`,
+      // Anything else is rethrown as a fixed message naming its class only:
+      // the original's message (a `BigInt` conversion quotes its input) is what
+      // the shared consumer would log on every attempt and copy into
+      // `x-dlq-error`. The original stays reachable as `cause` in-process.
+      const refusal = new AuditMappingError(
+        `audit record mapping failed for ${eventType} (${describeErrorClass(error)})`,
+        error,
       );
-      throw error;
+      this.logger.error(`Cannot map ${eventType} from ${delivery.topic}: ${refusal.message}`);
+      throw refusal;
     }
 
     // AUD-002. Three organization events also carry the hierarchy facts
@@ -149,13 +168,25 @@ export class DomainProjectorConsumer implements OnModuleDestroy {
       auditIngestionFailuresTotal.inc({
         reason: INGESTION_FAILURE_REASONS.UNMAPPABLE_ORGANIZATION_EVENT,
       });
-      // Key names only, exactly as above. A rejected organization payload is
-      // still a payload, and its values never reach a log line.
-      this.logger.error(
-        `Cannot project ${envelope.eventName} ${envelope.eventId} from ${delivery.topic} ` +
-          `into the organization hierarchy (payload keys: ${describePayloadKeys(envelope.payload)})`,
+      // Same rule as above. The `ZodError` is not rethrown as it is: its
+      // message carries Zod's own messages, which can quote a received value,
+      // and an issue path into an undeclared key would name that key. The
+      // refusal names issue codes and declared field names only, bounded, and
+      // stays an ordinary error, so it is retried and then dead-lettered as a
+      // malformed hierarchy event always was.
+      const issues = zodIssuesOf(error);
+      const why =
+        issues === null
+          ? `(${describeErrorClass(error)})`
+          : describeIssues(issues, ORGANIZATION_PROJECTION_FIELD_NAMES);
+      const refusal = new AuditMappingError(
+        `organization projection refused ${describeEventType(envelope)}: ${why}`,
+        error,
       );
-      throw error;
+      this.logger.error(
+        `Cannot project into the organization hierarchy from ${delivery.topic}: ${refusal.message}`,
+      );
+      throw refusal;
     }
 
     // D-046. The two payment-reconciliation events that record a human

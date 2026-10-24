@@ -1,3 +1,4 @@
+import { CompressionTypes } from 'kafkajs';
 import { DLQ_REASONS } from '@rasta/contracts';
 import { dlqMessagesTotal } from '@rasta/observability';
 import {
@@ -421,7 +422,12 @@ describe('EventConsumer.stop by a deadline (Codex on #267)', () => {
       await h.consumer.stop({ deadlineAt: Date.now() + 2000 });
 
       expect(h.producer.sent).toEqual([
-        { topic: DLQ_TOPIC, acks: -1, messages: expect.any(Array) },
+        {
+          topic: DLQ_TOPIC,
+          acks: -1,
+          compression: CompressionTypes.GZIP,
+          messages: expect.any(Array),
+        },
       ]);
       expect(h.kafka.committed).toEqual(['21']);
       expect(h.producer.disconnects).toBe(1);
