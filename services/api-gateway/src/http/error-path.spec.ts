@@ -22,6 +22,7 @@ import { RateLimiter, type RateLimitRule } from '../proxy/rate-limiter';
 import type { GatewayEnv } from '../config/env';
 import type { ServiceUrls } from '../config/routes';
 import { GATEWAY_ENV } from '../tokens';
+import { RevocationGate } from '../revocation/revocation-gate';
 
 /**
  * S-09 on the gateway's error path: an error body and its log line name the
@@ -85,6 +86,7 @@ function proxy(): ProxyService {
     { provide: ProxyService, useFactory: proxy },
     { provide: RateLimiter, useValue: limiter },
     { provide: GATEWAY_ENV, useValue: env },
+    { provide: RevocationGate, useValue: RevocationGate.off() },
     { provide: EXCEPTION_FILTER_LOGGER, useValue: logger },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],

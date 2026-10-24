@@ -22,6 +22,14 @@ export const ERROR_CODES = {
   UNAUTHENTICATED: 'UNAUTHENTICATED',
   TOKEN_EXPIRED: 'TOKEN_EXPIRED',
   TOKEN_INVALID: 'TOKEN_INVALID',
+  /**
+   * The gateway refused a valid token for the organization the request acts
+   * for: the token was issued before a role or membership there was taken
+   * away, or still carries a role taken away since (ADR-060, gateway
+   * revocation list addendum). A token issued after the change, carrying the
+   * current roles, is accepted. Never says which change, or why.
+   */
+  TOKEN_REVOKED: 'TOKEN_REVOKED',
   FORBIDDEN: 'FORBIDDEN',
   INSUFFICIENT_ROLE: 'INSUFFICIENT_ROLE',
   /** The caller authenticated, but the target belongs to another tenant. */
@@ -125,6 +133,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   UNAUTHENTICATED: 401,
   TOKEN_EXPIRED: 401,
   TOKEN_INVALID: 401,
+  TOKEN_REVOKED: 401,
   FORBIDDEN: 403,
   INSUFFICIENT_ROLE: 403,
   TENANT_MISMATCH: 403,

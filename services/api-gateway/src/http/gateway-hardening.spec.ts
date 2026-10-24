@@ -18,6 +18,7 @@ import { loadGatewayEnv } from '../config/env';
 import { applyTrustProxy, trustProxySetting } from './trust-proxy';
 import { assertCanonicalPath } from './canonical-path';
 import { corsOptions } from './cors';
+import { RevocationGate } from '../revocation/revocation-gate';
 
 /**
  * L1-03, L1-04 and L1-06, over real HTTP.
@@ -144,7 +145,12 @@ async function startGateway(options: {
   corsOrigins?: string[];
 }) {
   const { limiter, keys } = recordingLimiter();
-  const controller = new GatewayController(proxyTo(options.upstream), limiter, PLATFORM_ENV);
+  const controller = new GatewayController(
+    proxyTo(options.upstream),
+    limiter,
+    PLATFORM_ENV,
+    RevocationGate.off(),
+  );
 
   const adapter = new ExpressAdapter();
   if (options.corsOrigins) adapter.enableCors(corsOptions(options.corsOrigins));
@@ -364,6 +370,7 @@ describe('GATEWAY_TRUSTED_PROXIES', () => {
     OIDC_JWKS_URI: 'http://localhost:8080/realms/rasta/protocol/openid-connect/certs',
     OIDC_AUDIENCE: 'rasta-api',
     INTERNAL_TOKEN_SECRET: 'not-a-secret-placeholder-for-env-parsing-only',
+    NODE_ENV: 'test',
   };
   const load = (value?: string) =>
     loadGatewayEnv({ ...base, ...(value === undefined ? {} : { GATEWAY_TRUSTED_PROXIES: value }) })

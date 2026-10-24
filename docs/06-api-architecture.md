@@ -366,7 +366,7 @@ Charset یا Content-Encoding پشتیبانی‌نشده (`charset.unsupported`
 | 400   | `VALIDATION_FAILED` · `MALFORMED_REQUEST`                                                                                                         |
 | 413   | `PAYLOAD_TOO_LARGE`                                                                                                                               |
 | 415   | `UNSUPPORTED_MEDIA_TYPE`                                                                                                                          |
-| 401   | `UNAUTHENTICATED` · `TOKEN_EXPIRED` · `TOKEN_INVALID`                                                                                             |
+| 401   | `UNAUTHENTICATED` · `TOKEN_EXPIRED` · `TOKEN_INVALID` · `TOKEN_REVOKED`                                                                           |
 | 403   | `FORBIDDEN` · `INSUFFICIENT_ROLE` · **`TENANT_MISMATCH`**                                                                                         |
 | 404   | `NOT_FOUND`                                                                                                                                       |
 | 409   | `ALREADY_EXISTS` · `CONFLICT` · `IDEMPOTENCY_KEY_REUSED` · `INVALID_STATE_TRANSITION` · `OPTIMISTIC_LOCK_FAILED`                                  |

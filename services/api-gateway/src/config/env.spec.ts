@@ -52,6 +52,7 @@ const BASE: NodeJS.ProcessEnv = {
   OIDC_JWKS_URI: 'http://localhost:8080/realms/rasta/protocol/openid-connect/certs',
   OIDC_AUDIENCE: 'rasta-api',
   INTERNAL_TOKEN_SECRET: 'a_secret_that_is_at_least_thirty_two_chars',
+  NODE_ENV: 'test',
 };
 
 const load = (value?: string) =>
@@ -177,5 +178,71 @@ describe('GATEWAY_TENDER_OPEN_TIMEOUT_MS (Codex r2 on #250, G1)', () => {
           CALLS_AROUND_THE_TRANSACTION * value('CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS'),
       );
     });
+  });
+});
+
+/**
+ * `GATEWAY_REVOCATION_LIST` (ADR-060, gateway revocation list addendum). Omitting it must never
+ * choose for the operator outside development and test, and the token lifetime it compares with
+ * is the realm's, never a number written into the code.
+ */
+describe('the revocation list settings', () => {
+  const repoRoot = join(__dirname, '..', '..', '..', '..');
+  const withMode = (overrides: NodeJS.ProcessEnv) => {
+    const env: NodeJS.ProcessEnv = { ...BASE, ...overrides };
+    for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key];
+    return loadGatewayEnv(env);
+  };
+
+  it.each(['development', 'test'])('is off when omitted with NODE_ENV=%s', (nodeEnv) => {
+    expect(withMode({ NODE_ENV: nodeEnv }).GATEWAY_REVOCATION_LIST).toBe('off');
+  });
+
+  it.each(['staging', 'production', undefined])(
+    'refuses to start when omitted with NODE_ENV=%p — an unset NODE_ENV says nothing',
+    (nodeEnv) => {
+      expect(() => withMode({ NODE_ENV: nodeEnv })).toThrow(EnvValidationError);
+    },
+  );
+
+  it('takes an explicit off in production', () => {
+    expect(
+      withMode({ NODE_ENV: 'production', GATEWAY_REVOCATION_LIST: 'off' }).GATEWAY_REVOCATION_LIST,
+    ).toBe('off');
+  });
+
+  it.each(['on', 'true', 'ENFORCE', ''])('refuses %p rather than guessing', (value) => {
+    expect(() => withMode({ GATEWAY_REVOCATION_LIST: value })).toThrow(EnvValidationError);
+  });
+
+  it('refuses enforce without the supported token lifetime', () => {
+    expect(() => withMode({ GATEWAY_REVOCATION_LIST: 'enforce' })).toThrow(
+      /GATEWAY_REVOCATION_MAX_TOKEN_LIFETIME_SECONDS/,
+    );
+  });
+
+  it('refuses enforce while the identity-topic reader is not in the build', () => {
+    expect(() =>
+      withMode({
+        GATEWAY_REVOCATION_LIST: 'enforce',
+        GATEWAY_REVOCATION_MAX_TOKEN_LIFETIME_SECONDS: '900',
+      }),
+    ).toThrow(/identity-topic reader/);
+  });
+
+  it('reads the clock tolerance the verifier is given, 5 seconds unless set', () => {
+    expect(withMode({}).GATEWAY_OIDC_CLOCK_TOLERANCE_SECONDS).toBe(5);
+    expect(
+      withMode({ GATEWAY_OIDC_CLOCK_TOLERANCE_SECONDS: '2' }).GATEWAY_OIDC_CLOCK_TOLERANCE_SECONDS,
+    ).toBe(2);
+  });
+
+  it('.env.example states the realm’s access-token lifetime, not another number', () => {
+    const example = readFileSync(join(repoRoot, '.env.example'), 'utf8');
+    const realm = JSON.parse(
+      readFileSync(join(repoRoot, 'infrastructure/docker/keycloak/rasta-realm.json'), 'utf8'),
+    ) as { accessTokenLifespan: number };
+    const stated = /^GATEWAY_REVOCATION_MAX_TOKEN_LIFETIME_SECONDS=(\d+)$/m.exec(example)?.[1];
+    expect(Number(stated)).toBe(realm.accessTokenLifespan);
   });
 });
