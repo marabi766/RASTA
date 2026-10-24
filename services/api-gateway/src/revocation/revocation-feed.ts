@@ -73,6 +73,15 @@ interface Probe {
  * within `maxStalenessMs` — not yet caught up after start, a broker it cannot
  * reach, a reader that stopped, a partition it does not read — is not
  * current, and the gate refuses every pair it would have to evaluate.
+ *
+ * **Stop.** `stop()` forgets the feed's currency before it awaits anything:
+ * from that call on the feed is neither current nor caught up, so the gate
+ * refuses every pair and readiness is down while the source shuts down,
+ * whether that resolves, rejects or never returns (PR #381 r1 F3). Every
+ * `start()` and `stop()` opens a new generation; a startup step, a probe, a
+ * message or a failure belongs to the generation it began in and changes
+ * nothing once that one is over — so no late reading, record or callback of
+ * a stopped reader can make a feed current again.
  */
 export class RevocationFeed {
   private readonly positions = new Map<number, number>();
@@ -81,6 +90,10 @@ export class RevocationFeed {
   private lagRecords: number | undefined;
   private failed = false;
   private timer: NodeJS.Timeout | undefined;
+  /** Moves on every `start()` and `stop()`; what began in an older one is ignored. */
+  private generation = 0;
+  /** The generation of the `start()` that has not been stopped, if any. */
+  private running: number | undefined;
   private readonly now: () => number;
   private readonly maxPending: number;
 
@@ -97,37 +110,63 @@ export class RevocationFeed {
   }
 
   async start(): Promise<void> {
+    this.forget();
+    const generation = ++this.generation;
+    this.running = generation;
+    this.failed = false;
+
     const atMs = this.now();
     const high = await this.source.highWatermarks();
+    if (!this.isRunning(generation)) return;
     const from = await this.source.offsetsAt(atMs - this.list.timing.retentionMs);
+    if (!this.isRunning(generation)) return;
     for (const [partition, offset] of from) this.positions.set(partition, offset);
     this.pending.push({ atMs, high });
     this.resolveProbes();
 
     await this.source.start(
       from,
-      (message) => this.handle(message),
-      (error) => this.fail(error),
+      (message) => {
+        if (this.isRunning(generation)) this.handle(message);
+      },
+      (error) => {
+        if (this.isRunning(generation)) this.fail(error);
+      },
     );
+    if (!this.isRunning(generation)) {
+      // Stopped while the source was starting: the stop reached a source that
+      // had not started yet, so it is stopped once more — unless a newer
+      // start owns it by now.
+      if (this.running === undefined) await this.source.stop();
+      return;
+    }
     this.timer = setInterval(() => void this.probe(), this.options.probeIntervalMs);
     this.timer.unref();
   }
 
+  /** Not current nor caught up from this call on, before the source is awaited. */
   async stop(): Promise<void> {
+    this.generation += 1;
+    this.running = undefined;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    this.forget();
     await this.source.stop();
   }
 
   /** Reads the high watermarks once more; resolves when the reading is queued. */
   async probe(): Promise<void> {
+    const generation = this.generation;
+    if (!this.isRunning(generation)) return;
     const atMs = this.now();
     try {
       const high = await this.source.highWatermarks();
+      if (!this.isRunning(generation)) return;
       this.pending.push({ atMs, high });
       while (this.pending.length > this.maxPending) this.pending.shift();
       this.resolveProbes();
     } catch (error) {
+      if (!this.isRunning(generation)) return;
       // Not current until a later probe resolves: the staleness bound decides.
       this.options.logger?.warn(
         { error: errorName(error) },
@@ -138,7 +177,7 @@ export class RevocationFeed {
   }
 
   /** Applies one record. Never throws: what cannot be applied is held against every pair. */
-  handle(message: RevocationLogMessage): void {
+  private handle(message: RevocationLogMessage): void {
     try {
       const read = readAccessChange(message.value);
       if (read.outcome === 'unreadable') {
@@ -149,7 +188,7 @@ export class RevocationFeed {
           this.list.hold(Math.max(message.timestampMs, read.change.atMs));
           this.options.logger?.error(
             { partition: message.partition, offset: message.offset },
-            'Revocation list is full: every pair is held until this revocation has aged out',
+            'Revocation list is full: every pair is held until this change has aged out',
           );
         }
       }
@@ -187,6 +226,18 @@ export class RevocationFeed {
   /** Records between the read positions and the latest high watermark read. */
   lag(): number | undefined {
     return this.lagRecords;
+  }
+
+  private isRunning(generation: number): boolean {
+    return this.running === generation;
+  }
+
+  /** Everything the feed vouches for, gone: a stopped or restarting feed vouches for nothing. */
+  private forget(): void {
+    this.positions.clear();
+    this.pending.length = 0;
+    this.currentAtMs = undefined;
+    this.lagRecords = undefined;
   }
 
   private fail(error: unknown): void {

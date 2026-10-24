@@ -10,7 +10,11 @@ import { GatewayController } from '../proxy/gateway.controller';
 import type { ProxyService } from '../proxy/proxy.service';
 import type { RateLimiter } from '../proxy/rate-limiter';
 import type { GatewayEnv } from '../config/env';
-import type { RevocationFeed } from './revocation-feed';
+import {
+  RevocationFeed,
+  type RevocationLogMessage,
+  type RevocationLogSource,
+} from './revocation-feed';
 import { RevocationList, revocationTiming } from './revocation-list';
 import { RevocationGate } from './revocation-gate';
 
@@ -42,6 +46,9 @@ function gateWith(options: { current?: boolean; revokedAt?: number } = {}) {
         organizationId: 'ORG_A',
         roles: ['DRIVER'],
         atMs: options.revokedAt,
+        membershipId: 'M1',
+        seq: 1,
+        ends: false,
       },
       options.revokedAt,
     );
@@ -331,5 +338,136 @@ describe('a refused request reaches nothing upstream — a retried payment inclu
     );
     expect(result.outcome).toBe('forwarded');
     expect(result.forwarded).toBe(1);
+  });
+  describe('the PR #381 r1 F2 and F3 scenarios, with the key the form was given before', () => {
+    const ADMIN = ['DRIVER', 'ORGANIZATION_ADMIN'];
+    const PATHS = [
+      ['POST', '/v1/payment-intents'],
+      ['POST', '/v1/payment-intents/PI_1/refunds'],
+      ['POST', '/v1/transactions'],
+    ] as const;
+
+    function membershipEvent(
+      eventName: string,
+      membershipId: string,
+      seq: number,
+      atMs: number,
+      roles: string[] = [],
+    ) {
+      const pair = { membershipId, userId: 'U1', organizationId: 'ORG_A' };
+      return JSON.stringify({
+        eventId: `E-${membershipId}-${seq}`,
+        eventName,
+        eventVersion: 1,
+        occurredAt: new Date(atMs).toISOString(),
+        producer: 'identity-service',
+        aggregateType: 'Membership',
+        aggregateId: membershipId,
+        tenantId: 'ORG_A',
+        correlationId: 'COR-1',
+        streamSeq: seq,
+        streamKey: membershipId,
+        payload:
+          eventName === 'MEMBERSHIP_CREATED'
+            ? { ...pair, roles }
+            : eventName === 'MEMBERSHIP_REVOKED'
+              ? { ...pair, reason: 'x' }
+              : { ...pair, previousRoles: [], newRoles: roles, reason: 'x' },
+      });
+    }
+
+    /** A real feed over a one-partition identity topic holding `values`, read to the end. */
+    async function enforcedFrom(values: string[]) {
+      const list = new RevocationList(timing, 1_000);
+      const control: { reading?: Promise<void>; deliver?: (m: RevocationLogMessage) => void } = {};
+      const source: RevocationLogSource = {
+        highWatermarks: async () => {
+          const wait = control.reading;
+          control.reading = undefined;
+          if (wait) await wait;
+          return new Map([[0, values.length]]);
+        },
+        offsetsAt: async () => new Map([[0, 0]]),
+        start: async (_from, onMessage) => {
+          control.deliver = onMessage;
+        },
+        stop: async () => undefined,
+      };
+      const feed = new RevocationFeed(source, list, {
+        maxStalenessMs: 30_000,
+        probeIntervalMs: 5_000,
+        now: () => NOW,
+      });
+      await feed.start();
+      values.forEach((value, offset) =>
+        control.deliver?.({ partition: 0, offset, timestampMs: T0, value }),
+      );
+      expect(feed.isCurrent()).toBe(true);
+      const gate = RevocationGate.enforce(list, feed, { retryAfterSeconds: 7, now: () => NOW });
+      return { gate, feed, control };
+    }
+
+    // A stale administrator token: issued after the cutoff and its grace, still carrying the
+    // role the demotion took away.
+    const staleAdmin = () =>
+      userAuth({ roles: ADMIN }, { issuedAt: T0 + 20_000, tenantRoles: ADMIN });
+
+    it.each(PATHS)(
+      'F2 — %s %s: a demotion stamped before the grant it follows still refuses the old role',
+      async (method, path) => {
+        const { gate } = await enforcedFrom([
+          membershipEvent('ROLE_ASSIGNED', 'M1', 2, T0 + 4_000, ADMIN),
+          membershipEvent('ROLE_REVOKED', 'M1', 3, T0 + 1_000, ['DRIVER']),
+        ]);
+        expect(await send(gate, method, path, staleAdmin())).toEqual({
+          outcome: 'TOKEN_REVOKED',
+          forwarded: 0,
+          counted: 0,
+        });
+      },
+    );
+
+    it.each(PATHS)(
+      'F2 — %s %s: a delayed grant of a revoked membership does not lend its role to the new one',
+      async (method, path) => {
+        const { gate } = await enforcedFrom([
+          membershipEvent('MEMBERSHIP_CREATED', 'M2', 1, T0 + 20_000, ['DRIVER']),
+          membershipEvent('ROLE_ASSIGNED', 'M1', 2, T0 + 23_000, ADMIN),
+        ]);
+        expect(
+          await send(
+            gate,
+            method,
+            path,
+            userAuth({}, { issuedAt: T0 + 30_000, tenantRoles: ADMIN }),
+          ),
+        ).toEqual({ outcome: 'TOKEN_REVOKED', forwarded: 0, counted: 0 });
+      },
+    );
+
+    it.each(PATHS)('F3 — %s %s after stop(): refused, nothing forwarded', async (method, path) => {
+      const { gate, feed } = await enforcedFrom([]);
+      await feed.stop();
+      expect(await send(gate, method, path, userAuth())).toEqual({
+        outcome: 'UPSTREAM_UNAVAILABLE',
+        forwarded: 0,
+        counted: 0,
+      });
+    });
+
+    it('F3 — a probe resolving after stop() does not let the payment through', async () => {
+      const { gate, feed, control } = await enforcedFrom([]);
+      let release!: () => void;
+      control.reading = new Promise<void>((resolve) => (release = resolve));
+      const probing = feed.probe();
+      await feed.stop();
+      release();
+      await probing;
+      expect(await send(gate, 'POST', '/v1/payment-intents', userAuth())).toEqual({
+        outcome: 'UPSTREAM_UNAVAILABLE',
+        forwarded: 0,
+        counted: 0,
+      });
+    });
   });
 });

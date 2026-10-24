@@ -59,12 +59,31 @@ export interface TokenFacts {
   tenantRoles: readonly string[];
 }
 
+/**
+ * How many memberships of one pair the list keeps apart. Identity allows one
+ * live membership per pair (`ux_membership_live_user_org`), so more than one
+ * within a window means a revoke and a re-add; more than this many is not a
+ * pattern the list guesses at — the change is `full`, and held.
+ */
+export const MAX_MEMBERSHIPS_PER_PAIR = 8;
+
+/** One membership of a pair, as far as its own stream has been read. */
+interface MembershipState {
+  /** The highest `streamSeq` applied. */
+  seq: number;
+  /** The roles stated at `seq`; none once ended. */
+  roles: readonly string[];
+  /** Revoked or expired: never grants again, whatever arrives after. */
+  ended: boolean;
+}
+
 interface PairState {
   /** The latest revocation's `occurredAt`; absent while only grants are known. */
   cutoffMs?: number;
-  /** The roles stated by the latest event, and that event's `occurredAt`. */
+  /** Every membership of the pair seen within the window, by id. */
+  memberships: ReadonlyMap<string, MembershipState>;
+  /** What a token may carry: the roles every membership not seen ended agrees on. */
   roles: readonly string[];
-  stateAtMs: number;
   /** Only ever moves later; a replayed older event cannot pull it in or push it out. */
   expiresAtMs: number;
 }
@@ -98,17 +117,29 @@ export class RevocationList {
   /**
    * Applies one change. Idempotent and order-independent:
    *
-   *   - the cutoff is the latest revocation's, so a duplicate or an older
-   *     replay leaves it where it is;
-   *   - the roles are the latest event's — and at an equal instant the
-   *     intersection, the narrower reading;
+   *   - the cutoff is the latest revocation's `occurredAt`, so a duplicate or
+   *     an older replay leaves it where it is — wall time, because it is
+   *     compared with a token's `iat`, and only ever made later;
+   *   - a membership's roles are those of the highest `streamSeq` of its
+   *     stream applied — commit order, whatever either producer's clock
+   *     said (PR #381 r1 F2) — and at an equal position the intersection,
+   *     the narrower reading;
+   *   - a membership seen revoked or expired is ended for good: no event of
+   *     its stream, earlier or later, restores a role to it;
+   *   - the pair's roles are the intersection over its memberships not seen
+   *     ended. Identity allows one live membership per pair, and a new one
+   *     only once the old one is deleted, so every event of an ended
+   *     membership precedes the next one's creation; two not seen ended mean
+   *     one end has not been read yet, and which is not known;
    *   - the expiry only moves later, so a replay cannot restart the window.
    *
    * A change whose window has already passed is not stored: every token it
    * could concern has expired. `full` when a revocation cannot be stored
-   * because the list is at its bound: the caller holds every pair instead
-   * of dropping it. A grant that cannot be stored is dropped — that can only
-   * refuse a re-granted pair for longer, never admit a revoked one.
+   * because the list is at its bound, or when any change would make a pair
+   * keep more than `MAX_MEMBERSHIPS_PER_PAIR` apart: the caller holds every
+   * pair instead of dropping it. A grant for a pair the list holds nothing
+   * for, at the bound, is dropped — no state admits everything a grant's
+   * would, so that can only refuse for longer, never admit a revoked one.
    */
   apply(change: AccessChange, nowMs: number): 'applied' | 'expired' | 'full' {
     const expiresAtMs = change.atMs + this.timing.retentionMs;
@@ -124,33 +155,23 @@ export class RevocationList {
     if (!current) {
       if (this.pairs.size >= this.maxEntries) this.prune(nowMs);
       if (this.pairs.size >= this.maxEntries) return change.kind === 'revoke' ? 'full' : 'applied';
-      this.pairs.set(key, {
-        ...(change.kind === 'revoke' ? { cutoffMs: change.atMs } : {}),
-        roles: [...change.roles],
-        stateAtMs: change.atMs,
-        expiresAtMs,
-      });
-      return 'applied';
     }
+
+    const memberships = new Map(current?.memberships);
+    const before = memberships.get(change.membershipId);
+    if (!before && memberships.size >= MAX_MEMBERSHIPS_PER_PAIR) return 'full';
+    memberships.set(change.membershipId, advance(before, change));
 
     const cutoffMs =
       change.kind === 'revoke'
-        ? Math.max(current.cutoffMs ?? change.atMs, change.atMs)
-        : current.cutoffMs;
-    let roles = current.roles;
-    let stateAtMs = current.stateAtMs;
-    if (change.atMs > current.stateAtMs) {
-      roles = [...change.roles];
-      stateAtMs = change.atMs;
-    } else if (change.atMs === current.stateAtMs) {
-      roles = current.roles.filter((role) => change.roles.includes(role));
-    }
+        ? Math.max(current?.cutoffMs ?? change.atMs, change.atMs)
+        : current?.cutoffMs;
 
     this.pairs.set(key, {
       ...(cutoffMs !== undefined ? { cutoffMs } : {}),
-      roles,
-      stateAtMs,
-      expiresAtMs: Math.max(current.expiresAtMs, expiresAtMs),
+      memberships,
+      roles: agreedRoles(memberships.values()),
+      expiresAtMs: Math.max(current?.expiresAtMs ?? expiresAtMs, expiresAtMs),
     });
     return 'applied';
   }
@@ -188,6 +209,30 @@ export class RevocationList {
       if (state.expiresAtMs < nowMs) this.pairs.delete(key);
     }
   }
+}
+
+/** One membership's state once `change`, an event of its own stream, is applied. */
+function advance(before: MembershipState | undefined, change: AccessChange): MembershipState {
+  const ended = (before?.ended ?? false) || change.ends;
+  let seq = change.seq;
+  let roles: readonly string[] = change.roles;
+  if (before && change.seq < before.seq) {
+    seq = before.seq;
+    roles = before.roles;
+  } else if (before && change.seq === before.seq) {
+    roles = before.roles.filter((role) => change.roles.includes(role));
+  }
+  return { seq, roles: ended ? [] : [...roles], ended };
+}
+
+/** The roles every membership not seen ended holds; none when every one has ended. */
+function agreedRoles(memberships: Iterable<MembershipState>): string[] {
+  let agreed: string[] | undefined;
+  for (const membership of memberships) {
+    if (membership.ended) continue;
+    agreed = (agreed ?? [...membership.roles]).filter((role) => membership.roles.includes(role));
+  }
+  return agreed ?? [];
 }
 
 /** One key per pair, unambiguous whatever either id contains. */

@@ -76,6 +76,23 @@ export class GatewayHealthController {
   @ApiOperation({ summary: 'Readiness' })
   async ready(@Res({ passthrough: true }) response: Response) {
     const redis = await this.rateLimiter.isHealthy();
+
+    // Off, the answer is main's to the byte: no key a probe or a dashboard
+    // has not seen before (PR #381 r1 F4).
+    if (!this.revocation.isEnforcing()) {
+      // Redis being down degrades rate limiting but does not stop routing, so it
+      // is reported rather than treated as unreadiness.
+      response.status(HttpStatus.OK);
+
+      return {
+        status: 'ok',
+        service: SERVICE_NAME,
+        checks: { redis },
+        degraded: redis ? [] : ['rate-limiting'],
+        circuits: this.proxy.circuitStates(),
+      };
+    }
+
     const revocationList = this.revocation.isReady();
     const degraded = [
       ...(redis ? [] : ['rate-limiting']),

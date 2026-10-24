@@ -65,6 +65,11 @@ export class RevocationGate {
     });
   }
 
+  /** Whether the list is consulted at all: `false` for `off`. */
+  isEnforcing(): boolean {
+    return this.enforced !== undefined;
+  }
+
   /**
    * Readiness, from what is true of this replica alone: caught up once since
    * it started, and still reading. A replica that is not is taken out of

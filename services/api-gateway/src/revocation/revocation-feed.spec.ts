@@ -3,6 +3,7 @@ import {
   type RevocationLogMessage,
   type RevocationLogSource,
 } from './revocation-feed';
+import { RevocationGate } from './revocation-gate';
 import { RevocationList, revocationTiming } from './revocation-list';
 
 /**
@@ -12,6 +13,8 @@ import { RevocationList, revocationTiming } from './revocation-list';
 
 const T0 = Date.parse('2026-10-24T10:00:00.000Z');
 const timing = revocationTiming(900, 5);
+
+let nextSeq = 0;
 
 function event(eventName: string, userId: string, organizationId: string, occurredAtMs: number) {
   return JSON.stringify({
@@ -24,8 +27,63 @@ function event(eventName: string, userId: string, organizationId: string, occurr
     aggregateId: 'M1',
     tenantId: organizationId,
     correlationId: 'COR-1',
+    streamSeq: (nextSeq += 1),
+    streamKey: 'M1',
     payload: { membershipId: 'M1', userId, organizationId, reason: 'kept out of every log' },
   });
+}
+
+/**
+ * One event of membership `membershipId` of U1 in ORG_A, as identity-service writes it: on the
+ * membership's own stream (partition key = aggregate id = membership id), at position `seq`,
+ * stamped `atMs` by whichever replica's clock committed it.
+ */
+function membershipEvent(
+  eventName:
+    | 'MEMBERSHIP_CREATED'
+    | 'ROLE_ASSIGNED'
+    | 'ROLE_REVOKED'
+    | 'MEMBERSHIP_REVOKED'
+    | 'MEMBERSHIP_EXPIRED',
+  options: { membershipId?: string; seq: number; atMs: number; roles?: string[] },
+  overrides: Record<string, unknown> = {},
+) {
+  const membershipId = options.membershipId ?? 'M1';
+  const pair = { membershipId, userId: 'U1', organizationId: 'ORG_A' };
+  const roles = options.roles ?? [];
+  const payload =
+    eventName === 'MEMBERSHIP_CREATED'
+      ? { ...pair, roles }
+      : eventName === 'ROLE_ASSIGNED' || eventName === 'ROLE_REVOKED'
+        ? { ...pair, previousRoles: [], newRoles: roles, reason: 'x' }
+        : eventName === 'MEMBERSHIP_REVOKED'
+          ? { ...pair, reason: 'x' }
+          : { ...pair, validUntil: new Date(options.atMs).toISOString() };
+  return JSON.stringify({
+    eventId: `E-${membershipId}-${options.seq}`,
+    eventName,
+    eventVersion: 1,
+    occurredAt: new Date(options.atMs).toISOString(),
+    producer: 'identity-service',
+    aggregateType: 'Membership',
+    aggregateId: membershipId,
+    tenantId: 'ORG_A',
+    correlationId: 'COR-1',
+    streamSeq: options.seq,
+    streamKey: membershipId,
+    payload,
+    ...overrides,
+  });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 const revoked = (userId: string, organizationId: string, atMs: number) =>
   event('MEMBERSHIP_REVOKED', userId, organizationId, atMs);
@@ -34,7 +92,20 @@ const revoked = (userId: string, organizationId: string, atMs: number) =>
 class FakeTopic implements RevocationLogSource {
   readonly partitions: { timestampMs: number; value: string | null }[][];
   failHighWatermarks = false;
+  /** When set, the next `highWatermarks` waits for it. */
+  nextHighWatermarks: Promise<void> | undefined;
+  /** When set, the next `start` waits for it. */
+  nextStart: Promise<void> | undefined;
+  /** When set, `stop` waits for it. */
+  nextStop: Promise<void> | undefined;
   startedFrom: Map<number, number> | undefined;
+  startCalls = 0;
+  stopCalls = 0;
+  /** Every pair of callbacks `start` was given, oldest first: a reader may still call them late. */
+  readonly callbacks: {
+    onMessage: (message: RevocationLogMessage) => void;
+    onFailure: (error: unknown) => void;
+  }[] = [];
   private delivered = new Map<number, number>();
   private onMessage: ((message: RevocationLogMessage) => void) | undefined;
   onFailure: ((error: unknown) => void) | undefined;
@@ -48,8 +119,13 @@ class FakeTopic implements RevocationLogSource {
   }
 
   async highWatermarks() {
+    const wait = this.nextHighWatermarks;
+    this.nextHighWatermarks = undefined;
+    // Read before waiting: the reading is of the moment the probe was made.
+    const high = new Map(this.partitions.map((records, partition) => [partition, records.length]));
+    if (wait) await wait;
     if (this.failHighWatermarks) throw new Error('broker unreachable');
-    return new Map(this.partitions.map((records, partition) => [partition, records.length]));
+    return high;
   }
 
   async offsetsAt(timestampMs: number) {
@@ -66,14 +142,21 @@ class FakeTopic implements RevocationLogSource {
     onMessage: (message: RevocationLogMessage) => void,
     onFailure: (error: unknown) => void,
   ) {
+    this.startCalls += 1;
     this.startedFrom = new Map(from);
     this.delivered = new Map(from);
     this.onMessage = onMessage;
     this.onFailure = onFailure;
+    this.callbacks.push({ onMessage, onFailure });
+    const wait = this.nextStart;
+    this.nextStart = undefined;
+    if (wait) await wait;
   }
 
   async stop() {
+    this.stopCalls += 1;
     this.onMessage = undefined;
+    if (this.nextStop) await this.nextStop;
   }
 
   /** Delivers every record not yet delivered, partition by partition. */
@@ -96,7 +179,8 @@ function replica(topic: FakeTopic, clock: { now: number }, maxEntries = 1_000) {
     now: () => clock.now,
     logger,
   });
-  return { list, feed, logger };
+  const gate = RevocationGate.enforce(list, feed, { retryAfterSeconds: 1, now: () => clock.now });
+  return { list, feed, logger, gate };
 }
 
 const tokenOf = (userId: string, organizationId: string, issuedAtMs: number) => ({
@@ -291,6 +375,247 @@ describe('what cannot be applied holds every pair — and nothing of it reaches 
     topic.pump();
     expect(feed.isCurrent()).toBe(true);
     expect(list.isHeld(T0)).toBe(false);
+    await feed.stop();
+  });
+});
+
+describe('order: the membership stream sequence, never the producer clock (PR #381 r1 F2)', () => {
+  const ADMIN = ['DRIVER', 'ORGANIZATION_ADMIN'];
+  const tokenWith = (issuedAtMs: number, tenantRoles: string[]) => ({
+    userId: 'U1',
+    organizationId: 'ORG_A',
+    issuedAtMs,
+    tenantRoles,
+  });
+
+  async function replayed(records: string[][], clock = { now: T0 + 30_000 }) {
+    const topic = new FakeTopic(records.length);
+    for (const [partition, values] of records.entries()) {
+      for (const value of values) topic.publish(partition, T0, value);
+    }
+    const r = replica(topic, clock);
+    await r.feed.start();
+    topic.pump();
+    return { ...r, topic, clock };
+  }
+
+  // A grant commits at real time T on a replica whose clock runs 4 s ahead; the demotion
+  // commits at T+1 s on an accurate one. Both clocks are within the 5 s tolerance.
+  const grant = membershipEvent('ROLE_ASSIGNED', { seq: 2, atMs: T0 + 4_000, roles: ADMIN });
+  const demotion = membershipEvent('ROLE_REVOKED', { seq: 3, atMs: T0 + 1_000, roles: ['DRIVER'] });
+
+  it.each([
+    ['delivered in stream order', [grant, demotion]],
+    ['delivered demotion first', [demotion, grant]],
+  ])(
+    'a demotion stamped earlier than the grant it follows leaves the narrower roles (%s)',
+    async (_label, values) => {
+      const { list, clock } = await replayed([values]);
+      expect(list.evaluate(tokenWith(T0 + 20_000, ADMIN), clock.now)).toBe('stale_roles');
+      expect(list.evaluate(tokenWith(T0 + 20_000, ['DRIVER']), clock.now)).toBe('allow');
+      // The cutoff is still the demotion's own clock reading: iat is compared with wall time.
+      expect(list.evaluate(tokenWith(T0 + 1_000 + timing.graceMs, ['DRIVER']), clock.now)).toBe(
+        'revoked',
+      );
+    },
+  );
+
+  describe('revoke, recreate, then a delayed event of the old membership', () => {
+    // M1 (an administrator) is revoked; M2 is then created for the same pair with a new id,
+    // so its own stream from 1, on another partition. M1's last role change was stamped by a
+    // fast replica and its partition lags. Identity allows M2 only once M1 is deleted
+    // (ux_membership_live_user_org), so every M1 event is causally before every M2 event.
+    const m1Grant = membershipEvent('ROLE_ASSIGNED', { seq: 2, atMs: T0 + 23_000, roles: ADMIN });
+    const m1Revoked = membershipEvent('MEMBERSHIP_REVOKED', { seq: 3, atMs: T0 + 19_000 });
+    const m2Created = membershipEvent('MEMBERSHIP_CREATED', {
+      membershipId: 'M2',
+      seq: 1,
+      atMs: T0 + 20_000,
+      roles: ['DRIVER'],
+    });
+    const now = { now: T0 + 40_000 };
+
+    it("the old membership's grant, its revocation not yet read: the narrower of the two stands", async () => {
+      const { list } = await replayed([[m2Created], [m1Grant]], now);
+      expect(list.evaluate(tokenWith(T0 + 30_000, ADMIN), now.now)).toBe('stale_roles');
+      expect(list.evaluate(tokenWith(T0 + 30_000, ['DRIVER']), now.now)).toBe('allow');
+    });
+
+    it("once the old membership's revocation is read, the new membership's roles alone stand", async () => {
+      const { list } = await replayed([[m2Created], [m1Grant, m1Revoked]], now);
+      expect(list.evaluate(tokenWith(T0 + 30_000, ADMIN), now.now)).toBe('stale_roles');
+      expect(list.evaluate(tokenWith(T0 + 30_000, ['DRIVER']), now.now)).toBe('allow');
+    });
+
+    it('an event of a membership already seen ended, delivered late, changes no roles', async () => {
+      const { list } = await replayed([[m1Revoked, m1Grant]], now);
+      expect(list.evaluate(tokenWith(T0 + 30_000, ['DRIVER']), now.now)).toBe('stale_roles');
+    });
+  });
+
+  it('a membership seen expired never grants again, whatever later role event it carries', async () => {
+    const { list, clock } = await replayed([
+      [
+        membershipEvent('MEMBERSHIP_EXPIRED', { seq: 2, atMs: T0 }),
+        membershipEvent('ROLE_ASSIGNED', { seq: 3, atMs: T0 + 1_000, roles: ['DRIVER'] }),
+      ],
+    ]);
+    expect(list.evaluate(tokenWith(T0 + 20_000, ['DRIVER']), clock.now)).toBe('stale_roles');
+  });
+
+  it.each([
+    ['no sequence (a legacy producer)', { streamSeq: undefined, streamKey: undefined }],
+    ['a sequence without its stream', { streamKey: undefined }],
+    ['a stream without its sequence', { streamSeq: undefined }],
+    ['a stream other than the membership', { streamKey: 'M9' }],
+    ['an aggregate other than the payload membership', { aggregateId: 'M9', streamKey: 'M9' }],
+    ['an aggregate that is not a membership', { aggregateType: 'User' }],
+  ])('%s: held, never ordered by its timestamp', async (_label, overrides) => {
+    const { list, clock } = await replayed([
+      [membershipEvent('ROLE_REVOKED', { seq: 2, atMs: T0, roles: ['DRIVER'] }, overrides)],
+    ]);
+    expect(list.isHeld(clock.now)).toBe(true);
+  });
+});
+
+describe('stop: the feed stops vouching at once, and nothing late brings it back (PR #381 r1 F3)', () => {
+  async function caughtUp() {
+    const clock = { now: T0 };
+    const topic = new FakeTopic(1);
+    const r = replica(topic, clock);
+    await r.feed.start();
+    expect(r.feed.isCurrent()).toBe(true);
+    expect(r.gate.isReady()).toBe(true);
+    return { ...r, topic, clock };
+  }
+
+  function expectStopped(r: { feed: RevocationFeed; gate: RevocationGate; list: RevocationList }) {
+    expect(r.feed.isCurrent()).toBe(false);
+    expect(r.feed.hasCaughtUp()).toBe(false);
+    expect(r.gate.isReady()).toBe(false);
+    expect(r.gate.isRefusingEveryPair()).toBe(true);
+  }
+
+  it('is not current and not ready as soon as stop() is called, before the source has stopped', async () => {
+    const r = await caughtUp();
+    const shutdown = deferred<void>();
+    r.topic.nextStop = shutdown.promise;
+    const stopping = r.feed.stop();
+    expectStopped(r);
+    shutdown.resolve();
+    await stopping;
+    expectStopped(r);
+  });
+
+  it('a probe that resolves after stop() changes nothing', async () => {
+    const r = await caughtUp();
+    const reading = deferred<void>();
+    r.topic.nextHighWatermarks = reading.promise;
+    r.clock.now = T0 + 5_000;
+    const probing = r.feed.probe();
+    await r.feed.stop();
+    reading.resolve();
+    await probing;
+    expectStopped(r);
+    expect(r.feed.lag()).toBeUndefined();
+  });
+
+  it('stop() during startup: the source never starts and nothing becomes current', async () => {
+    const clock = { now: T0 };
+    const topic = new FakeTopic(1);
+    const r = replica(topic, clock);
+    const reading = deferred<void>();
+    topic.nextHighWatermarks = reading.promise;
+    const starting = r.feed.start();
+    await r.feed.stop();
+    reading.resolve();
+    await starting;
+    expect(topic.startCalls).toBe(0);
+    expectStopped(r);
+  });
+
+  it('stop() while the source is starting: the source is stopped again once it has started', async () => {
+    const clock = { now: T0 };
+    const topic = new FakeTopic(1);
+    const r = replica(topic, clock);
+    const started = deferred<void>();
+    topic.nextStart = started.promise;
+    const starting = r.feed.start();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(topic.startCalls).toBe(1);
+    await r.feed.stop();
+    started.resolve();
+    await starting;
+    expect(topic.stopCalls).toBe(2);
+    expectStopped(r);
+  });
+
+  it('a message or a failure delivered after stop() changes nothing', async () => {
+    const r = await caughtUp();
+    const { onMessage, onFailure } = r.topic.callbacks.at(-1)!;
+    await r.feed.stop();
+    onMessage({ partition: 0, offset: 0, timestampMs: T0, value: revoked('U1', 'ORG_A', T0) });
+    onMessage({ partition: 0, offset: 1, timestampMs: T0, value: '{' });
+    onFailure(new Error('late'));
+    expect(r.list.size).toBe(0);
+    expect(r.list.isHeld(T0)).toBe(false);
+    expect(r.feed.hasFailed()).toBe(false);
+    expect(r.logger.error).not.toHaveBeenCalled();
+    expectStopped(r);
+  });
+
+  it('a source whose shutdown rejects: stop() rejects, and the feed was already not current nor ready', async () => {
+    const r = await caughtUp();
+    const { onMessage } = r.topic.callbacks.at(-1)!;
+    r.topic.nextStop = Promise.reject(new Error('consumer would not leave'));
+    await expect(r.feed.stop()).rejects.toThrow('consumer would not leave');
+    expectStopped(r);
+    onMessage({ partition: 0, offset: 0, timestampMs: T0, value: revoked('U1', 'ORG_A', T0) });
+    expect(r.list.size).toBe(0);
+    expectStopped(r);
+  });
+
+  it('the callbacks of a previous start change nothing in the next one', async () => {
+    const r = await caughtUp();
+    const previous = r.topic.callbacks.at(-1)!;
+    await r.feed.stop();
+    await r.feed.start();
+    expect(r.feed.isCurrent()).toBe(true);
+    previous.onMessage({
+      partition: 0,
+      offset: 5,
+      timestampMs: T0,
+      value: revoked('U9', 'ORG_Z', T0),
+    });
+    previous.onFailure(new Error('the old reader crashed'));
+    expect(r.list.evaluate(tokenOf('U9', 'ORG_Z', T0 - 1_000), T0)).toBe('allow');
+    expect(r.feed.hasFailed()).toBe(false);
+    expect(r.feed.isCurrent()).toBe(true);
+    expect(r.gate.isReady()).toBe(true);
+    await r.feed.stop();
+  });
+});
+
+describe('PR #381 r1 F1 — open: design memo, PM decision pending; no fix in this PR yet', () => {
+  // Demoted at T while the projection lags; Keycloak still mints an administrator token at
+  // T+50 s that lives to T+950 s. The restriction expires at T+911 s on its timer and the same
+  // still-valid token is admitted. `it.failing` passes while the defect stands, and fails the
+  // day it is fixed — so the fix has to replace this with a plain test.
+  it.failing('a token minted during projection lag is still refused after the timer', async () => {
+    const clock = { now: T0 };
+    const topic = new FakeTopic(1);
+    topic.publish(0, T0, membershipEvent('ROLE_REVOKED', { seq: 2, atMs: T0, roles: ['DRIVER'] }));
+    const { list, feed } = replica(topic, clock);
+    await feed.start();
+    topic.pump();
+    const lagToken = {
+      userId: 'U1',
+      organizationId: 'ORG_A',
+      issuedAtMs: T0 + 50_000,
+      tenantRoles: ['DRIVER', 'ORGANIZATION_ADMIN'],
+    };
+    expect(list.evaluate(lagToken, T0 + 60_000)).toBe('stale_roles');
+    expect(list.evaluate(lagToken, T0 + timing.retentionMs + 1)).toBe('stale_roles');
     await feed.stop();
   });
 });

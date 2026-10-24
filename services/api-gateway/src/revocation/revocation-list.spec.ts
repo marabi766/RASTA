@@ -1,5 +1,10 @@
 import type { AccessChange } from './access-change';
-import { RevocationList, revocationTiming, type TokenFacts } from './revocation-list';
+import {
+  MAX_MEMBERSHIPS_PER_PAIR,
+  RevocationList,
+  revocationTiming,
+  type TokenFacts,
+} from './revocation-list';
 
 /**
  * The list's decisions (ADR-060, gateway revocation list addendum § 1–§ 3), with the realm's
@@ -11,13 +16,25 @@ const timing = revocationTiming(900, 5);
 
 const list = (maxEntries = 1_000) => new RevocationList(timing, maxEntries);
 
-const revoke = (
-  atMs: number,
-  roles: string[] = [],
-  pair = { userId: 'U1', organizationId: 'ORG_A' },
-) => ({ kind: 'revoke', ...pair, roles, atMs }) satisfies AccessChange;
-const grant = (atMs: number, roles: string[], pair = { userId: 'U1', organizationId: 'ORG_A' }) =>
-  ({ kind: 'grant', ...pair, roles, atMs }) satisfies AccessChange;
+/** Where on which membership's stream an event is: membership M1, position 1 unless said. */
+type At = { membershipId?: string; seq?: number };
+const PAIR = { userId: 'U1', organizationId: 'ORG_A' };
+
+const revoke = (atMs: number, roles: string[] = [], pair = PAIR, at: At = {}) =>
+  ({
+    kind: 'revoke',
+    ...pair,
+    roles,
+    atMs,
+    membershipId: at.membershipId ?? 'M1',
+    seq: at.seq ?? 1,
+    ends: false,
+  }) satisfies AccessChange;
+/** MEMBERSHIP_REVOKED or MEMBERSHIP_EXPIRED: the membership ends. */
+const end = (atMs: number, pair = PAIR, at: At = {}) =>
+  ({ ...revoke(atMs, [], pair, at), ends: true }) satisfies AccessChange;
+const grant = (atMs: number, roles: string[], pair = PAIR, at: At = {}) =>
+  ({ ...revoke(atMs, roles, pair, at), kind: 'grant' }) satisfies AccessChange;
 
 const token = (
   issuedAtMs: number,
@@ -67,7 +84,7 @@ describe('the issued-at comparison', () => {
 
   it('lets a confirmed re-grant through: a token issued after it, carrying the granted role', () => {
     const l = revoked();
-    l.apply(grant(T0 + 120_000, ['DRIVER', 'ORGANIZATION_ADMIN']), T0 + 120_000);
+    l.apply(grant(T0 + 120_000, ['DRIVER', 'ORGANIZATION_ADMIN'], PAIR, { seq: 2 }), T0 + 120_000);
     expect(l.evaluate(token(T0 + 130_000, ['DRIVER', 'ORGANIZATION_ADMIN']), T0 + 130_000)).toBe(
       'allow',
     );
@@ -75,10 +92,13 @@ describe('the issued-at comparison', () => {
     expect(l.evaluate(token(T0 - 1_000, ['DRIVER']), T0 + 130_000)).toBe('revoked');
   });
 
-  it('refuses every tenant role after a membership revocation, until a grant states one', () => {
+  it('refuses every tenant role after a membership revocation, until a new membership states one', () => {
     const l = list();
-    l.apply(revoke(T0, []), T0);
+    l.apply(end(T0), T0);
     expect(l.evaluate(token(T0 + 60_000, ['DRIVER']), T0 + 60_000)).toBe('stale_roles');
+    l.apply(grant(T0 + 90_000, ['DRIVER'], PAIR, { membershipId: 'M2' }), T0 + 90_000);
+    expect(l.evaluate(token(T0 + 100_000, ['DRIVER']), T0 + 100_000)).toBe('allow');
+    expect(l.evaluate(token(T0 - 1_000, ['DRIVER']), T0 + 100_000)).toBe('revoked');
   });
 });
 
@@ -133,18 +153,75 @@ describe('duplicates, reordering and replays keep the latest cutoff', () => {
 
   it('an older grant replayed after a newer revocation does not restore a removed role', () => {
     const l = list();
-    l.apply(revoke(T0 + 100_000, ['DRIVER']), T0 + 100_000);
-    l.apply(grant(T0, ['DRIVER', 'ORGANIZATION_ADMIN']), T0 + 100_001);
+    l.apply(revoke(T0 + 100_000, ['DRIVER'], PAIR, { seq: 3 }), T0 + 100_000);
+    l.apply(grant(T0, ['DRIVER', 'ORGANIZATION_ADMIN'], PAIR, { seq: 2 }), T0 + 100_001);
     expect(l.evaluate(token(T0 + 200_000, ['DRIVER', 'ORGANIZATION_ADMIN']), T0 + 200_000)).toBe(
       'stale_roles',
     );
   });
 
-  it('a grant and a revocation at one instant (one role change) take the narrower roles', () => {
+  it('two events at one position of one stream (never written so) take the narrower roles', () => {
     const l = list();
     l.apply(grant(T0, ['DRIVER', 'FLEET_MANAGER']), T0);
     l.apply(revoke(T0, ['DRIVER']), T0);
     expect(l.evaluate(token(T0 + 60_000, ['FLEET_MANAGER']), T0 + 60_000)).toBe('stale_roles');
+  });
+});
+
+describe('order is the stream position, never the producer clock (PR #381 r1 F2)', () => {
+  const ADMIN = ['DRIVER', 'ORGANIZATION_ADMIN'];
+  // The reviewer's case: a grant stamped T+4 s by a fast replica, the demotion that follows
+  // it stamped T+1 s by an accurate one — both within the 5 s tolerance.
+  const grantAhead = grant(T0 + 4_000, ADMIN, PAIR, { seq: 2 });
+  const demotion = revoke(T0 + 1_000, ['DRIVER'], PAIR, { seq: 3 });
+
+  it.each([
+    ['in stream order', [grantAhead, demotion]],
+    ['demotion first', [demotion, grantAhead]],
+  ])('the later position wins, whatever its stamp (%s)', (_label, changes) => {
+    const l = list();
+    for (const change of changes) l.apply(change, T0 + 5_000);
+    expect(l.evaluate(token(T0 + 20_000, ADMIN), T0 + 20_000)).toBe('stale_roles');
+    expect(l.evaluate(token(T0 + 20_000, ['DRIVER']), T0 + 20_000)).toBe('allow');
+    // The cutoff is still the demotion's own wall-clock reading, compared with `iat`.
+    expect(l.evaluate(token(T0 + 1_000 + timing.graceMs, ['DRIVER']), T0 + 20_000)).toBe('revoked');
+  });
+
+  it('each membership has its own stream: M2 position 1 is not "before" M1 position 5', () => {
+    const l = list();
+    l.apply(grant(T0, ADMIN, PAIR, { seq: 5 }), T0);
+    l.apply(end(T0 + 1_000, PAIR, { seq: 6 }), T0 + 1_000);
+    l.apply(grant(T0 + 2_000, ['DRIVER'], PAIR, { membershipId: 'M2', seq: 1 }), T0 + 2_000);
+    expect(l.evaluate(token(T0 + 30_000, ['DRIVER']), T0 + 30_000)).toBe('allow');
+    expect(l.evaluate(token(T0 + 30_000, ADMIN), T0 + 30_000)).toBe('stale_roles');
+  });
+
+  it('two memberships not seen ended: only the roles both hold', () => {
+    const l = list();
+    l.apply(grant(T0, ADMIN, PAIR, { seq: 2 }), T0);
+    l.apply(grant(T0, ['DRIVER', 'FLEET_MANAGER'], PAIR, { membershipId: 'M2' }), T0);
+    expect(l.evaluate(token(T0 + 30_000, ['DRIVER']), T0 + 30_000)).toBe('allow');
+    expect(l.evaluate(token(T0 + 30_000, ['FLEET_MANAGER']), T0 + 30_000)).toBe('stale_roles');
+    expect(l.evaluate(token(T0 + 30_000, ADMIN), T0 + 30_000)).toBe('stale_roles');
+  });
+
+  it('an ended membership never grants again, from an earlier or a later position', () => {
+    const l = list();
+    l.apply(end(T0, PAIR, { seq: 4 }), T0);
+    l.apply(grant(T0 - 1_000, ['DRIVER'], PAIR, { seq: 3 }), T0);
+    l.apply(grant(T0 + 1_000, ['DRIVER'], PAIR, { seq: 5 }), T0 + 1_000);
+    expect(l.evaluate(token(T0 + 30_000, ['DRIVER']), T0 + 30_000)).toBe('stale_roles');
+  });
+
+  it('more memberships of one pair than MAX_MEMBERSHIPS_PER_PAIR is `full`, a grant included', () => {
+    const l = list();
+    for (let i = 0; i < MAX_MEMBERSHIPS_PER_PAIR; i += 1) {
+      expect(l.apply(end(T0, PAIR, { membershipId: `M${i}` }), T0)).toBe('applied');
+    }
+    expect(l.apply(grant(T0, ['DRIVER'], PAIR, { membershipId: 'MX' }), T0)).toBe('full');
+    expect(l.apply(end(T0, PAIR, { membershipId: 'MY' }), T0)).toBe('full');
+    // A membership already kept is still advanced.
+    expect(l.apply(end(T0, PAIR, { membershipId: 'M0', seq: 2 }), T0)).toBe('applied');
   });
 });
 

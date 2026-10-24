@@ -18,6 +18,8 @@ function message(eventName: string, payload: unknown, overrides: Record<string, 
     aggregateId: 'M1',
     tenantId: 'ORG_A',
     correlationId: 'COR-1',
+    streamSeq: 7,
+    streamKey: 'M1',
     payload,
     ...overrides,
   });
@@ -42,6 +44,9 @@ describe('readAccessChange', () => {
         organizationId: 'ORG_A',
         roles: ['DRIVER'],
         atMs: Date.parse(OCCURRED_AT),
+        membershipId: 'M1',
+        seq: 7,
+        ends: false,
       },
     });
   });
@@ -114,6 +119,50 @@ describe('readAccessChange', () => {
     it('a payload missing the user', () => {
       const { userId: _userId, ...withoutUser } = roleChange;
       expect(readAccessChange(message('ROLE_REVOKED', withoutUser))).toEqual({
+        outcome: 'unreadable',
+        eventName: 'ROLE_REVOKED',
+      });
+    });
+  });
+  describe('the order identity: the membership stream, checked against the envelope (PR #381 r1 F2)', () => {
+    it('carries the membership, its stream position, and whether the event ends it', () => {
+      expect(readAccessChange(message('ROLE_REVOKED', roleChange))).toMatchObject({
+        change: { membershipId: 'M1', seq: 7, ends: false },
+      });
+      expect(
+        readAccessChange(
+          message('MEMBERSHIP_REVOKED', {
+            membershipId: 'M1',
+            userId: 'U1',
+            organizationId: 'ORG_A',
+            reason: 'x',
+          }),
+        ),
+      ).toMatchObject({ change: { membershipId: 'M1', seq: 7, ends: true } });
+    });
+
+    it.each([
+      [
+        'no sequence: a legacy producer is never ordered by its timestamp',
+        { streamSeq: undefined, streamKey: undefined },
+      ],
+      ['a sequence without its stream', { streamKey: undefined }],
+      ['a stream without its sequence', { streamSeq: undefined }],
+      ['a stream that is not the aggregate', { streamKey: 'M9' }],
+      ['an aggregate that is not the payload membership', { aggregateId: 'M9', streamKey: 'M9' }],
+      ['an aggregate type other than Membership', { aggregateType: 'User' }],
+      ['a zero sequence', { streamSeq: 0 }],
+      ['a sequence that is not an integer', { streamSeq: 1.5 }],
+    ])('unreadable: %s', (_label, overrides) => {
+      expect(readAccessChange(message('ROLE_REVOKED', roleChange, overrides))).toEqual({
+        outcome: 'unreadable',
+        eventName: 'ROLE_REVOKED',
+      });
+    });
+
+    it('unreadable: a payload without the membership', () => {
+      const { membershipId: _membershipId, ...withoutMembership } = roleChange;
+      expect(readAccessChange(message('ROLE_REVOKED', withoutMembership))).toEqual({
         outcome: 'unreadable',
         eventName: 'ROLE_REVOKED',
       });

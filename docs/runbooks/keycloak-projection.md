@@ -151,7 +151,8 @@ Keycloak تصمیم اپراتور است.
 `rasta_gateway_revocation_feed_staleness_seconds` بالای `GATEWAY_REVOCATION_MAX_STALENESS_SECONDS`، یا `degraded` شامل
 `revocation-list` در `/health/ready` یعنی هر درخواست مستاجردار `503` می‌گیرد؛ نخست دسترسی Gateway به بروکر و
 `rasta_gateway_revocation_feed_lag_records` را ببینید، سپس Log «could not be applied» (Partition و Offset پیام ناخوانا؛ نگه‌داشتن
-پس از پنجره‌ی ۹۱۱ ثانیه خودش برداشته می‌شود). طراحی: افزوده‌ی فهرست ابطال در ADR-060.
+پس از پنجره‌ی ۹۱۱ ثانیه خودش برداشته می‌شود). رویداد عضویت بی `streamSeq` و `streamKey` (تولیدکننده‌ی پیش از ADR-051 B3) هم
+ناخواناست: Gateway آن را به Timestamp مرتب نمی‌کند. طراحی: افزوده‌ی فهرست ابطال در ADR-060.
 
 ## چیزی که این Runbook پوشش نمی‌دهد
 
