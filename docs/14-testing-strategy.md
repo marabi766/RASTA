@@ -584,6 +584,14 @@ Migration نخستش `down.sql` ندارد (مثل `identity`) از این را�
 یک فایل است، نه یک Rollback. برای شکل ۱، افزودن اشیاء تازه به نگاشت `EXPECTED` هم لازم
 است؛ Migrationی که فقط یک Index می‌سازد و نامش در آن نگاشت نیست، **به‌کلی** نامرئی است.
 
+**نکته 2026-10-23 — در CI این سه شکل در چند Job موازی اجرا می‌شوند (task 082).** Job ‏`migration-reversibility-chain`
+یک Matrix است و هر Leg آن، برای گروهی از سرویس‌ها، کل زنجیره را (شکل ۱) روی PostgreSQL خودش بررسی می‌کند؛ شکل ۲ و ۳ و
+گاردهای پایگاه داده در `migration-guards` اجرا می‌شوند. Check الزامی «Migration reversibility and database guards» فقط
+تجمیع این دو است و اگر یکی شکست بخورد یا Skip شود، شکست می‌خورد. سرویس تازه‌ای که Migration دارد باید هم در
+`test:migration` و هم در **یکی** از Shardهای `include` در `.github/workflows/ci.yml` بیاید (در سبک‌ترین Shard)؛ وگرنه
+`scripts/verify-migration-reversible-lib.test.mjs` (با `scripts/ci-migration-reversibility-lib.mjs`) شکست می‌خورد.
+`pnpm test:migration` همچنان همه را پشت سر هم اجرا می‌کند.
+
 ---
 
 ## ۱۴٫۴ تست قرارداد

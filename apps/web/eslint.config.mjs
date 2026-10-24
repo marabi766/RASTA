@@ -48,6 +48,26 @@ export default tseslint.config(
       // its own yet, so the browser console is allowed only for real failures.
       'no-console': ['error', { allow: ['error'] }],
       '@typescript-eslint/no-explicit-any': 'error',
+      // The services' rule, restated (importing the root config here would load
+      // typescript-eslint from two roots): only `env.ts` may use `z.coerce`.
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "MemberExpression[object.name='z'][property.name='coerce']",
+          message:
+            'z.coerce converts unchecked input (a TypeError is a 500). Use numberInput from @rasta/contracts.',
+        },
+        {
+          selector:
+            "ImportDeclaration[source.value=/^zod/] ImportSpecifier[imported.name='coerce']",
+          message:
+            'z.coerce converts unchecked input (a TypeError is a 500). Use numberInput from @rasta/contracts.',
+        },
+      ],
     },
+  },
+  {
+    files: ['**/env.ts'],
+    rules: { 'no-restricted-syntax': 'off' },
   },
 );

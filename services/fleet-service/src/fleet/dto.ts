@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import { cursorPaginationSchema, seedIdSchema, ID_PREFIXES, plainText } from '@rasta/contracts';
+import {
+  cursorPaginationSchema,
+  seedIdSchema,
+  ID_PREFIXES,
+  plainText,
+  numberInput,
+} from '@rasta/contracts';
 
 /**
  * Request and response shapes for fleet.
@@ -348,7 +354,7 @@ export const utilizationQuerySchema = z
     assetId: assetId.optional(),
     from: z.string().datetime().optional(),
     to: z.string().datetime().optional(),
-    limit: z.coerce.number().int().min(1).max(200).default(50),
+    limit: numberInput(z.number().int().min(1).max(200)).default(50),
   })
   .strict();
 

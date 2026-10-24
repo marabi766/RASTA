@@ -1204,3 +1204,12 @@ Consumer هر رکوردی را که با خودش نخواند **رد** می‌
 ۵. تست قرارداد  →  Payload تولیدشده با Schema مطابقت دارد
 ۶. تست Idempotency  →  پردازش دو باره اثر دوم ندارد
 ```
+
+### Q-03 procurement threshold validation (2026-10-23)
+
+`TENDER_PUBLISHED` v1 optionally carries `procurementThresholdPolicyId` when an organization governance
+table was checked, and `procurementThresholdWarning = PROCUREMENT_AMOUNT_OUTSIDE_RANGE` for a WARN
+entry outside its inclusive bounds. These are identifiers and a closed code; no estimate or threshold
+amount is published. The warning and policy id are persisted on the tender in the publication transaction.
+Rejected publication uses the existing `TENDER_APPROVAL_ACTION` refusal audit, with
+`PROCUREMENT_AMOUNT_OUTSIDE_RANGE` or `PROCUREMENT_ESTIMATE_REQUIRED` as its refusal code.

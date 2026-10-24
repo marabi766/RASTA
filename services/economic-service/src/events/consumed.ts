@@ -83,6 +83,13 @@ const amountMinor = z.string().regex(/^\d{1,30}$/);
  *   `costBreakdown`            carried for audit. Not used to compute
  *                              anything — the total is authoritative.
  */
+/**
+ * maintenance-service sums the breakdown by cost category, so it has one row
+ * per category: five today (`COST_CATEGORIES`, maintenance `dto.ts`). Ten
+ * times that leaves room for categories added later.
+ */
+export const MAX_COST_BREAKDOWN_ROWS = 50;
+
 export const maintenanceApprovedSchema = z
   .object({
     requestId: z.string().min(1),
@@ -95,6 +102,9 @@ export const maintenanceApprovedSchema = z
     currency: z.string().min(3),
     costBreakdown: z
       .array(z.object({ category: z.string(), amountMinor, currency: z.string() }).passthrough())
+      // One row per cost category (five today); the cap only stops a payload
+      // whose length alone makes it a defect (GHSA-mrhx-c7xc-m3w5).
+      .max(MAX_COST_BREAKDOWN_ROWS)
       .optional(),
   })
   .passthrough();

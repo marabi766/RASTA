@@ -31,17 +31,20 @@ import {
 } from './maintenance/maintenance-facts.consumer';
 import { DashboardService } from './maintenance/dashboard.service';
 import { DashboardController } from './maintenance/dashboard.controller';
+import { KpiController } from './kpis/kpi.controller';
+import { KpiService, KPI_VALUE_READERS, kpiValueReaders } from './kpis/kpi.service';
+import { KpiRepository } from './kpis/kpi.repository';
 import { HealthController, MetricsController } from './health/health.controller';
 import { ENV, LOGGER } from './tokens';
 import { loadAnalyticsEnv, SERVICE_NAME, type AnalyticsEnv } from './config/env';
 
 /**
- * analytics-service wiring (RUN-001 PR 1, ADR-071).
+ * analytics-service wiring (RUN-001 PR 2, ADR-071).
  *
  * ## A consumer and a read API — no outbox, no write route
  *
  * One projection (`analytics-service.maintenance-facts`: `MAINTENANCE_COMPLETED` →
- * `fact_maintenance`) and one tenant dashboard that reads it. This service publishes no domain
+ * `fact_maintenance`), its tenant dashboard and the tenant KPI reads. This service publishes no domain
  * event (`docs/04` § 4.15: "only a consumer"), so it owns no `outbox_message` and runs no relay;
  * on shutdown only the projection drains, by the deadline, before the database disconnects
  * (`onModuleDestroy` below). The only topic it writes is its own dead-letter topic. No
@@ -59,7 +62,7 @@ import { loadAnalyticsEnv, SERVICE_NAME, type AnalyticsEnv } from './config/env'
  * (AGENTS.md A-12, S-02), which only the probes and the metrics scrape target do.
  */
 @Module({
-  controllers: [DashboardController, HealthController, MetricsController],
+  controllers: [DashboardController, KpiController, HealthController, MetricsController],
   providers: [
     { provide: ENV, useFactory: (): AnalyticsEnv => loadAnalyticsEnv() },
 
@@ -89,6 +92,9 @@ import { loadAnalyticsEnv, SERVICE_NAME, type AnalyticsEnv } from './config/env'
     DashboardAccess,
     MaintenanceFactRepository,
     DashboardService,
+    KpiRepository,
+    KpiService,
+    { provide: KPI_VALUE_READERS, useValue: kpiValueReaders },
 
     {
       provide: MaintenanceFactsConsumer,

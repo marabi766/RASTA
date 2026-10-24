@@ -6,6 +6,7 @@ import {
   type MiddlewareConsumer,
   type NestModule,
 } from '@nestjs/common';
+import { inspect } from 'node:util';
 import request from 'supertest';
 import { AllExceptionsFilter, runWithContext } from '@rasta/nest-common';
 import { MaintenanceRepository } from '../src/maintenance/maintenance.repository';
@@ -46,6 +47,8 @@ describe('repair-order writes under an Idempotency-Key', () => {
   let store: IdempotencyStore;
   let controller: RepairOrderController;
   let http: INestApplication;
+  /** The filter's logger: every line an HTTP refusal or failure writes. */
+  const filterLogger = { error: jest.fn(), warn: jest.fn(), info: jest.fn(), debug: jest.fn() };
 
   const org = tenants();
   const workshop = 'ORG-ITEST-WORKSHOP';
@@ -97,14 +100,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
     const moduleRef = await Test.createTestingModule({ imports: [HttpModule] }).compile();
     http = moduleRef.createNestApplication();
     http.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
-    http.useGlobalFilters(
-      new AllExceptionsFilter({
-        error: jest.fn(),
-        warn: jest.fn(),
-        info: jest.fn(),
-        debug: jest.fn(),
-      } as never),
-    );
+    http.useGlobalFilters(new AllExceptionsFilter(filterLogger as never));
     await http.init();
   });
 
@@ -816,6 +812,116 @@ describe('repair-order writes under an Idempotency-Key', () => {
       });
       expect(await costRows(second.id)).toEqual([]);
       expect((await totals(first.orderId)).request_total).toBe(MAX);
+    });
+  });
+
+  /**
+   * Task 011: the bound's refinement ran after the pattern had failed and `BigInt('1.5')` threw
+   * out of the validation pipe — a 500 for each of the three writes that take an amount, with
+   * the client's text in the error log. Through the real controller, pipe and filter over the
+   * database: the refusal leaves no line, no key and no event, and the corrected form under the
+   * same Idempotency-Key is recorded once.
+   */
+  describe('a malformed amount', () => {
+    const SENTINEL = 'private-invoice-reference-123';
+    const WRITES = [
+      {
+        verb: 'costs',
+        field: 'amountMinor',
+        body: () => charge(),
+        good: '500000',
+        event: 'REPAIR_COST_RECORDED',
+      },
+      {
+        verb: 'parts',
+        field: 'unitCostMinor',
+        body: () => part(),
+        good: '250000',
+        event: 'REPAIR_PART_RECORDED',
+      },
+      {
+        verb: 'labour',
+        field: 'hourlyRateMinor',
+        body: () => labour(),
+        good: '800000',
+        event: 'REPAIR_LABOUR_RECORDED',
+      },
+    ] as const;
+
+    describe.each(WRITES)(
+      'POST /v1/repair-orders/{id}/$verb',
+      ({ verb, field, body, good, event }) => {
+        it.each([
+          ['a fraction', '1.5'],
+          ['letters', 'abc'],
+          ['nothing', ''],
+          ['free text', SENTINEL],
+        ])('refuses %s with the standard 400 and writes nothing', async (_label, value) => {
+          const { orderId } = await order();
+          const key = id('KEY');
+          for (const level of Object.values(filterLogger)) level.mockClear();
+
+          const refused = await request(http.getHttpServer())
+            .post(`/v1/repair-orders/${orderId}/${verb}`)
+            .set('Idempotency-Key', key)
+            .send({ ...body(), [field]: value });
+
+          expect(refused.status).toBe(400);
+          expect(refused.body).toEqual({
+            code: 'VALIDATION_FAILED',
+            message: expect.any(String),
+            details: [
+              {
+                path: field,
+                code: 'invalid_string',
+                message: 'Amount must be a non-negative integer string in minor units',
+              },
+            ],
+            correlationId: expect.any(String),
+            timestamp: expect.any(String),
+          });
+          const logged = Object.values(filterLogger).flatMap((level) => level.mock.calls);
+          expect(logged.length).toBeGreaterThan(0);
+          expect(inspect([refused.body, logged], { depth: null })).not.toContain(SENTINEL);
+          expect(await costRows(orderId)).toEqual([]);
+          expect((await totals(orderId)).total).toBe('0');
+          expect(await keyRows(REPAIR_ORDER_ENDPOINTS[verb], key)).toEqual([]);
+          expect(await eventCount(orderId, event)).toBe(0);
+        });
+
+        it('records the corrected form under the same key once, and replays it', async () => {
+          const { orderId } = await order();
+          const key = id('KEY');
+          const post = (value: string) =>
+            request(http.getHttpServer())
+              .post(`/v1/repair-orders/${orderId}/${verb}`)
+              .set('Idempotency-Key', key)
+              .send({ ...body(), [field]: value });
+
+          expect((await post('12.5')).status).toBe(400);
+          const first = await post(good);
+          const replay = await post(good);
+
+          expect(first.status).toBe(201);
+          expect(replay.status).toBe(201);
+          expect(replay.body).toEqual(first.body);
+          expect(await costRows(orderId)).toHaveLength(1);
+          expect(await eventCount(orderId, event)).toBe(1);
+          expect(await keyRows(REPAIR_ORDER_ENDPOINTS[verb], key)).toEqual([
+            { state: 'COMPLETED' },
+          ]);
+        });
+      },
+    );
+
+    it('still keeps another organization’s order out of reach with a good amount', async () => {
+      const { orderId } = await order();
+      const stranger = { organizationId: org.b, userId: 'USR-ITEST-STRANGER' };
+
+      await expect(
+        asActor(stranger, () => controller.recordCost(orderId, charge(), id('KEY'))),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      expect(await costRows(orderId)).toEqual([]);
     });
   });
 });

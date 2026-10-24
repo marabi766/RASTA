@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { plainText } from '@rasta/contracts';
+import { plainText, numberInput } from '@rasta/contracts';
 import { RESPONSIBILITY_ATTRIBUTION } from '../events/events';
 
 /**
@@ -170,7 +170,7 @@ export const listOrdersQuerySchema = z
      */
     role: z.enum(['BUYER', 'SUPPLIER']).default('BUYER'),
     cursor: z.string().optional(),
-    limit: z.coerce.number().int().min(1).max(100).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).default(25),
   })
   .strict();
 

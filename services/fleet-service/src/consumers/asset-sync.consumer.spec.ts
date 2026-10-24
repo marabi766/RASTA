@@ -693,6 +693,35 @@ describe('AssetSyncConsumer', () => {
         ).rejects.toThrow();
         expect(recorded.processed).toHaveLength(0);
       });
+
+      it('dead-letters a retainedCoverages longer than 50 before the marker; the corrected event then applies (GHSA-mrhx-c7xc-m3w5)', async () => {
+        const { consumer, recorded } = buildConsumer({ existing: movingMachine });
+        const tooMany = Array.from({ length: 51 }, () => 'THIRD_PARTY');
+
+        await expect(
+          consumer.handle(transferWith({ ownershipGeneration: 2, retainedCoverages: tooMany })),
+        ).rejects.toMatchObject({ name: 'UnprocessableEventError', reason: 'VALIDATION_FAILED' });
+        expect(recorded.processed).toHaveLength(0);
+        expect(recorded.upserts).toEqual([]);
+
+        // Same event id, corrected by the producer: nothing was marked, so it applies.
+        await consumer.handle(
+          transferWith({ ownershipGeneration: 2, retainedCoverages: ['THIRD_PARTY'] }),
+        );
+        expect(recorded.upserts[0]!.retainedCoverages).toEqual(['THIRD_PARTY']);
+      });
+
+      it('accepts a retainedCoverages of exactly 50', async () => {
+        const { consumer, recorded } = buildConsumer({ existing: movingMachine });
+
+        await consumer.handle(
+          transferWith({
+            ownershipGeneration: 2,
+            retainedCoverages: Array.from({ length: 50 }, () => 'THIRD_PARTY'),
+          }),
+        );
+        expect(recorded.upserts).toHaveLength(1);
+      });
     });
 
     describe('r12: the ownership generation only rises', () => {

@@ -199,11 +199,32 @@ rotate_and_verify_split_logins() {
   echo "    - ${runtime} and ${migrator} each log in with the password just set; no older one remains for ${runtime}"
 }
 
+# grant_service_tables <service> <database> <default|migration>
+# Analytics grants are migration-managed, even for an older caller passing
+# default explicitly. A split re-run must never reopen baseline INSERT.
+grant_service_tables() {
+  local svc="$1" db="$2" mode="$3"
+  local runtime="rasta_${svc}" migrator="rasta_${svc}_migrator"
+  [[ "${svc}" == analytics ]] && mode=migration
+  if [[ "${mode}" == default ]]; then
+    # Exactly DML, whatever the tables held before: an upgraded database's
+    # runtime role held ALL as their owner, and REASSIGN does not carry a
+    # former owner's rights over as grants — but say it rather than rely on it.
+    _svc_split_psql "${db}" "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${runtime}"
+    _svc_split_psql "${db}" "REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM ${runtime}"
+    _svc_split_psql "${db}" "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${runtime}"
+    _svc_split_psql "${db}" "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${runtime}"
+    _svc_split_psql "${db}" "ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${runtime}"
+    _svc_split_psql "${db}" "ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO ${runtime}"
+  fi
+}
+
 # split_service_privileges <service> [database] [default|migration]
 split_service_privileges() {
   local svc="${1:?a service name is required}"
   local db="${2:-rasta_${svc}}"
   local mode="${3:-default}"
+  [[ "${svc}" == analytics ]] && mode=migration
   local runtime="rasta_${svc}"
   local migrator="rasta_${svc}_migrator"
   local password="${ROLE_PASSWORDS[$migrator]:?the ${migrator} password was not resolved (is ${svc} in PRIVILEGE_SPLIT_SERVICES?)}"
@@ -269,17 +290,7 @@ split_service_privileges() {
       END LOOP;
     END \$\$;"
 
-  if [[ "${mode}" == default ]]; then
-    # Exactly DML, whatever the tables held before: an upgraded database's
-    # runtime role held ALL as their owner, and REASSIGN does not carry a
-    # former owner's rights over as grants — but say it rather than rely on it.
-    _svc_split_psql "${db}" "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${runtime}"
-    _svc_split_psql "${db}" "REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM ${runtime}"
-    _svc_split_psql "${db}" "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${runtime}"
-    _svc_split_psql "${db}" "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${runtime}"
-    _svc_split_psql "${db}" "ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${runtime}"
-    _svc_split_psql "${db}" "ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO ${runtime}"
-  fi
+  grant_service_tables "${svc}" "${db}" "${mode}"
 
   # The migration ledger is the migrator's alone, from before the first
   # migration: a runtime role that could write it could mark a guard-creating

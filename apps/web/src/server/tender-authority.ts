@@ -64,6 +64,7 @@ export const AUTHORITY_STEP_SCHEMA = z.object({
       requestId: z.string(),
       tenderVersion: z.number().int(),
       status: z.string(),
+      procurementThresholdWarning: z.literal('PROCUREMENT_AMOUNT_OUTSIDE_RANGE').optional(),
       requestedBy: z.string(),
       bid: z
         .object({
