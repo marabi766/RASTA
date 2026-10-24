@@ -44,20 +44,6 @@ export class IdentityRepository {
   }
 
   /**
-   * Serialises every Keycloak projection of one user, inside the caller's
-   * transaction (ADR-060 § 5).
-   *
-   * A transaction-scoped advisory lock keyed on the user id, held until the
-   * projection's transaction ends. Taken *before* the projection reads the
-   * user's rows, so whichever projection writes last also read last — under
-   * READ COMMITTED it sees every change committed before it took the lock.
-   * The key is a bound parameter hashed by PostgreSQL; nothing is interpolated.
-   */
-  async lockUserProjection(tx: ExtendedPrismaClient, userId: string): Promise<void> {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`keycloak-projection:${userId}`}, 0))`;
-  }
-
-  /**
    * The per-user serialisation point for membership changes and the
    * active-organization switch (global audit L7-14, Codex #114 R1-1).
    *
@@ -77,6 +63,13 @@ export class IdentityRepository {
    * or deactivate, none of which exists yet (D-049) — must take it first, so a
    * disable that commits first is seen and wins, and one that commits after is
    * carried to Keycloak by the projection it triggers.
+   *
+   * And it is the **one lock of every Keycloak writer of the user** (ADR-060,
+   * write-ahead addendum, D-064): a narrowing change's write-ahead, every
+   * projection — after a request, from the outbox event, the backfill, the
+   * re-assertion sweep, an activation — and the orphan repair all take it
+   * before they read what they write. The protocol is stated once, in
+   * `KeycloakProjector`'s header.
    */
   async lockUserMemberships(
     tx: ExtendedPrismaClient,
@@ -86,6 +79,73 @@ export class IdentityRepository {
       SELECT active_organization_id, now() AS now FROM "user" WHERE id = ${userId} FOR UPDATE`;
     const row = rows[0];
     return row ? { activeOrganizationId: row.active_organization_id, now: row.now } : null;
+  }
+
+  /**
+   * What a write-ahead needs of the user it holds the lock of (D-064): the
+   * Keycloak account, and how many seconds remain before an earlier write of
+   * theirs whose answer was lost can no longer land — null when none can. On
+   * the database's clock, the one the mark was set with. Null when there is no
+   * such user.
+   */
+  async keycloakWriteState(
+    tx: ExtendedPrismaClient,
+    userId: string,
+  ): Promise<{ keycloakId: string | null; settlingForSeconds: number | null } | null> {
+    const rows = await tx.$queryRaw<Array<{ keycloak_id: string | null; settling: number | null }>>`
+      SELECT keycloak_id,
+             CASE WHEN keycloak_reassert_at > (clock_timestamp() AT TIME ZONE 'UTC')
+                  THEN CEIL(EXTRACT(EPOCH FROM keycloak_reassert_at
+                                     - (clock_timestamp() AT TIME ZONE 'UTC')))::int
+             END AS settling
+        FROM "user" WHERE id = ${userId} AND deleted_at IS NULL`;
+    const row = rows[0];
+    return row ? { keycloakId: row.keycloak_id, settlingForSeconds: row.settling } : null;
+  }
+
+  /**
+   * Records that Keycloak may disagree with this user's rows (D-064): re-project
+   * them `afterSeconds` from now on the database's clock, and — when that is
+   * in the future — refuse a narrowing change of them until then. Never
+   * brings an existing mark forward: an earlier write that may still land
+   * keeps its later instant. Its own short transaction, run after the one
+   * whose Keycloak write failed has ended, which is why it is a separate
+   * method rather than a statement in that transaction: that one rolled back.
+   */
+  async markKeycloakReassert(userId: string, afterSeconds: number): Promise<void> {
+    await this.client.$executeRaw`
+      UPDATE "user"
+         SET keycloak_reassert_at = GREATEST(
+               keycloak_reassert_at,
+               (clock_timestamp() AT TIME ZONE 'UTC') + make_interval(secs => ${afterSeconds}))
+       WHERE id = ${userId}`;
+  }
+
+  /**
+   * Clears this user's re-assertion mark once it has passed — in the
+   * transaction of a projection that has just written their rows to Keycloak,
+   * under the user lock. A mark still in the future stays: a write of theirs
+   * may yet land, and the sweep re-projects them when it can no longer.
+   */
+  async clearDueKeycloakReassert(tx: ExtendedPrismaClient, userId: string): Promise<void> {
+    await tx.$executeRaw`
+      UPDATE "user" SET keycloak_reassert_at = NULL
+       WHERE id = ${userId}
+         AND keycloak_reassert_at <= (clock_timestamp() AT TIME ZONE 'UTC')`;
+  }
+
+  /**
+   * Users whose re-assertion mark has passed, oldest first — the sweep's input
+   * (`MembershipExpiryScanner`). Platform-wide: a user is not a tenant's.
+   */
+  async findUsersDueKeycloakReassert(take: number): Promise<string[]> {
+    const rows = await this.client.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM "user"
+       WHERE deleted_at IS NULL
+         AND keycloak_reassert_at <= (clock_timestamp() AT TIME ZONE 'UTC')
+       ORDER BY keycloak_reassert_at ASC, id ASC
+       LIMIT ${take}`;
+    return rows.map((row) => row.id);
   }
 
   /**
@@ -293,6 +353,17 @@ export class IdentityRepository {
   }
 
   /**
+   * A membership whatever became of it, revoked included — so a revocation
+   * sent again finds the one it already ended and answers as it did, rather
+   * than 404 (D-064: the caller may not have seen the first answer). Scoped
+   * to the tenant like every membership read.
+   */
+  async findMembershipByIdIncludingRevoked(id: string, tx?: ExtendedPrismaClient) {
+    const db = tx ?? this.client;
+    return db.membership.findFirst({ where: { id } });
+  }
+
+  /**
    * The organizations a user holds a live membership in **now**, with the roles held in
    * each, and the instant that was. "Now" is the **database's** clock, read once for the
    * whole statement: a membership's `validFrom` defaults to the database's `now()`, so
@@ -388,15 +459,42 @@ export class IdentityRepository {
 
   /**
    * Memberships whose `validUntil` has passed and that the expiry sweep has
-   * not yet acted on (ADR-060 § 5), oldest lapse first. Platform-wide: a
+   * not yet acted on (ADR-060 § 5), oldest lapse first, a page at a time:
+   * `after` is the last one of the previous page, so a pass can walk past
+   * lapses it could not handle to the ones behind them. Platform-wide: a
    * membership expires whichever tenant it belongs to.
    */
-  async findLapsedMemberships(now: Date, take: number) {
+  async findLapsedMemberships(
+    now: Date,
+    take: number,
+    after: { validUntil: Date; id: string } | null = null,
+  ) {
     return runUnscoped('the membership expiry sweep covers every organization', () =>
       this.client.membership.findMany({
-        where: { deletedAt: null, lapseHandledAt: null, validUntil: { lte: now } },
+        where: {
+          deletedAt: null,
+          lapseHandledAt: null,
+          validUntil: { lte: now },
+          ...(after
+            ? {
+                OR: [
+                  { validUntil: { gt: after.validUntil } },
+                  { validUntil: after.validUntil, id: { gt: after.id } },
+                ],
+              }
+            : {}),
+        },
         orderBy: [{ validUntil: 'asc' }, { id: 'asc' }],
         take,
+      }),
+    );
+  }
+
+  /** How many lapses are past `validUntil` and not yet acted on: the sweep's backlog. */
+  async countLapsedMemberships(now: Date): Promise<number> {
+    return runUnscoped('the membership expiry backlog covers every organization', () =>
+      this.client.membership.count({
+        where: { deletedAt: null, lapseHandledAt: null, validUntil: { lte: now } },
       }),
     );
   }

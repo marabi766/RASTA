@@ -53,7 +53,9 @@ async function main(): Promise<number> {
       clientSecret: env.KEYCLOAK_BACKEND_CLIENT_SECRET,
       enabled: true,
     });
-    const projector = new KeycloakProjector(repository, keycloak);
+    const projector = new KeycloakProjector(repository, keycloak, {
+      writeSettleSeconds: env.KEYCLOAK_WRITE_SETTLE_SECONDS,
+    });
 
     const report = await runProjectionCommand(mode as ProjectionCommandMode, {
       repository,

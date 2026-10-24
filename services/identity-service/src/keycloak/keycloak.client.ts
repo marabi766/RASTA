@@ -98,6 +98,60 @@ export class KeycloakCreateUnconfirmedError extends RastaError {
   }
 }
 
+/**
+ * A Keycloak write whose outcome nobody can know (D-064): the request may have
+ * reached Keycloak, so it may have been applied — now, or later. Its deadline
+ * passed, the connection broke after it was sent, or something answered 5xx
+ * (Keycloak itself, or a proxy in front of it that may still be forwarding
+ * it). An aborted request is not a cancelled one: aborting stops this side
+ * waiting, and nothing more.
+ *
+ * Distinct from every other failure of a write, which is **confirmed**: the
+ * request provably never arrived (the connection was refused, the name did not
+ * resolve, the token could not be had, the read before it failed) or Keycloak
+ * answered 4xx, refusing it. A caller that needs Keycloak never to end wider
+ * than the database treats this one as "may land at any time"
+ * (`KeycloakProjector`, the re-assertion mark).
+ */
+export class KeycloakWriteUnconfirmedError extends RastaError {
+  constructor(operation: string, reason: 'deadline' | 'connection' | 'server_error') {
+    super(ERROR_CODES.UPSTREAM_UNAVAILABLE, 'A required service is temporarily unavailable', {
+      internalContext: { service: 'keycloak', operation, reason, unconfirmed: true },
+    });
+    this.name = 'KeycloakWriteUnconfirmedError';
+  }
+}
+
+/**
+ * Connection errors that prove the request never left: nothing was connected
+ * to, so nothing can have been applied. Anything else a write ends in — a
+ * deadline, a reset, a socket closed mid-answer — may have been sent.
+ */
+const NEVER_SENT = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+]);
+
+/**
+ * The error's name, read without `instanceof`: the deadline's `TimeoutError`
+ * is a `DOMException`, which need not share this realm's `Error`.
+ */
+function errorName(error: unknown): string {
+  const name = (error as { name?: unknown } | null)?.name;
+  return typeof name === 'string' ? name : '';
+}
+
+function neverSent(error: unknown): boolean {
+  const name = errorName(error);
+  if (name === 'TimeoutError' || name === 'AbortError') return false;
+  const cause = (error as { cause?: { code?: unknown } } | null)?.cause;
+  return typeof cause?.code === 'string' && NEVER_SENT.has(cause.code);
+}
+
 /** A Keycloak user id as the Location header carries it: one path segment, nothing else. */
 const KEYCLOAK_ID = /^[A-Za-z0-9-]{1,64}$/;
 
@@ -226,6 +280,49 @@ export class KeycloakAdminClient {
     );
   }
 
+  /**
+   * One `PUT` to a user, classified for a caller that must know whether it can
+   * have landed (`KeycloakWriteUnconfirmedError`). 2xx: applied. 404: no such
+   * account. Other 4xx, or a failure before anything was sent: refused, and
+   * provably not applied. A deadline, a broken connection or a 5xx: unknown.
+   */
+  private async putUser(
+    keycloakId: string,
+    body: unknown,
+    operation: string,
+    missing: 'not_found' | 'unavailable' = 'not_found',
+  ): Promise<void> {
+    // A token that cannot be had is a failure before anything was sent.
+    const token = await this.accessToken();
+    let response: Response;
+    try {
+      response = await fetch(
+        `${this.options.baseUrl}/admin/realms/${this.options.realm}/users/${keycloakId}`,
+        {
+          method: 'PUT',
+          headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: this.deadline(),
+        },
+      );
+    } catch (error) {
+      if (neverSent(error)) {
+        throw RastaError.upstreamUnavailable('keycloak', { operation, reason: 'unreachable' });
+      }
+      const name = errorName(error);
+      throw new KeycloakWriteUnconfirmedError(
+        operation,
+        name === 'TimeoutError' || name === 'AbortError' ? 'deadline' : 'connection',
+      );
+    }
+    if (response.ok) return;
+    if (response.status >= 500) throw new KeycloakWriteUnconfirmedError(operation, 'server_error');
+    if (response.status === 404 && missing === 'not_found') {
+      throw RastaError.notFound('KeycloakUser', keycloakId);
+    }
+    throw RastaError.upstreamUnavailable('keycloak', { status: response.status, operation });
+  }
+
   // -------------------------------------------------------------------------
   // Operations
   // -------------------------------------------------------------------------
@@ -305,7 +402,8 @@ export class KeycloakAdminClient {
    * any non-platform attribute — and the email is a sign-in and reset
    * identifier in this realm, not display data: `docs/23` D-037.
    *
-   * Throws when the write does not land. Whether that is fatal is the
+   * Throws when the write does not land — `KeycloakWriteUnconfirmedError`
+   * when it may land all the same (`putUser`). Whether that is fatal is the
    * caller's decision (`KeycloakProjector`), not this client's.
    */
   async replacePlatformAttributes(
@@ -321,17 +419,11 @@ export class KeycloakAdminClient {
       ),
     );
 
-    const response = await this.admin(`/users/${keycloakId}`, {
-      method: 'PUT',
-      body: JSON.stringify(platformAttributesWrite(current, { ...others, ...attributes })),
-    });
-
-    if (!response.ok) {
-      throw RastaError.upstreamUnavailable('keycloak', {
-        status: response.status,
-        operation: 'replacePlatformAttributes',
-      });
-    }
+    await this.putUser(
+      keycloakId,
+      platformAttributesWrite(current, { ...others, ...attributes }),
+      'replacePlatformAttributes',
+    );
   }
 
   /**
@@ -380,22 +472,17 @@ export class KeycloakAdminClient {
     if (!this.options.enabled) return;
 
     const current = await this.getUser(keycloakId, 'activateAccount');
-    const response = await this.admin(`/users/${keycloakId}`, {
-      method: 'PUT',
-      body: JSON.stringify({
+    await this.putUser(
+      keycloakId,
+      {
         ...platformAttributesWrite(current, {
           ...(current.attributes ?? {}),
           [ACTIVATION_ATTRIBUTE]: [registrationId],
         }),
         enabled: true,
-      }),
-    });
-    if (!response.ok) {
-      throw RastaError.upstreamUnavailable('keycloak', {
-        status: response.status,
-        operation: 'activateAccount',
-      });
-    }
+      },
+      'activateAccount',
+    );
   }
 
   /** The platform attributes Keycloak currently holds for one user, for reconcile. */
@@ -420,15 +507,9 @@ export class KeycloakAdminClient {
 
   async setEnabled(keycloakId: string | null, enabled: boolean): Promise<void> {
     if (!this.options.enabled || !keycloakId) return;
-
-    const response = await this.admin(`/users/${keycloakId}`, {
-      method: 'PUT',
-      body: JSON.stringify({ enabled }),
-    });
-
-    if (!response.ok) {
-      throw RastaError.upstreamUnavailable('keycloak', { operation: 'setEnabled' });
-    }
+    // A 404 stays an upstream failure here, as it always was: every caller
+    // has just read the account, so its absence is Keycloak changing under it.
+    await this.putUser(keycloakId, { enabled }, 'setEnabled', 'unavailable');
   }
 
   async isHealthy(): Promise<boolean> {

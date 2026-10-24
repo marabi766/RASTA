@@ -82,9 +82,13 @@ describe('Keycloak projection ordering (ADR-060 § 5)', () => {
     await prisma.onModuleDestroy();
   });
 
+  // The user row lock every Keycloak writer takes (D-064): a session of this
+  // database waiting on a lock. Not `pg_locks`, which spans the cluster other
+  // services' suites share.
   const waitingOnProjectionLock = async () => {
     const rows = await prisma.client.$queryRawUnsafe<{ waiting: bigint }[]>(
-      `SELECT count(*) AS waiting FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`,
+      `SELECT count(*) AS waiting FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock'`,
     );
     return Number(rows[0]?.waiting ?? 0) > 0;
   };

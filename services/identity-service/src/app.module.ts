@@ -36,7 +36,11 @@ import { PrismaService } from './prisma/prisma.service';
 import { PrismaOutboxStore } from './outbox/outbox.store';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { KeycloakAdminClient } from './keycloak/keycloak.client';
-import { KeycloakProjector } from './keycloak/keycloak.projector';
+import {
+  KEYCLOAK_PROJECTOR_OPTIONS,
+  KeycloakProjector,
+  type KeycloakProjectorOptions,
+} from './keycloak/keycloak.projector';
 import { KeycloakProjectionConsumer } from './keycloak/keycloak-projection.consumer';
 import { IdentityRepository } from './identity/identity.repository';
 import { IdentityService } from './identity/identity.service';
@@ -156,17 +160,34 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
 
     PrismaOutboxStore,
     IdentityRepository,
+    {
+      provide: KEYCLOAK_PROJECTOR_OPTIONS,
+      inject: [ENV],
+      useFactory: (env: IdentityEnv): KeycloakProjectorOptions => ({
+        writeSettleSeconds: env.KEYCLOAK_WRITE_SETTLE_SECONDS,
+      }),
+    },
     KeycloakProjector,
     IdentityService,
     {
       provide: MembershipExpiryScanner,
-      inject: [ENV, IdentityRepository, IdentityService],
-      useFactory: (env: IdentityEnv, repository: IdentityRepository, identity: IdentityService) =>
-        new MembershipExpiryScanner(repository, identity, {
-          enabled: env.MEMBERSHIP_EXPIRY_SCAN_ENABLED,
-          intervalSeconds: env.MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS,
-          batchSize: env.MEMBERSHIP_EXPIRY_SCAN_BATCH_SIZE,
-        }),
+      inject: [ENV, IdentityRepository, IdentityService, KeycloakProjector],
+      useFactory: (
+        env: IdentityEnv,
+        repository: IdentityRepository,
+        identity: IdentityService,
+        projector: KeycloakProjector,
+      ) =>
+        new MembershipExpiryScanner(
+          repository,
+          identity,
+          {
+            enabled: env.MEMBERSHIP_EXPIRY_SCAN_ENABLED,
+            intervalSeconds: env.MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS,
+            batchSize: env.MEMBERSHIP_EXPIRY_SCAN_BATCH_SIZE,
+          },
+          projector,
+        ),
     },
 
     // The durable half of the Keycloak projection (ADR-060 § 5): re-projects

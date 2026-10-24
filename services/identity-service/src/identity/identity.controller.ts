@@ -138,7 +138,14 @@ export class MembershipController {
   @Post(':id/roles')
   @HttpCode(200)
   @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
-  @ApiOperation({ summary: 'Replace the roles held in this organization' })
+  @ApiOperation({
+    summary: 'Replace the roles held in this organization',
+    description:
+      'A change that removes a role is written to the identity provider before it commits ' +
+      '(ADR-060, D-064). Refused with 503 KEYCLOAK_UNAVAILABLE, nothing changed and no event, ' +
+      'when the provider cannot be written; with `Retry-After` while an earlier unanswered write ' +
+      'of the same user may still land. Sending the same roles again answers the same and emits nothing.',
+  })
   updateRoles(
     @Param('id') id: string,
     @Body(zodPipe(updateMembershipRolesSchema)) dto: UpdateMembershipRolesDto,
@@ -149,7 +156,14 @@ export class MembershipController {
   @Post(':id/revoke')
   @HttpCode(204)
   @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
-  @ApiOperation({ summary: 'Revoke a membership' })
+  @ApiOperation({
+    summary: 'Revoke a membership',
+    description:
+      'Written to the identity provider before it commits (ADR-060, D-064). Refused with ' +
+      '503 KEYCLOAK_UNAVAILABLE, the membership still live and no event, when the provider cannot ' +
+      'be written; with `Retry-After` while an earlier unanswered write of the same user may still ' +
+      'land. Revoking an ended membership again answers 204 and emits nothing.',
+  })
   async revoke(
     @Param('id') id: string,
     @Body(zodPipe(revokeMembershipSchema)) dto: RevokeMembershipDto,

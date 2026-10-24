@@ -279,6 +279,9 @@ const repository = {
   findUserWithMemberships: async () => null,
   findMembership: async () => (lookups.membership ? membershipRow('MBR_x', ['DRIVER']) : null),
   findMembershipById: async (id: string) => membershipRow(id, memberships.get(id) ?? ['DRIVER']),
+  // A revocation also reads an ended membership (sent again, it answers as it did).
+  findMembershipByIdIncludingRevoked: async (id: string) =>
+    membershipRow(id, memberships.get(id) ?? ['DRIVER']),
   listMembershipsForUser: async () => [],
   findOrganizationRefs: async () => [],
   listUsersInOrganization: async () => ({

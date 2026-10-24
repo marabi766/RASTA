@@ -1,0 +1,108 @@
+# Behaviour tests for rules/rasta-identity-alerts.yml.
+#
+#   docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
+#     --entrypoint promtool prom/prometheus:v3.1.0 \
+#     test rules /etc/prometheus/tests/rasta-identity-alerts.test.yml
+#
+# Inputs carry the scrape's job/instance/environment labels so the expected alert also
+# proves which labels the rule keeps (none) and which it drops.
+
+rule_files:
+  - ../rules/rasta-identity-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------------------
+  # RastaIdentityMembershipLapseBacklog
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Two lapses wait from minute 1; one is acted on at 15, the other at 30.
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0 2x13 1x15 0x5'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts: []
+      # Waiting, but not yet for 20 minutes: a lapse the sweep is still backing off.
+      - eval_time: 20m
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: '1 lapsed memberships have not been taken out of Keycloak'
+              description: "The membership expiry sweep has lapses past validUntil that it has not acted on for 20 minutes. identity-service already refuses them, but each stays in the user's Keycloak attributes, and so in new tokens, until its write lands; the gateway's cutoff covers those tokens only once the lapse is acted on and its MEMBERSHIP_EXPIRED is out. The identity-service log names each membership and why it failed (Keycloak refused, unreachable, or a write of the user still settling). This alert deliberately carries none of them."
+              runbook: docs/runbooks/keycloak-projection.md
+      # Every lapse acted on.
+      - eval_time: 31m
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaIdentityKeycloakReassertMarkLost
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Marks stored throughout; one fails at minute 5.
+      - series: 'rasta_identity_keycloak_reassert_marks_total{reason="unconfirmed",outcome="recorded",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0+1x20'
+      - series: 'rasta_identity_keycloak_reassert_marks_total{reason="rolled_back",outcome="failed",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      # Stored marks alone never fire it.
+      - eval_time: 4m
+        alertname: RastaIdentityKeycloakReassertMarkLost
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: RastaIdentityKeycloakReassertMarkLost
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: 'A Keycloak re-assertion mark could not be stored'
+              description: "identity-service could not record that a user's Keycloak attributes may disagree with the database (a write whose answer was lost, or one that landed in a rolled-back transaction). Until a projection of that user lands, Keycloak may hold more or less than the rows. Run keycloak:reconcile, then keycloak:backfill once the database is healthy. The log names the user; this alert deliberately does not."
+              runbook: docs/runbooks/keycloak-projection.md
+      # Ten minutes on, the failure has left the window.
+      - eval_time: 16m
+        alertname: RastaIdentityKeycloakReassertMarkLost
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaIdentityNarrowingRefused
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Writes land throughout; refusals from minute 2 to 16, then Keycloak is back.
+      - series: 'rasta_identity_keycloak_write_ahead_total{outcome="written",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0+2x30'
+      - series: 'rasta_identity_keycloak_write_ahead_total{outcome="refused",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0 0 1+1x14 15x15'
+      # A single refusal of another kind, long before: an administrator retrying.
+      - series: 'rasta_identity_keycloak_write_ahead_total{outcome="settling",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaIdentityNarrowingRefused
+        exp_alerts: []
+      # Refusing, but not yet for ten minutes.
+      - eval_time: 11m
+        alertname: RastaIdentityNarrowingRefused
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: RastaIdentityNarrowingRefused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Demotions and revocations are being refused: Keycloak cannot be written'
+              description: 'For ten minutes, role removals, revocations or lapses have been refused (503 KEYCLOAK_UNAVAILABLE) because their write to Keycloak was refused, went unanswered, or a lost write of the same user was still settling. Nothing was committed: the old roles still stand in the database and in Keycloak. Restore Keycloak; the requests can be repeated as they are, and the expiry sweep retries on its own.'
+              runbook: docs/runbooks/keycloak-projection.md
+      # Keycloak back at 16: no new refusals within the 5-minute window after 21.
+      - eval_time: 23m
+        alertname: RastaIdentityNarrowingRefused
+        exp_alerts: []

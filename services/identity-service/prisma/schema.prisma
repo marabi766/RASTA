@@ -54,6 +54,11 @@ model User {
   /// account, writes its grants and clears it, once (#219 r2).
   accountActivationPending Boolean @default(false) @map("account_activation_pending")
 
+  /// Keycloak may disagree with this user's rows: re-project at or after this
+  /// instant, and refuse a narrowing change before it (ADR-060, write-ahead
+  /// addendum, D-064). Null when nothing is pending.
+  keycloakReassertAt DateTime? @map("keycloak_reassert_at")
+
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   createdBy String    @map("created_by")
