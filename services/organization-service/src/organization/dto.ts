@@ -4,7 +4,9 @@ import {
   seedIdSchema,
   ID_PREFIXES,
   plainText,
+  withMaxKeys,
   withoutBidiControlDeep,
+  numberInput,
 } from '@rasta/contracts';
 
 /**
@@ -84,10 +86,20 @@ const locationInput = z
 // ---------------------------------------------------------------------------
 
 /**
+ * How many top-level attributes `metadata` may carry. The seeded organizations
+ * use one or two (`role`, `note`, `households`); a hundred is room for a new
+ * type's attributes, not a target. Counted before any entry is parsed
+ * (GHSA-mrhx-c7xc-m3w5, see `withMaxKeys`).
+ */
+export const MAX_METADATA_KEYS = 100;
+
+/**
  * Free-form attributes: any shape, but no bidi control in any key or string
  * value at any depth (#209) — they are stored and shown like any other text.
  */
-const freeFormMetadata = withoutBidiControlDeep(z.record(z.unknown()));
+const freeFormMetadata = withoutBidiControlDeep(
+  withMaxKeys(z.record(z.unknown()), MAX_METADATA_KEYS),
+);
 
 export const createOrganizationSchema = z
   .object({
@@ -214,12 +226,12 @@ export type AddLocationDto = z.infer<typeof addLocationSchema>;
 
 export const nearbyQuerySchema = z
   .object({
-    latitude: z.coerce.number().min(-90).max(90),
-    longitude: z.coerce.number().min(-180).max(180),
+    latitude: numberInput(z.number().min(-90).max(90)),
+    longitude: numberInput(z.number().min(-180).max(180)),
     /** Search radius in metres. Capped so one query cannot scan the country. */
-    radiusMeters: z.coerce.number().int().min(1).max(500_000).default(50_000),
+    radiusMeters: numberInput(z.number().int().min(1).max(500_000)).default(50_000),
     type: organizationTypeSchema.optional(),
-    limit: z.coerce.number().int().min(1).max(100).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).default(25),
   })
   .strict();
 

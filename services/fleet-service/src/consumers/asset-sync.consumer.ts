@@ -1254,10 +1254,14 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
   }
 
   /**
-   * A parked event's dead letter, as the producer published it: the original
-   * envelope under the key the record carried, with the platform headers and
-   * why, from where and after how many attempts (the consumer's own DLQ
-   * headers, {@link deadLetterHeaders}).
+   * A parked event's dead letter: the envelope as stored — re-serialized from
+   * its JSONB column, not the original bytes — under the key the record
+   * carried, with platform headers rebuilt from that envelope rather than the
+   * original record's, and why, from where and after how many attempts (the
+   * consumer's own DLQ headers, {@link deadLetterHeaders}). Only those added
+   * headers are bounded: its size relative to the source record is not
+   * (known escapes (ii) and (iii) in `@rasta/contracts` dead-letter-size.ts;
+   * a refused publication stays in the outbox, PR #378 r4).
    */
   private parkedDeadLetter(
     row: ParkedInsurance,
