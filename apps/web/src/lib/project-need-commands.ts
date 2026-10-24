@@ -1,5 +1,3 @@
-import { z } from 'zod';
-
 import { normalizePersianText, toLatinDigits, toPersianDigits } from './format';
 import { PERSIAN_DECIMAL_SEPARATOR } from './format/codepoints';
 import {
@@ -221,12 +219,16 @@ export const withdrawNeedFormValues = (form: FormData): WithdrawNeedFormValues =
 
 const fa = (value: number): string => toPersianDigits(String(value));
 
-function text(label: string, min: number, max: number) {
-  return z
-    .string()
-    .min(1, `${label} را بنویسید`)
-    .min(min, `${label} دست‌کم ${fa(min)} نویسه باشد`)
-    .max(max, `${label} حداکثر ${fa(max)} نویسه است`);
+/**
+ * The message for a text of the wrong length, or null. Written here and not through Zod: the sentence
+ * is this portal's own Persian one, so no parser reads a Zod message (`form-issues.ts` is the boundary
+ * for the ones that do). Lengths are UTF-16 units of the canonical (LF) text, as the service counts.
+ */
+function lengthMessage(label: string, value: string, min: number, max: number): string | null {
+  if (value.length === 0) return `${label} را بنویسید`;
+  if (value.length < min) return `${label} دست‌کم ${fa(min)} نویسه باشد`;
+  if (value.length > max) return `${label} حداکثر ${fa(max)} نویسه است`;
+  return null;
 }
 
 export const QUANTITY_MESSAGE = `مقدار را به عدد مثبت و با دست‌بالا چهار رقم اعشار بنویسید، برای نمونه ۲۵ یا ۲${PERSIAN_DECIMAL_SEPARATOR}۵ (بدون جداکننده هزارگان)`;
@@ -249,9 +251,12 @@ export function parseQuantity(
   return { ok: true, quantity: canonical };
 }
 
-const needTitleSchema = text('عنوان', MIN_NEED_TITLE_LENGTH, MAX_NEED_TITLE_LENGTH);
-const needDescriptionSchema = text('شرح', MIN_NEED_DESCRIPTION_LENGTH, MAX_NEED_DESCRIPTION_LENGTH);
-const needUnitSchema = text('واحد', MIN_NEED_UNIT_LENGTH, MAX_NEED_UNIT_LENGTH);
+const titleMessage = (value: string) =>
+  lengthMessage('عنوان', value, MIN_NEED_TITLE_LENGTH, MAX_NEED_TITLE_LENGTH);
+const descriptionMessage = (value: string) =>
+  lengthMessage('شرح', value, MIN_NEED_DESCRIPTION_LENGTH, MAX_NEED_DESCRIPTION_LENGTH);
+const unitMessage = (value: string) =>
+  lengthMessage('واحد', value, MIN_NEED_UNIT_LENGTH, MAX_NEED_UNIT_LENGTH);
 
 /** What adding a need sends: the optional fields are left out when empty. */
 export interface AddNeedBody {
@@ -285,10 +290,8 @@ function optionalFields(values: NeedFormValues): {
   if (!quantity.ok) fieldErrors.quantity = quantity.message;
   const estimate = parseEstimate(values.estimatedCost);
   if (!estimate.ok) fieldErrors.estimatedCost = estimate.message;
-  if (values.unit !== '') {
-    const unit = needUnitSchema.safeParse(values.unit);
-    if (!unit.success) fieldErrors.unit = unit.error.issues[0]?.message ?? '';
-  }
+  const unit = values.unit === '' ? null : unitMessage(values.unit);
+  if (unit !== null) fieldErrors.unit = unit;
   return {
     fieldErrors,
     quantity: quantity.ok ? quantity.quantity : null,
@@ -299,10 +302,10 @@ function optionalFields(values: NeedFormValues): {
 
 function requiredIssues(values: NeedFormValues): FieldErrors {
   const fieldErrors: FieldErrors = {};
-  const title = needTitleSchema.safeParse(values.title);
-  if (!title.success) fieldErrors.title = title.error.issues[0]?.message ?? '';
-  const description = needDescriptionSchema.safeParse(values.description);
-  if (!description.success) fieldErrors.description = description.error.issues[0]?.message ?? '';
+  const title = titleMessage(values.title);
+  if (title !== null) fieldErrors.title = title;
+  const description = descriptionMessage(values.description);
+  if (description !== null) fieldErrors.description = description;
   return fieldErrors;
 }
 
@@ -385,12 +388,13 @@ export function parseSubmitNeedForm(): ParsedProjectForm<Record<string, never>, 
 export function parseWithdrawNeedForm(
   values: WithdrawNeedFormValues,
 ): ParsedProjectForm<{ readonly reason: string }, WithdrawNeedField> {
-  const reason = text('دلیل', MIN_NEED_REASON_LENGTH, MAX_NEED_REASON_LENGTH).safeParse(
+  const reason = lengthMessage(
+    'دلیل',
     values.reason,
+    MIN_NEED_REASON_LENGTH,
+    MAX_NEED_REASON_LENGTH,
   );
-  if (!reason.success) {
-    return { ok: false, fieldErrors: { reason: reason.error.issues[0]?.message ?? '' } };
-  }
+  if (reason !== null) return { ok: false, fieldErrors: { reason } };
   return { ok: true, body: { reason: values.reason } };
 }
 
