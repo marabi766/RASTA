@@ -33,10 +33,22 @@ module.exports = {
     {
       // Every suite under `test/` needs a real PostgreSQL with this service's migration applied.
       displayName: 'integration',
+      testPathIgnorePatterns: ['runtime-privileges[.]int-spec[.]ts$'],
       rootDir: __dirname,
       roots: ['<rootDir>/test'],
       testEnvironment: 'node',
       testRegex: '.*\.int-spec\.ts$',
+      transform: swcTransform,
+      setupFiles,
+      clearMocks: true,
+      collectCoverageFrom,
+    },
+    {
+      displayName: 'db-privileges',
+      rootDir: __dirname,
+      roots: ['<rootDir>/test'],
+      testEnvironment: 'node',
+      testMatch: ['**/runtime-privileges.int-spec.ts'],
       transform: swcTransform,
       setupFiles,
       clearMocks: true,
