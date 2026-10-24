@@ -13,7 +13,8 @@ import {
 } from '@rasta/config';
 import { isKekId, parseKekConfiguration, parseKekEntries } from '../tender/sealing/key-provider';
 import { EVIDENCE_MAX_CHAIN_LINKS } from '../tender/evidence-limits';
-import { constructionOperationBudgets } from './operation-budgets';
+import { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
+import { constructionOperationBudgets, replayFenceBudgetMs } from './operation-budgets';
 import {
   CANCELLABLE_BY_LIFECYCLE,
   PROJECT_STATES,
@@ -623,6 +624,18 @@ export const constructionEnvSchema = baseEnvSchema
     CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
 
     /**
+     * The largest offset of any replica's clock from true time, in seconds (PM decision D-065).
+     * The replay fence (`shared/idempotency.ts`) compares one replica's clock with the stored
+     * deadline another replica fixed, so its budget is `B = 2 · skew + margin`: a deadline ends
+     * `B` before its record's expiry and the purge waits `B` after it. Beyond this offset the
+     * fence's guarantee is void — alarm on clock offset above half of it. Out of range is a
+     * startup failure; at its largest (300) the budget is 607 s, under a sixth of the shortest
+     * retention the TTL setting allows (1 hour), so a deadline can never be pushed before its claim
+     * (`env.spec.ts` holds that arithmetic to the bounds).
+     */
+    CONSTRUCTION_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).default(30),
+
+    /**
      * How long one interactive transaction may stay open, BEGIN to COMMIT, before
      * the database client rolls it back (`PrismaService`). Every transaction of
      * this service runs on it unless its caller names its own bound (the
@@ -651,6 +664,22 @@ export const constructionEnvSchema = baseEnvSchema
         code: z.ZodIssueCode.custom,
         path: ['CONSTRUCTION_EVALUATION_MIN_EVALUATORS'],
         message: EVALUATORS_MIN_OVER_MAX,
+      });
+    }
+    // The replay fence refuses a deadline later than claim + TTL − B (shared/idempotency.ts). The
+    // portal's window is capped by the same constant (PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS), so
+    // the service must be able to accept a window of that size on its slowest legal clock:
+    //   TTL − B − skew ≥ K        (B = 2 · skew + margin)
+    // Otherwise an honest client could meet the refusal: fail the boot instead (PM decision D-067).
+    if (replayWindowRoomSeconds(env) < PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['CONSTRUCTION_IDEMPOTENCY_TTL_HOURS'],
+        message:
+          'CONSTRUCTION_IDEMPOTENCY_TTL_HOURS · 3600 − B − CONSTRUCTION_CLOCK_SKEW_SECONDS must be at least ' +
+          `${PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS} s (PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS), ` +
+          'with B = 2 · CONSTRUCTION_CLOCK_SKEW_SECONDS + 7 s: otherwise a portal window its own boot check ' +
+          'accepts could be refused by the replay fence',
       });
     }
     if (
@@ -683,6 +712,24 @@ export const constructionEnvSchema = baseEnvSchema
 export const CONSTRUCTION_ENV_MESSAGES = seal();
 
 export type ConstructionEnv = z.infer<typeof constructionEnvSchema>;
+
+/**
+ * The longest replay window (seconds, portal skew allowance included) this service can accept on its
+ * slowest legal clock: `TTL − B − skew`. The boot check holds it at or above
+ * `PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS`.
+ */
+export function replayWindowRoomSeconds(
+  env: Pick<
+    ConstructionEnv,
+    'CONSTRUCTION_IDEMPOTENCY_TTL_HOURS' | 'CONSTRUCTION_CLOCK_SKEW_SECONDS'
+  >,
+): number {
+  return (
+    env.CONSTRUCTION_IDEMPOTENCY_TTL_HOURS * 3600 -
+    replayFenceBudgetMs(env.CONSTRUCTION_CLOCK_SKEW_SECONDS) / 1000 -
+    env.CONSTRUCTION_CLOCK_SKEW_SECONDS
+  );
+}
 
 /** The narrowed type the service reads, so callers need no casts. */
 export type CancellableStates = readonly ProjectStateName[];

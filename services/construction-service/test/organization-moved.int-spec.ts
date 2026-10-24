@@ -1,3 +1,4 @@
+import { makeDue as makeEligibilityDue } from '@rasta/testing';
 import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
 import { RastaError, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
@@ -135,12 +136,18 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
 
   /** Makes every open task of this suite's organizations due now, and lets its lease lapse. */
   const makeDue = () =>
-    runUnscoped('the suite moves the retry time of its own tasks', () =>
-      w.prisma.client.policyReconciliationTask.updateMany({
+    runUnscoped('the suite moves the retry time of its own tasks', async () => {
+      const tasks = await w.prisma.client.policyReconciliationTask.findMany({
         where: { organizationId: { in: organizations }, status: 'PENDING' },
-        data: { nextAttemptAt: new Date(0), leaseUntil: null, leaseToken: null },
-      }),
-    );
+        select: { id: true },
+      });
+      const ids = tasks.map((task) => task.id);
+      await w.prisma.client.policyReconciliationTask.updateMany({
+        where: { id: { in: ids }, organizationId: { in: organizations }, status: 'PENDING' },
+        data: { leaseUntil: null, leaseToken: null },
+      });
+      await makeEligibilityDue(w.prisma, ids, 'policy_reconciliation_task');
+    });
 
   beforeAll(() => {
     w = wire();
