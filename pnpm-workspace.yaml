@@ -35,7 +35,13 @@ overrides:
   # denial of service. @nestjs/platform-express pins multer 2.2.0 exactly, so
   # the patched release has to come from here.
   # GHSA-3pph-fpjx-jg34 (moderate, 2026-10-05) — 2.4.0 closes it as well.
-  'multer@<2.4.0': '2.4.0'
+  # GHSA-q7qp-rjg7-q26m (high, published 2026-10-23) — multer <2.5.0: a pending
+  # asynchronous fileFilter after request teardown leaves busboy with no error
+  # listener, and its late error crashes the process. No service registers a
+  # multipart route today, but the audit gate is version-based and the fix is
+  # small. 2.5.0 (2026-10-22) is younger than the minimum release age, so it is
+  # named in minimumReleaseAgeExclude below.
+  'multer@<2.5.0': '2.5.0'
   # GHSA-6g55-p6wh-862q and GHSA-r28c-9q8g-f849 — arbitrary file read and path
   # traversal through an attacker-controlled `sourceMappingURL` in a CSS
   # comment. Both are reached only through `next`, which still pins an affected
@@ -83,6 +89,13 @@ overrides:
   # 2026-09-30) is now past the seven-day minimum release age, so the time-boxed
   # audit ignore is replaced by this pin.
   'source-map-js@<1.2.2': '1.2.2'
+  # GHSA-27r3-jxmh-p828 (high, published 2026-10-23) — body-parser <2.4.0: a
+  # compressed body followed by trailing bytes leaves the decoder piped with no
+  # error listener, and its late error crashes the process. Unauthenticated,
+  # before routing: one request takes down any service. 2.4.0 (2026-10-22) is
+  # younger than the minimum release age, so it is named in
+  # minimumReleaseAgeExclude below; this pin keeps that exception to one version.
+  'body-parser@<2.4.0': '2.4.0'
 
 # Advisories that no override can fix yet (no patched release, or the patch is
 # only in a new major that needs a code migration), accepted for a fixed time
@@ -108,7 +121,8 @@ auditConfig:
     # runtime: every service validates request bodies with zod. Bounded by the
     # JSON body limit each service sets in main.ts (16 kb to 512 kb; gateway
     # 256 kb), so one request cannot allocate without limit. RE-CHECK BY
-    # 2026-10-30: the zod 4 migration must be merged and this entry deleted.
+    # 2026-10-30: the zod 4 migration must be merged and this entry deleted,
+    # together with its Trivy twin (CVE-2023-54404) in .trivyignore.services.
     - GHSA-mrhx-c7xc-m3w5
 # A transitive dependency may not arrive from a git URL or a tarball over
 # http. Everything here comes from the registry, and a sub-dependency that
@@ -131,9 +145,24 @@ minimumReleaseAge: 10080
 minimumReleaseAgeStrict: true
 # Named exceptions only — a package that must track the newest release goes
 # here with the advisory or reason that justifies it, pinned to a version so
-# the exception dies with it. Empty today: deepmerge-ts@8.0.2, the security
-# pin that once needed one, aged out of the window on its own.
-minimumReleaseAgeExclude: []
+# the exception dies with it. (deepmerge-ts@8.0.2, an earlier security pin,
+# aged out of the window on its own.)
+minimumReleaseAgeExclude:
+  # GHSA-27r3-jxmh-p828 (see the body-parser override above). 2.4.0 was
+  # published by the expressjs GitHub Actions trusted publisher; its diff from
+  # 2.3.0 was read on 2026-10-23: the fix in lib/read.js plus small refactors,
+  # no new dependency, and every dependency range resolves to releases older
+  # than the window. Remove this entry once 2.4.0 is older than seven days
+  # (2026-10-29).
+  - body-parser@2.4.0
+  # GHSA-q7qp-rjg7-q26m (see the multer override above). 2.5.0 was published by
+  # the expressjs GitHub Actions trusted publisher with SLSA provenance; its diff
+  # from 2.4.0 was read on 2026-10-24: lib/make-middleware.js only (a no-op error
+  # listener kept after teardown, no cleanup entry for a file the engine never
+  # stored, and the fieldSize "max allowed" adjustment applied to busboy's 1MB
+  # default), no new dependency. Remove this entry once 2.5.0 is older than seven
+  # days (2026-10-29).
+  - multer@2.5.0
 
 # Refuse a version whose publish carried weaker trust evidence (no provenance
 # attestation) than an earlier-published version of the same package — the
