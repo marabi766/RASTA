@@ -20,6 +20,7 @@ import {
   reserveUnresolved,
   settleUnresolved,
 } from '@/server/unresolved-request';
+import { MAX_CLOCK_SKEW_MS } from '@/server/unresolved-request-policy';
 
 import {
   CONFIRM_DUPLICATE_FIELD,
@@ -112,9 +113,20 @@ export async function submitCreateProject(
   }
   const { attempt } = reserved;
 
+  // Re-checked right before the dispatch, after the reservation: the process may have been paused
+  // between the reserve and here (a stall, a slow store). UX only — a send this check lets through is
+  // still refused by construction-service if its own clock is past the deadline, which is what makes
+  // the guarantee (D-065). `REFUSED` proves only that THIS attempt did nothing: a retry of an
+  // unresolved request stays unresolved, and only a never-ambiguous first attempt is forgotten.
+  const deadline = reserved.deadline;
+  if (deadline === null || Date.now() + MAX_CLOCK_SKEW_MS > deadline) {
+    await settleUnresolved(attempt, 'REFUSED');
+    return { kind: 'EXPIRED', values };
+  }
+
   let result;
   try {
-    result = await createProject(session, parsed.body, submissionId);
+    result = await createProject(session, parsed.body, submissionId, deadline);
   } catch (error) {
     // Anything unexpected after the request may have gone out: unresolved.
     await settleUnresolved(attempt, 'UNRESOLVED');
@@ -151,6 +163,14 @@ export async function submitCreateProject(
       await settleUnresolved(attempt, 'REFUSED');
       return { kind: 'FAILED', status: 404, correlationId: result.correlationId };
     case 'UNAVAILABLE':
+      // The service's own clock is past the deadline this request carried: refused before it wrote
+      // anything (`REPLAY_WINDOW_CLOSED`). That proves this attempt did nothing — never that an earlier
+      // one did not — so it settles like every refusal (a retry stays unresolved) and the person is
+      // told to check the list first.
+      if (result.replayWindowClosed) {
+        await settleUnresolved(attempt, 'REFUSED');
+        return { kind: 'EXPIRED', values };
+      }
       // The request provably never left this portal: nothing was created, and
       // the hold this attempt made goes (or, for a retry, goes back).
       if (result.neverSent) {

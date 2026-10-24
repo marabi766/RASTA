@@ -23,6 +23,24 @@
  * A purpose that is not in the table is refused (fail closed). Supplier
  * purposes (#366) add their own rows: `retry: false, deadline: 'NONE'`.
  *
+ * ## Who guarantees what (PM decision D-065)
+ *
+ * Timing can never be closed in the portal alone: a clock jump, a paused process or a replica
+ * of the service a minute off all sit between this portal's clocks and the one that expires the
+ * service's idempotency key. So **the owning service is the guarantee**:
+ * `construction-service` compares the replay deadline this portal sends
+ * (`Idempotency-Replay-Deadline`) with the same clock that expires its key, and refuses a later
+ * attempt of the same request with `409 REPLAY_WINDOW_CLOSED` before it writes anything
+ * (`services/construction-service/src/shared/idempotency.ts`). Everything below — the skew
+ * rule, the margin, the re-check before the dispatch — is **UX**: it stops the portal offering
+ * a send the service would refuse, and it must never be read as the safety argument. Two further
+ * rules close the portal's own side of the class:
+ *
+ *   - every refusal (the service's, and this portal's pre-dispatch re-check) proves only that
+ *     THIS attempt did not execute: a request that was unresolved stays unresolved;
+ *   - time never releases a hold: a reservation whose dispatcher did not settle it becomes
+ *     `UNRESOLVED` when its lease ages, never free (`unresolved-request-store.ts`).
+ *
  * ## Clocks: one budget, end to end
  *
  * Four clocks take part: the web replica that signs the stamp (the *issuer*),
@@ -64,6 +82,17 @@ export const MAX_REQUEST_TIMEOUT_MS = 15_000;
 
 /** The smallest replay margin (ms) the boot check accepts. */
 export const MIN_REPLAY_MARGIN_MS = 2 * MAX_CLOCK_SKEW_MS + MAX_REQUEST_TIMEOUT_MS;
+
+/**
+ * The scopes a legacy (`v: 1`) record could have been written for: the first Redis version only ever
+ * held project creates, with no target. A legacy record names no login of its own, so the only proof
+ * that one belongs to the caller is its `bind` equalling the one the caller's session derives for one
+ * of these scopes (`unresolved-request.ts` `purgeUnresolved`). One list, so adding a purpose to the
+ * table does not silently widen what a purge may delete.
+ */
+export const LEGACY_V1_SCOPES: readonly { readonly purpose: string; readonly target?: string }[] = [
+  { purpose: 'project-create' },
+];
 
 export type DeadlineMode = 'REQUIRED' | 'NONE';
 

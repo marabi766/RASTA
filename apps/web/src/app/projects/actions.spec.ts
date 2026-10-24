@@ -219,7 +219,7 @@ describe('what is sent', () => {
       );
     }
     expect(createProject).toHaveBeenCalledTimes(1);
-    const [session, body, key] = createProject.mock.calls[0]!;
+    const [session, body, key, replayDeadline] = createProject.mock.calls[0]!;
     expect(session).toEqual(SESSION);
     expect(body).toEqual({
       title: 'بازسازی پل',
@@ -230,6 +230,10 @@ describe('what is sent', () => {
     });
     expect(key).toBe(submission);
     expect(isBoundSubmissionId(key, SESSION)).toBe(true);
+    // The deadline travels with the key (D-065): the stamp's, a finite instant within its window.
+    expect(Number.isSafeInteger(replayDeadline)).toBe(true);
+    expect(replayDeadline).toBeGreaterThan(Date.now());
+    expect(replayDeadline).toBeLessThanOrEqual(Date.now() + createReplayWindowSeconds() * 1000);
 
     expect(url!.pathname).toBe(`/projects/${PROJECT_ID}`);
     const flash = url!.searchParams.get('flash');
@@ -377,6 +381,130 @@ describe('what comes back', () => {
     });
     await submit(form).catch(() => undefined);
     expect(createProject.mock.calls[1]![2]).toBe(form.get(SUBMISSION_FIELD));
+  });
+});
+
+describe('the owning service is the guarantee; this portal’s timing is only UX (D-065)', () => {
+  const closed = {
+    kind: 'UNAVAILABLE',
+    status: 409,
+    replayWindowClosed: true,
+    correlationId: 'refused-by-clock',
+  };
+  const lost = { kind: 'UNKNOWN_OUTCOME', correlationId: 'lost' };
+  const scope = PROJECT_CREATE_UNRESOLVED;
+  const held = () => readUnresolved(SESSION, scope);
+
+  /** A store whose reserve can be followed by a pause: the process stalls and wakes at `stallTo`. */
+  function stallableStore() {
+    const inner = memoryUnresolvedStore();
+    let stallTo: number | null = null;
+    const store: UnresolvedStore = {
+      ...inner,
+      reserve: async (input) => {
+        const reply = await inner.reserve(input);
+        if (stallTo !== null) jest.spyOn(Date, 'now').mockReturnValue(stallTo);
+        return reply;
+      },
+    };
+    return { store, stallTo: (instant: number | null) => void (stallTo = instant) };
+  }
+  afterEach(() => jest.restoreAllMocks());
+
+  it('a first attempt the service refuses with REPLAY_WINDOW_CLOSED is resolved as refused: nothing is kept, the person is told to check the list', async () => {
+    createProject.mockResolvedValue(closed);
+    expect(await submit(formData())).toMatchObject({ kind: 'EXPIRED' });
+    expect(createProject).toHaveBeenCalledTimes(1);
+    expect(await held()).toEqual({ kind: 'NONE' });
+  });
+
+  it('the same refusal of a RETRY proves only that this attempt did nothing: the request stays unresolved', async () => {
+    createProject.mockResolvedValue(lost);
+    const form = formData();
+    expect(await submit(form)).toMatchObject({ kind: 'UNCONFIRMED' });
+    const before = await held();
+    if (before.kind !== 'PENDING') throw new Error(before.kind);
+
+    createProject.mockResolvedValue(closed);
+    expect(await submit(form)).toMatchObject({ kind: 'EXPIRED' });
+    expect(createProject).toHaveBeenCalledTimes(2);
+    const after = await held();
+    if (after.kind !== 'PENDING') throw new Error(after.kind);
+    expect(after.request).toMatchObject({
+      id: before.request.id,
+      key: before.request.key,
+      inFlight: false,
+    });
+    // And the second dispatch carried the SAME deadline the first one did: it never extends.
+    expect(createProject.mock.calls[1]![3]).toBe(createProject.mock.calls[0]![3]);
+  });
+
+  it('a pause after the reservation (110 s, past the deadline): refused locally, nothing is sent', async () => {
+    const real = Date.now();
+    const window = createReplayWindowSeconds() * 1000;
+    const { store, stallTo } = stallableStore();
+    useUnresolvedStore(store);
+    // The reserve returned, then the process did not run again until after the deadline.
+    stallTo(real + window + 110_000);
+    expect(await submit(formData(VALID, { replay: real }))).toMatchObject({ kind: 'EXPIRED' });
+    jest.restoreAllMocks();
+    expect(createProject).not.toHaveBeenCalled();
+    // A never-ambiguous first attempt that provably did not go out is forgotten.
+    expect(await held()).toEqual({ kind: 'NONE' });
+  });
+
+  it('the same pause on a RETRY keeps the earlier ambiguity: still unresolved, same record, nothing sent', async () => {
+    const { store, stallTo } = stallableStore();
+    useUnresolvedStore(store);
+    createProject.mockResolvedValue(lost);
+    const form = formData();
+    await submit(form);
+    const before = await held();
+    if (before.kind !== 'PENDING') throw new Error(before.kind);
+    createProject.mockClear();
+
+    stallTo(Date.now() + createReplayWindowSeconds() * 1000 + 110_000);
+    expect(await submit(form)).toMatchObject({ kind: 'EXPIRED' });
+    jest.restoreAllMocks();
+    expect(createProject).not.toHaveBeenCalled();
+    const after = await held();
+    if (after.kind !== 'PENDING') throw new Error(after.kind);
+    expect(after.request).toMatchObject({ id: before.request.id, key: before.request.key });
+  });
+
+  it('a Redis clock that jumps 61 s on a live reservation frees nothing: the next dispatch goes out under the SAME key, which the service answers with the first result or 409 in progress', async () => {
+    let jump = 0;
+    useUnresolvedStore(memoryUnresolvedStore(() => Date.now() + jump));
+    // The first dispatch never answers while the second tab submits.
+    createProject.mockReturnValueOnce(new Promise(() => undefined));
+    const form = formData();
+    void submit(form);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(createProject).toHaveBeenCalledTimes(1);
+    const before = await held();
+    if (before.kind !== 'PENDING') throw new Error(before.kind);
+    expect(before.request.inFlight).toBe(true);
+
+    jump = 61_000; // the store's clock: a failover, or a correction
+    createProject.mockResolvedValue(lost);
+    expect(await submit(form)).toMatchObject({ kind: 'UNCONFIRMED' });
+    // Never a fresh key: the same request, the same key, the same deadline.
+    expect(createProject).toHaveBeenCalledTimes(2);
+    expect(createProject.mock.calls[1]![2]).toBe(createProject.mock.calls[0]![2]);
+    expect(createProject.mock.calls[1]![3]).toBe(createProject.mock.calls[0]![3]);
+    const after = await held();
+    if (after.kind !== 'PENDING') throw new Error(after.kind);
+    expect(after.request.key).toBe(before.request.key);
+  });
+
+  it('a pause that still leaves the deadline ahead by more than the skew budget is sent', async () => {
+    const real = Date.now();
+    const { store, stallTo } = stallableStore();
+    useUnresolvedStore(store);
+    stallTo(real + 10_000);
+    createProject.mockResolvedValue(lost);
+    expect(await submit(formData(VALID, { replay: real }))).toMatchObject({ kind: 'UNCONFIRMED' });
+    expect(createProject).toHaveBeenCalledTimes(1);
   });
 });
 

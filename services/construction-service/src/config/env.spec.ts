@@ -13,7 +13,11 @@ import {
   TENDER_OPEN_TIMEOUT_MAX_MS,
   TENDER_OPEN_TIMEOUT_MIN_MS,
 } from './env';
-import { constructionOperationBudgets } from './operation-budgets';
+import {
+  REPLAY_FENCE_MARGIN_MS,
+  constructionOperationBudgets,
+  replayFenceBudgetMs,
+} from './operation-budgets';
 
 /**
  * Configuration parsing, the fallbacks a deployment relies on, and the four
@@ -482,6 +486,24 @@ describe('what is deliberately not configurable', () => {
   it('bounds the idempotency window', () => {
     expect(load().CONSTRUCTION_IDEMPOTENCY_TTL_HOURS).toBe(24);
     expect(() => load({ CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: '0' })).toThrow();
+  });
+
+  it('bounds the clock skew the replay fence budgets for (PM decision D-065)', () => {
+    expect(load().CONSTRUCTION_CLOCK_SKEW_SECONDS).toBe(30);
+    expect(load({ CONSTRUCTION_CLOCK_SKEW_SECONDS: '0' }).CONSTRUCTION_CLOCK_SKEW_SECONDS).toBe(0);
+    expect(load({ CONSTRUCTION_CLOCK_SKEW_SECONDS: '300' }).CONSTRUCTION_CLOCK_SKEW_SECONDS).toBe(
+      300,
+    );
+    for (const bad of ['-1', '301', '1.5', 'x']) {
+      expect(() => load({ CONSTRUCTION_CLOCK_SKEW_SECONDS: bad })).toThrow();
+    }
+  });
+
+  it('the largest budget leaves the shortest retention a usable window: B(max skew) · 2 ≤ 1 hour', () => {
+    // A deadline is claim + TTL − B; with the bounds above it can never be pushed before its claim.
+    expect(replayFenceBudgetMs(300) * 2).toBeLessThanOrEqual(1 * 60 * 60 * 1000);
+    expect(replayFenceBudgetMs(0)).toBe(REPLAY_FENCE_MARGIN_MS);
+    expect(replayFenceBudgetMs(30)).toBe(60_000 + REPLAY_FENCE_MARGIN_MS);
   });
 });
 

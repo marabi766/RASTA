@@ -23,7 +23,10 @@ import {
  *     is sent before it returns `RESERVED`.
  *   - `read`: the record and the store's own time, in one step.
  *   - `settle`: fenced by `(id, attemptId)`. A stale attempt changes nothing.
- *   - `release`: compare-and-delete by the record's `id`.
+ *   - `release`: compare-and-delete by the record's `id` — of an `UNRESOLVED` record only. A
+ *     `RESERVED` one is never deleted by time: if its lease has run out it becomes `UNRESOLVED`
+ *     (ambiguous, `wasUnresolved`) and stays, so a clock that jumped, or a dispatcher that is merely
+ *     slow, can never turn a request that may have been sent into a free key.
  *   - `purge`: a login's records and its capacity set.
  *
  * ## Time: the store's clock decides (unresolved-request-policy.ts)
@@ -49,7 +52,11 @@ import {
  *     and target; `org`/`login`/`purpose`/`target` are stored beside it);
  *   - its purpose's rule (`unresolved-request-policy.ts`): `REQUIRED` means a
  *     finite numeric `deadline`, `NONE` the explicit string `"NONE"`; absence or
- *     `null` is never "no limit".
+ *     `null` is never "no limit";
+ *   - its state against its history: `UNRESOLVED` implies `wasUnresolved` (the four
+ *     state/flag pairs: `RESERVED`+false a first attempt, `RESERVED`+true a retry,
+ *     `UNRESOLVED`+true, and `UNRESOLVED`+false — the only one that cannot be reached,
+ *     therefore corrupt). Reserving an existing unresolved request always keeps the flag.
  * A record that fails is **CORRUPT**: it is returned as such, never rewritten,
  * never deleted, never released into a fresh key, never a reason to send. A
  * read of it is `UNAVAILABLE` ("cannot be checked now"). Purge validates every
@@ -57,7 +64,10 @@ import {
  * member is corrupt or foreign: deletion is irreversible, a purge cannot tell
  * which member is at fault, and holds of a finished login are unreachable (their
  * keys name its csrf) and expire by themselves — so the safe answer is to leave
- * the whole index as it is and report "not purged".
+ * the whole index as it is and report "not purged". A legacy (`v: 1`) member names
+ * no login of its own, so it is deleted only when its `bind` is one the authenticated
+ * session derives itself (`PurgeScope.legacyBinds`); a legacy record in the index
+ * that the session cannot prove is its own — another login's, say — stops the purge.
  *
  * Rolling compatibility: records written by the first Redis version (`v: 1`)
  * have no `purpose`/`org`/`login`/`target`. They are read as the purpose of the
@@ -142,23 +152,37 @@ const commonFields = {
   bind: hex(64),
 };
 
+/**
+ * `UNRESOLVED ⇒ wasUnresolved`: a record only ever becomes unresolved by an ambiguous attempt (or an
+ * aged lease), and the flag remembers that for good. The other three combinations are real states
+ * (fresh `RESERVED`+false, a retry `RESERVED`+true, `UNRESOLVED`+true); `UNRESOLVED`+false cannot be
+ * reached by this code, so a record that says it is corrupt — it would let a refused retry delete the
+ * hold of a request that may have committed (Codex r5 F3). Lua's `validate` makes the same check.
+ */
+const ambiguityRemembered = (record: { state: string; wasUnresolved: boolean }) =>
+  record.state !== 'UNRESOLVED' || record.wasUnresolved;
+
 /** Current records. `deadline` is required: a finite instant, or `"NONE"` for a purpose that has none. */
-const recordV2 = z.strictObject({
-  v: z.literal(2),
-  purpose: z.string().regex(/^[a-z0-9-]{1,40}$/),
-  target: z.string().max(200),
-  org: z.string().min(1).max(300),
-  login: hex(64),
-  deadline: z.union([instant, z.literal('NONE')]),
-  ...commonFields,
-});
+const recordV2 = z
+  .strictObject({
+    v: z.literal(2),
+    purpose: z.string().regex(/^[a-z0-9-]{1,40}$/),
+    target: z.string().max(200),
+    org: z.string().min(1).max(300),
+    login: hex(64),
+    deadline: z.union([instant, z.literal('NONE')]),
+    ...commonFields,
+  })
+  .refine(ambiguityRemembered);
 
 /** Records of the first Redis version: only project creates existed, and every one had a deadline. */
-const recordV1 = z.strictObject({
-  v: z.literal(1),
-  deadline: instant,
-  ...commonFields,
-});
+const recordV1 = z
+  .strictObject({
+    v: z.literal(1),
+    deadline: instant,
+    ...commonFields,
+  })
+  .refine(ambiguityRemembered);
 
 export const storedRecordSchema = z.union([recordV2, recordV1]);
 export type StoredRecord = z.infer<typeof storedRecordSchema>;
@@ -253,6 +277,12 @@ export interface PurgeScope {
   readonly setKey: string;
   readonly org: string;
   readonly login: string;
+  /**
+   * The `bind` of every scope a legacy (`v: 1`) record could have been written for, derived from the
+   * authenticated session. A legacy record carries no login of its own, so this is the only proof a
+   * member is the caller's; a legacy member outside this list is never deleted.
+   */
+  readonly legacyBinds: readonly string[];
 }
 
 export interface UnresolvedStore {
@@ -337,6 +367,8 @@ local function validate(rec, c)
   if rec.ref ~= cjson.null and not isStr(rec.ref, 0, 800) then return false end
   if rec.state ~= 'RESERVED' and rec.state ~= 'UNRESOLVED' then return false end
   if type(rec.wasUnresolved) ~= 'boolean' then return false end
+  -- UNRESOLVED implies wasUnresolved: the one state/flag pair this code can never write.
+  if rec.state == 'UNRESOLVED' and rec.wasUnresolved ~= true then return false end
   if rec.v == 1 then
     if rec.purpose ~= nil or rec.target ~= nil or rec.org ~= nil or rec.login ~= nil then return false end
     if policy.deadline ~= 'REQUIRED' or not isInt(rec.deadline) then return false end
@@ -455,7 +487,9 @@ if policy.deadline == 'REQUIRED' then
     return {'EXPIRED', save(), stamp(now)}
   end
 end
+-- Reserving an unresolved request keeps its ambiguity, whatever the stored flag says.
 rec.state = 'RESERVED'
+rec.wasUnresolved = true
 rec.attemptId = attempt
 rec.reservedAt = now
 return {'RESERVED', save(), '1', stamp(now)}
@@ -503,7 +537,15 @@ if not raw then return 'GONE' end
 local rec = decode(raw)
 if rec == nil or not validate(rec, c) then return 'CORRUPT' end
 if rec.id ~= ARGV[7] then return 'STALE' end
-if rec.state == 'RESERVED' and nowMs() - rec.reservedAt <= tonumber(ARGV[8]) then
+-- Time never releases a hold. A reservation whose dispatcher has not settled it is not "free" because
+-- the lease looks old (a clock that jumped looks the same as a dead process): it becomes UNRESOLVED and
+-- stays; only a person's explicit release of an UNRESOLVED record deletes it.
+if rec.state == 'RESERVED' then
+  if nowMs() - rec.reservedAt > tonumber(ARGV[8]) then
+    rec.state = 'UNRESOLVED'
+    rec.wasUnresolved = true
+    redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
+  end
   return 'IN_PROGRESS'
 end
 redis.call('DEL', KEYS[1])
@@ -512,14 +554,20 @@ return 'RELEASED'
 `;
 
 /**
- * KEYS: login set. ARGV: org, login, policies JSON. Validates EVERY indexed
- * member first; deletes the records and the set only when all are this login's
- * and well-formed (a member whose record is already gone is fine). Otherwise
- * deletes nothing: {'CORRUPT', n}.
+ * KEYS: login set. ARGV: org, login, policies JSON, legacy binds JSON (the `bind` of every legacy
+ * scope, derived from the authenticated session). Validates EVERY indexed member first; deletes the
+ * records and the set only when all are this login's and well-formed (a member whose record is
+ * already gone is fine). A legacy (`v: 1`) record names no login of its own, so it is deleted only
+ * if its `bind` is one the session itself derives; any other is another login's, or unprovable.
+ * Otherwise deletes nothing: {'CORRUPT', n}.
  */
 export const PURGE_SCRIPT = `${LUA_PRELUDE}
-local c = { org = ARGV[1], login = ARGV[2], policies = decode(ARGV[3]) }
-if c.policies == nil then return {'CORRUPT', 0} end
+local c = { org = ARGV[1], login = ARGV[2], policies = decode(ARGV[3]), legacy = decode(ARGV[4]) }
+if c.policies == nil or c.legacy == nil then return {'CORRUPT', 0} end
+local function ownLegacy(bind)
+  for _, b in ipairs(c.legacy) do if b == bind then return true end end
+  return false
+end
 if KEYS[1] ~= PREFIX .. ':org:' .. c.org .. ':pwl:' .. c.login then return {'CORRUPT', 0} end
 local prefix = PREFIX .. ':org:' .. c.org .. ':pw:'
 local members = redis.call('ZRANGE', KEYS[1], 0, -1)
@@ -531,6 +579,7 @@ for _, member in ipairs(members) do
     if rec == nil or not validate(rec, c) or member ~= prefix .. rec.bind then
       return {'CORRUPT', #members}
     end
+    if rec.v == 1 and not ownLegacy(rec.bind) then return {'CORRUPT', #members} end
   end
 end
 for _, member in ipairs(members) do redis.call('DEL', member) end
@@ -686,6 +735,7 @@ export function redisUnresolvedStore(redis: RedisLike): UnresolvedStore {
         scope.org,
         scope.login,
         JSON.stringify(purposePolicies()),
+        JSON.stringify(scope.legacyBinds),
       );
       if (Array.isArray(reply) && reply[0] === 'PURGED') return true;
       if (Array.isArray(reply) && reply[0] === 'CORRUPT') return false;
@@ -831,6 +881,7 @@ export function memoryUnresolvedStore(clock: () => number = Date.now): MemoryUnr
         }
       }
       rec.state = 'RESERVED';
+      rec.wasUnresolved = true;
       rec.attemptId = input.attemptId;
       rec.reservedAt = now;
       save(binding, rec);
@@ -874,7 +925,11 @@ export function memoryUnresolvedStore(clock: () => number = Date.now): MemoryUnr
       if (existing === null) return 'GONE';
       if (existing === 'CORRUPT') throw new UnresolvedStoreUnavailable(new Error('CORRUPT'));
       if (existing.id !== id) return 'STALE';
-      if (existing.state === 'RESERVED' && clock() - existing.reservedAt <= leaseMs) {
+      // Time never releases a hold: an aged reservation turns UNRESOLVED and stays (see RELEASE_SCRIPT).
+      if (existing.state === 'RESERVED') {
+        if (clock() - existing.reservedAt > leaseMs) {
+          save(binding, { ...existing, state: 'UNRESOLVED', wasUnresolved: true });
+        }
         return 'IN_PROGRESS';
       }
       records.delete(binding.recordKey);
@@ -903,6 +958,7 @@ export function memoryUnresolvedStore(clock: () => number = Date.now): MemoryUnr
             valid =
               policy !== null &&
               member === `${prefix}${rec.bind}` &&
+              (rec.v === 1 ? scope.legacyBinds.includes(rec.bind) : true) &&
               (rec.v === 1 ||
                 (rec.org === scope.org &&
                   rec.login === scope.login &&

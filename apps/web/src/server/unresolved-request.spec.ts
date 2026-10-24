@@ -665,7 +665,7 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
       expect(await settleUnresolved(k2.attempt, 'UNRESOLVED')).toBe(true);
     });
 
-    it('a lease that really ran out is released whatever the replica’s clock says', async () => {
+    it('a lease that really ran out turns UNRESOLVED whatever the replica’s clock says — and is released only by a second, knowing press', async () => {
       const s = login();
       await reserved(s, 'K1');
       await backend.advance(INFLIGHT_LEASE_MS + 5 * SECOND);
@@ -673,6 +673,16 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
         const read = await readUnresolved(s, SCOPE);
         if (read.kind !== 'PENDING') throw new Error(read.kind);
         expect(read.request.inFlight).toBe(false);
+        // Time never releases a hold: the first press only records that the dispatch is unaccounted for.
+        expect(await releaseUnresolved(s, SCOPE, releaseToken(s, SCOPE, read.request))).toBe(
+          'IN_PROGRESS',
+        );
+        const { raw } = await onlyRecord(s);
+        expect(JSON.parse(raw)).toMatchObject({
+          key: 'K1',
+          state: 'UNRESOLVED',
+          wasUnresolved: true,
+        });
         expect(await releaseUnresolved(s, SCOPE, releaseToken(s, SCOPE, read.request))).toBe(
           'RELEASED',
         );
@@ -850,6 +860,147 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
       await backend.setRaw(key, bytes);
       expect(await readUnresolved(s, NO_LIMIT)).toEqual({ kind: 'UNAVAILABLE' });
       expect(await backend.getRaw(key)).toBe(bytes);
+    });
+  });
+
+  describe('time never releases a hold (D-065, the Redis clock-jump finding at its source)', () => {
+    it('a clock that jumps 61 s on a one-second-old reservation frees nothing: UNRESOLVED, same key, no fresh key', async () => {
+      const s = login();
+      const first = await reserved(s, 'K1');
+      await backend.advance(61 * SECOND);
+
+      const read = await readUnresolved(s, SCOPE);
+      if (read.kind !== 'PENDING') throw new Error(read.kind);
+      expect(read.request.inFlight).toBe(false);
+      // The person presses "send as new" once: the record turns UNRESOLVED, nothing is deleted.
+      expect(await releaseUnresolved(s, SCOPE, releaseToken(s, SCOPE, read.request))).toBe(
+        'IN_PROGRESS',
+      );
+      expect(JSON.parse((await onlyRecord(s)).raw)).toMatchObject({
+        key: 'K1',
+        state: 'UNRESOLVED',
+        wasUnresolved: true,
+      });
+      // No other key can be minted for this scope: the hold is still K1's.
+      expect(await reserve(s, 'K2')).toMatchObject({ kind: 'HELD', reason: 'OTHER_REQUEST' });
+      // The same request goes again under the SAME key — which the service answers with the first
+      // result, or 409 in progress, never a second project.
+      const retry = await reserve(s, 'K1');
+      expect(retry).toMatchObject({ kind: 'RESERVED', retry: true });
+      // The first dispatch's late word is fenced out and cannot delete the retry's record.
+      expect(await settleUnresolved(first.attempt, 'CONFIRMED')).toBe(false);
+      expect(await held(s)).toMatchObject({ key: 'K1', inFlight: true });
+    });
+
+    it('a reserve past the lease also ends UNRESOLVED, and a refused retry of it does not forget the hold', async () => {
+      const s = login();
+      await reserved(s, 'K1');
+      await backend.advance(INFLIGHT_LEASE_MS + SECOND);
+      const retry = await reserve(s, 'K1');
+      if (retry.kind !== 'RESERVED') throw new Error(retry.kind);
+      expect(await settleUnresolved(retry.attempt, 'REFUSED')).toBe(true);
+      expect(await held(s)).toMatchObject({ key: 'K1', inFlight: false });
+    });
+
+    it('only a dispatch proven not sent, by the attempt that made the record, deletes it', async () => {
+      const s = login();
+      const first = await reserved(s, 'K1');
+      expect(await settleUnresolved(first.attempt, 'NEVER_SENT')).toBe(true);
+      expect(await readUnresolved(s, SCOPE)).toEqual({ kind: 'NONE' });
+    });
+  });
+
+  describe('every refusal proves only that THIS attempt did not execute (D-065)', () => {
+    it.each(['REFUSED', 'NEVER_SENT'] as const)(
+      'a %s retry of an unresolved request leaves it unresolved; a never-ambiguous first attempt is forgotten',
+      async (outcome) => {
+        const s = login();
+        const first = await reserved(s, 'K1');
+        await settleUnresolved(first.attempt, 'UNRESOLVED');
+        const retry = await reserve(s, 'K1');
+        if (retry.kind !== 'RESERVED') throw new Error(retry.kind);
+        expect(await settleUnresolved(retry.attempt, outcome)).toBe(true);
+        expect(await held(s)).toMatchObject({ key: 'K1', inFlight: false });
+        expect(JSON.parse((await onlyRecord(s)).raw)).toMatchObject({
+          state: 'UNRESOLVED',
+          wasUnresolved: true,
+        });
+
+        const t = login();
+        const only = await reserved(t, 'K1');
+        expect(await settleUnresolved(only.attempt, outcome)).toBe(true);
+        expect(await readUnresolved(t, SCOPE)).toEqual({ kind: 'NONE' });
+      },
+    );
+  });
+
+  describe('a record’s state and its ambiguity flag agree (r5 F3)', () => {
+    /** The shape a record of `version` has: v1 has no purpose, target, org or login. */
+    const shaped = (raw: string, version: 1 | 2, state: string, wasUnresolved: boolean) => {
+      const rec = JSON.parse(raw) as Record<string, unknown>;
+      rec.state = state;
+      rec.wasUnresolved = wasUnresolved;
+      if (version === 1) {
+        rec.v = 1;
+        for (const f of ['purpose', 'target', 'org', 'login']) delete rec[f];
+      }
+      return JSON.stringify(rec);
+    };
+    const COMBINATIONS: [state: string, flag: boolean, valid: boolean][] = [
+      ['RESERVED', false, true], // a first attempt in flight
+      ['RESERVED', true, true], // a retry in flight
+      ['UNRESOLVED', true, true], // an ambiguous end
+      ['UNRESOLVED', false, false], // cannot be reached: corrupt
+    ];
+
+    describe.each([2, 1] as const)('a v%i record', (version) => {
+      it.each(COMBINATIONS)('%s with wasUnresolved=%s', async (state, flag, valid) => {
+        const s = login();
+        await reserved(s, 'K1');
+        const { key, raw } = await onlyRecord(s);
+        const bytes = shaped(raw, version, state, flag);
+        await backend.setRaw(key, bytes);
+        const index = await backend.members((await backend.setKeys(s))[0]!);
+
+        const read = await readUnresolved(s, SCOPE);
+        if (valid) {
+          expect(read.kind).toBe('PENDING');
+          return;
+        }
+        // The invalid pair is CORRUPT everywhere: unchanged bytes, nothing sent, nothing freed.
+        expect(read).toEqual({ kind: 'UNAVAILABLE' });
+        for (const key2 of ['K1', 'K2']) {
+          expect(await reserve(s, key2)).toEqual({ kind: 'UNAVAILABLE' });
+        }
+        expect(await purgeUnresolved(s)).toBe(false);
+        expect(await backend.getRaw(key)).toBe(bytes);
+        expect(await backend.members((await backend.setKeys(s))[0]!)).toEqual(index);
+      });
+    });
+
+    it('the reviewer’s scenario: UNRESOLVED with the flag lost cannot be retried and then erased by a refusal', async () => {
+      const s = login();
+      const first = await reserved(s, 'K1');
+      await settleUnresolved(first.attempt, 'UNRESOLVED');
+      const { key, raw } = await onlyRecord(s);
+      const bytes = shaped(raw, 2, 'UNRESOLVED', false);
+      await backend.setRaw(key, bytes);
+      // The retry that used to become RESERVED (flag still false) is refused outright.
+      expect(await reserve(s, 'K1')).toEqual({ kind: 'UNAVAILABLE' });
+      expect(await backend.getRaw(key)).toBe(bytes);
+    });
+
+    it('reserving an unresolved request keeps the flag it had', async () => {
+      const s = login();
+      const first = await reserved(s, 'K1');
+      expect(JSON.parse((await onlyRecord(s)).raw).wasUnresolved).toBe(false);
+      await settleUnresolved(first.attempt, 'UNRESOLVED');
+      const retry = await reserve(s, 'K1');
+      expect(retry).toMatchObject({ kind: 'RESERVED', retry: true });
+      expect(JSON.parse((await onlyRecord(s)).raw)).toMatchObject({
+        state: 'RESERVED',
+        wasUnresolved: true,
+      });
     });
   });
 
@@ -1063,6 +1214,54 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
       const before = await snapshot([...keys, foreignKey], setKey);
       expect(await purgeUnresolved(s)).toBe(false);
       expect(await snapshot([...keys, foreignKey], setKey)).toEqual(before);
+    });
+
+    /** `s`'s record, rewritten in the first Redis version's shape (no purpose, target, org or login). */
+    const asLegacy = (raw: string) => {
+      const rec = JSON.parse(raw) as Record<string, unknown>;
+      rec.v = 1;
+      for (const f of ['purpose', 'target', 'org', 'login']) delete rec[f];
+      return JSON.stringify(rec);
+    };
+
+    it('r5 F2: another login’s LEGACY record in this login’s index is not deleted, and stops the purge', async () => {
+      const a = login();
+      const b = login({ organizationId: a.organizationId });
+      const { keys, setKey } = await threeScopes(a);
+      const bOut = await reserved(b);
+      const bKey = bOut.attempt.binding.recordKey;
+      const legacy = asLegacy((await backend.getRaw(bKey))!);
+      await backend.setRaw(bKey, legacy);
+      await backend.addMember(setKey, bKey);
+      const before = await snapshot([...keys, bKey], setKey);
+
+      expect(await purgeUnresolved(a)).toBe(false);
+
+      // Nothing of B's is deleted; nothing of A's either (all-or-nothing); "not purged" is reported.
+      expect(await snapshot([...keys, bKey], setKey)).toEqual(before);
+      expect(await backend.getRaw(bKey)).toBe(legacy);
+      expect(await held(b)).toMatchObject({ key: 'sub_1' });
+    });
+
+    it('r5 F2: the login’s OWN legacy record — its bind is one the session derives — is purged with the rest', async () => {
+      const a = login();
+      const first = await reserved(a);
+      await settleUnresolved(first.attempt, 'UNRESOLVED');
+      const { key, raw } = await onlyRecord(a);
+      await backend.setRaw(key, asLegacy(raw));
+      expect(await purgeUnresolved(a)).toBe(true);
+      expect(await backend.recordKeys(a)).toEqual([]);
+    });
+
+    it('r5 F2: a legacy record whose bind is a scope the table never wrote as legacy is not provably this login’s', async () => {
+      const a = login();
+      const first = await reserve(a, 'k-z', {}, { purpose: 'z', target: 'z' });
+      if (first.kind !== 'RESERVED') throw new Error(first.kind);
+      const { key, raw } = await onlyRecord(a);
+      const legacy = asLegacy(raw);
+      await backend.setRaw(key, legacy);
+      expect(await purgeUnresolved(a)).toBe(false);
+      expect(await backend.getRaw(key)).toBe(legacy);
     });
 
     it('a member whose record is already gone does not block the purge', async () => {

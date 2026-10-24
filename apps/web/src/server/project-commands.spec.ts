@@ -314,6 +314,8 @@ const problem = (
 
 const S = session();
 const SUBMISSION = 'sub_0123456789abcdef0123456789abcdef0123456789';
+/** The replay deadline a create carries (ms since the epoch): an arbitrary instant. */
+const DEADLINE = 1_900_000_000_123;
 
 describe('what is sent to the gateway', () => {
   const OK = { id: 'PRJ_1' };
@@ -400,11 +402,40 @@ describe('what is sent to the gateway', () => {
       scopeOfWork: 'شرح',
       estimatedCostMinor: '1500000',
     };
-    expect((await createProject(S, body, SUBMISSION, impl)).kind).toBe('CREATED');
+    expect((await createProject(S, body, SUBMISSION, DEADLINE, impl)).kind).toBe('CREATED');
     expect(seen[0]!.url).toBe('http://gateway.test:3000/v1/projects');
     expect(seen[0]!.method).toBe('POST');
     expect(seen[0]!.body).toEqual(body);
     expect(seen[0]!.headers.get('idempotency-key')).toBe(SUBMISSION);
+    // D-065: the owning service compares this with its own clock, so it travels with the key.
+    expect(seen[0]!.headers.get('idempotency-replay-deadline')).toBe(String(DEADLINE));
+  });
+
+  it('create: a 409 REPLAY_WINDOW_CLOSED is a proven refusal of this attempt, not a field message', async () => {
+    const body = {
+      title: 'پل',
+      operationType: 'خاکبرداری',
+      locationDescription: 'کیلومتر ۱۲',
+      scopeOfWork: 'شرح',
+    };
+    const { impl } = gateway(409, problem('REPLAY_WINDOW_CLOSED', 'The time allowed has passed'));
+    expect(await createProject(S, body, SUBMISSION, DEADLINE, impl)).toMatchObject({
+      kind: 'UNAVAILABLE',
+      status: 409,
+      replayWindowClosed: true,
+    });
+    // Any other 409 stays what it was.
+    expect(
+      (
+        await createProject(
+          S,
+          body,
+          SUBMISSION,
+          DEADLINE,
+          gateway(409, problem('CONFLICT', 'x')).impl,
+        )
+      ).kind,
+    ).toBe('INVALID');
   });
 
   it('encodes the ids into the path', async () => {
@@ -458,6 +489,7 @@ describe('what the service says, in fixed Persian words', () => {
         scopeOfWork: 'شرح',
       },
       SUBMISSION,
+      DEADLINE,
       gateway(status, body, headers).impl,
     );
   const start = (status: number, body: unknown) =>

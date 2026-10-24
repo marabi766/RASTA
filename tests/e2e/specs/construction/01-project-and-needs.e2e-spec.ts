@@ -92,6 +92,55 @@ test.describe.serial('construction projects and needs (CON-001 PR 1)', () => {
     expect(ids.filter((id) => id === projectId)).toHaveLength(1);
   });
 
+  test('the replay deadline travels the whole stack: stored on the first claim, a replay inside it, refused past it, nothing created twice (PM D-065)', async ({
+    tenantA,
+  }) => {
+    const key = idempotencyKey('con-fence');
+    const deadline = Date.now() + 60 * 60 * 1000;
+    const first = await tenantA.post('/v1/projects', {
+      idempotencyKey: key,
+      replayDeadline: deadline,
+      body: { ...PROJECT, title: 'Replay fence project' },
+    });
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+    const again = await tenantA.post('/v1/projects', {
+      idempotencyKey: key,
+      replayDeadline: deadline,
+      body: { ...PROJECT, title: 'Replay fence project' },
+    });
+    expect(again.status).toBe(201);
+    expect((again.body as ProjectBody).id).toBe((first.body as ProjectBody).id);
+
+    // A deadline behind the service clock: refused before anything is written.
+    const late = await tenantA.post('/v1/projects', {
+      idempotencyKey: idempotencyKey('con-fence-late'),
+      replayDeadline: Date.now() - 5_000,
+      body: { ...PROJECT, title: 'Replay fence project, late' },
+    });
+    expect(late.status).toBe(409);
+    expect(errorCode(late.body)).toBe('REPLAY_WINDOW_CLOSED');
+
+    // Not one canonical integer, or no key beside it: 400, nothing claimed.
+    for (const value of ['0123', '1.5', '1e12', '-4']) {
+      const bad = await tenantA.post('/v1/projects', {
+        idempotencyKey: idempotencyKey('con-fence-bad'),
+        replayDeadline: value,
+        body: PROJECT,
+      });
+      expect(bad.status, value).toBe(400);
+    }
+    const keyless = await tenantA.post('/v1/projects', {
+      replayDeadline: deadline,
+      body: PROJECT,
+    });
+    expect(keyless.status).toBe(400);
+
+    const list = await tenantA.get('/v1/projects?limit=100');
+    const titles = (list.body as { items: { title: string }[] }).items.map((item) => item.title);
+    expect(titles.filter((title) => title === 'Replay fence project')).toHaveLength(1);
+    expect(titles).not.toContain('Replay fence project, late');
+  });
+
   test('a project and its need walk their lifecycle', async ({ tenantA }) => {
     const need = await tenantA.post(`/v1/projects/${projectId}/needs`, {
       body: { title: 'Gravel', description: 'Base course for two kilometres' },

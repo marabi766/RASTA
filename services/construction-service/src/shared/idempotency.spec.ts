@@ -4,7 +4,7 @@ import type { Logger } from '@rasta/logging';
 import { AllExceptionsFilter, runWithContext, type RequestContext } from '@rasta/nest-common';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { ConstructionEnv } from '../config/env';
-import { IdempotencyStore, hashRequestBody } from './idempotency';
+import { IdempotencyStore, hashRequestBody, parseReplayDeadline } from './idempotency';
 
 /**
  * The claim's race branches, which a real database hits only by timing: a
@@ -28,7 +28,10 @@ function fakeStore() {
     client: { idempotencyKey: delegate },
     transaction: jest.fn((fn: (client: typeof tx) => Promise<unknown>) => fn(tx)),
   } as unknown as PrismaService;
-  const env = { CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: 24 } as ConstructionEnv;
+  const env = {
+    CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: 24,
+    CONSTRUCTION_CLOCK_SKEW_SECONDS: 30,
+  } as ConstructionEnv;
   return { store: new IdempotencyStore(prisma, env), delegate };
 }
 
@@ -52,6 +55,7 @@ function row(overrides: Record<string, unknown>) {
     state: 'IN_PROGRESS',
     expiresAt: new Date(Date.now() + 60_000),
     responseBody: null,
+    replayDeadlineAt: null,
     ...overrides,
   };
 }
@@ -269,6 +273,52 @@ describe('hashRequestBody — every own key, whatever its name (#194)', () => {
   it('tells a body with a __proto__ key from the same body without it', () => {
     expect(hashRequestBody(JSON.parse('{"a":1,"__proto__":{"b":2}}'))).not.toBe(
       hashRequestBody({ a: 1 }),
+    );
+  });
+});
+
+describe('parseReplayDeadline (the replay fence header, PM decision D-065)', () => {
+  const KEY = 'a-key';
+
+  it('absent is no fence — with or without a key', () => {
+    expect(parseReplayDeadline(undefined, KEY)).toBeUndefined();
+    expect(parseReplayDeadline(undefined, undefined)).toBeUndefined();
+  });
+
+  it.each(['1', '1767225600000', '9007199254740991'])('accepts the canonical integer %s', (raw) => {
+    expect(parseReplayDeadline(raw, KEY)).toBe(Number(raw));
+  });
+
+  it.each([
+    '',
+    ' ',
+    '0',
+    '01',
+    '+1',
+    '-1',
+    '1.0',
+    '1e3',
+    '0x10',
+    '1 2',
+    '١٢٣',
+    '9007199254740992',
+    '12345678901234567',
+    '1767225600000, 1767225600001',
+  ])('refuses %j with 400 before any claim', (raw) => {
+    expect(() => parseReplayDeadline(raw, KEY)).toThrow(
+      expect.objectContaining({ code: 'VALIDATION_FAILED', status: 400 }),
+    );
+  });
+
+  it('refuses a repeated header however the framework hands it over', () => {
+    expect(() => parseReplayDeadline(['1767225600000', '1767225600001'], KEY)).toThrow(
+      expect.objectContaining({ code: 'VALIDATION_FAILED' }),
+    );
+  });
+
+  it('refuses a deadline without an Idempotency-Key: with no key there is nothing to fence', () => {
+    expect(() => parseReplayDeadline('1767225600000', undefined)).toThrow(
+      expect.objectContaining({ code: 'VALIDATION_FAILED' }),
     );
   });
 });

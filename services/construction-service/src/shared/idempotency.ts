@@ -6,7 +6,11 @@ import { isUniqueViolation } from '../shared/prisma-errors';
 import { idempotentReplaysTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
-import { CLAIM_WAIT_MS, WAIT_TRANSACTION_SLACK_MS } from '../config/operation-budgets';
+import {
+  CLAIM_WAIT_MS,
+  WAIT_TRANSACTION_SLACK_MS,
+  replayFenceBudgetMs,
+} from '../config/operation-budgets';
 
 export { CLAIM_WAIT_MS };
 
@@ -79,6 +83,53 @@ export { CLAIM_WAIT_MS };
  */
 
 /**
+ * ## The replay fence (PM decision D-065; project creation only so far)
+ *
+ * An expired key is reusable, which is right for a caller that never asked for more — and wrong for one
+ * that retries a request which may have committed: after the key is gone the same request runs as a
+ * NEW one. No caller can close that alone (clock jumps, paused processes and replica skew all sit
+ * between its clock and this one), so the owning service closes it with its own clock.
+ *
+ * A request may carry `Idempotency-Replay-Deadline` (epoch ms, one canonical safe integer; only with an
+ * `Idempotency-Key`): the last instant it may be executed under that key. Let `C` be the claiming
+ * replica's clock when the key is first claimed, `TTL` the retention and
+ * `B = 2·CONSTRUCTION_CLOCK_SKEW_SECONDS + margin` ({@link replayFenceBudgetMs}). The FIRST claim stores
+ *
+ *     D = min(header, C + TTL − B)          expiresAt = C + TTL            (so  D + B ≤ expiresAt)
+ *
+ * in `replayDeadlineAt`. A header can only narrow: a forged later value is clamped, so it needs no
+ * signature. Afterwards, for a request that matches the stored one (same requester and body — the
+ * actor and tenant checks stay first, so another actor's or tenant's request meets exactly what it met
+ * before):
+ *
+ *   - service-now `>` D  →  `409 REPLAY_WINDOW_CLOSED`, before any write. Never the
+ *     expired → delete → PROCEED path, whether the row is completed, in flight or past `expiresAt`;
+ *   - service-now `≤` D  →  the row is live whatever `expiresAt` says, and answers as always.
+ *
+ * A first claim whose header is already behind service-now is refused the same way, nothing written.
+ * Equality: `now == D` is still allowed; the refusal is strictly `now > D`.
+ *
+ * The purge keeps the row for the fence: it deletes a row carrying a deadline only when
+ * `expiresAt < now − B` (strictly; a row without a deadline as before, `expiresAt < now`).
+ * Retention inequality — every clock within `skew` of true time `t`, B = 2·skew + margin:
+ *
+ *     a request passes the check on clock R ≤ D          ⇒  t ≤ D + skew
+ *     the purge deletes on clock P > expiresAt + B ≥ D + 2B   ⇒  t > D + 2B − skew
+ *     D + skew < D + 2B − skew  ⇔  skew < B           (B = 2·skew + margin, margin > 0)
+ *
+ * so a request that passed the check always still finds its row. The claiming replica's own offset
+ * does not enter: D and `expiresAt` are stored numbers. The stored `expiresAt` and `replayDeadlineAt`
+ * govern: a TTL shortened by configuration never shortens a row that exists, and a purge uses the
+ * skew budget of the day — enough whenever the real offset is within the configured bound.
+ *
+ * What it does NOT cover (stated, not hidden): a request without the header, a row with a null
+ * deadline (written before this fence), a key already purged before it shipped — all behave as before.
+ * The guarantee covers header-carrying requests whose header is at most `C + TTL − B` (the caller's
+ * window must be shorter than the retention; the clamp makes the stored one so, but a later request
+ * claiming a purged key with a larger header meets a first claim).
+ */
+
+/**
  * How a request is stored to be recognised again: by default the unkeyed SHA-256 of its canonical
  * form ({@link hashRequestBody}). An endpoint whose body must say nothing to a reader of the
  * database (a sealed bid's price) brings a keyed one; `matches` compares a stored hash with a
@@ -120,6 +171,38 @@ export function requiredIdempotencyKey(value: string | undefined): string {
   return value.trim();
 }
 
+/** The header the fence reads: epoch milliseconds, canonical (no sign, no leading zero, no space, no exponent). */
+export const REPLAY_DEADLINE_HEADER = 'Idempotency-Replay-Deadline';
+
+const CANONICAL_EPOCH_MS = /^[1-9][0-9]{0,15}$/;
+
+/**
+ * Reads `Idempotency-Replay-Deadline`. Absent → `undefined` (no fence: today's behaviour). Present →
+ * exactly one canonical safe-integer epoch-ms value, with an `Idempotency-Key` beside it; a duplicated
+ * header reaches here comma-joined and fails the canonical form. Anything else is `400`, before any
+ * claim is made: a deadline without a key would run the request with no key to fence.
+ */
+export function parseReplayDeadline(
+  raw: string | string[] | undefined,
+  idempotencyKey: string | undefined,
+): number | undefined {
+  if (raw === undefined) return undefined;
+  const refuse = (message: string): never => {
+    throw RastaError.validation(
+      [{ path: REPLAY_DEADLINE_HEADER, code: 'invalid', message }],
+      `${REPLAY_DEADLINE_HEADER} is invalid`,
+    );
+  };
+  if (typeof raw !== 'string') return refuse('must be sent once');
+  if (!CANONICAL_EPOCH_MS.test(raw)) {
+    return refuse('must be one canonical integer: milliseconds since the epoch');
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) return refuse('must be a safe integer');
+  if (idempotencyKey === undefined) return refuse('is accepted only with an Idempotency-Key');
+  return value;
+}
+
 /**
  * Records the completion inside the caller's domain transaction. `status` is the one the response
  * was answered with, when a command answers more than one (a gated command: 200 executed, 202
@@ -155,6 +238,14 @@ export class IdempotencyStore {
     @Inject(ENV) private readonly env: ConstructionEnv,
   ) {}
 
+  /**
+   * This replica's clock, in ms. The one reading every expiry, deadline and purge of the store goes
+   * through; a test stands in a skewed replica by overriding it.
+   */
+  protected nowMs(): number {
+    return Date.now();
+  }
+
   /** SHA-256 over the canonical form. See {@link hashRequestBody}. */
   hash(body: unknown): string {
     return hashRequestBody(body);
@@ -164,27 +255,42 @@ export class IdempotencyStore {
    * Reserves the key, or reports what to do instead.
    *
    * Returns `PROCEED` with the claim this caller inserted, or `REPLAY` with a
-   * stored response; throws for the two conflict cases, because they are
+   * stored response; throws for the conflict cases, because they are
    * errors rather than outcomes, and when the claim could not be settled in
-   * {@link CLAIM_ATTEMPTS} attempts.
+   * {@link CLAIM_ATTEMPTS} attempts. `replayDeadlineMs` is the caller's
+   * `Idempotency-Replay-Deadline` (see the replay fence above).
    */
   async claim(
     endpoint: string,
     key: string,
     body: unknown,
     hasher: RequestHasher = SHA256_HASHER,
+    replayDeadlineMs?: number,
   ): Promise<{ kind: 'PROCEED'; claim: Claim } | { kind: 'REPLAY'; body: unknown }> {
     const organizationId = getOrganizationId();
     const requestHash = hasher.hash(body);
     const where = { organizationId_endpoint_key: { organizationId, endpoint, key } };
     const deadline = Date.now() + CLAIM_WAIT_MS;
+    const budgetMs = replayFenceBudgetMs(this.env.CONSTRUCTION_CLOCK_SKEW_SECONDS);
 
     for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt += 1) {
-      const now = new Date();
+      const nowMs = this.nowMs();
+      const now = new Date(nowMs);
       const token = randomUUID();
       const expiresAt = new Date(
-        now.getTime() + this.env.CONSTRUCTION_IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000,
+        nowMs + this.env.CONSTRUCTION_IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000,
       );
+
+      // A request whose own deadline is behind this clock is refused before anything is read or
+      // written: it depends on nothing stored, so it discloses nothing about the key.
+      if (replayDeadlineMs !== undefined && nowMs > replayDeadlineMs) {
+        throw this.windowClosed(endpoint);
+      }
+      // D = min(header, C + TTL − B): a header can only narrow (see the replay fence above).
+      const replayDeadlineAt =
+        replayDeadlineMs === undefined
+          ? null
+          : new Date(Math.min(replayDeadlineMs, expiresAt.getTime() - budgetMs));
 
       try {
         await this.withinBudget(endpoint, deadline, (tx) =>
@@ -197,6 +303,7 @@ export class IdempotencyStore {
               claimToken: token,
               state: 'IN_PROGRESS',
               expiresAt,
+              replayDeadlineAt,
             },
           }),
         );
@@ -211,7 +318,21 @@ export class IdempotencyStore {
       // is owned yet: try the insert again rather than proceeding.
       if (!existing) continue;
 
-      if (existing.expiresAt <= now) {
+      const matches = hasher.matches(existing.requestHash, body);
+
+      // The fence: a row that carries a deadline answers the request it stored by that deadline, on this
+      // replica's clock — never by `expiresAt`. Past it: refused, whatever the row's state, and never the
+      // delete-and-proceed below. Before it: live, even if `expiresAt` were behind us. A request that is
+      // not the stored one (another requester, another body) does not meet the fence and gets exactly
+      // what it always got.
+      const storedDeadline =
+        existing.replayDeadlineAt instanceof Date ? existing.replayDeadlineAt : null;
+      const fenced = storedDeadline !== null && matches;
+      if (fenced && nowMs > storedDeadline.getTime()) {
+        throw this.windowClosed(endpoint);
+      }
+
+      if (!fenced && existing.expiresAt <= now) {
         // Only the row that was read, and only while it is still expired: a
         // fresh claim another caller inserted meanwhile is never touched.
         // Waits for a domain transaction still holding it — within the budget only.
@@ -229,7 +350,7 @@ export class IdempotencyStore {
         continue;
       }
 
-      if (!hasher.matches(existing.requestHash, body)) throw this.reused(endpoint);
+      if (!matches) throw this.reused(endpoint);
 
       if (existing.state === 'IN_PROGRESS') throw this.inFlight(endpoint);
 
@@ -333,8 +454,10 @@ export class IdempotencyStore {
     successStatus: number,
     work: (record: RecordCompletion<T>) => Promise<T>,
     hasher?: RequestHasher,
+    replayDeadlineMs?: number,
   ): Promise<T> {
-    return (await this.execute(endpoint, key, body, successStatus, work, hasher)).result;
+    return (await this.execute(endpoint, key, body, successStatus, work, hasher, replayDeadlineMs))
+      .result;
   }
 
   /**
@@ -350,12 +473,13 @@ export class IdempotencyStore {
     successStatus: number,
     work: (record: RecordCompletion<T>) => Promise<T>,
     hasher?: RequestHasher,
+    replayDeadlineMs?: number,
   ): Promise<{ result: T; executed: boolean }> {
     if (key === undefined) {
       return { result: await work(async () => undefined), executed: true };
     }
 
-    const claimed = await this.claim(endpoint, key, body, hasher);
+    const claimed = await this.claim(endpoint, key, body, hasher, replayDeadlineMs);
     if (claimed.kind === 'REPLAY') return { result: claimed.body as T, executed: false };
 
     let recorded = false;
@@ -385,16 +509,26 @@ export class IdempotencyStore {
    *
    * Unscoped, and it has to be: the timer in `app.module.ts` runs outside any
    * request, so there is no tenant in context. Safe because the predicate is
-   * `expiresAt < now` and nothing else — it can only remove records that are
-   * already unusable, and it reads no tenant data. A work still running under
+   * `expiresAt < now` (a row with a replay deadline: `expiresAt < now − B`, so
+   * the fence still finds it — see the replay fence above) and nothing else: it can only remove records
+   * that are already unusable, and it reads no tenant data. A work still running under
    * a purged claim cannot complete it (see {@link complete}).
    */
   async purgeExpired(): Promise<number> {
+    const nowMs = this.nowMs();
+    const beyondFence = new Date(
+      nowMs - replayFenceBudgetMs(this.env.CONSTRUCTION_CLOCK_SKEW_SECONDS),
+    );
     const result = await runUnscoped(
       'expired idempotency records are platform upkeep, deleted by age alone and never by tenant',
       () =>
         this.prisma.client.idempotencyKey.deleteMany({
-          where: { expiresAt: { lt: new Date() } },
+          where: {
+            OR: [
+              { replayDeadlineAt: null, expiresAt: { lt: new Date(nowMs) } },
+              { replayDeadlineAt: { not: null }, expiresAt: { lt: beyondFence } },
+            ],
+          },
         }),
     );
     return result.count;
@@ -412,6 +546,15 @@ export class IdempotencyStore {
       internalContext: { endpoint },
       retryAfterSeconds: IN_FLIGHT_RETRY_AFTER_SECONDS,
     });
+  }
+
+  /** Proven refusal: nothing was written by this attempt. Fixed message, no state of the key. */
+  private windowClosed(endpoint: string): RastaError {
+    return new RastaError(
+      'REPLAY_WINDOW_CLOSED',
+      'The time allowed for this request has passed; this attempt did nothing',
+      { internalContext: { endpoint } },
+    );
   }
 
   private reused(endpoint: string): RastaError {

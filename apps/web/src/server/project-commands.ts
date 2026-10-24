@@ -183,16 +183,22 @@ export type WrittenProject = z.infer<typeof answerSchema>;
 
 const projectPath = (projectId: string): string => `/v1/projects/${encodeURIComponent(projectId)}`;
 
+/**
+ * `replayDeadline` (ms since the epoch) is sent with the key: construction-service refuses an attempt
+ * past it with `409 REPLAY_WINDOW_CLOSED` instead of finding its key expired and creating again.
+ */
 export const createProject = (
   session: WebSession,
   body: ProjectBody,
   submissionId: string,
+  replayDeadline: number,
   fetchImpl?: typeof fetch,
 ): Promise<WriteResult<WrittenProject, ProjectField>> =>
   writeThroughGateway(session, {
     path: '/v1/projects',
     body,
     submissionId,
+    replayDeadline,
     schema: answerSchema,
     mapping: CREATE_FIELD_MAPPING,
     fetchImpl,

@@ -732,6 +732,13 @@ model IdempotencyKey {
   createdAt DateTime @default(now()) @map("created_at")
   expiresAt DateTime @map("expires_at")
 
+  /// Until when this request may still be executed under its key (PM decision D-065): fixed by the FIRST
+  /// claim from the caller's `Idempotency-Replay-Deadline`, clamped to `expiresAt` less the fence budget.
+  /// A later claim past it is refused (`REPLAY_WINDOW_CLOSED`), never run again. Null: no deadline was
+  /// sent (or the record predates the column) and the key behaves as it always did.
+  /// `ck_idempotency_replay_deadline_within_expiry`: never past `expiresAt`.
+  replayDeadlineAt DateTime? @map("replay_deadline_at")
+
   @@id([organizationId, endpoint, key])
   @@index([expiresAt], map: "ix_idempotency_expires")
   @@map("idempotency_key")

@@ -60,6 +60,12 @@ export type WriteResult<T, F extends string> =
       readonly status: number;
       readonly correlationId: string;
       readonly neverSent?: true;
+      /**
+       * The owning service refused because the replay deadline this write carried is behind its own
+       * clock (`409 REPLAY_WINDOW_CLOSED`, PM decision D-065). A proven refusal of THIS attempt: nothing
+       * was written by it. It says nothing about an earlier attempt under the same key.
+       */
+      readonly replayWindowClosed?: true;
     }
   /**
    * Sent, and possibly committed, but not confirmed (Codex post-merge review
@@ -174,6 +180,8 @@ export interface WriteCall<S extends z.ZodTypeAny, F extends string> {
    * would suggest a retry is safe, and it is not.
    */
   readonly submissionId?: string;
+  /** The last instant this write may be executed under its key (needs `submissionId`); see `GatewayCall.replayDeadline`. */
+  readonly replayDeadline?: number;
   /** What the created resource must look like; everything else is dropped. */
   readonly schema: S;
   readonly mapping: FieldMapping<F>;
@@ -200,6 +208,7 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
       body: call.body,
       accessToken: session.accessToken,
       idempotencyKey: call.submissionId,
+      replayDeadline: call.replayDeadline,
       fetchImpl: call.fetchImpl,
     });
 
@@ -226,6 +235,10 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
         ),
         correlationId,
       };
+    }
+    // Before the generic 409 below, which would turn it into a message on a field.
+    if (status === 409 && problem?.code === 'REPLAY_WINDOW_CLOSED') {
+      return { kind: 'UNAVAILABLE', status, correlationId, replayWindowClosed: true };
     }
     if (status === 403) {
       const reasons = (problem?.details ?? []).flatMap((detail) =>

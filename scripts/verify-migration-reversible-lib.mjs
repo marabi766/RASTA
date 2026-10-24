@@ -2709,6 +2709,9 @@ export const EXPECTED = {
       // A completed idempotency key always names the resource it created.
       'ck_idempotency_completed_has_result',
       'ck_idempotency_claim_token_not_blank',
+      // 20261024120000_idempotency_replay_deadline (PM decision D-065): a stored replay deadline never
+      // lies past its record's own expiry.
+      'ck_idempotency_replay_deadline_within_expiry',
       // The tenant-bound foreign key: a need can only reference a project of
       // its own organization.
       'project_need_organization_id_project_id_fkey',

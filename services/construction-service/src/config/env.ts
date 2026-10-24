@@ -586,6 +586,18 @@ export const constructionEnvSchema = baseEnvSchema
     CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
 
     /**
+     * The largest offset of any replica's clock from true time, in seconds (PM decision D-065).
+     * The replay fence (`shared/idempotency.ts`) compares one replica's clock with the stored
+     * deadline another replica fixed, so its budget is `B = 2 · skew + margin`: a deadline ends
+     * `B` before its record's expiry and the purge waits `B` after it. Beyond this offset the
+     * fence's guarantee is void — alarm on clock offset above half of it. Out of range is a
+     * startup failure; at its largest (300) the budget is 607 s, under a sixth of the shortest
+     * retention the TTL setting allows (1 hour), so a deadline can never be pushed before its claim
+     * (`env.spec.ts` holds that arithmetic to the bounds).
+     */
+    CONSTRUCTION_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).default(30),
+
+    /**
      * How long one interactive transaction may stay open, BEGIN to COMMIT, before
      * the database client rolls it back (`PrismaService`). Every transaction of
      * this service runs on it unless its caller names its own bound (the
