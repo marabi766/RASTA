@@ -1,3 +1,4 @@
+import { expireClaim } from '@rasta/testing';
 import {
   claimPendingSql,
   OutboxRelay,
@@ -30,10 +31,10 @@ import type { PrismaService } from '../src/prisma/prisma.service';
  * expiry comparison is PostgreSQL's — all three live in SQL, so testing them
  * against a fake would only assert the fake.
  *
- * Every test is deterministic: no sleeps and no wall-clock races. Expiry is
- * produced by claiming with `leaseSeconds = 0` or by moving `claim_expires_at`
- * into the past, and a long publish is produced by a publisher that does not
- * return until the test releases it.
+ * Cross-statement expiry uses the shared expireClaim helper, one second in
+ * the past, so millisecond rounding cannot leave a fixture in the future.
+ * Exact boundaries use one transaction and the millisecond test clock below.
+ * A long publish is gated until the test releases it; no expiry sleeps are used.
  *
  * The suite owns its own schema (see `outbox-claim.helpers.ts`). `claimPending`
  * is deliberately unscoped and returns the oldest rows in the table, so on a
@@ -99,7 +100,8 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     // delivered. Nothing took the row back, so the token is still the truth.
     await seedRow(a, 'EXPIRED_UNRECLAIMED');
 
-    const claimed = await claim(storeA, 10, 0);
+    const claimed = await claim(storeA, 10);
+    await expireClaim(a, ['EXPIRED_UNRECLAIMED']);
     expect(claimed.rows).toHaveLength(1);
 
     const acknowledged = await storeA.markPublished(['EXPIRED_UNRECLAIMED'], claimed.token!);
@@ -113,7 +115,8 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
   it('3: an expired and reclaimed token cannot acknowledge', async () => {
     await seedRow(a, 'EXPIRED_RECLAIMED');
 
-    const first = await claim(storeA, 10, 0);
+    const first = await claim(storeA, 10);
+    await expireClaim(a, ['EXPIRED_RECLAIMED']);
     const second = await claim(storeB, 10, LEASE, 'worker-b');
     expect(second.rows.map((row) => row.id)).toEqual(['EXPIRED_RECLAIMED']);
 
@@ -127,7 +130,8 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
 
   it('4: a stale claimant cannot markFailed', async () => {
     await seedRow(a, 'STALE_FAIL');
-    const first = await claim(storeA, 10, 0);
+    const first = await claim(storeA, 10);
+    await expireClaim(a, ['STALE_FAIL']);
     await claim(storeB, 10, LEASE, 'worker-b');
 
     const updated = await storeA.markFailed('STALE_FAIL', first.token!, 'boom', BACKOFF);
@@ -142,7 +146,8 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
 
   it('5: a stale claimant cannot release', async () => {
     await seedRow(a, 'STALE_RELEASE');
-    const first = await claim(storeA, 10, 0);
+    const first = await claim(storeA, 10);
+    await expireClaim(a, ['STALE_RELEASE']);
     const second = await claim(storeB, 10, LEASE, 'worker-b');
 
     const released = await storeA.release(['STALE_RELEASE'], first.token!, releaseWithin(5_000));
@@ -157,7 +162,8 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
 
   it('6: a stale claimant cannot renew', async () => {
     await seedRow(a, 'STALE_RENEW');
-    const first = await claim(storeA, 10, 0);
+    const first = await claim(storeA, 10);
+    await expireClaim(a, ['STALE_RENEW']);
     await claim(storeB, 10, LEASE, 'worker-b');
 
     const renewed = await storeA.renew(['STALE_RENEW'], first.token!, LEASE, 5000);
@@ -404,7 +410,7 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
       publisher,
       batchSize: N,
       leaseSeconds: LEASE,
-      backoff: { baseSeconds: 0, maxSeconds: 0 },
+      backoff: BACKOFF,
       logger: silent,
     });
 
@@ -416,7 +422,7 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     expect(distinct.size).toBe(N);
     for (let i = 0; i < N; i += 1) expect(distinct.has(`LOSS${i}`)).toBe(true);
     // At-least-once: attempts may exceed N, and here they do.
-    expect(delivered.length).toBeGreaterThanOrEqual(N);
+    expect(delivered.length).toBeGreaterThan(N);
   });
 
   // -- 16 --------------------------------------------------------------------
@@ -1113,23 +1119,23 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
          AND (claim_expires_at IS NULL OR claim_expires_at <= now())
          AND (next_attempt_at  IS NULL OR next_attempt_at  <= now())`;
 
-    /** The four streams the claim query actually walks. */
-    const STREAMS = `
-      SELECT id FROM outbox_message
-       WHERE published_at IS NULL AND claim_expires_at IS NULL AND next_attempt_at IS NULL
-      UNION ALL
-      SELECT id FROM outbox_message
-       WHERE published_at IS NULL AND next_attempt_at IS NULL
-         AND claim_expires_at IS NOT NULL AND claim_expires_at <= now()
-      UNION ALL
-      SELECT id FROM outbox_message
-       WHERE published_at IS NULL AND claim_expires_at IS NULL
-         AND next_attempt_at IS NOT NULL AND next_attempt_at <= now()
-      UNION ALL
-      SELECT id FROM outbox_message
-       WHERE published_at IS NULL
-         AND claim_expires_at IS NOT NULL AND next_attempt_at IS NOT NULL
-         AND GREATEST(claim_expires_at, next_attempt_at) <= now()`;
+    /** Execute the actual candidate CTEs too: the final re-check can mask a widened stream. */
+    let STREAMS: string;
+    beforeAll(async () => {
+      const capture = jest.fn().mockResolvedValue([]);
+      await claimPendingSql(
+        { $queryRawUnsafe: capture, $executeRawUnsafe: jest.fn() },
+        { limit: 100, owner: 'capture', token: 'capture', leaseSeconds: LEASE },
+      );
+      const statement = capture.mock.calls[0]![0] as string;
+      const candidates = /,\s*candidates AS\s*\(/i.exec(statement);
+      expect(candidates).not.toBeNull();
+      // These fixtures are fewer than 100 rows. Inline only that test limit;
+      // the captured prefix otherwise has no bound parameters or mutations.
+      STREAMS = `${statement.slice(0, candidates!.index).replaceAll('$4', '100')}
+        SELECT id FROM fresh UNION ALL SELECT id FROM lease
+        UNION ALL SELECT id FROM retry UNION ALL SELECT id FROM paired`;
+    });
 
     /** One row per case ADR-050 enumerates, oldest first so the order is fixed. */
     const CASES: Array<{ id: string; sql: string; eligible: boolean }> = [
@@ -1171,6 +1177,18 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
       },
       // Exact equality with the transaction-local millisecond clock below.
       { id: 'EQ9_BOUNDARY_NOW', sql: `'tk', 'ow', now(), NULL, NULL`, eligible: true },
+      { id: 'EQ10_RETRY_NOW', sql: `NULL, NULL, NULL, now(), NULL`, eligible: true },
+      { id: 'EQ11_BOTH_NOW', sql: `'tk', 'ow', now(), now(), NULL`, eligible: true },
+      {
+        id: 'EQ12_LEASE_NEXT_TICK',
+        sql: `'tk', 'ow', now() + interval '1 millisecond', NULL, NULL`,
+        eligible: false,
+      },
+      {
+        id: 'EQ13_RETRY_NEXT_TICK',
+        sql: `NULL, NULL, NULL, now() + interval '1 millisecond', NULL`,
+        eligible: false,
+      },
     ];
 
     const ids = async (tx: OutboxSqlClient, query: string): Promise<string[]> => {
@@ -1186,10 +1204,17 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
      * schema's millisecond clock for this transaction only, leaving both the
      * migrated column and the shared claim SQL unchanged. All other protocol
      * tests use pg_catalog.now() through PostgreSQL's default search path.
+     * The claim SQL must use unqualified now() to resolve this test clock;
+     * pg_catalog.now(), CURRENT_TIMESTAMP and other clock functions bypass it.
      */
     const withCases = async (check: (tx: OutboxSqlClient) => Promise<void>): Promise<void> => {
       await a.client.$transaction(async (tx) => {
         await tx.$executeRawUnsafe(`SET LOCAL search_path TO "${PROTOCOL_SCHEMA}", pg_catalog`);
+        const clock = await tx.$queryRawUnsafe<{ active: boolean }[]>(
+          `SELECT now() <> pg_catalog.now()
+               OR pg_catalog.now() = date_trunc('milliseconds', pg_catalog.now()) AS active`,
+        );
+        expect(clock).toEqual([{ active: true }]);
         for (const [index, testCase] of CASES.entries()) {
           await tx.$executeRawUnsafe(
             `INSERT INTO outbox_message

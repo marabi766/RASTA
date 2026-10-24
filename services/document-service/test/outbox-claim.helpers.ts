@@ -1,3 +1,4 @@
+import { expireClaim } from '@rasta/testing';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl, ownerDatabaseUrl } from './helpers';
 
@@ -179,10 +180,7 @@ export class GatedPublisher {
 
 /** Advances a row's lease into the past without waiting for wall-clock time. */
 export async function expireLease(prisma: PrismaService, id: string): Promise<void> {
-  await prisma.client.$executeRawUnsafe(
-    `UPDATE outbox_message SET claim_expires_at = now() - interval '1 second' WHERE id = $1`,
-    id,
-  );
+  await expireClaim(prisma, [id]);
 }
 
 /** A lock held open on one connection until the test lets it go. */
