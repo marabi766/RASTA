@@ -106,12 +106,22 @@ jobs:
         # $GITHUB_ENV, a job-level env or a launched service; the admin's
         # directory goes to the broker bootstrap and the broker tests alone
         # (reviews of #131).
+        #
+        # And every topic states its planned max.message.bytes; each
+        # dead-letter topic lists its sources and is planned above them by the
+        # added-header bound and the GZIP margin (PR #378 r2 F1, r4 F2), and
+        # create-topics.sh's helpers parse describe output fail-closed. That
+        # headroom is not a guarantee for every dead letter (dead-letter-size.ts
+        # names the known escapes).
         run: |
           pnpm run test:kafka-acl-lib
           pnpm run test:kafka-credential-scope
           pnpm run check:kafka-credential-scope
           pnpm run test:kafka-outbox-tables
           pnpm run test:replay-dlq-lib
+          pnpm run test:kafka-topic-limits-lib
+          pnpm run test:disposable-broker-guard
+          pnpm run check:kafka-topic-limits
 
       - name: Role passwords are distinct and checked before any role changes
         # L7-33: the bootstrap and `pnpm db:rotate-role-passwords` refuse two
@@ -3240,7 +3250,7 @@ jobs:
   broker-authorisation:
     name: Broker authorisation
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     needs: quality
 
     steps:
@@ -3279,14 +3289,28 @@ jobs:
         # a topic's owner writes it, a service reads what it subscribes to
         # under its own group namespace, dead-letter and retry topics, refused
         # credentials and PLAINTEXT, no topic creation, and the idempotent
-        # producer on WRITE alone. Both refuse to run without the bootstrap's
-        # environment rather than skip.
+        # producer on WRITE alone. Last, nothing consuming after them, the
+        # size limits (PR #378 r4, r5): create-topics.sh against topics of its
+        # own, one run after another — a single run never lowering a limit,
+        # effective (inherited) limits read first, unreadable describe output
+        # and a failing alter stopping it, dead-letter topics raised before
+        # sources, a second provisioner caught by the re-read before a write
+        # and the window after it pinned as undetected; it sets the cluster
+        # default message.max.bytes and puts back what was there — and the
+        # known escape (i) pinned: a GZIP level-9 record whose dead letter
+        # does not fit leaves the consumer crashed with its offset uncommitted
+        # (it leaves that record on rasta.organization.v1). Those two refuse
+        # to start without RASTA_DISPOSABLE_BROKER=1, declared here only: this
+        # job's broker is its own (ci-up.sh), thrown away with the runner.
+        # All refuse to run without the bootstrap's environment rather than
+        # skip.
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh admin)"
           eval "${kafka_credentials}"
           pnpm exec turbo run build --filter=@rasta/nest-common
           REPLAY_TEST_DISPOSABLE_BROKER=1 pnpm run test:replay-dlq-broker
           pnpm run test:kafka-acl-broker
+          RASTA_DISPOSABLE_BROKER=1 pnpm run test:kafka-limits-broker
         env:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets
