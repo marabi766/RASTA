@@ -13,6 +13,12 @@ const EXPECTED_GRANTS: Record<string, string[]> = {
   processed_event: ['INSERT', 'SELECT'],
 };
 const OWNER_GRANTS = ['DELETE', 'INSERT', 'REFERENCES', 'SELECT', 'TRIGGER', 'TRUNCATE', 'UPDATE'];
+// Supplier's extension-membership exclusion: CI copies PostGIS tables from
+// template1. They are DBA-owned extension objects, not analytics migrations.
+const NOT_AN_EXTENSION_TABLE = Prisma.sql`NOT EXISTS (
+  SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass
+    AND d.objid = c.oid AND d.deptype = 'e'
+)`;
 const migrations = join(__dirname, '..', 'prisma', 'migrations');
 const privilegeMigration = join(
   migrations,
@@ -120,13 +126,15 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
     }
   });
 
-  it('uses the runtime identity, with every table owned by the migrator', async () => {
+  it('uses the runtime identity, with every analytics table owned by the migrator', async () => {
     expect(await runtime.$queryRaw`SELECT current_user::text AS role`).toEqual([
       { role: 'rasta_analytics' },
     ]);
     expect(
       await runtime.$queryRaw`
-      SELECT DISTINCT tableowner::text AS owner FROM pg_tables WHERE schemaname = 'public'`,
+      SELECT DISTINCT pg_get_userbyid(c.relowner)::text AS owner
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND ${NOT_AN_EXTENSION_TABLE}`,
     ).toEqual([{ owner: 'rasta_analytics_migrator' }]);
   });
 
@@ -137,7 +145,7 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
         array_agg(a.privilege_type ORDER BY a.privilege_type)::text[] AS privileges
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
-      WHERE n.nspname = 'public' AND c.relkind = 'r'
+      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND ${NOT_AN_EXTENSION_TABLE}
       GROUP BY c.relname, a.grantee ORDER BY c.relname, grantee`;
     const expected = Object.entries(EXPECTED_GRANTS).flatMap(([table, privileges]) => [
       ...(privileges.length ? [{ table, grantee: 'rasta_analytics', privileges }] : []),
