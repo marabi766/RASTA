@@ -82,6 +82,15 @@ export const ERROR_CODES = {
   // 5xx
   INTERNAL_ERROR: 'INTERNAL_ERROR',
   UPSTREAM_UNAVAILABLE: 'UPSTREAM_UNAVAILABLE',
+  /**
+   * A change that takes access away — a role removed, a membership revoked
+   * or lapsed — was refused because the identity provider could not be
+   * written first (ADR-060, write-ahead addendum, D-064). Nothing was
+   * committed: the roles or the membership are exactly as they were, and no
+   * event was emitted. The same request may be sent again; once it succeeds
+   * it is idempotent. Never says what the provider answered.
+   */
+  KEYCLOAK_UNAVAILABLE: 'KEYCLOAK_UNAVAILABLE',
   UPSTREAM_TIMEOUT: 'UPSTREAM_TIMEOUT',
   NOT_IMPLEMENTED: 'NOT_IMPLEMENTED',
 } as const;
@@ -145,6 +154,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   RATE_LIMIT_EXCEEDED: 429,
   INTERNAL_ERROR: 500,
   UPSTREAM_UNAVAILABLE: 503,
+  KEYCLOAK_UNAVAILABLE: 503,
   UPSTREAM_TIMEOUT: 504,
   NOT_IMPLEMENTED: 501,
 };

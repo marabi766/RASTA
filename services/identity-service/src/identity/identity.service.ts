@@ -30,11 +30,13 @@ import {
 import { IDENTITY_TOPIC, SERVICE_NAME } from '../config/env';
 import { APPROVAL_TRANSACTION_TIMEOUT_MS } from '../config/operation-budgets';
 import { KeycloakAdminClient, KeycloakCreateUnconfirmedError } from '../keycloak/keycloak.client';
-import { KeycloakProjector } from '../keycloak/keycloak.projector';
+import { KeycloakProjector, USER_LOCK_TRANSACTION_OPTIONS } from '../keycloak/keycloak.projector';
 import {
   grantsAnything,
+  intersectAttributes,
   platformAttributesFor,
   provenanceOnly,
+  type PlatformAttributes,
 } from '../keycloak/platform-attributes';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { markRefusal } from '../security-events/refusal-sites';
@@ -463,6 +465,26 @@ export class IdentityService {
     return toMembershipView(membership);
   }
 
+  /**
+   * Replaces the roles a membership holds.
+   *
+   * A role removed is a narrowing change (ADR-060, write-ahead addendum,
+   * D-064): Keycloak is written **before** commit with what the rows granted
+   * before and after the change, intersected, and the events are enqueued
+   * after that write, so their `occurredAt` — the gateway's cutoff — is later
+   * than every token minted with the removed role. When Keycloak cannot be
+   * written the change is refused, 503 `KEYCLOAK_UNAVAILABLE`, and nothing
+   * commits. A change that only adds roles commits first and is projected
+   * after, as before. A mixed change does both: the roles it keeps are
+   * written ahead, the full new set after commit.
+   *
+   * Decided under the user lock, on the membership as read under it — its
+   * roles, and the caller's right to manage them — never on the read before
+   * the lock, which only picks the user to lock and refuses early. Sending the
+   * same roles again (an administrator who never saw the answer, or behind a
+   * gateway timeout) answers the same and emits nothing: nothing was added or
+   * removed.
+   */
   async updateMembershipRoles(
     membershipId: string,
     dto: UpdateMembershipRolesDto,
@@ -474,112 +496,188 @@ export class IdentityService {
     // refused whether or not the membership they aimed at exists.
     assertMayGrantRoles(dto.roles, this.roleGrants);
 
-    const membership = await this.repository.findMembershipById(membershipId);
-    if (!membership) throw RastaError.notFound('Membership', membershipId);
+    // Tenant-scoped: another organization's membership is a 404 here, before
+    // any lock is taken or Keycloak is called.
+    const seen = await this.repository.findMembershipById(membershipId);
+    if (!seen) throw RastaError.notFound('Membership', membershipId);
 
     // And the other direction: the row may already hold a role above the
     // caller's ladder, which they may not quietly replace with a lesser one.
-    assertMayManageMembershipRoles(membership.roles, this.roleGrants);
+    // Refused early here, and decided again under the lock.
+    assertMayManageMembershipRoles(seen.roles, this.roleGrants);
 
-    const previousRoles = membership.roles;
+    const userId = seen.userId;
     const actor = getContext().userId ?? 'SYSTEM';
+    const writeAhead = this.projector.narrowing(userId);
 
-    const updated = await this.repository.transaction(async (tx) => {
-      // Every membership change for one user takes the same lock first.
-      await this.repository.lockUserMemberships(tx, membership.userId);
+    const updated = await this.repository
+      .transaction(async (tx) => {
+        // Every Keycloak writer and every membership change for one user
+        // takes the same lock first (`KeycloakProjector`, D-064).
+        await this.repository.lockUserMemberships(tx, userId);
 
-      const result = await tx.membership.update({
-        where: { id: membershipId },
-        data: { roles: dto.roles, updatedBy: actor, version: { increment: 1 } },
+        // What is decided on is what is changed: read again under the lock.
+        const membership = await this.repository.findMembershipById(membershipId, tx);
+        if (!membership) throw RastaError.notFound('Membership', membershipId);
+        assertMayManageMembershipRoles(membership.roles, this.roleGrants);
+
+        const previousRoles = membership.roles;
+        const nextRoles: readonly string[] = dto.roles;
+        const added = nextRoles.filter((role) => !previousRoles.includes(role));
+        const removed = previousRoles.filter((role) => !nextRoles.includes(role));
+        const now = new Date();
+        const before = removed.length > 0 ? await this.rowsGrant(tx, userId, now) : null;
+
+        const result = await tx.membership.update({
+          where: { id: membershipId },
+          data: { roles: dto.roles, updatedBy: actor, version: { increment: 1 } },
+        });
+
+        // Narrowing: Keycloak first, before any event exists.
+        if (before) {
+          await writeAhead.write(
+            tx,
+            intersectAttributes(before, await this.rowsGrant(tx, userId, now)),
+          );
+        }
+
+        // Two events, because a consumer usually cares about one direction. The
+        // gateway in particular must invalidate its permission cache the moment
+        // a role is removed, or the revoked role keeps working until TTL expiry.
+        const payload = {
+          membershipId,
+          userId,
+          organizationId: membership.organizationId,
+          previousRoles,
+          newRoles: dto.roles,
+          reason: dto.reason,
+        };
+
+        if (added.length > 0) {
+          await this.repository.enqueueEvent(tx, {
+            aggregateType: 'Membership',
+            aggregateId: membershipId,
+            eventName: IDENTITY_EVENTS.ROLE_ASSIGNED,
+            topic: IDENTITY_TOPIC,
+            organizationId: membership.organizationId,
+            payload: validateIdentityPayload(IDENTITY_EVENTS.ROLE_ASSIGNED, payload),
+          });
+        }
+
+        if (removed.length > 0) {
+          await this.repository.enqueueEvent(tx, {
+            aggregateType: 'Membership',
+            aggregateId: membershipId,
+            eventName: IDENTITY_EVENTS.ROLE_REVOKED,
+            topic: IDENTITY_TOPIC,
+            organizationId: membership.organizationId,
+            payload: validateIdentityPayload(IDENTITY_EVENTS.ROLE_REVOKED, payload),
+          });
+        }
+
+        return result;
+      }, USER_LOCK_TRANSACTION_OPTIONS)
+      .catch(async (error: unknown) => {
+        throw await writeAhead.settle(error);
       });
-
-      // Two events, because a consumer usually cares about one direction. The
-      // gateway in particular must invalidate its permission cache the moment
-      // a role is removed, or the revoked role keeps working until TTL expiry.
-      const payload = {
-        membershipId,
-        userId: membership.userId,
-        organizationId: membership.organizationId,
-        previousRoles,
-        newRoles: dto.roles,
-        reason: dto.reason,
-      };
-
-      const nextRoles: readonly string[] = dto.roles;
-      const added = nextRoles.filter((role) => !previousRoles.includes(role));
-      const removed = previousRoles.filter((role) => !nextRoles.includes(role));
-
-      if (added.length > 0) {
-        await this.repository.enqueueEvent(tx, {
-          aggregateType: 'Membership',
-          aggregateId: membershipId,
-          eventName: IDENTITY_EVENTS.ROLE_ASSIGNED,
-          topic: IDENTITY_TOPIC,
-          organizationId: membership.organizationId,
-          payload: validateIdentityPayload(IDENTITY_EVENTS.ROLE_ASSIGNED, payload),
-        });
-      }
-
-      if (removed.length > 0) {
-        await this.repository.enqueueEvent(tx, {
-          aggregateType: 'Membership',
-          aggregateId: membershipId,
-          eventName: IDENTITY_EVENTS.ROLE_REVOKED,
-          topic: IDENTITY_TOPIC,
-          organizationId: membership.organizationId,
-          payload: validateIdentityPayload(IDENTITY_EVENTS.ROLE_REVOKED, payload),
-        });
-      }
-
-      return result;
-    });
 
     // Promotion and demotion alike: before ADR-060 neither ever reached the
     // token, because roles were written to Keycloak only when the account was
-    // created. A demoted administrator kept administering.
-    await this.projector.projectAfterCommit(membership.userId);
+    // created. A demoted administrator kept administering. After a demotion
+    // this only adds what the write-ahead held back.
+    await this.projector.projectAfterCommit(userId);
 
     return toMembershipView(updated);
   }
 
+  /**
+   * Ends a membership. Always a narrowing change (D-064): Keycloak is written
+   * before commit, as for a role removed (`updateMembershipRoles`), with the
+   * user's active organization moved off it in the same write.
+   *
+   * Sending it again answers the same — `204`, no second event — so a caller
+   * who never saw the first answer (a gateway timeout while this finished) can
+   * simply repeat it. Authorized on the membership's roles either way.
+   */
   async revokeMembership(membershipId: string, dto: RevokeMembershipDto): Promise<void> {
-    const membership = await this.repository.findMembershipById(membershipId);
-    if (!membership) throw RastaError.notFound('Membership', membershipId);
+    const seen = await this.repository.findMembershipByIdIncludingRevoked(membershipId);
+    if (!seen) throw RastaError.notFound('Membership', membershipId);
 
     // Revoking is the other way to take a role off somebody, so it answers to
     // the same rule as replacing one: you may administer a membership whose
     // roles you could have granted, and no other.
-    assertMayManageMembershipRoles(membership.roles, this.roleGrants);
+    assertMayManageMembershipRoles(seen.roles, this.roleGrants);
 
+    const userId = seen.userId;
     const actor = getContext().userId ?? 'SYSTEM';
+    const writeAhead = this.projector.narrowing(userId);
 
-    await this.repository.transaction(async (tx) => {
-      // Before the membership is touched: a switch to this organization either
-      // commits first and is then moved off below, or waits and is refused.
-      await this.repository.lockUserMemberships(tx, membership.userId);
+    await this.repository
+      .transaction(async (tx) => {
+        // Before the membership is touched: a switch to this organization either
+        // commits first and is then moved off below, or waits and is refused.
+        await this.repository.lockUserMemberships(tx, userId);
 
-      // `deletedAt` is the end of the membership in every history read: the database's clock,
-      // like `validFrom`, not this process's.
-      await this.repository.revokeMembership(tx, membershipId, actor);
-
-      await this.moveActiveOrganizationOff(tx, membership.userId, membership.organizationId, actor);
-
-      await this.repository.enqueueEvent(tx, {
-        aggregateType: 'Membership',
-        aggregateId: membershipId,
-        eventName: IDENTITY_EVENTS.MEMBERSHIP_REVOKED,
-        topic: IDENTITY_TOPIC,
-        organizationId: membership.organizationId,
-        payload: validateIdentityPayload(IDENTITY_EVENTS.MEMBERSHIP_REVOKED, {
+        const membership = await this.repository.findMembershipByIdIncludingRevoked(
           membershipId,
-          userId: membership.userId,
-          organizationId: membership.organizationId,
-          reason: dto.reason,
-        }),
-      });
-    });
+          tx,
+        );
+        if (!membership) throw RastaError.notFound('Membership', membershipId);
+        assertMayManageMembershipRoles(membership.roles, this.roleGrants);
+        // Already ended — by this same request, sent again: nothing to do.
+        if (membership.deletedAt) return;
 
-    await this.projector.projectAfterCommit(membership.userId);
+        const now = new Date();
+        const before = await this.rowsGrant(tx, userId, now);
+
+        // `deletedAt` is the end of the membership in every history read: the database's clock,
+        // like `validFrom`, not this process's.
+        await this.repository.revokeMembership(tx, membershipId, actor);
+
+        await this.moveActiveOrganizationOff(tx, userId, membership.organizationId, actor, now);
+
+        // Keycloak first, before the event that is the gateway's cutoff.
+        await writeAhead.write(
+          tx,
+          intersectAttributes(before, await this.rowsGrant(tx, userId, now)),
+        );
+
+        await this.repository.enqueueEvent(tx, {
+          aggregateType: 'Membership',
+          aggregateId: membershipId,
+          eventName: IDENTITY_EVENTS.MEMBERSHIP_REVOKED,
+          topic: IDENTITY_TOPIC,
+          organizationId: membership.organizationId,
+          payload: validateIdentityPayload(IDENTITY_EVENTS.MEMBERSHIP_REVOKED, {
+            membershipId,
+            userId,
+            organizationId: membership.organizationId,
+            reason: dto.reason,
+          }),
+        });
+      }, USER_LOCK_TRANSACTION_OPTIONS)
+      .catch(async (error: unknown) => {
+        throw await writeAhead.settle(error);
+      });
+
+    await this.projector.projectAfterCommit(userId);
+  }
+
+  /**
+   * What one user's rows grant at `now`, read in the caller's transaction —
+   * under the user lock, so nothing changes them meanwhile except the caller.
+   * A narrowing change reads it before and after its own change and writes the
+   * intersection ahead (D-064).
+   */
+  private async rowsGrant(
+    tx: ExtendedPrismaClient,
+    userId: string,
+    now: Date,
+  ): Promise<PlatformAttributes> {
+    const user = await this.repository.findUserById(userId, tx);
+    if (!user) throw RastaError.notFound('User', userId);
+    const memberships = await this.repository.listMembershipsForUser(userId, tx);
+    return platformAttributesFor(user, memberships, now);
   }
 
   /**
@@ -652,7 +750,8 @@ export class IdentityService {
       });
 
       return updated;
-    });
+      // It may wait on a projection holding the user lock across Keycloak calls.
+    }, USER_LOCK_TRANSACTION_OPTIONS);
 
     // Not after-commit best effort: the caller asked for this switch and waits
     // on its answer. The event above is an audit record, not a retry trigger —
@@ -801,6 +900,9 @@ export class IdentityService {
       if (locked?.status !== 'PENDING') {
         throw registrationAlreadyDecided('APPROVED', locked?.status);
       }
+      // The one lock of every Keycloak writer of the user (`KeycloakProjector`,
+      // D-064), after the request lock: adopting an account may write to it.
+      await this.repository.lockUserMemberships(tx, request.userId);
       const keycloakId =
         created.outcome === 'created'
           ? created.keycloakId
@@ -1116,17 +1218,21 @@ export class IdentityService {
    * decision reads the validity window against the clock. What does not happen
    * on its own is everything *outside* this database that still believes in
    * it: the user's Keycloak attributes, and so their next token; the active
-   * organization they land in; the audit trail. This is that step:
+   * organization they land in; the audit trail. This is that step, a narrowing
+   * change like a revocation (D-064):
    *
    * 1. claim the lapse (`lapse_handled_at IS NULL`), so every replica may
    *    sweep and exactly one acts;
    * 2. move the user's active organization off it, if it was the active one;
-   * 3. publish `MEMBERSHIP_EXPIRED` — audit evidence, and the durable trigger
-   *    for re-projection should step 4 fail;
-   * 4. re-project the user after commit.
+   * 3. write Keycloak ahead, without the lapsed organization;
+   * 4. publish `MEMBERSHIP_EXPIRED` — audit evidence, the gateway's cutoff, and
+   *    the durable trigger for re-projection should step 5 fail;
+   * 5. re-project the user after commit.
    *
-   * 1–3 commit together. Runs inside the membership's own organization, like a
-   * request would: a background job is not trusted more than a person is.
+   * 1–4 commit together, or not at all: when Keycloak cannot be written the
+   * claim rolls back with the rest, and the next pass tries again. Runs inside
+   * the membership's own organization, like a request would: a background job
+   * is not trusted more than a person is.
    *
    * Returns whether this call acted, which is `false` when another replica
    * claimed the lapse first.
@@ -1137,6 +1243,7 @@ export class IdentityService {
   ): Promise<boolean> {
     if (!membership.validUntil || membership.validUntil > now) return false;
     const validUntil = membership.validUntil;
+    const writeAhead = this.projector.narrowing(membership.userId);
 
     const acted = await runWithContext(
       createSystemContext({
@@ -1155,12 +1262,17 @@ export class IdentityService {
           });
           if (claim.count === 0) return false;
 
+          const before = await this.rowsGrant(tx, membership.userId, now);
           await this.moveActiveOrganizationOff(
             tx,
             membership.userId,
             membership.organizationId,
             'SYSTEM',
             now,
+          );
+          await writeAhead.write(
+            tx,
+            intersectAttributes(before, await this.rowsGrant(tx, membership.userId, now)),
           );
 
           await this.repository.enqueueEvent(tx, {
@@ -1177,8 +1289,10 @@ export class IdentityService {
             }),
           });
           return true;
-        }),
-    );
+        }, USER_LOCK_TRANSACTION_OPTIONS),
+    ).catch(async (error: unknown) => {
+      throw await writeAhead.settle(error);
+    });
 
     if (acted) await this.projector.projectAfterCommit(membership.userId);
     return acted;
