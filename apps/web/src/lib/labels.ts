@@ -238,7 +238,8 @@ const PRODUCT_KINDS: Readonly<Record<string, string>> = {
 };
 
 function lookup(table: Readonly<Record<string, string>>, value: string): string {
-  return table[value] ?? value;
+  // Own keys only: «constructor» or «toString» is a word a person may type.
+  return Object.hasOwn(table, value) ? table[value]! : value;
 }
 
 export const assetTypeLabel = (value: string): string => lookup(ASSET_TYPE_LABELS, value);
@@ -289,19 +290,29 @@ export function timelineTitleLabel(title: string): string {
 }
 
 /**
- * A free-text reason a transaction or order carries. People type these in
- * Persian; the platform's own sagas and providers write English markers and
- * sentences (`REFUND_REQUESTED`, «wallet empty»). Text with an Arabic-script
- * letter, or with no Latin letter at all, is a person's and is shown;
- * anything else is machine wording and is replaced by `machineWording`.
+ * The machine-written reasons that can reach a transaction's `failureReason`:
+ * a CLOSED set, matched exactly (case and spelling), so a reason a person wrote
+ * is never replaced, whatever its language.
+ *
+ * `failureReason` is written in two places only, `TransactionService.refund`
+ * and `.cancel` (`transaction.service.ts:608`, `:640`), from the reason their
+ * caller sends. The one caller that sends machine text is the marketplace
+ * saga's compensation, which falls back to «Cancelled» when the order holds no
+ * reason (`marketplace-service/src/temporal/workflows.ts:567`); every other
+ * reason is typed by a person (the buyer's cancellation, the operator's
+ * dispute resolution, a direct refund or cancel) and is shown as written.
+ * The payment-intent markers (`REFUND_REQUESTED` …,
+ * `payment.service.ts:1473–1513`) live on the payment intent, never on a
+ * transaction, so they are not in the set. A new machine reason is added here
+ * with its source; until then it is shown as written.
  */
-export function reasonText(reason: string, machineWording: string): string {
-  // Detection, not an allow-list: any letter of the Arabic script blocks.
-  const personal =
-    /[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]/.test(reason) ||
-    !/[A-Za-z]/.test(reason);
-  return personal ? reason : machineWording;
-}
+const MACHINE_TRANSACTION_REASONS: Readonly<Record<string, string>> = {
+  Cancelled: 'لغو شد',
+};
+
+/** A transaction's recorded reason: a known machine wording in Persian, anything else as written. */
+export const transactionReasonLabel = (reason: string): string =>
+  lookup(MACHINE_TRANSACTION_REASONS, reason);
 
 export function blockerLabel(value: string): string {
   const status = STATUS_BLOCKER.exec(value)?.[1];

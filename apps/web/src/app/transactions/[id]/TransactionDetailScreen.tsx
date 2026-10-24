@@ -12,7 +12,7 @@ import {
 } from '@/ui';
 import { formatJalaliDateLong } from '@/lib/format';
 import {
-  reasonText,
+  transactionReasonLabel,
   transactionSourceLabel,
   transactionStatusLabel,
   transactionTypeLabel,
@@ -147,12 +147,7 @@ export function TransactionDetailScreen({
           {t.settledAt ? <Row term="زمان تسویه">{formatJalaliDateLong(t.settledAt)}</Row> : null}
           {t.failureReason !== null ? (
             <Row term="دلیل ثبت‌شده برای لغو، بازگشت وجه یا ناموفقی">
-              <IsolatedText>
-                {reasonText(
-                  t.failureReason,
-                  'علت را سامانه ثبت کرده است؛ با کد پیگیری پیگیری کنید.',
-                )}
-              </IsolatedText>
+              <IsolatedText>{transactionReasonLabel(t.failureReason)}</IsolatedText>
             </Row>
           ) : null}
         </dl>

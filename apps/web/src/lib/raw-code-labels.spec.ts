@@ -4,9 +4,9 @@ import { render } from '@testing-library/react';
 import { createElement } from 'react';
 
 import {
-  reasonText,
   standingVerdictLabel,
   timelineTitleLabel,
+  transactionReasonLabel,
   transactionSourceLabel,
 } from './labels';
 import { ROLE_LABELS, roleLabel, userStatusLabel } from './organization-fields';
@@ -67,15 +67,34 @@ describe('timelineTitleLabel', () => {
   });
 });
 
-describe('reasonText', () => {
-  const MACHINE = 'علت فنی';
-  it('shows a person’s reason: Persian, or no Latin letter at all', () => {
-    expect(reasonText('مشتری منصرف شد', MACHINE)).toBe('مشتری منصرف شد');
-    expect(reasonText('کالا Komatsu برگشت', MACHINE)).toBe('کالا Komatsu برگشت');
-    expect(reasonText('۱۲۳ - ۴۵', MACHINE)).toBe('۱۲۳ - ۴۵');
+describe('transactionReasonLabel', () => {
+  it('maps each known machine reason to its Persian label', () => {
+    // The closed set, one row per reason, with the line that writes it:
+    // marketplace-service/src/temporal/workflows.ts:567.
+    expect(
+      Object.fromEntries(
+        ['Cancelled'].map((machineReason) => [
+          machineReason,
+          transactionReasonLabel(machineReason),
+        ]),
+      ),
+    ).toEqual({ Cancelled: 'لغو شد' });
   });
-  it('replaces machine wording', () => {
-    expect(reasonText('REFUND_REQUESTED', MACHINE)).toBe(MACHINE);
-    expect(reasonText('wallet empty', MACHINE)).toBe(MACHINE);
+
+  it.each([
+    'Customer returned damaged goods',
+    'مشتری منصرف شد',
+    'wallet empty',
+    'REFUND_REQUESTED',
+    'cancelled',
+    ' Cancelled',
+    'Cancelled.',
+    'کالا Komatsu برگشت',
+    '۱۲۳ - ۴۵',
+    'constructor',
+    'toString',
+    '__proto__',
+  ])('shows %s as written: anything outside the closed set is a person’s', (reason) => {
+    expect(transactionReasonLabel(reason)).toBe(reason);
   });
 });

@@ -481,12 +481,33 @@ describe('raw codes and English wording in the detail', () => {
     },
   );
 
-  it('does not show a machine-worded reason, and shows a person’s', () => {
-    const machine = renderScreen(ok({ ...HELD, failureReason: 'REFUND_REQUESTED' }));
-    expect(machine.container.textContent).not.toContain('REFUND_REQUESTED');
-    expect(machine.container.textContent).toContain('علت را سامانه ثبت کرده است');
-    machine.unmount();
+  it('names the one known machine reason in Persian', () => {
+    const machine = renderScreen(ok({ ...HELD, failureReason: 'Cancelled' }));
+    expect(machine.container.textContent).not.toContain('Cancelled');
+    expect(machine.container.textContent).toContain('لغو شد');
+  });
 
+  // Provenance is not language: an English reason somebody typed is theirs.
+  it.each([
+    ['a refund', { status: 'REFUNDED' }],
+    ['a cancel', { status: 'CANCELLED' }],
+    [
+      'a cancellation compensation of a marketplace order',
+      { status: 'REFUNDED', transactionType: 'MARKETPLACE_ORDER', sourceType: 'ORDER' },
+    ],
+  ])('shows an English human reason verbatim on %s', (_label, patch) => {
+    const human = renderScreen(
+      ok({
+        ...HELD,
+        ...patch,
+        sourceReference: 'ORD_42',
+        failureReason: 'Customer returned damaged goods',
+      } as Transaction),
+    );
+    expect(human.container.textContent).toContain('Customer returned damaged goods');
+  });
+
+  it('shows a Persian reason as written', () => {
     const personal = renderScreen(ok({ ...HELD, failureReason: 'مشتری منصرف شد، مبلغ برگشت.' }));
     expect(personal.container.textContent).toContain('مشتری منصرف شد، مبلغ برگشت.');
   });
