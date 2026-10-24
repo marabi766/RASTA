@@ -3,7 +3,10 @@
 **شدت:** 🟠 هشدار (پس از ADR-060 گام ۳، 🔴 بحرانی — آن‌گاه توکن تنها منبع مجوز است)
 **سیگنال محرک:** افزایش `rasta_identity_keycloak_projections_total{outcome="failed"}`، یا پیام تازه در
 `rasta.identity.v1.dlq` از گروه `identity-service.keycloak-projection`، یا پیش از هر انتشارِ گام ۳ ADR-060.
-**هشدار خودکار:** ندارد. شمارنده صادر می‌شود؛ قاعدهٔ Prometheus برایش نوشته نشده است.
+**هشدار خودکار:** برای Projection پس از Commit ندارد (شمارنده صادر می‌شود). برای تغییرهای تنگ‌کننده (D-064) سه هشدار در
+`infrastructure/docker/prometheus/rules/rasta-identity-alerts.yml`: `RastaIdentityNarrowingRefused`،
+`RastaIdentityMembershipLapseBacklog` و `RastaIdentityKeycloakReassertMarkLost` — بخش
+[«تنزل یا ابطال 503 می‌دهد»](#narrowing-refused).
 **زمان پاسخ هدف:** ۱ ساعت؛ برای یک تنزل یا ابطالِ نرسیده ۱۵ دقیقه.
 
 ---
@@ -32,8 +35,11 @@
 
 وقتی `validUntil` می‌گذرد، هیچ درخواستی نمی‌آید. پس `MembershipExpiryScanner` هر
 `MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS` (پیش‌فرض ۶۰) عضویت‌های گذشته از `validUntil` را که هنوز
-`lapse_handled_at` ندارند برمی‌دارد، و برای هرکدام در یک تراکنش: آن را Claim می‌کند، سازمان فعال کاربر را اگر همان بود به
-قدیمی‌ترین عضویت زندهٔ دیگر منتقل (یا خالی) می‌کند، و `MEMBERSHIP_EXPIRED` منتشر می‌کند؛ سپس کاربر را Project می‌کند.
+`lapse_handled_at` ندارند برمی‌دارد، و برای هرکدام در یک تراکنش زیر قفل کاربر: سازمان فعال کاربر را اگر همان بود به
+قدیمی‌ترین عضویت زنده‌ی دیگر منتقل (یا خالی) می‌کند، **Keycloak را پیش از Commit تنگ می‌کند** (D-064)، آن را Claim می‌کند و
+`MEMBERSHIP_EXPIRED` منتشر می‌کند؛ سپس کاربر را Project می‌کند. اگر Keycloak نوشته نشود، هیچ‌کدام Commit نمی‌شود: عضویت
+Claim‌نشده می‌ماند، با Backoff دوبرابرشونده (تا ۱۶ Interval) کنار گذاشته می‌شود و گذر به عضویت‌های پشت آن می‌رسد؛ هرگز رها
+نمی‌شود. همین گذر کاربرانی را که علامت بازنویسی (`keycloak_reassert_at`) سررسیده دارند از ردیف‌ها دوباره Project می‌کند.
 Claim با `WHERE lapse_handled_at IS NULL` است، پس اجرا روی چند Replica یک بار عمل می‌کند و Replicaی که هنگام انقضا
 خاموش بوده، در اولین گذرش آن را می‌یابد. عضویت Revoke نمی‌شود.
 
@@ -42,11 +48,11 @@ Claim با `WHERE lapse_handled_at IS NULL` است، پس اجرا روی چند
 | از `validUntil` تا …                           | حداکثر                                                     |
 | ---------------------------------------------- | ---------------------------------------------------------- |
 | رد شدن تغییر سازمان فعال در `identity-service` | **صفر** — از ساعت خوانده می‌شود                            |
-| حذف از صفات Keycloak                           | یک Interval اسکن (۶۰ ثانیه) + نوشتن Projector              |
+| حذف از صفات Keycloak                           | یک Interval اسکن (۶۰ ثانیه) + نوشتن، تا Keycloak بپذیرد    |
 | آخرین توکنی که هنوز آن سازمان را نام می‌برد    | **Interval + ۹۰۵ ثانیه** (ADR-060 § ۷) — پیش‌فرض ۹۶۵ ثانیه |
 
-`MEMBERSHIP_EXPIRY_SCAN_ENABLED=false` دسترسی را باز نمی‌کند، ولی عضویت منقضی تا Project بعدیِ کاربر در توکن می‌ماند؛
-`keycloak:reconcile` آن را واگرا گزارش می‌کند.
+`MEMBERSHIP_EXPIRY_SCAN_ENABLED=false` و `KEYCLOAK_SYNC_ENABLED=false` فقط با `NODE_ENV` برابر `development` یا `test`
+پذیرفته می‌شوند؛ جای دیگر سرویس بالا نمی‌آید (D-064).
 
 ## اثر
 
@@ -78,6 +84,24 @@ Claim با `WHERE lapse_handled_at IS NULL` است، پس اجرا روی چند
    از پایگاه داده بازمی‌سازد، هرچه Keycloak داشته باشد. تکرارش بی‌خطر است.
 
 4. **دوباره گام ۱.** کد خروج باید ۰ باشد.
+
+<a id="narrowing-refused"></a>
+
+## تنزل یا ابطال `503 KEYCLOAK_UNAVAILABLE` می‌دهد (Keycloak پایین است)
+
+**چرا.** حذف نقش، ابطال عضویت و انقضا پیش از Commit در Keycloak نوشته می‌شوند (ADR-060، افزوده‌ی D-064). اگر Keycloak
+نپذیرد یا پاسخ ندهد، تغییر **Commit نمی‌شود**: نقش‌ها در پایگاه داده و Keycloak همان قبلی‌اند و رویدادی نیست. هیچ تنزلی
+«نیمه‌کاره» نمی‌ماند. افزودن نقش و عضویت تازه کار می‌کند.
+
+1. Keycloak را برگردان (`rasta-keycloak` سالم، Admin API پاسخ دهد). هشدار `RastaIdentityNarrowingRefused` پس از ده دقیقه
+   رد پیوسته روشن می‌شود.
+2. همان درخواست‌ها را **همان‌طور** دوباره بفرست؛ تکرار بی‌خطر است (همان پاسخ، بی رویداد دوم) — حتی اگر پاسخ اول `504` Gateway
+   بوده. انقضاها را گذر خودش دوباره می‌کند؛ `RastaIdentityMembershipLapseBacklog` تا صفر شدن صف روشن می‌ماند.
+3. `503` با `Retry-After` برای **یک کاربر** پس از برگشت Keycloak: نوشتنی از همان کاربر بی‌پاسخ ماند و ممکن است هنوز بنشیند؛
+   تا `KEYCLOAK_WRITE_SETTLE_SECONDS` (پیش‌فرض ۱۲۰) تنزل او رد می‌شود، سپس گذر انقضا او را از ردیف‌ها بازمی‌نویسد. صبر کن و
+   دوباره بفرست.
+4. `RastaIdentityKeycloakReassertMarkLost` (بحرانی): علامت بازنویسی ذخیره نشد. پایگاه داده را سالم کن، سپس گام ۱ و ۳ بخش
+   «گام‌ها» (`keycloak:reconcile`، `keycloak:backfill`).
 
 <a id="registration-approval-orphan"></a>
 

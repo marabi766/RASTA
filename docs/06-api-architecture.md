@@ -373,8 +373,13 @@ Charset یا Content-Encoding پشتیبانی‌نشده (`charset.unsupported`
 | 422   | `BUSINESS_RULE_VIOLATION` · `INSUFFICIENT_BALANCE` · `LEDGER_UNBALANCED` · `ACTOR_IDENTITY_UNKNOWN` · `NO_ACTIVE_RULE` · `BUSINESS_LINE_REQUIRED` |
 | 429   | `RATE_LIMIT_EXCEEDED`                                                                                                                             |
 | 500   | `INTERNAL_ERROR`                                                                                                                                  |
-| 503   | `UPSTREAM_UNAVAILABLE`                                                                                                                            |
+| 503   | `UPSTREAM_UNAVAILABLE` · `KEYCLOAK_UNAVAILABLE`                                                                                                   |
 | 504   | `UPSTREAM_TIMEOUT`                                                                                                                                |
+
+**`KEYCLOAK_UNAVAILABLE` (503، identity، D-064).** حذف نقش (`POST /v1/memberships/:id/roles`) و ابطال
+(`POST /v1/memberships/:id/revoke`) پیش از Commit در Keycloak نوشته می‌شوند؛ اگر نوشته نشود، هیچ چیز تغییر نمی‌کند و رویدادی
+نیست. پیام ثابت است و از پاسخ Keycloak چیزی نمی‌گوید. با `Retry-After` یعنی نوشتنی بی‌پاسخ از همان کاربر شاید هنوز بنشیند.
+تکرار همان درخواست بی‌خطر است (ADR-060، افزوده‌ی D-064).
 
 **`NO_ACTIVE_RULE` (422، economic، docs/24 Q-29).** `POST /v1/settlements` برای تراکنشی که خط کسب‌وکار دارد و هیچ قاعدهٔ
 کارمزد فعالی خطش را نمی‌پوشاند، بیرون از `development` و `test`؛ هیچ چیز جابه‌جا نمی‌شود و همان تسویه پس از نافذشدن قاعده‌ای برای
