@@ -134,7 +134,7 @@ describe('member roles (parser → action → rendered)', () => {
       post([
         ['membershipId', 'MBR_2'],
         ['roles', ''],
-        ['reason', 'جابه‌جایی مسئولیت'],
+        ['reason', 'جابه‌جایی نقش'],
       ]),
     );
     expect(state.kind).toBe('INVALID');

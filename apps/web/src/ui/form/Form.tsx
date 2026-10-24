@@ -39,7 +39,7 @@ export function useSchemaForm<TSchema extends z.ZodType<FieldValues>>(
     // is confined to this one line rather than leaking into every call site.
     // Zod's default sentences are English: the Persian error map is the same
     // boundary the server-side form parsers use (`lib/form-issues.ts`).
-    resolver: zodResolver(schema, { errorMap: persianErrorMap }) as never,
+    resolver: zodResolver(schema, { errorMap: persianErrorMap } as z.ParseParams) as never,
   });
 }
 

@@ -23,7 +23,7 @@ import {
 const LATIN_LETTER = /[A-Za-z]/;
 const ARABIC_LETTER = /\p{Script=Arabic}/u;
 /** Hamza letters and U+0654: the project's text policy for added copy. */
-const FORBIDDEN_SPELLING = /[أإؤئٔ]/u;
+const FORBIDDEN_SPELLING = /[\u0654\u0623\u0625\u0624\u0626]/u;
 
 const issueOf = (schema: z.ZodTypeAny, value: unknown): z.ZodIssue => {
   const result = schema.safeParse(value);
@@ -86,7 +86,11 @@ describe('formIssueMessage', () => {
   });
 
   it('answers one generic Persian sentence for an issue it cannot describe', () => {
-    const unknown = { code: 'custom', path: ['x'], message: 'Something nobody foresaw' } as const;
+    const unknown: z.ZodIssue = {
+      code: 'custom',
+      path: ['x'],
+      message: 'Something nobody foresaw',
+    };
     expect(formIssueMessage(unknown)).toBe(GENERIC_FIELD_MESSAGE);
     expect(GENERIC_FIELD_MESSAGE).toMatch(ARABIC_LETTER);
     expect(GENERIC_FIELD_MESSAGE).not.toMatch(LATIN_LETTER);

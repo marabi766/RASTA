@@ -99,7 +99,7 @@ describe('every exported local form schema answers in Persian', () => {
         expect(message).toMatch(/\p{Script=Arabic}/u);
         // A Latin word may sit inside a Persian sentence (a brand, a unit);
         // an all-English sentence may not.
-        expect(message).not.toMatch(/^[\x00-\x7f]+$/);
+        expect(message).not.toMatch(/^\p{ASCII}+$/u);
         expect(message).not.toMatch(/must contain|Expected|Invalid|Required|received/i);
         expect(message).not.toContain('9'.repeat(10));
       }
