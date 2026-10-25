@@ -55,6 +55,8 @@ export interface DriverOptions {
   /** Where `next` is resolved from (the fake one's root); default the portal. */
   nextFrom?: string;
   settleMs?: number;
+  stopGraceMs?: number;
+  stopWaitMs?: number;
   handshakeMs?: number;
   /** Pause after a good build, before the receipt: writes `paused`, waits for `go`. */
   pauseDir?: string;
@@ -62,12 +64,12 @@ export interface DriverOptions {
   recordChild?: string;
   /** Between starting `next build` and publishing its group (the r3 F1 window). */
   afterSpawn?: 'kill' | 'throw' | 'readonly-lock';
-  /** After a good build, before the receipt. */
-  beforeReceipt?: 'readonly-lock' | 'readonly-scratch';
+  /** After a good build, before the receipt (`steal-lock`: another owner replaces ours). */
+  beforeReceipt?: 'readonly-lock' | 'readonly-scratch' | 'steal-lock';
 }
 
 const DRIVER = `
-  import { chmodSync, existsSync, writeFileSync } from 'node:fs';
+  import { chmodSync, existsSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
   import { dirname, join } from 'node:path';
   import { setTimeout as sleep } from 'node:timers/promises';
   import { runWebBuild } from ${JSON.stringify(url('build-run.mjs'))};
@@ -89,12 +91,20 @@ const DRIVER = `
     }
     if (options.beforeReceipt === 'readonly-lock') chmodSync(lockDir, 0o500);
     if (options.beforeReceipt === 'readonly-scratch') chmodSync(scratch, 0o500);
+    if (options.beforeReceipt === 'steal-lock') {
+      const other = 'c'.repeat(24);
+      const [entry] = readdirSync(lockDir);
+      renameSync(join(lockDir, entry), join(lockDir, 'owner-' + other));
+      writeFileSync(join(lockDir, 'owner-' + other), JSON.stringify({ pid: process.pid, nonce: other }));
+    }
   };
   const result = await runWebBuild(dir, {
     nextFrom: options.nextFrom ?? ${JSON.stringify(WEB)},
     stdio: options.inherit ? 'inherit' : 'ignore',
     lockWaitMs: options.lockWaitMs,
     settleMs: options.settleMs,
+    stopGraceMs: options.stopGraceMs,
+    stopWaitMs: options.stopWaitMs,
     handshakeMs: options.handshakeMs,
     env: { ...process.env, ...options.env },
     afterSpawn,

@@ -566,6 +566,47 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     expect(existsSync(join(dir, LOCK))).toBe(false);
   });
 
+  it('(F) the build`s processes cannot be confirmed stopped: the lock is KEPT (it names the live group) and the build refuses', async () => {
+    // No settle and no stop deadline: the writer is still there when the wrapper gives up.
+    const dir = app({ linger: { ms: 60_000 } });
+    const result = await runDriver(dir, {
+      nextFrom,
+      settleMs: 0,
+      stopGraceMs: 0,
+      stopWaitMs: 0,
+      recordChild: join(dir, 'child.json'),
+    });
+    expect(result).toMatchObject({
+      status: 1,
+      problems: [
+        'build: processes of this build could not be confirmed stopped; the build lock is kept; refusing',
+      ],
+    });
+    expect(existsSync(join(dir, LOCK))).toBe(true);
+    expect(existsSync(join(dir, '.next/server-action-build-receipt.json'))).toBe(false);
+    // It was sent SIGKILL: once the group is gone, the kept lock is free, and not before.
+    const { pid } = record(dir);
+    await waitFor(() => !alive(-pid));
+    expect(inProgress(dir)).toBe(false);
+    plantFakeApp(dir, {});
+    expect(await runDriver(dir, { nextFrom, lockWaitMs: 5_000 })).toMatchObject({
+      status: 0,
+      problems: [],
+    });
+  });
+
+  it('(F) the lock is no longer ours when the receipt is due: no receipt, the other owner`s entry is left alone; refused', async () => {
+    const dir = app({});
+    const result = await runDriver(dir, { nextFrom, beforeReceipt: 'steal-lock' });
+    expect(result.status).toBe(1);
+    expect(result.problems).toEqual([
+      'build: unexpected failure (details withheld); refusing',
+      'build lock: could not be released (details withheld); it is free once this process has exited; refusing',
+    ]);
+    expect(existsSync(join(dir, '.next/server-action-build-receipt.json'))).toBe(false);
+    expect(readdirSync(join(dir, LOCK))).toEqual([`owner-${nonce('c')}`]);
+  });
+
   it('every line these failures print is a fixed sentence (no errno, path or value)', async () => {
     const dir = app({ linger: { ms: 60_000 } });
     const result = await runDriver(dir, { nextFrom });
