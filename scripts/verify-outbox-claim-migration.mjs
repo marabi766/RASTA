@@ -241,7 +241,8 @@ const args = process.argv.slice(2);
 const only = args.find((a) => !a.startsWith('--'));
 const targets = only ? [only] : SERVICES;
 if (only && !SERVICES.includes(only)) {
-  console.error(`Unknown service "${only}". Known: ${SERVICES.join(', ')}`);
+  // Echoed only once it is one of SERVICES (#385 r6).
+  console.error(`Unknown service; it is not repeated. Known: ${SERVICES.join(', ')}`);
   process.exit(1);
 }
 
@@ -267,7 +268,7 @@ const inPlace = args.includes('--in-place');
 const schemaFlag = args.indexOf('--schema');
 const scratchSchema = schemaFlag >= 0 ? args[schemaFlag + 1] : 'outbox_claim_check';
 if (!/^[a-z_][a-z0-9_]*$/.test(scratchSchema)) {
-  console.error(`--schema must be a plain lowercase identifier, received "${scratchSchema}".`);
+  console.error('--schema must be a plain lowercase identifier; its value is not repeated.');
   process.exit(1);
 }
 

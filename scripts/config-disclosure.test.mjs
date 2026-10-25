@@ -17,7 +17,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { UnreadableUrlError } from '../packages/config/src/url-reader.js';
 import { SENTINELS, assertNoSentinel, thrownBy } from './refusal-probes.mjs';
@@ -47,13 +49,17 @@ function cleanEnv(extra) {
 }
 
 /** Runs `script` with `args` under `env`; its whole output and exit code. */
-function cli(script, args, env, timeout = 120_000) {
-  const result = spawnSync(process.execPath, [resolve(ROOT, 'scripts', script), ...args], {
-    cwd: ROOT,
-    env,
-    encoding: 'utf8',
-    timeout,
-  });
+function cli(script, args, env, timeout = 120_000, nodeArgs = []) {
+  const result = spawnSync(
+    process.execPath,
+    [...nodeArgs, resolve(ROOT, 'scripts', script), ...args],
+    {
+      cwd: ROOT,
+      env,
+      encoding: 'utf8',
+      timeout,
+    },
+  );
   return {
     status: result.status,
     output: `${result.stdout ?? ''}${result.stderr ?? ''}`,
@@ -194,21 +200,135 @@ test("runtime-preflight refuses another role's owner URL without repeating its u
   );
 });
 
-test('runtime-preflight prints an error it did not write only without the run credentials', () => {
-  // Past the URL checks, into Kafka: a broker named like the owner password
-  // makes kafkajs's own error carry it. The handler prints that error — with
-  // the password replaced — and nothing of either sentinel.
-  const broker = `${PASSWORD.toLowerCase()}.invalid`;
+/**
+ * Every host lookup fails at once, as DNS does for a name that does not
+ * exist, with the error Node's resolver gives (which quotes the host): no
+ * network is used.
+ */
+const NO_DNS = `data:text/javascript,${encodeURIComponent(`
+import dns from 'node:dns';
+dns.lookup = (host, options, callback) => {
+  const done = typeof options === 'function' ? options : callback;
+  const error = Object.assign(new Error('getaddrinfo ENOTFOUND ' + host), {
+    code: 'ENOTFOUND', syscall: 'getaddrinfo', hostname: host,
+  });
+  process.nextTick(done, error);
+};
+`)}`;
+
+test('runtime-preflight reports a failure it did not write by a fixed category, whatever the credentials', () => {
+  // Codex PR-385 r5 F1: past the URL checks, into Kafka, with a broker named
+  // after the owner password — two characters, which no substring scrubbing
+  // could look for — and the username sentinel in the runtime URL. kafkajs's
+  // error quotes the broker; the script prints its category and code only.
+  const password = 'xy';
   const run = cli(
     PREFLIGHT,
     ['refused', 'audit-service'],
     cleanEnv({
       NODE_ENV: 'test',
       KAFKA_ALLOW_PLAINTEXT: 'true',
-      KAFKA_BROKERS: `${broker}:1`,
-      PREFLIGHT_OWNER_URL: `postgresql://rasta_audit_migrator:${broker}@127.0.0.1:1/db`,
+      KAFKA_BROKERS: `${password}.invalid:1`,
+      PREFLIGHT_OWNER_URL: `postgresql://rasta_audit_migrator:${password}@127.0.0.1:1/db`,
       DATABASE_URL_AUDIT: `postgresql://${USER}:${PASSWORD}@127.0.0.1:1/audit`,
     }),
+    120_000,
+    ['--import', NO_DNS],
   );
-  assertRefusedWith(run, 'ENOTFOUND <credential>', PREFLIGHT);
+  assertRefusedWith(
+    run,
+    'runtime-preflight refused: kafka connection failed while reading ' +
+      'audit-service.domain-projector as audit-service (KAFKA_BROKERS, KAFKA_SASL_PASSWORD_AUDIT) ' +
+      '(code ',
+    PREFLIGHT,
+  );
+  assert.doesNotMatch(run.output, new RegExp(password, 'i'), 'the two-character password');
+  assert.doesNotMatch(run.output, /invalid|getaddrinfo|ENOTFOUND [a-z]/i, "kafkajs's own text");
 });
+
+/**
+ * The command-line contract's echo rule (#385 r6, Codex PR-385 r5 F2 and the
+ * PM's addendum): a refusal repeats an argument only once it matched its
+ * closed list. Each CLI whose refusal echoed an unknown option, an unknown
+ * positional or an invalid value runs here with the sentinels in that place,
+ * and refuses during argument parsing — before any connection — by the
+ * option's name or the argument's position.
+ */
+const [SU, SP] = [USER, PASSWORD];
+const ECHOES = [
+  ['verify-migration-reversible.mjs', [SU], 'No expected-object list for that service'],
+  ['verify-migration-reversible.mjs', ['economic', '--schema', SP], '--schema must be a plain'],
+  ['verify-outbox-claim-migration.mjs', [SU], 'Unknown service; it is not repeated'],
+  ['verify-outbox-claim-migration.mjs', ['--schema', SP], 'Unknown service; it is not repeated'],
+  ['verify-security-event-outbox-migration.mjs', ['--schema', SP], '--schema must be a plain'],
+  ['verify-audit-correction-command-migration.mjs', ['--schema', SP], '--schema must be a plain'],
+  ['progress.mjs', [SU], 'Unknown command; it is not repeated'],
+  ['replay-dlq.mjs', [`--${SU}`, SP], 'unknown argument at position 1'],
+  ['replay-dlq.mjs', ['--dlq', SU, '--event-id', SP], '--dlq is not a dead-letter topic'],
+  ['replay-dlq.mjs', ['--check-marker', 'x', `--${SU}`, SP], 'unknown argument at position 3'],
+  ['outbox-b2-backfill.mjs', ['--service', SU, '--apply'], '1 --service value(s), not repeated'],
+  ['outbox-b2-backfill.mjs', [`--${SU}`, SP], 'Unknown option at position 1'],
+  ['outbox-b2-vacuum.mjs', [`--${SU}`, SP], 'Unknown option at position 1'],
+  ['run-test-phases.mjs', [SU], 'unknown task, not repeated'],
+  ['verify-test-independence.mjs', [`/tmp/${SU}`, SP], 'no such package directory'],
+  [
+    'check-local-postgres-config.mjs',
+    ['--file', `/tmp/${SU}/${SP}`],
+    'cannot read the --file path',
+  ],
+  ['check-kafka-topic-limits.mjs', [`/tmp/${SU}/${SP}`], 'the topics file cannot be read'],
+  ['check-service-boundaries.mjs', ['--root', `/tmp/${SU}/${SP}`], 'nothing scanned under'],
+  ['backup-restore-drill.mjs', ['--report', `/tmp/${SU}/${SP}.json`], 'cannot be created'],
+  ['aggregation-evidence.mjs', [`--${SU}`, SP], 'unknown option at position 1'],
+  [
+    'aggregation-evidence.mjs',
+    ['--calibrate', '--pairs', SP, '--slot', '1', 'r.txt'],
+    '--pairs must be a positive integer; its value is not repeated',
+  ],
+];
+
+for (const [script, args, text] of ECHOES) {
+  test(`${script} ${args.map((arg) => (/sentinel|JZ97/.test(arg) ? '<sentinel>' : arg)).join(' ')}: refused without echoing it`, () => {
+    assertRefusedWith(cli(script, args, cleanEnv({}), 60_000), text, script);
+  });
+}
+
+for (const [script, args, text] of [
+  [
+    'replay-dlq.mjs',
+    ['--dlq', 'rasta.analytics.v1.dlq', '--event-id', 'EVT-1'],
+    'replay-dlq: the Kafka operation failed (KafkaJSNumberOfRetriesExceeded, code ENOTFOUND)',
+  ],
+  [
+    'kafka-acl.mjs',
+    ['apply', '--profile', 'development'],
+    'kafka acl: the Kafka admin operation failed (KafkaJSNumberOfRetriesExceeded, code ENOTFOUND)',
+  ],
+]) {
+  test(`${script} reports a broker it cannot reach by category and code, whatever the credentials`, () => {
+    // As the preflight case above: a two-character password that the broker's
+    // name contains, every lookup failing at once, no network. kafkajs's own
+    // log and error both quote the broker; neither may be printed.
+    const password = 'xy';
+    const ca = join(mkdtempSync(join(tmpdir(), 'disclosure-ca-')), 'ca.pem');
+    writeFileSync(ca, '-----BEGIN CERTIFICATE-----\n');
+    const run = cli(
+      script,
+      args,
+      cleanEnv({
+        NODE_ENV: 'test',
+        KAFKA_BROKERS: `${password}.invalid:1`,
+        KAFKA_SSL: 'true',
+        KAFKA_SSL_CA_FILE: ca,
+        KAFKA_SASL_PASSWORD_OPS_REPLAY: password,
+        KAFKA_SASL_PASSWORD_ADMIN: password,
+        DATABASE_URL_AUDIT: `postgresql://${USER}:${PASSWORD}@127.0.0.1:1/audit`,
+      }),
+      120_000,
+      ['--import', NO_DNS],
+    );
+    assertRefusedWith(run, text, script);
+    assert.doesNotMatch(run.output, new RegExp(password, 'i'), 'the two-character password');
+    assert.doesNotMatch(run.output, /invalid|getaddrinfo/i, "kafkajs's own text");
+  });
+}

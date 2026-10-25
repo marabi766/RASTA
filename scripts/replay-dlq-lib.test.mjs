@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import {
   MAX_CEILING,
   UsageError,
+  foreignFailureText,
   OPERATOR_PATTERN,
   assess,
   executeReplays,
@@ -807,4 +808,28 @@ test('replay-dlq.mjs: an unreadable CA file is refused before connecting, path u
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('a failure the tool did not write is printed by category, class and code only (#385 r6)', () => {
+  const broker = 'private-sentinel-79.invalid:1';
+  const error = Object.assign(new Error(`Connection error: getaddrinfo ENOTFOUND ${broker}`), {
+    name: 'KafkaJSConnectionError',
+    broker,
+    cause: Object.assign(new Error(`getaddrinfo ENOTFOUND ${broker}`), { code: 'ENOTFOUND' }),
+  });
+  assert.equal(
+    foreignFailureText('the Kafka operation failed', error),
+    'the Kafka operation failed (KafkaJSConnectionError, code ENOTFOUND); its own text is withheld',
+  );
+  // A code or name that is not shaped like one is not printed either.
+  const odd = Object.assign(new Error('x'), {
+    name: broker,
+    code: broker,
+    type: 'JZ97-another-secret',
+  });
+  assert.doesNotMatch(foreignFailureText('c', odd), /sentinel|jz97|another/i);
+  assert.equal(
+    foreignFailureText('c', undefined),
+    'c (unknown, code unknown); its own text is withheld',
+  );
 });

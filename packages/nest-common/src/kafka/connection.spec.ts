@@ -190,6 +190,33 @@ describe('kafkaConnection refusals repeat nothing that was configured', () => {
     expect(everything).not.toMatch(FRAGMENTS);
   }
 
+  it.each([
+    ['credentials before the host', `${'private-sentinel-79'}:${'JZ97-another-secret'}@kafka:9092`],
+    ['a scheme', `SASL_SSL://${'private-sentinel-79'}.example:9092`],
+    ['no port', 'private-sentinel-79.example'],
+    ['a path', 'kafka:9092/JZ97-another-secret'],
+  ])('KAFKA_BROKERS with %s is refused before kafkajs could quote it (#385 r6)', (_, broker) => {
+    expectFixed(
+      refusalOf(() =>
+        kafkaConnection(env({ ...plaintext, KAFKA_BROKERS: `kafka:9092,${broker}` }), 'x'),
+      ),
+      'KAFKA_BROKERS must list host:port entries, without a scheme or credentials; ' +
+        'its value is not repeated',
+    );
+  });
+
+  it('KAFKA_BROKERS of names, addresses and bracketed IPv6, with ports, connects', () => {
+    expect(
+      kafkaConnection(
+        env({
+          ...plaintext,
+          KAFKA_BROKERS: 'kafka-1:9092, 10.0.0.7:19092,[::1]:9093,b.example.org:1',
+        }),
+        'x',
+      ).brokers,
+    ).toEqual(['kafka-1:9092', '10.0.0.7:19092', '[::1]:9093', 'b.example.org:1']);
+  });
+
   it.each(SENTINELS)('without a credential and TLS, SERVICE_NAME=%s is not named', (sentinel) => {
     expectFixed(
       refusalOf(() =>

@@ -36,6 +36,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import kafkajs from 'kafkajs';
 import { connectionFor, diffAcls, fromDescribe, toKafkajsAcl } from './kafka-acl-lib.mjs';
+import { foreignFailureText } from './replay-dlq-lib.mjs';
 
 const {
   Kafka,
@@ -88,7 +89,9 @@ if (!connection.sasl || !connection.ssl) {
 
 const admin = new Kafka({
   ...connection,
-  logLevel: logLevel.ERROR,
+  // kafkajs's own log quotes the broker and its errors: a failure is reported
+  // below, by category and code (#385 r6).
+  logLevel: logLevel.NOTHING,
   retry: { initialRetryTime: 500, retries: 10 },
 }).admin();
 
@@ -138,6 +141,12 @@ try {
     `kafka acl: ${profile}: ${spec.acls.length} bindings for ${spec.principals.length} principals in place ` +
       `(${add.length} added, ${remove.length} removed)\n`,
   );
+} catch (error) {
+  // The broker's or the client's failure by category, never its text (#385 r6).
+  process.stderr.write(
+    `kafka acl: ${foreignFailureText('the Kafka admin operation failed', error)}\n`,
+  );
+  process.exitCode = 1;
 } finally {
-  await admin.disconnect();
+  await admin.disconnect().catch(() => undefined);
 }

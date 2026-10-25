@@ -13,21 +13,24 @@
 // configuration. A new one fails here; so does an entry that no longer
 // matches anything.
 //
-// Two premises of the class boundary are held here too: no command-line flag
-// takes a credential or a URL (configuration with a secret arrives through the
-// environment), and every service-to-service base URL setting is read with
-// `serviceUrlSchema` (an http(s) URL without credentials — `fetch` repeats a
-// URL with credentials whole in its TypeError).
+// Two premises of the class boundary are held here too: the command-line
+// contract (scripts/cli-contract.mjs: per file, the options it accepts and the
+// kind of value each takes, none a URL or a credential — configuration with a
+// secret arrives through the environment), and every service-to-service base
+// URL setting is read with `serviceUrlSchema` (an http(s) URL without
+// credentials — `fetch` repeats a URL with credentials whole in its TypeError).
 // -----------------------------------------------------------------------------
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CLI_CONTRACT, OTHER_NAMED_LIKE_CREDENTIALS, VALUE_KINDS } from './cli-contract.mjs';
 import {
-  CREDENTIAL_FLAG,
-  credentialFlags,
+  commandLineSurface,
+  contractProblems,
   isTestFile,
+  namesCredential,
   rawUrlParses,
   repositoryUrlParses,
   sourceFiles,
@@ -118,13 +121,6 @@ const ALLOWED = Object.freeze([
     reason: 'the JWKS URL built from OIDC_ISSUER_URL, refused at boot unless it parses',
   },
   {
-    file: 'apps/web/e2e/contract-fixture.ts',
-    call: "new URL(requiredEnv('WEB_E2E_CONTRACT_DATABASE_URL'))",
-    reason:
-      "a Playwright fixture on CI's disposable contract database; apps/web has no " +
-      '@rasta/config dependency, and the fixture runs only inside the browser test job',
-  },
-  {
     file: 'tests/e2e/src/target-guard.ts',
     call: 'new URL(value)',
     reason: 'inside try/catch returning undefined: the native error is discarded',
@@ -160,6 +156,75 @@ test('every form of a native URL parse is found', () => {
   assert.deepEqual(sites('new URL(`${base}/x`)'), ['new URL']);
 });
 
+/**
+ * Codex PR-385 r5 F2: each way to reach a parser without spelling it at the
+ * call. Resolved where the binding says what it is (import and destructuring
+ * aliases, dynamic-import namespaces, computed members with a literal name);
+ * refused where it stands otherwise (an alias, an argument, a subclass, a
+ * computed member the parser cannot read). Each fails as written and passes
+ * once the value is read with the shared reader.
+ */
+const FIXED = "import { readUrl } from '@rasta/config'; readUrl(env.X);";
+const ESCAPES = [
+  ['import { URL as U }', "import { URL as U } from 'node:url'; new U(env.X);", 'new URL'],
+  [
+    "const { URL: U } = require('node:url')",
+    "const { URL: U } = require('node:url'); new U(env.X);",
+    'new URL',
+  ],
+  ['const { URL: U } = globalThis', 'const { URL: U } = globalThis; new U(env.X);', 'new URL'],
+  ['const U = URL', 'const U = URL; new U(env.X);', 'escape'],
+  ['const parse = URL.parse', 'const parse = URL.parse; parse(env.X);', 'escape'],
+  [
+    'const parse = url.parse',
+    "import url from 'node:url'; const parse = url.parse; parse(env.X);",
+    'escape',
+  ],
+  [
+    'a dynamic-import namespace',
+    "const m = await import('node:url'); m.parse(env.X);",
+    'url.parse',
+  ],
+  [
+    'a dynamic-import namespace, its URL',
+    "const m = await import('url'); new m.URL(env.X);",
+    'new URL',
+  ],
+  [
+    'dynamic-import destructuring',
+    "const { parse: p } = await import('url'); p(env.X);",
+    'url.parse',
+  ],
+  ['a dynamic import used unbound', "import('node:url').then((m) => m.parse(env.X));", 'escape'],
+  ["globalThis['URL']", "new globalThis['URL'](env.X);", 'new URL'],
+  ["URL['parse']", "URL['parse'](env.X);", 'URL.parse'],
+  ["url['parse']", "import url from 'node:url'; url['parse'](env.X);", 'url.parse'],
+  ['URL[name]', "const name = 'parse'; URL[name](env.X);", 'escape'],
+  ['globalThis[name]', "const name = 'URL'; new globalThis[name](env.X);", 'escape'],
+  ['a subclass', 'class Parsed extends URL {} new Parsed(env.X);', 'escape'],
+  ['an argument', 'Reflect.construct(URL, [env.X]);', 'escape'],
+  ["export { parse } from 'url'", "export { parse as p } from 'node:url';", 'escape'],
+  ["export * from 'url'", "export * from 'url';", 'escape'],
+];
+
+for (const [form, escape, kind] of ESCAPES) {
+  test(`the guard sees ${form}`, () => {
+    const found = rawUrlParses(escape, 'x.mts');
+    if (kind === null) {
+      // Re-exported, the binding leaves the file: the importer's call is the
+      // site, found there (see "import { URL as U }").
+      assert.deepEqual(found, []);
+    } else {
+      assert.ok(found.length > 0, `${form}: not found`);
+      assert.ok(
+        found.some((site) => site.kind === kind),
+        `${form}: ${JSON.stringify(found)}`,
+      );
+    }
+    assert.deepEqual(rawUrlParses(FIXED, 'x.mts'), [], `${form}: the fix`);
+  });
+}
+
 test('literals, import.meta.url, comments and other parse methods are not sites', () => {
   assert.deepEqual(sites("new URL('http://localhost:3000/x')"), []);
   assert.deepEqual(sites('new URL(`http://localhost/x`)'), []);
@@ -171,7 +236,7 @@ test('literals, import.meta.url, comments and other parse methods are not sites'
   assert.deepEqual(sites("import { parse } from 'node:path'; parse(raw)"), []);
 });
 
-test('test files are left out, test helpers are not', () => {
+test('test files are left out by name, test helpers are not — __tests__/ included', () => {
   for (const file of [
     'services/a/test/x.int-spec.ts',
     'services/a/src/x.spec.ts',
@@ -179,7 +244,7 @@ test('test files are left out, test helpers are not', () => {
     'scripts/x.test.mjs',
     'scripts/x.pg.test.mjs',
     'tests/e2e/specs/x.e2e-spec.ts',
-    'packages/a/src/__tests__/x.fixture.ts',
+    'packages/a/src/__tests__/x.spec.ts',
   ]) {
     assert.equal(isTestFile(file), true, file);
   }
@@ -188,6 +253,9 @@ test('test files are left out, test helpers are not', () => {
     'scripts/runtime-preflight.e2e.mjs',
     'scripts/refusal-probes.mjs',
     'tests/e2e/src/target-guard.ts',
+    // A helper beside the tests is in scope wherever it lives (#385 r6).
+    'packages/a/src/__tests__/x.fixture.ts',
+    'packages/a/src/__tests__/helpers.ts',
   ]) {
     assert.equal(isTestFile(file), false, file);
   }
@@ -236,21 +304,113 @@ test('no native URL parse of configuration outside the reader (allow-list aside)
   );
 });
 
-test('no command-line flag takes a credential or a URL', () => {
-  assert.ok(CREDENTIAL_FLAG.test('--database-url'));
-  assert.ok(CREDENTIAL_FLAG.test('--password-stdin'));
-  assert.ok(!CREDENTIAL_FLAG.test('--security-opt'));
-  assert.ok(!CREDENTIAL_FLAG.test('--with-database'));
-  const flags = sourceFiles(ROOT)
-    .filter((file) => !isTestFile(file))
-    .flatMap((file) => {
-      const text = readFileSync(join(ROOT, file), 'utf8');
-      return text.includes('--') ? credentialFlags(text, file) : [];
-    });
+test('the option-name backstop: credential and connection names in every spelling', () => {
+  // Codex PR-385 r5 F2: the old pattern missed these four.
+  for (const option of [
+    '--api-key',
+    '--apiKey',
+    '--databaseUrl',
+    '--endpoint',
+    '--database-url',
+    '--password-stdin',
+    '--DATABASE_URL',
+    '--broker',
+    '--auth-token',
+  ]) {
+    assert.ok(namesCredential(option), option);
+  }
+  for (const option of ['--security-opt', '--with-database', '--schema', '--keyword', '--hosted']) {
+    assert.ok(!namesCredential(option), option);
+  }
+});
+
+test('the command-line surface: argv readers, option literals and parseArgs options', () => {
+  const surface = (text) => commandLineSurface(text, 'x.mjs');
+  assert.deepEqual(surface("const [a] = process.argv.slice(2); if (a === '--apiKey') {}"), {
+    readsArgv: true,
+    options: ['--apiKey'],
+  });
   assert.deepEqual(
-    flags.map((flag) => `${flag.file}:${flag.line} ${flag.flag}`),
+    surface(
+      "import { parseArgs } from 'node:util'; parseArgs({ options: { 'api-key': { type: 'string' } } });",
+    ),
+    { readsArgv: true, options: ['--api-key'] },
+  );
+  assert.deepEqual(surface("process['argv']"), { readsArgv: true, options: [] });
+  assert.deepEqual(surface("run('psql', ['-X', '--file=x.sql'])"), {
+    readsArgv: false,
+    options: ['--file', '-X'],
+  });
+  // Text that is not an option: a sentence, a range, a negative number.
+  assert.deepEqual(surface("const a = '-- note'; const b = '--x needs a value'; const c = '-1';"), {
+    readsArgv: false,
+    options: [],
+  });
+});
+
+/** Every scanned file's command-line surface, test files aside. */
+function repositorySurfaces() {
+  const surfaces = new Map();
+  for (const file of sourceFiles(ROOT).filter((name) => !isTestFile(name))) {
+    // The contract itself spells every option, as data.
+    if (file === 'scripts/cli-contract.mjs') continue;
+    const text = readFileSync(join(ROOT, file), 'utf8');
+    if (!text.includes('-') && !text.includes('argv')) continue;
+    const surface = commandLineSurface(text, file);
+    if (surface.readsArgv || surface.options.length > 0) surfaces.set(file, surface);
+  }
+  return surfaces;
+}
+
+test('the contract checker refuses each way out (synthetic surfaces)', () => {
+  const kinds = { switch: '', path: '' };
+  const surfaces = new Map([
+    ['a.mjs', { readsArgv: true, options: ['--api-key', '--quiet'] }],
+    ['b.mjs', { readsArgv: true, options: ['--x'] }],
+    ['c.mjs', { readsArgv: false, options: ['--token'] }],
+    ['d.mjs', { readsArgv: false, options: [] }],
+  ]);
+  const contract = {
+    a: {},
+    'a.mjs': { accepts: { '--quiet': 'switch' }, positionals: [] },
+    'b.mjs': { accepts: { '--x': 'url', '--databaseUrl': 'path' }, positionals: ['secret'] },
+    'c.mjs': { other: ['--token'] },
+  };
+  assert.deepEqual(contractProblems(surfaces, contract, kinds, {}).sort(), [
+    'a.mjs: spells --api-key, not in its entry',
+    'a: listed, but neither reads argv nor spells an option',
+    'b.mjs: --x takes "url"',
+    'b.mjs: a positional takes "secret"',
+    'b.mjs: accepts --databaseUrl',
+    'b.mjs: its entry lists --databaseUrl, not spelled',
+    'c.mjs: passes --token; say why it is not a credential',
+    'd.mjs: not in the contract (argv)',
+  ]);
+  assert.deepEqual(
+    contractProblems(
+      new Map([['c.mjs', surfaces.get('c.mjs')]]),
+      { 'c.mjs': contract['c.mjs'] },
+      kinds,
+      {
+        '--token': 'a reason',
+      },
+    ),
     [],
-    'a credential or URL arrives through the environment, never argv (which the scripts echo)',
+  );
+});
+
+test('the command-line contract holds for the repository', () => {
+  const surfaces = repositorySurfaces();
+  assert.ok(surfaces.size > 40, 'the scan found too few command lines');
+  for (const kind of Object.keys(VALUE_KINDS)) {
+    assert.ok(
+      !namesCredential(`--${kind}`) && !/url|uri/i.test(kind),
+      `${kind} is not a value kind`,
+    );
+  }
+  assert.deepEqual(
+    contractProblems(surfaces, CLI_CONTRACT, VALUE_KINDS, OTHER_NAMED_LIKE_CREDENTIALS),
+    [],
   );
 });
 

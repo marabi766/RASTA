@@ -10,7 +10,8 @@
  *   current   `initTelemetry` as it is.
  *   baseline  a bare NodeSDK, its console logger and all: the control that
  *             the environment really makes the SDK quote it.
- *   explicit  `initTelemetry` with argv[2] as `otlpEndpoint`; prints what it threw.
+ *   explicit  `initTelemetry` with FIXTURE_OTLP_ENDPOINT as `otlpEndpoint` (from the
+ *             environment: no argument takes a URL, #385 r6); prints what it threw.
  *   exports   `initTelemetry` into an in-memory exporter: the positive control
  *             that telemetry still exports under the safe logger.
  */
@@ -49,7 +50,8 @@ function endSpans(): void {
 }
 
 async function main(): Promise<Record<string, unknown>> {
-  const [mode, endpoint] = process.argv.slice(1);
+  const [mode] = process.argv.slice(1);
+  const endpoint = process.env.FIXTURE_OTLP_ENDPOINT;
   if (mode === 'baseline') {
     const sdk = new NodeSDK({ instrumentations: [getNodeAutoInstrumentations()] });
     sdk.start();

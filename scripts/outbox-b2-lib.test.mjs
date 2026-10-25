@@ -71,6 +71,11 @@ test('an unknown service is refused rather than skipped', () => {
     refusal(() => parseOptions(['--service', 'Document'], {})),
     /Unknown service/,
   );
+  // Counted, never repeated (#385 r6).
+  assert.doesNotMatch(
+    refusal(() => parseOptions(['--service', 'supplier'], {})),
+    /supplier/,
+  );
 });
 
 test('--all selects exactly the eight B1 databases', () => {
@@ -170,7 +175,9 @@ test('an option missing its value is refused rather than reading the next flag',
 
 test('an unknown option is refused and the known ones are named', () => {
   const message = refusal(() => parseOptions(['--service', 'document', '--force'], {}));
-  assert.match(message, /Unknown option "--force"/);
+  // By position, never repeated (#385 r6); the known ones are this script's own.
+  assert.match(message, /Unknown option at position 3; it is not repeated/);
+  assert.doesNotMatch(message, /--force/);
   assert.match(message, /--apply/);
 });
 

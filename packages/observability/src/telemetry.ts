@@ -21,6 +21,7 @@ import {
   trace,
   metrics,
   context as otelContext,
+  propagation,
   SpanStatusCode,
   type Span,
   type Context,
@@ -29,7 +30,12 @@ import {
   type Link,
 } from '@opentelemetry/api';
 import { tryReadUrl } from '@rasta/config';
-import { installSafeDiagnostics, withoutSdkLogLevel } from './diagnostics';
+import {
+  installSafeDiagnostics,
+  telemetryRefusal,
+  withoutSdkLogLevel,
+  type TelemetryStage,
+} from './diagnostics';
 import { RedactingSampler, RedactingSpanProcessor } from './url-redaction';
 
 /**
@@ -106,6 +112,8 @@ export class RastaSampler implements Sampler {
 
 let sdk: NodeSDK | undefined;
 
+type Instrumentations = ReturnType<typeof getNodeAutoInstrumentations>;
+
 /**
  * What `initTelemetry` refuses an explicit OTLP endpoint that is not a URL
  * with: the OTLP exporter's own refusal quotes it, credentials included.
@@ -113,11 +121,40 @@ let sdk: NodeSDK | undefined;
 export const UNREADABLE_OTLP_ENDPOINT =
   'OTEL_EXPORTER_OTLP_ENDPOINT cannot be read as a URL; its value is not repeated';
 
-/** What a failure to build the explicit trace exporter is reported with, instead of its error. */
-export const TRACE_EXPORTER_REFUSED =
-  'the OTLP trace exporter could not be built from OTEL_EXPORTER_OTLP_ENDPOINT; ' +
-  "the exporter's own error is withheld, it may repeat the endpoint";
+/**
+ * Why telemetry did not start, or did not stop cleanly: a fixed text naming
+ * registered settings only (`telemetryRefusal`). Never the SDK's error, its
+ * cause or its stack — an exporter's constructor refuses with the endpoint on
+ * `.input` or a header in its message (#385 r6, Codex PR-385 r5 F1).
+ */
+export class TelemetryRefusedError extends Error {
+  override readonly name = 'TelemetryRefusedError';
+}
 
+/** What a failed {@link shutdownTelemetry} rejects with, in place of the SDK's error. */
+export const TELEMETRY_SHUTDOWN_FAILED =
+  "OpenTelemetry did not shut down cleanly; the SDK's own error is withheld, it may repeat " +
+  'configured values';
+
+/**
+ * Builds and starts the SDK once per process; later calls return the same SDK.
+ *
+ * Everything of the SDK that reads configuration runs inside one boundary —
+ * the auto-instrumentations, the `NodeSDK` constructor (which builds the
+ * metric readers and their exporters, even under `OTEL_SDK_DISABLED`), and
+ * `start()` (which builds the span and log exporters and their processors:
+ * OTLP over http/json, http/protobuf or gRPC, Zipkin, console; gRPC metadata
+ * from `*_HEADERS`). Whatever any of them throws is discarded and replaced by
+ * a fresh {@link TelemetryRefusedError} naming the stage's registered
+ * settings. What the SDK reports instead of throwing — during start, an
+ * export, a shutdown — goes to `diag`, whose only logger is the safe one
+ * (diagnostics.ts).
+ *
+ * A refused start leaves nothing behind: the instrumentations are disabled,
+ * whatever the SDK registered globally is unregistered and its providers are
+ * shut down, and no SDK is kept — so a later call builds afresh (and refuses
+ * again under the same configuration) rather than returning a half-built one.
+ */
 export function initTelemetry(config: TelemetryConfig): NodeSDK | undefined {
   if (config.enabled === false) return undefined;
   if (sdk) return sdk;
@@ -127,7 +164,7 @@ export function initTelemetry(config: TelemetryConfig): NodeSDK | undefined {
   // first: whatever they report goes through the safe logger (diagnostics.ts).
   const reinstallDiagnostics = installSafeDiagnostics();
   if (config.otlpEndpoint !== undefined && tryReadUrl(config.otlpEndpoint) === null) {
-    throw new Error(UNREADABLE_OTLP_ENDPOINT);
+    throw new TelemetryRefusedError(UNREADABLE_OTLP_ENDPOINT);
   }
 
   // OpenTelemetry 2.x replaced the `Resource` class with a factory; the
@@ -140,48 +177,99 @@ export function initTelemetry(config: TelemetryConfig): NodeSDK | undefined {
   });
 
   let spanProcessors: SpanProcessor[] | undefined;
-
-  // With OTEL_LOG_LEVEL hidden, so the constructor installs no console logger
-  // of its own over the safe one.
-  sdk = withoutSdkLogLevel(
-    () =>
-      new NodeSDK({
-        resource,
-        // Sanitizes what a span is started with before the SDK cuts it; the
-        // redacting span processor below takes everything written after.
-        sampler: new RedactingSampler(new RastaSampler(config.sampleRatio ?? 1)),
-        // Built when `start()` reads it — after NodeSDK has registered its meter
-        // provider, at the point where it would build the same processors itself —
-        // and not at all under `OTEL_SDK_DISABLED`, where `start()` reads nothing.
-        get spanProcessors(): SpanProcessor[] {
-          spanProcessors ??= spanPipeline(config);
-          return spanProcessors;
+  // Which part of the SDK is being built, for the refusal's names.
+  let stage: TelemetryStage = 'instrumentations';
+  let instrumentations: Instrumentations = [];
+  let built: NodeSDK | undefined;
+  let started = false;
+  let refused = false;
+  try {
+    instrumentations = getNodeAutoInstrumentations({
+      // Filesystem spans are enormous in volume and near-useless for
+      // diagnosing a distributed system.
+      '@opentelemetry/instrumentation-fs': { enabled: false },
+      '@opentelemetry/instrumentation-http': {
+        // Health and metrics endpoints are polled constantly; tracing them
+        // buries the requests that matter.
+        ignoreIncomingRequestHook: (request) => {
+          const url = request.url ?? '';
+          return url.startsWith('/health') || url.startsWith('/metrics');
         },
-        logRecordProcessors: config.logRecordExporter
-          ? [new logs.SimpleLogRecordProcessor({ exporter: config.logRecordExporter })]
-          : undefined,
-        instrumentations: [
-          getNodeAutoInstrumentations({
-            // Filesystem spans are enormous in volume and near-useless for
-            // diagnosing a distributed system.
-            '@opentelemetry/instrumentation-fs': { enabled: false },
-            '@opentelemetry/instrumentation-http': {
-              // Health and metrics endpoints are polled constantly; tracing them
-              // buries the requests that matter.
-              ignoreIncomingRequestHook: (request) => {
-                const url = request.url ?? '';
-                return url.startsWith('/health') || url.startsWith('/metrics');
-              },
-            },
-          }),
-        ],
-      }),
-  );
-  // Again, after construction and after start, should anything have replaced it.
-  reinstallDiagnostics();
-  sdk.start();
-  reinstallDiagnostics();
+      },
+    });
+    // The constructor builds the metric readers from the environment.
+    stage = 'metrics';
+    // With OTEL_LOG_LEVEL hidden, so the constructor installs no console logger
+    // of its own over the safe one.
+    built = withoutSdkLogLevel(
+      () =>
+        new NodeSDK({
+          resource,
+          // Sanitizes what a span is started with before the SDK cuts it; the
+          // redacting span processor below takes everything written after.
+          sampler: new RedactingSampler(new RastaSampler(config.sampleRatio ?? 1)),
+          // Built when `start()` reads it — after NodeSDK has registered its meter
+          // provider, at the point where it would build the same processors itself —
+          // and not at all under `OTEL_SDK_DISABLED`, where `start()` reads nothing.
+          // Read last before the log exporters, which `start()` builds next.
+          get spanProcessors(): SpanProcessor[] {
+            stage = 'traces';
+            spanProcessors ??= spanPipeline(config);
+            stage = 'logs';
+            return spanProcessors;
+          },
+          logRecordProcessors: config.logRecordExporter
+            ? [new logs.SimpleLogRecordProcessor({ exporter: config.logRecordExporter })]
+            : undefined,
+          instrumentations: [instrumentations],
+        }),
+    );
+    // Again, after construction and after start, should anything have replaced it.
+    reinstallDiagnostics();
+    stage = 'sdk';
+    started = true;
+    built.start();
+    reinstallDiagnostics();
+  } catch {
+    // Nothing of the error is kept: not its message, cause, stack or properties.
+    refused = true;
+  }
+  if (refused) {
+    discardPartialStart(built, instrumentations, started);
+    reinstallDiagnostics();
+    throw new TelemetryRefusedError(telemetryRefusal(stage, process.env));
+  }
+  sdk = built;
   return sdk;
+}
+
+/**
+ * Undoes what a refused start did: disables the instrumentations (they patch
+ * modules as they are built), unregisters what `start()` registers globally —
+ * the context manager, the propagator, and the meter and tracer providers
+ * (the logger provider is registered last, so a refused start never reached
+ * it) — and shuts the built SDK's providers down. The shutdown is not awaited;
+ * whatever it reports goes to `diag`, and a rejection is dropped.
+ */
+function discardPartialStart(
+  built: NodeSDK | undefined,
+  instrumentations: Instrumentations,
+  started: boolean,
+): void {
+  for (const instrumentation of instrumentations) {
+    try {
+      instrumentation.disable();
+    } catch {
+      // Best effort; its error is not reported, for the same reason.
+    }
+  }
+  if (started) {
+    trace.disable();
+    metrics.disable();
+    otelContext.disable();
+    propagation.disable();
+  }
+  built?.shutdown().catch(() => undefined);
 }
 
 /**
@@ -215,22 +303,29 @@ function spanPipeline(config: TelemetryConfig): SpanProcessor[] {
 }
 
 /**
- * The OTLP exporter at `otlpEndpoint`, or undefined without one. Its own
- * refusal of a URL it cannot use quotes the URL; this one is fixed.
+ * The OTLP exporter at `otlpEndpoint`, or undefined without one. Built inside
+ * `initTelemetry`'s boundary: its own refusal, which quotes the URL, is replaced.
  */
 function otlpTraceExporter(otlpEndpoint: string | undefined): SpanExporter | undefined {
   if (!otlpEndpoint) return undefined;
-  try {
-    return new OTLPTraceExporter({ url: `${otlpEndpoint.replace(/\/$/, '')}/v1/traces` });
-  } catch {
-    throw new Error(TRACE_EXPORTER_REFUSED);
-  }
+  return new OTLPTraceExporter({ url: `${otlpEndpoint.replace(/\/$/, '')}/v1/traces` });
 }
 
+/**
+ * Flushes and stops the SDK. Rejects, when the SDK's shutdown does, with a
+ * fresh {@link TelemetryRefusedError} ({@link TELEMETRY_SHUTDOWN_FAILED}): the
+ * SDK's own rejection — an exporter's, quoting its endpoint or a collector's
+ * answer — is dropped, since the caller logs what it is given.
+ */
 export async function shutdownTelemetry(): Promise<void> {
-  if (!sdk) return;
-  await sdk.shutdown();
+  const current = sdk;
+  if (!current) return;
   sdk = undefined;
+  let failed = false;
+  await current.shutdown().catch(() => {
+    failed = true;
+  });
+  if (failed) throw new TelemetryRefusedError(TELEMETRY_SHUTDOWN_FAILED);
 }
 
 // ---------------------------------------------------------------------------

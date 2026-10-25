@@ -54,7 +54,16 @@ if (args.length !== 2 || args[0] !== '--report') {
 }
 // Exclusive creation avoids overwriting an operator's file (including through a symlink).
 const reportPath = resolve(args[1]);
-const reportFd = openSync(reportPath, 'wx', 0o600);
+let reportFd;
+try {
+  reportFd = openSync(reportPath, 'wx', 0o600);
+} catch {
+  // Not the path, nor the error that quotes it (#385 r6).
+  console.error(
+    'the --report file cannot be created (it must not exist yet); its path is not repeated',
+  );
+  process.exit(2);
+}
 let temporary;
 let project;
 let composeFile;

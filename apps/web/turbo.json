@@ -14,6 +14,7 @@
     "test": {
       "inputs": [
         "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/packages/config/src/url-reader.js",
         "$TURBO_ROOT$/packages/contracts/src/common/errors.ts",
         "$TURBO_ROOT$/packages/contracts/src/common/money.ts",
         "$TURBO_ROOT$/packages/contracts/src/events/inventory-returns.ts",
@@ -142,6 +143,7 @@
     "test:unit": {
       "inputs": [
         "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/packages/config/src/url-reader.js",
         "$TURBO_ROOT$/packages/contracts/src/common/errors.ts",
         "$TURBO_ROOT$/packages/contracts/src/common/money.ts",
         "$TURBO_ROOT$/packages/contracts/src/events/inventory-returns.ts",

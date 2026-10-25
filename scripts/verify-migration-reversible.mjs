@@ -77,12 +77,14 @@ function usage(message) {
 const args = process.argv.slice(2);
 const service = args[0];
 if (!service) usage('A service name is required.');
-if (!EXPECTED[service]) usage(`No expected-object list for "${service}".`);
+// Echoed only once it is one of EXPECTED's services (#385 r6).
+if (!Object.hasOwn(EXPECTED, service))
+  usage('No expected-object list for that service; it is not repeated.');
 
 const schemaFlag = args.indexOf('--schema');
 const scratchSchema = schemaFlag >= 0 ? args[schemaFlag + 1] : 'migration_check';
 if (!/^[a-z_][a-z0-9_]*$/.test(scratchSchema)) {
-  usage(`--schema must be a plain lowercase identifier, received "${scratchSchema}".`);
+  usage('--schema must be a plain lowercase identifier; its value is not repeated.');
 }
 
 const serviceDir = join(REPO_ROOT, 'services', `${service}-service`);

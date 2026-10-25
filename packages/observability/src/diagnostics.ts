@@ -101,6 +101,68 @@ export const OTEL_SETTINGS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The parts of the SDK `initTelemetry` builds in turn, and what each reads:
+ * an exporter-building stage reads its signal's selector and exporter
+ * settings (the general `OTEL_EXPORTER_OTLP_*` ones too), and its processor's.
+ */
+export type TelemetryStage = 'instrumentations' | 'metrics' | 'traces' | 'logs' | 'sdk';
+
+const otlpSettingsOf = (signal: (typeof OTLP_SIGNALS)[number]): string[] =>
+  OTLP_SETTINGS.flatMap((setting) => [
+    `OTEL_EXPORTER_OTLP_${setting}`,
+    `OTEL_EXPORTER_OTLP_${signal}_${setting}`,
+  ]);
+
+/** Per stage: the registered settings it reads, by name, or a test on the name. */
+const STAGE_SETTINGS: Readonly<Record<TelemetryStage, (name: string) => boolean>> = {
+  instrumentations: (name) =>
+    /^OTEL_(NODE_(EN|DIS)ABLED_INSTRUMENTATIONS|INSTRUMENTATION_)/.test(name),
+  metrics: (name) =>
+    otlpSettingsOf('METRICS').includes(name) ||
+    /^OTEL_(METRICS?_|EXPORTER_PROMETHEUS_|EXPORTER_OTLP_METRICS_)/.test(name),
+  traces: (name) =>
+    otlpSettingsOf('TRACES').includes(name) ||
+    /^OTEL_(TRACES_EXPORTER|EXPORTER_ZIPKIN_ENDPOINT|BSP_)/.test(name),
+  logs: (name) =>
+    otlpSettingsOf('LOGS').includes(name) || /^OTEL_(LOGS_EXPORTER|BLRP_|LOGRECORD_)/.test(name),
+  sdk: () => true,
+};
+
+/** What a stage is named after in a refusal. */
+const STAGE_SUBJECT: Readonly<Record<TelemetryStage, string>> = {
+  instrumentations: 'instrumentation',
+  metrics: 'metrics exporter',
+  traces: 'trace exporter',
+  logs: 'log exporter',
+  sdk: 'SDK',
+};
+
+/**
+ * The registered settings `stage` reads that are set in `env`, sorted — the
+ * names a refusal points the operator at. Names only: each is in
+ * {@link OTEL_SETTINGS}, and nothing of a value is read but its presence.
+ */
+export function stageSettings(stage: TelemetryStage, env: NodeJS.ProcessEnv): string[] {
+  return [...OTEL_SETTINGS]
+    .filter((name) => STAGE_SETTINGS[stage](name) && env[name] !== undefined)
+    .sort();
+}
+
+/**
+ * What `initTelemetry` refuses with when building `stage` threw: a fixed text
+ * and registered names, never the SDK's error, which may quote any of their
+ * values (#385 r6, Codex PR-385 r5 F1).
+ */
+export function telemetryRefusal(stage: TelemetryStage, env: NodeJS.ProcessEnv): string {
+  const names = stageSettings(stage, env);
+  return (
+    `OpenTelemetry refused its ${STAGE_SUBJECT[stage]} configuration` +
+    (names.length > 0 ? ` (${names.join(', ')})` : '') +
+    "; the SDK's own error is withheld, it may repeat configured values"
+  );
+}
+
+/**
  * The categories a diagnostic is printed under, first match wins: tested
  * against the SDK's message, never printed from it.
  */

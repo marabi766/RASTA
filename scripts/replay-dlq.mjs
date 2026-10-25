@@ -57,6 +57,8 @@ import {
   reportLine,
   staleFrom,
   stalenessProbe,
+  ReplayFailure,
+  foreignFailureText,
   topologyOf,
   withStaleness,
 } from './replay-dlq-lib.mjs';
@@ -96,7 +98,7 @@ try {
     // Only a .retry the tool writes — never the economic stream's.
     const original = check.topic.slice(0, -contracts.RETRY_TOPIC_SUFFIX.length);
     if (!topics.has(check.topic) || contracts.NEVER_AUTO_REPLAY_TOPICS.has(original)) {
-      throw new UsageError(`${check.topic} is not a .retry topic the tool replays to`);
+      throw new UsageError('--topic is not a .retry topic the tool replays to; it is not repeated');
     }
   } else {
     topology = topologyOf(options.dlq, { topics, consumers: contracts.TOPIC_CONSUMERS });
@@ -133,7 +135,9 @@ const mode = check ? 'check-marker' : options.execute ? 'execute' : 'dry-run';
 const kafka = new Kafka({
   ...connection,
   clientId: `ops-replay-${reportId}`,
-  logLevel: logLevel.ERROR,
+  // kafkajs's own log quotes the broker and its errors: a failure is reported
+  // below, by category and code (#385 r6).
+  logLevel: logLevel.NOTHING,
   retry: { initialRetryTime: 300, retries: 5 },
 });
 const admin = kafka.admin();
@@ -225,7 +229,8 @@ async function select() {
       );
     }
     const { records, incomplete } = await readPartition(options.dlq, options.partition, from, to);
-    if (incomplete) throw new Error(`could not read ${options.dlq}/${options.partition} in full`);
+    if (incomplete)
+      throw new ReplayFailure(`could not read ${options.dlq}/${options.partition} in full`);
     return records;
   }
 
@@ -239,7 +244,7 @@ async function select() {
       BigInt(low),
       BigInt(high),
     );
-    if (incomplete) throw new Error(`could not read ${options.dlq}/${partition} in full`);
+    if (incomplete) throw new ReplayFailure(`could not read ${options.dlq}/${partition} in full`);
     for (const record of records) {
       const headers = headerStrings(record.headers);
       let eventId = headers[contracts.EVENT_HEADERS.eventId];
@@ -260,7 +265,10 @@ async function select() {
     }
   }
   const missing = options.eventIds.filter((id) => !found.has(id));
-  if (missing.length > 0) throw new UsageError(`not on ${options.dlq}: ${missing.join(', ')}`);
+  // The ids that matched are the topic's; the others are not repeated (#385 r6).
+  if (missing.length > 0) {
+    throw new UsageError(`${missing.length} --event-id value(s) are not on ${options.dlq}`);
+  }
   return [...found.values()].sort((a, b) =>
     a.partition !== b.partition
       ? a.partition - b.partition
@@ -414,7 +422,7 @@ try {
             return {
               send: async (topic, message) => {
                 const [result] = await transaction.send({ topic, acks: -1, messages: [message] });
-                if (!result) throw new Error(`${topic}: the broker returned no position`);
+                if (!result) throw new ReplayFailure(`${topic}: the broker returned no position`);
                 return { partition: result.partition, offset: result.baseOffset };
               },
               commit: () => transaction.commit(),
@@ -441,7 +449,11 @@ try {
     }
   }
 } catch (error) {
-  process.stderr.write(`replay-dlq: ${error.message}\n`);
+  // Its own refusals as written; a broker's or a client's failure by category.
+  const own = error instanceof UsageError || error instanceof ReplayFailure;
+  process.stderr.write(
+    `replay-dlq: ${own ? error.message : foreignFailureText('the Kafka operation failed', error)}\n`,
+  );
   exitCode = error instanceof UsageError ? 2 : 1;
 } finally {
   await admin.disconnect().catch(() => undefined);

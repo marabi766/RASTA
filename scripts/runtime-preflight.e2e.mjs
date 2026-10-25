@@ -44,7 +44,7 @@ import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
-import { UnreadableUrlError, readUrl, tryReadUrl } from '../packages/config/src/url-reader.js';
+import { UnreadableUrlError, readUrl } from '../packages/config/src/url-reader.js';
 import { withUtcSession } from './prisma-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -52,7 +52,7 @@ const require = createRequire(import.meta.url);
 const { Kafka, logLevel } = require(
   join(ROOT, 'packages', 'nest-common', 'node_modules', 'kafkajs'),
 );
-const { kafkaClientConfig, kafkaConnectionFor } = require(
+const { KafkaConnectionConfigError, kafkaClientConfig, kafkaConnectionFor } = require(
   join(ROOT, 'packages', 'nest-common', 'dist', 'index.js'),
 );
 const { kafkaPasswordVariable } = require(join(ROOT, 'packages', 'config', 'dist', 'index.js'));
@@ -197,6 +197,9 @@ const SERVICES = {
 const stateFile = (service) =>
   join(process.env.PREFLIGHT_STATE_DIR || '/tmp/rasta-logs', `runtime-preflight-${service}.json`);
 const REFUSAL_TIMEOUT_MS = 60_000;
+/** Why the service's output is not shown with a failed check. */
+const WITHHELD =
+  "the service's output is withheld (it may repeat its configuration); rerun it to see it";
 const CONSUME_TIMEOUT_MS = 180_000;
 
 const required = (name) => {
@@ -206,11 +209,12 @@ const required = (name) => {
 };
 
 /**
- * A refusal of this script, printed as it is: a fixed text, or one that quotes
- * the service's output only after {@link withoutCredentials}. Not `node:assert`
- * — an AssertionError's message and stack carry both compared values, here the
- * owner URL's username, and the rejection handler below printed that stack
- * (#385 r5).
+ * A refusal of this script, printed as it is: always a fixed text, which may
+ * name a setting, a service, a consumer group or a topic (all this script's
+ * own constants), never a value read from the environment and never anything
+ * another program wrote. Not `node:assert` — an AssertionError's message and
+ * stack carry both compared values, here the owner URL's username, and the
+ * rejection handler below printed that stack (#385 r5).
  */
 class PreflightFailure extends Error {
   name = 'PreflightFailure';
@@ -222,42 +226,53 @@ function check(condition, text) {
 }
 
 /**
- * Every credential this run was handed — each `*PASSWORD*` variable's value,
- * and the username and password of every URL in the environment, raw and
- * decoded — longest first. Shorter than three characters is not looked for:
- * it would be found in any text.
+ * A code a client library sets on its errors — a kafkajs protocol error type
+ * (`GROUP_COORDINATOR_NOT_AVAILABLE`), a system error code (`ENOTFOUND`), a
+ * Prisma code (`P1001`) — or `unknown`. Only its shape is trusted: upper-case
+ * letters, digits and `_`, so it cannot spell a host, a URL or a password
+ * with a lower-case letter in it.
  */
-function credentialsIn(env) {
-  const found = new Set();
-  for (const [name, value] of Object.entries(env)) {
-    if (!value) continue;
-    if (name.includes('PASSWORD')) found.add(value);
-    const url = tryReadUrl(value);
-    for (const part of url === null ? [] : [url.username, url.password]) {
-      found.add(part);
-      try {
-        found.add(decodeURIComponent(part));
-      } catch {
-        // Not percent-encoding: the raw form is looked for already.
-      }
+function codeOf(error) {
+  for (const candidate of [error?.type, error?.code, error?.cause?.code]) {
+    if (typeof candidate === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(candidate)) {
+      return candidate;
     }
   }
-  return [...found].filter((part) => part.length >= 3).sort((a, b) => b.length - a.length);
+  return 'unknown';
 }
 
-const CREDENTIALS = credentialsIn(process.env);
+/**
+ * A refusal with a fixed text: this script's, the URL reader's, or
+ * nest-common's refusal of the Kafka connection settings (which names them).
+ */
+const isOwnRefusal = (error) =>
+  error instanceof PreflightFailure ||
+  error instanceof UnreadableUrlError ||
+  error instanceof KafkaConnectionConfigError;
 
 /**
- * `text` this script did not write — the service's output, a Kafka or Prisma
- * error — with every credential of this run replaced (#385 r5). What it passes
- * through is the service's and the clients' own; the credentials are this
- * run's, and never printed.
+ * `work()`, with whatever another program or a client library throws from it
+ * — a kafkajs, DNS or connection error, a Prisma error — replaced by a
+ * {@link PreflightFailure} of a fixed category: `category` names what failed
+ * and the settings it read, the code is {@link codeOf}'s. Their own text is
+ * never printed: it may quote a broker, a URL or a username, and no scrubbing
+ * of credential substrings can tell which part of it is one (Codex PR-385 r5
+ * F1: a two-character password survived). This script's own refusals pass.
  */
-const withoutCredentials = (text) =>
-  CREDENTIALS.reduce(
-    (shown, credential) => shown.replaceAll(credential, '<credential>'),
-    `${text}`,
-  );
+async function reported(category, work) {
+  try {
+    return await work();
+  } catch (error) {
+    if (isOwnRefusal(error)) throw error;
+    throw new PreflightFailure(`${category} (code ${codeOf(error)}); its own text is withheld`);
+  }
+}
+
+/** The categories {@link reported} reports by, naming the settings each reads. */
+const KAFKA_FAILED = (service, what) =>
+  `kafka connection failed while ${what} as ${service} ` +
+  `(KAFKA_BROKERS, ${kafkaPasswordVariable(service)})`;
+const DATABASE_FAILED = (variable) => `database query failed (${variable})`;
 
 const kafkaAs = (principal) =>
   new Kafka({
@@ -354,6 +369,11 @@ function startWithOwnerUrl(service, spec, ownerUrl) {
       clearTimeout(timer);
       done({ code, output, timedOut: false });
     });
+    // Not started at all (no node, no dist): a refusal like any other.
+    child.on('error', () => {
+      clearTimeout(timer);
+      done({ code: null, output, timedOut: false });
+    });
   });
 }
 
@@ -369,37 +389,45 @@ async function refused(service, spec) {
   const ownerPassword = decodeURIComponent(owner.password);
   const group = spec.group();
 
-  const before = await groupView(service, group, spec.topic);
+  const before = await reported(KAFKA_FAILED(service, `reading ${group}`), () =>
+    groupView(service, group, spec.topic),
+  );
   check(before.state === 'Dead', `${group} has run before; the proof needs a fresh group`);
-  const eventId = await queueEvent(spec);
+  const eventId = await reported(
+    KAFKA_FAILED(spec.producer ?? service, `queueing on ${spec.topic}`),
+    () => queueEvent(spec),
+  );
   writeFileSync(stateFile(service), JSON.stringify({ group, eventId, before: before.offsets }));
   console.log(
     `${group} on ${spec.topic}: ${JSON.stringify(before)}; queued ${eventId ?? 'nothing'}`,
   );
 
   const run = await startWithOwnerUrl(service, spec, ownerUrl);
-  // Checked first, and the output is only ever quoted without this run's
-  // credentials: a service that printed the password must not have it
-  // printed again here.
-  check(!run.output.includes(ownerPassword), 'the owner password was printed');
-  const shown = withoutCredentials(run.output);
-  check(!run.timedOut, `${service} kept running with the owner URL:\n${shown}`);
-  check(run.code !== 0, `${service} exited 0 with the owner URL:\n${shown}`);
-  check(/RuntimeRoleRefusedError/.test(run.output), `no RuntimeRoleRefusedError:\n${shown}`);
+  // The service's output is tested, never printed: what it wrote is its own,
+  // and may quote anything it was configured with (WITHHELD).
+  check(!run.output.includes(ownerPassword), `the owner password was printed; ${WITHHELD}`);
+  check(!run.timedOut, `${service} kept running with the owner URL; ${WITHHELD}`);
+  check(run.code !== 0, `${service} exited 0 with the owner URL; ${WITHHELD}`);
+  check(/RuntimeRoleRefusedError/.test(run.output), `no RuntimeRoleRefusedError; ${WITHHELD}`);
   check(
     new RegExp(`${service} refuses to start: it is connected as ${spec.migrator}`).test(run.output),
-    `${service} did not refuse naming ${spec.migrator}:\n${shown}`,
+    `${service} did not refuse naming ${spec.migrator}; ${WITHHELD}`,
   );
   check(!/listening on :/.test(run.output), 'the application started listening');
   check(!/Consuming /.test(run.output), 'a consumer started before the refusal');
   console.log(`${service} with the owner URL exited ${run.code}: RuntimeRoleRefusedError`);
 
   // No consumer joined, nothing was committed, nothing was recorded.
-  const after = await groupView(service, group, spec.topic);
+  const after = await reported(KAFKA_FAILED(service, `reading ${group}`), () =>
+    groupView(service, group, spec.topic),
+  );
   check(after.state === 'Dead', `a consumer joined ${group} before the refusal`);
   check(isDeepStrictEqual(after.offsets, before.offsets), `${group} committed an offset`);
   if (eventId && spec.records) {
-    check((await spec.records(eventId)) === 0, `${eventId} was recorded`);
+    const recorded = await reported(DATABASE_FAILED(spec.runtimeVariables[0]), () =>
+      spec.records(eventId),
+    );
+    check(recorded === 0, `${eventId} was recorded`);
   }
   console.log(`${group}: never formed, offsets unchanged; nothing consumed`);
 }
@@ -409,10 +437,16 @@ async function consumed(service, spec) {
   // With an event queued: the group's offset moves past it and the service
   // records it. Without: the group forms — a consumer joined.
   const done = async () => {
-    const view = await groupView(service, state.group, spec.topic);
+    const view = await reported(KAFKA_FAILED(service, `reading ${state.group}`), () =>
+      groupView(service, state.group, spec.topic),
+    );
     if (!state.eventId) return view.state !== 'Dead';
     const moved = JSON.stringify(view.offsets) !== JSON.stringify(state.before);
-    return moved && (!spec.records || (await spec.records(state.eventId)) > 0);
+    if (!moved || !spec.records) return moved;
+    const recorded = await reported(DATABASE_FAILED(spec.runtimeVariables[0]), () =>
+      spec.records(state.eventId),
+    );
+    return recorded > 0;
   };
   const what = state.eventId ? `${state.eventId} consumed` : `${state.group} formed`;
   const deadline = Date.now() + CONSUME_TIMEOUT_MS;
@@ -439,12 +473,11 @@ if (!run || !spec) {
 run(service, spec).then(
   () => process.exit(0),
   (error) => {
-    // This script's own refusals as written; anything else — a Kafka or Prisma
-    // error — only without this run's credentials (#385 r5).
-    const text =
-      error instanceof PreflightFailure || error instanceof UnreadableUrlError
-        ? error.message
-        : withoutCredentials(error?.stack ?? error);
+    // This script's own refusals as written; anything else — what escaped
+    // every `reported` stage — by a fixed text only (#385 r6).
+    const text = isOwnRefusal(error)
+      ? error.message
+      : `an unexpected failure (code ${codeOf(error)}); its own text is withheld`;
     console.error(`runtime-preflight ${mode}: ${text}`);
     process.exit(1);
   },

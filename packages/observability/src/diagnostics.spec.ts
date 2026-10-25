@@ -203,8 +203,11 @@ describe('the OpenTelemetry SDK diagnostics under initTelemetry (child processes
     tasks.push(async () => {
       explicit = await runFixture(
         'explicit',
-        childEnv({ OTEL_LOG_LEVEL: 'ALL', OTEL_TRACES_EXPORTER: 'none' }),
-        CREDENTIAL_URL,
+        childEnv({
+          OTEL_LOG_LEVEL: 'ALL',
+          OTEL_TRACES_EXPORTER: 'none',
+          FIXTURE_OTLP_ENDPOINT: CREDENTIAL_URL,
+        }),
       );
     });
     for (const level of [undefined, 'WARN', 'ALL']) {

@@ -231,7 +231,10 @@ export function parseOptions(argv, env = {}) {
         );
         break;
       default:
-        refuse(`Unknown option "${arg}". Known: ${KNOWN_OPTIONS.join(', ')}.`);
+        // Not repeated: only an option that matched is ever echoed (#385 r6).
+        refuse(
+          `Unknown option at position ${i + 1}; it is not repeated. Known: ${KNOWN_OPTIONS.join(', ')}.`,
+        );
     }
   }
 
@@ -251,7 +254,9 @@ export function parseOptions(argv, env = {}) {
 
   const unknown = options.services.filter((service) => !SERVICES.includes(service));
   if (unknown.length > 0) {
-    refuse(`Unknown service(s): ${unknown.join(', ')}. Known: ${SERVICES.join(', ')}.`);
+    refuse(
+      `Unknown service(s): ${unknown.length} --service value(s), not repeated. Known: ${SERVICES.join(', ')}.`,
+    );
   }
   const duplicates = options.services.filter((s, i) => options.services.indexOf(s) !== i);
   if (duplicates.length > 0) {
@@ -278,10 +283,10 @@ const KNOWN_OPTIONS = [
 ];
 
 function parsePositiveInt(flag, raw) {
-  if (!/^\d+$/.test(raw)) refuse(`${flag} must be a positive integer, received "${raw}".`);
+  if (!/^\d+$/.test(raw)) refuse(`${flag} must be a positive integer; its value is not repeated.`);
   const parsed = Number(raw);
   if (!Number.isSafeInteger(parsed) || parsed < 1) {
-    refuse(`${flag} must be a positive integer, received "${raw}".`);
+    refuse(`${flag} must be a positive integer; its value is not repeated.`);
   }
   return parsed;
 }
@@ -317,7 +322,7 @@ export function assertEnvironment(env = {}) {
 
 /** `DATABASE_URL_<SERVICE>` and nothing else — never a shared connection (A-01). */
 export function databaseUrlKey(service) {
-  if (!SERVICES.includes(service)) refuse(`Unknown service "${service}".`);
+  if (!SERVICES.includes(service)) refuse('Unknown service; it is not repeated.');
   return `DATABASE_URL_${service.toUpperCase()}`;
 }
 

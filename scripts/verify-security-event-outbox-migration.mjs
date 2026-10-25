@@ -129,7 +129,7 @@ const args = process.argv.slice(2);
 const schemaFlag = args.indexOf('--schema');
 const scratchSchema = schemaFlag >= 0 ? args[schemaFlag + 1] : 'security_event_outbox_check';
 if (!/^[a-z_][a-z0-9_]*$/.test(scratchSchema)) {
-  fail(`--schema must be a plain lowercase identifier, received "${scratchSchema}".`);
+  fail('--schema must be a plain lowercase identifier; its value is not repeated.');
 }
 
 // The scratch schema is DDL: identity's migrator (D-045 — the runtime role owns

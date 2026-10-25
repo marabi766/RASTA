@@ -278,6 +278,7 @@ export type {
 export {
   CONNECTED_ROLE_SQL,
   RuntimeRoleRefusedError,
+  RuntimeRoleUnverifiedError,
   assertDemoSeedRuntimeRole,
   assertRuntimeRole,
   connectedRoleProblems,

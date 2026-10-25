@@ -53,6 +53,10 @@ export type KafkaConnectionEnv = Pick<BaseEnv, 'NODE_ENV' | 'SERVICE_NAME'> &
     | 'KAFKA_ALLOW_PLAINTEXT'
   >;
 
+/** One broker: a DNS name or IPv4 address, or a bracketed IPv6 address, and a port. */
+const BROKER =
+  /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\]):\d{1,5}$/;
+
 export class KafkaConnectionConfigError extends Error {
   constructor(message: string) {
     super(message);
@@ -88,6 +92,15 @@ export function kafkaConnection(
     .map((broker) => broker.trim())
     .filter((broker) => broker.length > 0);
   if (brokers.length === 0) throw new KafkaConnectionConfigError('KAFKA_BROKERS names no broker');
+  // host:port and nothing else — no scheme, no credentials: kafkajs quotes a
+  // broker it cannot reach in its errors, so one may only ever be a host
+  // (#385 r6, the configuration-disclosure class).
+  if (!brokers.every((broker) => BROKER.test(broker))) {
+    throw new KafkaConnectionConfigError(
+      'KAFKA_BROKERS must list host:port entries, without a scheme or credentials; ' +
+        'its value is not repeated',
+    );
+  }
 
   if (Boolean(env.KAFKA_SASL_USERNAME) !== Boolean(env.KAFKA_SASL_PASSWORD)) {
     throw new KafkaConnectionConfigError(
