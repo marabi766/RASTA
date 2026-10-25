@@ -733,23 +733,24 @@ describe('opening the bids of a tender', () => {
       expect(await codeOf(open(owner, tenderId))).toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
 
       // Ahead: audit-service holds a receipt this service has no bid for.
+      // One instant: the link and the receipt it carries name the same receivedAt.
+      const receivedAt = new Date();
       const extra = {
         seq: 3,
         bidId: 'BID_01HZZZZZZZZZZZZZZZZZZZZZZZ',
         revision: 1,
-        receivedAt: new Date().toISOString(),
+        receivedAt: receivedAt.toISOString(),
         ciphertextSha256: 'b'.repeat(64),
         contentCommitment: 'c'.repeat(64),
         previousReceipt: honest.head,
         receipt: nextReceipt(tenderId, honest.head, {
           bidId: 'BID_01HZZZZZZZZZZZZZZZZZZZZZZZ',
           revision: 1,
-          receivedAt: new Date(),
+          receivedAt,
           ciphertextSha256: 'b'.repeat(64),
           contentCommitment: 'c'.repeat(64),
         }),
       };
-      extra.receivedAt = new Date().toISOString();
       w.evidence.served.set(tenderId, {
         ...honest,
         links: [...honest.links, extra],

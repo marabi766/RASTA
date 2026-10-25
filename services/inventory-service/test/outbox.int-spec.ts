@@ -91,12 +91,15 @@ describe('the transactional outbox', () => {
     const owner = client(api, orgAdmin(a));
     await owner.createWarehouse({
       name: 'Very identifiable name',
-      location: { latitude: 35.7, longitude: 51.4 },
+      location: { latitude: 35.689197, longitude: 51.388974 },
     });
     const [row] = await outboxOf(a);
     const text = JSON.stringify(row?.payload);
     expect(text).not.toContain('Very identifiable name');
-    expect(text).not.toContain('35.7');
+    // Six decimals: an instant in the payload ("…:35.712Z") carries at most three after a dot,
+    // so the short "35.7" the old assertion looked for matched the clock one run in ~600.
+    expect(text).not.toContain('35.689197');
+    expect(text).not.toContain('51.388974');
   });
 
   it('writes nothing when a command is refused', async () => {
