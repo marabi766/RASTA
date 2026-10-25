@@ -1,3 +1,4 @@
+import { internalFetch } from '@rasta/nest-common';
 import { z } from 'zod';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
@@ -163,9 +164,10 @@ export class ReturnRequestSourceClient implements ReturnRequestSource {
     try {
       let response: Response;
       try {
-        response = await this.fetchImpl(
+        response = await internalFetch(
           `${this.options.baseUrl.replace(/\/+$/, '')}/v1/internal/returns/${encodeURIComponent(returnRequestId)}${suffix}`,
           { method, headers, signal: controller.signal },
+          this.fetchImpl,
         );
       } catch {
         // No cause attached: a runtime's transport error can quote the URL.

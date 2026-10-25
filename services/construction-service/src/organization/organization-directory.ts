@@ -1,3 +1,4 @@
+import { internalFetch } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
 import { z } from 'zod';
@@ -109,7 +110,7 @@ export class OrganizationDirectory {
     // One deadline for the whole exchange: headers, body and parse. A server
     // that answers 200 and then stalls its body is a timeout, not a hang.
     try {
-      const response = await fetch(url, {
+      const response = await internalFetch(url, {
         method: 'GET',
         headers: {
           accept: 'application/json',

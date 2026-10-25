@@ -3,6 +3,7 @@ import { inspect } from 'node:util';
 import { Logger } from '@nestjs/common';
 import request from 'supertest';
 import { ulid } from 'ulid';
+import { REDIRECT_CASES, withRedirectProbe } from '@rasta/testing';
 import { DLQ_HEADERS, DLQ_REASONS, MAX_AMOUNT_MINOR, type EventEnvelope } from '@rasta/contracts';
 import {
   EventConsumer,
@@ -449,6 +450,75 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
       expect(await obligationsOf(fact.statementId)).toHaveLength(0);
     });
   });
+
+  it.each(REDIRECT_CASES)(
+    'owner $status sameOrigin=$sameOrigin leaves financial/outbox/processed state unchanged, then recovery and replay create one effect',
+    async ({ status, sameOrigin }) => {
+      const { fact, payload } = approved();
+      const event = envelope(payload);
+      const { walletId } = await fundWallet(wiring, employer, 1_000_000n);
+      const financialState = async () => ({
+        balances: await readBalances(prisma, walletId),
+        journals: await journalsOf(employer),
+        holds: await runUnscoped('test snapshots the employer wallet holds', () =>
+          prisma.client.walletHold.count({ where: { walletId } }),
+        ),
+        outbox: await runUnscoped('test snapshots the employer outbox', () =>
+          prisma.client.outboxMessage.count({ where: { organizationId: employer } }),
+        ),
+      });
+      const before = await financialState();
+      await withRedirectProbe({ status, sameOrigin, body: fact }, async (probe) => {
+        const guarded = new StatementSettlementConsumer(
+          noBroker,
+          prisma,
+          wiring.transactions,
+          new SourceFactsClient({
+            maintenanceBaseUrl: probe.baseUrl,
+            fleetBaseUrl: probe.baseUrl,
+            contractBaseUrl: probe.baseUrl,
+            timeoutMs: 2000,
+            tokens,
+            fetch: probe.fetch,
+          }),
+          null,
+        );
+        await expect(guarded.handle(event)).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+        expect(await financialState()).toEqual(before);
+        expect(await obligationsOf(fact.statementId)).toEqual([]);
+        expect(await processedCount(event.eventId)).toBe(0);
+        expect(probe.sent).toHaveLength(1);
+        expect(probe.target).toEqual([]);
+        const claims = await tokens.verify(
+          String(probe.sent[0]!.headers['x-internal-token']),
+          'contract-service',
+        );
+        expect(claims).toMatchObject({
+          callerService: 'economic-service',
+          purpose: 'SERVICE',
+          organizationId: employer,
+        });
+        probe.recover();
+        await expect(guarded.handle(event)).resolves.toBeUndefined();
+        const after = await financialState();
+        expect(after).toEqual({ ...before, outbox: before.outbox + 1 });
+        const [row, ...others] = await obligationsOf(fact.statementId);
+        expect(others).toEqual([]);
+        expect(row).toMatchObject({
+          status: 'PENDING_SETTLEMENT',
+          grossAmountMinor: BigInt(fact.netMinor),
+        });
+        expect(row!.legs).toHaveLength(2);
+        expect(await processedCount(event.eventId)).toBe(1);
+        await expect(guarded.handle(event)).resolves.toBe('SKIPPED');
+        expect(await obligationsOf(fact.statementId)).toEqual([row]);
+        expect(await financialState()).toEqual(after);
+        expect(await processedCount(event.eventId)).toBe(1);
+        expect(probe.sent).toHaveLength(2);
+        expect(probe.target).toEqual([]);
+      });
+    },
+  );
 
   describe('contract-service unavailable: retried, then dead-lettered, funds untouched', () => {
     it('throws a retryable UPSTREAM_UNAVAILABLE when the owner answers 5xx, and records nothing', async () => {
