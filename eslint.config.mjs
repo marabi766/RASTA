@@ -3,22 +3,7 @@ import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 import globals from 'globals';
 import internalTokenTransport from './scripts/internal-token-transport-rule.mjs';
-
-/** Restated in `apps/web/eslint.config.mjs`, which does not extend this file. */
-/**
- * zod 4's `.default(value)` returns `value` as the output without parsing it;
- * zod 3's parsed it through the chain (a pipe, a transform, a trim, an
- * object's own defaults). `.prefault(value)` is zod 3's `.default()` exactly,
- * so every schema says that (GHSA-mrhx-c7xc-m3w5). No call named `default`
- * exists here outside zod chains. Restated in `apps/web/eslint.config.mjs`.
- */
-const NO_ZOD_DEFAULT = [
-  {
-    selector: "CallExpression[callee.type='MemberExpression'][callee.property.name='default']",
-    message:
-      "zod 4's .default() skips parsing the value; use .prefault() (zod 3's .default()).",
-  },
-];
+import noZodDefault from './scripts/no-zod-default-rule.mjs';
 
 const NO_ZOD_COERCE = [
   {
@@ -73,7 +58,7 @@ const base = tseslint.config(
       // `Number({"toString":null})` throws, and a 400 becomes a 500. A request
       // schema takes `numberInput` from @rasta/contracts instead; `env.ts`,
       // whose input is `process.env` (only strings), is exempt below.
-      'no-restricted-syntax': ['error', ...NO_ZOD_COERCE, ...NO_ZOD_DEFAULT],
+      'no-restricted-syntax': ['error', ...NO_ZOD_COERCE],
       'no-restricted-imports': [
         'error',
         {
@@ -88,6 +73,14 @@ const base = tseslint.config(
         },
       ],
     },
+  },
+  {
+    // zod 4's `.default(value)` skips parsing `value`; `.prefault()` is zod 3's
+    // `.default()` (GHSA-mrhx-c7xc-m3w5). Every route to the method is refused
+    // — bracket, template, extraction, destructuring, call/apply/bind, Reflect
+    // (PR #444 r1 F2); `apps/web/eslint.config.mjs` loads the same rule.
+    plugins: { zod: { rules: { 'no-default': noZodDefault } } },
+    rules: { 'zod/no-default': 'error' },
   },
   {
     // Root `scripts/` — CI checkers, verifiers and campaign tooling, plain Node
@@ -132,7 +125,7 @@ const base = tseslint.config(
     // `env-issues.spec.ts` builds environment schemas as `env.ts` does, from
     // the same string-only `process.env` input, to test their refusal texts.
     files: ['**/env.ts', '**/env-issues.spec.ts'],
-    rules: { 'no-restricted-syntax': ['error', ...NO_ZOD_DEFAULT] },
+    rules: { 'no-restricted-syntax': 'off' },
   },
   {
     files: ['**/*.spec.ts', '**/*.e2e-spec.ts', '**/*.int-spec.ts', '**/test/**/*.ts'],
