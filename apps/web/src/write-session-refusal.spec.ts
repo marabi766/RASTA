@@ -82,13 +82,17 @@ const CASES = EXPORTS.filter(
 
 /**
  * An exported action that is not a `submit*` form-state action has no `REFUSED` result to
- * return; it must be listed here (by `actionKey`) with where it sends a request that has no
- * session. A new non-`submit*` export that is not listed fails the coverage case below.
+ * return; it must be listed here (by `actionKey`) with the arguments to call it with and where
+ * it sends a request that has no session. A new non-`submit*` export that is not listed fails the coverage case below.
  */
-const NO_SESSION_REDIRECTS = new Map<string, string>([
+const NO_SESSION_REDIRECTS = new Map<string, { args: () => unknown[]; to: string }>([
   [
     actionKey('apps/web/src/app/projects/actions.ts', 'releaseUnresolvedCreate'),
-    '/login?returnTo=/projects',
+    { args: () => [new FormData()], to: '/login?returnTo=/projects' },
+  ],
+  [
+    actionKey('apps/web/src/app/suppliers/supplier-actions.ts', 'reconcileSupplierWrite'),
+    { args: () => [null, new FormData()], to: '/login?returnTo=%2Fsuppliers' },
   ],
 ]);
 
@@ -344,14 +348,15 @@ it('covers every exported action of every module: a `submit*` function or a list
 
 describe.each(REDIRECT_CASES)('$label', ({ key, action }) => {
   it('a request with no session is sent to sign in', async () => {
-    const thrown = await (action as (...args: unknown[]) => Promise<unknown>)(new FormData()).then(
+    const entry = NO_SESSION_REDIRECTS.get(key);
+    const thrown = await (action as (...args: unknown[]) => Promise<unknown>)(
+      ...(entry?.args() ?? []),
+    ).then(
       () => undefined,
       (error: unknown) => error,
     );
     // Exact message: `toThrow(string)` would also accept a longer URL.
-    expect((thrown as Error | undefined)?.message).toBe(
-      `NEXT_REDIRECT:${NO_SESSION_REDIRECTS.get(key)}`,
-    );
+    expect((thrown as Error | undefined)?.message).toBe(`NEXT_REDIRECT:${entry?.to}`);
   });
 });
 

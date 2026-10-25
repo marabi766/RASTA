@@ -17,6 +17,7 @@ import * as members from './members';
 import * as organizations from './organizations';
 import * as repairOrderCommands from './repair-order-commands';
 import * as usage from './usage';
+import * as supplierCommands from '@/lib/supplier-commands';
 
 /**
  * Every local form schema the portal exports, with hostile input in every
@@ -46,6 +47,7 @@ const MODULES: Record<string, Record<string, unknown>> = {
   members,
   organizations,
   'repair-order-commands': repairOrderCommands,
+  'supplier-commands': supplierCommands,
   usage,
 };
 
