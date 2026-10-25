@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { MAX_CONCURRENCY, unitStepProblems } from './check-unit-step-concurrency.mjs';
+import { MAX_CONCURRENCY, unitStepProblems } from './check-unit-step-concurrency-lib.mjs';
 
 const realWorkflow = readFileSync(
   fileURLToPath(new URL('../.github/workflows/ci.yml', import.meta.url)),
