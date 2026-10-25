@@ -1,3 +1,4 @@
+import { internalFetch } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
 import { RastaError, getContext, type InternalTokenService } from '@rasta/nest-common';
 import { z } from 'zod';
@@ -84,7 +85,7 @@ export class OrganizationHierarchy implements HierarchyQuestion {
     // One deadline for the whole exchange: headers, body and parse. A server that answers 200 and
     // then stalls its body is a timeout, not a hang inside a transaction holding a row lock.
     try {
-      const response = await fetch(url, {
+      const response = await internalFetch(url, {
         method: 'GET',
         headers: {
           accept: 'application/json',
