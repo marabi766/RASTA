@@ -260,6 +260,24 @@ describe('the dispute state, as the record says it', () => {
     await expectAccessible(container);
   });
 
+  it.each([
+    ['Dispute resolved: SETTLE', 'اعتراض با ادامهٔ تسویه به پایان رسید'],
+    ['Dispute resolved: REFUND', 'اعتراض با بازگشت وجه به پایان رسید'],
+  ])('shows the saga’s machine resolution %j in Persian', (machine, persian) => {
+    const { container } = renderScreen(
+      ok({
+        ...DISPUTED,
+        status: 'PENDING_SETTLEMENT',
+        disputeResolvedAt: '2026-10-03T09:00:00.000Z',
+        disputeResolution: machine,
+        resolvedDisputeId: 'TXD_A',
+      }),
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain(persian);
+    expect(text).not.toContain('Dispute resolved');
+  });
+
   it('resolved before D-060: says when, and that the one text may be either', async () => {
     const { container } = renderScreen(
       ok({

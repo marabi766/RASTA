@@ -23,6 +23,7 @@
  */
 
 import { assetStatusLabel, policyCoverageLabel } from './labels';
+import { ownValue } from '@/lib/own-key';
 
 export type BlockerImposedBy = 'DECLARATION' | 'PLATFORM' | 'ASSIGNMENT';
 
@@ -55,7 +56,7 @@ export function blockerWording(
   blocker: AvailabilityBlockerInput,
   assetStatus?: string,
 ): BlockerWording {
-  const owner = OWNER_LABELS[blocker.owner] ?? blocker.owner;
+  const owner = ownValue(OWNER_LABELS, blocker.owner) ?? blocker.owner;
 
   switch (blocker.code) {
     case 'DISPATCH_BLOCKED':

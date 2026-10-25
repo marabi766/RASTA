@@ -1,12 +1,11 @@
 'use client';
 
-import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
 import type { FieldValues, UseFormProps, UseFormReturn } from 'react-hook-form';
 import type { ReactNode } from 'react';
 import type { z } from 'zod';
 
-import { persianErrorMap } from '@/lib/form-issues';
+import { persianResolver } from '@/lib/form-issues';
 
 import { cn } from '../cn';
 
@@ -37,9 +36,10 @@ export function useSchemaForm<TSchema extends z.ZodType<FieldValues>>(
     // The generics of the resolver and of `useForm` describe the same schema
     // from two directions, and TypeScript cannot see that they meet. The cast
     // is confined to this one line rather than leaking into every call site.
-    // Zod's default sentences are English: the Persian error map is the same
-    // boundary the server-side form parsers use (`lib/form-issues.ts`).
-    resolver: zodResolver(schema, { errorMap: persianErrorMap } as z.ParseParams) as never,
+    // Zod's default sentences are English and a contract schema's own messages
+    // are too: every error goes through the boundary the server-side form
+    // parsers use (`lib/form-issues.ts`), by provenance and not by language.
+    resolver: persianResolver(schema) as never,
   });
 }
 

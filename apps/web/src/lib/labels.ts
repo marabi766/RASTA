@@ -23,6 +23,7 @@ import {
 } from './asset-fields';
 import type { PolicyCoverage } from './asset-record-fields';
 import type { DocumentKind } from './asset-document-fields';
+import { ownText } from './own-key';
 
 /** `ASSET_TYPES`, `./asset-fields.ts` — typed, so a type added there without a label does not compile. */
 const ASSET_TYPE_LABELS: Readonly<Record<AssetType, string>> = {
@@ -238,8 +239,8 @@ const PRODUCT_KINDS: Readonly<Record<string, string>> = {
 };
 
 function lookup(table: Readonly<Record<string, string>>, value: string): string {
-  // Own keys only: «constructor» or «toString» is a word a person may type.
-  return Object.hasOwn(table, value) ? table[value]! : value;
+  // Own keys only (`own-key.ts`): «constructor» or «toString» is a word a person may type.
+  return ownText(table, value) ?? value;
 }
 
 export const assetTypeLabel = (value: string): string => lookup(ASSET_TYPE_LABELS, value);
@@ -313,6 +314,21 @@ const MACHINE_TRANSACTION_REASONS: Readonly<Record<string, string>> = {
 /** A transaction's recorded reason: a known machine wording in Persian, anything else as written. */
 export const transactionReasonLabel = (reason: string): string =>
   lookup(MACHINE_TRANSACTION_REASONS, reason);
+
+/**
+ * The two sentences marketplace-service's saga writes as a dispute's resolution
+ * when the order holds none (`marketplace-service/src/temporal/workflows.ts:535,
+ * :558, :565`, `mirrorResolution`'s `fallback`): a CLOSED set, matched exactly,
+ * so a resolution an operator typed is never replaced. The text reaches
+ * `disputeResolution`, and `disputeReason` on rows resolved before D-060.
+ */
+const MACHINE_DISPUTE_RESOLUTIONS: Readonly<Record<string, string>> = {
+  'Dispute resolved: SETTLE': 'اعتراض با ادامهٔ تسویه به پایان رسید',
+  'Dispute resolved: REFUND': 'اعتراض با بازگشت وجه به پایان رسید',
+};
+
+/** A dispute's recorded text: a known machine wording in Persian, anything else as written. */
+export const disputeTextLabel = (text: string): string => lookup(MACHINE_DISPUTE_RESOLUTIONS, text);
 
 export function blockerLabel(value: string): string {
   const status = STATUS_BLOCKER.exec(value)?.[1];

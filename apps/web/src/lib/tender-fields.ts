@@ -1,4 +1,5 @@
 import { toPersianDigits } from '@/lib/format';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * The tender vocabulary the `/tenders` screens render (docs/16 § ۱۶٫۶;
@@ -50,7 +51,7 @@ const NATURE_LABELS: Readonly<Record<string, string>> = {
 
 export function tenderNatureLabel(nature: string | null): string {
   if (nature === null) return 'تعیین نشده';
-  return NATURE_LABELS[nature] ?? nature;
+  return ownValue(NATURE_LABELS, nature) ?? nature;
 }
 
 const VISIBILITY_LABELS: Readonly<Record<string, string>> = {
@@ -60,7 +61,7 @@ const VISIBILITY_LABELS: Readonly<Record<string, string>> = {
 
 export function tenderVisibilityLabel(visibility: string | null): string {
   if (visibility === null) return 'تعیین نشده';
-  return VISIBILITY_LABELS[visibility] ?? visibility;
+  return ownValue(VISIBILITY_LABELS, visibility) ?? visibility;
 }
 
 const SCORING_METHOD_LABELS: Readonly<Record<string, string>> = {
@@ -69,7 +70,7 @@ const SCORING_METHOD_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function scoringMethodLabel(method: string): string {
-  return SCORING_METHOD_LABELS[method] ?? method;
+  return ownValue(SCORING_METHOD_LABELS, method) ?? method;
 }
 
 /**
@@ -83,7 +84,7 @@ const STATUS_REASON_CODE_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function statusReasonCodeLabel(code: string | null): string | null {
-  return code === null ? null : (STATUS_REASON_CODE_LABELS[code] ?? null);
+  return code === null ? null : (ownValue(STATUS_REASON_CODE_LABELS, code) ?? null);
 }
 
 /**

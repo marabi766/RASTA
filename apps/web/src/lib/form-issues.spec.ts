@@ -4,6 +4,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
+import { displayText } from '@rasta/contracts';
 import { z } from 'zod';
 
 import {
@@ -11,6 +12,7 @@ import {
   formIssueMessage,
   GENERIC_FIELD_MESSAGE,
   persianErrorMap,
+  persianResolver,
 } from './form-issues';
 
 /**
@@ -173,12 +175,115 @@ describe('no parser reads Zod’s own message', () => {
     }
   });
 
-  it('gives every resolver the Persian error map', () => {
+  it('builds every form resolver through persianResolver, never zodResolver', () => {
     const offenders = sources(SRC)
       .map((file) => relative(SRC, file))
-      .filter((file) =>
-        /zodResolver\((?![^)]*persianErrorMap)/.test(readFileSync(join(SRC, file), 'utf8')),
-      );
+      .filter((file) => !file.endsWith('.spec.ts') && !file.endsWith('.spec.tsx'))
+      .filter((file) => /zodResolver\b/.test(readFileSync(join(SRC, file), 'utf8')));
     expect(offenders).toEqual([]);
+  });
+});
+
+describe('provenance, not language', () => {
+  const REFLECTED = 'ناشناخته';
+  const reflecting: ReadonlyArray<[string, z.ZodTypeAny]> = [
+    ['an enum', z.enum(['A', 'B'])],
+    ['a literal', z.literal('A')],
+    ['a union', z.union([z.literal('A'), z.literal('B')])],
+    ['a discriminated union', z.discriminatedUnion('k', [z.object({ k: z.literal('A') })])],
+    ['a native enum', z.nativeEnum({ A: 'A' } as const)],
+  ];
+  const value = (label: string) => (label.includes('discriminated') ? { k: REFLECTED } : REFLECTED);
+
+  it.each(reflecting)('never repeats Persian input a Zod default echoes (%s)', (label, schema) => {
+    const issue = issueOf(schema, value(label));
+    const message = formIssueMessage(issue);
+    expect(message).not.toContain(REFLECTED);
+    expect(message).not.toMatch(LATIN_LETTER);
+    expect(message).toBe(
+      label === 'a union' ? GENERIC_FIELD_MESSAGE : 'یکی از گزینه‌های موجود را انتخاب کنید',
+    );
+  });
+
+  it('proves the reflected default really carries the input (the old escape)', () => {
+    expect(issueOf(z.enum(['A', 'B']), REFLECTED).message).toContain(REFLECTED);
+  });
+
+  it('translates an English message a schema author wrote, even a contract one', () => {
+    const issue = issueOf(displayText(1, 20), 'x<y');
+    expect(issue.message).toBe('Contains unsupported characters');
+    expect(formIssueMessage(issue)).toBe('نویسه‌های واردشده مجاز نیست');
+    expect(formIssueMessage(issueOf(z.string().regex(/^a$/, 'Only letter a'), 'b'))).toBe(
+      'نویسه‌های واردشده مجاز نیست',
+    );
+    const custom = issueOf(
+      z.string().refine(() => false, 'Must be tidy'),
+      'x',
+    );
+    expect(formIssueMessage(custom)).toBe(GENERIC_FIELD_MESSAGE);
+  });
+
+  it.each([
+    ['Persian digits', '۱۲۳'],
+    ['Arabic-Indic digits', '١٢٣'],
+    ['Persian punctuation', '،؛؟٪'],
+    ['a byte-order mark', '\ufeff'],
+    ['digits, punctuation and a mark together', '\ufeff۱،؟'],
+  ])('does not take %s alone for a Persian sentence', (_label, text) => {
+    const issue = issueOf(
+      z.string().refine(() => false, text),
+      'x',
+    );
+    expect(issue.message).toBe(text);
+    expect(formIssueMessage(issue)).toBe(GENERIC_FIELD_MESSAGE);
+  });
+
+  it('keeps a Persian sentence the schema author wrote, on a refine and on a bound', () => {
+    expect(
+      formIssueMessage(
+        issueOf(
+          z.string().refine(() => false, 'نام را اصلاح کنید'),
+          'x',
+        ),
+      ),
+    ).toBe('نام را اصلاح کنید');
+    expect(formIssueMessage(issueOf(z.string().max(1, 'خیلی بلند است'), 'xx'))).toBe(
+      'خیلی بلند است',
+    );
+  });
+
+  it('answers the same at all three entry points', async () => {
+    const schema = z.object({ kind: z.enum(['A', 'B']), name: displayText(1, 5) });
+    const input = { kind: REFLECTED, name: 'a<b' };
+    const parsed = schema.safeParse(input);
+    if (parsed.success) throw new Error('expected a failed parse');
+
+    const viaMessage = parsed.error.issues.map((issue) => formIssueMessage(issue));
+    const viaFields = firstIssuePerField(parsed.error, ['kind', 'name']);
+    const viaResolver = await persianResolver(schema)(input, undefined, {
+      fields: {},
+      shouldUseNativeValidation: false,
+    });
+    const errors = viaResolver.errors as Record<string, { message?: string }>;
+
+    expect(viaMessage).toEqual([
+      'یکی از گزینه‌های موجود را انتخاب کنید',
+      'نویسه‌های واردشده مجاز نیست',
+    ]);
+    expect(viaFields).toEqual({
+      kind: 'یکی از گزینه‌های موجود را انتخاب کنید',
+      name: 'نویسه‌های واردشده مجاز نیست',
+    });
+    expect(errors.kind?.message).toBe(viaFields.kind);
+    expect(errors.name?.message).toBe(viaFields.name);
+    expect(JSON.stringify(viaResolver)).not.toContain(REFLECTED);
+  });
+
+  it('serves a clean parse its values and no errors', async () => {
+    const out = await persianResolver(z.object({ n: z.string() }))({ n: 'a' }, undefined, {
+      fields: {},
+      shouldUseNativeValidation: false,
+    });
+    expect(out).toEqual({ values: { n: 'a' }, errors: {} });
   });
 });

@@ -8,6 +8,7 @@ import type { AuthorityNote, AuthorityStep } from '@/server/tender-authority';
 
 import { THRESHOLD_WARNING_TEXT } from '@/lib/procurement-threshold-fields';
 import { StepBid } from './EvaluationSections';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * The page of a tender approval's authority who may not read the tender
@@ -109,7 +110,7 @@ function AuthoritySteps({ steps }: { readonly steps: readonly AuthorityStepView[
         <Section
           key={step.id}
           headingId={`tender-authority-${step.id.replace(/[^A-Za-z0-9_-]/g, '_')}`}
-          title={WORKFLOW_TITLES[step.workflowKey] ?? step.workflowKey}
+          title={ownValue(WORKFLOW_TITLES, step.workflowKey) ?? step.workflowKey}
         >
           <div className="flex flex-col gap-4">
             <dl className="grid gap-3 sm:grid-cols-2">

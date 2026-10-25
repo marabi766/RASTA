@@ -1,3 +1,4 @@
+import { ownValue } from '@/lib/own-key';
 /**
  * The shape of the asset lifecycle forms on `/assets/[id]`: which commands
  * exist, which statuses each is offered from, field names, and a blank set of
@@ -73,7 +74,7 @@ export const canActivateFrom = (status: string): boolean => status === 'REGISTER
 
 /** The statuses the change-status form offers for an asset in `status`. */
 export function statusTargetsFrom(status: string): ChangeStatusTarget[] {
-  const reachable = USER_TRANSITIONS[status] ?? [];
+  const reachable = ownValue(USER_TRANSITIONS, status) ?? [];
   // REGISTERED → ACTIVE is the activation command, which checks the dossier;
   // a plain status change must never be the way round that check, so this form
   // does not offer it (and asset-service refuses it on `/status`).
@@ -84,7 +85,7 @@ export function statusTargetsFrom(status: string): ChangeStatusTarget[] {
 
 /** Whether a person may decommission an asset that is in `status`. */
 export const canDecommissionFrom = (status: string): boolean =>
-  (USER_TRANSITIONS[status] ?? []).includes('DECOMMISSIONED');
+  (ownValue(USER_TRANSITIONS, status) ?? []).includes('DECOMMISSIONED');
 
 // ---------------------------------------------------------------------------
 // Forms

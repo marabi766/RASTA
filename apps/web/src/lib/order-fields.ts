@@ -1,3 +1,4 @@
+import { ownValue } from '@/lib/own-key';
 /**
  * The shape of the `/orders` screens: labels, the stepper's spine, and the
  * fields each order command's form posts.
@@ -176,7 +177,7 @@ export const ORDER_STATUS_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function orderStatusLabel(status: string): string {
-  return ORDER_STATUS_LABELS[status] ?? status;
+  return ownValue(ORDER_STATUS_LABELS, status) ?? status;
 }
 
 /**
