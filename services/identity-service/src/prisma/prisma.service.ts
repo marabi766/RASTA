@@ -1,4 +1,5 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { readUrl } from '@rasta/config';
 import { SERVICE_NAME } from '../config/env';
 import {
   createTenantGuardExtension,
@@ -43,7 +44,7 @@ export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
  * (D-069), apart from the pool business transactions hold their locks on.
  */
 export function separatePoolUrl(databaseUrl: string, connections: number, waitSeconds = 5): string {
-  const url = new URL(databaseUrl);
+  const url = readUrl(databaseUrl, { refusal: 'DATABASE_URL is not a readable URL' });
   url.searchParams.set('connection_limit', String(connections));
   url.searchParams.set('pool_timeout', String(waitSeconds));
   return url.toString();
