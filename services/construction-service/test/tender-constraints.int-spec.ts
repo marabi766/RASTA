@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { cleanup, newOrganizationId, ownerClient, wire, type Wiring } from './helpers';
 
@@ -68,7 +69,7 @@ describe('tender database invariants', () => {
       updated_by: `'USR_1'`,
       ...overrides,
     };
-    const sql = `INSERT INTO "tender" (${Object.keys(columns)
+    const sql = eligibilityClockSql`INSERT INTO "tender" (${Object.keys(columns)
       .map((c) => `"${c}"`)
       .join(', ')})
        VALUES (${Object.values(columns).join(', ')})`;

@@ -1,3 +1,4 @@
+import { eligibilityClockTag } from '@rasta/testing';
 import { createHash } from 'node:crypto';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
@@ -100,7 +101,9 @@ describe('database constraints (ADR-054 § 4, § 10)', () => {
     it('refuses a retry scheduled on a closed delivery', async () => {
       await expect(
         sql(
-          Prisma.sql`UPDATE "notification_delivery" SET "next_attempt_at" = now() WHERE "id" = ${deliveryId}`,
+          eligibilityClockTag(
+            Prisma.sql,
+          )`UPDATE "notification_delivery" SET "next_attempt_at" = now() WHERE "id" = ${deliveryId}`,
         ),
       ).rejects.toEqual(constraint('ck_delivery_next_attempt_only_when_open'));
     });
@@ -245,7 +248,9 @@ describe('database constraints (ADR-054 § 4, § 10)', () => {
       );
       await expect(
         sql(
-          Prisma.sql`UPDATE "notification_intent" SET "claim_token" = 't', "claim_owner" = 'o', "claim_expires_at" = now() WHERE "id" = ${intentId}`,
+          eligibilityClockTag(
+            Prisma.sql,
+          )`UPDATE "notification_intent" SET "claim_token" = 't', "claim_owner" = 'o', "claim_expires_at" = now() WHERE "id" = ${intentId}`,
         ),
       ).rejects.toEqual(constraint('ck_intent_claim_only_when_pending'));
     });

@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '../packages/testing/src/eligibility-clock.ts';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -235,7 +236,7 @@ export const DOCUMENT_DATA_ROLLBACK = {
     },
     {
       label: 'up again: a worker lease cannot be attached to a document that is not pending',
-      sql: `UPDATE "document" SET scan_lease_owner = 'worker-1',
+      sql: eligibilityClockSql`UPDATE "document" SET scan_lease_owner = 'worker-1',
               scan_lease_expires_at = NOW() + INTERVAL '1 minute'
              WHERE id = 'DOC_MIGCHECK_INFECTED';`,
       mustFail: 'ck_document_scan_lease_only_when_pending',
@@ -1555,7 +1556,7 @@ export const ECONOMIC_DATA_ROLLBACK = {
     },
     {
       label: 'up again: an intent cannot have a second open task',
-      sql: `INSERT INTO "payment_reconciliation_task"
+      sql: eligibilityClockSql`INSERT INTO "payment_reconciliation_task"
               ("id", "organization_id", "payment_intent_id", "kind", "next_attempt_at",
                "correlation_id", "created_at", "updated_at")
             VALUES ('PRT_MIGCHECK_SECOND', 'ORG-MIGCHECK', 'PAY_MIGCHECK_REFUND', 'REFUND',

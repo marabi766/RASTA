@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ERROR_CODES, eventEnvelopeSchema } from '@rasta/contracts';
@@ -19,7 +20,7 @@ import {
   newUserId,
   outboxFor,
   ownerClient,
-  ownerSql,
+  ownerEligibilityFixture,
   TEST_ISSUER,
   testEnv,
   untilASessionWaitsOnALock,
@@ -821,9 +822,7 @@ describe('awarding an evaluated tender', () => {
         // Not claimed again until the backoff has passed.
         expect((await w.awardCheckSweeper.runOnce(tenderId)).claimed).toBe(0);
         SUPPLIER.failure = undefined;
-        await ownerSql([
-          `UPDATE "tender_award_standing_check" SET "next_attempt_at" = now() - interval '1 second' WHERE "tender_id" = '${tenderId}'`,
-        ]);
+        await ownerEligibilityFixture('awardDue', tenderId);
         expect(await w.awardCheckSweeper.runOnce(tenderId)).toMatchObject({ claimed: 1, clear: 1 });
         expect(await rowOf(tenderId)).toMatchObject({
           status: 'DONE',
@@ -858,9 +857,7 @@ describe('awarding an evaluated tender', () => {
         expect(line).not.toContain('the database went away');
 
         // And once the database is back, the conflict is found and written — once.
-        await ownerSql([
-          `UPDATE "tender_award_standing_check" SET "next_attempt_at" = now() - interval '1 second' WHERE "tender_id" = '${tenderId}'`,
-        ]);
+        await ownerEligibilityFixture('awardDue', tenderId);
         expect((await w.awardCheckSweeper.runOnce(tenderId)).conflict).toBe(1);
         expect(await conflicts(owner, tenderId)).toHaveLength(1);
       });
@@ -876,9 +873,7 @@ describe('awarding an evaluated tender', () => {
         expect(await w.awardChecks.claimDue(10, 60, 'FENCE_B', tenderId)).toHaveLength(0);
 
         // The lease lapses; another sweeper takes the check back and settles it.
-        await ownerSql([
-          `UPDATE "tender_award_standing_check" SET "lease_until" = now() - interval '1 second' WHERE "tender_id" = '${tenderId}'`,
-        ]);
+        await ownerEligibilityFixture('awardExpired', tenderId);
         expect((await w.awardCheckSweeper.runOnce(tenderId)).conflict).toBe(1);
 
         // The first one, late, does nothing: the fence is not its any more.
@@ -1823,7 +1818,7 @@ describe('awarding an evaluated tender', () => {
         ]) {
           await expect(
             attack(
-              `UPDATE "tender_award_standing_check" SET ${change} WHERE "tender_id" = '${tenderId}'`,
+              eligibilityClockSql`UPDATE "tender_award_standing_check" SET ${change} WHERE "tender_id" = '${tenderId}'`,
             ),
           ).rejects.toThrow(/ck_award_standing_check_immutable/);
         }
@@ -1873,7 +1868,7 @@ describe('awarding an evaluated tender', () => {
         const { owner, tenderId, bids } = await evaluated({ count: 1 });
         await award(owner, tenderId, bids[0]!.bidId);
         const row = (set: string) =>
-          `UPDATE "tender_award_standing_check" SET ${set} WHERE "tender_id" = '${tenderId}'`;
+          eligibilityClockSql`UPDATE "tender_award_standing_check" SET ${set} WHERE "tender_id" = '${tenderId}'`;
         const transition = /ck_award_standing_check_transition/;
 
         // Straight to DONE, or to a conflict, with no claim and so no read and no event.
@@ -1883,38 +1878,54 @@ describe('awarding an evaluated tender', () => {
           ).rejects.toThrow(transition);
         }
         // Around the backoff and the attempts, on a check nobody holds.
-        await expect(attack(row(`"next_attempt_at" = now() + interval '1 day'`))).rejects.toThrow(
-          transition,
-        );
+        await expect(
+          attack(row(eligibilityClockSql`"next_attempt_at" = now() + interval '1 day'`)),
+        ).rejects.toThrow(transition);
         await expect(attack(row(`"attempts" = 3`))).rejects.toThrow(transition);
         // A lease that parks the check for good, and one claim over another's live lease.
         await expect(
-          attack(row(`"lease_until" = now() + interval '2 hours', "fence" = 'F_LONG'`)),
+          attack(
+            row(
+              eligibilityClockSql`"lease_until" = now() + interval '2 hours', "fence" = 'F_LONG'`,
+            ),
+          ),
         ).rejects.toThrow(transition);
-        await attack(row(`"lease_until" = now() + interval '1 minute', "fence" = 'F_ONE'`));
+        await attack(
+          row(eligibilityClockSql`"lease_until" = now() + interval '1 minute', "fence" = 'F_ONE'`),
+        );
         await expect(
-          attack(row(`"lease_until" = now() + interval '1 minute', "fence" = 'F_TWO'`)),
+          attack(
+            row(
+              eligibilityClockSql`"lease_until" = now() + interval '1 minute', "fence" = 'F_TWO'`,
+            ),
+          ),
         ).rejects.toThrow(transition);
         // A takeover of a lapsed lease is a new holder: it keeps no fence of the one it replaces.
-        await ownerSql([
-          `UPDATE "tender_award_standing_check" SET "lease_until" = now() - interval '1 second' WHERE "tender_id" = '${tenderId}'`,
-        ]);
+        await ownerEligibilityFixture('awardExpired', tenderId);
         await expect(
-          attack(row(`"lease_until" = now() + interval '1 minute', "fence" = 'F_ONE'`)),
+          attack(
+            row(
+              eligibilityClockSql`"lease_until" = now() + interval '1 minute', "fence" = 'F_ONE'`,
+            ),
+          ),
         ).rejects.toThrow(/a claim sets a new fence/);
-        await attack(row(`"lease_until" = now() + interval '1 minute', "fence" = 'F_THREE'`));
+        await attack(
+          row(
+            eligibilityClockSql`"lease_until" = now() + interval '1 minute', "fence" = 'F_THREE'`,
+          ),
+        );
         // From a live claim: a settlement dated in the future, or one that moves anything else.
         await expect(
           attack(
             row(
-              `"status" = 'DONE', "outcome" = 'CLEAR', "done_at" = now() + interval '1 hour', "lease_until" = NULL, "fence" = NULL`,
+              eligibilityClockSql`"status" = 'DONE', "outcome" = 'CLEAR', "done_at" = now() + interval '1 hour', "lease_until" = NULL, "fence" = NULL`,
             ),
           ),
         ).rejects.toThrow(transition);
         await expect(
           attack(
             row(
-              `"status" = 'DONE', "outcome" = 'CLEAR', "done_at" = now(), "attempts" = 9, "lease_until" = NULL, "fence" = NULL`,
+              eligibilityClockSql`"status" = 'DONE', "outcome" = 'CLEAR', "done_at" = now(), "attempts" = 9, "lease_until" = NULL, "fence" = NULL`,
             ),
           ),
         ).rejects.toThrow(transition);
@@ -1922,14 +1933,14 @@ describe('awarding an evaluated tender', () => {
         await expect(
           attack(
             row(
-              `"attempts" = 0, "next_attempt_at" = now() + interval '1 minute', "lease_until" = NULL, "fence" = NULL`,
+              eligibilityClockSql`"attempts" = 0, "next_attempt_at" = now() + interval '1 minute', "lease_until" = NULL, "fence" = NULL`,
             ),
           ),
         ).rejects.toThrow(transition);
         await expect(
           attack(
             row(
-              `"attempts" = 1, "next_attempt_at" = now() + interval '9 days', "lease_until" = NULL, "fence" = NULL`,
+              eligibilityClockSql`"attempts" = 1, "next_attempt_at" = now() + interval '9 days', "lease_until" = NULL, "fence" = NULL`,
             ),
           ),
         ).rejects.toThrow(transition);
@@ -1943,9 +1954,9 @@ describe('awarding an evaluated tender', () => {
       it('does not commit a conflict without its event: the outbox must hold it by the end of the transaction', async () => {
         const { owner, tenderId, bids } = await evaluated({ count: 1 });
         await award(owner, tenderId, bids[0]!.bidId);
-        const claim = `UPDATE "tender_award_standing_check" SET "lease_until" = now() + interval '1 minute', "fence" = 'F_DML' WHERE "tender_id" = '${tenderId}'`;
+        const claim = eligibilityClockSql`UPDATE "tender_award_standing_check" SET "lease_until" = now() + interval '1 minute', "fence" = 'F_DML' WHERE "tender_id" = '${tenderId}'`;
         const settle = (outcome: string) =>
-          `UPDATE "tender_award_standing_check" SET "status" = 'DONE', "outcome" = '${outcome}', "done_at" = now(), "lease_until" = NULL, "fence" = NULL WHERE "tender_id" = '${tenderId}'`;
+          eligibilityClockSql`UPDATE "tender_award_standing_check" SET "status" = 'DONE', "outcome" = '${outcome}', "done_at" = now(), "lease_until" = NULL, "fence" = NULL WHERE "tender_id" = '${tenderId}'`;
         await expect(
           runUnscoped('the suite settles a conflict as the runtime role', () =>
             w.prisma.client.$transaction(async (tx) => {
@@ -1963,9 +1974,7 @@ describe('awarding an evaluated tender', () => {
         await award(owner, tenderId, bids[0]!.bidId);
         SUPPLIER.suspend(bids[0]!.bidder, `SUS_${bids[0]!.bidder}`);
         const [held] = await w.awardChecks.claimDue(10, 60, 'FENCE_LAPSED', tenderId);
-        await ownerSql([
-          `UPDATE "tender_award_standing_check" SET "lease_until" = now() - interval '1 second' WHERE "tender_id" = '${tenderId}'`,
-        ]);
+        await ownerEligibilityFixture('awardExpired', tenderId);
 
         // It cannot settle (and the conflict it found is not written by it).
         expect(await w.awardCheckService.process(held!, { baseSeconds: 30, maxSeconds: 900 })).toBe(

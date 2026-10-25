@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
@@ -250,10 +251,9 @@ describe('bids', () => {
     it('refuses on the real clock once the window has passed, though the tender is still PUBLISHED', async () => {
       const { bidder, tenderId } = await setup();
       await runUnscoped('the suite moves the deadline into the past', () =>
-        w.prisma.client.$executeRawUnsafe(
-          `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
-             "bid_closing_at" = now() - interval '1 second' WHERE "id" = '${tenderId}'`,
-        ),
+        w.prisma.client
+          .$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+             "bid_closing_at" = now() - interval '1 second' WHERE "id" = '${tenderId}'`),
       );
 
       expect(await refusalsOf(submit(bidder, tenderId))).toContain('BID_WINDOW_CLOSED');
@@ -270,10 +270,8 @@ describe('bids', () => {
       const held = new Promise<void>((resolve) => (holding = resolve));
       const holder = runUnscoped('the suite holds the tender row and moves its deadline', () =>
         w.prisma.client.$transaction(async (tx) => {
-          await tx.$executeRawUnsafe(
-            `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
-               "bid_closing_at" = now() + interval '1 second' WHERE "id" = '${tenderId}'`,
-          );
+          await tx.$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+               "bid_closing_at" = now() + interval '1 second' WHERE "id" = '${tenderId}'`);
           holding();
           await mayRelease;
         }),
@@ -295,10 +293,9 @@ describe('bids', () => {
       const { owner, bidder, tenderId } = await setup();
       const view = await submit(bidder, tenderId);
       await runUnscoped('the suite closes the window', () =>
-        w.prisma.client.$executeRawUnsafe(
-          `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
-             "bid_closing_at" = now() - interval '1 second' WHERE "id" = '${tenderId}'`,
-        ),
+        w.prisma.client
+          .$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+             "bid_closing_at" = now() - interval '1 second' WHERE "id" = '${tenderId}'`),
       );
 
       // A replacement of the seal, or a withdrawal, straight in SQL: refused by the trigger.
@@ -328,10 +325,9 @@ describe('bids', () => {
   describe('a deadline that crosses between the decision and the write', () => {
     const closeWindowForReal = (tenderId: string) =>
       runUnscoped('the suite lets the real deadline pass', () =>
-        w.prisma.client.$executeRawUnsafe(
-          `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
-             "bid_closing_at" = now() - interval '1 second' WHERE "id" = '${tenderId}'`,
-        ),
+        w.prisma.client
+          .$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+             "bid_closing_at" = now() - interval '1 second' WHERE "id" = '${tenderId}'`),
       );
 
     it('is a 422 BID_WINDOW_CLOSED, not a 500, for a submission, a replacement and a withdrawal', async () => {
@@ -777,10 +773,9 @@ describe('bids', () => {
         // And a tender filled to its caps is opened — through the opening itself, not by checking
         // the chain on the side (Codex r1 on #250, R2): every standing bid against one verification.
         await runUnscoped('the suite lets the deadline pass', () =>
-          w.prisma.client.$executeRawUnsafe(
-            `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
-               "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`,
-          ),
+          w.prisma.client
+            .$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+               "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`),
         );
         await limited.tenderClose.close({ organizationId: owner, tenderId });
         // Four eyes: one proposes, another approves and opens.

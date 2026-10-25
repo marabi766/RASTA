@@ -1,3 +1,4 @@
+import { setEligibilityFixture } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -662,9 +663,7 @@ describe('malware scanning with a real ClamAV', () => {
       await drain(down);
       // Clear the backoff so the second attempt is claimable now rather than
       // making the test wait for a timer.
-      await prisma.client.$executeRaw`
-        UPDATE "document" SET "scan_next_attempt_at" = now() - interval '1 minute'
-         WHERE "id" = ${document.id}`;
+      await setEligibilityFixture(prisma, 'scanDue', [document.id]);
       await drain(down);
 
       const scanned = await row(document.id);
@@ -861,11 +860,8 @@ describe('malware scanning with a real ClamAV', () => {
         //
         // Bounded to the one row this test registered. Expiring leases by owner
         // or by state would expire whatever else the claim above swallowed.
-        await prisma.client.$executeRaw`
-          UPDATE "document"
-             SET "scan_lease_owner" = ${owner('that-died')},
-                 "scan_lease_expires_at" = now() - interval '1 minute'
-           WHERE "id" = ${document.id}`;
+        expect((await row(document.id))?.scanLeaseOwner).toBe(owner('that-died'));
+        await setEligibilityFixture(prisma, 'scanExpired', [document.id]);
 
         const reclaimed = await leases.claim('taking-over', 200, 300);
         expect(reclaimed.map((d) => d.id)).toContain(document.id);

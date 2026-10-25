@@ -1,4 +1,4 @@
-import { expireClaim } from '@rasta/testing';
+import { expireClaim, setEligibilityFixture } from '@rasta/testing';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { RecipientResolutionError } from '../src/recipients/recipient.port';
@@ -81,12 +81,9 @@ describe('recipient resolution failure and recovery', () => {
     });
 
     // Make it due again, with identity still down: the count climbs.
-    await runUnscoped('the test makes a deferred intent due immediately', () =>
-      w.prisma.client.notificationIntent.updateMany({
-        where: { organizationId },
-        data: { nextResolutionAt: null },
-      }),
-    );
+    await setEligibilityFixture(w.prisma, 'resolutionDue', [
+      (await rowsFor(w.prisma, organizationId)).intents[0]!.id,
+    ]);
     w.recipients.failWith = new RecipientResolutionError('REFUSED', 'identity answered 503');
     await expect(w.worker.tick()).resolves.toBeGreaterThanOrEqual(1);
     intent = (await rowsFor(w.prisma, organizationId)).intents[0]!;
@@ -98,12 +95,9 @@ describe('recipient resolution failure and recovery', () => {
     w.recipients.failWith = undefined;
     const user = newUserId();
     w.recipients.answers.set(organizationId, [{ userId: user, role: 'FLEET_MANAGER' }]);
-    await runUnscoped('the test makes a deferred intent due immediately', () =>
-      w.prisma.client.notificationIntent.updateMany({
-        where: { organizationId },
-        data: { nextResolutionAt: null },
-      }),
-    );
+    await setEligibilityFixture(w.prisma, 'resolutionDue', [
+      (await rowsFor(w.prisma, organizationId)).intents[0]!.id,
+    ]);
     await expect(w.worker.tick()).resolves.toBeGreaterThanOrEqual(1);
 
     rows = await rowsFor(w.prisma, organizationId);
@@ -163,12 +157,17 @@ describe('recipient resolution failure and recovery', () => {
     // file leave PENDING rows whose retry time can pass while this one runs (main
     // run 37192634269: worker-d leased two of them). Push every pending row that
     // is not this test's out of reach first, so the counts below are only ours.
-    await runUnscoped('the test parks rows left by earlier tests', () =>
-      w.prisma.client.notificationIntent.updateMany({
+    await runUnscoped('the test parks rows left by earlier tests', async () => {
+      const pending = await w.prisma.client.notificationIntent.findMany({
         where: { status: 'PENDING' },
-        data: { nextResolutionAt: new Date(Date.now() + 24 * 60 * 60 * 1_000) },
-      }),
-    );
+        select: { id: true },
+      });
+      await setEligibilityFixture(
+        w.prisma,
+        'resolutionParked',
+        pending.map((row) => row.id),
+      );
+    });
     const organizationId = organization();
     for (let i = 0; i < 6; i += 1) {
       await deliver(
