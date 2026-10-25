@@ -17,7 +17,8 @@
  *    jobs are unchanged between the PR base and HEAD (other jobs still gate
  *    containers through its unchanged needs);
  *  - only docs/ and tests/ (excluded by .dockerignore) may affect none;
- *    README.md is re-included, and manifests/shared inputs always win;
+ *    only the root README.md is re-included; nested READMEs stay excluded.
+ *    Manifests/shared inputs always win;
  *  - any unrecognised path affects all (including apps and other scripts).
  *
  * The service list is every directory under `services/` with a Dockerfile,
@@ -109,11 +110,10 @@ export function servicesToBuild(services, changed, workflowUnchanged = false) {
   if (paths.some((path) => SHARED_INPUTS.some((pattern) => pattern.test(path)))) {
     return [...services];
   }
-  // .dockerignore excludes these directories (lines 23-24); its README.md
-  // exception (line 26) is deliberately not exempted. Neither scan reads them.
+  // .dockerignore excludes these directories (lines 23-24). !README.md
+  // matches only the context root, not nested READMEs. Neither scan reads them.
   // No blanket *.md or apps exemption: every Dockerfile does COPY . . .
-  const excludedFromImages = (path) =>
-    /^(docs|tests)\//.test(path) && !/(^|\/)README\.md$/.test(path);
+  const excludedFromImages = (path) => /^(docs|tests)\//.test(path);
   if (
     paths.some(
       (path) =>

@@ -82,7 +82,13 @@ for (const service of SERVICES) {
   test(`${service}: the built service exits on an owner credential, naming it and never its value`, () => {
     const main = join(ROOT, 'services', service, 'dist', 'main.js');
     assert.ok(existsSync(main), `${main} is missing — run \`pnpm build\` first`);
-    for (const variable of ['DATABASE_URL_ECONOMIC_MIGRATOR', 'POSTGRES_PASSWORD_AUDIT_MIGRATOR']) {
+    for (const variable of [
+      'DATABASE_URL_ECONOMIC_MIGRATOR',
+      'POSTGRES_PASSWORD_AUDIT_MIGRATOR',
+      'DATABASE_URL_ANALYTICS_TEST_ADMIN',
+      'DATABASE_URL_ASSET_SUPERUSER',
+      'DATABASE_URL_ADMIN',
+    ]) {
       const value = 'postgresql://rasta_x_migrator:owner_secret_value@127.0.0.1:1/rasta_x';
       const result = spawnSync(process.execPath, [main], {
         cwd: join(ROOT, 'services', service),

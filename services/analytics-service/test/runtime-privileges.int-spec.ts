@@ -74,6 +74,24 @@ function currentGrantStep(mode: 'configured' | 'default'): string {
   return result.stdout;
 }
 
+function currentExtensionStep(): string {
+  const result = spawnSync(
+    'bash',
+    [
+      '-eu',
+      '-c',
+      `
+    source infrastructure/docker/postgres/lib/service-privilege-split.bash
+    _svc_split_psql() { printf '%s;\\n' "$2"; }
+    restrict_extension_relations ignored rasta_analytics
+  `,
+    ],
+    { encoding: 'utf8', cwd: repositoryRoot },
+  );
+  if (result.status !== 0) throw new Error(`extension step failed: ${result.stderr}`);
+  return result.stdout;
+}
+
 // Separate databases, not the integration database: both realistic provisioning
 // histories can be inspected without changing any other suite's grants/defaults.
 describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime grants', (history) => {
@@ -157,8 +175,8 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
     const before = await aclSnapshot(owner);
     let wrongRoleError: unknown;
     try {
-      const adminUrl = process.env.DATABASE_URL_ANALYTICS_TEST_ADMIN;
-      if (!adminUrl) throw new Error('DATABASE_URL_ANALYTICS_TEST_ADMIN is required');
+      const adminUrl = process.env.TEST_ANALYTICS_ADMIN_URL;
+      if (!adminUrl) throw new Error('TEST_ANALYTICS_ADMIN_URL is required');
       const wrongUrl = new URL(adminUrl);
       wrongUrl.pathname = `/${name}`;
       const wrongClient = new PrismaClient({ datasources: { db: { url: wrongUrl.toString() } } });
@@ -176,6 +194,30 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
     }
     wrongRole = { before, after: await aclSnapshot(owner), error: wrongRoleError };
     applyMigration(ownerUrl.toString(), 'public', privilegeMigration);
+    const adminUrl = process.env.TEST_ANALYTICS_ADMIN_URL;
+    if (!adminUrl) throw new Error('TEST_ANALYTICS_ADMIN_URL is required');
+    const extensionUrl = new URL(adminUrl);
+    extensionUrl.pathname = `/${name}`;
+    const extensionAdmin = new PrismaClient({
+      datasources: { db: { url: extensionUrl.toString() } },
+    });
+    try {
+      await extensionAdmin.$executeRawUnsafe('CREATE EXTENSION IF NOT EXISTS postgis');
+      await extensionAdmin.$executeRawUnsafe(
+        'GRANT UPDATE (srtext) ON spatial_ref_sys TO rasta_analytics',
+      );
+      expect(
+        await runtime.$queryRaw`SELECT has_any_column_privilege('spatial_ref_sys', 'UPDATE') AS forbidden`,
+      ).toEqual([{ forbidden: true }]);
+      // psql accepts the DO block as one statement; Prisma sends that block atomically too.
+      const cleanup = currentExtensionStep().trim().replace(/;$/, '');
+      if (cleanup) await extensionAdmin.$executeRawUnsafe(cleanup);
+      expect(
+        await runtime.$queryRaw`SELECT has_any_column_privilege('spatial_ref_sys', 'UPDATE') AS forbidden`,
+      ).toEqual([{ forbidden: false }]);
+    } finally {
+      await extensionAdmin.$disconnect();
+    }
     await owner.baselineMetric.create({ data: row });
   });
 
