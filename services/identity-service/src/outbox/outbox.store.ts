@@ -64,8 +64,7 @@ export class PrismaOutboxStore implements OutboxStore, OutboxPurgeStore {
 
   async release(ids: readonly string[], token: string, bound: OutboxReleaseBound): Promise<number> {
     return releaseSql(
-      (fn, timeoutMs) =>
-        this.prisma.client.$transaction(fn, { timeout: timeoutMs, maxWait: timeoutMs }),
+      (fn, timeoutMs) => this.prisma.transaction(fn, { timeout: timeoutMs, maxWait: timeoutMs }),
       ids,
       token,
       bound,
@@ -79,8 +78,7 @@ export class PrismaOutboxStore implements OutboxStore, OutboxPurgeStore {
     deadlineMs: number,
   ): Promise<string[]> {
     return renewSql(
-      (fn, timeoutMs) =>
-        this.prisma.client.$transaction(fn, { timeout: timeoutMs, maxWait: timeoutMs }),
+      (fn, timeoutMs) => this.prisma.transaction(fn, { timeout: timeoutMs, maxWait: timeoutMs }),
       ids,
       token,
       leaseSeconds,
@@ -123,7 +121,7 @@ export class PrismaOutboxStore implements OutboxStore, OutboxPurgeStore {
   async purgePublished(options: PurgePublishedOptions): Promise<PurgePublishedBatch> {
     return purgePublishedSql(
       (fn, { timeoutMs, maxWaitMs }) =>
-        this.prisma.client.$transaction(fn, { timeout: timeoutMs, maxWait: maxWaitMs }),
+        this.prisma.transaction(fn, { timeout: timeoutMs, maxWait: maxWaitMs }),
       options,
     );
   }

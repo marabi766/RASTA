@@ -1,10 +1,12 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { readUrl } from '@rasta/config';
 import { SERVICE_NAME } from '../config/env';
 import {
   createTenantGuardExtension,
   assertRuntimeRole as assertConnectedRuntimeRole,
 } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
+import { throwIfCancelled } from './cancellation';
 
 /**
  * Models in this service that carry an `organizationId` and must therefore be
@@ -36,6 +38,18 @@ export const TENANT_SCOPE_EXEMPTIONS = {
 
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 
+/**
+ * The same database URL, as a pool of at most `connections` connections with
+ * a short wait for one (seconds): what the Keycloak write fences run on
+ * (D-069), apart from the pool business transactions hold their locks on.
+ */
+export function separatePoolUrl(databaseUrl: string, connections: number, waitSeconds = 5): string {
+  const url = readUrl(databaseUrl, { refusal: 'DATABASE_URL is not a readable URL' });
+  url.searchParams.set('connection_limit', String(connections));
+  url.searchParams.set('pool_timeout', String(waitSeconds));
+  return url.toString();
+}
+
 @Injectable()
 export class PrismaService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PrismaService.name);
@@ -44,7 +58,16 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   /** The client every repository uses. Tenant scoping is already applied. */
   readonly client: ExtendedPrismaClient;
 
-  constructor(databaseUrl: string) {
+  /**
+   * @param loadedUrl always the loaded `DATABASE_URL` (the repository guard
+   *   `scripts/db-pool-config.pg.test.mjs` holds every service to it).
+   * @param pool a separate, bounded pool on that same URL — the Keycloak write
+   *   fences' (D-069), never the one business transactions hold locks on.
+   */
+  constructor(loadedUrl: string, pool?: { connections: number; waitSeconds?: number }) {
+    const databaseUrl = pool
+      ? separatePoolUrl(loadedUrl, pool.connections, pool.waitSeconds)
+      : loadedUrl;
     this.base = new PrismaClient({
       datasources: { db: { url: databaseUrl } },
       log: [
@@ -56,16 +79,28 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   }
 
   private buildClient() {
-    return this.base.$extends(
-      createTenantGuardExtension({
-        scopedModels: TENANT_SCOPED_MODELS,
-        onUnscopedQuery: ({ model, operation, reason }) => {
-          // Every deliberate boundary crossing is recorded, so an auditor can
-          // enumerate them without reading the whole codebase.
-          this.logger.warn(`Unscoped query on ${model}.${operation} — reason: ${reason}`);
+    // First, so it runs before anything else: a cancelled worker starts no
+    // database operation at all (`cancellation.ts`, #402 r2 F2).
+    return this.base
+      .$extends({
+        name: 'cancellation-boundary',
+        query: {
+          $allOperations({ args, query }) {
+            throwIfCancelled();
+            return query(args);
+          },
         },
-      }),
-    );
+      })
+      .$extends(
+        createTenantGuardExtension({
+          scopedModels: TENANT_SCOPED_MODELS,
+          onUnscopedQuery: ({ model, operation, reason }) => {
+            // Every deliberate boundary crossing is recorded, so an auditor can
+            // enumerate them without reading the whole codebase.
+            this.logger.warn(`Unscoped query on ${model}.${operation} — reason: ${reason}`);
+          },
+        }),
+      );
   }
 
   async onModuleInit(): Promise<void> {
@@ -112,7 +147,9 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Runs `fn` inside a transaction.
+   * Runs `fn` inside a transaction — the only way this service opens an
+   * interactive one (`transaction-boundary.spec.ts` holds `src/` to it), so the
+   * cancellation checks below are on every transaction of every worker.
    *
    * Exposed deliberately: the outbox pattern requires the state change and the
    * outbox insert to share one transaction, and that is the whole reason the
@@ -128,15 +165,28 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     fn: (tx: ExtendedPrismaClient) => Promise<T>,
     options?: TransactionOptions,
   ): Promise<T> {
+    // Transaction setup is a database operation too: none begins once the
+    // worker this runs in was stopped (`cancellation.ts`).
+    throwIfCancelled();
+    // And so is its COMMIT, which Prisma issues when the callback resolves,
+    // without passing through the client extension (#402 r3 R3-1): a callback
+    // that resumes after the stop returned — its last statement's reply held
+    // past it — throws here instead, and Prisma rolls the transaction back.
+    // Both branches below run `fn` only through this.
+    const committable = async (tx: ExtendedPrismaClient): Promise<T> => {
+      const result = await fn(tx);
+      throwIfCancelled();
+      return result;
+    };
     if (options?.statementTimeoutMs === undefined) {
-      return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient), options);
+      return this.client.$transaction((tx) => committable(tx as ExtendedPrismaClient), options);
     }
     const bound = localStatementTimeoutOf(options.statementTimeoutMs);
     const { maxWait, timeout } = options;
     return this.client.$transaction(
       async (tx) => {
         await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${bound}`);
-        return fn(tx as ExtendedPrismaClient);
+        return committable(tx as ExtendedPrismaClient);
       },
       { maxWait, timeout },
     );

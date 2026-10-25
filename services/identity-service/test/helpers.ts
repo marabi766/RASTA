@@ -2,6 +2,7 @@ import { withUtcSession } from '@rasta/config';
 import { runWithContext, type RequestContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { FENCE_POOL_CONNECTIONS, KeycloakWriteFences } from '../src/keycloak/keycloak-write-fence';
 
 /**
  * The minimum scaffolding the ADR-051 B3 integration evidence needs.
@@ -26,6 +27,16 @@ export function databaseUrl(): string {
 
 export function newPrisma(): PrismaService {
   return new PrismaService(databaseUrl());
+}
+
+/**
+ * The Keycloak write fences on a pool of their own, as the service runs them
+ * (D-069, `app.module.ts`). Connected; the suite closes `pool` in `afterAll`.
+ */
+export async function newFences(): Promise<{ fences: KeycloakWriteFences; pool: PrismaService }> {
+  const pool = new PrismaService(databaseUrl(), { connections: FENCE_POOL_CONNECTIONS });
+  await pool.onModuleInit();
+  return { fences: new KeycloakWriteFences(pool), pool };
 }
 
 export function id(prefix: string): string {
