@@ -23,7 +23,7 @@
 
 /** The environment variables that carry a database owner's credential. */
 export const MIGRATOR_CREDENTIAL_PATTERN =
-  /^(?:DATABASE_URL_[A-Z0-9_]+_MIGRATOR|POSTGRES_PASSWORD_[A-Z0-9_]+_MIGRATOR)$/;
+  /^(?:DATABASE_URL_(?:[A-Z0-9_]+_)?(?:ADMIN|TEST_ADMIN|MIGRATOR|SUPERUSER)|POSTGRES_PASSWORD_[A-Z0-9_]+_MIGRATOR)$/;
 
 /** The owner-credential variables set (non-empty) in `env`, by name, sorted. */
 export function migratorCredentialsIn(env: NodeJS.ProcessEnv): string[] {

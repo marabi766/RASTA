@@ -14,6 +14,7 @@
     "test": "jest --selectProjects unit",
     "test:unit": "jest --selectProjects unit",
     "test:integration": "jest --selectProjects integration --runInBand",
+    "test:db-privileges": "jest --selectProjects db-privileges --runInBand",
     "test:coverage": "jest --coverage --runInBand",
     "db:generate": "prisma generate",
     "db:migrate": "node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate deploy",

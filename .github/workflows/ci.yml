@@ -1581,8 +1581,6 @@ jobs:
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
           DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
-          # Disposable test admin: wrong-role guard must prevent an otherwise authorized ACL change.
-          DATABASE_URL_ANALYTICS_TEST_ADMIN: postgresql://rasta:rasta_ci_password@localhost:5432/postgres?schema=public
           DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
@@ -1608,6 +1606,15 @@ jobs:
           # proven by the `clamav-signatures` job.
           DOCUMENT_SCAN_SIGNATURE_MAX_AGE_HOURS: '8760'
           REDIS_URL: redis://localhost:6379
+
+      - name: Analytics database privilege integration tests
+        timeout-minutes: 5
+        run: pnpm --filter @rasta/analytics-service run test:db-privileges
+        env:
+          NODE_ENV: test
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          TEST_ANALYTICS_ADMIN_URL: postgresql://rasta:rasta_ci_password@localhost:5432/postgres?schema=public
 
       - name: Outbox stream-sequence protocol (ADR-051 B3)
         # The producer-side allocation protocol: strictly increasing sequences
@@ -2725,7 +2732,7 @@ jobs:
           DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
           DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
           # Disposable test admin: wrong-role guard must prevent an otherwise authorized ACL change.
-          DATABASE_URL_ANALYTICS_TEST_ADMIN: postgresql://rasta:rasta_ci_password@localhost:5432/postgres?schema=public
+          TEST_ANALYTICS_ADMIN_URL: postgresql://rasta:rasta_ci_password@localhost:5432/postgres?schema=public
 
   # Independent database-only gate: creates its own migrated fixture databases.
   integration-backup-drill:
