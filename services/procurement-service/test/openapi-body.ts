@@ -5,7 +5,7 @@ import type { OpenAPIObject } from '@nestjs/swagger';
  * operation and status (PR-327 r1 F3) — the JSON a client's validator reads, not the Zod source it
  * was generated from.
  *
- * Only the keywords `zod-schema.ts` emits are understood, and any other keyword is an error rather
+ * Only the keywords `toJsonSchema` emits are understood, and any other keyword is an error rather
  * than ignored: a validator that skipped what it did not know would accept a body the document
  * refuses. (ajv is a root devDependency only; services declare what they import.)
  */

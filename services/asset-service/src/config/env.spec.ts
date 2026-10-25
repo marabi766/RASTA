@@ -1,3 +1,4 @@
+import { envEnumProbes } from '@rasta/config';
 import { assetEnvSchema, loadAssetEnv } from './env';
 import { assetOperationBudgets } from './operation-budgets';
 
@@ -164,5 +165,52 @@ describe('idempotency configuration', () => {
   it('refuses a response lifetime outside one hour to a week', () => {
     expect(() => ttl.parse('0')).toThrow();
     expect(() => ttl.parse('169')).toThrow();
+  });
+});
+
+/**
+ * Refusals never carry the value written (S-09, #385 r2 F2): every enum setting, found by
+ * walking the schema rather than listed, set to each of two sentinels, is refused alike, with
+ * neither in the issues, the error's message or its stack (what the startup log prints).
+ */
+describe('enum settings are refused without the value written (#385 r2 F2)', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+  const probes = envEnumProbes(
+    assetEnvSchema,
+    (source) => loadAssetEnv(source),
+    {
+      DATABASE_URL: 'postgresql://u:p@localhost:5433/rasta_asset?schema=public',
+      KAFKA_BROKERS: 'localhost:9092',
+      OIDC_ISSUER_URL: 'http://localhost:8080/realms/rasta',
+      OIDC_JWKS_URI: 'http://localhost:8080/realms/rasta/certs',
+      OIDC_AUDIENCE: 'rasta-api',
+      INTERNAL_TOKEN_SECRET: 'a-throwaway-value-used-only-by-this-spec-32',
+      FLEET_SERVICE_URL: 'http://localhost:3104',
+      MAINTENANCE_SERVICE_URL: 'http://localhost:3105',
+      DOCUMENT_SERVICE_URL: 'http://localhost:3107',
+    },
+    SENTINELS,
+  );
+
+  it('are found by walking the schema, the ones the r2 review named among them', () => {
+    expect(probes.map((probe) => probe.name)).toEqual(
+      expect.arrayContaining([
+        'NODE_ENV',
+        'LOG_LEVEL',
+        'KAFKA_SASL_MECHANISM',
+        'INSURANCE_CLAIM_DOCUMENT_STATUSES',
+        'INSURANCE_COVERAGES_FOLLOWING_VEHICLE',
+      ]),
+    );
+  });
+
+  it.each(probes.map((probe) => [probe.name, probe] as const))('%s', (name, probe) => {
+    expect(probe.codes).toContain('invalid_enum_value');
+    const [a, b] = probe.refusals;
+    expect(a).toEqual(b);
+    for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
+    expect(a.issues.some((issue) => issue.path === name || issue.path.startsWith(`${name}.`))).toBe(
+      true,
+    );
   });
 });

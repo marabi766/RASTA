@@ -1,6 +1,6 @@
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { apiErrorSchema } from '@rasta/contracts';
-import { toJsonSchema, type JsonSchema } from './zod-schema';
+import { toJsonSchema, type JsonSchema } from '@rasta/nest-common';
 import {
   approveRequestSchema,
   assignWorkshopSchema,

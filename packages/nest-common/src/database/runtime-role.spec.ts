@@ -1,3 +1,4 @@
+import { inspect } from 'node:util';
 import {
   CONNECTED_ROLE_SQL,
   RuntimeRoleRefusedError,
@@ -5,6 +6,7 @@ import {
   assertRuntimeRole,
   connectedRoleProblems,
   preflightRuntimeRole,
+  RuntimeRoleUnverifiedError,
   type ConnectedRoleFacts,
   type RuntimeRoleQueryClient,
 } from './runtime-role';
@@ -146,10 +148,32 @@ describe('the preflight, before Nest builds anything (Codex on #178)', () => {
     expect(state.disconnected).toBe(1);
   });
 
-  it('fails closed when it cannot ask at all', async () => {
-    const { open, state } = opened(undefined, new Error('connection refused'));
-    await expect(preflightRuntimeRole(open, options)).rejects.toThrow('connection refused');
+  it('fails closed when it cannot ask at all — by the variable and the code, never the client text', async () => {
+    // Prisma's P1000 names the user it connected as (#385 r6): here the
+    // username sentinel of scripts/refusal-probes.mjs, and the host.
+    const p1000 = Object.assign(
+      new Error(
+        'Authentication failed against database server at `db.invalid`, the provided database ' +
+          'credentials for `private-sentinel-79` are not valid.',
+      ),
+      { name: 'PrismaClientInitializationError', errorCode: 'P1000' },
+    );
+    const { open, state } = opened(undefined, p1000);
+    const refusal = await preflightRuntimeRole(open, options).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(RuntimeRoleUnverifiedError);
+    expect((refusal as Error).message).toBe(
+      `${options.runtimeVariable}: the connected role could not be checked (code P1000); ` +
+        "the database client's own error is withheld",
+    );
+    expect((refusal as Error).cause).toBeUndefined();
+    expect(inspect(refusal, { showHidden: true, depth: 10 })).not.toMatch(/sentinel|db\.invalid/);
     expect(state.disconnected).toBe(1);
+  });
+
+  it('a code that is not shaped like one is not repeated either', async () => {
+    const odd = Object.assign(new Error('x'), { code: 'private-sentinel-79' });
+    const { open } = opened(undefined, odd);
+    await expect(preflightRuntimeRole(open, options)).rejects.toThrow('(code unknown)');
   });
 });
 

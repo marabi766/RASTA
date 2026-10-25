@@ -1,7 +1,12 @@
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { apiErrorSchema } from '@rasta/contracts';
-import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
-import { toJsonSchema, type JsonSchema } from './zod-schema';
+import type { z } from 'zod';
+import {
+  RETRY_AFTER_MAX_SECONDS,
+  RETRY_AFTER_MIN_SECONDS,
+  toJsonSchema as sharedToJsonSchema,
+  type JsonSchema,
+} from '@rasta/nest-common';
 import { TRANSACTION_RESPONSES, TRANSACTION_VIEW_SCHEMAS } from './transaction-view';
 import {
   listEntriesQuerySchema,
@@ -58,6 +63,30 @@ import {
  * gets a 400, and the reason it must not be optional — a retried POST charging
  * twice — is the whole point of docs/06 § 6.8.
  */
+
+/**
+ * The shared converter, minus array bounds. This service's own copy of the
+ * converter never published `minItems`/`maxItems`, and replacing that copy with
+ * the shared one keeps every generated document byte-identical. Publishing the
+ * three bounds it hides (recognition-rule `levels` ≤ 50 and `badges` ≤ 100,
+ * participation-rule `contributions` 1–2) is a contract change of its own:
+ * delete this wrapper then.
+ */
+function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
+  return withoutArrayBounds(sharedToJsonSchema(schema)) as JsonSchema;
+}
+
+function withoutArrayBounds(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(withoutArrayBounds);
+  if (typeof node !== 'object' || node === null) return node;
+  const isArray = (node as { type?: unknown }).type === 'array';
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (isArray && (key === 'minItems' || key === 'maxItems')) continue;
+    out[key] = withoutArrayBounds(value);
+  }
+  return out;
+}
 
 /** Request bodies, keyed by `METHOD /path` as Nest emits them. */
 const REQUEST_BODIES: Record<string, JsonSchema> = {

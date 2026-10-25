@@ -1,4 +1,4 @@
-import type { JsonSchema } from './zod-schema';
+import type { JsonSchema } from '@rasta/nest-common';
 
 /**
  * The transaction a response carries, as `shared/views.ts` writes it.

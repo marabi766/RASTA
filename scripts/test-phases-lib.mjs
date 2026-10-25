@@ -82,7 +82,7 @@ export function planTestRun(argv) {
   const [task, ...rest] = argv;
   if (!WORKSPACE_TASKS.includes(task)) {
     throw new Error(
-      `test phases: unknown task ${JSON.stringify(task ?? '')}; expected one of ${WORKSPACE_TASKS.join(', ')}`,
+      `test phases: unknown task, not repeated; expected one of ${WORKSPACE_TASKS.join(', ')}`,
     );
   }
   const separator = rest.indexOf('--');

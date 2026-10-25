@@ -8,8 +8,7 @@ import {
   tenderApprovalRequestViewSchema,
   listTenderApprovalsQuerySchema,
 } from '../tender/tender-approval.dto';
-import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
-import { toJsonSchema } from './zod-schema';
+import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS, toJsonSchema } from '@rasta/nest-common';
 import type { RefusalArea } from '../shared/refusal';
 import { thresholdPreviewSchema } from '../tender/procurement-thresholds';
 import { PUBLICATION_REFUSALS, type PublicationRefusal } from '../tender/publication';
@@ -144,7 +143,7 @@ import {
  *   - the same suite provokes every documented status against the real API.
  *
  * Payload shapes come from the Zod schemas the pipes validate with
- * (`src/project/dto.ts`), converted by `zod-schema.ts`; Nest supplies paths,
+ * (`src/project/dto.ts`), converted by `toJsonSchema`; Nest supplies paths,
  * methods and parameters from the decorators.
  *
  * Regenerate after changing the API: `pnpm --filter @rasta/construction-service openapi:generate`.

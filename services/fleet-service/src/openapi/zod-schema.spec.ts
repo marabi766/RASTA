@@ -1,6 +1,6 @@
 import { DISPLAY_TEXT_PATTERN } from '@rasta/contracts';
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
+import { toJsonSchema } from '@rasta/nest-common';
 import {
   createAssignmentSchema,
   createDriverSchema,

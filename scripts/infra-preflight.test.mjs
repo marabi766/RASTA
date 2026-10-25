@@ -16,6 +16,7 @@ import {
   rolesFromLibrary,
   splitServicesFromLibrary,
 } from './infra-preflight-lib.mjs';
+import { KEY_SENTINELS, assertNoSentinel } from './refusal-probes.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const BOOTSTRAP = join(ROOT, 'infrastructure/docker/postgres/00-init-databases.sh');
@@ -637,6 +638,22 @@ test('a .env still holding owner credentials is named, by variable only (D-045 e
   assert.match(warning, /DATABASE_URL_CONSTRUCTION_MIGRATOR, POSTGRES_PASSWORD_AUDIT_MIGRATOR/);
   assert.match(warning, /\.env\.migrator/);
   assert.ok(!warning.includes('owner_secret'));
+});
+
+// #385 r4: an owner-credential name no service has is the .env's own: counted.
+test('an owner credential in .env named for no service is counted, never named', () => {
+  for (const key of KEY_SENTINELS) {
+    const [warning] = migratorCredentialsInEnvFile({
+      [`DATABASE_URL_${key}_MIGRATOR`]: 'x',
+      [`POSTGRES_PASSWORD_${key}_MIGRATOR`]: 'x',
+      DATABASE_URL_AUDIT_MIGRATOR: 'x',
+    });
+    assert.match(
+      warning,
+      /\(DATABASE_URL_AUDIT_MIGRATOR, 2 more \*_MIGRATOR variable\(s\) named for no service\)/,
+    );
+    assertNoSentinel(warning, key);
+  }
 });
 
 test('.env.example holds no owner credential; .env.migrator.example holds every migrator, URL and password', () => {
