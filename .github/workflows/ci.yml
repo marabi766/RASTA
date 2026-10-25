@@ -4140,11 +4140,35 @@ jobs:
   # repository, 5 s and 15 s apart), and the copy is published under a key of
   # this run. The scans restore exactly that key (`.github/actions/
   # restore-trivy-db`), set TRIVY_SKIP_DB_UPDATE, and fail, rather than scan
-  # or skip, if the copy is missing, damaged, from another run or older than
-  # 24 h (skip mode checks the schema only, never the age, so
-  # scripts/ci-trivy-db-lib.mjs does). The scan gate is unchanged: same
-  # images, severity CRITICAL,HIGH, exit-code 1, ignore-unfixed and ignore
-  # files.
+  # or skip, unless the copy is the one this producer validated. Skip mode
+  # checks the schema only, never the age or the content, so
+  # scripts/ci-trivy-db-lib.mjs does, at one boundary used by this job before
+  # it publishes and by every scan before it scans (PR #435 round 2):
+  #  - metadata: Version 2, strict RFC 3339 UpdatedAt / NextUpdate /
+  #    DownloadedAt, UpdatedAt at most 24 h old and not in the future;
+  #  - trivy.db: a real bbolt file (both meta pages: magic, version, page
+  #    size, checksum; every page it walks in range) holding non-empty
+  #    `vulnerability`, `data-source`, npm-advisory and Alpine buckets (a
+  #    hollow DB makes Trivy exit 0 with no findings);
+  #  - here only, Trivy itself must find CVE-2021-23337 in lodash 4.17.20
+  #    with this DB, rated HIGH or CRITICAL;
+  #  - provenance: this key, run and attempt, an allowed repository, and the
+  #    sha256 of both files, so a scan accepts exactly the validated bytes.
+  # A copy that fails any of this is a failed attempt: the next attempt or
+  # repository gets its turn. The scan gate is unchanged: same images,
+  # severity CRITICAL,HIGH, exit-code 1, ignore-unfixed and ignore files.
+  #
+  # Time: each repository owns a 180 s window the other cannot spend, and
+  # every Trivy child is killed at its deadline (SIGTERM, SIGKILL 5 s later;
+  # Trivy also gets a matching --timeout), so a stalled mirror cannot keep
+  # ghcr.io from its turn. fetch <= 2 x 180 s + 2 x 20 s of validation = 400 s
+  # <= the step's 7 min; with checkout 2 + setup-trivy 3 + save 3 min that is
+  # this job's 15 min, and each step has its own limit (measured on
+  # run 40168706555: 1.5 s, 2 s, 7 s, 4.5 s).
+  #
+  # The DB lives in runner.temp, outside the checkout: in the workspace it
+  # would be part of every image's build context (`COPY . .`), as it was in
+  # round 1 (context 33.84 MB -> 1.67 GB).
   #
   # No `needs`: it starts with the fastest jobs, so the scans that wait for
   # it (the ClamAV scan now; the image scans only after quality, integration
@@ -4152,8 +4176,10 @@ jobs:
   #
   # Reruns: the key carries the run attempt, because cache entries are
   # immutable. "Re-run failed jobs" keeps this job's earlier output and so its
-  # earlier key, and the scans restore that copy; once it is older than 24 h
-  # they fail and the run must be re-run in full.
+  # earlier key; a scan on a later attempt accepts the copy that key names
+  # (expected run and attempt are read from the key, never from the scan's
+  # own attempt). Once that copy is older than 24 h the scans fail and the
+  # run must be re-run in full, which makes this job publish a new key.
   #
   # The Java DB is not fetched: no scan log of main run 40163416703 contains
   # a Java DB line (no .jar in any image), Trivy would fetch it on demand
@@ -4163,37 +4189,42 @@ jobs:
   trivy-db:
     name: Trivy vulnerability DB (downloaded once)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     outputs:
-      key: ${{ steps.publish.outputs.key }}
+      key: ${{ steps.fetch.outputs.key }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 2
         with:
+          # Everything the fetch imports (node built-ins only besides these):
+          # pinned by a test that follows the imports.
           sparse-checkout: |
             scripts/ci-trivy-db.mjs
             scripts/ci-trivy-db-lib.mjs
           sparse-checkout-cone-mode: false
 
       - name: Install Trivy
+        timeout-minutes: 3
         uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
         with:
           version: ${{ env.TRIVY_VERSION }}
           cache: true
 
-      - name: Download the DB (mirror.gcr.io, then ghcr.io)
+      - name: Download and validate the DB (mirror.gcr.io, then ghcr.io)
+        # Writes `key=trivy-db-<run id>-<run attempt>` to GITHUB_OUTPUT only
+        # after the copy passed every check.
+        id: fetch
+        timeout-minutes: 7
         env:
-          TRIVY_DB_DIR: ${{ github.workspace }}/.cache/trivy
+          TRIVY_DB_DIR: ${{ runner.temp }}/trivy-db
         run: node scripts/ci-trivy-db.mjs fetch "$TRIVY_DB_DIR"
 
-      - name: Publish the DB for this run
-        id: publish
-        run: echo "key=trivy-db-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
-
       - name: Save the DB under this run's key
+        timeout-minutes: 3
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: ${{ github.workspace }}/.cache/trivy
-          key: ${{ steps.publish.outputs.key }}
+          path: ${{ runner.temp }}/trivy-db
+          key: ${{ steps.fetch.outputs.key }}
 
   # ---------------------------------------------------------------------------
   # The malware scanner's own supply chain (ADR-049).
@@ -4251,8 +4282,12 @@ jobs:
           cache: true
 
       - name: Check the Trivy DB is still fresh
-        # Skip mode below validates the DB's schema and never its age.
-        run: node scripts/ci-trivy-db.mjs check "${{ steps.trivy-db.outputs.dir }}"
+        # Skip mode below validates the DB's schema and never its age or
+        # content; the same check as at restore.
+        env:
+          TRIVY_DB_DIR: ${{ steps.trivy-db.outputs.dir }}
+          TRIVY_DB_KEY: ${{ needs.trivy-db.outputs.key }}
+        run: node scripts/ci-trivy-db.mjs check "$TRIVY_DB_DIR" "$TRIVY_DB_KEY"
 
       - name: Scan the image
         # The same severity and the same `exit-code: 1` as every Rasta image
@@ -4433,9 +4468,13 @@ jobs:
           cache: true
 
       - name: Check the Trivy DB is still fresh
-        # Skip mode below validates the DB's schema and never its age, and the
-        # build above took minutes.
-        run: node scripts/ci-trivy-db.mjs check "${{ steps.trivy-db.outputs.dir }}"
+        # Skip mode below validates the DB's schema and never its age or
+        # content, and the build above took minutes; the same check as at
+        # restore.
+        env:
+          TRIVY_DB_DIR: ${{ steps.trivy-db.outputs.dir }}
+          TRIVY_DB_KEY: ${{ needs.trivy-db.outputs.key }}
+        run: node scripts/ci-trivy-db.mjs check "$TRIVY_DB_DIR" "$TRIVY_DB_KEY"
 
       - name: Scan image
         # Tags on this action carry a `v` prefix; the unprefixed `0.28.0` this
