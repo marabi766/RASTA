@@ -112,7 +112,13 @@ describe('MembershipExpiryScanner', () => {
         state.failures += 1;
         state.nextAt = db.clock + interval * 1000 * Math.min(2 ** state.failures, max);
       }),
-      counts: jest.fn(async () => ({ live: 1, due: db.fence.size, accountMissing: 2 })),
+      counts: jest.fn(async () => ({
+        live: 1,
+        due: db.fence.size,
+        accountMissing: 2,
+        overdue: 1,
+        total: db.fence.size + 3,
+      })),
     };
     return { db, repository, fences };
   }
@@ -366,7 +372,7 @@ describe('MembershipExpiryScanner', () => {
       const states = Object.fromEntries(
         (await keycloakWriteFences.get()).values.map((v) => [v.labels.state, v.value]),
       );
-      expect(states).toEqual({ live: 1, due: 0, account_missing: 2 });
+      expect(states).toEqual({ live: 1, due: 0, account_missing: 2, overdue: 1 });
     });
   });
 

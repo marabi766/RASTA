@@ -7,11 +7,14 @@ import { IdentityRepository } from '../src/identity/identity.repository';
 import { IdentityService } from '../src/identity/identity.service';
 import { MembershipExpiryScanner } from '../src/identity/membership-expiry.scanner';
 import {
+  FENCE_POOL_CONNECTIONS,
   KeycloakWriteFences,
   type KeycloakWriteAttempt,
 } from '../src/keycloak/keycloak-write-fence';
 import type { KeycloakAdminClient } from '../src/keycloak/keycloak.client';
 import { KeycloakProjector } from '../src/keycloak/keycloak.projector';
+import { runProjectionCommand } from '../src/keycloak/projection.command';
+import { keycloakWriteFenceEventsTotal } from '../src/observability/keycloak-projection.metrics';
 import {
   isWithin,
   platformAttributesFor,
@@ -259,6 +262,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       service: IdentityService;
       projector: KeycloakProjector;
       fences: KeycloakWriteFences;
+      repository?: IdentityRepository;
     } = {
       service,
       projector,
@@ -266,9 +270,10 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
     },
     only: Set<string> = mine,
   ) {
-    const scopedRepository = Object.create(repository) as IdentityRepository;
+    const base = using.repository ?? repository;
+    const scopedRepository = Object.create(base) as IdentityRepository;
     scopedRepository.findLapsedMemberships = async (at, take, after, until) =>
-      (await repository.findLapsedMemberships(at, 1000, after, until))
+      (await base.findLapsedMemberships(at, 1000, after, until))
         .filter((row) => only.has(row.userId))
         .slice(0, take);
     const scopedFences = Object.create(using.fences) as KeycloakWriteFences;
@@ -503,6 +508,8 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
             operation: 'replace_attributes',
             timeoutMs: REQUEST_TIMEOUT_MS,
             settleSeconds: SETTLE_SECONDS,
+            // Prisma's default transaction timeout.
+            transactionTimeoutMs: 5_000,
           }),
         ),
       ).rejects.toMatchObject({ code: 'NOT_FOUND' });
@@ -619,6 +626,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
               operation: 'replace_attributes',
               timeoutMs: REQUEST_TIMEOUT_MS,
               settleSeconds: SETTLE_SECONDS,
+              transactionTimeoutMs: 20_000,
             });
             return { attempt, ms: performance.now() - started };
           },
@@ -650,6 +658,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
                   operation: 'replace_attributes',
                   timeoutMs: REQUEST_TIMEOUT_MS,
                   settleSeconds: SETTLE_SECONDS,
+                  transactionTimeoutMs: 20_000,
                 });
               },
               { timeout: 20_000, maxWait: 5_000 },
@@ -669,14 +678,17 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       const lock = holdUserLock(s.userId);
       await lock.held;
       try {
-        // As the fence pool runs it: autocommit, no transaction of its own.
+        // As the fence pool runs it: its own short transaction, bounded.
         const started = performance.now();
-        await fencing.pool.client.$executeRaw`
-          INSERT INTO keycloak_write_attempt
-                 (attempt_id, user_id, keycloak_id, operation,
-                  started_at, deadline_at, takeover_at, next_reassert_at)
-          VALUES (${`KWA_${ulid()}`}, ${s.userId}, ${s.keycloakId}, 'replace_attributes',
-                  now(), now(), now(), now())`;
+        await fencing.pool.transaction(
+          (fence) => fence.$executeRaw`
+            INSERT INTO keycloak_write_attempt
+                   (attempt_id, user_id, keycloak_id, operation,
+                    started_at, deadline_at, takeover_at, next_reassert_at)
+            VALUES (${`KWA_${ulid()}`}, ${s.userId}, ${s.keycloakId}, 'replace_attributes',
+                    now(), now(), now(), now())`,
+          { maxWait: 5_000, timeout: 5_000, statementTimeoutMs: 5_000 },
+        );
         expect(performance.now() - started).toBeLessThan(1000);
       } finally {
         lock.release();
@@ -1097,6 +1109,636 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       expect(await fencesOf(s.userId)).toEqual([expect.objectContaining({ live: true })]);
       expect(await events(s.memberships[1]!)).toEqual([]);
       stub.releaseHeld();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // #402 r2 F1: the business transaction ends while its fence is inserted
+  // -------------------------------------------------------------------------
+
+  describe('the fence insert and the end of its transaction (#402 r2 F1)', () => {
+    /**
+     * Holds the next fence insert of the fence pool — before it starts
+     * (`before`: as if waiting for a fence connection) or after it committed
+     * (`after`) — until released.
+     */
+    function holdNextInsert(when: 'before' | 'after') {
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let reached!: () => void;
+      const atInsert = new Promise<void>((resolve) => (reached = resolve));
+      const real = fencing.pool.transaction.bind(fencing.pool);
+      jest.spyOn(fencing.pool, 'transaction').mockImplementationOnce((async (
+        fn: never,
+        options?: never,
+      ) => {
+        if (when === 'before') {
+          reached();
+          await released;
+          return real(fn, options);
+        }
+        const result = await real(fn, options);
+        reached();
+        await released;
+        return result;
+      }) as never);
+      return { atInsert, release };
+    }
+
+    /**
+     * The next fence opened ends its business transaction on the database
+     * side while it waits — the session is closed after 300 ms idle in
+     * transaction, which releases the user lock as an expiry or a rollback
+     * would.
+     */
+    function expireTransactionOfNextFence() {
+      const real = fencing.fences.open.bind(fencing.fences);
+      jest.spyOn(fencing.fences, 'open').mockImplementationOnce(async (tx, input) => {
+        await tx.$executeRawUnsafe(`SET LOCAL idle_in_transaction_session_timeout = '300ms'`);
+        return real(tx, input);
+      });
+    }
+
+    const lockLost = async () =>
+      (await keycloakWriteFenceEventsTotal.get()).values.find((v) => v.labels.event === 'lock_lost')
+        ?.value ?? 0;
+
+    it('a projection: its transaction ends while the fence insert waits, a narrowing commits in between — the old PUT is never sent', async () => {
+      const s = await seed({
+        memberships: [{ in: 'a', roles: ['ORGANIZATION_ADMIN', 'OPERATOR'] }],
+      });
+      const lostBefore = await lockLost();
+      const insert = holdNextInsert('before');
+      expireTransactionOfNextFence();
+
+      // 1. The projection holds the lock, read the wide rows, and waits on its insert.
+      const projection = projector.project(s.userId, 'event').then(
+        () => 'projected',
+        (error: unknown) => error,
+      );
+      await insert.atInsert;
+
+      // 2. Its transaction ends; the demotion waiting for the lock sees no
+      //    fence (none committed yet), writes, and commits.
+      await demote(s, ['OPERATOR']);
+      expect(stub.platform(s.keycloakId).organization_roles).toEqual([`${s.org.a}:OPERATOR`]);
+      expect((await events(s.memberships[0]!)).map((e) => e.eventName)).toEqual(['ROLE_REVOKED']);
+      const putsAfterNarrowing = stub.puts(s.keycloakId).length;
+
+      // 3. The old insert commits now. The re-check in its transaction fails:
+      //    nothing is sent, and its fence goes at once.
+      insert.release();
+      expect(await projection).toBeInstanceOf(Error);
+      expect(stub.puts(s.keycloakId)).toHaveLength(putsAfterNarrowing);
+      expect(stub.platform(s.keycloakId).organization_roles).toEqual([`${s.org.a}:OPERATOR`]);
+      expect(await fencesOf(s.userId)).toEqual([]);
+      expect(await lockLost()).toBe(lostBefore + 1);
+    });
+
+    it('a write-ahead: the same — the later narrowing commits, the earlier one sends nothing and is refused', async () => {
+      const s = await seed({
+        memberships: [{ in: 'a', roles: ['ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'OPERATOR'] }],
+      });
+      const insert = holdNextInsert('before');
+      expireTransactionOfNextFence();
+
+      // The earlier demotion would write FLEET_MANAGER + OPERATOR.
+      const first = failure(demote(s, ['FLEET_MANAGER', 'OPERATOR']));
+      await insert.atInsert;
+      await demote(s, ['OPERATOR']);
+      const putsAfterNarrowing = stub.puts(s.keycloakId).length;
+
+      insert.release();
+      expect(await first).toMatchObject({ status: 503, code: 'KEYCLOAK_UNAVAILABLE' });
+      expect(stub.puts(s.keycloakId)).toHaveLength(putsAfterNarrowing);
+      expect(stub.platform(s.keycloakId).organization_roles).toEqual([`${s.org.a}:OPERATOR`]);
+      expect((await events(s.memberships[0]!)).map((e) => e.eventName)).toEqual(['ROLE_REVOKED']);
+      expect(await fencesOf(s.userId)).toEqual([]);
+    });
+
+    it('the other order: the insert commits, then the transaction ends before the re-check — the narrowing reads the fence and refuses; nothing is sent; the retry commits', async () => {
+      const s = await seed({
+        memberships: [{ in: 'a', roles: ['ORGANIZATION_ADMIN', 'OPERATOR'] }],
+      });
+      const insert = holdNextInsert('after');
+      expireTransactionOfNextFence();
+      const putsBefore = stub.puts(s.keycloakId).length;
+
+      const projection = projector.project(s.userId, 'event').then(
+        () => 'projected',
+        (error: unknown) => error,
+      );
+      await insert.atInsert;
+      // The fence committed; the projection's transaction ends meanwhile.
+      expect(await failure(demote(s, ['OPERATOR']))).toMatchObject({
+        status: 503,
+        code: 'KEYCLOAK_WRITE_SETTLING',
+      });
+
+      insert.release();
+      expect(await projection).toBeInstanceOf(Error);
+      expect(stub.puts(s.keycloakId)).toHaveLength(putsBefore);
+      expect(await fencesOf(s.userId)).toEqual([]);
+
+      await demote(s, ['OPERATOR']);
+      expect(stub.platform(s.keycloakId).organization_roles).toEqual([`${s.org.a}:OPERATOR`]);
+    });
+
+    it('Prisma’s own transaction timeout: an insert that commits after it is refused in the re-check, and released', async () => {
+      const s = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
+      const insert = holdNextInsert('before');
+      let outcome: unknown = null;
+      const done = repository
+        .transaction(
+          async (tx) => {
+            await repository.lockUserMemberships(tx, s.userId);
+            try {
+              await fencing.fences.open(tx, {
+                userId: s.userId,
+                keycloakId: s.keycloakId,
+                operation: 'replace_attributes',
+                timeoutMs: REQUEST_TIMEOUT_MS,
+                settleSeconds: SETTLE_SECONDS,
+                // Wrong on purpose: the re-check does not trust the budget.
+                transactionTimeoutMs: 60_000,
+              });
+              outcome = 'returned';
+            } catch (error) {
+              outcome = error;
+            }
+          },
+          { timeout: 400, maxWait: 5_000 },
+        )
+        .catch(() => undefined);
+      await insert.atInsert;
+      await sleep(700);
+      insert.release();
+      await done;
+      await waitFor('the open to end', async () => (outcome === null ? null : true));
+      expect(outcome).toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+        internalContext: expect.objectContaining({ reason: 'transaction_ended_before_dispatch' }),
+      });
+      expect(await fencesOf(s.userId)).toEqual([]);
+    });
+
+    it('the insert is bounded by what is left of the business transaction: one that cannot commit in time is cancelled, inserts nothing and sends nothing', async () => {
+      const s = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
+      // Another session blocks every insert into the fence table (reads still pass).
+      let unblock!: () => void;
+      const unblocked = new Promise<void>((resolve) => (unblock = resolve));
+      let blocked!: () => void;
+      const isBlocked = new Promise<void>((resolve) => (blocked = resolve));
+      const blocker = holderRepository.transaction(
+        async (tx) => {
+          await tx.$executeRawUnsafe('LOCK TABLE keycloak_write_attempt IN SHARE MODE');
+          blocked();
+          await unblocked;
+        },
+        { timeout: 30_000, maxWait: 5_000 },
+      );
+      await isBlocked;
+      try {
+        const started = performance.now();
+        await expect(
+          repository.transaction(
+            async (tx) => {
+              await repository.lockUserMemberships(tx, s.userId);
+              return fencing.fences.open(tx, {
+                userId: s.userId,
+                keycloakId: s.keycloakId,
+                operation: 'replace_attributes',
+                timeoutMs: REQUEST_TIMEOUT_MS,
+                settleSeconds: SETTLE_SECONDS,
+                transactionTimeoutMs: 1_500,
+              });
+            },
+            { timeout: 10_000, maxWait: 5_000 },
+          ),
+        ).rejects.toBeDefined();
+        const ms = performance.now() - started;
+        expect(ms).toBeGreaterThan(1_000);
+        expect(ms).toBeLessThan(4_000);
+      } finally {
+        unblock();
+        await blocker;
+      }
+      expect(await fencesOf(s.userId)).toEqual([]);
+      expect(stub.puts(s.keycloakId)).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // #402 r2 F2: one cancellation boundary for every database operation
+  // -------------------------------------------------------------------------
+
+  describe('the stop reaches every database operation (#402 r2 F2)', () => {
+    /**
+     * The scanner's whole stack on its own two pools, each recording every
+     * operation that passed the cancellation boundary (the recorder is the
+     * client's last extension, so it sees only what the boundary let start).
+     */
+    async function recordedStack() {
+      const log: Array<{ at: number; operation: string }> = [];
+      const record = (service: PrismaService) => {
+        const client = service.client.$extends({
+          query: {
+            $allOperations({ operation, args, query }) {
+              log.push({ at: performance.now(), operation });
+              return query(args);
+            },
+          },
+        });
+        Object.defineProperty(service, 'client', { value: client });
+      };
+      const business = newPrisma();
+      await business.onModuleInit();
+      record(business);
+      const pool = new PrismaService(databaseUrl(), { connections: FENCE_POOL_CONNECTIONS });
+      await pool.onModuleInit();
+      record(pool);
+      const ownRepository = new IdentityRepository(business);
+      const ownFences = new KeycloakWriteFences(pool);
+      const ownProjector = new KeycloakProjector(ownRepository, keycloak, ownFences, {
+        writeSettleSeconds: SETTLE_SECONDS,
+      });
+      const ownService = new IdentityService(ownRepository, keycloak, ownProjector);
+      return {
+        log,
+        repository: ownRepository,
+        fences: ownFences,
+        projector: ownProjector,
+        service: ownService,
+        scanner: (only: Set<string>) =>
+          ownScanner(
+            50,
+            {
+              service: ownService,
+              projector: ownProjector,
+              fences: ownFences,
+              repository: ownRepository,
+            },
+            only,
+          ),
+        close: async () => {
+          await pool.onModuleDestroy();
+          await business.onModuleDestroy();
+        },
+      };
+    }
+
+    async function dueFence(userId: string, keycloakId: string) {
+      await prisma.client.$executeRaw`
+        INSERT INTO keycloak_write_attempt
+               (attempt_id, user_id, keycloak_id, operation,
+                started_at, deadline_at, takeover_at, next_reassert_at)
+        VALUES (${`KWA_${ulid()}`}, ${userId}, ${keycloakId}, 'replace_attributes',
+                now() - interval '10 minutes', now() - interval '10 minutes',
+                now() - interval '8 minutes', now() - interval '8 minutes')`;
+    }
+
+    /** Pauses the next call of `method` — after (`after`) or before (`before`) its query — until released. */
+    function pauseNext<T extends object>(
+      target: T,
+      method: keyof T & string,
+      when: 'before' | 'after',
+    ) {
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let reached!: () => void;
+      const paused = new Promise<void>((resolve) => (reached = resolve));
+      const real = (target[method] as (...args: unknown[]) => Promise<unknown>).bind(target);
+      jest.spyOn(target, method as never).mockImplementationOnce((async (...args: unknown[]) => {
+        if (when === 'before') {
+          reached();
+          await released;
+          return real(...args);
+        }
+        const result = await real(...args);
+        reached();
+        await released;
+        return result;
+      }) as never);
+      return { paused, release };
+    }
+
+    /** Runs a pass, pauses it where `pause` says, stops the scanner, then lets it resume. */
+    async function stopWhilePaused(
+      stack: Awaited<ReturnType<typeof recordedStack>>,
+      only: Set<string>,
+      pause: { paused: Promise<void>; release: () => void },
+    ) {
+      const scanner = stack.scanner(only);
+      const pass = scanner.scan();
+      await pause.paused;
+      await scanner.stop({ deadlineAt: Date.now() + 100 });
+      const stoppedAt = performance.now();
+      pause.release();
+      await pass;
+      await sleep(300);
+      return stack.log.filter((entry) => entry.at >= stoppedAt).map((entry) => entry.operation);
+    }
+
+    it('a re-assertion paused in databaseNow: the query completes after the stop returned, and nothing after it starts — no user read, no fence read, no PUT', async () => {
+      const s = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
+      await dueFence(s.userId, s.keycloakId);
+      const stack = await recordedStack();
+      try {
+        const putsBefore = stub.puts(s.keycloakId).length;
+        const after = await stopWhilePaused(
+          stack,
+          new Set([s.userId]),
+          pauseNext(stack.repository, 'databaseNow', 'after'),
+        );
+        expect(after).toEqual([]);
+        expect(stub.puts(s.keycloakId)).toHaveLength(putsBefore);
+        expect(await fencesOf(s.userId)).toEqual([expect.objectContaining({ live: false })]);
+      } finally {
+        await stack.close();
+      }
+    });
+
+    it('a re-assertion paused at its fence read: nothing after it starts — no membership read, no fence insert, no settle', async () => {
+      const s = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
+      await dueFence(s.userId, s.keycloakId);
+      const stack = await recordedStack();
+      try {
+        const putsBefore = stub.puts(s.keycloakId).length;
+        const after = await stopWhilePaused(
+          stack,
+          new Set([s.userId]),
+          pauseNext(stack.fences, 'ofUser', 'after'),
+        );
+        expect(after).toEqual([]);
+        expect(stub.puts(s.keycloakId)).toHaveLength(putsBefore);
+        expect(await fencesOf(s.userId)).toHaveLength(1);
+      } finally {
+        await stack.close();
+      }
+    });
+
+    it('a lapse paused before its write-ahead reads the user: the read never starts, nothing is claimed, sent or enqueued', async () => {
+      const s = await seed({
+        memberships: [
+          { in: 'a', roles: ['OPERATOR'] },
+          { in: 'b', roles: ['DRIVER'], validUntil: new Date(Date.now() - 1000) },
+        ],
+      });
+      const stack = await recordedStack();
+      try {
+        const putsBefore = stub.puts(s.keycloakId).length;
+        const after = await stopWhilePaused(
+          stack,
+          new Set([s.userId]),
+          pauseNext(stack.repository, 'findUserById', 'before'),
+        );
+        expect(after).toEqual([]);
+        expect(stub.puts(s.keycloakId)).toHaveLength(putsBefore);
+        expect(await events(s.memberships[1]!)).toEqual([]);
+        expect(
+          (
+            await runUnscoped('the suite reads its own fixture', () =>
+              prisma.client.membership.findUniqueOrThrow({ where: { id: s.memberships[1]! } }),
+            )
+          ).lapseHandledAt,
+        ).toBeNull();
+      } finally {
+        await stack.close();
+      }
+    });
+
+    it('control: the same stack without a stop runs the pass through, on both pools', async () => {
+      const s = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
+      await dueFence(s.userId, s.keycloakId);
+      const stack = await recordedStack();
+      try {
+        await stack.scanner(new Set([s.userId])).scan();
+        expect(stack.log.length).toBeGreaterThan(5);
+        expect(await fencesOf(s.userId)).toEqual([]);
+      } finally {
+        await stack.close();
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // #402 r2 F3: the backfill drains every fence
+  // -------------------------------------------------------------------------
+
+  describe('the backfill drains every fence, linked or not (#402 r2 F3)', () => {
+    async function fence(userId: string, keycloakId: string, state: 'due' | 'retry' | 'terminal') {
+      await prisma.client.$executeRaw`
+        INSERT INTO keycloak_write_attempt
+               (attempt_id, user_id, keycloak_id, operation,
+                started_at, deadline_at, takeover_at, next_reassert_at,
+                reassert_failures, account_missing_at)
+        VALUES (${`KWA_${ulid()}`}, ${userId}, ${keycloakId}, 'replace_attributes',
+                now() - interval '10 minutes', now() - interval '10 minutes',
+                now() - interval '8 minutes',
+                CASE WHEN ${state} = 'retry' THEN now() + interval '1 hour'
+                     ELSE now() - interval '8 minutes' END,
+                CASE WHEN ${state} = 'retry' THEN 3 ELSE 0 END,
+                CASE WHEN ${state} = 'terminal' THEN now() - interval '5 minutes' END)`;
+    }
+
+    /** A user whose registration was never approved: no account linked, an orphan account in Keycloak. */
+    async function unlinked(orphan: { enabled: boolean; grants: boolean }) {
+      const s = await seed({
+        memberships: [{ in: 'a', roles: ['OPERATOR'] }],
+        account: 'missing-in-keycloak',
+      });
+      await runUnscoped('test fixture', () =>
+        prisma.client.user.update({ where: { id: s.userId }, data: { keycloakId: null } }),
+      );
+      const username = `fn-${s.userId.slice(-12)}`.toLowerCase();
+      stub.add({
+        id: s.keycloakId,
+        username,
+        email: `${username}@example.test`,
+        firstName: 'آزمون',
+        lastName: 'حصار',
+        enabled: orphan.enabled,
+        attributes: orphan.grants
+          ? { ...provenanceOnly(s.userId), organization_ids: [s.org.a] }
+          : provenanceOnly(s.userId),
+      });
+      return s;
+    }
+
+    it('drains an unlinked user’s fence, a repaired orphan’s earlier attempt and a fence waiting out its retry; a terminal fence stays and keeps the count above zero', async () => {
+      // The review's probe: harmless orphan, unlinked, an uncertain fence left.
+      const harmless = await unlinked({ enabled: false, grants: false });
+      await fence(harmless.userId, harmless.keycloakId, 'due');
+      // A non-harmless orphan: the orphan sweep repairs it, settling only its own attempts.
+      const repaired = await unlinked({ enabled: true, grants: true });
+      await fence(repaired.userId, repaired.keycloakId, 'due');
+      // Linked, its fence deferred by failed re-assertions.
+      const retry = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
+      await fence(retry.userId, retry.keycloakId, 'retry');
+      // Linked, the account gone: terminal.
+      const terminal = await seed({
+        memberships: [{ in: 'a', roles: ['OPERATOR'] }],
+        account: 'missing-in-keycloak',
+      });
+      await fence(terminal.userId, terminal.keycloakId, 'terminal');
+
+      const only = new Set([harmless.userId, repaired.userId, retry.userId, terminal.userId]);
+      // The command over this suite's users only — the real queries, filtered
+      // after; the count is the same COUNT(*), over these users' rows.
+      const scopedRepository = Object.create(repository) as IdentityRepository;
+      scopedRepository.listUserIdsWithAccount = async (after, take) =>
+        (await repository.listUserIdsWithAccount(after, 100_000))
+          .filter((u) => only.has(u))
+          .slice(0, take);
+      scopedRepository.listUsersWithoutAccount = async (after, take) =>
+        (await repository.listUsersWithoutAccount(after, 100_000))
+          .filter((u) => only.has(u.id))
+          .slice(0, take);
+      const scopedFences = Object.create(fencing.fences) as KeycloakWriteFences;
+      scopedFences.owners = async (after, take) =>
+        (await fencing.fences.owners(after, 100_000)).filter((u) => only.has(u)).slice(0, take);
+      const ids = [...only];
+      scopedFences.counts = async () => {
+        const [row] = await prisma.client.$queryRaw<Array<{ total: bigint; terminal: bigint }>>`
+          SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE account_missing_at IS NOT NULL) AS terminal
+            FROM keycloak_write_attempt WHERE user_id = ANY(${ids}::text[])`;
+        return {
+          live: 0,
+          due: 0,
+          overdue: 0,
+          accountMissing: Number(row!.terminal),
+          total: Number(row!.total),
+        };
+      };
+
+      const report = await runProjectionCommand('backfill', {
+        repository: scopedRepository,
+        projector,
+        keycloak,
+        fences: scopedFences,
+      });
+
+      expect(await fencesOf(harmless.userId)).toEqual([]);
+      expect(await fencesOf(repaired.userId)).toEqual([]);
+      expect(await fencesOf(retry.userId)).toEqual([]);
+      expect(await fencesOf(terminal.userId)).toEqual([
+        expect.objectContaining({ accountMissing: true }),
+      ]);
+      expect(report.fences).toMatchObject({ outstanding: 1, accountMissing: 1 });
+      expect(report.fences.drained).toBeGreaterThanOrEqual(2);
+      expect(stub.accounts.get(repaired.keycloakId)).toMatchObject({ enabled: false });
+
+      // Nothing to wait for but the terminal one: once its account is back, the
+      // next backfill drains it, and the count is zero.
+      stub.add({
+        id: terminal.keycloakId,
+        username: `fn-${terminal.userId.slice(-12)}`.toLowerCase(),
+        email: `fn-${terminal.userId.slice(-12)}@example.test`.toLowerCase(),
+        firstName: 'آزمون',
+        lastName: 'حصار',
+        attributes: { ...(await rowsGrant(terminal.userId)), rasta_activation: ['REG_FIXTURE'] },
+      });
+      const again = await runProjectionCommand('backfill', {
+        repository: scopedRepository,
+        projector,
+        keycloak,
+        fences: scopedFences,
+      });
+      expect(again.fences.outstanding).toBe(0);
+    });
+
+    it('counts every row as COUNT(*) does, whatever its state', async () => {
+      const at = await repository.databaseNow(prisma.client);
+      const counted = await fencing.fences.counts(at);
+      const [row] = await prisma.client.$queryRaw<Array<{ n: bigint }>>`
+        SELECT COUNT(*) AS n FROM keycloak_write_attempt`;
+      expect(counted.total).toBe(Number(row!.n));
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // #402 r2 F4 and D-070
+  // -------------------------------------------------------------------------
+
+  describe('the durable backoffs cannot overflow (#402 r2 F4)', () => {
+    it.each([1023, 2_147_483_647])(
+      'a re-assertion counter of %i: deferred by the capped interval, the counter capped',
+      async (failures) => {
+        const s = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
+        await prisma.client.$executeRaw`
+          INSERT INTO keycloak_write_attempt
+                 (attempt_id, user_id, keycloak_id, operation,
+                  started_at, deadline_at, takeover_at, next_reassert_at, reassert_failures)
+          VALUES (${`KWA_${ulid()}`}, ${s.userId}, ${s.keycloakId}, 'replace_attributes',
+                  now() - interval '10 minutes', now() - interval '10 minutes',
+                  now() - interval '8 minutes', now() - interval '8 minutes', ${failures})`;
+        await fencing.fences.deferReassert(s.userId, 60, 16);
+        const [deferred] = await fencesOf(s.userId);
+        expect(deferred!.reassertFailures).toBe(Math.min(failures + 1, 1_000_000));
+        expect(deferred!.nextIn).toBeGreaterThan(60 * 16 - 5);
+        expect(deferred!.nextIn).toBeLessThanOrEqual(60 * 16);
+      },
+    );
+
+    it.each([1023, 2_147_483_647])(
+      'a lapse counter of %i: deferred by the capped interval, the counter capped',
+      async (failures) => {
+        const s = await seed({
+          memberships: [{ in: 'a', roles: ['OPERATOR'], validUntil: new Date(Date.now() - 1000) }],
+        });
+        const membershipId = s.memberships[0]!;
+        await runUnscoped(
+          'test fixture',
+          () =>
+            prisma.client
+              .$executeRaw`UPDATE membership SET lapse_failures = ${failures} WHERE id = ${membershipId}`,
+        );
+        await repository.deferLapse(membershipId, 60, 16);
+        const [row] = await runUnscoped(
+          'test reads its fixture',
+          () =>
+            prisma.client.$queryRaw<Array<{ failures: number; retry_in: number }>>`
+            SELECT lapse_failures AS failures,
+                   EXTRACT(EPOCH FROM lapse_retry_at - (clock_timestamp() AT TIME ZONE 'UTC'))::float AS retry_in
+              FROM membership WHERE id = ${membershipId}`,
+        );
+        expect(row!.failures).toBe(Math.min(failures + 1, 1_000_000));
+        expect(row!.retry_in).toBeGreaterThan(60 * 16 - 5);
+        expect(row!.retry_in).toBeLessThanOrEqual(60 * 16);
+      },
+    );
+  });
+
+  describe('a write unresolved past half its settle window is counted as overdue (D-070)', () => {
+    it('counts live fences past deadline + settle/2, not those before it, nor due ones', async () => {
+      const s = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
+      const at = await repository.databaseNow(prisma.client);
+      const before = await fencing.fences.counts(at);
+      // settle 70 s each. Overdue: deadline 50 s ago (half the window passed 15 s ago).
+      // Not yet: deadline 10 s ago (25 s to go). Due: past takeover.
+      for (const [deadlineAgo, takeoverIn] of [
+        [50, 20],
+        [10, 60],
+        [100, -30],
+      ] as const) {
+        await prisma.client.$executeRaw`
+          INSERT INTO keycloak_write_attempt
+                 (attempt_id, user_id, keycloak_id, operation,
+                  started_at, deadline_at, takeover_at, next_reassert_at)
+          SELECT ${`KWA_${ulid()}`}, ${s.userId}, ${s.keycloakId}, 'replace_attributes',
+                 t.c - make_interval(secs => ${deadlineAgo + 10}),
+                 t.c - make_interval(secs => ${deadlineAgo}),
+                 t.c + make_interval(secs => ${takeoverIn}),
+                 t.c + make_interval(secs => ${takeoverIn})
+            FROM (SELECT ${at}::timestamp AS c) t`;
+      }
+      const after = await fencing.fences.counts(at);
+      expect(after.overdue - before.overdue).toBe(1);
+      expect(after.live - before.live).toBe(2);
+      expect(after.due - before.due).toBe(1);
+      expect(after.total - before.total).toBe(3);
+      await prisma.client
+        .$executeRaw`DELETE FROM keycloak_write_attempt WHERE user_id = ${s.userId}`;
     });
   });
 });

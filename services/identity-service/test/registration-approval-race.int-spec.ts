@@ -595,6 +595,7 @@ describe('registration decisions and the Keycloak account an approval creates', 
         repository,
         projector,
         keycloak,
+        fences: fencing.fences,
       });
       expect(reconciled.activationPending).toContain(userId);
 
@@ -602,12 +603,18 @@ describe('registration decisions and the Keycloak account an approval creates', 
         repository,
         projector,
         keycloak,
+        fences: fencing.fences,
       });
       expect(backfilled.failed).not.toContain(userId);
       expectActivated(username, userId);
       expect(await state(registrationId, userId)).toEqual(APPROVED_STATE(account!.id));
 
-      const again = await runProjectionCommand('reconcile', { repository, projector, keycloak });
+      const again = await runProjectionCommand('reconcile', {
+        repository,
+        projector,
+        keycloak,
+        fences: fencing.fences,
+      });
       expect(again.activationPending).not.toContain(userId);
     });
 
@@ -646,6 +653,7 @@ describe('registration decisions and the Keycloak account an approval creates', 
         repository,
         projector,
         keycloak,
+        fences: fencing.fences,
       });
       expect(reconciled.orphans).toContainEqual(
         expect.objectContaining({ userId, enabled: true, grants: true, repaired: false }),
@@ -655,6 +663,7 @@ describe('registration decisions and the Keycloak account an approval creates', 
         repository,
         projector,
         keycloak,
+        fences: fencing.fences,
       });
       expect(backfilled.orphans).toContainEqual(
         expect.objectContaining({ userId, repaired: true }),
@@ -671,7 +680,12 @@ describe('registration decisions and the Keycloak account an approval creates', 
       await reject(registrationId);
       plantOrphan(username, userId);
 
-      await runProjectionCommand('backfill', { repository, projector, keycloak });
+      await runProjectionCommand('backfill', {
+        repository,
+        projector,
+        keycloak,
+        fences: fencing.fences,
+      });
       expectHarmless(username, userId);
     });
 
@@ -711,6 +725,7 @@ describe('registration decisions and the Keycloak account an approval creates', 
         repository,
         projector,
         keycloak,
+        fences: fencing.fences,
       });
       expect(backfilled.failed).toContain(userId);
       expect(accountsOf(username)[0]).toMatchObject({ enabled: true });
@@ -718,8 +733,15 @@ describe('registration decisions and the Keycloak account an approval creates', 
   });
 
   describe('round 3: one-shot activation, harmless adoption, and an unconfirmed create', () => {
-    const reconcile = () => runProjectionCommand('reconcile', { repository, projector, keycloak });
-    const backfill = () => runProjectionCommand('backfill', { repository, projector, keycloak });
+    const reconcile = () =>
+      runProjectionCommand('reconcile', {
+        repository,
+        projector,
+        keycloak,
+        fences: fencing.fences,
+      });
+    const backfill = () =>
+      runProjectionCommand('backfill', { repository, projector, keycloak, fences: fencing.fences });
 
     it('HIGH 1: an activation whose answer was lost is never repeated — an account an administrator disabled since stays disabled', async () => {
       const { registrationId, userId, username } = await submit();
@@ -906,8 +928,15 @@ describe('registration decisions and the Keycloak account an approval creates', 
   });
 
   describe('round 4: the platform status is the authority on enabling (HIGH 1, D-049)', () => {
-    const reconcile = () => runProjectionCommand('reconcile', { repository, projector, keycloak });
-    const backfill = () => runProjectionCommand('backfill', { repository, projector, keycloak });
+    const reconcile = () =>
+      runProjectionCommand('reconcile', {
+        repository,
+        projector,
+        keycloak,
+        fences: fencing.fences,
+      });
+    const backfill = () =>
+      runProjectionCommand('backfill', { repository, projector, keycloak, fences: fencing.fences });
 
     /**
      * A platform disable as any suspend or deactivate path must make one —
