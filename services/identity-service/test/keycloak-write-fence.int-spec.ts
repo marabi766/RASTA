@@ -1282,6 +1282,41 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       expect(await fencesOf(s.userId)).toEqual([]);
     });
 
+    it('a transaction still open but past its budget at the re-check (the database clock says so) sends nothing', async () => {
+      const s = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
+      const insert = holdNextInsert('before');
+      let outcome: unknown = null;
+      const done = repository.transaction(
+        async (tx) => {
+          await repository.lockUserMemberships(tx, s.userId);
+          try {
+            await fencing.fences.open(tx, {
+              userId: s.userId,
+              keycloakId: s.keycloakId,
+              operation: 'replace_attributes',
+              timeoutMs: REQUEST_TIMEOUT_MS,
+              settleSeconds: SETTLE_SECONDS,
+              // The budget its caller gave it; Prisma's own timeout is longer.
+              transactionTimeoutMs: 500,
+            });
+            outcome = 'returned';
+          } catch (error) {
+            outcome = error;
+          }
+        },
+        { timeout: 10_000, maxWait: 5_000 },
+      );
+      await insert.atInsert;
+      await sleep(700);
+      insert.release();
+      await done;
+      expect(outcome).toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+        internalContext: expect.objectContaining({ reason: 'transaction_ended_before_dispatch' }),
+      });
+      expect(await fencesOf(s.userId)).toEqual([]);
+    });
+
     it('the insert is bounded by what is left of the business transaction: one that cannot commit in time is cancelled, inserts nothing and sends nothing', async () => {
       const s = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
       // Another session blocks every insert into the fence table (reads still pass).
