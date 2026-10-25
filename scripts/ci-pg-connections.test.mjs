@@ -511,10 +511,12 @@ test('a query past its deadline is TERMed, then KILLed, and recorded as a failed
     killWaitMs: 1000,
   });
   await waitFor(() => existsSync(join(dir, 'stalled.pid')), 5000, 'the stalled child');
-  const result = await run.done;
+  const stalled = Number(readFileSync(join(dir, 'stalled.pid'), 'utf8'));
+  const result = await Promise.race([run.done, delay(5000).then(() => 'still running')]);
+  if (result === 'still running') process.kill(stalled, 'SIGKILL'); // our own stub: never left behind
   assert.deepEqual(result, { ok: false, stdout: '', reason: 'timeout' });
   assert.ok(Date.now() - started >= 600 && Date.now() - started < 3000);
-  assert.equal(alive(Number(readFileSync(join(dir, 'stalled.pid'), 'utf8'))), false);
+  assert.equal(alive(stalled), false);
   const missing = await runBounded(join(dir, 'absent-psql'), [], {
     env: process.env,
     deadlineMs: 1000,
