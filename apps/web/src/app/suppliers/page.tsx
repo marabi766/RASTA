@@ -15,7 +15,7 @@ import { SuppliersScreen } from './SuppliersScreen';
 import { SupplierPendingNotices } from './UnresolvedSupplierNotice';
 
 /**
- * The `/suppliers` route — تامین‌کنندگان (docs/16 § ۱۶٫۶): the directory, and
+ * The `/suppliers` route — تأمین‌کنندگان (docs/16 § ۱۶٫۶): the directory, and
  * the form that registers this organization's own profile.
  *
  * **No access decision for the directory here**, as on every portal route:
@@ -74,8 +74,8 @@ export default async function SuppliersPage({
       sidebar={<PortalSidebar session={session} currentHref="/suppliers" />}
     >
       <PageHeader
-        title="تامین‌کنندگان"
-        description="تامین‌کنندگان کالا، تعمیرگاه‌ها و پیمانکارانی که این سازمان می‌تواند ببیند."
+        title="تأمین‌کنندگان"
+        description="تأمین‌کنندگان کالا، تعمیرگاه‌ها و پیمانکارانی که این سازمان می‌تواند ببیند."
       />
       <div className="mt-4">
         <SuppliersScreen

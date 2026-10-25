@@ -164,10 +164,10 @@ const CASES: readonly Case[] = [
     submit: (place, form) =>
       actions.submitCancelProject(PROJECT_ID, place, IDLE_PROJECT_FORM, form),
     send: cancelProject,
-    valid: { reason: 'بودجه تامین نشد', confirm: 'yes' },
+    valid: { reason: 'بودجه تأمین نشد', confirm: 'yes' },
     notice: 'cancelled',
-    args: [PROJECT_ID, { reason: 'بودجه تامین نشد' }, VERSION],
-    invalid: { reason: 'بودجه تامین نشد', confirm: '' },
+    args: [PROJECT_ID, { reason: 'بودجه تأمین نشد' }, VERSION],
+    invalid: { reason: 'بودجه تأمین نشد', confirm: '' },
     invalidField: 'confirm',
   },
   {

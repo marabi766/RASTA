@@ -9,10 +9,11 @@ import * as supplierFields from '@/lib/supplier-fields';
 import * as unconfirmed from '@/lib/unconfirmed-write';
 import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import type { SupplierFormState } from './supplier-form-state';
+import { NON_STANDARD_SPELLING } from '@/test/orthography';
 
 /**
  * Persian wording (docs/16 § ۱۶٫۱۱, pre-review-checklist item 19): nothing the
- * supplier screens say carries U+0654 or a hamza letter (أ إ ؤ ئ). Not only the
+ * supplier screens say is spelled in the standard orthography (hamza included, no U+0654). Not only the
  * new notice: every string the touched screens render — labels, messages,
  * statuses, the shared unconfirmed-write sentence, session refusals — is checked,
  * from the exported values and from the rendered forms in every state.
@@ -36,8 +37,6 @@ Object.assign(process.env, {
   WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
 });
 
-const HAMZA = /[ٔأإؤئ]/;
-
 function strings(value: unknown, out: string[] = []): string[] {
   if (typeof value === 'string') out.push(value);
   else if (Array.isArray(value)) for (const item of value) strings(item, out);
@@ -54,8 +53,8 @@ describe('the exported wording of the supplier screens', () => {
     ['lib/unconfirmed-write', unconfirmed],
     ['lib/session-refusal messages', SESSION_REFUSAL_MESSAGES],
     ['app/nav (the shared navigation)', nav],
-  ])('%s has no combining or hamza letters', (_name, exported) => {
-    const offending = strings(exported).filter((text) => HAMZA.test(text));
+  ])('%s uses the standard orthography', (_name, exported) => {
+    const offending = strings(exported).filter((text) => NON_STANDARD_SPELLING.test(text));
     expect(offending).toEqual([]);
   });
 });
@@ -83,7 +82,7 @@ describe('the source of the touched screens', () => {
   });
 
   it.each(files.map((file) => [path.relative(root, file), file]))('%s', (_name, file) => {
-    expect(readFileSync(file as string, 'utf8')).not.toMatch(HAMZA);
+    expect(readFileSync(file as string, 'utf8')).not.toMatch(NON_STANDARD_SPELLING);
   });
 });
 
@@ -125,10 +124,10 @@ describe('the forms, in every state', () => {
     <forms.ReinstateSupplierForm key="i" {...BOUND} held={held} />,
   ];
 
-  it.each([false, true])('say nothing with a hamza (held: %s)', (held) => {
+  it.each([false, true])('use the standard orthography (held: %s)', (held) => {
     for (const element of draw(held)) {
       const { container, unmount } = render(element);
-      expect(container.textContent ?? '').not.toMatch(HAMZA);
+      expect(container.textContent ?? '').not.toMatch(NON_STANDARD_SPELLING);
       unmount();
     }
   });
@@ -151,19 +150,22 @@ describe('the forms, in every state', () => {
   // Every answer, on every form, drawn while the slot is held and while it is open.
   it.each(
     [false, true].flatMap((held) => STATES.map((state) => [held, state.kind, state] as const)),
-  )('say nothing with a hamza when held is %s and the answer is %s', async (held, _kind, state) => {
-    const { act } = await import('@testing-library/react');
-    const actions = jest.requireMock('./supplier-actions') as Record<string, jest.Mock>;
-    for (const mock of Object.values(actions)) mock.mockResolvedValue(state);
-    for (const element of draw(held)) {
-      const { container, unmount } = render(element);
-      await act(async () => {
-        container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true }));
-      });
-      expect(container.textContent ?? '').not.toMatch(HAMZA);
-      unmount();
-    }
-  });
+  )(
+    'use the standard orthography when held is %s and the answer is %s',
+    async (held, _kind, state) => {
+      const { act } = await import('@testing-library/react');
+      const actions = jest.requireMock('./supplier-actions') as Record<string, jest.Mock>;
+      for (const mock of Object.values(actions)) mock.mockResolvedValue(state);
+      for (const element of draw(held)) {
+        const { container, unmount } = render(element);
+        await act(async () => {
+          container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true }));
+        });
+        expect(container.textContent ?? '').not.toMatch(NON_STANDARD_SPELLING);
+        unmount();
+      }
+    },
+  );
 });
 
 describe('the shared navigation both supplier screens render', () => {
@@ -192,19 +194,22 @@ describe('the shared navigation both supplier screens render', () => {
     ['a supplier', ['SUPPLIER']],
     ['a platform operator', ['PLATFORM_OPERATOR', 'PLATFORM_ADMIN']],
     ['a project manager and contractor', ['PROJECT_MANAGER', 'CONTRACTOR', 'ORG_ADMIN']],
-  ])('%s sees no hamza in the sidebar, on either supplier screen', (_name, roles) => {
-    // Both screens pass `currentHref="/suppliers"` (pinned in supplier-unresolved-pages.spec.ts).
-    const { container, unmount } = render(
-      <PortalSidebar session={sessionWith(roles)} currentHref="/suppliers" />,
-    );
-    expect(container.textContent ?? '').not.toMatch(HAMZA);
-    unmount();
-  });
+  ])(
+    '%s sees the standard orthography in the sidebar, on either supplier screen',
+    (_name, roles) => {
+      // Both screens pass `currentHref="/suppliers"` (pinned in supplier-unresolved-pages.spec.ts).
+      const { container, unmount } = render(
+        <PortalSidebar session={sessionWith(roles)} currentHref="/suppliers" />,
+      );
+      expect(container.textContent ?? '').not.toMatch(NON_STANDARD_SPELLING);
+      unmount();
+    },
+  );
 
-  it('draws the supplier entry, spelled without a hamza', () => {
+  it('draws the supplier entry, spelled with its hamza', () => {
     const { container } = render(
       <PortalSidebar session={sessionWith(['SUPPLIER'])} currentHref="/suppliers" />,
     );
-    expect(container.textContent).toContain('تامین‌کنندگان');
+    expect(container.textContent).toContain('تأمین‌کنندگان');
   });
 });

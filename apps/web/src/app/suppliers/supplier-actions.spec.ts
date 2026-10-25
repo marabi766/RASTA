@@ -936,7 +936,7 @@ describe('REGISTER', () => {
     registerSupplier.mockResolvedValue({
       kind: 'INVALID',
       fieldErrors: {},
-      message: 'این سازمان پیش از این پرونده تامین‌کننده دارد',
+      message: 'این سازمان پیش از این پرونده تأمین‌کننده دارد',
       correlationId: 'corr-409',
     });
     const state = await submit(registerForm());

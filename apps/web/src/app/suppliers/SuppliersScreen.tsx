@@ -65,7 +65,7 @@ function hrefWith(query: SupplierListQuery, changes: Partial<SupplierListQuery>)
 function StatusFilter({ query }: { query: SupplierListQuery }) {
   const items: readonly (SupplierStatus | undefined)[] = [undefined, ...SUPPLIER_STATUSES];
   return (
-    <nav aria-label="وضعیت تامین‌کننده" className="flex flex-wrap gap-2">
+    <nav aria-label="وضعیت تأمین‌کننده" className="flex flex-wrap gap-2">
       {items.map((status) => (
         <Link
           key={status ?? 'ALL'}
@@ -87,7 +87,7 @@ function StatusFilter({ query }: { query: SupplierListQuery }) {
 function CapabilityFilter({ query }: { query: SupplierListQuery }) {
   const items: readonly (SupplierCapability | undefined)[] = [undefined, ...SUPPLIER_CAPABILITIES];
   return (
-    <nav aria-label="دسته‌ی تامین‌کننده" className="flex flex-wrap gap-2">
+    <nav aria-label="دسته‌ی تأمین‌کننده" className="flex flex-wrap gap-2">
       {items.map((capability) => (
         <Link
           key={capability ?? 'ALL'}
@@ -151,7 +151,7 @@ export function SuppliersScreen({
   return (
     <div className="flex flex-col gap-4">
       {register ? (
-        <Section headingId="supplier-register" title="ثبت پرونده تامین‌کننده برای سازمان شما">
+        <Section headingId="supplier-register" title="ثبت پرونده تأمین‌کننده برای سازمان شما">
           {register}
         </Section>
       ) : null}
@@ -168,19 +168,19 @@ function SuppliersBody({
   ownOrganizationId,
 }: SuppliersScreenProps & { ownOrganizationId: string | null }) {
   if (result.kind === 'FORBIDDEN') {
-    return <NoAccessState description="فهرست تامین‌کنندگان در اختیار شما نیست." />;
+    return <NoAccessState description="فهرست تأمین‌کنندگان در اختیار شما نیست." />;
   }
 
   if (result.kind === 'NOT_FOUND') {
     return (
-      <EmptyState title="تامین‌کننده‌ای یافت نشد" description="این نشست سازمان فعالی ندارد." />
+      <EmptyState title="تأمین‌کننده‌ای یافت نشد" description="این نشست سازمان فعالی ندارد." />
     );
   }
 
   if (result.kind === 'UNAVAILABLE' || result.kind === 'MALFORMED') {
     return (
       <ErrorState
-        description="فهرست تامین‌کنندگان خوانده نشد. کمی بعد دوباره تلاش کنید."
+        description="فهرست تأمین‌کنندگان خوانده نشد. کمی بعد دوباره تلاش کنید."
         correlationId={result.correlationId}
       />
     );
@@ -189,20 +189,20 @@ function SuppliersBody({
   const page = result.data;
 
   return (
-    <Section headingId="suppliers" title="تامین‌کنندگان">
+    <Section headingId="suppliers" title="تأمین‌کنندگان">
       {page.items.length === 0 ? (
         <EmptyState
-          title="تامین‌کننده‌ای نیست"
+          title="تأمین‌کننده‌ای نیست"
           description={
             query.status || query.capability
-              ? 'تامین‌کننده‌ای با این فیلتر یافت نشد.'
-              : 'هنوز تامین‌کننده‌ای در این فهرست نیست.'
+              ? 'تأمین‌کننده‌ای با این فیلتر یافت نشد.'
+              : 'هنوز تأمین‌کننده‌ای در این فهرست نیست.'
           }
         />
       ) : (
         <>
           <p className="mb-3 text-sm text-content-muted">
-            {toPersianDigits(String(page.items.length))} تامین‌کننده در این صفحه
+            {toPersianDigits(String(page.items.length))} تأمین‌کننده در این صفحه
           </p>
           <ul className="flex flex-col gap-3">
             {page.items.map((supplier) => (

@@ -140,7 +140,7 @@ const STEP = (over: Record<string, unknown> = {}) => ({
   workflowKey: 'project.execution',
   round: 1,
   stepOrder: 1,
-  approvalType: 'تایید فنی',
+  approvalType: 'تأیید فنی',
   authorityOrganizationId: ORG,
   authorityRole: 'ORGANIZATION_ADMIN',
   authorityLabel: 'شورا',

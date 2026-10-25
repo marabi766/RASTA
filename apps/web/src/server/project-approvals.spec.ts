@@ -69,7 +69,7 @@ const STEP = {
   stepOrder: 1,
   policyId: 'POL_1',
   policyVersion: 1,
-  approvalType: 'تایید فنی',
+  approvalType: 'تأیید فنی',
   authorityOrganizationId: 'ORG_COUNCIL',
   authorityRole: 'UNION_ADMIN',
   authorityLabel: 'شورای شهر',
@@ -104,7 +104,7 @@ const POLICY = (over: Record<string, unknown> = {}) => ({
   steps: [
     {
       stepOrder: 2,
-      approvalType: 'تایید مالی',
+      approvalType: 'تأیید مالی',
       authorityOrganizationId: 'O2',
       authorityRole: 'UNION_ADMIN',
       authorityLabel: 'استانداری',
@@ -113,7 +113,7 @@ const POLICY = (over: Record<string, unknown> = {}) => ({
     },
     {
       stepOrder: 1,
-      approvalType: 'تایید فنی',
+      approvalType: 'تأیید فنی',
       authorityOrganizationId: 'O1',
       authorityRole: 'UNION_ADMIN',
       authorityLabel: 'شورای شهر',
@@ -293,8 +293,8 @@ describe('the execution policy', () => {
         label: 'سیاست شورا',
         isSample: false,
         steps: [
-          { approvalType: 'تایید فنی', authorityLabel: 'شورای شهر' },
-          { approvalType: 'تایید مالی', authorityLabel: 'استانداری' },
+          { approvalType: 'تأیید فنی', authorityLabel: 'شورای شهر' },
+          { approvalType: 'تأیید مالی', authorityLabel: 'استانداری' },
         ],
       },
     });

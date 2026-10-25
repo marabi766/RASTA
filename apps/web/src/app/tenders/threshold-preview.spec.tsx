@@ -5,6 +5,7 @@ import * as messages from '@/lib/procurement-threshold-fields';
 import { PENDING_REQUEST, TENDER_ID } from '@/test/owner-fixtures';
 import { ThresholdPreviewView, RequestView } from './[id]/OwnerSections';
 import { AuthorityScreen } from './[id]/AuthoritySections';
+import { NON_STANDARD_SPELLING } from '@/test/orthography';
 
 describe('procurement threshold pre-decision visibility', () => {
   it.each([
@@ -22,7 +23,7 @@ describe('procurement threshold pre-decision visibility', () => {
       />,
     );
     expect(screen.getByText(message)).toBeVisible();
-    expect(container.textContent).not.toMatch(/[\u0654أإؤئ]/u);
+    expect(container.textContent).not.toMatch(NON_STANDARD_SPELLING);
     expect(await axe(container)).toHaveNoViolations();
   });
   it('does not present a stale preview as current', () => {
@@ -102,7 +103,8 @@ describe('procurement threshold pre-decision visibility', () => {
   it('threshold refusal uses the configured ZWNJ spelling', () => {
     expect(PUBLICATION_REFUSAL_TEXT.PROCUREMENT_AMOUNT_OUTSIDE_RANGE).toContain('پیکربندی‌شده');
   });
-  it('all new fixed threshold messages have no hamza', () => {
-    for (const message of Object.values(messages)) expect(message).not.toMatch(/[\u0654أإؤئ]/u);
+  it('all fixed threshold messages use the standard orthography', () => {
+    for (const message of Object.values(messages))
+      expect(message).not.toMatch(NON_STANDARD_SPELLING);
   });
 });
