@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import { ERROR_CODES } from '@rasta/contracts';
-import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
+import {
+  internalFetch,
+  RastaError,
+  tryGetContext,
+  type InternalTokenService,
+} from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
 /**
@@ -91,6 +96,10 @@ export interface LiveMembershipClientOptions {
  * `3xx` (or the opaque redirect a browser-style fetch returns, status 0) is not
  * a 200, so it is refused like any other — one request, nothing written. A
  * `fetch` that reports having followed one anyway (`redirected`) is refused too.
+ * The request goes through the platform's redirect-rejecting transport,
+ * `internalFetch` (`@rasta/nest-common`, PR 423), which sets `redirect:
+ * 'manual'` itself and turns a redirect into a transport failure — here the
+ * same `503`.
  */
 export class LiveMembershipClient implements MembershipSource {
   private readonly fetchImpl: typeof fetch;
@@ -120,10 +129,11 @@ export class LiveMembershipClient implements MembershipSource {
     timer.unref?.();
     let text: string | null;
     try {
-      const response = await this.fetchImpl(
+      const response = await internalFetch(
         `${this.options.baseUrl.replace(/\/+$/, '')}/v1/users/` +
           `${encodeURIComponent(userId)}/live-membership`,
-        { method: 'GET', headers, signal: controller.signal, redirect: 'manual' },
+        { method: 'GET', headers, signal: controller.signal },
+        this.fetchImpl,
       );
       if (response.status === 200 && !response.redirected) {
         text = await readCapped(response, MAX_MEMBERSHIP_ANSWER_BYTES);
