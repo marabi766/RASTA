@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { parse as parseYaml } from 'yaml';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { servicesToBuild } from './container-scope-lib.mjs';
+import { SHARED_INPUTS, servicesToBuild } from './container-scope-lib.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = join(root, 'scripts', 'container-scope.mjs');
@@ -314,10 +314,16 @@ test('CLI: main --all works without the YAML dependency or base', (t) => {
   assert.deepEqual(f.run([], ['--all']), ALL);
 });
 
+test('no Trivy ignore file is a shared input: the services one was deleted with its exception (PR #444 r1)', () => {
+  assert.equal(
+    SHARED_INPUTS.some((pattern) => pattern.test('.trivyignore.services')),
+    false,
+  );
+  // Re-added at the root it is an unknown input, which still rebuilds and rescans everything.
+  assert.deepEqual(servicesToBuild(ALL, ['.trivyignore.services']), ALL);
+});
+
 for (const path of [
-  '.trivyignore.services',
-  'docs/.trivyignore.services',
-  'services/fleet-service/.trivyignore.services',
   'apps/web/package.json',
   'services/fleet-service/package.json',
   'docs/package.json',
