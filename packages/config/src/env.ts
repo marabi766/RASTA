@@ -1,6 +1,15 @@
 import { z } from 'zod';
 import { DatabaseUrlConflictError, withDatabasePool } from './database-pool';
-import { withStatementTimeout, withUtcSession } from './database-session';
+import {
+  DATABASE_URL_CONTROL_CHARACTER,
+  DATABASE_URL_REPEATED_OPTIONS,
+  withStatementTimeout,
+  withUtcSession,
+} from './database-session';
+import { envIssues, type EnvIssue } from './env-issues';
+import { tryReadUrl } from './url-reader';
+
+export type { EnvIssue } from './env-issues';
 
 /**
  * Environment loading for Rasta services.
@@ -26,28 +35,57 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
  * instead — which is exactly the failure mode this module exists to prevent.
  */
 export function urlWithProtocol(protocols: readonly string[], label: string) {
-  const expected = protocols.map((p) => `${p}//`).join(' or ');
+  const messages = urlWithProtocolMessages(protocols, label);
   return z.string().superRefine((value, ctx) => {
-    let parsed: URL;
-    try {
-      parsed = new URL(value);
-    } catch {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} must be a valid URL` });
+    const parsed = tryReadUrl(value);
+    if (parsed === null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: messages.invalid });
       return;
     }
     if (!protocols.includes(parsed.protocol)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `${label} must start with ${expected} (received "${parsed.protocol}//")`,
-      });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: messages.wrongProtocol });
     }
     if (!parsed.hostname) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} must include a host` });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: messages.noHost });
     }
   });
 }
 
+/**
+ * What {@link urlWithProtocol} refuses with, fixed per schema: never the
+ * protocol written. A value that failed this check is not known to be a URL,
+ * and what it carries goes into the boot error and its log (S-09). A schema
+ * built here with other protocols or another label hands these texts to
+ * `loadEnv` (`fixedMessages`), or its refusals print the fixed text for their
+ * code instead.
+ */
+export function urlWithProtocolMessages(protocols: readonly string[], label: string) {
+  const expected = protocols.map((p) => `${p}//`).join(' or ');
+  return {
+    invalid: `${label} must be a valid URL`,
+    wrongProtocol: `${label} must start with ${expected}`,
+    noHost: `${label} must include a host`,
+  } as const;
+}
+
 export const httpUrlSchema = urlWithProtocol(['http:', 'https:'], 'URL');
+
+/** What {@link serviceUrlSchema} refuses a URL with a username or password with. */
+export const URL_CREDENTIALS_REFUSED = 'URL must not include a username or password';
+
+/**
+ * The base URL of a service called with `fetch`: an http(s) URL with a host,
+ * and **no username or password**. `fetch` refuses
+ * to build a request from a URL with credentials, and its TypeError repeats the
+ * URL whole — the password in it — into whatever logs the failure (#385 r5).
+ * Nothing that works is refused: such a URL fails every call.
+ */
+export const serviceUrlSchema = httpUrlSchema.superRefine((value, ctx) => {
+  const parsed = tryReadUrl(value);
+  if (parsed !== null && (parsed.username !== '' || parsed.password !== '')) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: URL_CREDENTIALS_REFUSED });
+  }
+});
 export const postgresUrlSchema = urlWithProtocol(
   ['postgresql:', 'postgres:'],
   'Database connection string',
@@ -93,7 +131,14 @@ export function booleanEnv(defaultValue: boolean) {
  * they have to stay that way: the moment an environment flag and a query
  * parameter disagree about what `"off"` means, one of them is a defect waiting
  * to be found.
+ *
+ * The refusal is {@link BOOLEAN_EXPECTED} and nothing else, whatever was sent:
+ * through `queryBoolean` it is the client's own text, and the pipe's echo
+ * backstop does not look for values under three characters, so `?flag=42`
+ * would otherwise come back verbatim (S-09, #385 r1 F2).
  */
+const BOOLEAN_EXPECTED = 'Expected a boolean such as "true" or "false"';
+
 function booleanish(defaultValue: boolean) {
   return z
     .union([z.boolean(), z.string()])
@@ -105,10 +150,7 @@ function booleanish(defaultValue: boolean) {
       if (['true', '1', 'yes', 'on'].includes(normalised)) return true;
       if (['false', '0', 'no', 'off', ''].includes(normalised)) return false;
 
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `Expected a boolean such as "true" or "false", received "${value}"`,
-      });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: BOOLEAN_EXPECTED });
       return z.NEVER;
     });
 }
@@ -233,10 +275,12 @@ export const DATABASE_STATEMENT_TIMEOUT_MS_MAX = 3_600_000;
  * as 16 and an empty value as 0. For a setting that sizes a production pool,
  * anything but the number the operator meant fails at boot.
  */
+const WHOLE_NUMBER_EXPECTED = 'Expected a whole number written as digits, such as "10"';
+
 function wholeNumberEnv(min: number, max: number) {
   return z
     .string()
-    .regex(/^[0-9]+$/, 'Expected a whole number written as digits, such as "10"')
+    .regex(/^[0-9]+$/, WHOLE_NUMBER_EXPECTED)
     .transform(Number)
     .pipe(z.number().int().min(min).max(max));
 }
@@ -541,7 +585,23 @@ export function kafkaPlaintextAllowed(
   );
 }
 
-export type EnvIssue = { path: string; message: string };
+/**
+ * The fixed texts this package's schemas refuse with — the audited list
+ * `loadEnv` keeps verbatim (compared by equality). Every other message is
+ * replaced by the fixed text for its issue code ({@link envIssues}).
+ */
+export const CONFIG_ENV_MESSAGES: readonly string[] = Object.freeze([
+  BOOLEAN_EXPECTED,
+  WHOLE_NUMBER_EXPECTED,
+  ...[
+    urlWithProtocolMessages(['http:', 'https:'], 'URL'),
+    urlWithProtocolMessages(['postgresql:', 'postgres:'], 'Database connection string'),
+    urlWithProtocolMessages(['redis:', 'rediss:'], 'Redis URL'),
+  ].flatMap((messages) => Object.values(messages)),
+  URL_CREDENTIALS_REFUSED,
+  DATABASE_URL_CONTROL_CHARACTER,
+  DATABASE_URL_REPEATED_OPTIONS,
+]);
 
 export class EnvValidationError extends Error {
   constructor(public readonly issues: EnvIssue[]) {
@@ -630,12 +690,22 @@ export interface LoadEnvOptions<T> {
    * closed). Not consulted while the variable is unset.
    */
   readonly operationBudgets?: (env: T) => readonly OperationBudget[];
+  /**
+   * The fixed texts the service's own schema refuses with (`fixedEnvMessages`
+   * in `env-issues.ts`), kept verbatim beside {@link CONFIG_ENV_MESSAGES}. Any
+   * other message is replaced by the fixed text for its issue code.
+   */
+  readonly fixedMessages?: readonly string[];
 }
 
 /**
  * Validates `source` against `schema` and returns the parsed, typed result.
  * Throws {@link EnvValidationError} listing *every* problem at once — fixing
  * one missing variable per restart is a miserable way to configure 17 services.
+ *
+ * The list is built by {@link envIssues} from each issue's path, code and the
+ * schema only, never from the value written: Zod's own enum refusal repeats
+ * it (`received '…'`), and the error reaches the boot log (S-09, #385 r2 F2).
  */
 export function loadEnv<S extends z.ZodTypeAny>(
   schema: S,
@@ -645,12 +715,8 @@ export function loadEnv<S extends z.ZodTypeAny>(
   const result = schema.safeParse(withKafkaCredentialFallback(source));
 
   if (!result.success) {
-    throw new EnvValidationError(
-      result.error.issues.map((issue) => ({
-        path: issue.path.join('.') || '(root)',
-        message: issue.message,
-      })),
-    );
+    const fixed = new Set([...CONFIG_ENV_MESSAGES, ...(options.fixedMessages ?? [])]);
+    throw new EnvValidationError(envIssues(result.error.issues, schema, fixed));
   }
 
   assertKafkaPlaintextOptOut(source, result.data);

@@ -1,3 +1,4 @@
+import { inspect } from 'node:util';
 import { Kafka } from 'kafkajs';
 import { TOPIC_CONSUMERS } from '@rasta/contracts';
 import {
@@ -147,6 +148,145 @@ describe('kafkaConnection', () => {
   });
 });
 
+/**
+ * #385 r4: `SERVICE_NAME` passes its schema as any string (asset's loader keeps
+ * an override), and the CA path is whatever was configured; each refusal is a
+ * fixed text, and no part of the thrown error — stack, properties, what an
+ * uncaught throw or the boot log's inspection prints — repeats either, in any
+ * spelling.
+ */
+describe('kafkaConnection refusals repeat nothing that was configured', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'];
+  const FRAGMENTS = /sentinel|jz97|another[-_]secret/i;
+  const NO_CREDENTIAL =
+    'This Kafka client refuses to reach Kafka without its SASL credential and TLS ' +
+    '(KAFKA_SASL_PASSWORD or KAFKA_SASL_PASSWORD_<SERVICE>, and KAFKA_SSL=true). PLAINTEXT is ' +
+    'allowed only with KAFKA_ALLOW_PLAINTEXT=true and NODE_ENV development or test (ADR-061 § 3)';
+  const OTHER_PRINCIPAL =
+    'KAFKA_SASL_USERNAME is not SERVICE_NAME: this process holds a Kafka credential for ' +
+    'another principal; each service connects as itself';
+  const UNREADABLE_CA =
+    'KAFKA_SSL_CA_FILE cannot be read; with KAFKA_SSL=true it must name a readable file ' +
+    "holding the broker's CA certificate";
+
+  function refusalOf(connect: () => unknown): Error {
+    try {
+      connect();
+    } catch (error) {
+      return error as Error;
+    }
+    throw new Error('expected a refusal');
+  }
+
+  function expectFixed(error: Error, text: string): void {
+    expect(error).toBeInstanceOf(KafkaConnectionConfigError);
+    expect(error.message).toBe(text);
+    expect(error.cause).toBeUndefined();
+    const everything = [
+      error.stack,
+      JSON.stringify(error, Object.getOwnPropertyNames(error)),
+      inspect(error, { depth: 10, showHidden: true }),
+    ].join('\n');
+    expect(everything).not.toMatch(FRAGMENTS);
+  }
+
+  it.each([
+    ['credentials before the host', `${'private-sentinel-79'}:${'JZ97-another-secret'}@kafka:9092`],
+    ['a scheme', `SASL_SSL://${'private-sentinel-79'}.example:9092`],
+    ['no port', 'private-sentinel-79.example'],
+    ['a path', 'kafka:9092/JZ97-another-secret'],
+  ])('KAFKA_BROKERS with %s is refused before kafkajs could quote it (#385 r6)', (_, broker) => {
+    expectFixed(
+      refusalOf(() =>
+        kafkaConnection(env({ ...plaintext, KAFKA_BROKERS: `kafka:9092,${broker}` }), 'x'),
+      ),
+      'KAFKA_BROKERS must list host:port entries, without a scheme or credentials; ' +
+        'its value is not repeated',
+    );
+  });
+
+  it('KAFKA_BROKERS of names, addresses and bracketed IPv6, with ports, connects', () => {
+    expect(
+      kafkaConnection(
+        env({
+          ...plaintext,
+          KAFKA_BROKERS: 'kafka-1:9092, 10.0.0.7:19092,[::1]:9093,b.example.org:1',
+        }),
+        'x',
+      ).brokers,
+    ).toEqual(['kafka-1:9092', '10.0.0.7:19092', '[::1]:9093', 'b.example.org:1']);
+  });
+
+  it.each(SENTINELS)('without a credential and TLS, SERVICE_NAME=%s is not named', (sentinel) => {
+    expectFixed(
+      refusalOf(() =>
+        kafkaConnection(env({ NODE_ENV: 'production', SERVICE_NAME: sentinel }), 'x'),
+      ),
+      NO_CREDENTIAL,
+    );
+    // The script and test-harness path: the principal stands in for SERVICE_NAME.
+    expectFixed(
+      refusalOf(() => kafkaConnectionFor(sentinel, 'x', { NODE_ENV: 'production' })),
+      NO_CREDENTIAL,
+    );
+  });
+
+  it.each(SENTINELS)('another principal’s credential: SERVICE_NAME=%s is not named', (sentinel) => {
+    for (const names of [
+      { SERVICE_NAME: sentinel, KAFKA_SASL_USERNAME: 'asset-service' },
+      { SERVICE_NAME: 'asset-service', KAFKA_SASL_USERNAME: sentinel },
+    ]) {
+      expectFixed(
+        refusalOf(() => kafkaConnection(env({ ...credential, KAFKA_SSL: true, ...names }), 'x')),
+        OTHER_PRINCIPAL,
+      );
+    }
+  });
+
+  it.each(SENTINELS)('an unreadable CA file: the path %s is not repeated', (sentinel) => {
+    const missing = `/nonexistent/${sentinel}/${sentinel.replaceAll('-', '_')}/ca.pem`;
+    // The real filesystem read: its ENOENT names the path, on .message and .path.
+    expectFixed(
+      refusalOf(() =>
+        kafkaConnection(env({ ...credential, KAFKA_SSL: true, KAFKA_SSL_CA_FILE: missing }), 'x'),
+      ),
+      UNREADABLE_CA,
+    );
+    expectFixed(
+      refusalOf(() =>
+        kafkaConnectionFor('fleet-service', 'x', {
+          NODE_ENV: 'production',
+          KAFKA_SASL_PASSWORD_FLEET: 'fleet-secret',
+          KAFKA_SSL: 'true',
+          KAFKA_SSL_CA_FILE: missing,
+        }),
+      ),
+      UNREADABLE_CA,
+    );
+  });
+
+  it('each check still refuses at the same point, and a valid configuration still connects', () => {
+    // Positive controls: the same calls with valid settings return a connection.
+    expect(
+      kafkaConnection(
+        env({ NODE_ENV: 'production', ...credential, KAFKA_SSL: true, KAFKA_SSL_CA_FILE: '/ca' }),
+        'x',
+        () => 'PEM',
+      ),
+    ).toMatchObject({
+      sasl: { username: 'fleet-service' },
+      ssl: { ca: ['PEM'], rejectUnauthorized: true },
+    });
+    expect(
+      kafkaConnectionFor('itest-observer', 'x', {
+        NODE_ENV: 'production',
+        KAFKA_SASL_PASSWORD_ITEST_OBSERVER: 'observer-secret',
+        KAFKA_SSL: 'true',
+      }),
+    ).toMatchObject({ sasl: { username: 'itest-observer' }, ssl: true });
+  });
+});
+
 describe('kafkaConnectionFor', () => {
   it('connects as the named principal with its own password, over TLS when asked', () => {
     const connection = kafkaConnectionFor(
@@ -266,13 +406,13 @@ describe('EventConsumer and TOPIC_CONSUMERS', () => {
         groupId: 'organization-service.orders',
         sasl: { ...sasl, username: 'organization-service' },
       }),
-    ).toThrow(/organization-service is not declared/);
+    ).toThrow(/the consumer's service is not declared in TOPIC_CONSUMERS/);
   });
 
   it('refuses, even unauthenticated, a service’s consumer that is not declared at all', () => {
     expect(() =>
       build({ ...fleet, groupId: 'procurement-service.demand', topics: ['rasta.fleet.v1'] }),
-    ).toThrow(/procurement-service is not declared/);
+    ).toThrow(/the consumer's service is not declared in TOPIC_CONSUMERS/);
   });
 
   it('leaves an unauthenticated group outside every declared namespace to the topic check alone', () => {
@@ -295,6 +435,36 @@ describe('EventConsumer and TOPIC_CONSUMERS', () => {
     ).not.toThrow();
     expect(() =>
       build({ ...fleet, groupId: 'itest-observer.x', sasl: { ...sasl, username: 'ops-service' } }),
-    ).toThrow(/ops-service is not declared/);
+    ).toThrow(/the consumer's service is not declared in TOPIC_CONSUMERS/);
   });
+
+  // #385 r4: the group and an undeclared principal can come from the
+  // environment (KAFKA_CONSUMER_GROUP, SERVICE_NAME); neither is named.
+  it.each(['private-sentinel-79', 'JZ97-another-secret'])(
+    'names neither a configured group nor an undeclared principal (%s)',
+    (sentinel) => {
+      const fragments = /sentinel|jz97|another[-_]secret/i;
+      const refusals = [
+        { ...fleet, groupId: `${sentinel}.x`, topics: ['rasta.unknown.v1'] },
+        { ...fleet, groupId: `fleet-service.${sentinel}`, topics: ['rasta.economic.v1'] },
+        { ...fleet, groupId: `${sentinel}.x`, sasl },
+        { ...fleet, groupId: `${sentinel}-service.x` },
+        { ...fleet, sasl: { ...sasl, username: `${sentinel}-service` } },
+      ].map((options) => {
+        try {
+          build(options);
+        } catch (error) {
+          return error as Error;
+        }
+        throw new Error(`not refused: ${options.groupId}`);
+      });
+      for (const error of refusals) {
+        expect(
+          [error.stack, inspect(error, { depth: 10, showHidden: true })].join('\n'),
+        ).not.toMatch(fragments);
+      }
+      // Positive control: the declared consumer still starts.
+      expect(() => build({ ...fleet, sasl })).not.toThrow();
+    },
+  );
 });

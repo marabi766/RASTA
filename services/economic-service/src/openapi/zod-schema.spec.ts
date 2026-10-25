@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { toJsonSchema, type JsonSchema } from './zod-schema';
+import { toJsonSchema, type JsonSchema } from '@rasta/nest-common';
 import { listTransactionsQuerySchema } from '../transaction/dto';
 import { listSettlementsQuerySchema } from '../settlement/dto';
 

@@ -1,4 +1,4 @@
-import { withUtcSession } from '@rasta/config';
+import { readUrl, withUtcSession } from '@rasta/config';
 import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
 import { RastaError, runUnscoped, runWithContext, type RequestContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
@@ -49,7 +49,7 @@ export function databaseUrl(): string {
 export const TEST_POOL_CONNECTIONS = 16;
 
 function withTestPool(url: string): string {
-  const parsed = new URL(url);
+  const parsed = readUrl(url);
   parsed.searchParams.set('connection_limit', String(TEST_POOL_CONNECTIONS));
   return parsed.toString();
 }

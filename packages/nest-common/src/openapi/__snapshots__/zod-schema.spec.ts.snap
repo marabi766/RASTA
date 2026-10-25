@@ -1,0 +1,132 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`toJsonSchema publishes every construct the services use 1`] = `
+{
+  "additionalProperties": false,
+  "properties": {
+    "codePoints": {
+      "maxLength": 500,
+      "minLength": 2,
+      "type": "string",
+    },
+    "count": {
+      "maximum": 5,
+      "minimum": 0,
+      "type": "integer",
+    },
+    "defaulted": {
+      "default": 25,
+      "type": "integer",
+    },
+    "described": {
+      "description": "What it is",
+      "type": "string",
+    },
+    "either": {
+      "anyOf": [
+        {
+          "type": "string",
+        },
+        {
+          "type": "number",
+        },
+      ],
+    },
+    "email": {
+      "format": "email",
+      "type": "string",
+    },
+    "flag": {
+      "type": "boolean",
+    },
+    "include": {
+      "default": false,
+      "type": "boolean",
+    },
+    "instant": {
+      "format": "date-time",
+      "type": "string",
+    },
+    "lines": {
+      "items": {
+        "type": "string",
+      },
+      "maxItems": 50,
+      "minItems": 1,
+      "type": "array",
+    },
+    "maybe": {
+      "type": "string",
+    },
+    "metadata": {
+      "additionalProperties": {
+        "type": "number",
+      },
+      "type": "object",
+    },
+    "nothing": {
+      "nullable": true,
+      "type": "string",
+    },
+    "ratio": {
+      "minimum": 0.5,
+      "type": "number",
+    },
+    "refined": {
+      "type": "string",
+    },
+    "status": {
+      "enum": [
+        "OPEN",
+        "CLOSED",
+      ],
+      "type": "string",
+    },
+    "tags": {
+      "items": {
+        "type": "string",
+      },
+      "type": "array",
+    },
+    "text": {
+      "maxLength": 10,
+      "minLength": 1,
+      "pattern": "^[a-z]+$",
+      "type": "string",
+    },
+    "transformed": {
+      "type": "string",
+    },
+    "unsupported": {},
+    "url": {
+      "format": "uri",
+      "type": "string",
+    },
+    "version": {
+      "const": 1,
+    },
+  },
+  "required": [
+    "text",
+    "email",
+    "url",
+    "instant",
+    "count",
+    "ratio",
+    "flag",
+    "status",
+    "version",
+    "lines",
+    "tags",
+    "metadata",
+    "either",
+    "nothing",
+    "refined",
+    "transformed",
+    "described",
+    "codePoints",
+    "unsupported",
+  ],
+  "type": "object",
+}
+`;

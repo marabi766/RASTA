@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 /**
  * The shapes several resources share. The same Zod schemas validate input, type the code and —
- * through `zod-schema.ts` — become the OpenAPI document, so the three cannot disagree.
+ * through `toJsonSchema` — become the OpenAPI document, so the three cannot disagree.
  */
 
 /** The ULID alphabet (Crockford base32), as every id here is `<PREFIX>_<ULID>`. */

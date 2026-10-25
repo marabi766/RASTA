@@ -4,12 +4,38 @@ import {
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
 } from '@rasta/config';
 import { documentOperationBudgets } from './operation-budgets';
 import type { ClamdAddress } from '../scanning/clamav/clamd.client';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+
+const CLAMAV_ADDRESS_MISSING = fixed(
+  'The ClamAV driver needs an address: set DOCUMENT_CLAMAV_SOCKET_PATH (production) ' +
+    'or DOCUMENT_CLAMAV_HOST (local development and CI only).',
+);
+const CLAMAV_TCP_IN_PRODUCTION = fixed(
+  'DOCUMENT_CLAMAV_HOST configures an unauthenticated TCP scanner and is refused in ' +
+    'production (AGENTS.md S-08, ADR-049). Use DOCUMENT_CLAMAV_SOCKET_PATH with a ' +
+    'sidecar sharing the socket volume.',
+);
+const CLAMAV_SOCKET_IN_PRODUCTION = fixed(
+  'A production deployment must reach clamd over a Unix domain socket (ADR-049).',
+);
+const SCANNER_DISABLED_IN_PRODUCTION = fixed(
+  'DOCUMENT_SCANNER_DRIVER=disabled binds a scanner that inspects nothing, which leaves ' +
+    'every document undownloadable. It is a development setting and is refused in ' +
+    'production (ADR-049).',
+);
+const SCAN_LEASE_TOO_SHORT = fixed(
+  'DOCUMENT_SCAN_LEASE_SECONDS must exceed DOCUMENT_SCAN_TIMEOUT_MS, or a scan still ' +
+    'running loses its claim and is started again by another worker.',
+);
 
 export const SERVICE_NAME = 'document-service';
 
@@ -243,9 +269,7 @@ export const documentEnvSchema = baseEnvSchema
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['DOCUMENT_CLAMAV_SOCKET_PATH'],
-          message:
-            'The ClamAV driver needs an address: set DOCUMENT_CLAMAV_SOCKET_PATH (production) ' +
-            'or DOCUMENT_CLAMAV_HOST (local development and CI only).',
+          message: CLAMAV_ADDRESS_MISSING,
         });
       }
 
@@ -265,10 +289,7 @@ export const documentEnvSchema = baseEnvSchema
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['DOCUMENT_CLAMAV_HOST'],
-          message:
-            'DOCUMENT_CLAMAV_HOST configures an unauthenticated TCP scanner and is refused in ' +
-            'production (AGENTS.md S-08, ADR-049). Use DOCUMENT_CLAMAV_SOCKET_PATH with a ' +
-            'sidecar sharing the socket volume.',
+          message: CLAMAV_TCP_IN_PRODUCTION,
         });
       }
 
@@ -276,7 +297,7 @@ export const documentEnvSchema = baseEnvSchema
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['DOCUMENT_CLAMAV_SOCKET_PATH'],
-          message: 'A production deployment must reach clamd over a Unix domain socket (ADR-049).',
+          message: CLAMAV_SOCKET_IN_PRODUCTION,
         });
       }
     }
@@ -290,10 +311,7 @@ export const documentEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['DOCUMENT_SCANNER_DRIVER'],
-        message:
-          'DOCUMENT_SCANNER_DRIVER=disabled binds a scanner that inspects nothing, which leaves ' +
-          'every document undownloadable. It is a development setting and is refused in ' +
-          'production (ADR-049).',
+        message: SCANNER_DISABLED_IN_PRODUCTION,
       });
     }
 
@@ -305,12 +323,12 @@ export const documentEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['DOCUMENT_SCAN_LEASE_SECONDS'],
-        message:
-          'DOCUMENT_SCAN_LEASE_SECONDS must exceed DOCUMENT_SCAN_TIMEOUT_MS, or a scan still ' +
-          'running loses its claim and is started again by another worker.',
+        message: SCAN_LEASE_TOO_SHORT,
       });
     }
   });
+
+export const DOCUMENT_ENV_MESSAGES = seal();
 
 export type DocumentEnv = z.infer<typeof documentEnvSchema>;
 
@@ -326,7 +344,7 @@ export function loadDocumentEnv(source: NodeJS.ProcessEnv = process.env): Docume
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: documentOperationBudgets },
+    { operationBudgets: documentOperationBudgets, fixedMessages: DOCUMENT_ENV_MESSAGES },
   );
 }
 

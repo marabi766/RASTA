@@ -5,11 +5,16 @@ import {
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { inventoryOperationBudgets } from './operation-budgets';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
 
 export const SERVICE_NAME = 'inventory-service';
 
@@ -26,6 +31,10 @@ export const DEFAULT_PORT = '3109';
  */
 const REFUSED_ROLES = ['AUDITOR', 'SYSTEM_ADMIN'] as const;
 
+const UNKNOWN_DISPOSITION = fixed(
+  `Unknown disposition in INVENTORY_RETURN_DISPOSITIONS_ALLOWED (${RETURN_DISPOSITIONS.join(', ')})`,
+);
+
 /** A comma-separated list, trimmed, with empty elements dropped. */
 function commaList() {
   return z.string().transform((raw) =>
@@ -38,14 +47,17 @@ function commaList() {
 
 /** A non-empty list of platform roles that names neither refused role. */
 function roleList(name: string) {
+  const unknownRole = fixed(`Unknown role in ${name}`);
   return commaList().pipe(
     z
-      .array(z.enum(PLATFORM_ROLES, { errorMap: () => ({ message: `Unknown role in ${name}` }) }))
-      .min(1, `${name} must name at least one role`)
+      .array(z.enum(PLATFORM_ROLES, { errorMap: () => ({ message: unknownRole }) }))
+      .min(1, fixed(`${name} must name at least one role`))
       .refine(
         (roles) => !roles.some((role) => (REFUSED_ROLES as readonly string[]).includes(role)),
         {
-          message: `${name} may not name ${REFUSED_ROLES.join(' or ')} (docs/09 § 9.3, Q-103)`,
+          message: fixed(
+            `${name} may not name ${REFUSED_ROLES.join(' or ')} (docs/09 § 9.3, Q-103)`,
+          ),
         },
       ),
   );
@@ -174,9 +186,7 @@ export const inventoryEnvSchema = baseEnvSchema
       .pipe(
         z.array(
           z.enum(RETURN_DISPOSITIONS, {
-            errorMap: () => ({
-              message: `Unknown disposition in INVENTORY_RETURN_DISPOSITIONS_ALLOWED (${RETURN_DISPOSITIONS.join(', ')})`,
-            }),
+            errorMap: () => ({ message: UNKNOWN_DISPOSITION }),
           }),
         ),
       )
@@ -201,7 +211,7 @@ export const inventoryEnvSchema = baseEnvSchema
      * is recorded, the request is read there and its dispatch reserved (A-13, ADR-061 § 4; Codex
      * r1 on #336) — over REST with an internal token signed for the supplier, never its database.
      */
-    MARKETPLACE_SERVICE_URL: z.string().url().default('http://localhost:3106'),
+    MARKETPLACE_SERVICE_URL: serviceUrlSchema.default('http://localhost:3106'),
     /**
      * How long each of those two exchanges may take, body included. Both run before the
      * command's transaction, never inside it; one that does not answer in time refuses the
@@ -222,6 +232,8 @@ export const inventoryEnvSchema = baseEnvSchema
       .max(900)
       .default(120),
   });
+
+export const INVENTORY_ENV_MESSAGES = seal();
 
 export type InventoryEnv = z.infer<typeof inventoryEnvSchema>;
 
@@ -248,7 +260,7 @@ export function loadInventoryEnv(source: NodeJS.ProcessEnv = process.env): Inven
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: inventoryOperationBudgets },
+    { operationBudgets: inventoryOperationBudgets, fixedMessages: INVENTORY_ENV_MESSAGES },
   );
 }
 

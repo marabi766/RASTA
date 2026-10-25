@@ -1,5 +1,6 @@
 import { internalFetch } from '@rasta/nest-common';
 import { z } from 'zod';
+import { readUrl } from '@rasta/config';
 import type { InternalTokenService } from '@rasta/nest-common';
 import { IDENTITY_SERVICE, SERVICE_NAME } from '../config/env';
 import { RESOLUTION_FAILURE_REASONS } from '../observability/metrics';
@@ -132,7 +133,12 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
     cursor: string | undefined,
     correlationId: string,
   ): Promise<z.infer<typeof userPageSchema>> {
-    const url = new URL('/v1/users', this.options.baseUrl);
+    // Against a base read by the shared reader: `new URL`'s own error keeps the
+    // base on `.base`, and an uncaught throw prints it (#385 r5).
+    const url = readUrl('/v1/users', {
+      base: this.options.baseUrl,
+      refusal: 'IDENTITY_SERVICE_URL cannot be read as a URL; its value is not repeated',
+    });
     url.searchParams.set('role', role);
     url.searchParams.set('status', 'ACTIVE');
     url.searchParams.set('limit', String(PAGE_SIZE));

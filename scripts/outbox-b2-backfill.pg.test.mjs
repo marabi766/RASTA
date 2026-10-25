@@ -1547,7 +1547,7 @@ test('a global preflight refusal emits one unscoped refused, no summary and no s
         name: 'unknown service',
         argv: ['--service', 'supplier', '--apply'],
         env: { DATABASE_URL_DOCUMENT: url },
-        reason: /Unknown service\(s\): supplier/,
+        reason: /Unknown service\(s\): 1 --service value\(s\), not repeated/,
       },
       {
         name: 'NODE_ENV=production',
