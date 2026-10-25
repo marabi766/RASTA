@@ -1,3 +1,4 @@
+import { internalFetch } from '@rasta/nest-common';
 import { z } from 'zod';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
@@ -102,7 +103,11 @@ export class AuditLookupClient {
     try {
       let response: Response;
       try {
-        response = await this.fetchImpl(url, { method: 'GET', headers, signal: controller.signal });
+        response = await internalFetch(
+          url,
+          { method: 'GET', headers, signal: controller.signal },
+          this.fetchImpl,
+        );
       } catch {
         // No cause attached: a runtime's transport error can quote the URL.
         throw controller.signal.aborted

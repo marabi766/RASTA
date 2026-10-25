@@ -1,3 +1,4 @@
+import { internalFetch } from '@rasta/nest-common';
 import { Inject, Injectable } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
 import { z } from 'zod';
@@ -39,7 +40,7 @@ export class ProcurementThresholdPolicy {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(
+      const response = await internalFetch(
         `${this.env.ORGANIZATION_SERVICE_URL.replace(/\/+$/, '')}/v1/organizations/${encodeURIComponent(organizationId)}/procurement-thresholds`,
         {
           headers: {

@@ -1,3 +1,4 @@
+import { internalFetch } from '@rasta/nest-common';
 import { z } from 'zod';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
@@ -95,10 +96,11 @@ export class TransferRecordClient implements TransferRecordSource {
     let status: number;
     let text: string;
     try {
-      const response = await this.fetchImpl(
+      const response = await internalFetch(
         `${this.options.baseUrl.replace(/\/+$/, '')}/v1/internal/assets/` +
           `${encodeURIComponent(assetId)}/transfers/${encodeURIComponent(fenceId)}`,
         { method: 'GET', headers, signal: controller.signal },
+        this.fetchImpl,
       );
       text = await response.text();
       if (controller.signal.aborted) throw new Error('deadline passed');

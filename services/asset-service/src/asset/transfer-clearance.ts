@@ -1,3 +1,4 @@
+import { internalFetch } from '@rasta/nest-common';
 import { performance } from 'node:perf_hooks';
 import { z } from 'zod';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
@@ -250,9 +251,10 @@ export class TransferClearanceClient implements TransferClearance {
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
     timer.unref?.();
     try {
-      const response = await this.fetchImpl(
+      const response = await internalFetch(
         `${this.options.baseUrls[owner].replace(/\/+$/, '')}${path}`,
         { method, headers, body, signal: controller.signal },
+        this.fetchImpl,
       );
       // The body is read inside the deadline too, and an answer that arrives
       // after it is not taken, even from a transport that ignored the abort.

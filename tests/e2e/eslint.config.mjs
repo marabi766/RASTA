@@ -10,4 +10,14 @@ import base from '../../eslint.config.mjs';
  * buries anything real. Both are gitignored; this keeps `pnpm lint` usable on
  * a machine that has actually run the tests.
  */
-export default [{ ignores: ['playwright-report/**', 'test-results/**'] }, ...base];
+export default [
+  { ignores: ['playwright-report/**', 'test-results/**'] },
+  ...base,
+  {
+    // The E2E harness has no nest-common runtime dependency. Its hand guard in
+    // send() uses the same five statuses; actor.test.ts exercises real HTTP.
+    // Only this transport implementation is exempt, not actors or new senders.
+    files: ['src/http.ts'],
+    rules: { 'internal/transport': 'off' },
+  },
+];

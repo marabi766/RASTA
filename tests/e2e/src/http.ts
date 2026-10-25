@@ -201,6 +201,7 @@ export async function send(
   fetchImpl: Fetch = fetch,
   timeoutMs: number = REQUEST_TIMEOUT_MS,
 ): Promise<HttpAnswer> {
+  const internal = new Headers(request.headers).has('x-internal-token');
   const deadline = Date.now() + timeoutMs;
   const body =
     request.form !== undefined
@@ -213,6 +214,7 @@ export async function send(
     response = await beforeDeadline(
       fetchImpl(`${request.baseUrl}${request.path}`, {
         method: request.method,
+        ...(internal ? { redirect: 'manual' as const } : {}),
         headers: {
           ...request.headers,
           ...(request.form !== undefined
@@ -228,6 +230,10 @@ export async function send(
     throw new TransportError(request, undefined, causeCodeOf(error));
   }
   if (response === DEADLINE_PASSED) throw new TransportError(request, undefined, 'TIMEOUT');
+  if (internal && [301, 302, 303, 307, 308].includes(response.status)) {
+    void response.body?.cancel().catch(() => undefined);
+    throw new TransportError(request, response.status, 'REDIRECT');
+  }
   let text: string | typeof DEADLINE_PASSED;
   try {
     text = await beforeDeadline(response.text(), deadline);
