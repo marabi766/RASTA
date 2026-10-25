@@ -5,7 +5,7 @@ import { IDENTITY_EVENTS } from '../src/identity/events';
 import type { KeycloakAdminClient } from '../src/keycloak/keycloak.client';
 import { KeycloakProjector } from '../src/keycloak/keycloak.projector';
 import type { PrismaService } from '../src/prisma/prisma.service';
-import { asActor, id, newPrisma, tenants } from './helpers';
+import { asActor, id, newPrisma, tenants, newFences } from './helpers';
 
 /**
  * The active-organization switch is audited (AGENTS.md S-06, global audit
@@ -20,6 +20,7 @@ describe('active organization switch audit (L7-14)', () => {
   const org = tenants();
   const outsider = `${org.b}-X`;
   let prisma: PrismaService;
+  let fencing: Awaited<ReturnType<typeof newFences>> | undefined;
   let repository: IdentityRepository;
   let service: IdentityService;
 
@@ -36,11 +37,12 @@ describe('active organization switch audit (L7-14)', () => {
     service = new IdentityService(
       repository,
       keycloak,
-      new KeycloakProjector(repository, keycloak),
+      new KeycloakProjector(repository, keycloak, (fencing = await newFences()).fences),
     );
   });
 
   afterAll(async () => {
+    await fencing?.pool.onModuleDestroy();
     await prisma.onModuleDestroy();
   });
 

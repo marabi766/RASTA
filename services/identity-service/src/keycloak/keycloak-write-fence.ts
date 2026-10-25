@@ -1,0 +1,491 @@
+import { performance } from 'node:perf_hooks';
+import { ulid } from 'ulid';
+import { ERROR_CODES } from '@rasta/contracts';
+import { RastaError } from '@rasta/nest-common';
+import { Prisma } from '../generated/prisma';
+import type { ExtendedPrismaClient, PrismaService } from '../prisma/prisma.service';
+import { keycloakWriteFenceEventsTotal } from '../observability/keycloak-projection.metrics';
+
+/**
+ * The durable in-flight fence of every Keycloak write (ADR-060, write-ahead
+ * addendum, D-069).
+ *
+ * Keycloak has no conditional write: its admin `PUT` carries no version and
+ * honours no `If-Match` (measured, `keycloak.client.ts`). An aborted request is
+ * not a cancelled one, so a write whose answer was lost may still be applied
+ * later — after a newer write, leaving Keycloak wider than the rows. What
+ * stands in for the missing version is this table: **before** any request that
+ * changes a user's attributes or `enabled` flag is sent, a row for that one
+ * attempt is inserted and committed, on its own connection pool, and nothing
+ * but a confirmed outcome removes it.
+ *
+ * ## One row per attempt
+ *
+ * `attempt_id`, the user, the account addressed, and three instants on the
+ * database's clock: `started_at` (the insert), `deadline_at` = `started_at` +
+ * the Keycloak request timeout — the sender aborts by then, and re-checks it
+ * immediately before dispatch (`KeycloakWriteAttempt.assertDispatchable`) —
+ * and `takeover_at` = `deadline_at` + `KEYCLOAK_WRITE_SETTLE_SECONDS`.
+ *
+ * - **live** (`takeover_at` in the future): may still land. A narrowing change
+ *   of the user is refused (`KEYCLOAK_WRITE_SETTLING`), and an account is not
+ *   enabled for the first time, until none is.
+ * - **due** (`takeover_at` passed): can no longer land, but what Keycloak holds
+ *   is unknown. The sweep re-asserts the committed state; the projection that
+ *   confirms it deletes the row.
+ * - **terminal** (`account_missing_at`): Keycloak answered 404 for the account
+ *   on re-assertion. Nothing can mint a token for it; kept and alerted on, no
+ *   longer retried by the sweep, and taken over by the next projection of the
+ *   user that lands (the account restored, or the user linked to another).
+ *
+ * ## Who deletes a row
+ *
+ * Only these, each by `attempt_id` (compare-and-delete, so a late callback can
+ * never remove a newer attempt's row):
+ *
+ * 1. the attempt's owner, at once, when the request provably was not applied
+ *    (never sent, refused 4xx, 404, its deadline passed before dispatch) —
+ *    {@link KeycloakWriteFences.release};
+ * 2. the owner's transaction, in the same commit as the state it wrote, when
+ *    the write landed and carried exactly what that transaction commits —
+ *    {@link KeycloakWriteFences.settle};
+ * 3. a projection of the user whose own writes all landed, for every row that
+ *    was already **due** when it read them under the user lock — its write of
+ *    the committed state is the re-assertion that takes them over.
+ *
+ * A write that landed but whose transaction did not commit, or that carried
+ * less than its transaction commits (a mixed change's intersection, an
+ * adoption's clear), is not deleted: its owner makes it **due** at once
+ * ({@link KeycloakWriteFences.confirmLanded}) — it landed, so it can no
+ * longer land, and holds no narrowing back; what Keycloak holds is re-asserted
+ * by the next projection, the owner's own after commit or the sweep's.
+ *
+ * A timeout, a broken connection, a 5xx, a rollback before the owner heard
+ * back, an exit: the row stays live until `takeover_at`.
+ *
+ * ## Why the insert can never wait on the business transaction
+ *
+ * The business transaction holds the user lock (`"user"` row FOR UPDATE)
+ * while it opens a fence. The insert runs on a **separate pool** (`pool`,
+ * {@link FENCE_POOL_CONNECTIONS} connections) in a short transaction of its
+ * own — one statement, bounded by what is left of the business transaction's
+ * budget — and touches only this table: no foreign key to `"user"` (whose check would take FOR KEY SHARE
+ * on the locked row), no trigger, a fresh primary key. So it neither waits on
+ * the user lock nor for a business connection — a shared pool could be
+ * exhausted by transactions queued on that same lock. The business transaction
+ * reads this table without locking and deletes its own rows last, after its
+ * final fence statement; a fence statement waits at most on such a delete,
+ * never the other way round. Lock graph: `ADR-060`, D-069 addendum.
+ *
+ * ## Why the business transaction is checked again after the insert
+ *
+ * The insert is on another connection, so the business transaction may end —
+ * its budget spent, rolled back, its connection lost — while the insert waits,
+ * and the user lock pass to a narrowing that sees no fence yet and commits
+ * (#402 r2 F1). So `open` returns an attempt only after one more statement in
+ * the business transaction, after the insert committed, proved that
+ * transaction still alive and holding the lock. Every writer that takes the
+ * lock after that point reads the fence; one that took it before cannot exist.
+ */
+
+/** Connections of the fence pool: inserts and releases are single short statements. */
+export const FENCE_POOL_CONNECTIONS = 2;
+
+/** Below this much left of the business transaction, no fence is opened: nothing is sent. */
+const MIN_INSERT_BUDGET_MS = 1;
+
+/** How long the current transaction has run, in milliseconds, on the database clock. */
+const AGE_OF_TRANSACTION_MS = Prisma.sql`(EXTRACT(EPOCH FROM clock_timestamp() - transaction_timestamp()) * 1000)::float8`;
+
+/**
+ * The durable backoffs' bounds (#402 r2 F4): the exponent is capped **before**
+ * `POWER` — `2^31` is far above any cap of scan intervals and far below
+ * double precision's range — and the failure counter itself stops at
+ * {@link BACKOFF_FAILURES_CAP}, well inside `INTEGER`, so neither the
+ * arithmetic nor the counter can overflow however long a row keeps failing.
+ * Shared with the expiry sweep's `deferLapse`.
+ */
+export const BACKOFF_EXPONENT_CAP = 30;
+export const BACKOFF_FAILURES_CAP = 1_000_000;
+
+/** What one attempt writes. */
+export type KeycloakWriteOperation = 'replace_attributes' | 'activate' | 'disable';
+
+/**
+ * One PUT's fence, committed: what the client needs to send it, and nothing
+ * about the database.
+ */
+export interface KeycloakWriteAttempt {
+  readonly id: string;
+  /** Aborts at the attempt's deadline, or when the caller is cancelled. */
+  readonly signal: AbortSignal;
+  /**
+   * Throws a confirmed not-sent failure when the deadline has passed or the
+   * caller was cancelled. Called immediately before the request is dispatched.
+   */
+  assertDispatchable(): void;
+}
+
+/**
+ * What a Keycloak write method asks for right before its PUT (after the token
+ * and the read it builds the body from): an attempt whose fence has committed.
+ * Required by every write method of `KeycloakAdminClient`, so no PUT can be
+ * sent without one.
+ */
+export type KeycloakWriteFence = (
+  operation: KeycloakWriteOperation,
+) => Promise<KeycloakWriteAttempt>;
+
+/** A fence row as a writer under the user lock reads it. */
+export interface FenceRow {
+  attemptId: string;
+  keycloakId: string;
+  operation: KeycloakWriteOperation;
+  /** `takeover_at` has not passed: the write may still land. */
+  live: boolean;
+  /** Terminal: the account was missing on re-assertion. */
+  accountMissing: boolean;
+  /** Seconds until `takeover_at`, rounded up; 0 once it has passed. */
+  settlesInSeconds: number;
+}
+
+/**
+ * The deadline passed, the caller was cancelled, or the business transaction
+ * ended while the fence was being committed (#402 r2 F1), before the request
+ * was sent: provably not applied.
+ */
+export function writeNotSent(
+  operation: string,
+  reason: 'deadline' | 'cancelled' | 'transaction_ended',
+): RastaError {
+  return new RastaError(
+    ERROR_CODES.UPSTREAM_UNAVAILABLE,
+    'A required service is temporarily unavailable',
+    { internalContext: { service: 'keycloak', operation, reason: `${reason}_before_dispatch` } },
+  );
+}
+
+export class KeycloakWriteFences {
+  /**
+   * @param pool the fence pool — a `PrismaService` of its own, never the one
+   *   business transactions run on (see the header).
+   */
+  constructor(private readonly pool: PrismaService) {}
+
+  /**
+   * Inserts and commits one attempt's fence, then returns it. `tx` must hold
+   * the user lock: it is taken again here (a no-op for its holder), so a fence
+   * is only ever opened by the user's one writer, and a reader under the lock
+   * sees every fence of every write that can be in flight.
+   *
+   * **After the insert commits, `tx` is checked again** (#402 r2 F1): one
+   * more statement in that same transaction re-takes the user lock without
+   * waiting (`NOWAIT`) and reads the transaction's age on the database clock.
+   * Only if it succeeds — so the transaction was still alive, still held the
+   * lock, and had budget left **after** the fence became visible — is the
+   * attempt returned. From then on the fence protects every lock handoff: a
+   * writer that takes the lock after this transaction ends reads it. If the
+   * transaction ended while the insert waited (expired, rolled back, its
+   * connection lost), the lock may already have passed to a narrowing that
+   * saw no fence and committed: then **nothing is sent** — the attempt never
+   * leaves this method, so no request of it can ever be dispatched — and its
+   * row, provably not applied, is released at once (a failed release leaves
+   * it live until takeover: slower, never unsafe).
+   *
+   * The insert is bounded by what remains of the business transaction's
+   * budget (`transactionTimeoutMs`, measured on the database clock from the
+   * transaction's start): its wait for a fence connection, its statement and
+   * its own transaction. An insert that cannot commit while the business
+   * transaction can still use it is abandoned, and nothing is sent.
+   *
+   * The local deadline is measured from **before** the insert, so it falls no
+   * later, in real time, than the `deadline_at` the database stamps.
+   */
+  async open(
+    tx: ExtendedPrismaClient,
+    input: {
+      userId: string;
+      keycloakId: string;
+      operation: KeycloakWriteOperation;
+      timeoutMs: number;
+      settleSeconds: number;
+      /** The budget `tx` was opened with (its Prisma `timeout`). */
+      transactionTimeoutMs: number;
+      cancel?: AbortSignal;
+    },
+  ): Promise<KeycloakWriteAttempt> {
+    const operation = input.operation;
+    input.cancel?.throwIfAborted();
+    const held = await tx.$queryRaw<Array<{ elapsed_ms: number }>>`
+      SELECT ${AGE_OF_TRANSACTION_MS} AS elapsed_ms FROM "user" WHERE id = ${input.userId} FOR UPDATE`;
+    if (held.length !== 1) throw RastaError.notFound('User', input.userId);
+    input.cancel?.throwIfAborted();
+    // Whole milliseconds the business transaction may still use the fence for.
+    const elapsed = Number(held[0]?.elapsed_ms ?? Number.POSITIVE_INFINITY);
+    const budget = Math.floor(input.transactionTimeoutMs - elapsed);
+    if (budget < MIN_INSERT_BUDGET_MS) throw writeNotSent(operation, 'transaction_ended');
+
+    const attemptId = `KWA_${ulid()}`;
+    const startedAt = performance.now();
+    const timeout = input.timeoutMs / 1000;
+    // A failure here throws, and nothing is sent. The insert's own transaction
+    // rolled back; should its COMMIT have landed all the same (an answer lost
+    // on the fence connection), the row is an ordinary live fence no attempt
+    // owns — it holds narrowing back until `takeover_at`, then the sweep
+    // re-asserts: never unsafe. Not released here: a release would wait on
+    // whatever made the insert miss its budget.
+    await this.pool.transaction(
+      (fence) => fence.$executeRaw`
+        INSERT INTO keycloak_write_attempt
+               (attempt_id, user_id, keycloak_id, operation,
+                started_at, deadline_at, takeover_at, next_reassert_at)
+        SELECT ${attemptId}, ${input.userId}, ${input.keycloakId}, ${input.operation},
+               t.c, t.c + make_interval(secs => ${timeout}),
+               t.c + make_interval(secs => ${timeout + input.settleSeconds}),
+               t.c + make_interval(secs => ${timeout + input.settleSeconds})
+          FROM (SELECT clock_timestamp() AT TIME ZONE 'UTC' AS c) t`,
+      { maxWait: budget, timeout: budget, statementTimeoutMs: budget },
+    );
+
+    // The fence is visible to every later reader. Is `tx` still the one
+    // holding the user lock? Checked in `tx` itself, on the database clock.
+    let alive = false;
+    try {
+      const again = await tx.$queryRaw<Array<{ elapsed_ms: number }>>`
+        SELECT ${AGE_OF_TRANSACTION_MS} AS elapsed_ms
+          FROM "user" WHERE id = ${input.userId} FOR UPDATE NOWAIT`;
+      alive =
+        again.length === 1 &&
+        Number(again[0]?.elapsed_ms ?? Number.POSITIVE_INFINITY) < input.transactionTimeoutMs;
+    } catch {
+      alive = false;
+    }
+    if (!alive) {
+      const released = await this.release(attemptId);
+      keycloakWriteFenceEventsTotal.inc({ event: 'lock_lost' });
+      keycloakWriteFenceEventsTotal.inc({ event: released ? 'released' : 'release_failed' });
+      throw writeNotSent(operation, 'transaction_ended');
+    }
+
+    const deadline = startedAt + input.timeoutMs;
+    // Whole milliseconds, rounded down: never later than the deadline.
+    const remaining = Math.max(0, Math.floor(deadline - performance.now()));
+    const timer = AbortSignal.timeout(remaining);
+    const signal = input.cancel ? AbortSignal.any([timer, input.cancel]) : timer;
+    return {
+      id: attemptId,
+      signal,
+      assertDispatchable(): void {
+        if (input.cancel?.aborted) throw writeNotSent(operation, 'cancelled');
+        if (performance.now() >= deadline || timer.aborted)
+          throw writeNotSent(operation, 'deadline');
+      },
+    };
+  }
+
+  /**
+   * Deletes one attempt's fence because its request provably was not applied.
+   * On the fence pool, at once, whatever the business transaction does next.
+   * A delete that fails leaves the row, which only holds narrowing back until
+   * the sweep takes it over: never unsafe.
+   */
+  async release(attemptId: string): Promise<boolean> {
+    try {
+      await this.pool.client.$executeRaw`
+        DELETE FROM keycloak_write_attempt WHERE attempt_id = ${attemptId}`;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * These attempts **landed** — confirmed — but are not deleted with their
+   * transaction: makes them due now, so they hold no narrowing back and the
+   * next projection of the user takes them over. On the fence pool; an update
+   * that fails leaves them live until `takeover_at` — slower, never unsafe.
+   * Only ever shortens a fence, and only an attempt's own owner calls it.
+   */
+  async confirmLanded(attemptIds: readonly string[]): Promise<boolean> {
+    if (attemptIds.length === 0) return true;
+    try {
+      await this.pool.client.$executeRaw`
+        UPDATE keycloak_write_attempt
+           SET deadline_at = LEAST(deadline_at, t.c),
+               takeover_at = LEAST(takeover_at, t.c),
+               next_reassert_at = LEAST(next_reassert_at, t.c)
+          FROM (SELECT clock_timestamp() AT TIME ZONE 'UTC' AS c) t
+         WHERE attempt_id = ANY(${[...attemptIds]}::text[])`;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Every fence of the user, read in `tx` under the user lock, judged against
+   * `now` — the database's clock, read after that lock.
+   */
+  async ofUser(tx: ExtendedPrismaClient, userId: string, now: Date): Promise<FenceRow[]> {
+    const rows = await tx.$queryRaw<
+      Array<{
+        attempt_id: string;
+        keycloak_id: string;
+        operation: KeycloakWriteOperation;
+        live: boolean;
+        account_missing: boolean;
+        settles_in: number;
+      }>
+    >`
+      SELECT attempt_id, keycloak_id, operation,
+             takeover_at > ${now} AS live,
+             account_missing_at IS NOT NULL AS account_missing,
+             GREATEST(0, CEIL(EXTRACT(EPOCH FROM takeover_at - ${now})))::int AS settles_in
+        FROM keycloak_write_attempt
+       WHERE user_id = ${userId}
+       ORDER BY takeover_at ASC, attempt_id ASC`;
+    return rows.map((row) => ({
+      attemptId: row.attempt_id,
+      keycloakId: row.keycloak_id,
+      operation: row.operation,
+      live: row.live,
+      accountMissing: row.account_missing,
+      settlesInSeconds: row.settles_in,
+    }));
+  }
+
+  /**
+   * Deletes these attempts' fences in `tx` — so only if `tx` commits, and in
+   * the same commit as the state their writes carried. The caller's last fence
+   * statement: nothing on the fence pool may follow it in that transaction.
+   */
+  async settle(
+    tx: ExtendedPrismaClient,
+    userId: string,
+    attemptIds: readonly string[],
+  ): Promise<void> {
+    if (attemptIds.length === 0) return;
+    await tx.$executeRaw`
+      DELETE FROM keycloak_write_attempt
+       WHERE user_id = ${userId} AND attempt_id = ANY(${[...attemptIds]}::text[])`;
+  }
+
+  /**
+   * Users with a fence past takeover and due for another re-assertion,
+   * walked by user id (byte order) strictly after `after` and, when given, up
+   * to `until`: the sweep's cursor across passes and its one wrap round.
+   * Terminal fences are not retried.
+   */
+  async dueUsers(
+    after: string | null,
+    take: number,
+    until: string | null = null,
+  ): Promise<string[]> {
+    const rows = await this.pool.client.$queryRaw<Array<{ user_id: string }>>`
+      SELECT DISTINCT user_id COLLATE "C" AS user_id FROM keycloak_write_attempt
+       WHERE account_missing_at IS NULL
+         AND takeover_at <= (clock_timestamp() AT TIME ZONE 'UTC')
+         AND next_reassert_at <= (clock_timestamp() AT TIME ZONE 'UTC')
+         AND (${after}::text IS NULL OR user_id COLLATE "C" > ${after}::text)
+         AND (${until}::text IS NULL OR user_id COLLATE "C" <= ${until}::text)
+       ORDER BY 1 ASC
+       LIMIT ${take}`;
+    return rows.map((row) => row.user_id);
+  }
+
+  /**
+   * One more failed re-assertion of the user: their due fences wait twice as
+   * long as last time, up to `maxIntervals` scan intervals, before the next.
+   * The exponent and the counter are bounded first ({@link BACKOFF_EXPONENT_CAP}).
+   * Durable, so neither a restart nor another replica tries them sooner, and
+   * the sweep moves on to the users behind them.
+   */
+  async deferReassert(
+    userId: string,
+    intervalSeconds: number,
+    maxIntervals: number,
+  ): Promise<void> {
+    await this.pool.client.$executeRaw`
+      UPDATE keycloak_write_attempt
+         SET reassert_failures = LEAST(reassert_failures, ${BACKOFF_FAILURES_CAP - 1}) + 1,
+             next_reassert_at = (clock_timestamp() AT TIME ZONE 'UTC')
+               + make_interval(secs => ${intervalSeconds}
+                   * LEAST(POWER(2, LEAST(reassert_failures, ${BACKOFF_EXPONENT_CAP}) + 1),
+                           ${maxIntervals}))
+       WHERE user_id = ${userId}
+         AND account_missing_at IS NULL
+         AND takeover_at <= (clock_timestamp() AT TIME ZONE 'UTC')`;
+  }
+
+  /**
+   * Terminal: these due fences' account is gone from Keycloak (404). They stop
+   * being retried, stay in the table, and are counted and alerted on
+   * (`rasta_identity_keycloak_write_fences{state="account_missing"}`). On the
+   * fence pool, so the record survives whatever the caller's transaction does.
+   */
+  async markAccountMissing(attemptIds: readonly string[]): Promise<void> {
+    if (attemptIds.length === 0) return;
+    await this.pool.client.$executeRaw`
+      UPDATE keycloak_write_attempt
+         SET account_missing_at = (clock_timestamp() AT TIME ZONE 'UTC')
+       WHERE attempt_id = ANY(${[...attemptIds]}::text[]) AND account_missing_at IS NULL`;
+  }
+
+  /**
+   * How many fences are live, due and terminal — the sweep's gauges — and
+   * `overdue`: live fences whose write is still unresolved past its deadline
+   * plus half its settle window (`deadline_at + (takeover_at - deadline_at) / 2`).
+   * Such a write timed out, broke off or was answered 5xx, or its sender is
+   * paused; the settle window is all that keeps a late delivery of it from
+   * landing after takeover (ADR-060 D-069 § 6, D-070). Alerted on at once
+   * (`RastaIdentityKeycloakWriteOverdue`). `total` is every row, whatever its
+   * state: the rollback's readiness check (`COUNT(*) = 0`).
+   *
+   * As of the database's clock now; `at` (a database instant) judges every
+   * row as of that one instant instead — for a reader comparing two counts.
+   */
+  async counts(at?: Date): Promise<{
+    live: number;
+    due: number;
+    accountMissing: number;
+    overdue: number;
+    total: number;
+  }> {
+    const instant =
+      at === undefined ? Prisma.sql`clock_timestamp() AT TIME ZONE 'UTC'` : Prisma.sql`${at}`;
+    const rows = await this.pool.client.$queryRaw<
+      Array<{ live: bigint; due: bigint; account_missing: bigint; overdue: bigint; total: bigint }>
+    >`
+      SELECT COUNT(*) FILTER (WHERE takeover_at > t.now) AS live,
+             COUNT(*) FILTER (WHERE takeover_at <= t.now AND account_missing_at IS NULL) AS due,
+             COUNT(*) FILTER (WHERE account_missing_at IS NOT NULL) AS account_missing,
+             COUNT(*) FILTER (
+               WHERE takeover_at > t.now
+                 AND t.now >= deadline_at + (takeover_at - deadline_at) / 2) AS overdue,
+             COUNT(*) AS total
+        FROM keycloak_write_attempt, (SELECT ${instant} AS now) t`;
+    const row = rows[0];
+    return {
+      live: Number(row?.live ?? 0),
+      due: Number(row?.due ?? 0),
+      accountMissing: Number(row?.account_missing ?? 0),
+      overdue: Number(row?.overdue ?? 0),
+      total: Number(row?.total ?? 0),
+    };
+  }
+
+  /**
+   * Every user that owns a fence — live, due, waiting out a retry, or
+   * terminal; linked to an account or not — walked by user id (byte order)
+   * strictly after `after`: the backfill's drain (#402 r2 F3), which must
+   * reach every row the down migration would refuse on.
+   */
+  async owners(after: string | null, take: number): Promise<string[]> {
+    const rows = await this.pool.client.$queryRaw<Array<{ user_id: string }>>`
+      SELECT DISTINCT user_id COLLATE "C" AS user_id FROM keycloak_write_attempt
+       WHERE (${after}::text IS NULL OR user_id COLLATE "C" > ${after}::text)
+       ORDER BY 1 ASC
+       LIMIT ${take}`;
+    return rows.map((row) => row.user_id);
+  }
+}
