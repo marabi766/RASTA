@@ -1,6 +1,6 @@
 name: Restore the shared Trivy DB
 description: >-
-  Restores the vulnerability DB the `trivy-db` job of this run published, and
+  Downloads the vulnerability DB the `trivy-db` job of this run published, and
   fails unless it is exactly the copy that producer validated (same key, run
   and attempt, same bytes) and at most 24 h old. Used by every Trivy scan;
   none of them downloads a DB of its own. See scripts/ci-trivy-db-lib.mjs and
@@ -30,37 +30,46 @@ runs:
           echo "::error::The trivy-db job published no database for this run; refusing to scan without one."
           exit 1
         fi
-        # The producer's path (`runner.temp`/trivy-db in ci.yml), outside the
-        # checkout so no image build context carries it. actions/cache
-        # versions an entry by its path, so this string must match exactly.
+        # Outside the checkout, so no image build context carries it.
         echo "dir=$RUNNER_TEMP/trivy-db" >> "$GITHUB_OUTPUT"
+        echo "archive=$RUNNER_TEMP/trivy-db-artifact" >> "$GITHUB_OUTPUT"
 
-    - name: Restore the shared Trivy DB
-      # Exact key only. No restore-keys: a prefix match could hand this scan
-      # another run's (older) copy, which is what the action's own daily cache
-      # does. A miss fails the step.
-      id: restore
-      uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+    - name: Download the shared Trivy DB
+      # By exact name, from this run (an artifact, not actions/cache: the
+      # cache entry was evicted before the image scans needed it, see the
+      # `trivy-db` job). No pattern: nothing but the producer's artifact. A
+      # missing artifact fails the step.
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
       with:
-        path: ${{ steps.where.outputs.dir }}
-        key: ${{ inputs.key }}
-        fail-on-cache-miss: true
+        name: ${{ inputs.key }}
+        path: ${{ steps.where.outputs.archive }}
 
-    - name: Require an exact hit on the producer's key
-      # `fail-on-cache-miss` and the absence of restore-keys do not by
-      # themselves prove an exact match: the restore can succeed on another
-      # entry with `cache-hit` other than 'true' (PR #435 review, F4). Only an
-      # exact hit on the key the producer published is accepted.
+    - name: Unpack exactly the producer's archive
+      # One file, trivy-db.tar.zst, holding only regular files and
+      # directories under trivy-db/ (no links, no `..`); whatever was in the
+      # target before is removed first.
       shell: bash
       env:
-        KEY: ${{ inputs.key }}
-        CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
-        MATCHED_KEY: ${{ steps.restore.outputs.cache-matched-key }}
+        ARCHIVE_DIR: ${{ steps.where.outputs.archive }}
+        TRIVY_DB_DIR: ${{ steps.where.outputs.dir }}
       run: |
-        if [ "$CACHE_HIT" != "true" ] || [ "$MATCHED_KEY" != "$KEY" ]; then
-          echo "::error::Restored '${MATCHED_KEY}' (cache-hit '${CACHE_HIT}'), not an exact hit on '${KEY}'; refusing to scan with it."
+        set -euo pipefail
+        shopt -s nullglob dotglob
+        files=("$ARCHIVE_DIR"/*)
+        if [ "${#files[@]}" -ne 1 ] || [ "${files[0]}" != "$ARCHIVE_DIR/trivy-db.tar.zst" ]; then
+          echo "::error::The downloaded artifact is not exactly trivy-db.tar.zst; refusing to scan with it."
           exit 1
         fi
+        listing="$(zstd -dc "${files[0]}" | tar -tvf -)"
+        names="$(zstd -dc "${files[0]}" | tar -tf -)"
+        if printf '%s\n' "$listing" | cut -c1 | grep -q -v -E '^[-d]$' ||
+          printf '%s\n' "$names" | grep -q -v -E '^trivy-db(/[A-Za-z0-9._-]+)*/?$' ||
+          printf '%s\n' "$names" | grep -q -E '(^|/)\.\.(/|$)'; then
+          echo "::error::The Trivy DB archive holds something other than files under trivy-db/; refusing to scan with it."
+          exit 1
+        fi
+        rm -rf "$TRIVY_DB_DIR"
+        zstd -dc "${files[0]}" | tar -C "$(dirname "$TRIVY_DB_DIR")" --no-same-owner -xf -
 
     - name: Check the restored Trivy DB
       shell: bash

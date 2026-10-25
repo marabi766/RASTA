@@ -4137,9 +4137,10 @@ jobs:
   #
   # Here the download is `trivy image --download-db-only` against
   # mirror.gcr.io and then ghcr.io, retrying on ANY failure (3 attempts per
-  # repository, 5 s and 15 s apart), and the copy is published under a key of
-  # this run. The scans restore exactly that key (`.github/actions/
-  # restore-trivy-db`), set TRIVY_SKIP_DB_UPDATE, and fail, rather than scan
+  # repository, 5 s and 15 s apart), and the copy is published as an
+  # artifact named by a key of this run. The scans download exactly that
+  # artifact (`.github/actions/restore-trivy-db`), set TRIVY_SKIP_DB_UPDATE,
+  # and fail, rather than scan
   # or skip, unless the copy is the one this producer validated. Skip mode
   # checks the schema only, never the age or the content, so
   # scripts/ci-trivy-db-lib.mjs does, at one boundary used by this job before
@@ -4162,9 +4163,20 @@ jobs:
   # every Trivy child is killed at its deadline (SIGTERM, SIGKILL 5 s later;
   # Trivy also gets a matching --timeout), so a stalled mirror cannot keep
   # ghcr.io from its turn. fetch <= 2 x 180 s + 2 x 20 s of validation = 400 s
-  # <= the step's 7 min; with checkout 2 + setup-trivy 3 + save 3 min that is
-  # this job's 15 min, and each step has its own limit (measured on
-  # run 40168706555: 1.5 s, 2 s, 7 s, 4.5 s).
+  # <= the step's 7 min; with checkout 2 + setup-trivy 3 + pack 2 + upload
+  # 3 min that is this job's 17 min, and each step has its own limit
+  # (measured on run 40189036039: 1.5 s, 2 s, 9 s, then the cache save
+  # 3.6 s that the upload replaces).
+  #
+  # Transport: an artifact, not actions/cache. Run 40191748744 saved the DB
+  # to the cache at 12:07, the ClamAV scan restored it at 12:08, and by 12:40,
+  # when the image scans asked for it, it had been evicted: the repository's
+  # caches stood at 10.43 GB against GitHub's 10 GB limit after another
+  # PR's image builds wrote ~10 GB of buildkit layers (`cache-to: type=gha,
+  # mode=max`) at 12:18-12:20, and eviction takes the least recently used
+  # entry. Artifacts are stored apart from that limit and are immutable;
+  # the download is by exact name, and the provenance check still binds the
+  # copy to this key. tar + zstd keeps it at ~100 MB instead of 1.6 GB.
   #
   # The DB lives in runner.temp, outside the checkout: in the workspace it
   # would be part of every image's build context (`COPY . .`), as it was in
@@ -4174,12 +4186,14 @@ jobs:
   # it (the ClamAV scan now; the image scans only after quality, integration
   # and e2e) never wait on it for long.
   #
-  # Reruns: the key carries the run attempt, because cache entries are
-  # immutable. "Re-run failed jobs" keeps this job's earlier output and so its
-  # earlier key; a scan on a later attempt accepts the copy that key names
-  # (expected run and attempt are read from the key, never from the scan's
-  # own attempt). Once that copy is older than 24 h the scans fail and the
-  # run must be re-run in full, which makes this job publish a new key.
+  # Reruns: the key carries the run attempt, because artifact names are
+  # unique within a run. "Re-run failed jobs" keeps this job's earlier output
+  # and so its earlier key; a scan on a later attempt downloads that
+  # artifact of the same run and accepts the copy the key names (expected run
+  # and attempt are read from the key, never from the scan's own attempt).
+  # Once that copy is older than 24 h (the artifact is kept one day) the
+  # scans fail and the run must be re-run in full, which makes this job
+  # publish a new key.
   #
   # The Java DB is not fetched: no scan log of main run 40163416703 contains
   # a Java DB line (no .jar in any image), Trivy would fetch it on demand
@@ -4189,7 +4203,7 @@ jobs:
   trivy-db:
     name: Trivy vulnerability DB (downloaded once)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 17
     outputs:
       key: ${{ steps.fetch.outputs.key }}
     steps:
@@ -4219,12 +4233,24 @@ jobs:
           TRIVY_DB_DIR: ${{ runner.temp }}/trivy-db
         run: node scripts/ci-trivy-db.mjs fetch "$TRIVY_DB_DIR"
 
-      - name: Save the DB under this run's key
+      - name: Pack the DB
+        # The validated directory exactly as it is, provenance included; the
+        # scans unpack it and run the same check.
+        timeout-minutes: 2
+        env:
+          TRIVY_DB_PARENT: ${{ runner.temp }}
+        run: tar -C "$TRIVY_DB_PARENT" -cf - trivy-db | zstd -q -T0 -3 -o "$TRIVY_DB_PARENT/trivy-db.tar.zst"
+
+      - name: Publish the DB as this run's artifact
         timeout-minutes: 3
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          path: ${{ runner.temp }}/trivy-db
-          key: ${{ steps.fetch.outputs.key }}
+          name: ${{ steps.fetch.outputs.key }}
+          path: ${{ runner.temp }}/trivy-db.tar.zst
+          if-no-files-found: error
+          # Already zstd-compressed.
+          compression-level: 0
+          retention-days: 1
 
   # ---------------------------------------------------------------------------
   # The malware scanner's own supply chain (ADR-049).

@@ -1125,20 +1125,36 @@ test('containers: every job it already waited for is still required to have succ
   assert.ok(cond.includes("needs.container-scope.outputs.services != '[]'"));
 });
 
-test('trivy-db job: no needs, pinned Trivy, the key comes from the validated fetch', () => {
+const producerStep = (pred) => workflow.jobs['trivy-db'].steps.find(pred);
+const PACK = () => producerStep((s) => s.name === 'Pack the DB');
+const UPLOAD = () => producerStep((s) => s.uses?.startsWith('actions/upload-artifact@'));
+
+test('trivy-db job: no needs, pinned Trivy, the key comes from the validated fetch and names the artifact', () => {
   const job = workflow.jobs['trivy-db'];
   assert.equal(job.needs, undefined);
   assert.equal(job['continue-on-error'], undefined);
   assert.equal(job.outputs.key, '${{ steps.fetch.outputs.key }}');
-  const fetch = job.steps.find((s) => s.id === 'fetch');
+  const fetch = producerStep((s) => s.id === 'fetch');
   assert.equal(fetch.run, 'node scripts/ci-trivy-db.mjs fetch "$TRIVY_DB_DIR"');
   // No step but the validated fetch may write the key.
   assert.equal(job.steps.filter((s) => /GITHUB_OUTPUT/.test(s.run ?? '')).length, 0);
-  const save = job.steps.find((s) => s.uses?.startsWith('actions/cache/save@'));
-  assert.equal(save.with.key, '${{ steps.fetch.outputs.key }}');
-  assert.equal(save.if, undefined); // only after a successful fetch
+  const names = job.steps.map((s) => s.name ?? s.uses);
+  assert.ok(names.indexOf(PACK().name) > names.indexOf(fetch.name));
+  const upload = UPLOAD();
+  assert.match(upload.uses, /^actions\/upload-artifact@[0-9a-f]{40}$/);
+  assert.match(
+    readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8'),
+    new RegExp(`uses: ${upload.uses} # v4\\n`),
+  );
+  assert.equal(upload.with.name, '${{ steps.fetch.outputs.key }}');
+  assert.equal(upload.with.path, '${{ runner.temp }}/trivy-db.tar.zst');
+  assert.equal(upload.with['if-no-files-found'], 'error');
+  assert.equal(upload.with.overwrite, undefined);
+  for (const s of [PACK(), upload]) assert.equal(s.if, undefined); // only after a successful fetch
+  // actions/cache is gone from the transport: run 40191748744 lost its entry to eviction.
+  assert.equal(job.steps.filter((s) => s.uses?.startsWith('actions/cache')).length, 0);
   assert.equal(
-    job.steps.find((s) => s.uses?.startsWith('aquasecurity/setup-trivy@')).with.version,
+    producerStep((s) => s.uses?.startsWith('aquasecurity/setup-trivy@')).with.version,
     '${{ env.TRIVY_VERSION }}',
   );
   assert.equal(workflow.env.TRIVY_VERSION, 'v0.70.0');
@@ -1152,7 +1168,7 @@ test('trivy-db job: the time budget fits the step and job limits (F3 arithmetic)
     'every step has its own limit',
   );
   assert.ok(limits.reduce((a, b) => a + b, 0) <= job['timeout-minutes']);
-  const fetch = job.steps.find((s) => s.id === 'fetch');
+  const fetch = producerStep((s) => s.id === 'fetch');
   const fetchWorstMs = REPOSITORIES.length * (BUDGET.repositoryWindowMs + BUDGET.validationSlopMs);
   assert.ok(fetchWorstMs <= fetch['timeout-minutes'] * 60_000, `${fetchWorstMs} ms`);
   assert.ok(
@@ -1190,19 +1206,21 @@ test('trivy-db job: the sparse checkout holds every file the fetch imports (adde
 
 test('the DB lives outside the checkout, at one path for producer and consumers (no build context carries it)', () => {
   const job = workflow.jobs['trivy-db'];
-  const fetch = job.steps.find((s) => s.id === 'fetch');
-  const save = job.steps.find((s) => s.uses?.startsWith('actions/cache/save@'));
-  assert.equal(fetch.env.TRIVY_DB_DIR, '${{ runner.temp }}/trivy-db');
-  assert.equal(save.with.path, '${{ runner.temp }}/trivy-db');
+  assert.equal(
+    producerStep((s) => s.id === 'fetch').env.TRIVY_DB_DIR,
+    '${{ runner.temp }}/trivy-db',
+  );
+  assert.equal(PACK().env.TRIVY_DB_PARENT, '${{ runner.temp }}');
   const where = compositeStep('Require the key of the shared Trivy DB');
   assert.match(where.run, /echo "dir=\$RUNNER_TEMP\/trivy-db" >> "\$GITHUB_OUTPUT"/);
+  assert.match(where.run, /echo "archive=\$RUNNER_TEMP\/trivy-db-artifact" >> "\$GITHUB_OUTPUT"/);
   assert.equal(composite.outputs.dir.value, '${{ steps.where.outputs.dir }}');
   const text = readFileSync(join(ROOT, '.github/actions/restore-trivy-db/action.yml'), 'utf8');
   assert.doesNotMatch(text, /github\.workspace/);
   assert.doesNotMatch(JSON.stringify(job), /github\.workspace/);
 });
 
-/** Runs one composite step's real script with the given env; returns status and output. */
+/** Runs one workflow or composite step's real script with the given env; returns status and output. */
 function runStep(step, env) {
   const out = join(tmp(), 'github-output');
   writeFileSync(out, '');
@@ -1212,23 +1230,61 @@ function runStep(step, env) {
   });
   return { ...r, output: readFileSync(out, 'utf8') };
 }
+const UNPACK = () => compositeStep("Unpack exactly the producer's archive");
+const sh = (script, cwd) => {
+  const r = spawnSync('bash', ['-euo', 'pipefail', '-c', script], { cwd, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+};
 
-test('restore action: exact key only, a miss fails, and an empty key fails before any restore', () => {
-  const [where, restore, exact, check] = composite.runs.steps;
+/** Packs `dir` (a cache directory) with the producer's real pack step; returns the artifact directory. */
+function packed(dir) {
+  const parent = tmp();
+  sh(`cp -r "${dir}" "${parent}/trivy-db"`);
+  const r = runStep(PACK(), { TRIVY_DB_PARENT: parent });
+  assert.equal(r.status, 0, r.stderr);
+  const artifact = tmp();
+  sh(`mv "${parent}/trivy-db.tar.zst" "${artifact}/"`);
+  return artifact;
+}
+/** A hand-made archive: `build` runs in an empty directory, then everything in it is tarred (`tarArgs`). */
+function hostile(build, tarArgs = '.') {
+  const work = tmp();
+  sh(build, work);
+  const artifact = tmp();
+  sh(`tar -cf - ${tarArgs} | zstd -q -o "${artifact}/trivy-db.tar.zst"`, work);
+  return artifact;
+}
+const unpack = (artifact, target = join(tmp(), 'trivy-db')) => ({
+  target,
+  ...runStep(UNPACK(), { ARCHIVE_DIR: artifact, TRIVY_DB_DIR: target }),
+});
+
+test('restore action: key first, then the exact artifact of this run, unpacked strictly, then the check', () => {
+  const [where, download, unpackStep, check] = composite.runs.steps;
   assert.equal(where.name, 'Require the key of the shared Trivy DB');
-  assert.match(restore.uses, /^actions\/cache\/restore@[0-9a-f]{40}$/);
-  assert.equal(restore.id, 'restore');
-  assert.equal(restore.with['fail-on-cache-miss'], true);
-  assert.equal(restore.with['restore-keys'], undefined);
-  assert.equal(restore.with.path, '${{ steps.where.outputs.dir }}');
-  assert.equal(restore['continue-on-error'], undefined);
-  assert.equal(exact.name, "Require an exact hit on the producer's key");
+  assert.match(download.uses, /^actions\/download-artifact@[0-9a-f]{40}$/);
+  assert.match(
+    readFileSync(join(ROOT, '.github/actions/restore-trivy-db/action.yml'), 'utf8'),
+    new RegExp(`uses: ${download.uses} # v4\\.3\\.0\\n`),
+  );
+  // Exact name, this run, one directory: no pattern, no other run, no merging.
+  assert.deepEqual(download.with, {
+    name: '${{ inputs.key }}',
+    path: '${{ steps.where.outputs.archive }}',
+  });
+  assert.equal(download['continue-on-error'], undefined);
+  assert.equal(unpackStep, UNPACK());
+  assert.deepEqual(unpackStep.env, {
+    ARCHIVE_DIR: '${{ steps.where.outputs.archive }}',
+    TRIVY_DB_DIR: '${{ steps.where.outputs.dir }}',
+  });
   assert.equal(check.run, PRE_SCAN_CHECK);
   assert.deepEqual(check.env, {
     TRIVY_DB_DIR: '${{ steps.where.outputs.dir }}',
     TRIVY_DB_KEY: '${{ inputs.key }}',
   });
   for (const s of composite.runs.steps) assert.equal(s.if, undefined, s.name);
+  assert.equal(composite.runs.steps.filter((s) => s.uses?.startsWith('actions/cache')).length, 0);
 
   const empty = runStep(where, { KEY: '' });
   assert.equal(empty.status, 1);
@@ -1236,58 +1292,93 @@ test('restore action: exact key only, a miss fails, and an empty key fails befor
   assert.equal(empty.output, '');
   const set = runStep(where, { KEY: KEY });
   assert.equal(set.status, 0);
-  assert.equal(set.output, 'dir=/runner/_temp/trivy-db\n');
+  assert.equal(set.output, 'dir=/runner/_temp/trivy-db\narchive=/runner/_temp/trivy-db-artifact\n');
 });
 
-test('restore action: only an exact hit on the key is accepted (F4: partial hit refused)', () => {
-  const exact = compositeStep("Require an exact hit on the producer's key");
-  assert.deepEqual(exact.env, {
-    KEY: '${{ inputs.key }}',
-    CACHE_HIT: '${{ steps.restore.outputs.cache-hit }}',
-    MATCHED_KEY: '${{ steps.restore.outputs.cache-matched-key }}',
+test('pack -> unpack -> check, the real step scripts end to end: the sealed copy arrives intact', () => {
+  const target = join(tmp(), 'trivy-db');
+  mkdirSync(target);
+  writeFileSync(join(target, 'stale-leftover'), 'x');
+  const r = unpack(packed(writeDb(tmp(), { base: new Date() })), target);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(existsSync(join(target, 'stale-leftover')), false); // replaced, not merged
+  const check = runStep(compositeStep('Check the restored Trivy DB'), {
+    TRIVY_DB_DIR: target,
+    TRIVY_DB_KEY: KEY,
+    GITHUB_RUN_ID: '77',
+    GITHUB_RUN_ATTEMPT: '2', // a re-run consumer accepts producer attempt 1
   });
-  for (const [name, env, status] of [
-    ['exact hit', { KEY, CACHE_HIT: 'true', MATCHED_KEY: KEY }, 0],
-    [
-      'prefix match (cache-hit false)',
-      { KEY, CACHE_HIT: 'false', MATCHED_KEY: 'trivy-db-77-10' },
-      1,
-    ],
-    ['cache-hit unset', { KEY, CACHE_HIT: '', MATCHED_KEY: KEY }, 1],
-    [
-      'cache-hit true but another key',
-      { KEY, CACHE_HIT: 'true', MATCHED_KEY: 'trivy-db-77-10' },
-      1,
-    ],
-    // actions/cache's isExactKeyMatch ignores case; this step does not.
-    [
-      'a case-insensitive "exact" match',
-      { KEY, CACHE_HIT: 'true', MATCHED_KEY: 'TRIVY-DB-77-1' },
-      1,
-    ],
-    ['nothing matched', { KEY, CACHE_HIT: '', MATCHED_KEY: '' }, 1],
-  ]) {
-    const r = runStep(exact, env);
-    assert.equal(r.status, status, `${name}: ${r.stdout}${r.stderr}`);
-    if (status) assert.match(r.stdout, /::error::Restored .* not an exact hit on 'trivy-db-77-1'/);
-  }
+  assert.equal(check.status, 0, check.stderr);
+  assert.match(check.stdout, /shared copy ok - trivy-db-77-1 .* sha256 verified/);
 });
 
-test('restore action, scripted end to end: a partial hit is refused at the exact-hit step, and again by the check', () => {
-  // What actions/cache would leave behind after a prefix match on trivy-db-77-1.
-  const dir = writeDb(tmp(), {
+for (const [name, artifact] of [
+  ['an empty artifact', () => tmp()],
+  [
+    'a second file beside the archive',
+    () => {
+      const a = packed(writeDb(tmp(), { base: new Date() }));
+      writeFileSync(join(a, 'zz-extra'), 'x'); // sorts after the archive
+      return a;
+    },
+  ],
+  [
+    'a hidden second file',
+    () => {
+      const a = packed(writeDb(tmp(), { base: new Date() }));
+      writeFileSync(join(a, '.extra'), 'x');
+      return a;
+    },
+  ],
+  [
+    'the archive under another name',
+    () => {
+      const a = packed(writeDb(tmp(), { base: new Date() }));
+      sh(`mv "${a}/trivy-db.tar.zst" "${a}/db.tar.zst"`);
+      return a;
+    },
+  ],
+]) {
+  test(`restore action: ${name} -> refused before unpacking`, () => {
+    const r = unpack(artifact());
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /::error::The downloaded artifact is not exactly trivy-db\.tar\.zst/);
+    assert.equal(existsSync(r.target), false);
+  });
+}
+
+for (const [name, build, tarArgs] of [
+  ['a symlink out of the tree', 'mkdir trivy-db && ln -s /etc trivy-db/db', 'trivy-db'],
+  [
+    'a path climbing out (..)',
+    'mkdir -p trivy-db && echo x > evil',
+    "--transform='s|^evil$|trivy-db/../evil|' trivy-db evil",
+  ],
+  ['another top-level directory', 'mkdir trivy-db other && echo x > other/f', 'trivy-db other'],
+  ['a hard link', 'mkdir trivy-db && echo x > trivy-db/a && ln trivy-db/a trivy-db/b', 'trivy-db'],
+  ['an empty archive', 'true', '--files-from /dev/null'],
+]) {
+  test(`restore action: an archive with ${name} -> refused, nothing unpacked`, () => {
+    const r = unpack(hostile(build, tarArgs));
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(
+      r.stdout,
+      /::error::The Trivy DB archive holds something other than files under trivy-db\//,
+    );
+    assert.equal(existsSync(r.target), false);
+  });
+}
+
+test('restore action, scripted end to end: a copy sealed for another producer is refused by the check', () => {
+  // The artifact name is exact, so this needs a wrong upload; the provenance still catches it.
+  const target = join(tmp(), 'trivy-db');
+  const sealed = writeDb(tmp(), {
     base: new Date(),
     source: { key: 'trivy-db-77-10', runAttempt: '10' },
   });
-  const exact = runStep(compositeStep("Require an exact hit on the producer's key"), {
-    KEY,
-    CACHE_HIT: 'false',
-    MATCHED_KEY: 'trivy-db-77-10',
-  });
-  assert.equal(exact.status, 1);
-  // Without that step the provenance still names the wrong producer.
+  assert.equal(unpack(packed(sealed), target).status, 0);
   const check = runStep(compositeStep('Check the restored Trivy DB'), {
-    TRIVY_DB_DIR: dir,
+    TRIVY_DB_DIR: target,
     TRIVY_DB_KEY: KEY,
     GITHUB_RUN_ID: '77',
     GITHUB_RUN_ATTEMPT: '10',

@@ -212,7 +212,7 @@ function clockNs(now) {
 const POSITIVE = /^[1-9]\d{0,19}$/;
 const KEY = /^trivy-db-([1-9]\d{0,19})-([1-9]\d{0,19})$/;
 
-/** The cache key the producer of run `run.id`, attempt `run.attempt` publishes under. */
+/** The key (artifact name) the producer of run `run.id`, attempt `run.attempt` publishes under. */
 export function producerKey(run) {
   if (!POSITIVE.test(String(run?.id ?? '')) || !POSITIVE.test(String(run?.attempt ?? ''))) {
     return null;
@@ -519,7 +519,7 @@ function checkContent(cacheDir, now, nowNs) {
  * bytes (sha256). Anything unknown, unreadable or missing is a refusal.
  * @param {string} cacheDir
  * @param {{now: Date, key: string, run: {id: string, attempt: string}}} ctx
- *   `now` the runner's clock; `key` the producer's cache key; `run` this
+ *   `now` the runner's clock; `key` the producer's key; `run` this
  *   job's GITHUB_RUN_ID / GITHUB_RUN_ATTEMPT.
  * @returns {{ok: true, updatedAt: string, ageHours: number, buckets: number, source: object}
  *   | {ok: false, reason: string}}
