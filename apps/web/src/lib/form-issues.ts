@@ -43,9 +43,11 @@ export const GENERIC_FIELD_MESSAGE = 'مقدار واردشده معتبر نی�
 /**
  * Rule 3 only, for text the portal's own authors wrote: an Arabic-script LETTER
  * (`\p{L}`), not a digit, a punctuation mark, a mark or the byte-order mark,
- * all of which sit in the Arabic blocks too.
+ * all of which sit in the Arabic blocks too. Detection only, not an allow-list of
+ * what may be typed (`display-text-sites.spec.ts` keeps
+ * its one-definition rule for allow-lists).
  */
-const ARABIC_SCRIPT_LETTER = /(?=\p{Script=Arabic})\p{L}/u;
+const ARABIC_SCRIPT_LETTER = /(?=\p{sc=Arab})\p{L}/u;
 
 export function isPersianSentence(text: string): boolean {
   return ARABIC_SCRIPT_LETTER.test(text);
