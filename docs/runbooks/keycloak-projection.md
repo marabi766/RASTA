@@ -130,9 +130,13 @@ FROM keycloak_write_attempt WHERE takeover_at < now() AND account_missing_at IS 
    دیرتر از پنجره نمی‌رسد یا اعمال نمی‌شود. همین حالا تاخیر Admin API در Keycloak، Proxy و شبکه‌ی جلوی آن، و مکث‌های Event
    Loop در identity-service را ببین؛ اگر به پنجره نزدیک‌اند، `KEYCLOAK_WRITE_SETTLE_SECONDS` را بالا ببر. فهرست:
    `SELECT user_id, operation, deadline_at, takeover_at FROM keycloak_write_attempt WHERE takeover_at > now() AND
-account_missing_at IS NULL ORDER BY deadline_at`. این سیگنال در هر گذر نمونه گرفته می‌شود، پس
-   `MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS` باید حداکثر نیمی از `KEYCLOAK_WRITE_SETTLE_SECONDS` باشد. مسیریابی هشدار در
-   Production هنوز وجود ندارد.
+account_missing_at IS NULL ORDER BY deadline_at`. **این هشدار هنوز قابل اتکا نیست (#402 r3 R3-2):** Gauge فقط در پایان
+   گذر جاروکننده نمونه گرفته می‌شود، پس از انقضاها و بازنویسی‌های پشت‌سرهمِ همان گذر؛ گذری که زودتر شکست بخورد یا نوبتی که
+   محافظ هم‌پوشانی رد کند اصلا نمونه نمی‌گیرد؛ و حصاری که از `takeover_at` بگذرد سررسیده است، نه دیرکرده، پس پنجره‌ای که میان
+   دو نمونه گذشته باشد هیچ ردی نمی‌گذارد. هیچ مقداری از `MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS` آن را قابل اتکا نمی‌کند: حتی
+   با پیش‌فرض‌ها همه‌ی پنجره‌ی دیرکرد یک حصار می‌تواند بی‌نمونه بگذرد. نبود هشدار پس دلیل نبود نوشتن دیرکرده نیست؛ پرس‌وجوی بالا
+   را مستقیم اجرا کن. پیگیری: نمونه‌گیر مستقل و کران‌دار (با کهنگی نمونه‌ی خودش). مسیریابی هشدار در Production هنوز وجود
+   ندارد.
 
 <a id="registration-approval-orphan"></a>
 

@@ -78,9 +78,12 @@ groups:
       # answered 5xx, or its sender paused). Each one is a write that is relying on the
       # window right now; a delivery that late would land after takeover. Fires at once, well
       # before the window ends, so an operator can look at Keycloak's and the network's latency
-      # while it still matters. Sampled once per sweep pass: reliable while
-      # MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS <= KEYCLOAK_WRITE_SETTLE_SECONDS / 2 (60 <= 60
-      # at the defaults).
+      # while it still matters. NOT reliable yet (#402 r3 R3-2): the gauge is sampled only at
+      # the end of a sweep pass, after its serial lapses and re-assertions, and not at all by a
+      # pass that fails earlier or a tick the overlap guard skips; and a fence past takeover is
+      # due, not overdue, so a window missed between two samples leaves no trace. No scan
+      # interval makes it reliable: a fence's whole overdue window can pass unsampled even at
+      # the defaults. Follow-up: an independent, bounded sampler (with its staleness exposed).
       - alert: RastaIdentityKeycloakWriteOverdue
         expr: max(rasta_identity_keycloak_write_fences{state="overdue"}) > 0
         labels:
