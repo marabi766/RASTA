@@ -23,7 +23,6 @@ import {
   RETRY_TOPIC_SUFFIX,
   type DlqReason,
   type EventEnvelope,
-  type LegacyRefusal,
 } from '@rasta/contracts';
 import { dlqMessagesTotal } from '@rasta/observability';
 import { createSystemContext, runWithContext } from '../context/request-context';
@@ -1076,7 +1075,7 @@ export function handlerMessage(error: unknown): string {
 
 /**
  * The message's bytes as an event envelope, or why not: the `JSON.parse`
- * error, or the envelope schema's {@link LegacyRefusal} (from `legacyParse`,
+ * error, or the envelope schema's `LegacyRefusal` (from `legacyParse`,
  * so {@link unparseableReason} names zod 3's codes against the schema that
  * refused — PR #444 r1 F1).
  */
@@ -1100,7 +1099,7 @@ function readEnvelope(
  * Why a message could not be read as an event envelope, in words that contain
  * nothing from the message itself: fixed text, the body's size, and — for an
  * envelope that parsed as JSON but failed the schema — each issue's path and
- * zod 3 code, from the envelope schema's {@link LegacyRefusal}. Paths name
+ * zod 3 code, from the envelope schema's `LegacyRefusal`. Paths name
  * schema fields (escaped and bounded all the same); messages are left out
  * because some repeat the value received. Anything else — a bare zod error
  * included, which carries no schema to translate against — is described by its

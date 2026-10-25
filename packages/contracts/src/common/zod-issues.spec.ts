@@ -191,7 +191,7 @@ describe('legacyParse', () => {
   });
 
   it('accepts exactly what safeParse accepts, with the same output', () => {
-    const schema = z.object({ n: z.coerce.number().prefault(3), s: z.string().trim() });
+    const schema = z.object({ n: z.number().prefault(3), s: z.string().trim() });
     expect(legacyParse(schema, { s: ' x ' })).toEqual({ success: true, data: { n: 3, s: 'x' } });
     expect(legacyParse(schema, { s: 1 }).success).toBe(schema.safeParse({ s: 1 }).success);
   });
