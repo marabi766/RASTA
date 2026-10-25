@@ -309,7 +309,7 @@ export class DriverService {
    * held across the call. Fails closed: no answer throws, and the caller writes
    * nothing. What it cannot see is a membership ending between this answer and
    * the commit, or any time after: the row then stays assignable until somebody
-   * suspends it (docs/24 Q-154).
+   * suspends it (docs/24 Q-156).
    */
   private async assertLiveMember(organizationId: string, userId: string): Promise<void> {
     if (!(await this.membership.isLiveMember(organizationId, userId))) throw notAMember();
