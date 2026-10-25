@@ -43,7 +43,9 @@ import { SETTLEMENT_REFUSED, toSettlementRefusalProjection } from './settlement-
  * lists the r1 head's answers beside them. Inputs are the review's
  * reproductions: `limit=1e999`/`nope` and a numeric `action` at the query pipe,
  * `CONTRACT_AUTHORITY_REFUSED` with payload `{}`, an envelope whose
- * `actor.type` is `7`.
+ * `actor.type` is `7`. The two `limit=0.5` list cases are Codex PR-444 r2 F1's,
+ * recorded the same way on main `5c88ae21`
+ * (`~/worker6/session/039/scripts/record.sh`).
  */
 
 const META: ArgumentMetadata = { type: 'query' };
@@ -129,6 +131,27 @@ const ZOD3: Record<string, unknown> = {
   'list an unknown parameter': [
     { path: '(root)', message: 'Unrecognized key(s) in object (1)', code: 'unrecognized_keys' },
   ],
+  'list limit=0.5, a resource id without its type, a bad cursor': [
+    { path: 'limit', message: 'Expected integer, received float', code: 'invalid_type' },
+    { path: 'limit', message: 'Number must be greater than or equal to 1', code: 'too_small' },
+    {
+      path: 'resourceType',
+      message: '`resourceId` may only be used together with `resourceType`',
+      code: 'custom',
+    },
+    { path: 'cursor', message: 'The cursor is not valid', code: 'custom' },
+  ],
+  'list the same, window reversed': [
+    { path: 'limit', message: 'Expected integer, received float', code: 'invalid_type' },
+    { path: 'limit', message: 'Number must be greater than or equal to 1', code: 'too_small' },
+    { path: 'to', message: '`to` must not be earlier than `from`', code: 'custom' },
+    {
+      path: 'resourceType',
+      message: '`resourceId` may only be used together with `resourceType`',
+      code: 'custom',
+    },
+    { path: 'cursor', message: 'The cursor is not valid', code: 'custom' },
+  ],
   'list no window': [
     { path: 'from', message: 'Required', code: 'invalid_type' },
     { path: 'to', message: 'Required', code: 'invalid_type' },
@@ -183,6 +206,15 @@ describe('audit query pipes answer as zod 3 did (valid window, authorized caller
     ['actorType missing its enum, given a number', { ...WINDOW, actorType: 7 }],
     ['an unknown parameter', { ...WINDOW, colour: 'red' }],
     ['no window', {}],
+    // Codex PR-444 r2 F1: zod 4 stopped at the integer, and lost both refinements.
+    [
+      'limit=0.5, a resource id without its type, a bad cursor',
+      { ...WINDOW, limit: '0.5', resourceId: 'AST_1', cursor: 'bad' },
+    ],
+    [
+      'the same, window reversed',
+      { from: WINDOW.to, to: WINDOW.from, limit: '0.5', resourceId: 'AST_1', cursor: 'bad' },
+    ],
   ])('list: %s', (name, query) => {
     matchesZod3(`list ${name}`, pipeRefusal(list, query));
   });
