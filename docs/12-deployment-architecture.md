@@ -29,6 +29,10 @@
 | Log Level          | debug       | info       | info                         |
 | نمونه‌برداری Trace | ۱۰۰٪        | ۱۰۰٪       | ۱۰٪ + ۱۰۰٪ خطاها             |
 
+> **Staging فعلی (RUN-002، طرح):** تا ماشین دوم، Staging روی یک میزبان و با Docker Compose است، نه Kubernetes — با داده‌ی
+> مصنوعی، بی mTLS و با استقرار Pull. انحراف‌ها، مرز اعتماد و برنامه:
+> [ADR-074](adr/ADR-074-staging-on-a-single-host.md).
+
 ---
 
 ## ۱۲٫۲ توسعه محلی
