@@ -105,6 +105,8 @@ export interface PurposePolicy {
 
 const PURPOSES: Readonly<Record<string, PurposePolicy>> = {
   'project-create': { retry: true, deadline: 'REQUIRED' },
+  // supplier-service has no Idempotency-Key and no expiry: never resent, no deadline.
+  'supplier-write': { retry: false, deadline: 'NONE' },
 };
 
 /** The table, as the scripts receive it. A function so a test can stand in extra purposes. */
