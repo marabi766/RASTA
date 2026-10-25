@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import {
   SCHEMA_DUMP_FLAGS,
   DUMP_RESTRICT_KEY,
-  schemaDumpEvidence,
+  dumpSchema,
   checkSourceReference,
   schemaReferenceEvidence,
   INVENTORY_SQL,
@@ -33,7 +33,8 @@ import {
 const database = `drill_test_${randomBytes(8).toString('hex')}`;
 const directory = mkdtempSync(join(tmpdir(), 'drill-sql-test-'));
 const dump = join(directory, 'database.dump');
-const scratch = [`${database}_ref`, `${database}_fixed`];
+const suffix = randomBytes(8).toString('hex');
+const scratch = [`drill_ref_${suffix}`, `drill_fixed_${suffix}`];
 let reference;
 let referenceMilliseconds = 0;
 let created = false;
@@ -58,7 +59,14 @@ let dumpMilliseconds = 0;
 function schemaDump(db = database) {
   const result = spawnSync('pg_dump', [...dumpFlags, '-d', db], { timeout: 60_000 });
   assert.equal(result.status, 0, 'schema dump command failed');
-  return schemaDumpEvidence(result.stdout, dumpVersion);
+  return dumpSchema(
+    db,
+    db === scratch[0] ? 'reference' : db === scratch[1] ? 'fixed-point' : 'source',
+    () => ({
+      raw: result.stdout,
+      version: dumpVersion,
+    }),
+  ).evidence;
 }
 function makeReference(source) {
   const started = performance.now();
@@ -175,12 +183,7 @@ before(() => {
   command('pg_restore', ['--create', '--exit-on-error', '-d', 'postgres', dump]);
   // Subsequent mutant SOURCE snapshots are taken from the now-restored fixture.
   // Keep the first SOURCE proof on initialSnapshot for the first-restore assertion.
-  reference = schemaReferenceEvidence(
-    reference.reference,
-    reference.reference,
-    reference.fixedPoint,
-    checkSourceReference(reference.reference, reference.reference, database),
-  );
+  reference = makeReference(schemaDump());
 });
 after(() => {
   try {
