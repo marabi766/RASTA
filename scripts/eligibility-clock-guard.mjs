@@ -112,6 +112,7 @@ export function deriveColumns(repository) {
 
 function name(node, ast) {
   if (!node) return '';
+  if (ts.isComputedPropertyName(node)) return sqlText(node.expression);
   return ts.isStringLiteralLike(node) || ts.isIdentifier(node) ? node.text : node.getText(ast);
 }
 
@@ -275,7 +276,9 @@ export function hazards(source, file, columns, reviewed = new Set(), signatures 
         report(node, 'zero positional lease');
     }
     if (ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)) {
-      if (!fields.has(name(node.name, ast))) return;
+      const unclassified =
+        ts.isComputedPropertyName(node.name) && name(node.name, ast).includes('${value}');
+      if (!fields.has(name(node.name, ast)) && !unclassified) return;
       let parent = node.parent;
       while (parent && !ts.isCallExpression(parent) && !ts.isSourceFile(parent))
         parent = parent.parent;
@@ -300,7 +303,9 @@ export function hazards(source, file, columns, reviewed = new Set(), signatures 
       if (
         parent &&
         ts.isCallExpression(parent) &&
-        /(?:create|update|upsert)(?:Many)?$/.test(parent.expression.getText(ast)) &&
+        !/(?:toMatchObject|toEqual|toStrictEqual|objectContaining)$/.test(
+          parent.expression.getText(ast),
+        ) &&
         (() => {
           let p = node.parent;
           while (p && p !== parent) {
@@ -314,7 +319,10 @@ export function hazards(source, file, columns, reviewed = new Set(), signatures 
           return false;
         })()
       )
-        report(node, 'direct ORM eligibility write');
+        report(
+          node,
+          unclassified ? 'unclassified ORM write columns' : 'direct ORM eligibility write',
+        );
     }
     if (
       literal(node) ||

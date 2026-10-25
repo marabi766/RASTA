@@ -185,6 +185,25 @@ test('F1d: ORM writes reject variables, shorthand, strings, ternaries, globals a
   refused('db.task.update({data:{nextAttemptAt}});');
 });
 
+test('ORM data writes default to refusal across method families and computed keys', () => {
+  for (const method of [
+    'create',
+    'createMany',
+    'createManyAndReturn',
+    'update',
+    'updateMany',
+    'updateManyAndReturn',
+    'upsert',
+    'unknownWrite',
+  ]) {
+    refused(`db.task.${method}({data:[{nextAttemptAt:new Date()}]});`);
+    refused(`db.task.${method}({data:{["nextAttemptAt"]:new Date()}});`);
+    refused(`db.task.${method}({data:{['next' + 'AttemptAt']:new Date()}});`);
+    refused(`db.task.${method}({data:{[column]:new Date()}});`, /unclassified ORM write columns/);
+  }
+  assert.deepEqual(check('expect(row).toMatchObject({data:{["nextAttemptAt"]:new Date(0)}});'), []);
+});
+
 test('F1e: traversal includes nested helpers, restored src specs and JS/MJS/TSX service tests plus real-PG scripts', () => {
   fixture((dir) => {
     const paths = [
