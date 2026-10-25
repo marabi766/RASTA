@@ -89,9 +89,62 @@ const isImportMetaUrl = (node) =>
   node.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
   node.name.text === 'url';
 
-/** A literal argument cannot carry configuration. */
-const isLiteral = (node) =>
-  ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || isImportMetaUrl(node);
+/**
+ * A literal argument cannot carry configuration: a string literal, a template
+ * without substitutions, `import.meta.url`, or a name in `literalUrls`.
+ */
+const isLiteral = (node, literalUrls = new Set()) =>
+  ts.isStringLiteral(node) ||
+  ts.isNoSubstitutionTemplateLiteral(node) ||
+  isImportMetaUrl(node) ||
+  (ts.isIdentifier(unwrap(node)) && literalUrls.has(unwrap(node).text));
+
+/**
+ * The names a file binds, once and with `const`, to a URL built from literals
+ * only (`const lib = new URL('../lib/', import.meta.url)`): a repository
+ * path, which a parse against it cannot turn into configuration. A name bound
+ * more than once anywhere in the file (another `const`, a `let`, a parameter)
+ * is not one, whatever the scope: the guard does not resolve scopes.
+ */
+function literalUrlNames(sourceFile, bindings) {
+  const declared = new Map();
+  const count = (name) => declared.set(name, (declared.get(name) ?? 0) + 1);
+  const candidates = [];
+  const visit = (node) => {
+    if (
+      (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node)) &&
+      ts.isIdentifier(node.name)
+    ) {
+      count(node.name.text);
+    }
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
+      ts.isVariableDeclarationList(node.parent) &&
+      (node.parent.flags & ts.NodeFlags.Const) !== 0
+    ) {
+      candidates.push(node);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  const literalUrls = new Set();
+  // In source order, so a URL built on an earlier one is seen.
+  for (const declaration of candidates) {
+    const value = unwrap(declaration.initializer);
+    if (
+      declared.get(declaration.name.text) === 1 &&
+      ts.isNewExpression(value) &&
+      parserReference(value.expression, bindings) === 'class' &&
+      (value.arguments ?? []).length > 0 &&
+      value.arguments.every((argument) => isLiteral(argument, literalUrls))
+    ) {
+      literalUrls.add(declaration.name.text);
+    }
+  }
+  return literalUrls;
+}
 
 const isStringLike = (node) => ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node);
 
@@ -400,6 +453,7 @@ export function rawUrlParses(text, file) {
   const kind = SCRIPT_KINDS[extname(file)] ?? ts.ScriptKind.TS;
   const sourceFile = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
   const bindings = parserBindings(sourceFile);
+  const literalUrls = literalUrlNames(sourceFile, bindings);
   const found = [];
   const seen = new Set();
   const site = (node, what) => {
@@ -415,7 +469,12 @@ export function rawUrlParses(text, file) {
   };
   const visit = (node) => {
     const what = parseKind(node, bindings);
-    if (what !== null && !(node.arguments ?? []).every(isLiteral)) site(node, what);
+    if (
+      what !== null &&
+      !(node.arguments ?? []).every((argument) => isLiteral(argument, literalUrls))
+    ) {
+      site(node, what);
+    }
     const reference =
       (ts.isIdentifier(node) && !isDeclarationName(node)) ||
       isMemberAccess(node) ||

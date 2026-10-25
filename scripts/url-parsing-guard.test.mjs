@@ -136,6 +136,24 @@ const ALLOWED_ZOD_URL_SETTINGS = Object.freeze({
 
 const sites = (text, file = 'x.mjs') => rawUrlParses(text, file).map((site) => site.kind);
 
+test('a base is a literal only when it is a const URL of literals, bound once', () => {
+  // From configuration: still a site.
+  assert.deepEqual(sites("const lib = new URL(env.X); new URL('a.sql', lib);"), [
+    'new URL',
+    'new URL',
+  ]);
+  // Reassignable, or the name bound again elsewhere: not resolved.
+  assert.deepEqual(sites("let lib = new URL('../lib/', import.meta.url); new URL('a', lib);"), [
+    'new URL',
+  ]);
+  assert.deepEqual(
+    sites(
+      "const lib = new URL('../lib/', import.meta.url); function f(lib) { return new URL('a', lib); }",
+    ),
+    ['new URL'],
+  );
+});
+
 test('every form of a native URL parse is found', () => {
   assert.deepEqual(sites('new URL(process.env.X)'), ['new URL']);
   assert.deepEqual(sites('new globalThis.URL(raw)'), ['new URL']);
@@ -232,6 +250,13 @@ test('literals, import.meta.url, comments and other parse methods are not sites'
   assert.deepEqual(sites('// new URL(process.env.X) is how it used to be\n'), []);
   assert.deepEqual(sites("const text = 'new URL(process.env.X)';"), []);
   assert.deepEqual(sites('JSON.parse(raw); path.parse(raw); new URLSearchParams(raw);'), []);
+  // A literal against a URL built only from literals (#421's privilege library).
+  assert.deepEqual(
+    sites(
+      "const lib = new URL('../lib/', import.meta.url); const sql = new URL('a.sql', lib); new URL('b.txt', sql);",
+    ),
+    [],
+  );
   // `parse` from another module is not `node:url`'s.
   assert.deepEqual(sites("import { parse } from 'node:path'; parse(raw)"), []);
 });
