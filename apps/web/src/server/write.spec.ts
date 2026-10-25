@@ -4,6 +4,7 @@
 import type { z } from 'zod';
 
 import {
+  GENERIC_REFUSAL_MESSAGE,
   MAX_IN_PROGRESS_WAIT_SECONDS,
   mapProblemToFields,
   writeThroughGateway,
@@ -31,7 +32,11 @@ type Field = 'hours' | 'periodEnd';
 
 const mapping: FieldMapping<Field> = {
   paths: { hours: 'hours', periodEnd: 'periodEnd' },
-  messages: { 'Record at least one of hours or kilometres': 'یکی از دو مقدار لازم است' },
+  messages: {
+    'Record at least one of hours or kilometres': 'یکی از دو مقدار لازم است',
+    'periodEnd must be after periodStart': 'پایان باید پس از شروع باشد',
+    'Usage cannot be recorded for a period in the future.': 'بازه نمی‌تواند در آینده باشد',
+  },
 };
 
 /**
@@ -151,12 +156,12 @@ describe('what comes back', () => {
 
     expect(result).toMatchObject({
       kind: 'INVALID',
-      fieldErrors: { periodEnd: 'periodEnd must be after periodStart' },
+      fieldErrors: { periodEnd: 'پایان باید پس از شروع باشد' },
       message: null,
     });
   });
 
-  it('translates a message it knows and keeps one it does not', async () => {
+  it('translates a message it knows and replaces one it does not', async () => {
     const known = await call((async () =>
       jsonResponse(400, {
         code: 'VALIDATION_FAILED',
@@ -165,8 +170,8 @@ describe('what comes back', () => {
       })) as unknown as typeof fetch);
     expect(known).toMatchObject({ fieldErrors: { hours: 'یکی از دو مقدار لازم است' } });
 
-    // A message this portal has never seen is shown as it arrived. The
-    // service's sentence is the truth; a stale dictionary is not.
+    // A message this portal has never seen is never shown: the generic Persian
+    // sentence stands in for it, and the gap is logged without the text.
     const unknown = await call((async () =>
       jsonResponse(400, {
         code: 'VALIDATION_FAILED',
@@ -174,11 +179,11 @@ describe('what comes back', () => {
         details: [{ path: 'hours', message: 'A rule invented after this portal shipped' }],
       })) as unknown as typeof fetch);
     expect(unknown).toMatchObject({
-      fieldErrors: { hours: 'A rule invented after this portal shipped' },
+      fieldErrors: { hours: GENERIC_REFUSAL_MESSAGE },
     });
   });
 
-  it('keeps a 422 business rule as a message when no field is named', async () => {
+  it('keeps a mapped 422 business rule as a message when no field is named', async () => {
     const result = await call((async () =>
       jsonResponse(422, {
         code: 'BUSINESS_RULE_VIOLATION',
@@ -188,7 +193,7 @@ describe('what comes back', () => {
     expect(result).toMatchObject({
       kind: 'INVALID',
       fieldErrors: {},
-      message: 'Usage cannot be recorded for a period in the future.',
+      message: 'بازه نمی‌تواند در آینده باشد',
     });
   });
 
@@ -260,9 +265,10 @@ describe('mapProblemToFields — a fallback keyed by error code', () => {
     expect(mapped.message).toBe('پیام جایگزین');
   });
 
-  it('keeps the sentence as it arrived under a code with no fallback', () => {
+  it('says the generic Persian sentence under a code with no fallback, never the English one', () => {
     const mapped = mapProblemToFields({ code: 'OTHER', message: 'Something new' }, mapping);
-    expect(mapped.message).toBe('Something new');
+    expect(mapped.message).toBe(GENERIC_REFUSAL_MESSAGE);
+    expect(mapped.message).not.toMatch(/[A-Za-z]/);
   });
 
   it('applies to a detail the mapping does not place on a field', () => {
@@ -375,7 +381,7 @@ describe('mapProblemToFields', () => {
       },
       mapping,
     );
-    expect(mapped.fieldErrors.hours).toBe('first');
+    expect(mapped.fieldErrors.hours).toBe(GENERIC_REFUSAL_MESSAGE);
   });
 
   it('surfaces a detail for a path no field owns rather than dropping it', () => {
@@ -388,7 +394,122 @@ describe('mapProblemToFields', () => {
       mapping,
     );
     expect(mapped.fieldErrors).toEqual({});
-    expect(mapped.message).toBe('required');
+    expect(mapped.message).toBe(GENERIC_REFUSAL_MESSAGE);
+  });
+});
+
+describe('an unknown English service message (the class: never shown raw)', () => {
+  const mapping = {
+    paths: { hours: 'hours' as const },
+    messages: { 'Known sentence': 'متن شناخته‌شده' },
+  };
+  const ECHO = 'Q-110 open question; you typed typed-input-xyz';
+
+  it.each<[string, { details?: { path: string; message: string }[] }, 'field' | 'message']>([
+    ['a detail on a field', { details: [{ path: 'hours', message: ECHO }] }, 'field'],
+    ['a detail on no field', { details: [{ path: 'elsewhere', message: ECHO }] }, 'message'],
+    ['a sentence with no details', {}, 'message'],
+  ])('renders the generic Persian fallback for %s', (_label, extra, where) => {
+    const mapped = mapProblemToFields(
+      { code: 'BUSINESS_RULE_VIOLATION', message: ECHO, ...extra },
+      mapping,
+    );
+    const shown = where === 'field' ? mapped.fieldErrors.hours : mapped.message;
+    expect(shown).toBe(GENERIC_REFUSAL_MESSAGE);
+    expect(JSON.stringify(mapped)).not.toContain('Q-110');
+    expect(JSON.stringify(mapped)).not.toContain('typed-input-xyz');
+  });
+
+  it('uses the mapping’s own fallback in place of the generic sentence', () => {
+    const mapped = mapProblemToFields(
+      { code: 'X', message: ECHO },
+      { ...mapping, fallback: 'جمله‌ی ویژه‌ی فرم' },
+    );
+    expect(mapped.message).toBe('جمله‌ی ویژه‌ی فرم');
+  });
+
+  it('keeps a mapped sentence, a pattern and a code-keyed sentence out of the diagnostic', () => {
+    (console.error as jest.Mock).mockClear();
+    mapProblemToFields({ code: 'X', message: 'Known sentence' }, mapping);
+    mapProblemToFields({ code: 'X', message: 'No' }, { ...mapping, patterns: [[/^No$/, 'الگو']] });
+    mapProblemToFields(
+      { code: 'KEYED', message: 'whatever' },
+      { ...mapping, byCode: { KEYED: 'کد' } },
+    );
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it('translates the shared text-rule refusals in every module that does not list them', () => {
+    expect(
+      mapProblemToFields(
+        { code: 'VALIDATION_FAILED', message: 'Contains unsupported characters' },
+        mapping,
+      ).message,
+    ).toContain('نویسه‌ی غیرمجاز');
+    expect(
+      mapProblemToFields(
+        {
+          code: 'VALIDATION_FAILED',
+          message: 'Validation failed',
+          details: [{ path: 'hours', message: 'Name contains unsupported characters' }],
+        },
+        mapping,
+      ).fieldErrors.hours,
+    ).toContain('نام نویسه‌ی غیرمجاز');
+  });
+
+  it('logs a sanitised structured diagnostic: status, code, path, length, hash — never the text', async () => {
+    (console.error as jest.Mock).mockClear();
+    const result = await writeThroughGateway(session, {
+      path: '/v1/x',
+      body: {},
+      submissionId: 'sub-1',
+      schema: { safeParse: () => ({ success: true, data: {} }) } as unknown as z.ZodTypeAny,
+      mapping,
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({
+            code: 'VALIDATION_FAILED',
+            message: 'Validation failed',
+            details: [{ path: 'hours', message: ECHO }],
+          }),
+          { status: 400, headers: { 'content-type': 'application/json' } },
+        )) as unknown as typeof fetch,
+    });
+
+    expect(result).toMatchObject({
+      kind: 'INVALID',
+      fieldErrors: { hours: GENERIC_REFUSAL_MESSAGE },
+    });
+    const lines = (console.error as jest.Mock).mock.calls.map((call) => String(call[0]));
+    expect(lines).toHaveLength(1);
+    const entry = JSON.parse(lines[0]!);
+    expect(entry).toEqual({
+      event: 'web.unmapped_service_message',
+      status: 400,
+      code: 'VALIDATION_FAILED',
+      path: 'hours',
+      messageLength: ECHO.length,
+      messageSha256: expect.stringMatching(/^[0-9a-f]{16}$/),
+    });
+    expect(lines[0]).not.toContain('Q-110');
+    expect(lines[0]).not.toContain('typed-input-xyz');
+  });
+
+  it('never turns a timeout into "nothing saved": the unknown outcome is not a refusal', async () => {
+    const result = await writeThroughGateway(session, {
+      path: '/v1/x',
+      body: {},
+      submissionId: 'sub-2',
+      schema: { safeParse: () => ({ success: true, data: {} }) } as unknown as z.ZodTypeAny,
+      mapping,
+      fetchImpl: (async () =>
+        new Response(JSON.stringify({ code: 'UPSTREAM_TIMEOUT', message: 'Upstream timed out' }), {
+          status: 504,
+          headers: { 'content-type': 'application/json' },
+        })) as unknown as typeof fetch,
+    });
+    expect(result).toMatchObject({ kind: 'UNKNOWN_OUTCOME' });
   });
 });
 
@@ -468,7 +589,14 @@ describe('sent, but not confirmed', () => {
     ['a connect timeout', 'UND_ERR_CONNECT_TIMEOUT'],
   ])('is still UNAVAILABLE for %s: nothing was sent', async (_label, code) => {
     const result = await call(rejecting(socket(code)));
+    expect(result).toMatchObject({ kind: 'UNAVAILABLE', status: 503, neverSent: true });
+  });
+
+  it('does not mark a 503 the platform answered as never sent: it may follow a commit', async () => {
+    const result = await call((async () =>
+      jsonResponse(503, { code: 'UNAVAILABLE', message: 'x' })) as unknown as typeof fetch);
     expect(result).toMatchObject({ kind: 'UNAVAILABLE', status: 503 });
+    expect(result).not.toHaveProperty('neverSent');
   });
 
   it('is UNKNOWN_OUTCOME for a 2xx whose body does not parse', async () => {

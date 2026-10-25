@@ -131,6 +131,9 @@ export const STEP_INVENTORY = Object.freeze({
     // Stopgap until the integration step is sharded (owner, 2026-10-24); back to 12 then.
     timeout: 16,
   },
+  'Backup restore SQL on a disposable database': postgresGuard(
+    'pnpm run test:backup-restore-drill-pg',
+  ),
   'Economic coverage gate': coverageGate('economic'),
   'Marketplace coverage gate': coverageGate('marketplace'),
   'Document coverage gate': coverageGate('document', { ...BUCKET, ...SCANNER }),
@@ -142,7 +145,12 @@ export const STEP_INVENTORY = Object.freeze({
   'Notification coverage gate': coverageGate('notification', MAILPIT),
   'Organization coverage gate': coverageGate('organization'),
   'Procurement coverage gate': coverageGate('procurement'),
-  'Analytics coverage gate': coverageGate('analytics'),
+  'Analytics coverage gate': coverageGate('analytics', { TEST_ANALYTICS_ADMIN_URL: ANY }),
+  'Analytics database privilege integration tests': {
+    run: ['pnpm --filter @rasta/analytics-service run test:db-privileges'],
+    env: { NODE_ENV: 'test', ...databases('ANALYTICS'), TEST_ANALYTICS_ADMIN_URL: ANY },
+    timeout: 5,
+  },
   'Test independence (F-25)': {
     run: withKafka('tests', 'pnpm run test:independence'),
     env: { ...KAFKA_TESTS, ...databases('MAINTENANCE') },
@@ -359,7 +367,12 @@ export function checkIntegrationSplit(workflow) {
         'postgres' in services && before(PROVISION_STEP),
       );
       needsInfra(
-        database && step.name !== MIGRATE_STEP,
+        database &&
+          step.name !== MIGRATE_STEP &&
+          !(
+            id === 'integration-backup-drill' &&
+            step.name === 'Backup restore SQL on a disposable database'
+          ),
         `"${MIGRATE_STEP}" before it`,
         before(MIGRATE_STEP),
       );

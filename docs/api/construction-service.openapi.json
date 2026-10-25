@@ -3,7 +3,7 @@
   "paths": {
     "/v1/projects": {
       "post": {
-        "description": "The organization is the one the request acts for; there is no field for it. Fields are the provisional set of docs/24 Q-68 (from docs/03 and docs/05, not the product document). An optional Idempotency-Key makes a retry return the first response. Publishes PROJECT_CREATED in the same transaction. Allowed roles come from configuration (CONSTRUCTION_PROJECT_ROLES to change, plus CONSTRUCTION_PROJECT_READER_ROLES to read; SYSTEM_ADMIN acting for a selected organization always) — docs/24 Q-69. AUDITOR is always refused.",
+        "description": "The organization is the one the request acts for; there is no field for it. Fields are the provisional set of docs/24 Q-68 (from docs/03 and docs/05, not the product document). An optional Idempotency-Key makes a retry return the first response. With it, an optional Idempotency-Replay-Deadline (epoch ms) is the last instant the request may be executed: past it on this service's clock the answer is 409 REPLAY_WINDOW_CLOSED, nothing written. Publishes PROJECT_CREATED in the same transaction. Allowed roles come from configuration (CONSTRUCTION_PROJECT_ROLES to change, plus CONSTRUCTION_PROJECT_READER_ROLES to read; SYSTEM_ADMIN acting for a selected organization always) — docs/24 Q-69. AUDITOR is always refused.",
         "operationId": "ProjectController_create_v1",
         "parameters": [
           {
@@ -15,6 +15,16 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 255
+            }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional; only with an Idempotency-Key (otherwise 400 VALIDATION_FAILED, as for any value that is not one canonical integer: no sign, no leading zero, no space, once). The last instant, in milliseconds since the epoch, this request may be executed under its key. A value later than claim time + retention − B on the receiving replica (B = 2 · CONSTRUCTION_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message): nothing is written, and the answer depends on nothing stored. It is never clamped. Otherwise the first claim stores the value as sent. The portal and this service are bound to one constant, PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts), and refuse to start when their own settings break it, so a conforming client does not meet the refusal. A stored record is forgotten (reclaimed or purged) only when its expiry is more than B in the past; another requester or body meets IDEMPOTENCY_KEY_REUSED until then. Past the stored deadline on this service's clock, the same request is refused with 409 REPLAY_WINDOW_CLOSED before anything is written: that attempt did nothing, an earlier one under the key may have. A first claim whose value is already behind this service's clock is refused the same way. A request without the header, and a record written before the deadline existed, behave as before (an expired key is reusable).",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
             }
           }
         ],
@@ -155,7 +165,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -185,7 +195,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -445,7 +455,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -645,7 +655,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -853,7 +863,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -893,7 +903,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1160,7 +1170,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1200,7 +1210,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1386,7 +1396,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1426,7 +1436,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -1673,7 +1683,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1852,7 +1862,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1892,7 +1902,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2100,7 +2110,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2140,7 +2150,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2318,7 +2328,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2358,7 +2368,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2572,7 +2582,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2612,7 +2622,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2966,7 +2976,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3176,7 +3186,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3216,7 +3226,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3425,7 +3435,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3465,7 +3475,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3666,7 +3676,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3706,7 +3716,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -3968,7 +3978,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -4147,7 +4157,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -4187,7 +4197,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4364,7 +4374,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -4404,7 +4414,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4666,7 +4676,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -4696,7 +4706,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -5113,7 +5123,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5423,7 +5433,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5673,7 +5683,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5933,7 +5943,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5973,7 +5983,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6252,7 +6262,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -6292,7 +6302,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6571,7 +6581,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -6611,7 +6621,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6875,7 +6885,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -6915,7 +6925,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7264,7 +7274,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -7565,7 +7575,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -7923,7 +7933,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -8006,7 +8016,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
             "content": {
               "application/json": {
                 "schema": {
@@ -8278,7 +8288,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -8318,7 +8328,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -8611,7 +8621,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -8801,7 +8811,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -8999,7 +9009,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -9039,7 +9049,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9413,7 +9423,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -9453,7 +9463,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -9728,7 +9738,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -9758,7 +9768,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -9985,7 +9995,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -10120,7 +10130,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -10266,7 +10276,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -10306,7 +10316,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -10493,7 +10503,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -10593,7 +10603,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -10927,7 +10937,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -10967,7 +10977,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -11221,7 +11231,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -11261,7 +11271,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -11460,7 +11470,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -11640,7 +11650,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -11775,7 +11785,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -11910,7 +11920,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -11950,7 +11960,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -12244,7 +12254,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -12327,7 +12337,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -12494,7 +12504,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -12694,7 +12704,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -12899,7 +12909,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -12939,7 +12949,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -13194,7 +13204,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -13277,7 +13287,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -13452,7 +13462,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -13492,7 +13502,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -13666,7 +13676,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -13749,7 +13759,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -13923,7 +13933,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -14006,7 +14016,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -14151,7 +14161,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -14234,7 +14244,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (opening: PROPOSAL_SUPERSEDED)",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (opening: PROPOSAL_SUPERSEDED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -14508,7 +14518,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -14681,7 +14691,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -14769,7 +14779,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -14971,7 +14981,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -15059,7 +15069,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -15280,7 +15290,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -15368,7 +15378,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -15591,7 +15601,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -15678,7 +15688,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -16055,7 +16065,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -16462,7 +16472,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -16545,7 +16555,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (award: ALREADY_AWARDED; approval: APPROVAL_STALE)",
+            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (award: ALREADY_AWARDED; approval: APPROVAL_STALE)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -16889,7 +16899,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -17196,7 +17206,7 @@
             }
           },
           "400": {
-            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, an operating area PostGIS considers invalid, and an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {

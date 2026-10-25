@@ -51,6 +51,8 @@
 #       migration  — nothing here: each table's grant is in the service's own
 #                    migrations (supplier-service grants less than DML on its
 #                    append-only and insert-only tables).
+#   * Extension relations keep at most SELECT in every mode (including audit);
+#     the superuser removes legacy writes after the application grants above.
 #   * The migration ledger `_prisma_migrations` is created **here**, with
 #     Prisma's own DDL, owned by the migrator and granted to no one — before any
 #     migration runs (Codex review of #176). Left to Prisma, a fresh database's
@@ -219,6 +221,121 @@ grant_service_tables() {
   fi
 }
 
+# Shared with the catalogue checker. Do not replace MEMBER with USAGE/SET:
+# this deliberately conservative closure also includes non-inherited memberships.
+_runtime_reachable_sql() {
+  local sql
+  sql="$(cat "$(dirname "${BASH_SOURCE[0]}")/runtime-reachable.sql")"
+  printf '%s' "${sql//RUNTIME_ROLE/\'${1}\'}"
+}
+
+# Revoke actual ACL entries as THEIR grantor. PG16 object REVOKE GRANTED BY
+# cannot name a different current_user. The privileged session switches roles
+# for each grant, then resets; CASCADE removes dependent grant chains too.
+# 'extension' is separate so every mode runs it AFTER application table grants.
+_restrict_reachable_acl() {
+  local db="$1" runtime="$2" migrator="$3" scope="$4"
+  _svc_split_psql "${db}" "DO \$\$
+    DECLARE item record;
+    BEGIN
+      FOR item IN
+        WITH reachable AS ($(_runtime_reachable_sql "${runtime}")),
+        relations AS (
+          SELECT c.*, n.nspname,
+            EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass
+              AND d.objid = c.oid AND d.deptype = 'e') AS extension
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\\_%'
+            AND c.relkind IN ('r','p','v','m','f','S')
+        ), entries AS (
+          SELECT a.grantor, a.grantee, a.privilege_type AS privilege,
+            format('%s %I.%I', CASE WHEN c.relkind = 'S' THEN 'SEQUENCE' ELSE 'TABLE' END,
+              c.nspname, c.relname) AS target, '' AS column_sql
+          FROM relations c, LATERAL aclexplode(c.relacl) a
+          WHERE ('${scope}' = 'extension' AND c.extension AND
+              ((c.relkind = 'S' AND a.privilege_type IN ('USAGE','UPDATE')) OR
+               (c.relkind <> 'S' AND a.privilege_type <> 'SELECT')))
+             OR ('${scope}' = 'general' AND
+              (c.relname = '_prisma_migrations' OR
+               (c.relkind <> 'S' AND a.privilege_type IN ('TRUNCATE','REFERENCES','TRIGGER'))))
+          UNION ALL
+          SELECT a.grantor, a.grantee, a.privilege_type,
+            format('TABLE %I.%I', c.nspname, c.relname), format(' (%I)', att.attname)
+          FROM relations c JOIN pg_attribute att ON att.attrelid = c.oid,
+            LATERAL aclexplode(att.attacl) a
+          WHERE ('${scope}' = 'extension' AND c.extension AND a.privilege_type <> 'SELECT')
+             OR ('${scope}' = 'general' AND
+                 (c.relname = '_prisma_migrations' OR a.privilege_type = 'REFERENCES'))
+          UNION ALL
+          SELECT a.grantor, a.grantee, a.privilege_type,
+            format('SCHEMA %I', n.nspname), ''
+          FROM pg_namespace n, LATERAL aclexplode(n.nspacl) a
+          WHERE '${scope}' = 'general' AND a.privilege_type = 'CREATE'
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%'
+          UNION ALL
+          SELECT a.grantor, a.grantee, a.privilege_type, format('DATABASE %I', d.datname), ''
+          FROM pg_database d, LATERAL aclexplode(d.datacl) a
+          WHERE '${scope}' = 'general' AND d.datname = current_database()
+            AND a.privilege_type IN ('CREATE','TEMPORARY')
+          UNION ALL
+          SELECT a.grantor, a.grantee, a.privilege_type,
+            format('FUNCTION %s', p.oid::regprocedure), ''
+          FROM pg_proc p, LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+          WHERE '${scope}' = 'general'
+            AND p.pronamespace IN (SELECT oid FROM pg_namespace WHERE nspname NOT IN ('pg_catalog','information_schema') AND nspname NOT LIKE 'pg\\_%')
+            AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass
+              AND d.objid = p.oid AND d.deptype = 'e')
+            AND ((a.grantee = 0 AND p.proowner = '${migrator}'::regrole) OR p.prosecdef OR p.prorettype IN ('trigger'::regtype,'event_trigger'::regtype))
+        )
+        SELECT DISTINCT pg_get_userbyid(e.grantor) AS grantor,
+          format('REVOKE %s%s ON %s FROM %s CASCADE', e.privilege, e.column_sql, e.target,
+            CASE WHEN e.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(e.grantee)) END) AS command
+        FROM entries e JOIN reachable r ON r.oid = e.grantee
+      LOOP
+        EXECUTE format('SET LOCAL ROLE %I', item.grantor);
+        EXECUTE item.command;
+        EXECUTE 'RESET ROLE';
+      END LOOP;
+    END \$\$;"
+}
+
+restrict_extension_relations() {
+  _restrict_reachable_acl "$1" "$2" "$2" extension
+}
+
+restrict_service_functions_and_rights() {
+  local db="$1" runtime="$2" migrator="$3"
+  _svc_split_psql "${db}" "ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC" || return 1
+  _restrict_reachable_acl "${db}" "${runtime}" "${migrator}" general || return 1
+}
+
+# Repair grants stripped by pre-407 splitters, even when migrations are already
+# recorded as applied. Bootstrap may precede the helper's creating migration.
+# Never turn an allowlisted signature into a SECURITY DEFINER/trigger back door.
+restore_runtime_function_grants() {
+  local svc="$1" db="$2" runtime="$3" migrator="$4" service signature
+  while IFS='|' read -r service signature; do
+    [[ "${service}" == "${svc}" ]] || continue
+    _svc_split_psql "${db}" "DO \$\$
+      DECLARE fn oid := to_regprocedure('${signature}');
+      BEGIN
+        IF fn IS NOT NULL THEN
+          IF NOT EXISTS (SELECT 1 FROM pg_proc p WHERE p.oid = fn
+            AND p.proowner = '${migrator}'::regrole AND NOT p.prosecdef
+            AND p.prorettype NOT IN ('trigger'::regtype,'event_trigger'::regtype)
+            AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass
+              AND d.objid = p.oid AND d.deptype = 'e')) THEN
+            RAISE EXCEPTION 'required runtime function has unsafe ownership or definition';
+          END IF;
+          EXECUTE format('SET LOCAL ROLE %I', '${migrator}');
+          EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', fn::regprocedure, '${runtime}');
+          EXECUTE 'RESET ROLE';
+        END IF;
+      END \$\$;" || return 1
+  done < "$(dirname "${BASH_SOURCE[0]}")/runtime-function-grants.txt"
+}
+
 # split_service_privileges <service> [database] [default|migration]
 split_service_privileges() {
   local svc="${1:?a service name is required}"
@@ -270,27 +387,11 @@ split_service_privileges() {
   _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA public FROM ${runtime}"
   _svc_split_psql "${db}" "GRANT USAGE ON SCHEMA public TO ${runtime}"
 
-  # Functions: no EXECUTE for PUBLIC. The global form, deliberately without
-  # `IN SCHEMA`: a per-schema default can only add to the global defaults,
-  # never revoke them (measured on PostgreSQL 16 for supplier-service).
-  _svc_split_psql "${db}" "ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"
-  _svc_split_psql "${db}" "DO \$\$
-    DECLARE fn regprocedure;
-    BEGIN
-      FOR fn IN
-        SELECT p.oid::regprocedure
-          FROM pg_proc p
-         WHERE p.proowner = '${migrator}'::regrole
-           AND NOT EXISTS (
-             SELECT 1 FROM pg_depend d
-              WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e'
-           )
-      LOOP
-        EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC, ${runtime}', fn);
-      END LOOP;
-    END \$\$;"
+  restrict_service_functions_and_rights "${db}" "${runtime}" "${migrator}" || return 1
+  restore_runtime_function_grants "${svc}" "${db}" "${runtime}" "${migrator}" || return 1
 
   grant_service_tables "${svc}" "${db}" "${mode}"
+  restrict_extension_relations "${db}" "${runtime}" || return 1
 
   # The migration ledger is the migrator's alone, from before the first
   # migration: a runtime role that could write it could mark a guard-creating
@@ -300,7 +401,7 @@ split_service_privileges() {
   ensure_utc_session_defaults "${db}" "${runtime}" "${migrator}"
   ensure_runtime_statement_timeout "${svc}" "${db}" "${runtime}" || return 1
 
-  echo "    - ${db}: owned by ${migrator}; ${runtime} has CONNECT, USAGE on public, no CREATEDB, no EXECUTE, grants: ${mode}; ledger pre-created, no runtime rights; sessions default to UTC"
+  echo "    - ${db}: owned by ${migrator}; ${runtime} has CONNECT, USAGE on public, no CREATEDB, no direct definer/trigger EXECUTE, grants: ${mode}; ledger pre-created, no runtime rights; sessions default to UTC"
 }
 
 # split_audit_database_privileges [database] [service]
@@ -347,6 +448,8 @@ split_audit_database_privileges() {
   _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA audit FROM PUBLIC"
   _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA audit FROM ${runtime}"
   _svc_split_psql "${db}" "GRANT USAGE ON SCHEMA audit TO ${runtime}"
+  restrict_service_functions_and_rights "${db}" "${runtime}" "${migrator}" || return 1
+  restrict_extension_relations "${db}" "${runtime}" || return 1
   # Its migrations run with `?schema=audit`, so that is where Prisma keeps the
   # ledger; the same pre-creation, so it never holds a runtime grant either.
   own_migration_ledger "${db}" audit "${migrator}" "${runtime}"

@@ -326,6 +326,27 @@ describe('the award', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
+  it('names a standing verdict other than ELIGIBLE in Persian, not by its code', () => {
+    awardPage({
+      request: { kind: 'OK', data: AWARD_PENDING_REQUEST },
+      step: {
+        kind: 'OK',
+        data: {
+          ...AWARD_STEP,
+          request: {
+            ...AWARD_STEP.request!,
+            bid: { ...AWARD_STEP.request!.bid!, standingVerdict: 'NOT_ELIGIBLE' },
+          },
+        },
+      },
+      notes: ['AWARD_PENDING'],
+      offered: [offer('GRANT_AWARD'), offer('REJECT_AWARD')],
+    });
+    const named = region('واگذاری');
+    expect(named).toHaveTextContent('فاقد صلاحیت');
+    expect(named).not.toHaveTextContent('NOT_ELIGIBLE');
+  });
+
   it('approved: only executing it, with the justification approved and nothing to type', async () => {
     const { container } = awardPage({
       request: { kind: 'OK', data: AWARD_APPROVED_REQUEST },

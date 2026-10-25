@@ -19,10 +19,12 @@ export {
 export type { IdPrefix, OrganizationId, UserId, AssetId } from './common/identifiers';
 
 export {
+  DISPLAY_TEXT_PATTERN,
   WITHOUT_BIDI_CONTROL,
   WITHOUT_CONTROL_CHARACTER,
   UNSUPPORTED_CHARACTERS,
   containsBidiControl,
+  displayText,
   plainText,
   referenceId,
   withoutBidiControlDeep,
@@ -55,6 +57,8 @@ export type { BusinessLine } from './common/business-line';
 
 export { ERROR_CODES, ERROR_STATUS, errorDetailSchema, apiErrorSchema } from './common/errors';
 export type { ErrorCode, ErrorDetail, ApiError } from './common/errors';
+
+export { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from './common/replay-window';
 
 export {
   DEFAULT_PAGE_SIZE,

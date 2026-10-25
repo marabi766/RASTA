@@ -1,6 +1,7 @@
 import { ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText } from '@/lib/format';
 import {
   ASSIGN_DRIVER_FIELDS,
@@ -186,14 +187,7 @@ export function parseAssignForm(
   const parsed = assignFormSchema.safeParse(values);
   if (parsed.success) return { ok: true, request: { ...parsed.data, driverId: driverIdValue } };
 
-  const fieldErrors: Partial<Record<AssignDriverField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (typeof field === 'string' && isAssignField(field) && fieldErrors[field] === undefined) {
-      fieldErrors[field] = issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isAssignField) };
 }
 
 function isAssignField(value: string): value is AssignDriverField {
@@ -281,18 +275,7 @@ export function parseEndAssignmentForm(values: EndAssignmentFormValues): ParsedE
   const parsed = endAssignmentFormSchema.safeParse(values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<EndAssignmentField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (
-      typeof field === 'string' &&
-      isEndAssignmentField(field) &&
-      fieldErrors[field] === undefined
-    ) {
-      fieldErrors[field] = issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isEndAssignmentField) };
 }
 
 function isEndAssignmentField(value: string): value is EndAssignmentField {
