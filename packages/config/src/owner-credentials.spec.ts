@@ -54,3 +54,25 @@ describe('a service never holds its database owner credential (D-045)', () => {
     ).toEqual([]);
   });
 });
+
+// The shared .env carries all service runtime URLs; privileged names alone fail boot.
+describe('privileged database URL names', () => {
+  it.each([
+    'DATABASE_URL_ANALYTICS_TEST_ADMIN',
+    'DATABASE_URL_ADMIN',
+    'DATABASE_URL_ASSET_SUPERUSER',
+    'DATABASE_URL_ECONOMIC_ADMIN',
+  ])('refuses %s', (name) => {
+    expect(migratorCredentialsIn({ [name]: 'credential' })).toEqual([name]);
+    expect(() => assertNoMigratorCredentials({ [name]: 'credential' })).toThrow(name);
+  });
+  it('accepts all foreign runtime URLs from the shared example', () => {
+    expect(() =>
+      assertNoMigratorCredentials({
+        DATABASE_URL_ANALYTICS: 'runtime',
+        DATABASE_URL_ECONOMIC: 'runtime',
+        DATABASE_URL_PROCUREMENT: 'runtime',
+      }),
+    ).not.toThrow();
+  });
+});
