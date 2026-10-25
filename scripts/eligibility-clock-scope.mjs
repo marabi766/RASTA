@@ -229,7 +229,12 @@ function constantPath(node, path, ast, depth = 0) {
   if (ts.isNewExpression(node) && node.expression.getText(ast) === 'URL') {
     const [rel, base] = (node.arguments ?? []).map(again);
     if (rel === null || base === null || base === undefined) return null;
-    return new URL(rel, base.startsWith('file://') ? base : 'file://' + base).pathname;
+    // URL resolution of a file path, by path arithmetic: relative to the base's
+    // directory, or to the base itself when it names a directory (trailing /).
+    const basePath = base.replace(/^file:\/\//, '');
+    const relPath = rel.replace(/^file:\/\//, '');
+    if (relPath.startsWith('/')) return relPath;
+    return resolvePath(basePath.endsWith('/') ? basePath : dirname(basePath), relPath);
   }
   if (ts.isCallExpression(node)) {
     const callee = node.expression.getText(ast).replace(/^path\./, '');
