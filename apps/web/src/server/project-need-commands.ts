@@ -164,6 +164,7 @@ export const updateNeed = (
     body: { ...body, expectedVersion },
     schema: answerSchema,
     mapping: NEED_FIELD_MAPPING,
+    idempotency: 'NONE',
     fetchImpl,
   });
 
@@ -179,6 +180,7 @@ export const submitNeed = (
     body: { expectedVersion },
     schema: answerSchema,
     mapping: NO_NEED_FIELD_MAPPING,
+    idempotency: 'NONE',
     fetchImpl,
   });
 
@@ -195,6 +197,7 @@ export const withdrawNeed = (
     body: { ...body, expectedVersion },
     schema: answerSchema,
     mapping: WITHDRAW_NEED_FIELD_MAPPING,
+    idempotency: 'NONE',
     fetchImpl,
   });
 
