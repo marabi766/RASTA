@@ -61,7 +61,12 @@ function liveGroup(): number {
   groups.push(child.pid as number);
   return child.pid as number;
 }
+/** Lock processes a case started; a failed expectation must not leave one holding forever. */
+const lockProcesses: ChildProcess[] = [];
 afterEach(() => {
+  for (const child of lockProcesses.splice(0)) {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  }
   for (const group of groups.splice(0)) {
     try {
       process.kill(-group, 'SIGKILL');
@@ -335,6 +340,7 @@ function spawnLockProcess(
     }
   `;
   const child = spawn(process.execPath, ['--input-type=module', '-e', code, '--', web]);
+  lockProcesses.push(child);
   let stdout = '';
   child.stdout?.on('data', (chunk) => (stdout += chunk));
   const result = new Promise<unknown>((resolve) =>
