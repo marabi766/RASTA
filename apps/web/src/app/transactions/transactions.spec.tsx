@@ -19,6 +19,16 @@ import type { DisputeFormState } from './[id]/form-state';
  * the real hook.
  */
 
+// Forty tests here run jest-axe over a screen, and no one of them can be made cheaper without
+// scanning less: a scan is ~150-250 ms of jsdom `getComputedStyle` (about 1.3 ms an element, even
+// with no stylesheet) plus axe's rule selectors, and all 40 scans cover different states (39 distinct HTML
+// strings) are scanned. Alone the file takes 7-9 s and no test passes 0.7 s; but in CI `turbo` runs
+// every package's jest at once on four cores, and the same file took 56 s (main 61a13bbc) and its
+// first test 4.6 s of the 5 s default — the axe run a timed-out test leaves behind then fails the
+// next tests with "Axe is already running". This gives each test the room the sibling jest-axe
+// specs (`statements.spec.tsx`, `evaluation.spec.tsx` …) already have.
+jest.setTimeout(20_000);
+
 let formState: DisputeFormState = { kind: 'IDLE' };
 let pending = false;
 
