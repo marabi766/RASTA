@@ -42,7 +42,7 @@ const TENDERS_ITEM: SidebarItem = { href: '/tenders', label: 'مناقصه‌ه�
 const CONTRACTS_ITEM: SidebarItem = { href: '/contracts', label: 'قراردادها' };
 
 /** Shown only to a role that may read the supplier directory (`server/portal-nav.ts`). */
-const SUPPLIERS_ITEM: SidebarItem = { href: '/suppliers', label: 'تأمین‌کنندگان' };
+const SUPPLIERS_ITEM: SidebarItem = { href: '/suppliers', label: 'تامین‌کنندگان' };
 
 const NAV_AFTER_PROJECTS: readonly SidebarItem[] = [
   { href: '/wallet', label: 'کیف پول' },

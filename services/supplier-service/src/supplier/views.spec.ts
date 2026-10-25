@@ -16,6 +16,11 @@ import {
  * platform, through a query that is otherwise entirely correct.
  */
 
+/** A platform operator outside the supplier's organization (`mayReadReviewerNote`). */
+const REVIEWER = { reviewer: true } as const;
+/** The supplier's own organization, or a reviewer who belongs to it. */
+const NOT_A_REVIEWER = { reviewer: false } as const;
+
 const SUSPENDED_AT = new Date('2026-04-01T00:00:00.000Z');
 
 function row(overrides: Partial<SupplierRow> = {}): SupplierRow {
@@ -38,6 +43,7 @@ function row(overrides: Partial<SupplierRow> = {}): SupplierRow {
         decidedBy: 'USR_OPERATOR',
         decidedAt: new Date('2026-03-01T00:00:00.000Z'),
         decisionNote: 'Called the referee listed on the second document',
+        rejectionReason: null,
         evidence: [{ documentId: 'DOC_PRIVATE_LICENCE', label: 'Trade licence' }],
       },
       {
@@ -50,6 +56,7 @@ function row(overrides: Partial<SupplierRow> = {}): SupplierRow {
         decidedBy: null,
         decidedAt: null,
         decisionNote: null,
+        rejectionReason: null,
         evidence: [],
       },
     ],
@@ -181,7 +188,7 @@ describe('qualifiedFor', () => {
 describe('the detail projection', () => {
   it('contains everything the directory does, so a field cannot be public here and private there', () => {
     const directory = toDirectoryView(row());
-    const detail = toDetailView(row()) as Record<string, unknown>;
+    const detail = toDetailView(row(), REVIEWER) as Record<string, unknown>;
 
     for (const [key, value] of Object.entries(directory)) {
       expect(detail[key]).toEqual(value);
@@ -189,7 +196,7 @@ describe('the detail projection', () => {
   });
 
   it('adds the private material a permitted reader needs', () => {
-    const detail = toDetailView(row());
+    const detail = toDetailView(row(), REVIEWER);
 
     expect(detail.registeredBy).toBe('USR_OWNER');
     expect(detail.qualifications[0].decisionNote).toContain('referee');
@@ -197,13 +204,13 @@ describe('the detail projection', () => {
   });
 
   it('shows undecided submissions, which the directory hides', () => {
-    const detail = toDetailView(row());
+    const detail = toDetailView(row(), REVIEWER);
 
     expect(detail.qualifications.map((q) => q.state)).toEqual(['APPROVED', 'SUBMITTED']);
   });
 
   it('marks an approval as not current while the supplier is suspended', () => {
-    const detail = toDetailView(SUSPENDED);
+    const detail = toDetailView(SUSPENDED, REVIEWER);
     const approval = detail.qualifications.find((q) => q.state === 'APPROVED');
 
     // The approval is untouched — suspension does not revoke it — but it does
@@ -214,7 +221,7 @@ describe('the detail projection', () => {
   });
 
   it('reports the suspension episode as open', () => {
-    expect(toDetailView(SUSPENDED).suspensions[0].open).toBe(true);
+    expect(toDetailView(SUSPENDED, REVIEWER).suspensions[0].open).toBe(true);
   });
 
   it('reports a closed episode as closed and keeps it in the history', () => {
@@ -230,7 +237,7 @@ describe('the detail projection', () => {
       ],
     });
 
-    const detail = toDetailView(reinstated);
+    const detail = toDetailView(reinstated, REVIEWER);
 
     expect(detail.suspensions).toHaveLength(1);
     expect(detail.suspensions[0].open).toBe(false);
@@ -239,9 +246,52 @@ describe('the detail projection', () => {
   });
 });
 
+describe('the reviewer note is the reviewers’ own (Codex review of PR 366, finding 1)', () => {
+  const REJECTED = row({
+    qualifications: [
+      {
+        ...row().qualifications[1],
+        state: 'REJECTED',
+        decidedBy: 'USR_OPERATOR',
+        decidedAt: new Date('2026-03-20T00:00:00.000Z'),
+        decisionNote: 'The licence number did not match the registry entry',
+        rejectionReason: 'The submitted licence has expired',
+      },
+    ],
+  });
+
+  it('carries no decisionNote key at all for a reader who is not a reviewer', () => {
+    const detail = toDetailView(row(), NOT_A_REVIEWER);
+
+    for (const qualification of detail.qualifications) {
+      expect(Object.keys(qualification)).not.toContain('decisionNote');
+    }
+    expect(JSON.stringify(detail)).not.toContain('referee');
+  });
+
+  it('carries the note to a reviewer', () => {
+    expect(toDetailView(REJECTED, REVIEWER).qualifications[0].decisionNote).toBe(
+      'The licence number did not match the registry entry',
+    );
+  });
+
+  it('carries the rejection reason to both, because it was written for the supplier', () => {
+    expect(toDetailView(REJECTED, NOT_A_REVIEWER).qualifications[0].rejectionReason).toBe(
+      'The submitted licence has expired',
+    );
+    expect(toDetailView(REJECTED, REVIEWER).qualifications[0].rejectionReason).toBe(
+      'The submitted licence has expired',
+    );
+  });
+
+  it('keeps the rejection reason out of the directory', () => {
+    expect(JSON.stringify(toDirectoryView(REJECTED))).not.toContain('expired');
+  });
+});
+
 describe('timestamps', () => {
   it('renders every timestamp as ISO-8601 UTC (docs/07 § 7.3)', () => {
-    const detail = toDetailView(SUSPENDED);
+    const detail = toDetailView(SUSPENDED, REVIEWER);
 
     expect(detail.registeredAt).toBe('2026-01-01T00:00:00.000Z');
     expect(detail.suspensions[0].suspendedAt).toBe(SUSPENDED_AT.toISOString());

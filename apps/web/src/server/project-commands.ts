@@ -215,6 +215,8 @@ export const updateProject = (
     path: projectPath(projectId),
     method: 'PATCH',
     body: { ...body, expectedVersion },
+    // Fenced by the version, not by a key (stated at the call since the key became required).
+    idempotency: 'NONE',
     schema: answerSchema,
     mapping: UPDATE_FIELD_MAPPING,
     fetchImpl,
@@ -234,6 +236,7 @@ function postCommand<F extends string, B extends object>(
     // command to that version only, so a stale page — or a second send of this
     // one — cannot write.
     body: { ...body, expectedVersion },
+    idempotency: 'NONE',
     schema: answerSchema,
     mapping,
     fetchImpl,

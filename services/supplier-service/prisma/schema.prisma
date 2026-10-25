@@ -182,10 +182,18 @@ model Qualification {
   decidedAt            DateTime? @map("decided_at")
   decidedCorrelationId String?   @map("decided_correlation_id")
 
-  /// The reviewer's own words. **Private** — it never leaves through a
-  /// directory projection, and src/supplier/views.ts is where that is enforced
+  /// The reviewer's own words. **Private to reviewers** — it never leaves
+  /// through a directory projection, and the detail projection carries it only
+  /// to a platform operator outside the supplier's organization
+  /// (`mayReadReviewerNote`); src/supplier/views.ts is where that is enforced
   /// and tested.
   decisionNote String? @map("decision_note")
+
+  /// Why a rejection was made, stated **for the supplier**: required by
+  /// RejectQualification, published on SUPPLIER_REJECTED, and readable on the
+  /// supplier's own record. Null on every other state, and on a rejection
+  /// recorded before 20261023120000 whose event had already left the outbox.
+  rejectionReason String? @map("rejection_reason")
 
   evidence QualificationEvidence[]
 
