@@ -22,7 +22,7 @@ import { toPersianDigits } from './format/digits';
  *     («حداکثر ۲۰۰ نویسه مجاز است»), which names the limit and never the input.
  *  3. Otherwise one generic sentence.
  *
- * No hamza letters and no U+0654 in any sentence here (docs/16 text policy).
+ * Standard orthography (hamza included), no U+0654: `orthography.spec.ts`.
  */
 
 /** The fallback for an issue nothing above can describe. */

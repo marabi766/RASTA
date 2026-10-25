@@ -31,12 +31,7 @@ import { PlaceOrderForm } from './PlaceOrderForm';
  * (`docs/16 § ۱۶٫۱۱`, ADR-041).
  */
 
-/**
- * The marketplace's existing wording for an approved supplier, kept as it was
- * on main: the supplier screens spell the shared label without a hamza (PR 366
- * r5/r6), and which spelling the product uses is still an open owner question,
- * so this screen does not follow that change.
- */
+/** The marketplace's wording for an approved supplier, in the standard orthography (with hamza). */
 const APPROVED_OFFER_LABEL = 'تأییدشده';
 
 export interface OffersScreenProps {

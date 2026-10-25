@@ -173,7 +173,7 @@ export function ApprovalsSection({ children }: { children: ReactNode }) {
     <Section
       headingId="project-approvals"
       title="موافقت‌ها"
-      description="سامانه هیچ پروژه‌ای را خودکار تایید نمی‌کند: هر مرحله را مرجع نام‌برده تصمیم می‌گیرد."
+      description="سامانه هیچ پروژه‌ای را خودکار تأیید نمی‌کند: هر مرحله را مرجع نام‌برده تصمیم می‌گیرد."
     >
       {children}
     </Section>

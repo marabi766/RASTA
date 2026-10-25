@@ -189,7 +189,7 @@ export function orderCommandFormValues(form: FormData): OrderCommandFormValues {
  * words: the note is not kept, nothing was confirmed, and what to do next.
  */
 export const RECEIPT_NOTE_REFUSAL =
-  'یادداشت هنگام تایید دریافت ذخیره نمی‌شود، پس چیزی ارسال نشد. صفحه را تازه کنید و بدون یادداشت تایید کنید.';
+  'یادداشت هنگام تأیید دریافت ذخیره نمی‌شود، پس چیزی ارسال نشد. صفحه را تازه کنید و بدون یادداشت تأیید کنید.';
 
 /** An optional free-text field: blank means "not given", so it is left out. */
 const optionalText = (max: number, message: string) =>

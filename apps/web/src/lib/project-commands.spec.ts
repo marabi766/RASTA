@@ -1,8 +1,6 @@
 /**
  * @jest-environment node
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 
 import * as commands from './project-commands';
 import { IN_PROGRESS_WRITE_MESSAGE } from './in-progress-write';
@@ -34,6 +32,7 @@ import {
   type ProjectField,
 } from './project-commands';
 import { SESSION_REFUSAL_MESSAGES } from './session-refusal';
+import { NON_STANDARD_SPELLING } from '@/test/orthography';
 
 const VALID = {
   title: 'بازسازی پل',
@@ -190,11 +189,11 @@ describe('the edit form', () => {
 
 describe('the other commands', () => {
   it('needs the cancel reason and the tick, and sends the reason only', () => {
-    expect(parseCancelForm({ reason: 'بودجه تامین نشد', confirm: 'yes' })).toEqual({
+    expect(parseCancelForm({ reason: 'بودجه تأمین نشد', confirm: 'yes' })).toEqual({
       ok: true,
-      body: { reason: 'بودجه تامین نشد' },
+      body: { reason: 'بودجه تأمین نشد' },
     });
-    expect(parseCancelForm({ reason: 'بودجه تامین نشد', confirm: '' })).toEqual({
+    expect(parseCancelForm({ reason: 'بودجه تأمین نشد', confirm: '' })).toEqual({
       ok: false,
       fieldErrors: { confirm: CANCEL_UNCONFIRMED_MESSAGE },
     });
@@ -266,13 +265,6 @@ describe('the words', () => {
     expect(workflowLabel('other')).toBe('other');
   });
 
-  // The rule for new text on these screens: no hamza, no combining hamza. The
-  // regular expression is built from code points so this file carries neither.
-  const HAMZA = new RegExp(
-    `[${[0x0621, 0x0623, 0x0624, 0x0625, 0x0626, 0x0654].map((c) => String.fromCodePoint(c)).join('')}]`,
-    'u',
-  );
-
   function strings(value: unknown, out: string[] = []): string[] {
     if (typeof value === 'string') out.push(value);
     else if (value instanceof RegExp) return out;
@@ -282,40 +274,19 @@ describe('the words', () => {
     return out;
   }
 
-  it('carries no hamza in anything this module exports', () => {
-    const offending = strings(Object.entries(commands)).filter((text) => HAMZA.test(text));
+  it('uses the standard orthography in anything this module exports', () => {
+    const offending = strings(Object.entries(commands)).filter((text) =>
+      NON_STANDARD_SPELLING.test(text),
+    );
     expect(offending).toEqual([]);
   });
 
-  it('carries no hamza in the shared sentences these screens render', () => {
+  it('uses the standard orthography in the shared sentences these screens render', () => {
     const shared = [
       UNCONFIRMED_WRITE_MESSAGE,
       IN_PROGRESS_WRITE_MESSAGE,
       ...Object.values(SESSION_REFUSAL_MESSAGES),
     ];
-    expect(shared.filter((text) => HAMZA.test(text))).toEqual([]);
-  });
-
-  it.each([
-    'src/lib/project-commands.ts',
-    'src/server/project-commands.ts',
-    'src/app/projects/page.tsx',
-    'src/app/projects/actions.ts',
-    'src/app/projects/form-state.ts',
-    'src/app/projects/CreateProjectForm.tsx',
-    'src/server/project-create-replay.ts',
-    'src/app/projects/ApprovalInbox.tsx',
-    'src/app/projects/[id]/page.tsx',
-    'src/app/projects/[id]/ProjectForms.tsx',
-    'src/app/projects/[id]/ProjectCommands.tsx',
-    'src/app/projects/[id]/ProjectApprovals.tsx',
-    'src/app/projects/[id]/project-actions.ts',
-    'src/app/projects/[id]/project-runner.ts',
-    'src/app/projects/[id]/project-form-state.ts',
-  ])('%s carries no hamza in new text', (file) => {
-    const text = readFileSync(join(process.cwd(), file), 'utf8');
-    // The one word of the existing reading screens (the page title, «جزئیات») this task did not write.
-    const mine = text.split('\u062c\u0632\u0626\u06cc\u0627\u062a').join('');
-    expect(mine.split('\n').filter((line) => HAMZA.test(line))).toEqual([]);
+    expect(shared.filter((text) => NON_STANDARD_SPELLING.test(text))).toEqual([]);
   });
 });

@@ -116,7 +116,7 @@ export function roleLabel(role: string): string {
  * `PENDING` or `DEACTIVATED`, and a user is never `REVOKED`.
  */
 export const USER_STATUS_LABELS: Readonly<Record<string, string>> = {
-  PENDING: 'در انتظار تایید',
+  PENDING: 'در انتظار تأیید',
   ACTIVE: 'فعال',
   SUSPENDED: 'معلق',
   DEACTIVATED: 'غیرفعال‌شده',

@@ -32,6 +32,7 @@ import {
 } from './[id]/ProjectForms';
 import type { ProjectFormState } from './[id]/project-form-state';
 import type { CreateProjectFormState } from './form-state';
+import { NON_STANDARD_SPELLING } from '@/test/orthography';
 
 /**
  * The project write screens with the real `useActionState`: only the server
@@ -106,12 +107,6 @@ const field = (container: HTMLElement, name: string) =>
   container.querySelector(`[name="${name}"]`) as HTMLInputElement;
 
 beforeEach(() => act_.mockReset());
-
-/** Built from code points so this file carries none: hamza, its carriers, and the combining hamza. */
-const HAMZA = new RegExp(
-  `[${[0x0621, 0x0623, 0x0624, 0x0625, 0x0626, 0x0654].map((c) => String.fromCodePoint(c)).join('')}]`,
-  'u',
-);
 
 const FORMS = [
   {
@@ -224,7 +219,7 @@ describe.each(FORMS)('the $name form', (form) => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  // The rule for new text on these screens (no hamza, no combining hamza) covers
+  // The orthography rule (standard spelling, no combining hamza) covers
   // what they render from shared modules too, not only their own source files:
   // the unconfirmed alert, the session refusals, the in-progress sentence.
   it.each([
@@ -235,12 +230,12 @@ describe.each(FORMS)('the $name form', (form) => {
     { kind: 'FAILED', status: 503, correlationId: 'c' } as const,
     { kind: 'FAILED', status: 429, correlationId: 'c' } as const,
     { kind: 'UNCONFIRMED', correlationId: 'c' } as const,
-  ])('renders %j without a hamza', async (state) => {
+  ])('renders %j in the standard orthography', async (state) => {
     act_.mockResolvedValueOnce(state);
     const { container } = form.render();
     await send(container);
     const alert = await screen.findByRole('alert');
-    expect(alert.textContent).not.toMatch(HAMZA);
+    expect(alert.textContent).not.toMatch(NON_STANDARD_SPELLING);
   });
 
   it('says a refusal the service put on no field in a message, with no axe violation', async () => {
@@ -520,7 +515,7 @@ describe('the approval policy, as the page states it', () => {
   it('says the system is closed when no policy is active, and says who does what about it', async () => {
     const { container } = render(<PolicyState policy={ok({ kind: 'CLOSED' })} />);
     expect(screen.getByRole('alert')).toHaveTextContent(POLICY_CLOSED_TITLE);
-    expect(container).toHaveTextContent('هیچ پروژه‌ای به مرحله تایید نمی‌رسد');
+    expect(container).toHaveTextContent('هیچ پروژه‌ای به مرحله تأیید نمی‌رسد');
     expect(container).toHaveTextContent('مدیر پلتفرم فعال می‌کند');
     expect(await axe(container)).toHaveNoViolations();
   });
@@ -533,8 +528,8 @@ describe('the approval policy, as the page states it', () => {
           label: 'سیاست شورا',
           isSample: true,
           steps: [
-            { approvalType: 'تایید فنی', authorityLabel: 'شورای شهر' },
-            { approvalType: 'تایید مالی', authorityLabel: 'استانداری' },
+            { approvalType: 'تأیید فنی', authorityLabel: 'شورای شهر' },
+            { approvalType: 'تأیید مالی', authorityLabel: 'استانداری' },
           ],
         })}
       />,
@@ -542,7 +537,7 @@ describe('the approval policy, as the page states it', () => {
     expect(container).toHaveTextContent('سیاست شورا');
     expect(container).toHaveTextContent('(نمونه)');
     const items = screen.getAllByRole('listitem');
-    expect(items[0]).toHaveTextContent('تایید فنی');
+    expect(items[0]).toHaveTextContent('تأیید فنی');
     expect(items[1]).toHaveTextContent('استانداری');
     expect(await axe(container)).toHaveNoViolations();
   });
@@ -566,7 +561,7 @@ const STEP = (over: Partial<ProjectApproval> = {}): ProjectApproval => ({
   workflowKey: 'project.execution',
   round: 1,
   stepOrder: 1,
-  approvalType: 'تایید فنی',
+  approvalType: 'تأیید فنی',
   authorityOrganizationId: 'ORG-COUNCIL',
   authorityRole: 'UNION_ADMIN',
   authorityLabel: 'شورای شهر',
@@ -609,7 +604,7 @@ describe('the approval rounds', () => {
           stepOrder: 2,
           status: 'REJECTED',
           reason: 'برآورد نادرست است',
-          approvalType: 'تایید مالی',
+          approvalType: 'تأیید مالی',
         }),
         STEP({ id: 'B1', round: 2, stepOrder: 1, status: 'PENDING' }),
       ],
@@ -673,7 +668,7 @@ describe('the authority’s inbox', () => {
     const { container } = draw(ok([], true));
     expect(container).not.toHaveTextContent('تصمیمی منتظر شما نیست');
     expect(container).toHaveTextContent('خوانده نشد');
-    expect(container.textContent).not.toMatch(HAMZA);
+    expect(container.textContent).not.toMatch(NON_STANDARD_SPELLING);
     expect(await axe(container)).toHaveNoViolations();
   });
 

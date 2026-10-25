@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 
 import { SUBMISSION_FIELD } from '@/lib/form-fields';
 import type { SupplierFormState } from './supplier-form-state';
+import { NON_STANDARD_SPELLING } from '@/test/orthography';
 
 /**
  * The forms and the notice for an unresolved supplier write, with the real
@@ -51,10 +52,10 @@ const FORMS = {
     <forms.SubmitQualificationForm {...BOUND} held={held} capabilities={['GOODS_SUPPLY']} />
   ),
   approve: (held: boolean) => (
-    <forms.ApproveQualificationForm {...BOUND} held={held} capabilityLabel="تامین کالا" />
+    <forms.ApproveQualificationForm {...BOUND} held={held} capabilityLabel="تأمین کالا" />
   ),
   reject: (held: boolean) => (
-    <forms.RejectQualificationForm {...BOUND} held={held} capabilityLabel="تامین کالا" />
+    <forms.RejectQualificationForm {...BOUND} held={held} capabilityLabel="تأمین کالا" />
   ),
   suspend: (held: boolean) => <forms.SuspendSupplierForm {...BOUND} held={held} />,
   reinstate: (held: boolean) => <forms.ReinstateSupplierForm {...BOUND} held={held} />,
@@ -127,8 +128,8 @@ describe('the notice', () => {
     expect(screen.getByText(/هم‌اکنون در حال فرستاده شدن/)).toBeInTheDocument();
   });
 
-  it('has no U+0654 or hamza letter in what it says', () => {
+  it('uses the standard orthography in what it says', () => {
     const { container } = render(notice({ inFlight: true }, null));
-    expect(container.textContent ?? '').not.toMatch(/[ٔأإؤئ]/);
+    expect(container.textContent ?? '').not.toMatch(NON_STANDARD_SPELLING);
   });
 });

@@ -235,7 +235,7 @@ export function RegisterSupplierForm(identity: SupplierIdentity) {
       <Banner state={state} />
       <Consequence command="REGISTER" />
 
-      <Field label="نام تامین‌کننده" required error={errors.displayName}>
+      <Field label="نام تأمین‌کننده" required error={errors.displayName}>
         {(control) => (
           <input
             {...control}
@@ -257,7 +257,7 @@ export function RegisterSupplierForm(identity: SupplierIdentity) {
 
       <div>
         <Button type="submit" disabled={pending || blocked(identity, state)}>
-          {pending ? 'در حال ثبت…' : 'ثبت پرونده تامین‌کننده'}
+          {pending ? 'در حال ثبت…' : 'ثبت پرونده تأمین‌کننده'}
         </Button>
       </div>
     </form>
@@ -319,7 +319,7 @@ export function SubmitQualificationForm({
       <Field
         label="توضیح"
         error={errors.statement}
-        hint="اختیاری؛ حرف خود تامین‌کننده است، نه تصمیم."
+        hint="اختیاری؛ حرف خود تأمین‌کننده است، نه تصمیم."
       >
         {(control) => (
           <textarea
@@ -414,7 +414,7 @@ export function ApproveQualificationForm({
       <Banner state={state} />
       <Consequence command="APPROVE_QUALIFICATION" />
       <Field
-        label={`یادداشت تایید ${capabilityLabel}`}
+        label={`یادداشت تأیید ${capabilityLabel}`}
         error={errors.note}
         hint={REVIEWER_NOTE_HINT}
       >
@@ -431,7 +431,7 @@ export function ApproveQualificationForm({
       </Field>
       <div>
         <Button type="submit" disabled={pending || blocked(identity, state)}>
-          {pending ? 'در حال ثبت…' : `تایید صلاحیت ${capabilityLabel}`}
+          {pending ? 'در حال ثبت…' : `تأیید صلاحیت ${capabilityLabel}`}
         </Button>
       </div>
     </form>
@@ -459,7 +459,7 @@ export function RejectQualificationForm({
         label={`دلیل رد ${capabilityLabel}`}
         required
         error={errors.reason}
-        hint={`دست‌کم ${MIN_REASON_LENGTH} نویسه؛ روی پرونده تامین‌کننده نمایش داده و منتشر می‌شود.`}
+        hint={`دست‌کم ${MIN_REASON_LENGTH} نویسه؛ روی پرونده تأمین‌کننده نمایش داده و منتشر می‌شود.`}
       >
         {(control) => (
           <textarea
@@ -556,7 +556,7 @@ export function SuspendSupplierForm(identity: SupplierBoundIdentity) {
       command="SUSPEND"
       label="دلیل تعلیق"
       hint={`دست‌کم ${MIN_REASON_LENGTH} نویسه؛ در سابقه تعلیق و رویداد منتشرشده می‌ماند.`}
-      submitLabel="تعلیق تامین‌کننده"
+      submitLabel="تعلیق تأمین‌کننده"
       pendingLabel="در حال تعلیق…"
       tone="secondary"
       actionFor={submitSuspendSupplier}

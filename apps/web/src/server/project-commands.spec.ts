@@ -360,8 +360,8 @@ describe('what is sent to the gateway', () => {
       name: 'cancel',
       method: 'POST',
       path: '/v1/projects/PRJ_1/cancel',
-      body: { reason: 'بودجه تامین نشد', expectedVersion: 3 },
-      run: (impl) => cancelProject(S, 'PRJ_1', { reason: 'بودجه تامین نشد' }, 3, impl),
+      body: { reason: 'بودجه تأمین نشد', expectedVersion: 3 },
+      run: (impl) => cancelProject(S, 'PRJ_1', { reason: 'بودجه تأمین نشد' }, 3, impl),
     },
     {
       name: 'grant',

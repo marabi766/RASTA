@@ -16,7 +16,7 @@ import { SupplierDetailScreen } from './SupplierDetailScreen';
 import { NO_COMMANDS, supplierCommandsFor } from './SupplierCommands';
 
 /**
- * The `/suppliers/[id]` route — پرونده‌ی تامین‌کننده (docs/16 § ۱۶٫۶).
+ * The `/suppliers/[id]` route — پرونده‌ی تأمین‌کننده (docs/16 § ۱۶٫۶).
  *
  * **No role check on the read.** Whether this caller may see this supplier's
  * private record is supplier-service's answer, against the record: another
@@ -60,10 +60,10 @@ export default async function SupplierPage({
       }
       sidebar={<PortalSidebar session={session} currentHref="/suppliers" />}
     >
-      <PageHeader title="پرونده‌ی تامین‌کننده" description="صلاحیت‌ها، وضعیت و تاریخچه‌ی تعلیق." />
+      <PageHeader title="پرونده‌ی تأمین‌کننده" description="صلاحیت‌ها، وضعیت و تاریخچه‌ی تعلیق." />
       <div className="mt-2">
         <ButtonLink href="/suppliers" tone="quiet">
-          بازگشت به فهرست تامین‌کنندگان
+          بازگشت به فهرست تأمین‌کنندگان
         </ButtonLink>
       </div>
       <div className="mt-4 flex flex-col gap-4">

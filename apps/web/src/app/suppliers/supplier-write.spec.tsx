@@ -106,13 +106,13 @@ const FORMS = [
   },
   {
     name: 'approve',
-    render: () => render(<ApproveQualificationForm {...BOUND} capabilityLabel="تامین کالا" />),
+    render: () => render(<ApproveQualificationForm {...BOUND} capabilityLabel="تأمین کالا" />),
     named: true,
     values: { note: '' },
   },
   {
     name: 'reject',
-    render: () => render(<RejectQualificationForm {...BOUND} capabilityLabel="تامین کالا" />),
+    render: () => render(<RejectQualificationForm {...BOUND} capabilityLabel="تأمین کالا" />),
     named: true,
     values: { reason: '', note: '' },
   },
@@ -403,7 +403,7 @@ const DETAIL: SupplierDetail = {
       id: 'QUA_OPEN',
       capability: 'GOODS_SUPPLY',
       state: 'SUBMITTED',
-      statement: 'تامین لوازم یدکی',
+      statement: 'تأمین لوازم یدکی',
       submittedAt: '2026-09-02T08:00:00.000Z',
       decidedAt: null,
       decisionNote: null,
@@ -459,7 +459,7 @@ describe('who is drawn which form on a supplier', () => {
         .map((o) => o.textContent),
     ).toEqual(['انتخاب کنید…', 'پیمانکاری']);
     expect(buttons()).toContain('ارسال درخواست صلاحیت');
-    expect(buttons().join()).not.toMatch(/تایید صلاحیت|رد صلاحیت|تعلیق/);
+    expect(buttons().join()).not.toMatch(/تأیید صلاحیت|رد صلاحیت|تعلیق/);
   });
 
   it('offers no request when every capability is awaiting a decision or approved', () => {
@@ -479,30 +479,30 @@ describe('who is drawn which form on a supplier', () => {
 
   it('a platform operator may decide a request awaiting a decision and suspend — and cannot submit', () => {
     drawn(DETAIL, 'ORG-UNION', ['UNION_ADMIN']);
-    expect(screen.getByText('تایید صلاحیت…')).toBeInTheDocument();
+    expect(screen.getByText('تأیید صلاحیت…')).toBeInTheDocument();
     expect(screen.getByText('رد صلاحیت…')).toBeInTheDocument();
-    expect(screen.getByText('تعلیق این تامین‌کننده…')).toBeInTheDocument();
+    expect(screen.getByText('تعلیق این تأمین‌کننده…')).toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: /دسته/ })).toBeNull();
     // Only the one request awaiting a decision has the decision forms.
-    expect(screen.getAllByText('تایید صلاحیت…')).toHaveLength(1);
+    expect(screen.getAllByText('تأیید صلاحیت…')).toHaveLength(1);
   });
 
   it('draws a reinstatement, and no suspension, for a suspended supplier', () => {
     drawn(SUSPENDED, 'ORG-UNION', ['UNION_ADMIN']);
     expect(buttons()).toContain('رفع تعلیق');
-    expect(screen.queryByText('تعلیق این تامین‌کننده…')).toBeNull();
+    expect(screen.queryByText('تعلیق این تأمین‌کننده…')).toBeNull();
   });
 
   it('a platform operator who belongs to the supplier’s organization is offered no decision and is told why', () => {
     drawn(DETAIL, 'ORG-UNION', ['UNION_ADMIN'], ['ORG-UNION', SUPPLIER_ORG]);
-    expect(screen.queryByText('تایید صلاحیت…')).toBeNull();
-    expect(screen.queryByText('تعلیق این تامین‌کننده…')).toBeNull();
+    expect(screen.queryByText('تأیید صلاحیت…')).toBeNull();
+    expect(screen.queryByText('تعلیق این تأمین‌کننده…')).toBeNull();
     expect(screen.getByText(/سازمان شما صاحب این پرونده است/)).toBeInTheDocument();
   });
 
   it('a platform administrator with no organization decides too: no decision names a tenant', () => {
     drawn(DETAIL, null, ['SYSTEM_ADMIN']);
-    expect(screen.getByText('تایید صلاحیت…')).toBeInTheDocument();
+    expect(screen.getByText('تأیید صلاحیت…')).toBeInTheDocument();
   });
 
   it.each([
@@ -752,7 +752,7 @@ describe('the directory page', () => {
       />,
     );
     expect(
-      screen.getByRole('heading', { name: 'ثبت پرونده تامین‌کننده برای سازمان شما' }),
+      screen.getByRole('heading', { name: 'ثبت پرونده تأمین‌کننده برای سازمان شما' }),
     ).toBeInTheDocument();
     expect(await axe(container)).toHaveNoViolations();
   });

@@ -12,6 +12,7 @@ import {
   GENERIC_FIELD_MESSAGE,
   persianErrorMap,
 } from './form-issues';
+import { NON_STANDARD_SPELLING } from '@/test/orthography';
 
 /**
  * The portal's one Persian boundary for local validation (`form-issues.ts`).
@@ -22,8 +23,6 @@ import {
 
 const LATIN_LETTER = /[A-Za-z]/;
 const ARABIC_LETTER = /\p{Script=Arabic}/u;
-/** Hamza letters and U+0654: the project's text policy for added copy. */
-const FORBIDDEN_SPELLING = /[\u0654\u0623\u0625\u0624\u0626]/u;
 
 const issueOf = (schema: z.ZodTypeAny, value: unknown): z.ZodIssue => {
   const result = schema.safeParse(value);
@@ -61,7 +60,7 @@ describe('formIssueMessage', () => {
       const message = formIssueMessage(issueOf(schema, value));
       expect(message).toBe(expected);
       expect(message).not.toMatch(LATIN_LETTER);
-      expect(message).not.toMatch(FORBIDDEN_SPELLING);
+      expect(message).not.toMatch(NON_STANDARD_SPELLING);
     },
   );
 
