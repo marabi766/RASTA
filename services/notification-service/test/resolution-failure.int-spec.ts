@@ -162,11 +162,14 @@ describe('recipient resolution failure and recovery', () => {
         where: { status: 'PENDING' },
         select: { id: true },
       });
-      await setEligibilityFixture(
-        w.prisma,
-        'resolutionParked',
-        pending.map((row) => row.id),
-      );
+      // Parking is a sweep of whatever others left: none left is fine here, and
+      // the helper refuses an empty list rather than "pass" on nothing.
+      if (pending.length > 0)
+        await setEligibilityFixture(
+          w.prisma,
+          'resolutionParked',
+          pending.map((row) => row.id),
+        );
     });
     const organizationId = organization();
     for (let i = 0; i < 6; i += 1) {

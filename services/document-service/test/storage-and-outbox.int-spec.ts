@@ -289,10 +289,12 @@ describe('the outbox store, against a real database', () => {
    */
   const claimWithToken = async (limit: number) => {
     const claimed = await store.claimPending({ limit, owner: 'int-spec', leaseSeconds: 60 });
-    await expireClaim(
-      prisma,
-      claimed.rows.map((row) => row.id),
-    );
+    // A claim may take nothing; the helper refuses an empty list.
+    if (claimed.rows.length > 0)
+      await expireClaim(
+        prisma,
+        claimed.rows.map((row) => row.id),
+      );
     return claimed;
   };
   const claimRows = async (limit: number) => (await claimWithToken(limit)).rows;

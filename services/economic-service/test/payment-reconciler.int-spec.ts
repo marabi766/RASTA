@@ -298,8 +298,9 @@ describe('the payment reconciler (real database)', () => {
       ]);
       expect(await deviations()).toEqual([]);
 
-      // A second sweep finds nothing to do and moves nothing again.
-      await makeDue(made.intentId);
+      // A second sweep finds nothing to do and moves nothing again. The task is
+      // DONE (above), so there is no pending task to make due: the old
+      // makeDue here matched no row and passed silently (PR-432 r1 F3).
       await sweeperWith().runOnce();
       expect(await reversalsOf(made.intentId)).toBe(1);
     });

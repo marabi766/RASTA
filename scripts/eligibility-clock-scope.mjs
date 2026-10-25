@@ -138,7 +138,7 @@ function aliasesFor(repository, local) {
 }
 
 /** Edges of one file: [{specifier, resolved, line}] plus refusals. */
-export function edges(repository, local) {
+export function edges(repository, local, allowedImports = REVIEWED_COMPUTED_IMPORTS) {
   const path = join(repository, local);
   const source = readFileSync(path, 'utf8');
   const ast = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
@@ -172,7 +172,7 @@ export function edges(repository, local) {
         if (arg && ts.isStringLiteralLike(arg)) add(node, arg.text);
         else {
           const value = arg && constantPath(arg, path, ast);
-          const reviewed = REVIEWED_COMPUTED_IMPORTS.find(
+          const reviewed = allowedImports.find(
             (r) => r.file === local && r.argument === arg?.getText(ast),
           );
           if (value) add(node, value);
@@ -283,8 +283,20 @@ const REVIEWED_COMPUTED_IMPORTS = [
   },
   {
     file: 'apps/web/src/write-session-refusal.spec.ts',
-    argument: '`./${path}`',
-    loads: 'the apps/web/src server-action modules named in MODULES: production (apps/*/src)',
+    argument: 'join(REPO_ROOT, path)',
+    loads:
+      'the server-action modules discoverServerActions finds under apps/web/src: production (apps/*/src)',
+  },
+  {
+    file: 'packages/observability/src/diagnostics.spec.ts',
+    argument: 'name',
+    loads:
+      "require.resolve of '@opentelemetry/sdk-node' and '@opentelemetry/auto-instrumentations-node': node_modules (external); opens no database",
+  },
+  {
+    file: 'packages/observability/src/__tests__/telemetry-boundary.fixture.ts',
+    argument: 'module',
+    loads: "Node's own 'http' or 'https' (typed 'http' | 'https'): built-ins (external)",
   },
   {
     file: 'apps/web/src/token-roles-screens.spec.ts',
@@ -357,7 +369,7 @@ export function productionEntryPoints(repository) {
   return out;
 }
 
-function closure(repository, roots, cache) {
+function closure(repository, roots, cache, reviewedImports) {
   const seen = new Set();
   const refusals = [];
   const stack = [...roots];
@@ -368,7 +380,7 @@ function closure(repository, roots, cache) {
     if (!SOURCE.test(local)) continue;
     let result = cache.get(local);
     if (!result) {
-      result = edges(repository, local);
+      result = edges(repository, local, reviewedImports);
       cache.set(local, result);
     }
     refusals.push(...result.refusals);
@@ -378,10 +390,19 @@ function closure(repository, roots, cache) {
 }
 
 /** {enforced: Set(local), production: Set(local), refusals: string[], sqlFixtures: [local]} */
-export function scope(repository, entries = testEntryPoints(repository)) {
+export function scope(
+  repository,
+  entries = testEntryPoints(repository),
+  reviewedImports = REVIEWED_COMPUTED_IMPORTS,
+) {
   const cache = new Map();
-  const production = closure(repository, productionEntryPoints(repository), cache).files;
-  const tests = closure(repository, entries, cache);
+  const production = closure(
+    repository,
+    productionEntryPoints(repository),
+    cache,
+    reviewedImports,
+  ).files;
+  const tests = closure(repository, entries, cache, reviewedImports);
   const enforced = new Set(
     [...tests.files].filter(
       (local) => !production.has(local) && SOURCE.test(local) && !local.endsWith('.d.ts'),
@@ -392,5 +413,14 @@ export function scope(repository, entries = testEntryPoints(repository)) {
     .flatMap((b) => files(join(repository, b)).map((p) => relative(repository, p)))
     .filter((local) => local.endsWith('.sql') && !/\/prisma\/migrations\//.test(local));
   const refusals = [...new Set(tests.refusals)].filter((r) => enforced.has(r.split(':')[0]));
+  // A reviewed computed import that no test file still makes is stale.
+  const used = new Set(
+    [...tests.files].flatMap((local) =>
+      (cache.get(local)?.reviewedImports ?? []).map((r) => `${r.file}|${r.argument}`),
+    ),
+  );
+  for (const r of reviewedImports)
+    if (!used.has(`${r.file}|${r.argument}`))
+      refusals.push(`${r.file}:1: stale reviewed computed import (${r.argument})`);
   return { enforced, production, refusals, sqlFixtures, cache };
 }

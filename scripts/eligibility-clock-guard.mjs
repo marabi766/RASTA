@@ -2130,7 +2130,7 @@ export function repositoryHazards(repository, options = {}) {
   const index = options.index ?? gateIndex(gate);
   const reviewed = options.reviewed ?? reviewedTemplates(repository);
   const signatures = options.signatures ?? leaseSignatures(repository, gate.flow);
-  const s = options.scope ?? testScope(repository);
+  const s = options.scope ?? testScope(repository, undefined, options.reviewedImports);
   const project = createProject(repository, s);
   const errors = [...s.refusals];
   for (const local of [...s.enforced].sort()) {

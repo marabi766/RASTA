@@ -23,12 +23,24 @@ import {
 import { stripComments } from './eligibility-clock-sql.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const gate = deriveGate(root);
-const index = gateIndex(gate);
-const reviewed = reviewedTemplates(root);
-const signatures = leaseSignatures(root, gate.flow);
-const check = (source, file = 'fixture.ts', approved = reviewed) =>
-  hazards(source, file, index, approved, signatures);
+// The repository's own gate, derived once and only when a test needs it, so the
+// fixture-repository tests below stand on their own (a mutant that breaks the
+// derivation fails them, not just the module import).
+let realCache;
+const real = () => {
+  if (!realCache) {
+    const gate = deriveGate(root);
+    realCache = {
+      gate,
+      index: gateIndex(gate),
+      reviewed: reviewedTemplates(root),
+      signatures: leaseSignatures(root, gate.flow),
+    };
+  }
+  return realCache;
+};
+const check = (source, file = 'fixture.ts', approved = real().reviewed) =>
+  hazards(source, file, real().index, approved, real().signatures);
 const WRITE =
   /direct (?:SQL|ORM) eligibility write|unprovable ORM data flow|unclassified SQL write/;
 const refused = (source, reason = WRITE) =>
@@ -77,10 +89,12 @@ const DUE =
   'export async function dueItems(tx: any) { return tx.$queryRawUnsafe(`SELECT id FROM hold WHERE expires_at <= now()`); }';
 
 test('the repository: every enforced test, fixture and script write goes through the helpers or a reviewed probe', () => {
+  const { gate, index, reviewed, signatures } = real();
   assert.deepEqual(repositoryHazards(root, { gate, index, reviewed, signatures }), []);
 });
 
 test('F1: derivation reads every product SQL literal; the four tables the name filter missed are gated', () => {
+  const { gate, index } = real();
   for (const [key, evidence] of [
     ['stock_reservation.expires_at', 'inventory-service/src/reservation/reservation.repository.ts'],
     ['asset_transfer_fence.expires_at', 'fleet-service/src/fleet/fleet.repository.ts'],
@@ -294,6 +308,7 @@ test('F1: reviews are narrow: stale entries, not-eligibility off the DB clock an
 });
 
 test('C: retention and gauge comparisons are classified not-eligibility with a reason; none is silently skipped', () => {
+  const { gate } = real();
   const notEligibility = gate.sites.filter((s) => s.verdict === 'not-eligibility');
   for (const [file, column] of [
     ['packages/nest-common/src/outbox/outbox-sql.ts', 'published_at'],
@@ -340,7 +355,12 @@ test('F2: ORM data is followed through map builders, variables, spreads, helpers
     'db.outboxMessage.update({ where, data: { ["nextAttemptAt"]: x } });',
     "db.outboxMessage.update({ where, data: { ['next' + 'AttemptAt']: x } });",
   ])
-    refused(source);
+    refused(source, /direct ORM eligibility write \(outboxMessage\.nextAttemptAt\)/);
+  // Positive controls: a followed builder or helper without a gated field is allowed, so
+  // an unfollowed one (refused as unprovable) cannot pass for a followed one.
+  allowed('db.outboxMessage.createMany({ data: ids.map((id) => ({ id, attempts: 0 })) });');
+  allowed('db.outboxMessage.createMany({ data: ids.flatMap((id) => [{ id, attempts: 0 }]) });');
+  allowed('const data = { attempts: 0 }; db.outboxMessage.update({ where, data });');
   for (const method of [
     'create',
     'createMany',
@@ -521,7 +541,7 @@ test('F2/B: scope is the import graph from test entry points; production roots a
     },
     (dir) => {
       const derived = deriveGate(dir, { reviewedSites: [] });
-      const errors = repositoryHazards(dir, { gate: derived, reviewed: [] });
+      const errors = repositoryHazards(dir, { gate: derived, reviewed: [], reviewedImports: [] });
       const files = errors.map((e) => e.split(':')[0]).sort();
       assert.deepEqual(files, [
         'apps/web/e2e/support/db.ts',
@@ -540,28 +560,37 @@ test('F2/B: scope is the import graph from test entry points; production roots a
   );
 });
 
-test('F2/H: unresolved and computed imports in enforced files refuse; reviewed computed imports are listed', () => {
+test('F2/H: unresolved and computed imports in enforced files refuse; a reviewed one passes, a stale one refuses', () => {
   repository(
     {
       ...product(DUE),
       'services/sample/test/a.int-spec.ts':
-        "import { gone } from './missing';\nimport { other } from '@rasta/nowhere';\nconst m = await import(name);\n",
+        "import { gone } from './missing';\nimport { other } from '@rasta/nowhere';\nconst m = await import(name);\nconst n = await import(other);\n",
     },
     (dir) => {
+      const gateHere = deriveGate(dir, { reviewedSites: [] });
+      const listed = {
+        file: 'services/sample/test/a.int-spec.ts',
+        argument: 'other',
+        loads: 'test fixture',
+      };
+      const stale = { file: 'services/sample/test/a.int-spec.ts', argument: 'gone', loads: 'x' };
       const errors = repositoryHazards(dir, {
-        gate: deriveGate(dir, { reviewedSites: [] }),
+        gate: gateHere,
         reviewed: [],
+        reviewedImports: [listed, stale],
       });
+      const has = (pattern) =>
+        assert.ok(
+          errors.some((e) => pattern.test(e)),
+          errors.join('\n'),
+        );
+      has(/unresolved import '\.\/missing'/);
+      has(/unresolved import '@rasta\/nowhere'/);
+      has(/a\.int-spec\.ts:3: computed import specifier/);
+      has(/stale reviewed computed import \(gone\)/);
       assert.ok(
-        errors.some((e) => /unresolved import '\.\/missing'/.test(e)),
-        errors.join('\n'),
-      );
-      assert.ok(
-        errors.some((e) => /unresolved import '@rasta\/nowhere'/.test(e)),
-        errors.join('\n'),
-      );
-      assert.ok(
-        errors.some((e) => /computed import specifier/.test(e)),
+        !errors.some((e) => /a\.int-spec\.ts:4: computed import/.test(e)),
         errors.join('\n'),
       );
     },
@@ -680,6 +709,7 @@ test('F4: a reviewed entry no live template matches is stale', () => {
 });
 
 test('declared lease parameter names cover claimDue index 1 and notification index 2', () => {
+  const { signatures } = real();
   assert.ok(signatures.get('claimDue').has(1));
   assert.ok(signatures.get('claimPending').has(2));
   for (const zero of ['0', '0.0', '-0', '(0)', '0x0']) {
