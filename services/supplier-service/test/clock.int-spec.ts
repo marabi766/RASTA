@@ -181,9 +181,17 @@ describe('D-5 — the database is the only clock a persisted fact uses', () => {
 
     const behind = new Date((await databaseNow()).getTime() - 5_000);
     await withApplicationClockAt(behind, async () => {
-      await asOperator(() => suspensions.suspend(supplier.id, { reason: 'clock probe' } as never));
+      const suspended = await asOperator(() =>
+        suspensions.suspend(supplier.id, {
+          reason: 'clock probe',
+          latestSuspensionId: null,
+        } as never),
+      );
       await asOperator(() =>
-        suspensions.reinstate(supplier.id, { reason: 'clock probe lifted' } as never),
+        suspensions.reinstate(supplier.id, {
+          reason: 'clock probe lifted',
+          suspensionId: suspended.suspensions[0]!.id,
+        } as never),
       );
     });
 

@@ -292,14 +292,20 @@ esac
       const evidence = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
       assert.equal(evidence.error.stage, 'dump rasta_identity');
       assert.match(
-        evidence.error.message,
+        evidence.error.message ?? '',
         mode === 'failed'
-          ? /Private schema command failed/
+          ? /^$/
           : mode === 'complete'
             ? // The complete dump passed; this stub intentionally supplies no inventory.
               /Unexpected end of JSON input/
             : /Missing schema dump|Incomplete schema dump/,
       );
+      if (mode === 'failed')
+        assert.deepEqual(evidence.error, {
+          stage: 'dump rasta_identity',
+          database: 'rasta_identity',
+          exitCode: 1,
+        });
       assert.doesNotMatch(JSON.stringify(evidence), /PRIVATE_FUNCTION_BODY|PRIVATE_ERROR/);
       assert.equal(evidence.cleanup.passed, true);
     } finally {
@@ -337,15 +343,16 @@ async function referenceCliFixture(directory, mode) {
   cpSync(join(repo, reader), join(directory, reader));
   symlinkSync(join(repo, 'node_modules'), join(copied, 'node_modules'), 'dir');
   const path = join(copied, 'backup-restore-drill.mjs');
-  let implementation = readFileSync(path, 'utf8');
+  const target = mode === 'bypass-ref' ? path : join(copied, 'backup-restore-drill-lib.mjs');
+  let implementation = readFileSync(target, 'utf8');
   const replacements = {
     'bypass-ref': [
       'before.reference = await collectReference(source, `rasta_${service}`, before.schemaDump);',
       'before.reference = { checkLinesDifferent: 0, milliseconds: 0 };',
     ],
     'bypass-fixed': [
-      'for (const [index, name] of scratch.entries()) {',
-      'for (const [index, name] of scratch.slice(0, 1).entries()) {',
+      "const dumped = await dump(name, index === 0 ? 'reference' : 'fixed-point');",
+      "const dumped = await dump(scratch[0], index === 0 ? 'reference' : 'fixed-point');",
     ],
     'bypass-guard': [
       'const allowance = checkSourceReference(sourceDump, reference.evidence, database);',
@@ -357,11 +364,18 @@ async function referenceCliFixture(directory, mode) {
     assert.equal(implementation.split(before).length, 2, 'mutant must change one call');
     implementation = implementation.replace(before, after);
   }
-  writeFileSync(path, implementation);
+  writeFileSync(target, implementation);
   const dump =
     '--\n-- PostgreSQL database dump\n--\n\n-- Dumped from database version 16.4\n-- Dumped by pg_dump version 16.4\n\nSET statement_timeout = 0;\nCREATE TABLE "public"."fixture" (\n    "id" integer,\n    CONSTRAINT "ck" CHECK ((id >= 0))\n);\n--\n-- PostgreSQL database dump complete\n--\n\n';
   writeFileSync(join(directory, 'schema.sql'), dump);
-  writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  writeFileSync(
+    join(directory, 'pnpm'),
+    `#!/bin/sh
+${mode === 'failed-migrate' ? 'case "$*" in *db:migrate*) echo PRIVATE_MIGRATION_SQL; echo PRIVATE_MIGRATION_SQL >&2; exit 43;; esac' : ':'}
+exit 0
+`,
+    { mode: 0o700 },
+  );
   const ledger = {
     journalsChecked: '2',
     entriesChecked: '4',
@@ -384,14 +398,16 @@ case "$*" in
       *'drill_ref_'*) ${mode === 'failed-ref-dump' ? 'echo PRIVATE_REF_SQL; echo PRIVATE_ERROR >&2; exit 1' : ':'} ;;
       *'drill_fixed_'*) ${mode === 'failed-fixed-dump' ? 'echo PRIVATE_FIXED_SQL; echo PRIVATE_ERROR >&2; exit 1' : ':'} ;;
     esac
-    cat '${directory}/schema.sql' ;;
+    ${mode === 'check-drift' ? `case "$*" in *'drill_ref_'*|*'drill_fixed_'*|*'-restored '*) sed 's/((id >= 0))/(id >= 0)/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : mode === 'original-and-drop-fail' ? `case "$*" in *'drill_ref_'*) sed 's/"id" integer/"id" bigint/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : `cat '${directory}/schema.sql'`} ;;
+  *'pg_restore '*) ${mode === 'failed-archive' ? 'echo PRIVATE_ARCHIVE_SQL; echo PRIVATE_ARCHIVE_SQL >&2; exit 42' : ':'} ;;
   *'psql '*)
     body=$(cat)
     case "$body" in
       *'CREATE DATABASE "drill_'*)
         printf '%s\\n' "$body" >> '${directory}/scratch-created' ;;
       *'DROP DATABASE IF EXISTS "drill_'*)
-        printf '%s\\n' "$body" >> '${directory}/scratch-dropped' ;;
+        printf '%s\\n' "$body" >> '${directory}/scratch-dropped'
+        ${mode === 'failed-drop' || mode === 'original-and-drop-fail' ? 'echo PRIVATE_DROP_SQL >&2; exit 44' : ':'} ;;
       *'PostgreSQL database dump'*)
         case "$*" in
           *'drill_ref_'*)
@@ -416,6 +432,11 @@ esac
 
 for (const mode of [
   'baseline',
+  'check-drift',
+  'failed-archive',
+  'failed-migrate',
+  'failed-drop',
+  'original-and-drop-fail',
   'bypass-ref',
   'bypass-fixed',
   'bypass-guard',
@@ -440,7 +461,7 @@ for (const mode of [
       child.stderr.on('data', (chunk) => {
         stderr += chunk;
       });
-      const exited = once(child, 'exit');
+      const exited = once(child, 'close');
       if (mode.startsWith('signal-')) {
         await waitFor(join(directory, 'started'));
         const privateDirectory = join(
@@ -455,20 +476,55 @@ for (const mode of [
         child.kill('SIGTERM');
       }
       const [code] = await exited;
-      assert.equal(code, mode === 'baseline' ? 0 : 1);
+      const success = ['baseline', 'check-drift'].includes(mode);
+      assert.equal(code, success ? 0 : 1);
       const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
-      assert.equal(report.passed, mode === 'baseline');
+      assert.equal(report.passed, success);
       assert.equal(report.cleanup.passed, true);
       assert.ok(existsSync(join(directory, 'cleaned')));
       assert.doesNotMatch(
         JSON.stringify(report) + stdout + stderr,
-        /PRIVATE_REF_SQL|PRIVATE_FIXED_SQL|PRIVATE_ERROR/,
+        /PRIVATE_REF_SQL|PRIVATE_FIXED_SQL|PRIVATE_ERROR|PRIVATE_ARCHIVE_SQL|PRIVATE_MIGRATION_SQL|PRIVATE_DROP_SQL/,
       );
       assert.equal(
         readdirSync(directory).some((name) => name.startsWith('rasta-restore-drill-')),
         false,
       );
-      if (mode !== 'bypass-ref') {
+      if (mode === 'bypass-fixed') {
+        assert.equal(report.error.message, 'Invalid schema dump provenance');
+        assert.doesNotMatch(report.error.message, /TypeError|undefined|properties/);
+      }
+      if (mode === 'failed-archive' || mode === 'failed-migrate') {
+        assert.deepEqual(report.error, {
+          stage:
+            mode === 'failed-archive' ? 'restore and compare rasta_identity' : 'migrate identity',
+          database: 'rasta_identity',
+          exitCode: mode === 'failed-archive' ? 42 : 43,
+        });
+      }
+      if (mode === 'failed-drop' || mode === 'original-and-drop-fail') {
+        assert.equal(report.scratchDropFailed.length, 2);
+        assert.ok(
+          report.scratchDropFailed.every(
+            (error) => error.stage === 'scratch drop' && error.exitCode === 44,
+          ),
+        );
+        if (mode === 'original-and-drop-fail')
+          assert.equal(report.error.message, 'SOURCE/REF non-CHECK difference');
+        else assert.equal(report.error.stage, 'scratch drop');
+      }
+      if (mode === 'check-drift') {
+        assert.ok(report.databases.every((db) => db.before.reference.checkLinesDifferent === 1));
+        assert.ok(
+          report.databases.every(
+            (db) =>
+              JSON.stringify(db.before.reference.checkConstraints) ===
+              JSON.stringify([{ schema: 'public', table: 'fixture', name: 'ck' }]),
+          ),
+        );
+        assert.doesNotMatch(JSON.stringify(report), /id >= 0|CONSTRAINT|CREATE TABLE/);
+      }
+      if (!['bypass-ref', 'failed-migrate'].includes(mode)) {
         const created = readFileSync(join(directory, 'scratch-created'), 'utf8');
         assert.match(
           created,
@@ -499,3 +555,48 @@ for (const mode of [
     }
   });
 }
+
+test('SIGKILL leaves a provisional private report with project and Compose cleanup path', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-sigkill-test-'));
+  let child;
+  try {
+    const root = fixture(directory);
+    writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    writeFileSync(
+      join(directory, 'docker'),
+      `#!/bin/sh
+case "$*" in
+  *'up -d'*)
+    touch '${directory}/started'
+    while [ ! -f '${directory}/release' ]; do sleep 0.05; done
+    touch '${directory}/released' ;;
+  *'down --volumes'*) touch '${directory}/unexpected-cleanup' ;;
+esac
+`,
+      { mode: 0o700 },
+    );
+    child = start(directory, root);
+    const exited = once(child, 'exit');
+    await waitFor(join(directory, 'started'));
+    child.kill('SIGKILL');
+    const [code, signal] = await exited;
+    assert.equal(code, null);
+    assert.equal(signal, 'SIGKILL');
+    const path = join(directory, 'report.json');
+    const report = JSON.parse(readFileSync(path, 'utf8'));
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    assert.match(report.project, /^restore-drill-[a-f0-9]{16}$/);
+    assert.equal(report.passed, false);
+    assert.equal(report.cleanup.passed, false);
+    assert.equal(report.finishedAt, undefined);
+    assert.ok(report.temporary.startsWith(directory + '/rasta-restore-drill-'));
+    const compose = JSON.parse(readFileSync(join(report.temporary, 'compose.json'), 'utf8'));
+    assert.equal(compose.services.source.container_name, `${report.project}-source`);
+    assert.equal(existsSync(join(directory, 'unexpected-cleanup')), false);
+  } finally {
+    child?.kill('SIGKILL');
+    writeFileSync(join(directory, 'release'), 'go');
+    await waitFor(join(directory, 'released'));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -2,6 +2,7 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 import globals from 'globals';
+import internalTokenTransport from './scripts/internal-token-transport-rule.mjs';
 
 /** Restated in `apps/web/eslint.config.mjs`, which does not extend this file. */
 const NO_ZOD_COERCE = [
@@ -91,6 +92,20 @@ const base = tseslint.config(
     rules: {
       'no-console': ['error', { allow: ['log', 'info', 'warn', 'error'] }],
     },
+  },
+  {
+    // Workspaces re-export this config, so paths must match from their cwd too.
+    files: ['**/src/**/*.ts', '**/dev/**/*.ts', '**/prisma/**/*.ts', 'scripts/**/*.{js,mjs,cjs}'],
+    ignores: [
+      '**/*.spec.ts',
+      '**/*.test.ts',
+      '**/*.test.mjs',
+      '**/*.int-spec.ts',
+      '**/*.e2e-spec.ts',
+      '**/test/**',
+    ],
+    plugins: { internal: { rules: { transport: internalTokenTransport } } },
+    rules: { 'internal/transport': 'error' },
   },
   {
     // @rasta/config's URL reader is plain CommonJS so the scripts can import

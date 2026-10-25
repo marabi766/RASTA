@@ -1,3 +1,4 @@
+import { internalFetch } from '@rasta/nest-common';
 import { z } from 'zod';
 import { MAX_AMOUNT_MINOR, digitsToBigInt } from '@rasta/contracts';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
@@ -245,11 +246,15 @@ export class SourceFactsClient implements SourceFacts {
     try {
       let response: Response;
       try {
-        response = await this.fetchImpl(`${baseUrl.replace(/\/+$/, '')}${path}`, {
-          method: 'GET',
-          headers,
-          signal: controller.signal,
-        });
+        response = await internalFetch(
+          `${baseUrl.replace(/\/+$/, '')}${path}`,
+          {
+            method: 'GET',
+            headers,
+            signal: controller.signal,
+          },
+          this.fetchImpl,
+        );
       } catch {
         // No cause attached: a runtime's transport error can quote the URL.
         throw failed();
