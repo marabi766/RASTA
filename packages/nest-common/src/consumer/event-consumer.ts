@@ -340,8 +340,9 @@ export class EventConsumer {
     // fails the service at startup rather than dead-lettering every message.
     const undeclared = options.topics.filter((topic) => !isDeclaredTopic(topic));
     if (undeclared.length > 0) {
+      // The group is not named: it can come from KAFKA_CONSUMER_GROUP (#385 r4).
       throw new Error(
-        `${options.groupId} subscribes to ${undeclared.join(', ')}, which ` +
+        `A consumer subscribes to ${undeclared.join(', ')}, which ` +
           `${undeclared.length === 1 ? 'has' : 'have'} no producer declared in TOPIC_PRODUCERS ` +
           '(@rasta/contracts, ADR-061 § 1). Declare the owner there first.',
       );
@@ -365,7 +366,7 @@ export class EventConsumer {
       const problem = consumerDeclarationProblem(service, options);
       if (problem !== undefined) {
         throw new Error(
-          `${options.groupId}: ${problem} (@rasta/contracts TOPIC_CONSUMERS, RUN-006). ` +
+          `A consumer is refused: ${problem} (@rasta/contracts TOPIC_CONSUMERS, RUN-006). ` +
             'Declare the subscription there first.',
         );
       }

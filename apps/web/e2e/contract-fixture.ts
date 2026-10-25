@@ -1,6 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+// The repository's one reader of configured URLs (#385): its refusal is a
+// fixed text, never the value. Imported from source, as the scripts do — a
+// plain CommonJS file, so the fixture needs no build of @rasta/config.
+import { readUrl } from '../../../packages/config/src/url-reader.js';
 
 /**
  * A fresh contract for one live scenario — `fixtures/contract-draft.sql`, run
@@ -16,9 +20,20 @@ import { join } from 'node:path';
  * cancelled.
  *
  * Needs `WEB_E2E_CONTRACT_DATABASE_URL` (the runtime role's URL; the job sets
- * it) and `psql` on the path. The URL is passed in the child's environment,
- * never on its command line, and nothing here is logged.
+ * it, and README.md says how to run it locally) and `psql` on the path. The URL
+ * is passed in the child's environment, never on its command line, and nothing
+ * here is logged. Neither refusal repeats anything of it (#385 r6): a URL that
+ * does not parse is refused by the shared reader, and a psql that fails is
+ * reported by its exit code alone — its stderr, which names the connection's
+ * user, is captured and dropped.
  */
+
+const DATABASE_URL = 'WEB_E2E_CONTRACT_DATABASE_URL';
+
+/** What a failed psql is reported with: a fixed text and its exit code. */
+export const PSQL_FAILED = (code: number | string): string =>
+  `psql could not write the contract fixture with ${DATABASE_URL} (exit ${code}); ` +
+  'its output is withheld, it may repeat the connection';
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -35,37 +50,47 @@ export interface ContractParties {
 
 function write(parties: ContractParties, signed: boolean): string {
   const id = `CTR_E2E_${randomUUID().replace(/-/g, '').slice(0, 20).toUpperCase()}`;
-  const url = new URL(requiredEnv('WEB_E2E_CONTRACT_DATABASE_URL'));
-  execFileSync(
-    'psql',
-    [
-      '-X',
-      '-q',
-      '-v',
-      `id=${id}`,
-      '-v',
-      `employer=${parties.employer}`,
-      '-v',
-      `contractor=${parties.contractor}`,
-      '-v',
-      `amount=${parties.amountMinor}`,
-      '-v',
-      `signed=${signed}`,
-      '-f',
-      join(__dirname, 'fixtures', 'contract-draft.sql'),
-    ],
-    {
-      env: {
-        ...process.env,
-        PGHOST: url.hostname,
-        PGPORT: url.port || '5432',
-        PGDATABASE: url.pathname.replace(/^\//, ''),
-        PGUSER: decodeURIComponent(url.username),
-        PGPASSWORD: decodeURIComponent(url.password),
+  const url = readUrl(requiredEnv(DATABASE_URL), {
+    refusal: `${DATABASE_URL} cannot be read as a URL; its value is not repeated`,
+  });
+  let failed: number | string | undefined;
+  try {
+    execFileSync(
+      'psql',
+      [
+        '-X',
+        '-q',
+        '-v',
+        `id=${id}`,
+        '-v',
+        `employer=${parties.employer}`,
+        '-v',
+        `contractor=${parties.contractor}`,
+        '-v',
+        `amount=${parties.amountMinor}`,
+        '-v',
+        `signed=${signed}`,
+        '-f',
+        join(__dirname, 'fixtures', 'contract-draft.sql'),
+      ],
+      {
+        env: {
+          ...process.env,
+          PGHOST: url.hostname,
+          PGPORT: url.port || '5432',
+          PGDATABASE: url.pathname.replace(/^\//, ''),
+          PGUSER: decodeURIComponent(url.username),
+          PGPASSWORD: decodeURIComponent(url.password),
+        },
+        stdio: ['ignore', 'ignore', 'pipe'],
       },
-      stdio: ['ignore', 'ignore', 'pipe'],
-    },
-  );
+    );
+  } catch (error) {
+    // Nothing of the error is kept: its message and `stderr` carry psql's text.
+    const status = (error as { status?: unknown }).status;
+    failed = typeof status === 'number' ? status : 'unknown';
+  }
+  if (failed !== undefined) throw new Error(PSQL_FAILED(failed));
   return id;
 }
 

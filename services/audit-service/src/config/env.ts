@@ -11,6 +11,7 @@ import {
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
 } from '@rasta/config';
@@ -19,6 +20,14 @@ import {
   DEFAULT_MAX_VERIFICATION_RECORDS,
 } from '../audit/audit.query.dto';
 import { auditOperationBudgets } from './operation-budgets';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+
+const PRODUCER_ENTRY_EMPTY = fixed('has an entry that is empty');
+const PRODUCER_ENTRY_UNKNOWN = fixed(
+  `has an entry that is not a known audit producer; allowed: ${AUDIT_SOURCE_SERVICES.join(', ')}`,
+);
 
 export const SERVICE_NAME = 'audit-service';
 
@@ -38,8 +47,9 @@ export const DEFAULT_PORT = '3115';
  * comma) and any name outside `AUDIT_SOURCE_SERVICES` — including the metric
  * fallback `unknown` and any other casing — refuse to boot rather than being
  * skipped: a typo that silently dropped a producer would disable exactly the
- * alert the operator asked for. The message names the entry's position and the
- * allowed set, never the rejected text.
+ * alert the operator asked for. The message is fixed: it names the allowed set,
+ * never the rejected text — nor, since every environment message is now a fixed
+ * text (#385 r2 F2), the entry's position or the list's length.
  */
 export const expectedActiveProducersSchema = z
   .string()
@@ -49,20 +59,12 @@ export const expectedActiveProducersSchema = z
 
     const parsed = new Set<AuditSourceService>();
     const entries = raw.split(',');
-    entries.forEach((entry, index) => {
+    entries.forEach((entry) => {
       const name = entry.trim();
       if (name.length === 0) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `entry ${index + 1} of ${entries.length} is empty`,
-        });
+        context.addIssue({ code: z.ZodIssueCode.custom, message: PRODUCER_ENTRY_EMPTY });
       } else if (!isAuditSourceService(name)) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message:
-            `entry ${index + 1} of ${entries.length} is not a known audit producer; ` +
-            `allowed: ${AUDIT_SOURCE_SERVICES.join(', ')}`,
-        });
+        context.addIssue({ code: z.ZodIssueCode.custom, message: PRODUCER_ENTRY_UNKNOWN });
       } else {
         parsed.add(name);
       }
@@ -188,6 +190,8 @@ export const auditEnvSchema = baseEnvSchema
       .default(168),
   });
 
+export const AUDIT_ENV_MESSAGES = seal();
+
 export type AuditEnv = z.infer<typeof auditEnvSchema>;
 
 /**
@@ -225,7 +229,7 @@ export function loadAuditEnv(source: NodeJS.ProcessEnv = process.env): AuditEnv 
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? DOMAIN_PROJECTOR_CONSUMER,
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: auditOperationBudgets },
+    { operationBudgets: auditOperationBudgets, fixedMessages: AUDIT_ENV_MESSAGES },
   );
 }
 

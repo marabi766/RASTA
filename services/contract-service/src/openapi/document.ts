@@ -3,8 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
-import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
+import { toJsonSchema, RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
 import { ContractController } from '../contract/contract.controller';
 import { ContractService } from '../contract/contract.service';
 import {
@@ -67,7 +66,7 @@ import { REFUSAL_REASONS, type RefusalArea } from '../shared/refusal';
  *   - the same suite provokes every documented status against the real API.
  *
  * Payload shapes come from the Zod schemas the pipes validate with (`src/contract/dto.ts`),
- * converted by `zod-schema.ts`; Nest supplies paths, methods and parameters from the decorators.
+ * converted by `toJsonSchema`; Nest supplies paths, methods and parameters from the decorators.
  *
  * Regenerate after changing the API: `pnpm --filter @rasta/contract-service openapi:generate`.
  */

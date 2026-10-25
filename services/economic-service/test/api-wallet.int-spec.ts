@@ -3,11 +3,10 @@ import request from 'supertest';
 import type { Server } from 'node:http';
 import { admin, apiTenant, auditor, bearer, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, id } from './helpers';
-import { EXCEPTION_FILTER_LOGGER, runUnscoped } from '@rasta/nest-common';
+import { EXCEPTION_FILTER_LOGGER, runUnscoped, type JsonSchema } from '@rasta/nest-common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { enrichOpenApiDocument } from '../src/openapi/document';
 import { schemaMismatches } from '../src/openapi/schema-mismatches';
-import type { JsonSchema } from '../src/openapi/zod-schema';
 
 /**
  * The wallet and payment HTTP surface, every path including the refusals.

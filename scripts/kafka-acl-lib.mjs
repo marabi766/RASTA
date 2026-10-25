@@ -17,9 +17,31 @@ export function passwordVariable(principal) {
 }
 
 /**
+ * The refusal of an unreadable `KAFKA_SSL_CA_FILE`, as a fixed text: the
+ * filesystem's own error names the configured path (`ENOENT: …, open
+ * '<path>'`, and `.path`), which an uncaught throw prints (#385 r4).
+ */
+export const UNREADABLE_CA_FILE =
+  "KAFKA_SSL_CA_FILE cannot be read; it must name a readable file holding the broker's CA " +
+  'certificate';
+
+function readCaFile(readFile, path) {
+  let ca;
+  try {
+    ca = readFile(path);
+  } catch {
+    ca = undefined;
+  }
+  // Thrown here, outside the catch: nothing of the filesystem's error goes with it.
+  if (ca === undefined) throw new Error(UNREADABLE_CA_FILE);
+  return ca;
+}
+
+/**
  * The kafkajs connection for `principal`, from the environment: brokers,
  * SCRAM-SHA-512 and TLS trusting `KAFKA_SSL_CA_FILE`. Without a password it
- * connects PLAINTEXT — which the authenticated broker refuses.
+ * connects PLAINTEXT — which the authenticated broker refuses. An unreadable CA
+ * file is {@link UNREADABLE_CA_FILE}.
  */
 export function connectionFor(principal, env, readFile) {
   const brokers = (env.KAFKA_BROKERS ?? 'localhost:9092')
@@ -32,7 +54,10 @@ export function connectionFor(principal, env, readFile) {
     connection.sasl = { mechanism: 'scram-sha-512', username: principal, password };
   }
   if (env.KAFKA_SSL_CA_FILE) {
-    connection.ssl = { ca: [readFile(env.KAFKA_SSL_CA_FILE)], rejectUnauthorized: true };
+    connection.ssl = {
+      ca: [readCaFile(readFile, env.KAFKA_SSL_CA_FILE)],
+      rejectUnauthorized: true,
+    };
   }
   return connection;
 }

@@ -16,6 +16,7 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { SecurityEventOutboxStore } from '../src/security-events/security-event-outbox.store';
 import { SECURITY_EVENT_RELAY } from '../src/security-events/security-event.relay';
 import { databaseUrl } from './helpers';
+import { readUrl } from '@rasta/config';
 
 /**
  * The identity HTTP surface, booted from the **real** `AppModule` (AUD-004
@@ -170,7 +171,7 @@ export interface IdentityApiHarness {
 /** `url` with its pool pinned to `connections`, or unchanged when none is given. */
 function withConnectionLimit(url: string, connections: number | undefined): string {
   if (connections === undefined) return url;
-  const pinned = new URL(url);
+  const pinned = readUrl(url);
   pinned.searchParams.set('connection_limit', String(connections));
   return pinned.toString();
 }

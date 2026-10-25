@@ -1,3 +1,4 @@
+import { envEnumProbes } from '@rasta/config';
 import { CONSUMER_SESSION_TIMEOUT_MS } from '@rasta/nest-common';
 import {
   assetSyncBudgetProblem,
@@ -150,6 +151,48 @@ describe('FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS', () => {
 });
 
 /** #240 r8: the parked-insurance sweep. */
+/**
+ * #385 r4, the rule for numbers: the budget refusal prints the three timeouts,
+ * which the schema has read as numbers first. Written as text, each is refused
+ * by the schema with a fixed message, never repeated.
+ */
+describe('the asset-sync budget settings, written as text', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'];
+  const MINIMAL: NodeJS.ProcessEnv = {
+    NODE_ENV: 'test',
+    DATABASE_URL: 'postgresql://rasta_fleet:pw@127.0.0.1:5433/rasta_fleet?schema=public',
+    KAFKA_BROKERS: 'localhost:9092',
+    REDIS_URL: 'redis://127.0.0.1:6379',
+    OIDC_ISSUER_URL: 'http://localhost:8080/realms/rasta',
+    OIDC_JWKS_URI: 'http://localhost:8080/realms/rasta/protocol/openid-connect/certs',
+    OIDC_AUDIENCE: 'rasta-api',
+    INTERNAL_TOKEN_SECRET: 'x'.repeat(48),
+    ASSET_SERVICE_URL: 'http://localhost:3102',
+    MAINTENANCE_SERVICE_URL: 'http://localhost:3106',
+  };
+  const refusal = (source: NodeJS.ProcessEnv): Error => {
+    try {
+      loadFleetEnv(source);
+    } catch (error) {
+      return error as Error;
+    }
+    throw new Error('expected a refusal');
+  };
+
+  it.each([
+    'FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS',
+    'FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS',
+    'ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS',
+  ])('%s is refused before the budget check can print it', (name) => {
+    const [a, b] = SENTINELS.map((value) => refusal({ ...MINIMAL, [name]: value }));
+    expect(a?.message).toBe(b?.message);
+    expect(a?.message).toContain(name);
+    for (const error of [a, b]) {
+      expect(`${error?.message}\n${error?.stack}`).not.toMatch(/sentinel|jz97|another[-_]secret/i);
+    }
+  });
+});
+
 describe('FLEET_INSURANCE_PARKED_*', () => {
   const shape = fleetEnvSchema.shape;
 
@@ -203,5 +246,53 @@ describe('FLEET_DISPATCH_REQUIRED_COVERAGES', () => {
   it('refuses an unknown coverage rather than requiring nothing', () => {
     expect(field.safeParse('THIRD_PARTY,FIRE').success).toBe(false);
     expect(field.safeParse('third_party').success).toBe(false);
+  });
+});
+
+/**
+ * Refusals never carry the value written (S-09, #385 r2 F2): every enum setting, found by
+ * walking the schema rather than listed, set to each of two sentinels, is refused alike, with
+ * neither in the issues, the error's message or its stack (what the startup log prints).
+ */
+describe('enum settings are refused without the value written (#385 r2 F2)', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+  const probes = envEnumProbes(
+    fleetEnvSchema,
+    (source) => loadFleetEnv(source),
+    {
+      NODE_ENV: 'test',
+      DATABASE_URL: 'postgresql://rasta_fleet:pw@127.0.0.1:5433/rasta_fleet?schema=public',
+      KAFKA_BROKERS: 'localhost:9092',
+      REDIS_URL: 'redis://127.0.0.1:6379',
+      OIDC_ISSUER_URL: 'http://localhost:8080/realms/rasta',
+      OIDC_JWKS_URI: 'http://localhost:8080/realms/rasta/certs',
+      OIDC_AUDIENCE: 'rasta-api',
+      INTERNAL_TOKEN_SECRET: 'x'.repeat(48),
+      ASSET_SERVICE_URL: 'http://localhost:3102',
+      MAINTENANCE_SERVICE_URL: 'http://localhost:3106',
+    },
+    SENTINELS,
+  );
+
+  it('are found by walking the schema, the ones the r2 review named among them', () => {
+    expect(probes.map((probe) => probe.name)).toEqual(
+      expect.arrayContaining([
+        'NODE_ENV',
+        'LOG_LEVEL',
+        'KAFKA_SASL_MECHANISM',
+        'FLEET_DISPATCH_BLOCKING_COVERAGES',
+        'FLEET_DISPATCH_REQUIRED_COVERAGES',
+      ]),
+    );
+  });
+
+  it.each(probes.map((probe) => [probe.name, probe] as const))('%s', (name, probe) => {
+    expect(probe.codes).toContain('invalid_enum_value');
+    const [a, b] = probe.refusals;
+    expect(a).toEqual(b);
+    for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
+    expect(a.issues.some((issue) => issue.path === name || issue.path.startsWith(`${name}.`))).toBe(
+      true,
+    );
   });
 });

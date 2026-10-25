@@ -3,8 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
-import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
-import { toJsonSchema } from './zod-schema';
+import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS, toJsonSchema } from '@rasta/nest-common';
 import { WarehouseController } from '../warehouse/warehouse.controller';
 import { WarehouseService } from '../warehouse/warehouse.service';
 import {
@@ -75,7 +74,7 @@ import { REFUSAL_REASONS, type RefusalArea } from '../shared/refusal';
  *   - the same suite provokes the documented refusals against the real API.
  *
  * Payload shapes come from the Zod schemas the pipes validate with, converted by
- * `zod-schema.ts`; Nest supplies paths, methods and parameters from the decorators.
+ * `toJsonSchema`; Nest supplies paths, methods and parameters from the decorators.
  *
  * Regenerate after changing the API: `pnpm --filter @rasta/inventory-service openapi:generate`.
  */
