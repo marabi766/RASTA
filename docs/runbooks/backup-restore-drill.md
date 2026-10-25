@@ -57,8 +57,8 @@ identities (database, schema, table, constraint name) are required. Every differ
 line must be a whole `CONSTRAINT "name" CHECK (...)` line in actual CREATE TABLE
 SQL context. Function bodies, comments and COMMENT strings never qualify. A
 non-CHECK difference, dropped/extra object or renamed constraint refuses. Report
-only the observed number of differing CHECK lines per database; do not hard-code
-exceptions or print expressions. Rows/MD5 digests, migration records, sequences,
+the observed number of differing CHECK lines and their constraint names (with schema
+and table) per database in `checkConstraints`; do not hard-code exceptions or print expressions. Rows/MD5 digests, migration records, sequences,
 ACLs, ledger and wallet remain compared against SOURCE; REF contains schema only.
 
 PostgreSQL CHECK deparse is not idempotent on the first round trip. For example,
@@ -68,19 +68,27 @@ PostgreSQL CHECK deparse is not idempotent on the first round trip. For example,
 REF equality proves the backup under test restores to exactly what PostgreSQL itself produces from the source schema. The SOURCE-vs-REF allowance TRUSTS PostgreSQL's own schema dump/restore for CHECK text: it does not prove semantic equivalence of those lines (a same-name CHECK with a different bound would also pass that structural guard — e.g. economic init migration :648-649). The fixed point proves stability for one more round trip only.
 
 Restore REF into a second fresh scratch database and dump it: these bytes must
-also equal REF. Missing REF, missing fixed-point evidence, a skipped allowance
+also equal REF. Private WeakMap provenance, issued only by schema dump collection,
+requires three distinct dumps: SOURCE from the service database with label `source`,
+REF from `drill_ref_<suffix>` with label `reference`, and the fixed point from
+`drill_fixed_<suffix>` with label `fixed-point`. Both scratch names must share the
+same invocation suffix. Dumping the wrong database refuses even if its bytes match.
+Missing REF, missing fixed-point evidence, a skipped allowance
 guard, or any failed reference restore/dump refuses operator acceptance. The drill
 creates both databases with its random suffix inside its existing single active
 PostgreSQL server (512 MiB, one CPU). It drops them after collection, and removes
 the owned cluster/volume on success, failure and signals. Ownership comes from
 names created by this invocation, never from a restored disposable marker.
 All new SQL files are private 0600 inside the 0700 directory. Plain-SQL restore
-stdout/stderr are captured and never printed, including on failure. Writers,
+stdout/stderr are captured and never printed, including on failure. The same rule
+covers archive restore, dump and migration children: private failures report only
+`{stage, database, exitCode}`, without SQL or subprocess diagnostics. Writers,
 services, consumers and publishers stay stopped throughout SOURCE, REF and archive
 collection; restored outboxes never publish.
 
 Version 5 JSON includes mandatory `referenceChecked`, `allowanceChecked` and
 `fixedPointEqual` gates plus per-database `before.reference.checkLinesDifferent`
+and `before.reference.checkConstraints` (schema, table and constraint name; no SQL)
 and `before.reference.milliseconds` (extra reference collection/restore/dump and
 fixed-point time). The PG suite prints that extra time separately in local and CI
 logs. CI budgets remain **10 minutes per job / 5 minutes for the PG test step**;
@@ -142,13 +150,16 @@ consistency with active writers, or full-system recovery.
 `numeric SUM` پیاده می‌کنند تا جمع مبلغ‌ها سرریز نکند. بررسی سراسری فقط روی داده
 ساختگی و seed در خوشه متعلق به تمرین انجام می‌شود؛ مسیر خواندن داده مستاجر زنده نیست.
 
-در خطا، `error.stage` مرحله شکست را نشان می‌دهد؛ خروجی خطای فرمان با حذف URL پایگاه
+در خطا، `error.stage` مرحله شکست را نشان می‌دهد؛ برای فرمان خصوصی فقط مرحله، نام پایگاه و کد خروج ثبت می‌شود. خروجی خطای دیگر فرمان‌ها با حذف URL پایگاه
 ثبت می‌شود؛ آخرین ۴ کیلوبایت هر جریان خروجی ممکن است داده ساختگی seed داشته باشد. `cleanup.passed: false` همراه نام پروژه و مسیر موقت یعنی پاکسازی کامل
 نشده و باید همان منابع بررسی شوند. SIGHUP، SIGINT و SIGTERM فرایند در حال اجرا را متوقف و
 پاکسازی را شروع می‌کنند؛ سیگنال‌های بعدی ثبت می‌شوند و فرمان پاکسازی را نمی‌کشند.
 خطای نوشتن stderr پس از قطع پایپ مانع پاکسازی نمی‌شود. برای هر فرمان سقف زمان داریم. SIGKILL، قطع برق یا از دست
-رفتن Docker daemon می‌تواند منابع را باقی بگذارد. فقط با نام پروژه ثبت‌شده در گزارش
-و فایل Compose همان پوشه موقت پاکسازی کنید؛ هرگز stack مشترک را reset نکنید.
+رفتن Docker daemon می‌تواند منابع را باقی بگذارد. بلافاصله پس از ساخت نام پروژه، گزارش اولیه با
+`project` و `temporary` و `passed: false` نوشته می‌شود؛ نبود `finishedAt` یعنی اجرا کامل نشده است.
+فقط با همین نام پروژه ثبت‌شده در گزارش و فایل `compose.json` در مسیر `temporary` پاکسازی کنید؛
+هرگز stack مشترک را reset نکنید. شکست حذف پایگاه scratch در `scratchDropFailed` ثبت می‌شود؛
+خطای اصلی جمع‌آوری مدرک حفظ می‌شود و پاکسازی خوشه متعلق به تمرین همچنان انجام می‌شود.
 
 فایل‌های dump موقت، شامل schema و بدنه تابع، پس از موفقیت پاکسازی حذف می‌شوند؛ گزارش JSON باقی می‌ماند.
 این فرمان سرویس‌های دیگر یا containerهای موجود را متوقف نمی‌کند. فایل گزارش را

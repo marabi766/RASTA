@@ -1,3 +1,4 @@
+import { internalFetch } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError } from '@rasta/nest-common';
 import { ERROR_CODES, type ApiError, type ErrorCode } from '@rasta/contracts';
@@ -533,7 +534,7 @@ export class EconomicClient {
 
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await internalFetch(url, {
         method: request.method,
         headers: {
           'content-type': 'application/json',

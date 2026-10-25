@@ -1,3 +1,4 @@
+import { internalFetch } from '../http/internal-fetch';
 import { tryGetContext } from '../context/request-context';
 import { RastaError } from '../errors/rasta-error';
 import type { InternalTokenService } from './token-verifier';
@@ -54,11 +55,15 @@ export async function internalGet(
   const timer = setTimeout(() => controller.abort(), options.timeoutMs);
   timer.unref?.();
   try {
-    const response = await fetchImpl(`${options.baseUrl.replace(/\/+$/, '')}${path}`, {
-      method: 'GET',
-      headers,
-      signal: controller.signal,
-    });
+    const response = await internalFetch(
+      `${options.baseUrl.replace(/\/+$/, '')}${path}`,
+      {
+        method: 'GET',
+        headers,
+        signal: controller.signal,
+      },
+      fetchImpl,
+    );
     const text = await response.text();
     if (controller.signal.aborted) throw new Error('deadline passed');
     return { status: response.status, body: parseJson(text) };

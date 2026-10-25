@@ -48,10 +48,11 @@ describe('a supplier write carrying a bidi control (HTTP)', () => {
   });
 
   const SUPPLIER = '/v1/suppliers/SUP_1';
+  // Each route's other required fields, so only the reason decides the answer.
   const REASON_ROUTES = [
-    ['reject-qualification', `${SUPPLIER}/qualifications/QLF_1/reject`, qualifications.reject],
-    ['suspend', `${SUPPLIER}/suspend`, suspensions.suspend],
-    ['reinstate', `${SUPPLIER}/reinstate`, suspensions.reinstate],
+    ['reject-qualification', `${SUPPLIER}/qualifications/QLF_1/reject`, qualifications.reject, {}],
+    ['suspend', `${SUPPLIER}/suspend`, suspensions.suspend, { latestSuspensionId: null }],
+    ['reinstate', `${SUPPLIER}/reinstate`, suspensions.reinstate, { suspensionId: 'SSP_1' }],
   ] as const;
   const SPOOFED_REASONS = [
     ['U+202E', 'مدرک ارائه‌شده ‮نامعتبر‬ است'],
@@ -59,11 +60,13 @@ describe('a supplier write carrying a bidi control (HTTP)', () => {
     ['U+2066', 'evidence ⁦expired⁩ in 2025'],
   ] as const;
 
-  describe.each(REASON_ROUTES)('%s', (_name, path, handler) => {
+  describe.each(REASON_ROUTES)('%s', (_name, path, handler, rest) => {
     it.each(SPOOFED_REASONS)(
       'refuses a reason carrying %s, repeats nothing, and writes nothing',
       async (_label, reason) => {
-        const response = await request(app.getHttpServer()).post(path).send({ reason });
+        const response = await request(app.getHttpServer())
+          .post(path)
+          .send({ ...rest, reason });
 
         expect(response.status).toBe(400);
         expect(response.body.code).toBe('VALIDATION_FAILED');
@@ -75,11 +78,13 @@ describe('a supplier write carrying a bidi control (HTTP)', () => {
     it('still accepts a clean Persian reason with ZWNJ, and keeps its bounds', async () => {
       const accepted = await request(app.getHttpServer())
         .post(path)
-        .send({ reason: 'مدرک ارائه‌شده منقضی شده است' });
+        .send({ ...rest, reason: 'مدرک ارائه‌شده منقضی شده است' });
       expect(accepted.status).toBeLessThan(300);
       expect(handler).toHaveBeenCalledTimes(1);
 
-      const short = await request(app.getHttpServer()).post(path).send({ reason: 'کوتاه' });
+      const short = await request(app.getHttpServer())
+        .post(path)
+        .send({ ...rest, reason: 'کوتاه' });
       expect(short.status).toBe(400);
     });
   });

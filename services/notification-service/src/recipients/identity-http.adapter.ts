@@ -1,3 +1,4 @@
+import { internalFetch } from '@rasta/nest-common';
 import { z } from 'zod';
 import type { InternalTokenService } from '@rasta/nest-common';
 import { IDENTITY_SERVICE, SERVICE_NAME } from '../config/env';
@@ -142,15 +143,19 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
 
     let response: Response;
     try {
-      response = await this.fetchImpl(url, {
-        method: 'GET',
-        headers: {
-          accept: 'application/json',
-          'x-internal-token': token,
-          'x-correlation-id': correlationId,
+      response = await internalFetch(
+        url,
+        {
+          method: 'GET',
+          headers: {
+            accept: 'application/json',
+            'x-internal-token': token,
+            'x-correlation-id': correlationId,
+          },
+          signal: controller.signal,
         },
-        signal: controller.signal,
-      });
+        this.fetchImpl,
+      );
     } catch (error) {
       // The error object is not forwarded: depending on the runtime it can
       // carry the request URL and headers, and the header is the token.

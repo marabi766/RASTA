@@ -46,7 +46,15 @@
       "env": ["DATABASE_URL", "DATABASE_URL_*", "RASTA_ALLOW_DEMO_SEED"]
     },
     "typecheck": { "dependsOn": ["^build", "db:generate"], "outputs": [] },
-    "lint": { "dependsOn": ["^build"], "outputs": [] },
+    "lint": {
+      "dependsOn": ["^build"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/eslint.config.mjs",
+        "$TURBO_ROOT$/scripts/internal-token-transport-rule.mjs"
+      ],
+      "outputs": []
+    },
     // KAFKA_BROKERS is the same trap again (D-005), found by AUD-004 Phase C2:
     // identity-service's `test` runs its integration project too, and its
     // Kafka suite skips itself when the variable is absent. Undeclared, turbo

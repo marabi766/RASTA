@@ -1,3 +1,4 @@
+import { internalFetch } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { z } from 'zod';
@@ -182,7 +183,7 @@ export class ReturnGoodsClient implements ReturnGoodsOwner {
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
     timer.unref?.();
     try {
-      const response = await this.fetchImpl(
+      const response = await internalFetch(
         `${this.options.baseUrl.replace(/\/+$/, '')}/v1/internal/return-requests/${path}`,
         {
           method,
@@ -190,6 +191,7 @@ export class ReturnGoodsClient implements ReturnGoodsOwner {
           signal: controller.signal,
           ...(payload ? { body: JSON.stringify(payload) } : {}),
         },
+        this.fetchImpl,
       );
       if (response.status !== 200) {
         await response.body?.cancel().catch(() => undefined);
