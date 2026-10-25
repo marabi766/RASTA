@@ -16,13 +16,22 @@
  * Three reads are not a method of a schema and stay allowed:
  *  - a module's default export: the object is `require(…)`, `import(…)`,
  *    `jest.requireActual(…)` / `jest.requireMock(…)` (awaited, cast or not);
- *  - an assignment to a plain object's `default` key (a JSON Schema built
- *    by hand: `schema.default = value`);
+ *  - a plain `=` assignment to an object's `default` key (a JSON Schema built
+ *    by hand: `schema.default = value`). `||=`, `&&=`, `??=` and the compound
+ *    operators read the key first, and are refused like any read;
  *  - the value handed straight to `expect(…)`, which reads a JSON Schema's
  *    `default` keyword in an assertion and never calls it.
  *
  * A name computed from data at run time cannot be decided by any static rule;
  * none exists in this repository (PR #444 r2 body: the grep).
+ *
+ * **Out of scope by design (PM decision D-075, as D-074):** this rule is a
+ * tripwire against *accidental* `.default` use, not a sandbox against
+ * deliberate evasion, which code review catches. It does not follow a
+ * reflective function reached by a computed or built name (`Reflect['get']`,
+ * a template-built `Reflect` callee, `Object['getOwnPropertyDescriptor']`), a
+ * reflective function taken out first (`const get = Reflect.get`), or one
+ * called through `.call` / `.apply` / `.bind`. Do not grow it to.
  *
  * Used by the root config and by `apps/web/eslint.config.mjs`: one rule, both
  * trees.
@@ -40,10 +49,14 @@ function variableOf(scope, name) {
   return undefined;
 }
 
-/** The string `node` always evaluates to, or `undefined` when that is not decidable here. */
-function staticString(node, scope, seen = new Set()) {
-  if (!node || seen.has(node)) return undefined;
-  seen.add(node);
+/**
+ * The string `node` always evaluates to, or `undefined` when that is not
+ * decidable here. `resolving` holds the constants on the current path only,
+ * so a constant used twice (`empty + 'default' + empty`) is read each time,
+ * and only a constant that refers back to itself stops the evaluation.
+ */
+function staticString(node, scope, resolving = new Set()) {
+  if (!node) return undefined;
   switch (node.type) {
     case 'Literal':
       return typeof node.value === 'string' ? node.value : undefined;
@@ -52,7 +65,7 @@ function staticString(node, scope, seen = new Set()) {
       for (const [at, quasi] of node.quasis.entries()) {
         text += quasi.value.cooked ?? '';
         if (at < node.expressions.length) {
-          const part = staticString(node.expressions[at], scope, seen);
+          const part = staticString(node.expressions[at], scope, resolving);
           if (part === undefined) return undefined;
           text += part;
         }
@@ -61,23 +74,30 @@ function staticString(node, scope, seen = new Set()) {
     }
     case 'BinaryExpression': {
       if (node.operator !== '+') return undefined;
-      const left = staticString(node.left, scope, seen);
-      const right = staticString(node.right, scope, seen);
+      const left = staticString(node.left, scope, resolving);
+      const right = staticString(node.right, scope, resolving);
       return left === undefined || right === undefined ? undefined : left + right;
     }
     case 'TSAsExpression':
     case 'TSSatisfiesExpression':
     case 'TSNonNullExpression':
     case 'TSTypeAssertion':
-      return staticString(node.expression, scope, seen);
+      return staticString(node.expression, scope, resolving);
     case 'Identifier': {
-      const definition = variableOf(scope, node.name)?.defs[0];
+      const variable = variableOf(scope, node.name);
+      const definition = variable?.defs[0];
       if (
+        !resolving.has(variable) &&
         definition?.type === 'Variable' &&
         definition.parent?.kind === 'const' &&
         definition.node.id.type === 'Identifier'
       ) {
-        return staticString(definition.node.init, scope, seen);
+        resolving.add(variable);
+        try {
+          return staticString(definition.node.init, scope, resolving);
+        } finally {
+          resolving.delete(variable);
+        }
       }
       return undefined;
     }
@@ -126,9 +146,12 @@ function isModuleLoad(node) {
   );
 }
 
+/** A plain write (`x.default = value`); `||=`, `??=`, `&&=`, `+=` … read it first. */
 function isAssignmentTarget(member) {
   const parent = member.parent;
-  return parent?.type === 'AssignmentExpression' && parent.left === member;
+  return (
+    parent?.type === 'AssignmentExpression' && parent.operator === '=' && parent.left === member
+  );
 }
 
 function isAssertedValue(member) {

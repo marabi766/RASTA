@@ -9,7 +9,9 @@ import { ESLint } from 'eslint';
 /**
  * `zod/no-default` through both real configurations (PR #444 r1 F2): the root
  * one, as a service file is linted, and the portal's, as a web file is. Each
- * escape the review found — and the ones next to it — is refused in both.
+ * escape the review found — and the ones next to it — is refused in both. The
+ * reflective forms the rule leaves to code review (D-075) are listed in its
+ * header, not here.
  */
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const WEB = join(ROOT, 'apps/web');
@@ -70,6 +72,12 @@ const REFUSED = [
   ['.call by bracket', "s['default'].call(s, 'x');"],
   ['Reflect.get', "Reflect.get(s, 'default');"],
   ['Object.getOwnPropertyDescriptor', "Object.getOwnPropertyDescriptor(s, 'default');"],
+  // Codex PR-444 r2 F2: a constant used twice, and assignments that read the method.
+  ['a const used twice in one name', "const empty = '';\ns[empty + 'default' + empty]('x');"],
+  ['a ||= that reads the method', "(s.default ||= s.prefault)('x');"],
+  ['a ??= that reads the method', "(s.default ??= s.prefault)('x');"],
+  ['a &&= that reads the method', "(s.default &&= s.prefault)('x');"],
+  ['a compound assignment', 'const json: Record<string, number> = {};\njson.default += 1;'],
 ];
 
 const ALLOWED = [
