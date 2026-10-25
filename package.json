@@ -31,6 +31,7 @@
     "test:outbox-b1": "node --test scripts/verify-outbox-b1-lib.test.mjs",
     "test:outbox-b2": "node --test scripts/outbox-b2-lib.test.mjs",
     "test:url-parsing-guard": "node --test scripts/url-parsing-guard.test.mjs",
+    "test:unit-step-concurrency": "node --test scripts/check-unit-step-concurrency.test.mjs && node scripts/check-unit-step-concurrency.mjs",
     "test:config-disclosure": "node --test scripts/config-disclosure.test.mjs",
     "test:service-boundaries-lib": "node --test scripts/check-service-boundaries.test.mjs",
     "check:service-boundaries": "node scripts/check-service-boundaries.mjs",
